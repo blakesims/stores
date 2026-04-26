@@ -1,21 +1,63 @@
 use crate::schema::actor::Actor;
+use crate::schema::expr::{Expr, parse_guard};
 use serde::Deserialize;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Deserialize)]
+/// Helper for deserializing the `guard:` field as a string, then parsing it.
+fn deserialize_guard<'de, D>(d: D) -> Result<Option<Expr>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let opt: Option<String> = Option::deserialize(d)?;
+    match opt {
+        None => Ok(None),
+        Some(s) => parse_guard(&s).map(Some).map_err(|e| D::Error::custom(e.to_string())),
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Transition {
     pub from: String,
     pub to: String,
     pub verb: String,
-    #[serde(default)]
     pub actor: Option<Actor>,
     /// Optional gate key that must match the submit verb's `--gate` argument for
     /// this transition to be selected.  When multiple transitions share the same
     /// `(from, verb)` pair, all but at most one must declare `requires_gate`.
     /// If two transitions share `(from, verb, requires_gate: None)` the schema
     /// fails to load with an "ambiguous transition selection" error.  (Task 1.10)
-    #[serde(default)]
     pub requires_gate: Option<String>,
+    /// Optional guard expression evaluated against the (engine-bumped) merged entry
+    /// BEFORE the transition is applied.  If the guard is present and evaluates
+    /// false, the engine looks for a fallback transition.  (Task 5.2)
+    pub guard: Option<Expr>,
+}
+
+impl<'de> Deserialize<'de> for Transition {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            from: String,
+            to: String,
+            verb: String,
+            #[serde(default)]
+            actor: Option<Actor>,
+            #[serde(default)]
+            requires_gate: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_guard")]
+            guard: Option<Expr>,
+        }
+        let r = Raw::deserialize(d)?;
+        Ok(Transition {
+            from: r.from,
+            to: r.to,
+            verb: r.verb,
+            actor: r.actor,
+            requires_gate: r.requires_gate,
+            guard: r.guard,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -189,5 +231,65 @@ transitions:
 "#;
         let lc: Lifecycle = serde_yaml::from_str(yaml).unwrap();
         assert!(lc.validate_transition_ambiguity().is_ok());
+    }
+
+    // ---- Task 5.2: guard field ----
+
+    #[test]
+    fn transition_guard_parses() {
+        let lc: Lifecycle = serde_yaml::from_str(r#"
+states: [code_review, executing, blocked]
+transitions:
+  - from: code_review
+    to: executing
+    verb: submit-review
+    requires_gate: REVISE
+    guard: "current_cycle <= 4"
+    actor: ai_autonomous
+  - from: code_review
+    to: blocked
+    verb: submit-review
+    requires_gate: REVISE
+    actor: ai_autonomous
+"#).unwrap();
+        let revise_guarded = lc.transitions.iter().find(|t| t.guard.is_some()).unwrap();
+        assert!(revise_guarded.guard.is_some(), "guard should parse");
+        let unguarded = lc.transitions.iter().find(|t| t.guard.is_none() && t.to == "blocked").unwrap();
+        assert!(unguarded.guard.is_none());
+    }
+
+    #[test]
+    fn transition_guard_invalid_expression_errors() {
+        let result: Result<Lifecycle, _> = serde_yaml::from_str(r#"
+states: [open, done]
+transitions:
+  - from: open
+    to: done
+    verb: close
+    guard: "a && b"
+"#);
+        assert!(result.is_err(), "invalid guard expression should fail deserialization");
+    }
+
+    #[test]
+    fn transition_guard_path_length_parses() {
+        let lc: Lifecycle = serde_yaml::from_str(r#"
+states: [code_review, complete, executing]
+transitions:
+  - from: code_review
+    to: complete
+    verb: submit-review
+    requires_gate: PASS
+    guard: "current_phase >= plan.phases.length"
+    actor: ai_autonomous
+  - from: code_review
+    to: executing
+    verb: submit-review
+    requires_gate: PASS
+    guard: "current_phase < plan.phases.length"
+    actor: ai_autonomous
+"#).unwrap();
+        assert_eq!(lc.transitions.len(), 2);
+        assert!(lc.transitions.iter().all(|t| t.guard.is_some()));
     }
 }
