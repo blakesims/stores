@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** EXECUTING_PHASE_7
+- **Status:** CODE_REVIEW
 - **Phase 4 Start:** 2026-04-26
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
@@ -632,6 +632,35 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
   - **DONE_WHEN:** Phase 6 fully closes #2, #4, #5, #6, #7, #8 (all six per the plan). Sets up #3 (multi-store coexistence — final verification with `gate` is Phase 7's responsibility).
   - **Status:** Advance to Phase 7 — `EXECUTING_PHASE_7`.
 - → Details: code-review-phase-6.md
+
+---
+
+### Phase 7: Bundled `gate` store + human-only actor enforcement demo
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+
+**Files Created:**
+- `stores/gate/schema.yaml` — gate store: `id_format: "G{:03d}"`, `default_actor: ai_autonomous`, fields: `type` (enum decision|script, required), `question` (text, required), `options` (list<text>, optional), `answer` (text, optional, **actor: human**), `task_ref` (text, optional, cross-store ref by convention); lifecycle: `pending→answered` (verb `answer`, actor `human`), `pending→cancelled` (verb `cancel`, actor `ai_autonomous`)
+- `stores/gate/README.md` — bundled-store README mirroring observations/README.md shape
+
+**Framework Bug Fixed (src/ change required):**
+- `src/validate/actor.rs` — `check_actor`: treat `Value::Null` as absent (consistent with `required.rs:43`). During transitions, `read_row` populates the entry with `Value::Null` for unset optional columns; the old check (`lookup().is_none()`) missed Null, causing actor errors for absent fields. One-line fix.
+- `src/validate/mod.rs` — added `Op::TransitionWithDiff(String, EntryMap)` variant; `validate_field` receives separate `actor_entry` parameter (diff for transitions, full entry for Add/Update). Actor checks during transitions now scope to the diff only — fields written by a prior operation at a different actor don't block the current transition invoker.
+- `src/handlers/transition.rs` — switch `Op::Transition` → `Op::TransitionWithDiff(verb, diff.clone())`.
+
+**ACs:**
+- [x] AC1: `stores install ./stores/gate` — both `gate` and `observations` tables in `.stores/db.sqlite`. DONE_WHEN #3 fully.
+- [x] AC2: `stores gate add --type decision --question "Soft or hard delete on cleanup?" --options "soft|hard" --task-ref L001` → `G001`. DONE_WHEN #9.
+- [x] AC3: `stores gate answer G001 --answer hard --invoker human` → `Transitioned G001: pending → answered`; `answer=hard`. DONE_WHEN #10.
+- [x] AC4: `CLAUDECODE=1 stores gate answer G002 --answer a` (no `--invoker`) → fails: `field 'answer' requires actor 'human'; invoker is 'ai_autonomous' (auto-detected from $CLAUDECODE; pass --invoker human to override if appropriate)`. DONE_WHEN #11.
+- [x] AC4b: `CLAUDECODE=1 stores gate answer G002 --answer a --invoker human` → succeeds.
+- [x] AC5: `CLAUDECODE=1 stores gate cancel G003` (no `--invoker`) → `Transitioned G003: pending → cancelled`. Cancel actor is `ai_autonomous` — matches CLAUDECODE auto-detect; no error.
+- [x] All 83 tests pass.
+
+**DONE_WHEN closed:** #3 (fully), #9, #10, #11.
+- **Status:** Advance to Phase 8 — `CODE_REVIEW`.
 
 ---
 

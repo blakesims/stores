@@ -20,9 +20,10 @@ pub fn check_actor(
     default_actor: Option<Actor>,
     errors: &mut Vec<ValidationError>,
 ) {
-    // Only check fields that are actually being written
-    if lookup(entry, field_path).is_none() {
-        return;
+    // Only check fields that are actually being written (treat Null as absent)
+    match lookup(entry, field_path) {
+        None | Some(serde_json::Value::Null) => return,
+        _ => {}
     }
 
     let required_actor = match effective_actor(field, default_actor) {

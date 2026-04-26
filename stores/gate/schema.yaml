@@ -1,0 +1,43 @@
+name: gate
+id_format: "G{:03d}"
+default_actor: ai_autonomous
+lifecycle:
+  states: [pending, answered, cancelled]
+  transitions:
+    - from: pending
+      to: answered
+      verb: answer
+      actor: human
+    - from: pending
+      to: cancelled
+      verb: cancel
+      actor: ai_autonomous
+
+fields:
+  - name: type
+    type: enum
+    enum_values: [decision, script]
+    required: true
+    description: "Gate type: decision (human chooses) or script (automated)"
+
+  - name: question
+    type: text
+    required: true
+    description: "The question posed at this gate"
+
+  - name: options
+    type:
+      list: text
+    required: false
+    description: "Possible answers; pipe-separated on CLI: \"soft|hard\""
+
+  - name: answer
+    type: text
+    required: false
+    actor: human
+    description: "The chosen answer — human actor required"
+
+  - name: task_ref
+    type: text
+    required: false
+    description: "Cross-store reference to a task display_id (e.g. L001); no FK enforced"

@@ -21,7 +21,11 @@ pub enum Op {
     Add,
     Update,
     /// Lifecycle transition verb (e.g. "triage", "close").
+    /// The optional diff restricts actor checks to only the fields being written
+    /// in this call (not carried-over fields from the existing row).
     Transition(String),
+    /// Like Transition but carries the diff so actor checks are scoped to written fields.
+    TransitionWithDiff(String, EntryMap),
 }
 
 /// Validate an entry map against a schema for the given operation and invoker.
@@ -39,9 +43,16 @@ pub fn validate(
 ) -> Result<(), Vec<ValidationError>> {
     let mut errors: Vec<ValidationError> = Vec::new();
 
+    // Determine the transition verb and optional diff for actor scoping.
+    let (verb_opt, actor_entry) = match &op {
+        Op::Transition(verb) => (Some(verb.as_str()), entry),
+        Op::TransitionWithDiff(verb, diff) => (Some(verb.as_str()), diff),
+        _ => (None, entry),
+    };
+
     // If this is a Transition op, check the transition's declared actor first.
-    if let Op::Transition(ref verb) = op {
-        if let Some(transition) = schema.lifecycle.transitions.iter().find(|t| &t.verb == verb) {
+    if let Some(verb) = verb_opt {
+        if let Some(transition) = schema.lifecycle.transitions.iter().find(|t| t.verb == verb) {
             if let Some(transition_actor) = transition.actor {
                 actor::check_transition_actor(verb, transition_actor, invoker, &mut errors);
             }
@@ -49,13 +60,15 @@ pub fn validate(
     }
 
     // Walk all fields (top-level + Record sub-fields).
+    // required/enum/pattern checks run against the full merged entry;
+    // actor checks run against actor_entry (diff-only for TransitionWithDiff).
     for field in &schema.fields {
-        validate_field(field, entry, &[], &schema.default_actor, invoker, &mut errors);
+        validate_field(field, entry, actor_entry, &[], &schema.default_actor, invoker, &mut errors);
 
         if let FieldType::Record(sub_fields) = &field.ty {
             let parent_path = vec![field.name.clone()];
             for sub in sub_fields {
-                validate_field(sub, entry, &parent_path, &schema.default_actor, invoker, &mut errors);
+                validate_field(sub, entry, actor_entry, &parent_path, &schema.default_actor, invoker, &mut errors);
             }
         }
     }
@@ -70,6 +83,7 @@ pub fn validate(
 fn validate_field(
     field: &crate::schema::Field,
     entry: &EntryMap,
+    actor_entry: &EntryMap,
     parent_path: &[String],
     default_actor: &Option<Actor>,
     invoker: Actor,
@@ -87,8 +101,8 @@ fn validate_field(
     // pattern / regex check
     regex_check::check_pattern(field, &field_path, entry, errors);
 
-    // actor check (only for fields that are present in entry)
-    actor::check_actor(field, &field_path, entry, invoker, *default_actor, errors);
+    // actor check — uses actor_entry (diff only for TransitionWithDiff, else full entry)
+    actor::check_actor(field, &field_path, actor_entry, invoker, *default_actor, errors);
 }
 
 #[cfg(test)]

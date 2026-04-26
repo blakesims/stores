@@ -85,8 +85,8 @@ pub fn run(
         merged.insert(k.clone(), v.clone());
     }
 
-    // Run validator against merged entry with Op::Transition
-    validate::validate(schema, &merged, Op::Transition(verb.to_string()), invoker).map_err(
+    // Run validator against merged entry; actor checks scoped to diff only.
+    validate::validate(schema, &merged, Op::TransitionWithDiff(verb.to_string(), diff.clone()), invoker).map_err(
         |errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)),
     )?;
 
