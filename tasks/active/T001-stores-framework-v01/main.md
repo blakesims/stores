@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** EXECUTING_PHASE_8
+- **Status:** CODE_REVIEW
 - **Phase 4 Start:** 2026-04-26
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
@@ -710,7 +710,7 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 
 **Test count:** 85 tests (83 previous + 2 new regression), all pass.
 
-**Commits:** `06fbaf0` (Part A: Op::Update fix), `<phase8-b-sha>` (e2e + README)
+**Commits:** `06fbaf0` (Part A: Op::Update fix), `d52d186` (e2e + README)
 
 **Notes:**
 - The carry-forward Op::Update fix is the same root-cause fix as Phase 7's `Op::TransitionWithDiff` work: actor checks must scope to the diff (fields being written this call), not the merged row. The fix also took the opportunity to rename `Op::TransitionWithDiff(verb, diff)` → `Op::Transition(verb, diff)` (cleaning up the vestigial split that Phase 7 left), making the Op enum tight: Add | Update(diff) | Transition(verb, diff).
@@ -767,7 +767,7 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
   - `400ab8b` — Phase 6: lifecycle transitions + observations store
   - `e0f1dac` — Phase 7: gate store + actor diff-scoping fix
   - `06fbaf0` — Phase 8 Part A: Op::Update actor-scoping carry-forward fix
-  - `<phase8-b-sha>` — Phase 8 Part B: e2e + README
+  - `d52d186` — Phase 8 Part B: e2e + README
 - **Lessons Learned:**
   - **Actor-scoping must track the diff, not the merged row.** Both `Op::Transition` and `Op::Update` initially validated the full merged entry for actor checks. The right invariant is "actor checks apply to what you're writing, not what's already there." Fixing transition in Phase 7 without also fixing update left a live bug; the code reviewer's Phase 7 M1 callout caught it exactly.
   - **Op enum naming pays forward.** Having `Op::TransitionWithDiff` alongside `Op::Transition` created a vestigial dead-code variant in Phase 7. Phase 8's carry-forward fix was the right moment to rename both into a tight 3-variant enum (Add | Update(diff) | Transition(verb, diff)). Tight enums force callers to carry the diff explicitly — no silent fallback to the full entry.
