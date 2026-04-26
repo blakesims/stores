@@ -107,28 +107,7 @@ pub fn dispatch(
                     let display_id = sub.get_one::<String>("display_id")
                         .map(|s| s.as_str())
                         .unwrap_or("");
-                    // Resume: blocked → ready → executing
-                    // Implemented via the transition handler with the "resume" verb,
-                    // plus a follow-on via fire_on_entry_follow_ons.
-                    // We do this inline here to stay within the dispatch boundary.
-                    let tx = conn.unchecked_transaction()?;
-                    let (row_id, current_entry) = handlers::row::read_row(schema, &tx, display_id)?;
-                    let current_status = current_entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                    if current_status != "blocked" {
-                        anyhow::bail!("cannot resume: row is in state '{}', expected 'blocked'", current_status);
-                    }
-                    // Reset current_cycle to 1; current_phase unchanged
-                    let mut fw_fields: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
-                    fw_fields.insert("current_cycle".to_string(), 1);
-                    let txt_fields: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-                    handlers::submit::write_status_and_fields(
-                        &tx, &schema.name, row_id, "ready", &invoker.to_string(), &fw_fields, &txt_fields,
-                    )?;
-                    handlers::submit::fire_on_entry_follow_ons(&tx, schema, display_id, row_id, "ready")?;
-                    let (_, final_entry) = handlers::row::read_row(schema, &tx, display_id)?;
-                    let final_status = final_entry.get("status").and_then(|v| v.as_str()).unwrap_or("executing");
-                    tx.commit()?;
-                    println!("Resumed {display_id}; status now: {final_status}");
+                    handlers::submit::run_resume(schema, &conn, display_id, invoker)?;
                 }
                 Some((verb, sub)) => {
                     // Check if this is a declared lifecycle transition verb

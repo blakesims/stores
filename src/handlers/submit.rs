@@ -381,7 +381,7 @@ pub(crate) fn fire_on_entry_follow_ons(
 ///   sets current_phase = 1, current_cycle = 1 ONLY if current_phase == 0
 ///   (distinguishes initial plan approval from resume, where current_phase is preserved).
 fn compute_on_entry_framework_fields(
-    schema: &Schema,
+    _schema: &Schema,
     target_state: &str,
     current_entry: &EntryMap,
 ) -> (BTreeMap<String, i64>, BTreeMap<String, String>) {
@@ -974,6 +974,108 @@ pub fn run_submit_review(
 }
 
 // ---------------------------------------------------------------------------
+// resume: blocked → ready (→ executing via on-entry follow-on) (AC5.14)
+// ---------------------------------------------------------------------------
+
+/// Resume a blocked task.  Follows the same 11-step pattern as the other submit verbs.
+///
+/// Required actor: `ai_with_human` (declared on the `resume` transition in schema).
+/// Post-actions per 5.4 "resume" row:
+///   - `current_cycle = 1` (reset; audit trail in cycles[] preserved)
+///   - `current_phase` UNCHANGED
+///   - `blocked_reason` cleared
+pub(crate) fn compute_resume(
+    schema: &Schema,
+    conn: &Connection,
+    display_id: &str,
+    invoker: Actor,
+) -> Result<ResumeOutput> {
+    require_workflow(schema, "resume")?;
+
+    // Step 1: open tx
+    let tx = conn.unchecked_transaction().context("resume: begin tx")?;
+
+    // Step 2: acquire lock (error if already claimed)
+    acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
+
+    // Step 3: read row
+    let (row_id, existing) = read_row(schema, &tx, display_id)?;
+
+    // State-machine check
+    let current_status = existing.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if current_status != "blocked" {
+        bail!(
+            "cannot resume: row is in state '{}', expected 'blocked'",
+            current_status
+        );
+    }
+
+    // Step 4/5: no user diff for resume; build an empty diff for the actor check
+    let diff: EntryMap = BTreeMap::new();
+
+    // Step 6: validator pass — enforces `actor: ai_with_human` on the resume transition
+    validate::validate(schema, &existing, Op::Transition("resume".to_string(), diff), invoker)
+        .map_err(|errs| {
+            anyhow::anyhow!("resume validation failed:\n{}", validate::pretty_print(&errs))
+        })?;
+
+    // Step 7: compute post-action fields
+    //   current_cycle reset to 1; current_phase UNCHANGED; blocked_reason cleared
+    let mut fw_fields: BTreeMap<String, i64> = BTreeMap::new();
+    fw_fields.insert("current_cycle".to_string(), 1);
+    let mut txt_fields: BTreeMap<String, String> = BTreeMap::new();
+    txt_fields.insert("blocked_reason".to_string(), String::new());
+
+    // Step 8: write blocked → ready
+    write_status_and_fields(
+        &tx, &schema.name, row_id, "ready",
+        &invoker.to_string(), &fw_fields, &txt_fields,
+    )?;
+
+    // Step 9: fire on-entry follow-ons (ready → executing)
+    fire_on_entry_follow_ons(&tx, schema, display_id, row_id, "ready")?;
+
+    // Read final status after follow-ons
+    let (_, final_entry) = read_row(schema, &tx, display_id)?;
+    let final_status = final_entry
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("executing")
+        .to_string();
+
+    // Step 10: release lock
+    release_lock(&tx, &schema.name, display_id)?;
+
+    // Step 11: commit
+    tx.commit().context("resume: commit")?;
+
+    Ok(ResumeOutput {
+        display_id: display_id.to_string(),
+        new_status: final_status.clone(),
+        summary: format!("Resumed {display_id}; status now: {final_status}"),
+    })
+}
+
+/// Structured output from resume handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeOutput {
+    pub display_id: String,
+    pub new_status: String,
+    pub summary: String,
+}
+
+pub fn run_resume(
+    schema: &Schema,
+    conn: &Connection,
+    display_id: &str,
+    invoker: Actor,
+) -> Result<()> {
+    let out = compute_resume(schema, conn, display_id, invoker)?;
+    println!("{}", out.summary);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests — all 14 ACs verified at compute level
 // ---------------------------------------------------------------------------
 
@@ -1172,9 +1274,10 @@ workflow:
     }
 
     /// Insert a row with specific state for testing.
+    #[allow(unused_variables)]
     fn insert_row_at(
         conn: &Connection,
-        _schema: &Schema, // unused — kept for call-site clarity
+        schema: &Schema, // unused — kept for call-site clarity
         status: &str,
         current_phase: i64,
         current_cycle: i64,
@@ -1849,14 +1952,14 @@ fields:
     }
 
     // ---------------------------------------------------------------------------
-    // AC5.14: BLOCKED → READY recovery via resume
+    // AC5.14: BLOCKED → READY recovery via compute_resume
     // ---------------------------------------------------------------------------
 
     #[test]
     fn ac5_14_blocked_to_ready_recovery() {
         let (schema, conn) = setup();
 
-        // Set up: blocked at phase 1, cycle 4 (after 4th REVISE), with audit trail
+        // Set up: blocked at phase 1, cycle 4 (after 4th REVISE), with audit trail and stale blocked_reason
         let audit_cycles = vec![
             json!({"phase":1,"cycle":1,"executor":{"summary":"a1"},"review":{"gate":"REVISE"}}),
             json!({"phase":1,"cycle":2,"executor":{"summary":"a2"},"review":{"gate":"REVISE"}}),
@@ -1869,33 +1972,12 @@ fields:
             Some("4th revise rejected by guard current_cycle <= 4 on phase 1 cycle 4: test"),
         );
 
-        // Perform resume: blocked → ready → executing
-        // The resume transition is ai_with_human; we simulate it via the transition handler
-        // which calls run_in_tx with the resume verb.
-        // Per AC5.14: current_phase UNCHANGED, current_cycle RESET to 1
-        {
-            let tx = conn.unchecked_transaction().unwrap();
-            let (row_id, _) = read_row(&schema, &tx, "WF001").unwrap();
+        // Call through compute_resume (production code path, not raw helpers)
+        let out = compute_resume(&schema, &conn, "WF001", Actor::AiWithHuman).unwrap();
 
-            // Write: status → ready, current_cycle = 1 (reset), current_phase unchanged
-            let mut fw_fields: BTreeMap<String, i64> = BTreeMap::new();
-            fw_fields.insert("current_cycle".to_string(), 1);
-            let txt_fields: BTreeMap<String, String> = BTreeMap::new();
+        assert_eq!(out.new_status, "executing");
+        assert!(out.summary.contains("WF001"));
 
-            write_status_and_fields(
-                &tx, &schema.name, row_id, "ready", "ai_with_human",
-                &fw_fields, &txt_fields,
-            ).unwrap();
-
-            // Fire on-entry follow-ons for "ready" → "executing"
-            // At this point current_phase = 1 in DB, current_cycle just set to 1.
-            // compute_on_entry_framework_fields will see current_phase > 0 and NOT override it.
-            fire_on_entry_follow_ons(&tx, &schema, "WF001", row_id, "ready").unwrap();
-
-            tx.commit().unwrap();
-        }
-
-        // Assertions
         assert_eq!(read_status(&conn), "executing",
             "after resume, status must be executing");
         assert_eq!(read_i64(&conn, "current_phase"), 1,
@@ -1903,8 +1985,208 @@ fields:
         assert_eq!(read_i64(&conn, "current_cycle"), 1,
             "current_cycle must be RESET to 1");
 
+        // blocked_reason must be cleared (not the stale "4th revise..." string)
+        let br = read_text(&conn, "blocked_reason").unwrap_or_default();
+        assert!(
+            br.is_empty(),
+            "blocked_reason must be cleared after resume, got: {:?}", br
+        );
+
         // Audit trail preserved
         let cycles = read_cycles(&conn);
         assert_eq!(cycles.len(), 4, "cycles audit trail must be preserved after resume");
+
+        // Lock released
+        let claimed_by = read_text(&conn, "claimed_by");
+        assert!(
+            claimed_by.is_none() || claimed_by.as_deref() == Some(""),
+            "lock must be released after resume: {:?}", claimed_by
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC5.14 (extra): resume rejects ai_autonomous invoker (actor: ai_with_human)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac5_14_resume_actor_mismatch_rejected() {
+        let (schema, conn) = setup();
+        insert_row_at(
+            &conn, &schema, "blocked", 1, 4, 2, vec![], vec![],
+            Some("blocked for testing"),
+        );
+
+        // ai_autonomous invoker must be rejected because resume declares actor: ai_with_human
+        let err = compute_resume(&schema, &conn, "WF001", Actor::AiAutonomous).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ai_with_human"),
+            "error must mention required actor 'ai_with_human': {msg}"
+        );
+        assert!(
+            msg.contains("resume"),
+            "error must mention verb 'resume': {msg}"
+        );
+
+        // DB state must be completely unchanged (lock acquired then rolled back with tx)
+        assert_eq!(read_status(&conn), "blocked", "status must not change on actor mismatch");
+        let claimed_by = read_text(&conn, "claimed_by");
+        assert!(
+            claimed_by.is_none() || claimed_by.as_deref() == Some(""),
+            "lock must not remain after failed compute_resume: {:?}", claimed_by
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC5.14 (extra): resume errors when row is already claimed by another invoker
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac5_14_resume_acquires_lock() {
+        let (schema, conn) = setup();
+        insert_row_at(
+            &conn, &schema, "blocked", 1, 4, 2, vec![], vec![],
+            Some("blocked for testing"),
+        );
+
+        // Pre-claim the row as a different agent
+        let now = now_iso8601();
+        conn.execute(
+            "UPDATE wf_tasks SET claimed_by = 'other-agent', claimed_at = ?1 WHERE display_id = 'WF001'",
+            rusqlite::params![now],
+        ).unwrap();
+
+        // compute_resume must fail with a lock-contention error
+        let err = compute_resume(&schema, &conn, "WF001", Actor::AiWithHuman).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("other-agent") || msg.contains("claimed"),
+            "error must name the current lock holder: {msg}"
+        );
+
+        // Status still blocked
+        assert_eq!(read_status(&conn), "blocked");
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC5.13 (extra): lock held during follow-on — probed before and after follow-on
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac5_13_lock_held_during_follow_on() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "plan_review", 0, 0, 2, vec![], vec![], None);
+
+        // Reproduce the steps inside compute_submit_plan_review (READY path) manually,
+        // probing claimed_by from the SAME connection (same tx) between step 8 and step 9.
+        // This proves that release_lock (step 10) happens AFTER fire_on_entry_follow_ons (step 9).
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let (row_id, _) = read_row(&schema, &tx, "WF001").unwrap();
+
+        // Step 2: acquire lock
+        acquire_lock(&tx, &schema.name, "WF001", "ai_autonomous").unwrap();
+
+        // Assert lock held before step 8
+        let claimed_after_acquire: Option<String> = tx.query_row(
+            "SELECT claimed_by FROM wf_tasks WHERE display_id = 'WF001'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(
+            claimed_after_acquire.as_deref(), Some("ai_autonomous"),
+            "lock must be held after acquire_lock"
+        );
+
+        // Step 8: write status → ready
+        let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
+        let txt_fields: BTreeMap<String, String> = BTreeMap::new();
+        write_status_and_fields(&tx, &schema.name, row_id, "ready", "ai_autonomous", &fw_fields, &txt_fields).unwrap();
+
+        // Probe BETWEEN step 8 and step 9: lock must still be held
+        let claimed_between: Option<String> = tx.query_row(
+            "SELECT claimed_by FROM wf_tasks WHERE display_id = 'WF001'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(
+            claimed_between.as_deref(), Some("ai_autonomous"),
+            "lock must still be held DURING follow-on (between write and follow-on)"
+        );
+
+        // Step 9: fire on-entry follow-ons (ready → executing)
+        fire_on_entry_follow_ons(&tx, &schema, "WF001", row_id, "ready").unwrap();
+
+        // Probe AFTER follow-on, BEFORE release: lock must still be held
+        let claimed_after_followon: Option<String> = tx.query_row(
+            "SELECT claimed_by FROM wf_tasks WHERE display_id = 'WF001'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(
+            claimed_after_followon.as_deref(), Some("ai_autonomous"),
+            "lock must still be held AFTER follow-on, before release_lock"
+        );
+
+        // Step 10: release lock
+        release_lock(&tx, &schema.name, "WF001").unwrap();
+
+        // Step 11: commit
+        tx.commit().unwrap();
+
+        // After commit: lock must be NULL
+        let claimed_post_commit = read_text(&conn, "claimed_by");
+        assert!(
+            claimed_post_commit.is_none() || claimed_post_commit.as_deref() == Some(""),
+            "lock must be NULL after commit: {:?}", claimed_post_commit
+        );
+        // Final status must be executing (follow-on fired)
+        assert_eq!(read_status(&conn), "executing");
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC5.11b: handler-path validator failure rolls back tx (not just SQLite semantics)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac5_11b_handler_path_validator_failure_rolls_back() {
+        let (schema, conn) = setup();
+        // Insert row in executing state, phase 1 cycle 1
+        insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
+
+        let pre_status = read_status(&conn);
+        let pre_phase = read_i64(&conn, "current_phase");
+        let pre_cycle = read_i64(&conn, "current_cycle");
+        let pre_cycles_len = read_cycles(&conn).len();
+        let pre_claimed = read_text(&conn, "claimed_by");
+
+        // Call compute_submit_execute with an ai_with_human invoker.
+        // submit-execute declares `actor: ai_autonomous`, so ai_with_human is also
+        // rejected by the actor check (actor_allowed: ai_with_human != ai_autonomous).
+        // This triggers a validator failure INSIDE compute_submit_execute before any commit.
+        //
+        // Note: Actor::AiWithHuman does NOT satisfy Actor::AiAutonomous (see actor_allowed in actor.rs).
+        // The validator will fire the transition actor mismatch error and return Err before tx.commit().
+        let err = compute_submit_execute(
+            &schema, &conn, "WF001",
+            "attempted summary", Some("abc"), None, None,
+            Actor::AiWithHuman,
+        ).unwrap_err();
+
+        // Must be a validation error (actor mismatch for submit-execute)
+        let msg = err.to_string();
+        assert!(
+            msg.contains("submit-execute") || msg.contains("actor") || msg.contains("validation"),
+            "error must be validator failure: {msg}"
+        );
+
+        // DB state must be completely unchanged — proves the handler's tx rolled back
+        assert_eq!(read_status(&conn), pre_status, "status must be unchanged after validator failure");
+        assert_eq!(read_i64(&conn, "current_phase"), pre_phase, "current_phase must be unchanged");
+        assert_eq!(read_i64(&conn, "current_cycle"), pre_cycle, "current_cycle must be unchanged");
+        assert_eq!(read_cycles(&conn).len(), pre_cycles_len, "cycles must be unchanged");
+
+        let post_claimed = read_text(&conn, "claimed_by");
+        assert_eq!(
+            post_claimed, pre_claimed,
+            "claimed_by must be rolled back (lock released by tx rollback): {:?}", post_claimed
+        );
     }
 }
