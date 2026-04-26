@@ -49,6 +49,31 @@ fn main() -> Result<()> {
             let path = sub.get_one::<String>("path").unwrap();
             install::run(std::path::Path::new(path))?;
         }
+        Some(("skills", sub)) => {
+            use cli::skills::{SkillsCmd, run as skills_run};
+            let cmd = match sub.subcommand() {
+                Some(("list", _)) => SkillsCmd::List,
+                Some(("install", isub)) => SkillsCmd::Install {
+                    name: isub.get_one::<String>("name").cloned(),
+                    all: *isub.get_one::<bool>("all").unwrap_or(&false),
+                    global: *isub.get_one::<bool>("global").unwrap_or(&false),
+                },
+                Some(("uninstall", usub)) => SkillsCmd::Uninstall {
+                    name: usub.get_one::<String>("name").unwrap().clone(),
+                    global: *usub.get_one::<bool>("global").unwrap_or(&false),
+                },
+                _ => {
+                    // Print skills help
+                    let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
+                    if let Some(skills_cmd) = cmd2.find_subcommand_mut("skills") {
+                        skills_cmd.print_help()?;
+                        println!();
+                    }
+                    return Ok(());
+                }
+            };
+            skills_run(cmd)?;
+        }
         Some((store_name, _)) => {
             // Must be a store subcommand — dispatch
             // Check store is known

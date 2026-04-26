@@ -35,6 +35,44 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .help("Path to the store directory")
                         .required(true),
                 ),
+        )
+        // Skills subcommand
+        .subcommand(
+            Command::new("skills")
+                .about("Manage bundled Claude Code skill suggestions")
+                .subcommand(Command::new("list").about("List available bundled skills"))
+                .subcommand(
+                    Command::new("install")
+                        .about("Install a bundled skill into .claude/skills/")
+                        .arg(Arg::new("name").help("Skill name").required(false))
+                        .arg(
+                            Arg::new("all")
+                                .long("all")
+                                .action(ArgAction::SetTrue)
+                                .help("Install all bundled skills"),
+                        )
+                        .arg(
+                            Arg::new("global")
+                                .long("global")
+                                .action(ArgAction::SetTrue)
+                                .help("Install to ~/.claude/skills/ instead of ./.claude/skills/"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("uninstall")
+                        .about("Remove an installed bundled skill")
+                        .arg(
+                            Arg::new("name")
+                                .help("Skill name")
+                                .required(true),
+                        )
+                        .arg(
+                            Arg::new("global")
+                                .long("global")
+                                .action(ArgAction::SetTrue)
+                                .help("Remove from ~/.claude/skills/ instead of ./.claude/skills/"),
+                        ),
+                ),
         );
 
     // Add one subcommand per installed store
