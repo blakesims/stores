@@ -90,6 +90,7 @@ pub fn run(path: &Path) -> Result<()> {
         schema_path: canonical,
         installed_at,
         table_name: schema.name.clone(),
+        scope: schema.scope,
     };
     manifest.stores.push(entry);
     manifest.save()?;
@@ -149,6 +150,7 @@ fn install_bundled(name: &str, schema_yaml: &str) -> Result<()> {
         schema_path: sentinel_path,
         installed_at,
         table_name: schema.name.clone(),
+        scope: schema.scope,
     };
     manifest.stores.push(entry);
     manifest.save()?;
