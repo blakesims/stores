@@ -16,11 +16,32 @@ use serde_json::{Map, Value};
 use crate::schema::Schema;
 use crate::validate::EntryMap;
 
+/// Reserved column names that are always available in every store entry.
+/// These are always included in the render context so templates can use
+/// `{{status}}`, `{{display_id}}`, etc. regardless of whether the schema
+/// explicitly declares them as fields.
+const RESERVED_ENTRY_KEYS: &[&str] = &[
+    "display_id",
+    "status",
+    "created_at",
+    "updated_at",
+    "created_by",
+    "updated_by",
+];
+
 /// Build the template render context for a given schema entry.
 pub fn build_context(schema: &Schema, entry: &EntryMap) -> Value {
     let mut obj = Map::new();
 
-    // Copy every top-level entry value into the context.
+    // Include reserved columns first so templates can always use {{status}} etc.
+    for key in RESERVED_ENTRY_KEYS {
+        let val = entry.get(*key).cloned().unwrap_or(Value::Null);
+        obj.insert(key.to_string(), val);
+    }
+
+    // Copy every top-level schema field value into the context (may overlap with
+    // reserved keys if a schema declares a field with the same name — schema field
+    // wins since it's inserted after).
     for field in &schema.fields {
         let val = entry
             .get(&field.name)
@@ -125,7 +146,8 @@ mod tests {
         }
     }
 
-    // AC3.5: top-level keys equal schema field names plus current_cycle_for_phase.
+    // AC3.5: top-level keys include reserved columns, schema field names, and
+    // the engine-only `current_cycle_for_phase` key.
     #[test]
     fn context_top_level_keys_match_schema_plus_engine_key() {
         let schema = wf_schema();
@@ -136,6 +158,14 @@ mod tests {
         let ctx = build_context(&schema, &entry);
         let obj = ctx.as_object().unwrap();
 
+        // All reserved columns must be present.
+        for key in RESERVED_ENTRY_KEYS {
+            assert!(
+                obj.contains_key(*key),
+                "missing reserved key '{}' in context",
+                key
+            );
+        }
         // All schema field names must be present.
         for field in &schema.fields {
             assert!(
@@ -146,8 +176,15 @@ mod tests {
         }
         // Engine-only key must be present.
         assert!(obj.contains_key("current_cycle_for_phase"));
-        // No extra keys beyond schema fields + engine key.
-        let expected_count = schema.fields.len() + 1;
+        // Total count: unique(reserved ∪ schema_fields) + engine key.
+        // Some schema fields may overlap with reserved names (e.g. display_id);
+        // use a set to count unique keys.
+        let mut expected_keys: std::collections::BTreeSet<&str> =
+            RESERVED_ENTRY_KEYS.iter().copied().collect();
+        for f in &schema.fields {
+            expected_keys.insert(f.name.as_str());
+        }
+        let expected_count = expected_keys.len() + 1; // +1 for current_cycle_for_phase
         assert_eq!(
             obj.len(),
             expected_count,
