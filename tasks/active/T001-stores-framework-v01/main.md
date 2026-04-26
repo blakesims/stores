@@ -1,7 +1,8 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
+- **Phase 4 Start:** 2026-04-26
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
 - **Blocked Reason:** —
@@ -408,6 +409,53 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 - `parse.rs` is a re-export shim; `Schema::from_yaml` lives in `mod.rs` for the same reason. No behavioral change.
 
 **Commits:** `169480f` feat(T001 phase 2): YAML schema parser with Record sub-field flattening
+
+---
+
+### Phase 4: Dynamic CLI codegen + `add`/`show`/`list`/`update` verbs
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+
+**Files Created:**
+- `src/cli/dynamic.rs` — `build_root(manifest, schemas) -> clap::Command`; builder API (no derive); per store: `Command::new(store.name)` with `add`/`show`/`list`/`update` verbs; per leaf: `Arg::new(cli_name).long(cli_name)` + `--<name>-from-file` companion for Text/Timestamp/DisplayId leaves; `--json` global flag; `is_reserved()` guard prevents collision with clap builtins
+- `src/cli/dispatch.rs` — routes parsed `ArgMatches` to handler by store-name match; calls `detect_invoker` (reads `$CLAUDECODE` env var)
+- `src/handlers/mod.rs` — declares `add`, `list`, `row`, `show`, `update` submodules
+- `src/handlers/row.rs` — `build_entry_map(schema, get_arg)`: reads flat CLI args, nests Record sub-fields back into `entry["record"]["subfield"] = val`; `coerce_value(ty, raw)`: List splits on `|`; `now_iso8601()` UTC formatter; `read_row(schema, conn, display_id)` deserializes JSON columns back to nested `serde_json::Value`
+- `src/handlers/add.rs` — builds entry, calls validator stub, inserts row in transaction: INSERT stub → `last_insert_rowid()` → `id_format::render()` → `UPDATE display_id`; prints display_id; 3 unit tests for status/created_*/display_id
+- `src/handlers/show.rs` — reads row via `read_row`; prints text (nested) or `--json` (single object)
+- `src/handlers/list.rs` — queries all rows; decodes JSON columns; prints text (one line per entry) or `--json` (array)
+- `src/handlers/update.rs` — reads existing row, builds diff from args, merges, runs validator stub, executes SET for diff fields + `updated_at`/`updated_by`
+- `src/validate/mod.rs` — `type EntryMap = BTreeMap<String, Value>`; `validate(schema, entry, invoker) -> Ok(())` stub
+- `src/output.rs` — `print_entry_text`, `print_list_text`, `print_entry_json`, `print_list_json`
+
+**Files Modified:**
+- `src/main.rs` — replaced derive `Cli` struct with builder-API entry: load manifest + schemas (appending `/schema.yaml` to stored `schema_path`), call `dynamic::build_root`, parse, dispatch via `match subcommand()`; `init` and `install` work before manifest exists
+- `src/cli/mod.rs` — added `dispatch` and `dynamic` module declarations
+- `src/schema/actor.rs` — added `Copy` derive to `Actor` (no heap data; enables passing by value without clone noise)
+- `Cargo.toml` — added `"string"` to clap features (required for `From<String> for clap::builder::Str`, which is `#[cfg(feature = "string")]` in clap 4.6)
+
+**ACs verified:**
+- [x] AC1: `stores kitchen_sink add --title "thing broke" --priority low` → `K001`, exits 0
+- [x] AC2: Flat leaf args — `--title`, `--notes`, `--severity` (Record sub-fields) appear as flat flags; no `--details` arg
+- [x] AC3: `--tags "alpha|beta|gamma"` → JSON `["alpha","beta","gamma"]` (List split on `|`)
+- [x] AC4: `stores kitchen_sink show K001` prints entry; `--json` emits valid JSON; Record and List columns decoded back to nested structures (`details.notes`, `tags` array)
+- [x] AC5: `stores kitchen_sink list` shows all rows; `--json` emits JSON array
+- [x] AC6: `--title-from-file /tmp/test_note.txt` loads file content into `--title`
+- [x] AC7: `stores kitchen_sink update K001 --title "edited"` mutates row; `updated_at`/`updated_by` bumped; `created_*` unchanged
+- [x] AC8: `status = lifecycle.states[0]` on every `add` (unit tested + E2E)
+- [x] AC9: `created_at`/`updated_at`/`created_by`/`updated_by` populated on add; `updated_*` bumped on update (unit tested)
+- [x] AC10: `stores --help` shows `kitchen_sink`; `stores kitchen_sink --help` shows verbs
+
+**Test count:** 41 tests (3 new in `handlers::add::tests`), all pass
+
+**Deviations:**
+- `ArgMatches::contains_id` panics in clap 4.6 for unregistered IDs; used `try_contains_id` instead (returns `Result<bool>`, safer API). No behavioral change.
+- `build_write_cmd` split into `build_add_cmd`/`build_update_cmd`/`build_leaf_cmd` to avoid passing `&str` to `Command::new` (which requires `&'static str` without the `string` feature); lifetime issue was pre-existing clap 4.6 constraint. No behavioral change.
+- ISO-8601 UTC math duplicated from `install.rs` into `handlers/row.rs` (both are stdlib-only). Minor code smell; deferred to Phase 5 or later.
+
+**Commits:** (pending)
 
 ---
 

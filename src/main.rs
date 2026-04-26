@@ -1,59 +1,71 @@
 mod cli;
 mod codegen;
 mod db;
+pub mod handlers;
 pub mod id_format;
 mod install;
 mod manifest;
+mod output;
 mod paths;
 pub mod schema;
+pub mod validate;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
+use std::collections::HashMap;
 
-#[derive(Parser)]
-#[command(name = "stores", about = "Schema-driven store framework")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-
-    /// Remaining args for dynamically-added store subcommands (Phase 4)
-    #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
-    args: Vec<String>,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Initialize .stores/ in the current directory
-    Init,
-    /// Install a store from a directory containing schema.yaml
-    Install {
-        /// Path to the store directory
-        path: String,
-    },
-}
+use manifest::Manifest;
+use schema::Schema;
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Determine whether a manifest exists (init must work without one)
+    let manifest_exists = paths::manifest_path()
+        .map(|p| p.exists())
+        .unwrap_or(false);
 
-    match cli.command {
-        Some(Commands::Init) => cli::init::run(),
-        Some(Commands::Install { path }) => {
-            install::run(std::path::Path::new(&path))
+    // Load manifest + schemas if available
+    let (manifest, schemas) = if manifest_exists {
+        let m = Manifest::load()?;
+        let mut s: HashMap<String, Schema> = HashMap::new();
+        for store in &m.stores {
+            let schema_file = store.schema_path.join("schema.yaml");
+            let yaml = std::fs::read_to_string(&schema_file)?;
+            let schema = Schema::from_yaml(&yaml)?;
+            s.insert(store.name.clone(), schema);
         }
-        None => {
-            if cli.args.is_empty() {
-                // Print help when no subcommand given
-                let mut cmd = Cli::command();
-                cmd.print_help()?;
-                println!();
+        (m, s)
+    } else {
+        (Manifest::empty(), HashMap::new())
+    };
+
+    // Build the command tree dynamically
+    let cmd = cli::dynamic::build_root(&manifest, &schemas);
+    let matches = cmd.get_matches();
+
+    match matches.subcommand() {
+        Some(("init", _)) => {
+            cli::init::run()?;
+        }
+        Some(("install", sub)) => {
+            let path = sub.get_one::<String>("path").unwrap();
+            install::run(std::path::Path::new(path))?;
+        }
+        Some((store_name, _)) => {
+            // Must be a store subcommand — dispatch
+            // Check store is known
+            if manifest.stores.iter().any(|s| s.name == store_name) {
+                cli::dispatch::dispatch(&matches, &manifest, &schemas)?;
             } else {
-                eprintln!(
-                    "Unknown subcommand '{}'. Run `stores init` first or `stores install <path>`.",
-                    cli.args[0]
-                );
+                eprintln!("Unknown subcommand '{store_name}'. Run `stores init` first or `stores install <path>`.");
                 std::process::exit(1);
             }
-            Ok(())
+        }
+        None => {
+            // Re-parse to print help
+            let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
+            cmd2.print_help()?;
+            println!();
         }
     }
+
+    Ok(())
 }

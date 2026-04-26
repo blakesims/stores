@@ -92,6 +92,23 @@ fn strip_first_placeholder(s: &str) -> String {
     s.to_string()
 }
 
+/// Render a display_id from an `id_format` template and a primary key.
+///
+/// Example: `render("L{:03d}", 1)` → `"L001"`.
+pub fn render(template: &str, pk: i64) -> String {
+    // Find the placeholder position and width specifier.
+    let start = template.find('{').expect("template must have placeholder");
+    let end = template.find('}').expect("template must have closing brace");
+    // inner is ":0Nd"
+    let inner = &template[start + 1..end];
+    // inner starts with ":0" — width follows
+    let width_str = &inner[2..inner.len() - 1]; // strip ":0" and "d"
+    let width: usize = width_str.parse().unwrap_or(1);
+    let prefix = &template[..start];
+    let suffix = &template[end + 1..];
+    format!("{prefix}{pk:0>width$}{suffix}", pk = pk, width = width)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
