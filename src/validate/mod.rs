@@ -19,13 +19,12 @@ pub type EntryMap = BTreeMap<String, serde_json::Value>;
 #[derive(Debug, Clone)]
 pub enum Op {
     Add,
-    Update,
-    /// Lifecycle transition verb (e.g. "triage", "close").
-    /// The optional diff restricts actor checks to only the fields being written
-    /// in this call (not carried-over fields from the existing row).
-    Transition(String),
-    /// Like Transition but carries the diff so actor checks are scoped to written fields.
-    TransitionWithDiff(String, EntryMap),
+    /// Update op carrying the diff (fields actually being written in this call).
+    /// Actor checks scope to the diff only; required/enum/pattern use the merged entry.
+    Update(EntryMap),
+    /// Lifecycle transition verb (e.g. "triage", "close") carrying the diff.
+    /// Actor checks scope to the diff only; required/enum/pattern use the merged entry.
+    Transition(String, EntryMap),
 }
 
 /// Validate an entry map against a schema for the given operation and invoker.
@@ -43,11 +42,13 @@ pub fn validate(
 ) -> Result<(), Vec<ValidationError>> {
     let mut errors: Vec<ValidationError> = Vec::new();
 
-    // Determine the transition verb and optional diff for actor scoping.
+    // Determine the transition verb and diff for actor scoping.
+    // Actor checks use the diff (what's actually being written this call);
+    // required/enum/pattern use the full merged entry.
     let (verb_opt, actor_entry) = match &op {
-        Op::Transition(verb) => (Some(verb.as_str()), entry),
-        Op::TransitionWithDiff(verb, diff) => (Some(verb.as_str()), diff),
-        _ => (None, entry),
+        Op::Transition(verb, diff) => (Some(verb.as_str()), diff),
+        Op::Update(diff) => (None, diff),
+        Op::Add => (None, entry),
     };
 
     // If this is a Transition op, check the transition's declared actor first.
@@ -61,7 +62,7 @@ pub fn validate(
 
     // Walk all fields (top-level + Record sub-fields).
     // required/enum/pattern checks run against the full merged entry;
-    // actor checks run against actor_entry (diff-only for TransitionWithDiff).
+    // actor checks run against actor_entry (diff-only for Transition/Update, full entry for Add).
     for field in &schema.fields {
         validate_field(field, entry, actor_entry, &[], &schema.default_actor, invoker, &mut errors);
 
@@ -101,7 +102,7 @@ fn validate_field(
     // pattern / regex check
     regex_check::check_pattern(field, &field_path, entry, errors);
 
-    // actor check — uses actor_entry (diff only for TransitionWithDiff, else full entry)
+    // actor check — uses actor_entry (diff only for Transition/Update, full entry for Add)
     actor::check_actor(field, &field_path, actor_entry, invoker, *default_actor, errors);
 }
 
@@ -347,8 +348,54 @@ fields:
         let s = schema();
         let entry = entry_from(&[("summary", str_val("hello"))]);
         // "triage" transition requires ai_with_human; both actors are valid
-        validate(&s, &entry, Op::Transition("triage".to_string()), Actor::Human).unwrap();
-        validate(&s, &entry, Op::Transition("triage".to_string()), Actor::AiAutonomous).unwrap();
+        let diff = entry_from(&[("summary", str_val("hello"))]);
+        validate(&s, &entry, Op::Transition("triage".to_string(), diff.clone()), Actor::Human).unwrap();
+        validate(&s, &entry, Op::Transition("triage".to_string(), diff.clone()), Actor::AiAutonomous).unwrap();
+    }
+
+    // ---- Op::Update actor scoping — regression test for carry-forward fix ----
+
+    #[test]
+    fn update_with_human_invoker_on_ai_authored_row_succeeds() {
+        // Scenario: an ai_autonomous Add wrote the full row (including the human-actor `answer`
+        // field as null — absent in the diff). A human then tries to update a different field
+        // (`summary`) only. The validator must NOT fire the actor check on `answer` because
+        // `answer` is not in the diff for this Update call.
+        let s = schema();
+
+        // Simulate the merged row as it would look after an AI-authored add:
+        // summary present (required), answer absent (null-shaped, not in the human's diff).
+        let merged = entry_from(&[
+            ("summary", str_val("original summary")),
+            ("answer", serde_json::Value::Null), // AI-authored row has answer=null
+        ]);
+
+        // The human's diff only changes summary.
+        let diff = entry_from(&[("summary", str_val("updated summary"))]);
+
+        // Should succeed: human is only mutating `summary` (no actor constraint).
+        // `answer` is in the merged entry (as Null) but NOT in the diff → must not error.
+        validate(&s, &merged, Op::Update(diff), Actor::Human)
+            .expect("update scoped to summary should succeed even though merged row has answer=null written by AI");
+    }
+
+    #[test]
+    fn update_with_ai_invoker_writing_human_field_fails() {
+        // Sanity: AI trying to update the human-actor `answer` field directly must still fail.
+        let s = schema();
+        let merged = entry_from(&[
+            ("summary", str_val("hello")),
+        ]);
+        // The AI's diff includes `answer` — this should be caught.
+        let diff = entry_from(&[
+            ("answer", str_val("ai-wrote-this")),
+        ]);
+        let errs = validate(&s, &merged, Op::Update(diff), Actor::AiAutonomous)
+            .unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.field_path == vec!["answer".to_string()] && e.rule == error::RuleKind::Actor),
+            "expected actor error on answer for AI invoker; got: {:?}", errs
+        );
     }
 
     // ---- pretty_print determinism ----

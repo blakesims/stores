@@ -61,8 +61,8 @@ pub fn run(
         merged.insert(k.clone(), v.clone());
     }
 
-    // Run validator against merged entry
-    validate::validate(schema, &merged, Op::Update, invoker).map_err(|errs| {
+    // Run validator against merged entry; actor checks scoped to diff only.
+    validate::validate(schema, &merged, Op::Update(diff.clone()), invoker).map_err(|errs| {
         anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
     })?;
 
