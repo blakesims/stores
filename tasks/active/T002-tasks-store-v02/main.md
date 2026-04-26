@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: Phase 1 cycle 2 PASS; advancing to Phase 2)
+- **Last Updated:** 2026-04-26 (executor: Phase 2 complete)
 - **Blocked Reason:** —
 
 ## Task
@@ -1098,6 +1098,41 @@ Rendered tasks/completed/T003-smoke-test/main.md
   - AC1.6 outside-git hard error confirmed (per user decision Q7→B).
   - All 12 ACs verified by unit tests that can be individually run.
   - The `flatten.rs` module was NOT modified — ListRecord/ListFk have no flat CLI arg surface in Phase 1 (CLI surface is Phase 4+). The build_entry_map insert_at_path helper is future-safe for arbitrary depth.
+
+### Phase 2: `workflow:` block in schema
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+- **Commits:**
+  - `6b84c2c` T002 P2.1+P2.2: define Workflow types and wire into Schema
+  - `4e8998f` T002 P2.3+P2.4: WorkflowResolved + install-time template resolution
+- **Files Modified:**
+  - `src/schema/workflow.rs` — NEW: `Workflow`, `AgentRole`, `StateAction` (DispatchAgent/Increment/TransitionTo), `WorkflowResolved`, `FieldShape`, serde deserialization, `validate_cross_refs`, `resolve_from_disk`, `resolve_from_strings`
+  - `src/schema/mod.rs` — `pub mod workflow`; `pub use workflow::{...}`; `Schema.workflow: Option<Workflow>`; `RawSchema.workflow`; validation call in `Schema::from_yaml`; 8 AC-level schema tests added
+  - `src/install.rs` — call `wf.resolve_from_disk(&canonical)` at install time to verify template files exist (AC2.5)
+  - `tests/fixtures/workflow_minimal/schema.yaml` — new fixture with lifecycle + fields + workflow block
+  - `tests/fixtures/workflow_minimal/templates/planner-brief.md.tpl` — fixture template
+  - `tests/fixtures/workflow_minimal/templates/executor-brief.md.tpl` — fixture template
+  - `tests/fixtures/workflow_minimal/templates/main.md.tpl` — fixture template
+- **Test count:** 207 (184 prior + 23 new; all pass)
+- **e2e:** All 13 steps pass
+- **AC verification:**
+  - **AC2.1** (backward compat): `schema_without_workflow_is_none` test + all 184 prior tests pass unchanged
+  - **AC2.2** (full parse): `schema_with_workflow_parses` — agent_roles, on_state, briefing_templates, submit_targets, render_target_path round-trip
+  - **AC2.3** (unknown on_state state): `schema_workflow_unknown_on_state_errors` names the state
+  - **AC2.4** (unknown DispatchAgent role): `schema_workflow_unknown_dispatch_agent_errors` names the role
+  - **AC2.5** (missing template path): `resolve_from_disk_missing_template_errors` errors with path in message
+  - **AC2.6** (submit_targets field existence + type shape): `schema_workflow_submit_target_unknown_field_errors` + `schema_workflow_submit_plan_wrong_type_errors`
+- **Deviations from plan:**
+  - Tasks 2.1 and 2.2 batched into one commit (both in new `workflow.rs` + `mod.rs` — coherent unit)
+  - Task 2.5 validation logic implemented inside 2.1 commit's `validate_cross_refs` method (not a separate commit); all validation rules are present and tested
+  - `tempfile` crate used in `workflow::tests::resolve_from_disk_missing_template_errors` (already in dev-dependencies from Phase 1)
+  - `resolve_from_disk` called at install time for validation only; in-memory `WorkflowResolved` is not persisted (consistent with the plan: it's created fresh at each load/dispatch, driven by the schema YAML on disk). The `Schema` struct itself holds `Option<Workflow>` (paths); resolution happens on demand. This is a minor deviation from "embed in memory at install" — but since the manifest doesn't store workflow state and schemas are re-parsed from YAML at startup, producing a `WorkflowResolved` at dispatch time (Phase 5) is the correct final shape. Phase 5 will add the load-time resolution in the main.rs schema loading loop.
+- **Notes:**
+  - The `workflow_minimal` fixture schema deliberately uses `auto_increment: true` on `current_phase` without `auto_increment_within` (valid: top-level auto-incrementor). This is the simplest valid shape for Phase 2 tests.
+  - No CLI verbs added (deferred to Phases 4-6 per plan).
+  - No engine logic added (deferred to Phase 5 per plan).
 
 ---
 
