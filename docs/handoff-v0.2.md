@@ -7,6 +7,91 @@
 
 ---
 
+## ⚠️ Changelog — read before relying on this document
+
+The architectural direction for the **tasks store** has shifted substantially since this handoff was written. Treat the original tasks-store sketch in this file as **superseded historical context**, not a specification.
+
+### 2026-04-26 (later same day) — β architecture ratified
+
+The marquee v0.2 task (this document called it "the tasks store") expanded into something broader: **DB-as-truth + framework-as-engine** ("β"). The framework now grows generic workflow CLI verbs (`next-action`, `brief`, `submit-execute`, `submit-review`, `submit-plan`, `submit-plan-review`, `render`) driven by per-store lifecycle metadata. Agents become thin workers receiving scoped briefings; main.md is rendered from DB rows on demand. This is the foundation for any future workflow-shaped store, not just tasks.
+
+**The authoritative source for the in-flight work is now:** `tasks/active/T002-tasks-store-v02/main.md` (Intent Contract in `## Task`; ratified plan in `## Plan`).
+
+Specifically superseded sections of this document:
+
+| Section in this file | Status | What replaces it |
+|---|---|---|
+| "v0.2 priority list" → item #2 (`tasks` store) | **DELIVERED — see T002 main.md for the audit trail** | T002 main.md `## Plan` (10 phases, β architecture) |
+| Sub-document arrays as CLI surface — three options sketched | **Superseded** | β chose option (b)+ : briefing/submission verbs (`stores tasks brief`, `stores tasks submit-execute`, etc.) bypass flat-flag flattening for workflow stores |
+| Section ownership as per-section actors | **Superseded** | Agents are thin; framework owns sections via render. Plus: `actor: framework` is a new actor variant for engine-fired transitions |
+| Parameterized `EXECUTING_PHASE_N` states | **Superseded** | Dropped — single `executing` state + `current_phase: integer` field with `auto_increment*` |
+| Lifecycle sketch with `phase_review`, `merge_review`, `merge_ready` | **Superseded** | 7 states only: `[planning, plan_review, ready, executing, code_review, blocked, complete]`. Phase-reviewer dropped entirely. Merge-reviewer / CodeRabbit moved to a separate (out-of-scope) `tasks:wrap` skill. |
+| `list_record` / `list_fk` field types deferred to Phase 7 | **Superseded** | Promoted to Phase 1 of T002 (per code-review C1) — they're foundational, not tasks-specific |
+| `task_ref`-style soft FK by string | **Still valid** but generalized via `FieldType::ListFk { ref_store }` |
+| Open question on storage scope (per-cwd vs `repo`) | **Resolved** | `scope: repo \| worktree \| user` field on schema; tasks/observations/gate share `repo` scope; resolves via `git rev-parse --git-common-dir` |
+| Open question: sub-doc CLI surface | **Resolved** | option (b)+ via briefing/submission verbs |
+| Open question: skill format convergence with pi-extension | **Out of scope for T002** | Defer to a future cross-runtime task |
+
+Sections of this document that are **still authoritative**:
+
+- "What you're picking up" — current repo state, test count, e2e. (Numbers move; the structural claims hold.)
+- "Locked design decisions from v0.1" — all 9 still locked. β extends them, doesn't relitigate them.
+- "Known issues / open work — Bugs deferred" — the 6 deferred bugs (`--tags` pipe-split, `--summary-from-file` masking, per-verb `--help` filtering, `required_when` OR/AND substring rejection, reserved-column-name collision, lock primitive) are still on the v0.2 backlog. Some may be picked up incidentally during T002 (e.g., the lock primitive is now subsumed by T002's `claimed_by`/`claimed_at` lock pattern).
+- "How to develop" — workflow conventions still apply.
+- "What NOT to do" — all six guardrails still apply, with one carve-out: guardrail #4 ("don't add a process layer to the framework") IS being modified by β. Workflow-shaped stores opt in via an explicit `workflow:` block; non-opt-in stores keep v0.1 "data + enforcement only" behavior. The framework gains a process layer that is generic across opt-in stores.
+
+### 2026-04-26 (final, post-T002 ship) — `tasks` store DELIVERED
+
+T002 shipped via β architecture. The 10-phase plan executed cleanly with two cycle-2 plan revisions and several phase-level cycle-2 code reviews. Key landed pieces:
+- New schema features: `actor: framework`, `guard:` predicates, `auto_increment` / `auto_increment_within`, `workflow:` opt-in block, `scope: repo | worktree | user` storage resolution, `FieldType::ListRecord`, `FieldType::ListFk`, `requires_gate` on Transition.
+- Generic workflow CLI verbs: `next-action`, `brief`, `submit-execute`, `submit-review`, `submit-plan`, `submit-plan-review`, `render`, `resume`.
+- `tasks` bundled store + 4 briefing templates + main.md render template.
+- `tasks:start` bundled skill.
+- Final test count: ~298 unit tests + 13 e2e steps (original) + 16 tasks_e2e steps (new). All green.
+- Marquee DONE_WHEN — "4th REVISE attempt rejected by schema-level guard with status auto-set to BLOCKED" — verified end-to-end at 1.1s.
+
+**Legacy boundary:** filesystem tasks T001 (stores framework v0.1) and T002 (this work) stay as legacy filesystem-only. T003 onwards are DB rows rendered to filesystem via `stores tasks render <id>`. No automated migration of T001/T002. Do not attempt to import legacy tasks — the schema and render template are built for T003+; the legacy main.md layout differs enough that mechanical import would corrupt intent contract fields.
+
+**v0.3 candidates** (deferred per Intent Contract scope-out):
+- Phase-reviewer agent + lifecycle state
+- Merge-reviewer agent + MERGE_REVIEW / MERGE_READY states
+- `tasks:wrap` skill (Stage 6 CodeRabbit + Stage 7 Completion summary)
+- `runs` event log store (provenance audit trail)
+- `notes` store (10.06 worklog port)
+- HTTP/JSON API for tasks store
+- 10.06 capability YAML reconciliation in a project-specific wrapper skill (`/task:open` port)
+- The 6 deferred bugs from the original v0.2 handoff (`--tags` pipe-split, `--summary-from-file` masking, per-verb `--help` filtering, `required_when` OR/AND substring rejection, reserved-column-name collision, the lock primitive — partially subsumed by tasks's `claimed_by`/`claimed_at`)
+- Documentation polish from Phase 8 (skill gate enumeration, task-workflow plugin dependency declaration in skill frontmatter)
+
+### Why the shift
+
+A second-opinion review of the original handoff surfaced a fundamental ambiguity: source of truth. The original sketch implicitly mixed "DB has rows; main.md is the agents' working document" — leading to two write paths and inevitable drift. β commits to one write path (the CLI), with main.md as a deterministic render. The pi-extension's graph-engine had already pioneered this pattern; β lifts it into the framework so any orchestrator (Claude Code, pi, future runtimes) can drive the same state machine.
+
+The cost: T002 is ~3-4 weeks elapsed and ~4000-6000 LOC, vs the original handoff's ~2 weeks and 1500-2500 LOC. The benefit: every future workflow-shaped store gets the engine for free, and the marquee 4th-revise-→-BLOCKED enforcement happens at schema level (untestable in markdown, mechanical in DB).
+
+### Ratified decisions (locked at T002 Intent Contract; do not relitigate)
+
+| # | Decision | Locked value |
+|---|---|---|
+| 1 | Architecture | β: DB-as-truth + workflow engine in framework |
+| 2 | Workflow opt-in | Explicit `workflow:` block in schema (not implicit) |
+| 3 | CLI verb shape | Split verbs: `brief` returns prompt; `submit-execute`/`submit-review`/`submit-plan`/`submit-plan-review` are explicit submission verbs (no overloaded args) |
+| 4 | Smoke-test target | Expand `observations` lifecycle to 10.06's full set: `investigating`, `confirmed`, `needs_info`, `in_progress` |
+| 5 | ID prefix | `T{:03d}` shared with filesystem; T001-T002 stay legacy filesystem-only; T003 onwards are DB rows rendered to filesystem |
+| 6 | `guard:` expression scope | Equality (`==`, `!=`) + `.length <`, `<=`, `>`, `>=`, `==` only; defer full AND/OR/inequalities for non-length comparisons |
+| 7 | Capability fields | Bake `capability`/`sub_item`/`infra` into bundled tasks schema as optional. 10.06 YAML check stays in project-specific wrapper skill, not framework. |
+| 8 | Concurrency lock | `claimed_by` / `claimed_at` with 5-min default timeout (releases on submit or expiry) |
+
+### Read order if you've just opened this repo
+
+1. `tasks/active/T002-tasks-store-v02/main.md` — the **current** Intent Contract + 10-phase plan (cycle-2 ratified). Authoritative.
+2. `tasks/active/T002-tasks-store-v02/plan-review.md` — review history + plan-strengthening decisions.
+3. `tasks/active/T002-tasks-store-v02/code-review-phase-{N}.md` — phase-by-phase audit trail (read in phase order).
+4. `tasks/completed/T001-stores-framework-v01/main.md` — full v0.1 audit trail.
+5. **This document** — original v0.2 framing + still-valid decisions and deferred bugs. Skip the superseded sections marked above.
+
+---
+
 ## TL;DR
 
 `stores` is a schema-driven store framework written in Rust. v0.1 just shipped: single binary CLI, two bundled stores (`observations` + `gate`), schema → CLI → SQLite → insert-time enforcement chain works end-to-end. **94 tests pass; 13-step DONE_WHEN demo passes from a fresh shell** via `tests/e2e.sh`.
