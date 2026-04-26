@@ -5,6 +5,25 @@ use crate::manifest::Manifest;
 use crate::schema::{FieldType, Schema};
 use crate::schema::flatten::leaf_args;
 
+// ---------------------------------------------------------------------------
+// Bundled stores — embedded at compile time
+// ---------------------------------------------------------------------------
+
+/// Names of bundled stores (the subdirectory name == schema name).
+pub static BUNDLED_STORE_NAMES: &[&str] = &["observations", "gate"];
+
+/// Embedded schema.yaml content for each bundled store (same order as BUNDLED_STORE_NAMES).
+pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
+    (
+        "observations",
+        include_str!("../../stores/observations/schema.yaml"),
+    ),
+    (
+        "gate",
+        include_str!("../../stores/gate/schema.yaml"),
+    ),
+];
+
 /// Build the root `stores` Command with all installed stores added as subcommands.
 pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Command {
     let mut root = Command::new("stores")
@@ -35,6 +54,11 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .help("Path to the store directory")
                         .required(true),
                 ),
+        )
+        // list-installable subcommand
+        .subcommand(
+            Command::new("list-installable")
+                .about("List stores bundled with the binary (run `stores install <name>` to install one)"),
         )
         // Skills subcommand
         .subcommand(
@@ -85,7 +109,7 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
     root
 }
 
-/// Build a subcommand for a single store with add/show/list/update verbs
+/// Build a subcommand for a single store with add/show/list/update/schema verbs
 /// plus one verb per lifecycle transition declared in the schema.
 fn build_store_command(schema: &Schema) -> Command {
     // Get leaf args — uniqueness already enforced at install time
@@ -94,17 +118,19 @@ fn build_store_command(schema: &Schema) -> Command {
     let add_cmd = build_add_cmd(&leaves, schema);
     let update_cmd = build_update_cmd(&leaves, schema);
     let show_cmd = build_show_cmd();
-    let list_cmd = build_list_cmd();
+    let list_cmd = build_list_cmd(schema);
+    let schema_cmd = build_schema_cmd();
 
     // Base verb names reserved by the framework
-    const BASE_VERBS: &[&str] = &["add", "show", "list", "update"];
+    const BASE_VERBS: &[&str] = &["add", "show", "list", "update", "schema"];
 
     let mut store_cmd = Command::new(schema.name.clone())
         .about(format!("Operate on the '{}' store", schema.name))
         .subcommand(add_cmd)
         .subcommand(show_cmd)
         .subcommand(list_cmd)
-        .subcommand(update_cmd);
+        .subcommand(update_cmd)
+        .subcommand(schema_cmd);
 
     // Register one subcommand per transition verb
     for transition in &schema.lifecycle.transitions {
@@ -271,9 +297,64 @@ fn build_show_cmd() -> Command {
         )
 }
 
-/// Build the `list` command.
-fn build_list_cmd() -> Command {
-    Command::new("list").about("list entries")
+/// Build the `list` command with filter/sort/limit flags.
+fn build_list_cmd(schema: &Schema) -> Command {
+    // Build the sorted hint for --sort help text
+    let col_names: Vec<String> = {
+        let mut cols = vec![
+            "status".to_string(),
+            "created_at".to_string(),
+            "updated_at".to_string(),
+            "created_by".to_string(),
+            "updated_by".to_string(),
+            "display_id".to_string(),
+        ];
+        for f in &schema.fields {
+            cols.push(f.name.clone());
+        }
+        cols
+    };
+    let cols_help = col_names.join(", ");
+
+    Command::new("list")
+        .about("list entries")
+        .arg(
+            Arg::new("status")
+                .long("status")
+                .help("Filter rows where status == value")
+                .required(false),
+        )
+        .arg(
+            Arg::new("limit")
+                .long("limit")
+                .help("Limit result count to N rows")
+                .value_parser(clap::value_parser!(u64))
+                .required(false),
+        )
+        .arg(
+            Arg::new("sort")
+                .long("sort")
+                .help(format!("Order by column ascending. Valid columns: {cols_help}"))
+                .required(false),
+        )
+        .arg(
+            Arg::new("reverse")
+                .long("reverse")
+                .action(ArgAction::SetTrue)
+                .help("Reverse the sort order (descending)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("since")
+                .long("since")
+                .help("Filter rows where created_at >= date (YYYY-MM-DD)")
+                .required(false),
+        )
+}
+
+/// Build the `schema` command.
+fn build_schema_cmd() -> Command {
+    Command::new("schema").about("Print the schema for this store")
 }
 
 /// Names that collide with our reserved layer or clap builtins.

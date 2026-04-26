@@ -27,8 +27,23 @@ fn main() -> Result<()> {
         let m = Manifest::load()?;
         let mut s: HashMap<String, Schema> = HashMap::new();
         for store in &m.stores {
-            let schema_file = store.schema_path.join("schema.yaml");
-            let yaml = std::fs::read_to_string(&schema_file)?;
+            let path_str = store.schema_path.to_string_lossy();
+            let yaml = if let Some(bundled_name) = path_str.strip_prefix("bundled:") {
+                // Bundled store: find embedded schema by name
+                cli::dynamic::BUNDLED_STORE_SCHEMAS
+                    .iter()
+                    .find(|(n, _)| *n == bundled_name)
+                    .map(|(_, y)| y.to_string())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "bundled store '{}' not found in binary; was the binary rebuilt?",
+                            bundled_name
+                        )
+                    })?
+            } else {
+                let schema_file = store.schema_path.join("schema.yaml");
+                std::fs::read_to_string(&schema_file)?
+            };
             let schema = Schema::from_yaml(&yaml)?;
             s.insert(store.name.clone(), schema);
         }
@@ -48,6 +63,14 @@ fn main() -> Result<()> {
         Some(("install", sub)) => {
             let path = sub.get_one::<String>("path").unwrap();
             install::run(std::path::Path::new(path))?;
+        }
+        Some(("list-installable", _)) => {
+            use cli::dynamic::BUNDLED_STORE_NAMES;
+            println!("Bundled stores (run `stores install <name>` to install one or more):");
+            println!();
+            for name in BUNDLED_STORE_NAMES {
+                println!("  {name}");
+            }
         }
         Some(("skills", sub)) => {
             use cli::skills::{SkillsCmd, run as skills_run};

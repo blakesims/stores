@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+use crate::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use crate::codegen::ddl::ddl_for;
 use crate::db;
 use crate::manifest::{InstalledStore, Manifest};
@@ -8,8 +9,23 @@ use crate::paths::{db_path, ensure_initialized};
 use crate::schema::flatten::leaf_args;
 use crate::schema::Schema;
 
-/// Entry point for `stores install <path>`.
+/// Entry point for `stores install <path-or-bundled-name>`.
+///
+/// If `path` is a single component that matches a bundled store name, install
+/// from the embedded schema. Otherwise treat it as a filesystem path.
 pub fn run(path: &Path) -> Result<()> {
+    // Check if this looks like a bare bundled name (no path separator, no .yaml)
+    let path_str = path.to_string_lossy();
+    if !path_str.contains(std::path::MAIN_SEPARATOR)
+        && !path_str.contains('/')
+        && !path_str.ends_with(".yaml")
+    {
+        let name = path_str.as_ref();
+        if let Some(&(_, schema_yaml)) = BUNDLED_STORE_SCHEMAS.iter().find(|(n, _)| *n == name) {
+            return install_bundled(name, schema_yaml);
+        }
+    }
+
     // 1. Resolve to canonical absolute path
     let canonical = path
         .canonicalize()
@@ -81,6 +97,64 @@ pub fn run(path: &Path) -> Result<()> {
     // 9. Print success
     println!(
         "Installed store '{}' (table: {})",
+        schema.name, schema.name
+    );
+
+    Ok(())
+}
+
+/// Install a bundled store from embedded YAML content.
+fn install_bundled(name: &str, schema_yaml: &str) -> Result<()> {
+    let schema = Schema::from_yaml(schema_yaml)
+        .with_context(|| format!("bundled schema parse error for '{name}'"))?;
+
+    leaf_args(&schema).with_context(|| {
+        format!("bundled schema '{}' has leaf-arg collisions", schema.name)
+    })?;
+
+    ensure_initialized()?;
+    let db = db_path()?;
+    let conn = db::open(&db)?;
+
+    let mut manifest = Manifest::load()?;
+
+    // For bundled stores, use a synthetic path: "bundled:<name>"
+    // We store a relative sentinel so the manifest records the source clearly.
+    let sentinel_path = std::path::PathBuf::from(format!("bundled:{name}"));
+
+    if let Some(existing) = manifest.stores.iter().find(|s| s.schema_path == sentinel_path) {
+        bail!(
+            "bundled store '{}' is already installed (from {}); \
+             v0.1 has no migrations — to reinstall, remove it from the manifest manually",
+            existing.name,
+            existing.schema_path.display()
+        );
+    }
+    if let Some(existing) = manifest.stores.iter().find(|s| s.name == schema.name) {
+        bail!(
+            "a store named '{}' is already installed (from {}); \
+             v0.1 has no migrations — store names must be unique",
+            existing.name,
+            existing.schema_path.display()
+        );
+    }
+
+    let ddl = ddl_for(&schema);
+    conn.execute_batch(&format!("BEGIN;\n{ddl}\nCOMMIT;"))
+        .with_context(|| format!("failed to apply DDL for bundled store '{}'", schema.name))?;
+
+    let installed_at = chrono_now();
+    let entry = InstalledStore {
+        name: schema.name.clone(),
+        schema_path: sentinel_path,
+        installed_at,
+        table_name: schema.name.clone(),
+    };
+    manifest.stores.push(entry);
+    manifest.save()?;
+
+    println!(
+        "Installed bundled store '{}' (table: {})",
         schema.name, schema.name
     );
 

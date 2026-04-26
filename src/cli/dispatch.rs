@@ -40,6 +40,9 @@ pub fn dispatch(
                 Some(("update", sub)) => {
                     handlers::update::run(schema, &conn, sub, invoker)?;
                 }
+                Some(("schema", sub)) => {
+                    handlers::schema_show::run(schema, sub)?;
+                }
                 Some((verb, sub)) => {
                     // Check if this is a declared lifecycle transition verb
                     if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {
