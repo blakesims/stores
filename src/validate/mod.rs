@@ -1,6 +1,7 @@
 pub mod actor;
 pub mod enum_check;
 pub mod error;
+pub mod expr_eval;
 pub mod regex_check;
 pub mod required;
 
