@@ -1,11 +1,15 @@
 # stores
 
-`stores` is a schema-driven store framework with a single binary CLI. v0.1 ships with two built-in stores (`observations` and `gate`) demonstrating the schema → CLI → SQLite → enforcement chain: define a YAML schema, `stores install` it, and every field rule (required, enum, pattern, `required_when`, per-field actor authority) is enforced at write time.
+`stores` is a schema-driven store framework with a single binary CLI. v0.2 ships with three built-in stores (`observations`, `gate`, `tasks`) demonstrating the schema → CLI → SQLite → enforcement chain: define a YAML schema, `stores install` it, and every field rule (required, enum, pattern, `required_when`, per-field actor authority) is enforced at write time. The `tasks` store adds a full multi-agent workflow engine with state machine, cycle guards, briefing templates, and deterministic main.md rendering.
 
 ## Install
 
 ```bash
 cargo install --path .
+stores init
+stores install observations    # v0.1 bundled store
+stores install gate            # v0.1 bundled store
+stores install tasks           # v0.2 workflow store
 ```
 
 Requires: Rust toolchain (stable). SQLite is bundled via `rusqlite-bundled` — no system SQLite dependency.
