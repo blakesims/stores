@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (executor: Phase 3 cycle 2 — C1+m1+m2+m3 applied; 230 tests pass)
+- **Last Updated:** 2026-04-26 (code-reviewer: Phase 3 cycle 2 PASS — advance to Phase 4)
 - **Blocked Reason:** —
 
 ## Task
@@ -1213,14 +1213,21 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Cycle:** 1 of max 3
 - **Issues:** 1 critical / 3 minor (1 test-coverage, 2 design notes)
 - **Status next:** EXECUTING_PHASE_3
-- **Summary:** All five ACs (3.1-3.5) verified by named tests; 21 new tests, 228 total green; e2e all 13 steps green. The executor's `call_inner` / `ScopedJson<Derived(bool)>` design for the `eq` helper is correct and well-justified — `if_eq_helper_false_branch` does verify the BLOCKED-conditional skip on a non-BLOCKED status (engine.rs:209-214). `current_cycle_for_phase` derivation is sound across all four shapes tested (basic, empty, short alias, JSON-string-encoded). `set_strict_mode(false)` is explicit. handlebars 5 confirmed in Cargo.toml. **However**, one critical issue breaks the universal contract that plan task 3.4 explicitly enumerates ("missing key returns empty string (NOT error — render must never crash on partial DB rows)"): `GtHelper::call_inner` and `LtHelper::call_inner` (engine.rs:46-54, 67-75) return `RenderError` when a referenced key is missing or non-numeric — confirmed by direct probe (`render_template("{{#if (gt missing 3)}}...", &json!({}))` returns `Err("Helper/Decorator gt param at index 0 required but not found")`). This is the same class of bug the executor correctly diagnosed and fixed in `EqHelper` — re-introduced via `ok_or_else(...)?`. Phase 6 `render` against PLANNING-state rows with NULL `current_phase`/`current_cycle` will crash on any `{{#if (gt …)}}` template. The fix is symmetric with `eq`: missing/non-numeric → `Ok(ScopedJson::Derived(json!(false)))`.
-- **What's good:** Test names lock to the contract they enforce (every failure points at the broken AC); the `eq` helper's `ScopedJson<Derived(bool)>` design is exactly right; `current_cycle_for_phase` is computed in Rust per plan rationale ("keeps templates dumber"); fixture template exercises all four substitution patterns at byte-for-byte resolution; explicit doc comment at engine.rs:127 promises the never-crash contract — the spec is right, only `gt`/`lt` slipped past it.
-- **Required actions for cycle 2:**
-  1. **C1 fix:** In `src/render/engine.rs`, change `GtHelper::call_inner` and `LtHelper::call_inner` so missing/non-numeric params yield `Ok(ScopedJson::Derived(json!(false)))` instead of `Err`. Mirror `EqHelper`'s lenient semantics.
-  2. **m1 fix:** Add `gt_helper_missing_key_returns_false` and `lt_helper_missing_key_returns_false` regression tests.
-  3. **m2 (optional, recommended):** Either tighten the `default` helper docstring (engine.rs:79) to `"missing / null / empty string"` (current behavior — `0`, `false`, `[]` pass through their JSON renderings), OR extend the helper to treat empty arrays/objects/zero as fallback. Either is acceptable; the contract should be explicit.
-  4. **m3 (optional, defer to Phase 6):** TODO comment near `render_template` noting per-call Handlebars + 4 helpers rebuild cost; Phase 6 decides whether to cache via `OnceLock` or wrap in a `RenderEngine` struct.
-- **Expected after fixes:** 230 tests pass (228 baseline + 2 new). e2e all 13 steps green. No other phase touched.
+- **Summary:** All five ACs (3.1-3.5) verified by named tests; 21 new tests, 228 total green; e2e all 13 steps green. The executor's `call_inner` / `ScopedJson<Derived(bool)>` design for the `eq` helper is correct and well-justified. **However**, one critical issue breaks the universal contract that plan task 3.4 explicitly enumerates ("missing key returns empty string — render must never crash on partial DB rows"): `GtHelper::call_inner` and `LtHelper::call_inner` returned `RenderError` when a referenced key was missing or non-numeric — confirmed by direct probe. Phase 6 `render` against PLANNING-state rows with NULL `current_phase`/`current_cycle` would crash on any `{{#if (gt …)}}` template. Fix is symmetric with `eq`: missing/non-numeric → `Ok(ScopedJson::Derived(json!(false)))`.
+- → Details: `code-review-phase-3.md` (overwritten by cycle 2)
+
+### Phase 3 — cycle 2
+
+- **Gate:** PASS
+- **Reviewed:** 2026-04-26
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 2 of max 3
+- **Issues:** 0 new (cycle 1's 1 critical / 3 minor: critical fixed; m1 fixed; m2 fixed via doc tightening; m3 fixed via parked TODO for Phase 6)
+- **Status next:** EXECUTING_PHASE_4
+- **Summary:** Cycle 2 cleanly resolves C1. `GtHelper::call_inner` and `LtHelper::call_inner` now use the symmetric `match (a, b)` pattern returning `Ok(ScopedJson::Derived(json!(false)))` on missing/non-numeric params — universal "render must never crash on partial DB rows" contract is restored. Two new regression tests (`gt_helper_missing_key_returns_false`, `lt_helper_missing_key_returns_false`) lock the contract; each covers four sub-cases (missing first arg, missing second arg, non-numeric string, both missing). `RenderErrorReason` import removed (no longer needed). The `default` helper docstring is tightened with explicit behavior for `0`/`false`/`[]` (m2). A `# Performance note (TODO Phase 6)` doc block is parked on `render_template` naming `OnceLock<Handlebars<'static>>` and a `RenderEngine` struct as candidate fixes (m3).
+- **What's good:** 230 tests pass (228 baseline + 2 new), 0 failed; e2e all 13 steps green; the cycle-2 diff is tightly scoped (only `src/render/engine.rs` 98 ins / 20 del + main.md log update — verified via `git diff 9b2da0a..HEAD -- ':!tasks/' ':!src/render/engine.rs'` returning empty); the fix is byte-for-byte symmetric across `gt` and `lt`; new tests render the `{{else}}` branch and assert `"no"` (proving no error path remains); commit hygiene clean (`23a6442` fix + `f4134e4` log; no amends, no force-push).
+- **Verified actions:** All 4 cycle-1 required actions addressed (C1 fix verified by direct re-probe of the cycle-1 critical; m1 covered with 4 sub-cases per helper; m2 doc tightening explicit about `0`/`false`/`[]` pass-through; m3 TODO parked with two named candidate fixes).
+- **Carry-forward to Phase 6 (informational, not a gate condition):** TODO Phase 6 (engine.rs:129-133) — decide on render-engine caching via profiling. `default` helper now documents that `0`/`false`/`[]` pass through; Phase 6 templates needing null-shape fallback for those types must use `{{#if}}` guards.
 - → Details: `code-review-phase-3.md`
 
 ---
