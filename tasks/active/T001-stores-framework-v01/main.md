@@ -682,6 +682,42 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 
 ---
 
+### Phase 8: End-to-end demo verification, `--json` polish, README
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+
+**Files Created:**
+- `tests/e2e.sh` — bash script (`set -euo pipefail`); creates fresh `mktemp -d`; runs all 13 DONE_WHEN steps in order; asserts expected output (display_ids, error substrings on #5/#11, success exit on #6/#10); step #12 executes the exact `sqlite3` JOIN query and asserts `G001` appears in the output (non-NULL gate match); exits 0 on success; top-of-file comment block lists all README commands for auditability
+- `README.md` — one-paragraph intro; `cargo install --path .` install; 13-step demo walk with each command in its own fenced block and one-line expected outcome; "What this demonstrates" section (required_when T3 contract + per-field actor); "Where the data lives" (sqlite3 .tables); "Next steps / not in v0.1" (7 deferred items from Decision Matrix / Scope Out)
+
+**Carry-forward fix (Part A — Op::Update actor-scoping bug):**
+- `src/validate/mod.rs` — renamed `Op::Update` → `Op::Update(EntryMap)` (carries diff); renamed `Op::TransitionWithDiff(verb, diff)` → `Op::Transition(verb, diff)` (vestigial `Op::Transition(verb)` variant removed; Op enum now has 3 variants: Add, Update(EntryMap), Transition(String, EntryMap)); actor_entry resolves to diff for both Update and Transition, full entry for Add
+- `src/handlers/update.rs` — `Op::Update` call site updated to `Op::Update(diff.clone())`
+- `src/handlers/transition.rs` — `Op::TransitionWithDiff` call site updated to `Op::Transition(verb, diff.clone())`
+- New regression tests: `update_with_human_invoker_on_ai_authored_row_succeeds` (human updates summary only on AI-authored row with answer=null — must succeed); `update_with_ai_invoker_writing_human_field_fails` (AI directly writes human-actor field — must fail)
+
+**ACs:**
+- [x] `tests/e2e.sh` exits 0 — all 13 DONE_WHEN steps verified
+- [x] `sqlite3` JOIN in step #12 returns `L001|triaged|T3|G001` — non-NULL gate match confirmed
+- [x] `tests/e2e.sh` top-of-file comment lists all README commands in order; script commands byte-identical to README commands (modulo assertion plumbing)
+- [x] `--json` output validated as JSON (python3 json.tool) for show/list on both stores; nested triage + contract keys confirmed
+- [x] Op::Update actor-scoping fix: 2 regression tests pass; 85 total tests pass
+
+**Deviations:**
+- DONE_WHEN #11 specifies "G001 fails actor mismatch" but G001 is already answered (state=`answered`) after step 10, so the state machine would reject before the actor check. Script and README use G002 (a fresh pending gate added under CLAUDECODE=1) for step 11's rejection demo — this is the correct interpretation (the DONE_WHEN intent is to demonstrate the actor enforcement, not the specific display_id G001). The Phase 7 code review used G002 for the same reason.
+
+**Test count:** 85 tests (83 previous + 2 new regression), all pass.
+
+**Commits:** `06fbaf0` (Part A: Op::Update fix), `<phase8-b-sha>` (e2e + README)
+
+**Notes:**
+- The carry-forward Op::Update fix is the same root-cause fix as Phase 7's `Op::TransitionWithDiff` work: actor checks must scope to the diff (fields being written this call), not the merged row. The fix also took the opportunity to rename `Op::TransitionWithDiff(verb, diff)` → `Op::Transition(verb, diff)` (cleaning up the vestigial split that Phase 7 left), making the Op enum tight: Add | Update(diff) | Transition(verb, diff).
+- `--json` polish: all show/list commands on both stores pipe to `python3 -m json.tool` cleanly. Gate's `options` List is a real JSON array (not an escaped string). Observations' `triage` and `contract` Records are nested JSON objects.
+
+---
+
 ### Phase 3: install + DDL
 
 - **Status:** COMPLETE
@@ -718,9 +754,23 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 ---
 
 ## Completion
-_Final summary when task is complete._
 
-- **Completed:** —
-- **Summary:** —
-- **Commits:** —
-- **Lessons Learned:** —
+- **Completed:** 2026-04-26
+- **Summary:** `stores` v0.1 ships as a single Rust binary (~4400 LOC) with the full schema → CLI → SQLite → enforcement chain. Both bundled stores (`observations` and `gate`) are installed from YAML schemas; all 13 DONE_WHEN steps are verified end-to-end by `tests/e2e.sh` (exits 0 from a fresh tmp dir every run). The final 85 tests cover schema parsing, DDL codegen, the enforcement engine (required, required_when, enum, pattern, actor), lifecycle transitions, deep-merge Record updates, and the Op::Update actor-scoping carry-forward fix. Cross-store SQL JOIN (DONE_WHEN #12) returns `L001|triaged|T3|G001` as a real non-NULL join match. `--json` output is valid nested JSON on all read/write verbs for both stores.
+- **Commits:**
+  - `6bcfc08` — Phase 1: cargo scaffold + stores init
+  - `169480f` — Phase 2: YAML schema parser
+  - `9469d77` — Phase 3: stores install + DDL codegen
+  - `8beeb67` — Phase 4 cycle 1: dynamic CLI codegen + add/show/list/update
+  - `0ba36d1` — Phase 4 cycle 2: deep-merge Record update fix
+  - `ebd667b` — Phase 5: enforcement engine
+  - `400ab8b` — Phase 6: lifecycle transitions + observations store
+  - `e0f1dac` — Phase 7: gate store + actor diff-scoping fix
+  - `06fbaf0` — Phase 8 Part A: Op::Update actor-scoping carry-forward fix
+  - `<phase8-b-sha>` — Phase 8 Part B: e2e + README
+- **Lessons Learned:**
+  - **Actor-scoping must track the diff, not the merged row.** Both `Op::Transition` and `Op::Update` initially validated the full merged entry for actor checks. The right invariant is "actor checks apply to what you're writing, not what's already there." Fixing transition in Phase 7 without also fixing update left a live bug; the code reviewer's Phase 7 M1 callout caught it exactly.
+  - **Op enum naming pays forward.** Having `Op::TransitionWithDiff` alongside `Op::Transition` created a vestigial dead-code variant in Phase 7. Phase 8's carry-forward fix was the right moment to rename both into a tight 3-variant enum (Add | Update(diff) | Transition(verb, diff)). Tight enums force callers to carry the diff explicitly — no silent fallback to the full entry.
+  - **DONE_WHEN literal ambiguity:** Step 11 specifies "G001 fails actor mismatch" but G001 is already answered by step 10. The intent is clear (demonstrate actor enforcement), but the literal command fails for the wrong reason. README and e2e script diverge minimally: G002 is added for the rejection demo. Future DONE_WHEN steps should be sequentially consistent (each step's preconditions satisfied by prior steps).
+  - **rusqlite-bundled is the right call for a single-binary CLI.** Zero system dependencies; `cargo install --path .` is genuinely the entire install story. The binary is ~3 MB stripped. No surprises there.
+  - **Dynamic clap construction is verbose but predictable.** Building the Command tree at runtime from manifest + schema is ~150 LOC in `dynamic.rs`; derive macros would be ~30 LOC but require the schema to be known at compile time. The runtime approach is the only way to support user-installed stores. The verbosity is the cost of the extensibility.
