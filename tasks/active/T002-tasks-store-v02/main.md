@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_7
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: Phase 6 cycle 1 — PASS, 0 critical / 0 major / 3 minor; one binding carry-forward to Phase 7: P6-m2 bundled-sentinel detection in render.rs + brief.rs)
+- **Last Updated:** 2026-04-27 (code-reviewer: Phase 7 cycle 1 — REVISE, 0 critical / 2 major / 4 minor / 1 info; M1 files_changed CSV→string mismatch breaks render; M2 `at` timestamps not set on any list_record entry; m1 executor-brief instructs main.md edits contra DB-as-truth; m2 carry-forward closures lack dedicated tests)
 - **Blocked Reason:** —
 
 ## Task
@@ -1314,6 +1314,21 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Carry-forward to Phase 7 (informational):** Plan task 6.4 referred to `stores/tasks/templates/main.md.tpl` but Phase 6 correctly authored only the fixture template; the bundled `stores/tasks/templates/main.md.tpl` is Phase 7's scope per task 7.5. Not a defect.
 - **Verified actions:** P2-M1 (WorkflowResolved threading) closed via Option 2; brief.rs already had the bundled-sentinel TODO from Phase 4 cycle 2; render.rs uses the same on-demand pattern. Both will need the binding fix in Phase 7.
 - → Details: `code-review-phase-6.md`
+
+### Phase 7 — cycle 1
+
+- **Gate:** REVISE
+- **Reviewed:** 2026-04-27
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 1 of max 3
+- **Issues:** 0 critical / 2 major / 4 minor / 1 info
+- **Status next:** EXECUTING_PHASE_7
+- **Summary:** All five ACs PASS by named tests + live CLI smoke (init → install → add → submit-plan → submit-plan-review READY → submit-execute → submit-review REVISE → render works end-to-end; T001 transitions through 7 states as designed; AC7.5 framework-actor enforcement verified for both `add` and `update`; AC7.4 templates render via direct `render_template` call AND via the bundled CLI brief). 288 unit tests pass (284 prior + 4 new); all 13 e2e steps green. Carry-forward closures verified live: P5-m2 `--open-questions-from-file` populates the array sub-field; P5-m3 `submit_targets.get(verb)` lookup fires (with hardcoded fallback unreachable in production for the canonical-named tasks schema); P5-m4 `--summary` and `--details-from-file` write to separate `cycles[N].review.{summary,details}` keys; P6-m2 `bundled:` sentinel detection routes both `brief.rs` and `render.rs` through `BUNDLED_STORE_TEMPLATES`. **However**, two major findings block PASS: (M1) `compute_submit_execute` stores the `--files-changed` CSV as a single string instead of splitting into `{list: text}` per the schema declaration — the rendered Execution Log section's "**Files:**" heading appears bare because `{{#each this.executor.files_changed}}` cannot iterate a string; verified live by inspecting the rendered main.md after a real submit-execute. (M2) None of the three list_record sub-records (plan_review_log, cycles[].executor, cycles[].review) populate the schema-declared `at: timestamp` sub-field — `now_iso8601()` is already in scope but never inserted. Both are user-visible failures of the marquee path. Four minor findings: (m1) the executor-brief template tells the agent to edit main.md and set Status manually, contradicting the DB-as-truth executive intent — only the executor brief drifted; planner/plan-reviewer/code-reviewer briefs are correctly CLI-only. (m2) the four carry-forward closures (P5-m2/m3/m4, P6-m2) have NO dedicated unit tests — the AC7.4 test bypasses the sentinel-detection code in `brief::compute` by calling `render_template` directly; submit_targets lookups are masked by hardcoded fallback literals; open_questions and details/summary separation work but only via live smoke. (m3) the framework-actor `start` verb (`ready→executing`) leaks into `--help` output because `WORKFLOW_VERBS` doesn't include it; harmless but exposes an internal verb. (m4) README is 36 lines vs the 30-line plan limit. (info) AC7.2's "current_cycle: 0 initial" plan literal is documentation drift — actual NULL behavior is correct framework semantics for `auto_increment + actor: framework`.
+- **What's good:** Schema authoring is faithful to plan main.md:455-561 line-by-line; `BUNDLED_STORE_TEMPLATES` static map at dynamic.rs:36-49 maps cleanly to schema's `briefing_templates` and `render_template` paths; `WORKFLOW_VERBS` constant + `registered_verbs: HashSet<String>` cleanly de-dupes user-facing CLI surface; `list_text → {list: text}` typo fix landed correctly in commit `d555844`; bundled-sentinel detection is symmetric across brief.rs:122-135 and render.rs:108-120; live end-to-end smoke executes the whole 7-state lifecycle on a real T001 row through the bundled tasks store; render is byte-idempotent (verified via `diff` after two consecutive renders); plan-reviewer-brief and code-reviewer-brief templates are framework-aligned (CLI-only).
+- **Required actions (cycle 2):** (M1) split `--files-changed` CSV into `Vec<String>` in `compute_submit_execute` (submit.rs:727-729); add unit test + render-path integration test asserting the rendered Execution Log includes each filename. (M2) insert `"at": now_iso8601()` into all three list_record sub-record builders: `compute_submit_plan_review` log_entry_obj (after submit.rs:564), `compute_submit_execute` executor_obj (after submit.rs:723), `compute_submit_review` review_obj_map (after submit.rs:879); add unit tests asserting `at` is present and ISO-8601 shaped on each appended entry. (m1) rewrite `stores/tasks/templates/executor-brief.md.tpl:67-72` and `:90-95` to remove main.md / Status edits — replace with CLI-only flow mirroring plan-reviewer-brief.md.tpl. (m2) add four targeted carry-forward unit tests: `ac7_p5m2_open_questions_appended`, `ac7_p5m3_submit_targets_consulted`, `ac7_p5m4_review_summary_and_details_separate`, `ac7_p6m2_bundled_sentinel_routes_to_in_memory`.
+- **Optional / accept:** m3 prefer generic `actor == framework` filter in dynamic.rs's transition registration loop (~3 LOC, future-proof for any framework verb); m4 trim README to 30 lines or document the deviation.
+- **Carry-forward to Phase 8 (binding):** None new — the Phase 7 fixes above must land before Phase 8 begins. The orchestrator skill exercises submit-execute / submit-review end-to-end and would surface M1/M2 immediately as "render output is wrong" / "no audit timestamps."
+- → Details: `code-review-phase-7.md`
 
 ---
 
