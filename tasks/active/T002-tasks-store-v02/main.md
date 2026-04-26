@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_2
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: cycle 1 REVISE — AC1.4 parser gap; see Code Review Log)
+- **Last Updated:** 2026-04-26 (code-reviewer: Phase 1 cycle 2 PASS; advancing to Phase 2)
 - **Blocked Reason:** —
 
 ## Task
@@ -1103,34 +1103,19 @@ Rendered tasks/completed/T003-smoke-test/main.md
 
 ## Code Review Log
 
-### Phase 1 — cycle 1
+### Phase 1 — cycle 2
 
-- **Gate:** REVISE
+- **Gate:** PASS
 - **Reviewed:** 2026-04-26
 - **Reviewer:** code-reviewer agent
-- **Cycle:** 1 of max 3
-- **Issues:** 1 critical / 2 major / 3 minor
-- **Summary:** Phase 1 lands cleanly on 11 of 12 ACs (test count, e2e, depth-3 walker, ambiguity validation, framework-actor DDL, scope/manifest plumbing, `--invoker framework` rejection, `from_env`-never-Framework, outside-git hard error). The diff is honest — 18 source files match the plan's file list and the mechanical extras (Field-init updates, two match arms in `schema_show.rs`) are defensible. The critical issue is **AC1.4**: the plan and worked-example transcript require `parse_guard("current_phase < plan.phases.length")` (path-vs-path-length form). The parser only accepts single-quoted literals or bare integers on the RHS, so the schema YAML Phase 5/Phase 7 will write CANNOT load. The executor's test renames the AC into a parseable form (`plan.phases.length > 1`) without flagging the substitution. A small grammar extension (~30 LOC + 3 tests) closes the gap. Two majors flag downstream-Phase-5 risks (single-AST intent deferred; ListRecord runtime validation skipped) — neither blocks Phase 1 in isolation.
-- **What's good:** 174 tests pass, 0 failed; e2e green; depth-3 round-trip tests exercise `plan.phases[2].name` and `cycles[1].executor.summary` directly; ambiguity validation covers both pathological and one-unguarded-allowed cases; outside-git error is hard, not a silent fallback.
-- **Required actions (executor):** see "Required Actions for REVISE" in detail file. Priority 1 is the AC1.4 parser/eval extension.
+- **Cycle:** 2 of max 3
+- **Issues:** 0 new (cycle 1's 1 critical / 2 major / 3 minor: critical fixed; both majors deferred to Phase 5 with explicit notes + TODO + pinning test; minors fixed or accepted)
+- **Status next:** EXECUTING_PHASE_2
+- **Summary:** Cycle 2 closes the cycle-1 critical (AC1.4 parser/eval gap) cleanly. New `Rhs::Path` + `Rhs::PathLength` AST variants land at the parser, with eval-side resolution that mirrors LHS path semantics; 8 new tests at parse + eval level cover the EXACT AC1.4 form `current_phase < plan.phases.length` (true on 1<2, false on 2<2, false on missing path) plus the M9-companion `>=` form and the path-vs-path equality form. The two majors (M1 single-AST unification; M2 ListRecord validator walker) are explicitly deferred to Phase 5. The deferrals are acceptable on Phase-1 cohesion grounds: M2 has a `TODO(phase-5)` block comment AND a self-naming pinning test (`list_record_required_sub_field_not_validated_phase1`) that will FAIL when Phase 5 closes the gap; M1's deviation note is now accurate ("two ASTs coexist; Phase 5 must bridge"). m1 test names corrected; m2 added a `cycles_update_round_trips` test exercising add → UPDATE → read on a list_record column (covers element-modify and element-add; element-remove not tested but acceptable since Phase 5 only appends).
+- **What's good:** 184 tests pass (174 + 10 new), 0 failed; e2e all 13 steps green; the C1 fix is surgical (~80 LOC code + ~80 LOC tests, no API churn at existing call sites); pinning-test pattern with `_phase1` in the name will surface itself when Phase 5 tries to silently keep it.
+- **Verified actions:** All 6 cycle-1 required actions addressed (C1 fully fixed; M1 and M2 explicitly deferred with documented Phase-5 obligations; m1 + m2 fixed; m3 accepted with executor's "don't churn history" rationale).
+- **Carry-forward to Phase 5:** The Phase 5 plan MUST enumerate (a) bridging `required_when::Expr` and `expr::Expr` (option a — widen to alias and update 8 call sites — or option b — `impl From<...>`) under task 5.2, and (b) extending `validate/mod.rs::validate_field` to recurse into `FieldType::ListRecord` sub-fields under task 5.3. Phase 5's plan-review must verify both are present before execution begins.
 - → Details: `code-review-phase-1.md`
-
-### Phase 1 — cycle 2 revisions (commit `a758662`)
-
-- **C1 — Rhs::Path + Rhs::PathLength parser+eval extension:**
-  - `src/schema/expr.rs`: Added `Rhs::Path(Vec<String>)` and `Rhs::PathLength(Vec<String>)` to the `Rhs` enum. `parse_rhs` now falls through to dotted-identifier parsing (mirroring `parse_lhs`) after the integer branch fails. `parse_guard("current_phase < plan.phases.length")` now returns `Expr { lhs: Path(["current_phase"]), op: Lt, rhs: PathLength(["plan", "phases"]) }`.
-  - `src/validate/expr_eval.rs`: Added `rhs_as_i64` helper. `eval_path` handles `Rhs::PathLength` (look up length, compare_i64) and `Rhs::Path` (look up both sides, compare numerically or lexicographically). `eval_length` handles `Rhs::PathLength` and `Rhs::Path`. New AC1.4 tests: `current_phase_lt_plan_phases_length_true` (1 < 2 → true), `current_phase_lt_plan_phases_length_false_equal` (2 < 2 → false), `current_phase_lt_plan_phases_length_missing_phase_returns_false`, `path_eq_path_true`, `path_eq_path_false`.
-  - Parser tests added in `expr.rs`: `parse_current_phase_lt_plan_phases_length`, `parse_current_phase_ge_plan_phases_length`, `parse_path_eq_path`.
-- **m1 — misleading test names corrected:**
-  - `current_phase_lt_plan_phases_length_depth3` → `plan_phases_length_gt_constant_depth3` (doc comment explains the rename).
-  - `current_phase_lt_plan_phases_length_false` → `plan_phases_length_gt_constant_false`.
-- **M2 — ListRecord sub-field validation gap documented:**
-  - `src/validate/mod.rs`: Added `TODO(phase-5)` block comment at the ListRecord walker gap explaining the Phase-5 required change. Added pinning test `list_record_required_sub_field_not_validated_phase1` asserting current behavior (no error on missing required list element field); test comment notes it will invert to `unwrap_err()` in Phase 5.
-- **M1 — deviation note clarified in main.md:**
-  - Replaced the "satisfied at module level" claim with an accurate statement: two ASTs coexist; Phase 5 must bridge (option a: widen `required_when::Expr` to alias `expr::Expr` + update 8 call sites, or option b: `impl From<...>`).
-- **m2 — update round-trip test added:**
-  - `src/handlers/row.rs`: Added `cycles_update_round_trips` test covering add → `UPDATE` SQL → `read_row` for a `list_record` column; verifies element count, modified first element, and added second element all persist.
-- **Test count:** 184 (was 174 after cycle-1 commit). All pass. e2e all 13 steps pass.
 
 ---
 
