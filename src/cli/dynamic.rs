@@ -180,6 +180,10 @@ fn build_store_command(schema: &Schema) -> Command {
     let mut registered_verbs: std::collections::HashSet<String> = std::collections::HashSet::new();
     for transition in &schema.lifecycle.transitions {
         let verb = &transition.verb;
+        // Skip framework-actor transitions — they are engine-fired and must not appear in user-facing help
+        if transition.actor == Some(crate::schema::actor::Actor::Framework) {
+            continue;
+        }
         // Skip base framework verbs
         if BASE_VERBS.contains(&verb.as_str()) {
             eprintln!(
