@@ -1,6 +1,6 @@
 name: gate
 id_format: "G{:03d}"
-default_actor: ai_autonomous
+# No store-level default_actor — fields are unguarded by default; only `answer` requires `human`.
 lifecycle:
   states: [pending, answered, cancelled]
   transitions:

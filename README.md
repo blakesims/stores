@@ -38,7 +38,7 @@ stores install ./stores/gate
 
 Both `observations` and `gate` tables now live in `.stores/db.sqlite`.
 
-**Step 4** — Add an observation. Returns `L001`.
+**Step 4** — Add an observation. Returns `OBS001`.
 
 ```bash
 stores observations add --summary "thing broke"
@@ -47,7 +47,7 @@ stores observations add --summary "thing broke"
 **Step 5** — Triage to T3 without the required contract fields. **Fails** — the `required_when: triage.verdict == 'T3'` rule fires on all three contract sub-fields.
 
 ```bash
-stores observations triage L001 --verdict T3
+stores observations triage OBS001 --verdict T3
 ```
 
 Expected error (all three violations in one pass):
@@ -61,16 +61,16 @@ Error: validation failed:
 **Step 6** — Triage again with the full contract. Succeeds.
 
 ```bash
-stores observations triage L001 --verdict T3 \
+stores observations triage OBS001 --verdict T3 \
     --done-when "X works after fix" \
     --scope-in "backend handler" \
     --scope-out "frontend"
 ```
 
-**Step 7** — Show L001. Entry includes nested `triage` and `contract` records.
+**Step 7** — Show OBS001. Entry includes nested `triage` and `contract` records.
 
 ```bash
-stores observations show L001
+stores observations show OBS001
 ```
 
 Add `--json` for machine-readable output with fully nested objects (not escaped strings).
@@ -83,13 +83,13 @@ stores observations list
 
 Add `--json` for a JSON array.
 
-**Step 9** — Add a gate decision linked to L001. Returns `G001`. (`task_ref = L001` makes the cross-store JOIN in step 12 return a real match.)
+**Step 9** — Add a gate decision linked to OBS001. Returns `G001`. (`task_ref = OBS001` makes the cross-store JOIN in step 12 return a real match.)
 
 ```bash
 stores gate add --type decision \
     --question "Soft or hard delete on cleanup?" \
     --options "soft|hard" \
-    --task-ref L001
+    --task-ref OBS001
 ```
 
 **Step 10** — Answer the gate as a human. The `answer` field carries `actor: human`; `--invoker human` satisfies the constraint.
@@ -127,7 +127,7 @@ The `--invoker human` override clears it:
 stores gate answer G002 --answer yes --invoker human
 ```
 
-**Step 12** — Cross-store SQL JOIN in the single DB. Returns a row with non-NULL `g.display_id` (`G001`) joined to observation `L001` via `task_ref`.
+**Step 12** — Cross-store SQL JOIN in the single DB. Returns a row with non-NULL `g.display_id` (`G001`) joined to observation `OBS001` via `task_ref`.
 
 ```bash
 sqlite3 .stores/db.sqlite \
@@ -135,7 +135,7 @@ sqlite3 .stores/db.sqlite \
    from observations o left join gate g on g.task_ref = o.display_id"
 ```
 
-Expected output: `L001|triaged|T3|G001`
+Expected output: `OBS001|triaged|T3|G001`
 
 **Step 13** — Invoker resolution is demonstrated throughout:
 - No `--invoker` + `$CLAUDECODE=1` → `ai_autonomous` (auto-detected)

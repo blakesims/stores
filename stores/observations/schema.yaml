@@ -1,6 +1,6 @@
 name: observations
-id_format: "L{:03d}"
-default_actor: ai_with_human
+id_format: "OBS{:03d}"
+# No store-level default_actor — fields are unguarded by default; explicit actor per-field only.
 lifecycle:
   states: [open, triaged, resolved, wont_fix]
   transitions:
