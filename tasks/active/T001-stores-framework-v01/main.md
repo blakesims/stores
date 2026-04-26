@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** READY
+- **Status:** EXECUTING_PHASE_1
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
 - **Blocked Reason:** —
@@ -338,7 +338,36 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 ---
 
 ## Execution Log
-_Executor agent fills this section per phase._
+
+### Phase 1: Cargo scaffold + stores init
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+
+**Files Created:**
+- `Cargo.toml` — single-binary crate; deps: clap v4 derive, serde + serde_yaml, serde_json, rusqlite bundled, regex, anyhow, thiserror
+- `src/main.rs` — clap Parser with Init + Install (stub) subcommands; catch-all for unknown subcommands
+- `src/cli/mod.rs` — mod declaration
+- `src/cli/init.rs` — init handler; idempotency logic (full init → "Already initialized"; partial → completes missing files)
+- `src/manifest.rs` — Manifest { stores: Vec<InstalledStore> }; atomic save via tmp+rename
+- `src/db.rs` — open(path) → Connection with WAL pragma applied
+- `src/paths.rs` — stores_dir(), db_path(), manifest_path() from cwd
+- `.gitignore` — /target/ and /.stores/
+
+**ACs:**
+- [x] `cargo build` succeeds (1 dead_code warning on `Manifest::load()` — unused until Phase 3; not an error)
+- [x] `cargo install --path .` installs `/home/blake/.cargo/bin/stores`
+- [x] Re-running after code change replaces binary cleanly; `.stores/` dir in unrelated tmp dir untouched
+- [x] `stores init` creates `.stores/db.sqlite` (SQLite 3.x, WAL on) and `.stores/manifest.yaml` (content: `stores: []`)
+- [x] Re-running `stores init` prints "Already initialized at <path>", exits 0, manifest unchanged
+
+**Deviations:**
+- `src/main.rs` uses `clap::CommandFactory` import (required to call `Cli::command()` for help printing) — not called out in the plan but standard clap v4 pattern, no behavioral change.
+- `Commands::Install` stub added (phase 3 will implement) so `stores install` gives a clear "not yet implemented" error instead of "unknown subcommand".
+- The dead_code warning on `Manifest::load()` is expected; Phase 3 will consume it.
+
+**Commits:** (see below)
 
 ---
 
