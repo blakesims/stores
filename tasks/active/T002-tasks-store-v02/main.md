@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_8
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: Phase 7 cycle 2 PASS — all 6 cycle-1 items closed; verified at source + tests + live smoke; status → EXECUTING_PHASE_8)
+- **Last Updated:** 2026-04-26 (executor: Phase 8 complete — tasks:start skill authored, BUNDLED_SKILLS wired, task:next updated; 298 tests pass; all 4 ACs verified)
 - **Blocked Reason:** —
 
 ## Task
@@ -1698,6 +1698,55 @@ Canonical layout: Meta (status, phase, cycle, blocked_reason), Task (executive_i
 - **`on_state` empty lists for `blocked` and `complete`:** YAML `blocked: []` and `complete: []` parse correctly as empty `Vec<StateAction>` by the serde deserializer.
 - **Template `{{add @index 1}}` correctness:** Handlebars `@index` inside `{{#each}}` is 0-based; `{{add @index 1}}` produces the 1-based number for user-facing display. The `AddHelper` implementation returns `ScopedJson::Derived(json!(a + b))` where `a` is extracted via `p.value().as_i64()`.
 - **`current_phase_idx` and `plan_phases_count`:** Added to `build_context` in `context.rs` as derived keys. Required by executor/code-reviewer templates for phase-scoped display. Not in original plan spec but required for correct template function.
+
+### Phase 8: Bundled `tasks:start` orchestrator skill
+
+- **Status:** CODE_REVIEW
+- **Executor:** Claude Sonnet 4.6
+- **Commits:**
+  - `05233b6` T002 P8.1: author tasks:start orchestrator skill
+  - `2c66e8d` T002 P8.3: register tasks:start in BUNDLED_SKILLS + update tests
+  - `eaf576c` T002 P8.4: update task:next skill to use tasks store CLI
+- **Tests:** 298 unit tests pass (296 prior + 2 new — `all_skills_bundled`, `tasks_start_install_byte_identical`)
+
+#### Tasks completed
+
+**8.1 — `skills/tasks:start/SKILL.md`**
+Full orchestrator skill prose (347 lines):
+- Frontmatter: `name: tasks:start`, `user_invocable: true`, `requires_stores: [tasks]`, `effort: medium`
+- Non-negotiable rules: Task subagents only, no direct code writes, no main.md edits, autonomous run
+- Stage 0: Context gate
+- Stage 1: Intent Contract + task row creation via `stores tasks add`
+- Stage 2: Planning — `next-action` assertion + `brief` + planner subagent + `submit-plan` + `render`
+- Stage 3: Plan review — `next-action` + `brief` + plan-reviewer subagent + `submit-plan-review` + `render`
+- Stage 4: Plan gate — NEEDS_WORK loops back; READY continues
+- Stage 5: Phase loop — `next-action` + `brief` + executor + `submit-execute` + `render`; then `next-action` + `brief` + code-reviewer + `submit-review` + `render`; gate table covers PASS/REVISE/4th-REVISE-auto-BLOCKED
+- Routing rule: do not return until complete/blocked/high-impact decision
+- Blockers section: technical vs. business/scope separation
+- DONE_WHEN propagation rule (verbatim anchor string present)
+
+**8.2 — Frontmatter verified**
+`requires_stores: [tasks]`, all required keys present. No disallowed terms (CodeRabbit, Stage 6, Stage 7, pi-extension, merge-review, phase-reviewer). All 10 allowed CLI verbs present.
+
+**8.3 — `src/cli/skills.rs`**
+Added `tasks:start` to `BUNDLED_SKILLS` (index 4). Updated `all_four_skills_bundled` → `all_skills_bundled` (asserts `len == 5`). Added `tasks_start_install_byte_identical` test (AC8.1).
+
+**8.4 — `skills/task:next/SKILL.md`**
+Replaced the v0.1 forward-looking stub. Uses `stores tasks list --status ready --limit 1 --sort updated_at` to discover next task. Hands off via `tasks:start`. Drops observations fallback, old manual update verb patterns. Keeps `ai_autonomous` + contract-present guard.
+
+#### AC Verification
+
+| AC | Result | Evidence |
+|----|--------|----------|
+| AC8.1 | PASS | `stores skills list` includes `tasks:start`; `tasks_start_install_byte_identical` test confirms byte-identical install |
+| AC8.2 | PASS | All 10 verbs present in skill body; grep for CodeRabbit/Stage 6/Stage 7/pi-extension returns no matches |
+| AC8.3 | PASS | Python yaml.safe_load round-trip: name, description, user_invocable, requires_stores, effort all parse cleanly |
+| AC8.4 | PASS | `grep "DONE_WHEN propagation"` → line 340 in SKILL.md |
+
+#### Deviations / Notes
+
+- None. Plan spec was followed exactly. Tasks 8.1 and 8.2 are inherently merged (frontmatter is in SKILL.md authored in 8.1).
+- `all_four_skills_bundled` test renamed to `all_skills_bundled` and count updated to 5 — a necessary rename to avoid a misleading assertion; not a behavioral change.
 
 ## Completion
 
