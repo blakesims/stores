@@ -5,10 +5,12 @@ pub mod lifecycle;
 pub mod parse;
 pub mod required_when;
 pub mod types;
+pub mod workflow;
 
 pub use actor::Actor;
 pub use lifecycle::{Lifecycle, Transition};
 pub use required_when::Expr as RequiredWhenExpr;
+pub use workflow::{FieldShape, StateAction, Workflow, WorkflowResolved};
 
 use serde::{Deserialize, Deserializer};
 
@@ -105,6 +107,8 @@ pub struct Schema {
     pub default_actor: Option<Actor>,
     /// Storage scope resolution hint.  Absent → Worktree (v0.1 default).  (Task 1.5)
     pub scope: StoreScope,
+    /// Optional workflow declaration.  `None` for v0.1 stores (no `workflow:` key).
+    pub workflow: Option<Workflow>,
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +331,8 @@ struct RawSchema {
     lifecycle: Lifecycle,
     #[serde(default)]
     scope: Option<StoreScope>,
+    #[serde(default)]
+    workflow: Option<Workflow>,
 }
 
 impl Schema {
@@ -346,6 +352,21 @@ impl Schema {
         // Validate transition ambiguity (Task 1.10)
         raw.lifecycle.validate_transition_ambiguity()?;
 
+        // Validate workflow cross-references (Task 2.5)
+        if let Some(ref wf) = raw.workflow {
+            let field_lookup = |name: &str| {
+                fields.iter().find(|f| f.name == name).map(|f| {
+                    match &f.ty {
+                        FieldType::Record(_) => workflow::FieldShape::Record,
+                        FieldType::ListRecord(_) => workflow::FieldShape::ListRecord,
+                        _ => workflow::FieldShape::Other,
+                    }
+                })
+            };
+            wf.validate_cross_refs(&raw.lifecycle.states, &field_lookup)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+        }
+
         Ok(Schema {
             name: raw.name,
             id_format: raw.id_format,
@@ -353,6 +374,7 @@ impl Schema {
             lifecycle: raw.lifecycle,
             default_actor: raw.default_actor,
             scope: raw.scope.unwrap_or(StoreScope::Worktree),
+            workflow: raw.workflow,
         })
     }
 }
