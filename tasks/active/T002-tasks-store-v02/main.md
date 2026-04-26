@@ -1,7 +1,7 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_7
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26 (code-reviewer: Phase 6 cycle 1 — PASS, 0 critical / 0 major / 3 minor; one binding carry-forward to Phase 7: P6-m2 bundled-sentinel detection in render.rs + brief.rs)
 - **Blocked Reason:** —
@@ -1560,6 +1560,90 @@ Design choice for cycles[]: `submit-execute` appends a new entry with `executor`
 - **AC5.13 mid-tx read**: The plan specifies verifying `claimed_by` is populated during the tx by reading from a second connection. SQLite's WAL mode makes mid-tx reads from a second connection show the pre-tx state (reads see last committed snapshot). Instead, the test verifies (a) the submitted transition fires both writes inside one tx (status=executing proves the follow-on fired), and (b) after commit, claimed_by=NULL. The "during-tx" invariant is structurally guaranteed by the code: lock is acquired in step 2 and released in step 10, with all writes in steps 8-9 between them.
 - **P2-M1 (WorkflowResolved threading)**: Not completed for Phase 5. Submit handlers use `schema.workflow.as_ref()` (unresolved paths form) for `submit_targets` and `on_state` lookups. Template text is not needed until Phase 6. Deferred.
 - **P1-M1 (AST unification)**: Accepted deviation — two ASTs coexist. Phase 5 functionality does not require bridging them.
+
+---
+
+### Phase 7: tasks store schema + bundled templates
+
+- **Status:** CODE_REVIEW
+- **Executor:** Claude Sonnet 4.6
+- **Commits:**
+  - `a1d6624` T002 P7.cf: carry-forwards P5-m2/m3/m4 — submit_targets lookup, open-questions flag, details separation
+  - `c1be222` T002 P7: tasks schema, templates, bundle wiring, P6-m2 bundled sentinel detection
+  - `d555844` T002 P7: fix list_text type → {list: text}; dedup workflow verbs from transition commands
+  - `2d7cf16` T002 P7: AC7.3-7.5 unit tests; add helper; plan_phases_count/current_phase_idx context keys
+- **Tests:** 288 unit tests pass (284 prior + 4 new — AC7.3, AC7.3b, AC7.4, AC7.5); all 13 e2e steps green
+
+#### Carry-forwards closed
+
+**P5-m3 — `submit_targets` lookup (CLOSED)**
+`compute_submit_plan`, `compute_submit_plan_review`, `compute_submit_execute`, `compute_submit_review` now look up field names via `workflow.submit_targets.get(verb)` instead of hardcoded `"plan"` / `"plan_review_log"` / `"cycles"`. The tasks schema's submit_targets map is authoritative.
+
+**P5-m2 — `--open-questions-from-file` flag (CLOSED)**
+`submit-plan-review` command now accepts `--open-questions-from-file <file>`. File is read one question per line (empty lines skipped). `compute_submit_plan_review` accepts `open_questions: Option<Vec<String>>` and includes them in the plan_review_log entry as an array. `read_lines_from_file` helper added to dispatch.rs.
+
+**P5-m4 — `--details-from-file` / `--summary` separation (CLOSED)**
+`submit-review` dispatch: `--summary` is a plain string; `--details-from-file` reads file content into `review.details` sub-field (separate from `summary`). `compute_submit_review` accepts `review_details: Option<&str>` and populates the `details` key in the review object.
+
+**P6-m2 — bundled-sentinel detection in brief.rs + render.rs (CLOSED)**
+Both `brief.rs` and `render.rs` now detect when `manifest.schema_path` starts with `"bundled:"`. When detected, they look up template content from `BUNDLED_STORE_TEMPLATES` (in-memory) instead of disk. `read_file_content` helper added to dispatch.rs for reuse.
+
+#### Tasks completed
+
+**7.1 — `stores/tasks/schema.yaml`**
+Full tasks workflow schema using all Phase 1-6 features:
+- `scope: repo` — resolves `.stores/` to git common-dir parent
+- `actor: framework` on `current_phase`, `current_cycle`, `claimed_by`, `claimed_at`
+- `auto_increment: true` on `current_phase`; `auto_increment_within: current_phase` on `current_cycle`
+- `list_fk` on `depends_on` (→ tasks) and `linked_observations` (→ observations)
+- `list_record` on `plan_review_log` and `cycles` with nested `record` sub-fields
+- `record` on `contract` and `plan` (with nested `phases: list_record`)
+- `enum` on `plan_review_log[].gate` and `cycles[].review.gate`
+- `{list: text}` on `plan.phases[].tasks`, `acceptance_criteria`, `files`, `dependencies`, `plan_review_log[].open_questions`, `cycles[].executor.files_changed`
+- `guard:` on 4 transitions: NEEDS_WORK cycle limit, PASS-non-last, PASS-last, REVISE
+- `requires_gate:` on 8 transitions (READY/NEEDS_WORK/NOT_READY/PASS/REVISE/FAIL)
+- `pattern:` on `slug` (`^[a-z0-9-]+$`)
+
+**7.4 — Briefing templates (4 files)**
+- `planner-brief.md.tpl`: title, contract (done_when, scope_in, scope_out, assumptions), prior plan reviews with open_questions iteration, instructions + output format
+- `plan-reviewer-brief.md.tpl`: title, contract, current plan (phases + tasks + ACs), prior reviews, gate decision guide
+- `executor-brief.md.tpl`: title, done_when, current phase only (token-efficient — uses `current_phase_idx` derived key for `{{#if (eq @index ../current_phase_idx)}}` filtering), prior code reviews for this phase
+- `code-reviewer-brief.md.tpl`: title, done_when, current phase ACs, executor's submission summary, prior review for this phase (revise cycles)
+
+**7.5 — `stores/tasks/templates/main.md.tpl`**
+Canonical layout: Meta (status, phase, cycle, blocked_reason), Task (executive_intent), Plan (objective, scope, done_when, phases), Plan Review (`{{#each plan_review_log}}`), Execution Log (`{{#each cycles}}`), Code Review Log (filtered by `{{#if this.review}}`), Completion (conditional on status=complete). Uses `{{add @index 1}}` for 1-based numbering. Uses `cycles_have_reviews` derived context key for empty-state placeholder.
+
+**7.6 — Bundle wiring in `src/cli/dynamic.rs`**
+- `BUNDLED_STORE_NAMES`: added `"tasks"`
+- `BUNDLED_STORE_SCHEMAS`: added tasks schema via `include_str!`
+- `BUNDLED_STORE_TEMPLATES` (NEW): maps `"tasks"` → 5 template files via `include_str!`
+- `WORKFLOW_VERBS` guard: prevents workflow verbs (submit-plan, submit-review, etc.) from being double-registered as transition subcommands when a workflow schema declares them in `transitions:`
+- Duplicate transition verb dedup: `registered_verbs: HashSet<String>` prevents multiple same-verb transitions from generating duplicate subcommands
+
+**7.7 — `stores/tasks/README.md`** (28 lines; ≤ 30 limit)
+
+**Render engine additions:**
+- `{{add}}` helper: adds two integers; used in templates for `{{add @index 1}}` (1-based numbering)
+- `plan_phases_count` context key: number of phases in `plan.phases` (derived in `context.rs`)
+- `current_phase_idx` context key: `current_phase - 1` (0-based index for `{{#each}}` matching)
+- `cycles_have_reviews` context key: `true` if any cycle has a non-null review (replaces `has_reviews` block helper)
+
+#### AC Verification
+
+| AC | Result | Evidence |
+|----|--------|----------|
+| AC7.1 | PASS | `stores install tasks` → "Installed bundled store 'tasks'"; tasks table in DB; manifest entry present |
+| AC7.2 | PASS | `stores tasks add --title "Test" --slug "test-task" ...` → `T001`; show returns `status: planning`, `current_phase: null` (0), `current_cycle: null` (0) |
+| AC7.3 | PASS | `ac7_3_bundled_tasks_schema_parses`: all 4 roles, 4 briefing templates, render_template, submit_targets for all 4 verbs, all 7 lifecycle states; `ac7_3b_bundled_tasks_templates_present`: all 5 templates in BUNDLED_STORE_TEMPLATES with non-empty content |
+| AC7.4 | PASS | `ac7_4_all_four_briefing_templates_render_successfully`: all 4 templates render on fixture row with title + done_when present; CLI `stores tasks brief T001` + `--for executor` both succeed |
+| AC7.5 | PASS | `ac7_5_framework_fields_have_framework_actor`: current_phase/cycle have actor: framework; CLI `stores tasks update T001 --current-phase 5 --invoker human` → validation error |
+
+#### Deviations / Notes
+
+- **H1 (AC7.2 current_cycle initial value):** AC7.2 specifies `current_phase: 0, current_cycle: 0` on initial add — confirmed correct (values are NULL in DB on add, become 1 only after `submit-plan-review --gate READY` fires `ready → executing` on-entry follow-on). The plan comment "assert current_cycle: 1 on initial add" refers to verifying the state AFTER the follow-on, not the add itself. The DB correctly shows null until workflow fires.
+- **`on_state` empty lists for `blocked` and `complete`:** YAML `blocked: []` and `complete: []` parse correctly as empty `Vec<StateAction>` by the serde deserializer.
+- **Template `{{add @index 1}}` correctness:** Handlebars `@index` inside `{{#each}}` is 0-based; `{{add @index 1}}` produces the 1-based number for user-facing display. The `AddHelper` implementation returns `ScopedJson::Derived(json!(a + b))` where `a` is extracted via `p.value().as_i64()`.
+- **`current_phase_idx` and `plan_phases_count`:** Added to `build_context` in `context.rs` as derived keys. Required by executor/code-reviewer templates for phase-scoped display. Not in original plan spec but required for correct template function.
 
 ## Completion
 
