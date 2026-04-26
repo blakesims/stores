@@ -110,11 +110,9 @@ pub fn run(
         .iter()
         .find(|s| s.name == schema.name)
         .map(|s| {
-            // schema_path is the path to schema.yaml; parent is the store root.
-            s.schema_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| s.schema_path.clone())
+            // schema_path in the manifest is the store directory (not schema.yaml itself).
+            // Template paths in briefing_templates are relative to this directory.
+            s.schema_path.clone()
         })
         .unwrap_or_else(|| stores_dir.clone());
 

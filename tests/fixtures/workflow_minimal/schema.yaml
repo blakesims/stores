@@ -2,16 +2,20 @@ name: wf_tasks
 id_format: "WF{:03d}"
 
 lifecycle:
-  states: [planning, executing, done]
+  states: [planning, executing, blocked, done]
   transitions:
     - from: planning
       to: executing
-      verb: submit-plan
+      verb: start-execute
       actor: ai_autonomous
     - from: executing
       to: done
-      verb: submit-execute
+      verb: finish
       actor: ai_autonomous
+    - from: executing
+      to: blocked
+      verb: block
+      actor: human
 
 fields:
   - name: title
@@ -19,15 +23,18 @@ fields:
     required: true
   - name: description
     type: text
-  - name: status
-    type: text
   - name: current_phase
     type: integer
     actor: framework
-    auto_increment: true
   - name: current_cycle
     type: integer
     actor: framework
+  - name: blocked_reason
+    type: text
+  - name: claimed_by
+    type: text
+  - name: claimed_at
+    type: timestamp
   - name: plan
     type: record
     fields:
@@ -58,6 +65,5 @@ workflow:
     executing:
       - dispatch_agent: executor
   submit_targets:
-    submit-plan: plan
     submit-execute: cycles
   max_revise_cycles: 3
