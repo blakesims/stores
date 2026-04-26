@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (executor: Phase 2 complete)
+- **Last Updated:** 2026-04-26 (code-reviewer: Phase 2 PASS — advance to Phase 3)
 - **Blocked Reason:** —
 
 ## Task
@@ -1151,6 +1151,20 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Verified actions:** All 6 cycle-1 required actions addressed (C1 fully fixed; M1 and M2 explicitly deferred with documented Phase-5 obligations; m1 + m2 fixed; m3 accepted with executor's "don't churn history" rationale).
 - **Carry-forward to Phase 5:** The Phase 5 plan MUST enumerate (a) bridging `required_when::Expr` and `expr::Expr` (option a — widen to alias and update 8 call sites — or option b — `impl From<...>`) under task 5.2, and (b) extending `validate/mod.rs::validate_field` to recurse into `FieldType::ListRecord` sub-fields under task 5.3. Phase 5's plan-review must verify both are present before execution begins.
 - → Details: `code-review-phase-1.md`
+
+### Phase 2 — cycle 1
+
+- **Gate:** PASS (with documented Phase-5 carryforward)
+- **Reviewed:** 2026-04-26
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 1 of max 3
+- **Issues:** 1 major (deferred) / 4 minor (3 accepted, 1 cross-phase note)
+- **Status next:** EXECUTING_PHASE_3
+- **Summary:** All 6 ACs verified by named tests (23 new + 184 prior all green). The fixture `tests/fixtures/workflow_minimal/` is appropriately minimal; `validate_cross_refs` covers all 4 plan-2.5 rules + AC2.6's submit_targets type-shape branches with dedicated tests (`workflow_validate_submit_plan_wrong_type_errors`, `workflow_validate_submit_execute_accepts_list_record`, `workflow_validate_submit_execute_wrong_type_errors`). e2e all 13 steps green. The single major issue (M1) is the executor's documented deviation: `Schema.workflow` carries `PathBuf` paths, and `WorkflowResolved` is constructed transiently inside `install::run` for AC2.5 validation only — never threaded into runtime. Plan task 2.4 explicitly asked for the in-memory `Workflow` to carry text after install. The deviation is acceptable as a Phase-5 carryforward because the runtime-threading decision (where to store the resolved map; how to integrate with main.rs's per-CLI schema reload) is engine-layer work that doesn't make sense in Phase 2; same shape as Phase 1's M1/M2 carryforwards. Minor m1 (no install-pathway integration test for AC2.5), m2 (`install_bundled` skips workflow validation), m3 (validate_cross_refs is direction-asymmetric on agent_roles ↔ briefing_templates) all accepted as-is. m4 flags that Phase 7's `on_state` YAML literal in the plan (main.md:555-561) uses pseudo-Rust syntax that will not parse via the deserializer the executor implemented; Phase 7 plan-review must catch this.
+- **What's good:** Tests are named for the contract they enforce (every failure points at the broken AC by name); custom `Deserialize` for `RawStateAction` cleanly handles the three-variant action shape with explicit error messages; `FieldShape` enum decouples `validate_cross_refs` from `FieldType`'s full enum surface; resolve_from_disk and resolve_from_strings have symmetric outputs (Phase 7-ready); fixture has real Handlebars-syntax templates for Phase 3 to chew on.
+- **Carry-forward to Phase 5:** The Phase 5 plan MUST add a third item alongside Phase-1's M1 and M2: **(P2-M1)** wire `WorkflowResolved` into the runtime schema map in `main.rs:25-50`. For filesystem paths, call `wf.resolve_from_disk(&schema_path_dir)`. For `bundled:<name>` paths, call `wf.resolve_from_strings(...)` against `BUNDLED_STORE_TEMPLATES` (introduced by Phase 7.6; Phase 5 may need to stub this map empty until Phase 7 lands). Phase 5's plan-review must verify all three carryforwards (P1-M1 expr unification, P1-M2 ListRecord walker, P2-M1 WorkflowResolved threading) are enumerated in the plan before execution begins.
+- **Carry-forward to Phase 7:** Rewrite `on_state` YAML literal in plan main.md:555-561 from `[DispatchAgent(planner)]` to `- dispatch_agent: planner`. Extend `install_bundled` (install.rs:115-171) with workflow validation analog using `BUNDLED_STORE_TEMPLATES`.
+- → Details: `code-review-phase-2.md`
 
 ---
 
