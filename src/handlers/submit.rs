@@ -458,12 +458,20 @@ pub(crate) fn compute_submit_plan(
     }
 
     // Step 4/5: build diff — write plan record
+    // P5-m3: look up field name from submit_targets instead of hardcoding "plan"
+    let workflow = require_workflow(schema, "submit-plan")?;
+    let plan_field = workflow
+        .submit_targets
+        .get("submit-plan")
+        .map(|s| s.as_str())
+        .unwrap_or("plan");
+
     let mut diff: EntryMap = BTreeMap::new();
-    diff.insert("plan".to_string(), plan_json.clone());
+    diff.insert(plan_field.to_string(), plan_json.clone());
 
     // Deep-merge for validation
     let mut merged = existing.clone();
-    merged.insert("plan".to_string(), plan_json.clone());
+    merged.insert(plan_field.to_string(), plan_json.clone());
 
     // Step 6: validator pass
     validate::validate(schema, &merged, Op::SubmitPlan(diff), invoker).map_err(|errs| {
@@ -477,7 +485,7 @@ pub(crate) fn compute_submit_plan(
     // Step 8: write plan record + new status
     let plan_json_str = serde_json::to_string(&plan_json)?;
     let mut text_fields: BTreeMap<String, String> = BTreeMap::new();
-    text_fields.insert("plan".to_string(), plan_json_str);
+    text_fields.insert(plan_field.to_string(), plan_json_str);
 
     let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
 
@@ -526,9 +534,16 @@ pub(crate) fn compute_submit_plan_review(
     display_id: &str,
     gate: &str,       // READY | NEEDS_WORK | NOT_READY
     summary: &str,
+    open_questions: Option<Vec<String>>,
     invoker: Actor,
 ) -> Result<SubmitOutput> {
-    require_workflow(schema, "submit-plan-review")?;
+    // P5-m3: look up field name from submit_targets instead of hardcoding "plan_review_log"
+    let workflow = require_workflow(schema, "submit-plan-review")?;
+    let log_field = workflow
+        .submit_targets
+        .get("submit-plan-review")
+        .map(|s| s.as_str())
+        .unwrap_or("plan_review_log");
 
     let tx = conn.unchecked_transaction().context("submit-plan-review: begin tx")?;
     acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
@@ -543,11 +558,20 @@ pub(crate) fn compute_submit_plan_review(
         );
     }
 
-    // Build updated plan_review_log (append new entry)
-    let log_entry = json!({ "gate": gate, "summary": summary });
+    // P5-m2: Build updated log entry, including open_questions if provided
+    let mut log_entry_obj = serde_json::Map::new();
+    log_entry_obj.insert("gate".to_string(), Value::String(gate.to_string()));
+    log_entry_obj.insert("summary".to_string(), Value::String(summary.to_string()));
+    if let Some(qs) = open_questions {
+        log_entry_obj.insert(
+            "open_questions".to_string(),
+            Value::Array(qs.into_iter().map(Value::String).collect()),
+        );
+    }
+    let log_entry = Value::Object(log_entry_obj);
 
     let mut log_list: Vec<Value> = existing
-        .get("plan_review_log")
+        .get(log_field)
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -562,10 +586,10 @@ pub(crate) fn compute_submit_plan_review(
     log_list.push(log_entry);
 
     let mut diff: EntryMap = BTreeMap::new();
-    diff.insert("plan_review_log".to_string(), Value::Array(log_list.clone()));
+    diff.insert(log_field.to_string(), Value::Array(log_list.clone()));
 
     let mut merged = existing.clone();
-    merged.insert("plan_review_log".to_string(), Value::Array(log_list.clone()));
+    merged.insert(log_field.to_string(), Value::Array(log_list.clone()));
 
     // Validator pass (against post-append merged — ensures content validity)
     validate::validate(
@@ -600,7 +624,7 @@ pub(crate) fn compute_submit_plan_review(
     }
 
     let log_json = serde_json::to_string(&log_list)?;
-    text_fields.insert("plan_review_log".to_string(), log_json);
+    text_fields.insert(log_field.to_string(), log_json);
 
     write_status_and_fields(
         &tx, &schema.name, row_id, &new_status,
@@ -642,9 +666,10 @@ pub fn run_submit_plan_review(
     display_id: &str,
     gate: &str,
     summary: &str,
+    open_questions: Option<Vec<String>>,
     invoker: Actor,
 ) -> Result<()> {
-    let out = compute_submit_plan_review(schema, conn, display_id, gate, summary, invoker)?;
+    let out = compute_submit_plan_review(schema, conn, display_id, gate, summary, open_questions, invoker)?;
     println!("{}", out.summary);
     Ok(())
 }
@@ -663,7 +688,13 @@ pub(crate) fn compute_submit_execute(
     notes: Option<&str>,
     invoker: Actor,
 ) -> Result<SubmitOutput> {
-    require_workflow(schema, "submit-execute")?;
+    // P5-m3: look up field name from submit_targets instead of hardcoding "cycles"
+    let workflow = require_workflow(schema, "submit-execute")?;
+    let cycles_field = workflow
+        .submit_targets
+        .get("submit-execute")
+        .map(|s| s.as_str())
+        .unwrap_or("cycles");
 
     let tx = conn.unchecked_transaction().context("submit-execute: begin tx")?;
     acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
@@ -708,7 +739,7 @@ pub(crate) fn compute_submit_execute(
     });
 
     let mut cycles: Vec<Value> = existing
-        .get("cycles")
+        .get(cycles_field)
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -716,10 +747,10 @@ pub(crate) fn compute_submit_execute(
     cycles.push(new_cycle_entry);
 
     let mut diff: EntryMap = BTreeMap::new();
-    diff.insert("cycles".to_string(), Value::Array(cycles.clone()));
+    diff.insert(cycles_field.to_string(), Value::Array(cycles.clone()));
 
     let mut merged = existing.clone();
-    merged.insert("cycles".to_string(), Value::Array(cycles.clone()));
+    merged.insert(cycles_field.to_string(), Value::Array(cycles.clone()));
 
     validate::validate(schema, &merged, Op::SubmitExecute(diff), invoker)
         .map_err(|errs| {
@@ -734,7 +765,7 @@ pub(crate) fn compute_submit_execute(
 
     let cycles_json = serde_json::to_string(&cycles)?;
     let mut text_fields: BTreeMap<String, String> = BTreeMap::new();
-    text_fields.insert("cycles".to_string(), cycles_json);
+    text_fields.insert(cycles_field.to_string(), cycles_json);
 
     let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
 
@@ -787,12 +818,19 @@ pub(crate) fn compute_submit_review(
     display_id: &str,
     gate: &str,       // PASS | REVISE | FAIL
     review_summary: &str,
+    review_details: Option<&str>,
     critical: i64,
     major: i64,
     minor: i64,
     invoker: Actor,
 ) -> Result<SubmitOutput> {
-    require_workflow(schema, "submit-review")?;
+    // P5-m3: look up field name from submit_targets instead of hardcoding "cycles"
+    let workflow = require_workflow(schema, "submit-review")?;
+    let cycles_field = workflow
+        .submit_targets
+        .get("submit-review")
+        .map(|s| s.as_str())
+        .unwrap_or("cycles");
 
     let tx = conn.unchecked_transaction().context("submit-review: begin tx")?;
     acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
@@ -817,7 +855,7 @@ pub(crate) fn compute_submit_review(
         .unwrap_or(1);
 
     let mut cycles: Vec<Value> = existing
-        .get("cycles")
+        .get(cycles_field)
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
@@ -835,14 +873,17 @@ pub(crate) fn compute_submit_review(
         )
     })?;
 
-    // Patch the cycles entry with the review sub-record
-    let review_obj = json!({
-        "gate": gate,
-        "summary": review_summary,
-        "critical": critical,
-        "major": major,
-        "minor": minor,
-    });
+    // P5-m4: Patch the cycles entry with the review sub-record; summary and details are separate fields
+    let mut review_obj_map = serde_json::Map::new();
+    review_obj_map.insert("gate".to_string(), Value::String(gate.to_string()));
+    review_obj_map.insert("summary".to_string(), Value::String(review_summary.to_string()));
+    if let Some(details) = review_details {
+        review_obj_map.insert("details".to_string(), Value::String(details.to_string()));
+    }
+    review_obj_map.insert("critical".to_string(), Value::from(critical));
+    review_obj_map.insert("major".to_string(), Value::from(major));
+    review_obj_map.insert("minor".to_string(), Value::from(minor));
+    let review_obj = Value::Object(review_obj_map);
 
     if let Some(entry) = cycles.get_mut(cycle_idx) {
         if let Value::Object(ref mut obj) = entry {
@@ -851,10 +892,10 @@ pub(crate) fn compute_submit_review(
     }
 
     let mut diff: EntryMap = BTreeMap::new();
-    diff.insert("cycles".to_string(), Value::Array(cycles.clone()));
+    diff.insert(cycles_field.to_string(), Value::Array(cycles.clone()));
 
     let mut merged = existing.clone();
-    merged.insert("cycles".to_string(), Value::Array(cycles.clone()));
+    merged.insert(cycles_field.to_string(), Value::Array(cycles.clone()));
 
     validate::validate(
         schema, &merged,
@@ -873,7 +914,7 @@ pub(crate) fn compute_submit_review(
     let mut text_fields: BTreeMap<String, String> = BTreeMap::new();
 
     let cycles_json = serde_json::to_string(&cycles)?;
-    text_fields.insert("cycles".to_string(), cycles_json);
+    text_fields.insert(cycles_field.to_string(), cycles_json);
 
     let new_status: String;
 
@@ -961,13 +1002,14 @@ pub fn run_submit_review(
     display_id: &str,
     gate: &str,
     review_summary: &str,
+    review_details: Option<&str>,
     critical: i64,
     major: i64,
     minor: i64,
     invoker: Actor,
 ) -> Result<()> {
     let out = compute_submit_review(
-        schema, conn, display_id, gate, review_summary, critical, major, minor, invoker,
+        schema, conn, display_id, gate, review_summary, review_details, critical, major, minor, invoker,
     )?;
     println!("{}", out.summary);
     Ok(())
@@ -1430,7 +1472,7 @@ workflow:
 
         let out = compute_submit_review(
             &schema, &conn, "WF001",
-            "PASS", "approved", 0, 0, 1,
+            "PASS", "approved", None, 0, 0, 1,
             Actor::AiAutonomous,
         ).unwrap();
 
@@ -1461,7 +1503,7 @@ workflow:
 
         let out = compute_submit_review(
             &schema, &conn, "WF001",
-            "PASS", "final approved", 0, 0, 0,
+            "PASS", "final approved", None, 0, 0, 0,
             Actor::AiAutonomous,
         ).unwrap();
 
@@ -1489,7 +1531,7 @@ workflow:
 
         // Helper: do a REVISE and assert it produces executing
         let do_revise = |summary: &str| {
-            compute_submit_review(&schema, &conn, "WF001", "REVISE", summary, 1, 0, 0, Actor::AiAutonomous)
+            compute_submit_review(&schema, &conn, "WF001", "REVISE", summary, None, 1, 0, 0, Actor::AiAutonomous)
         };
 
         // 1st REVISE: current_cycle 1 → 2 (guard 2 <= 4 true) → executing
@@ -1579,7 +1621,7 @@ workflow:
 
         // 1st REVISE phase 1: cycle 1 → 2
         {
-            let out = compute_submit_review(&schema, &conn, "WF001", "REVISE", "needs work", 1, 0, 0, Actor::AiAutonomous).unwrap();
+            let out = compute_submit_review(&schema, &conn, "WF001", "REVISE", "needs work", None, 1, 0, 0, Actor::AiAutonomous).unwrap();
             assert_eq!(out.new_status, "executing");
             assert_eq!(read_i64(&conn, "current_cycle"), 2);
 
@@ -1593,7 +1635,7 @@ workflow:
 
         // 2nd REVISE phase 1: cycle 2 → 3
         {
-            let out = compute_submit_review(&schema, &conn, "WF001", "REVISE", "still needs work", 0, 1, 0, Actor::AiAutonomous).unwrap();
+            let out = compute_submit_review(&schema, &conn, "WF001", "REVISE", "still needs work", None, 0, 1, 0, Actor::AiAutonomous).unwrap();
             assert_eq!(out.new_status, "executing");
             assert_eq!(read_i64(&conn, "current_cycle"), 3);
 
@@ -1608,7 +1650,7 @@ workflow:
 
         // PASS on phase 1 → phase 2 (current_phase bumps to 2, current_cycle resets to 1)
         {
-            let out = compute_submit_review(&schema, &conn, "WF001", "PASS", "phase 1 approved", 0, 0, 0, Actor::AiAutonomous).unwrap();
+            let out = compute_submit_review(&schema, &conn, "WF001", "PASS", "phase 1 approved", None, 0, 0, 0, Actor::AiAutonomous).unwrap();
             assert_eq!(out.new_status, "executing");
             assert_eq!(read_i64(&conn, "current_phase"), 2, "current_phase must advance to 2");
             assert_eq!(read_i64(&conn, "current_cycle"), 1, "current_cycle must reset to 1 on phase advance");
@@ -1628,7 +1670,7 @@ workflow:
         // Phase 2's first REVISE: counter was 1, bumps to 2 (2 <= 4 true)
         let out = compute_submit_review(
             &schema, &conn, "WF001",
-            "REVISE", "phase 2 needs work", 0, 1, 0,
+            "REVISE", "phase 2 needs work", None, 0, 1, 0,
             Actor::AiAutonomous,
         ).unwrap();
 
@@ -1725,7 +1767,7 @@ workflow:
 
         let out = compute_submit_plan_review(
             &schema, &conn, "WF001",
-            "READY", "plan approved", Actor::AiAutonomous,
+            "READY", "plan approved", None, Actor::AiAutonomous,
         ).unwrap();
 
         // Both plan_review→ready AND ready→executing must have fired inside the same tx
@@ -1756,7 +1798,7 @@ workflow:
         // 1st NEEDS_WORK: log.length = 0 < 3 → planning
         {
             let out = compute_submit_plan_review(
-                &schema, &conn, "WF001", "NEEDS_WORK", "needs changes 1", Actor::AiAutonomous,
+                &schema, &conn, "WF001", "NEEDS_WORK", "needs changes 1", None, Actor::AiAutonomous,
             ).unwrap();
             assert_eq!(out.new_status, "planning");
             assert_eq!(read_plan_review_log(&conn).len(), 1);
@@ -1766,7 +1808,7 @@ workflow:
         // 2nd NEEDS_WORK: log.length = 1 < 3 → planning
         {
             let out = compute_submit_plan_review(
-                &schema, &conn, "WF001", "NEEDS_WORK", "needs changes 2", Actor::AiAutonomous,
+                &schema, &conn, "WF001", "NEEDS_WORK", "needs changes 2", None, Actor::AiAutonomous,
             ).unwrap();
             assert_eq!(out.new_status, "planning");
             assert_eq!(read_plan_review_log(&conn).len(), 2);
@@ -1776,7 +1818,7 @@ workflow:
         // 3rd NEEDS_WORK: log.length = 2 < 3 → planning
         {
             let out = compute_submit_plan_review(
-                &schema, &conn, "WF001", "NEEDS_WORK", "needs changes 3", Actor::AiAutonomous,
+                &schema, &conn, "WF001", "NEEDS_WORK", "needs changes 3", None, Actor::AiAutonomous,
             ).unwrap();
             assert_eq!(out.new_status, "planning");
             assert_eq!(read_plan_review_log(&conn).len(), 3);
@@ -1786,7 +1828,7 @@ workflow:
         // 4th NEEDS_WORK: log.length = 3 < 3 false → blocked (unguarded fallback)
         {
             let out = compute_submit_plan_review(
-                &schema, &conn, "WF001", "NEEDS_WORK", "still needs changes", Actor::AiAutonomous,
+                &schema, &conn, "WF001", "NEEDS_WORK", "still needs changes", None, Actor::AiAutonomous,
             ).unwrap();
             assert_eq!(out.new_status, "blocked",
                 "4th NEEDS_WORK must route to blocked (guard plan_review_log.length < 3 fails)");
@@ -1805,7 +1847,7 @@ workflow:
 
         let out = compute_submit_plan_review(
             &schema, &conn, "WF001",
-            "NOT_READY", "plan is fundamentally flawed", Actor::AiAutonomous,
+            "NOT_READY", "plan is fundamentally flawed", None, Actor::AiAutonomous,
         ).unwrap();
 
         assert_eq!(out.new_status, "blocked");
@@ -1932,7 +1974,7 @@ fields:
         //   plan_review → ready → executing
         let out = compute_submit_plan_review(
             &schema, &conn, "WF001",
-            "READY", "approved", Actor::AiAutonomous,
+            "READY", "approved", None, Actor::AiAutonomous,
         ).unwrap();
 
         assert_eq!(out.new_status, "executing");

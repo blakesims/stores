@@ -68,8 +68,10 @@ pub fn dispatch(
                         .as_str();
                     let summary = read_text_or_file(sub, "summary", "summary-from-file")
                         .unwrap_or_default();
+                    // P5-m2: --open-questions-from-file reads a file with one question per line
+                    let open_questions = read_lines_from_file(sub, "open-questions-from-file");
                     handlers::submit::run_submit_plan_review(
-                        schema, &conn, display_id, gate, &summary, invoker,
+                        schema, &conn, display_id, gate, &summary, open_questions, invoker,
                     )?;
                 }
                 Some(("submit-execute", sub)) => {
@@ -95,14 +97,17 @@ pub fn dispatch(
                     let gate = sub.get_one::<String>("gate")
                         .ok_or_else(|| anyhow::anyhow!("submit-review requires --gate"))?
                         .as_str();
-                    let summary = read_text_or_file(sub, "summary", "details-from-file")
-                        .unwrap_or_default();
+                    // P5-m4: --summary is a string; --details-from-file reads file content into details sub-field
+                    let summary = sub.get_one::<String>("summary")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let details = read_file_content(sub, "details-from-file");
                     let critical = sub.get_one::<i64>("critical").copied().unwrap_or(0);
                     let major = sub.get_one::<i64>("major").copied().unwrap_or(0);
                     let minor = sub.get_one::<i64>("minor").copied().unwrap_or(0);
                     handlers::submit::run_submit_review(
                         schema, &conn, display_id,
-                        gate, &summary, critical, major, minor,
+                        gate, summary, details.as_deref(), critical, major, minor,
                         invoker,
                     )?;
                 }
@@ -168,6 +173,34 @@ fn read_plan_json(sub: &ArgMatches) -> anyhow::Result<serde_json::Value> {
         std::fs::read_to_string(path)?
     };
     serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("plan JSON parse error: {e}"))
+}
+
+/// Read a file's content from a named from-file arg (if present).
+/// Returns None if the arg is absent.
+fn read_file_content(sub: &ArgMatches, from_file: &str) -> Option<String> {
+    let path = sub.get_one::<String>(from_file)?;
+    if path == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).ok();
+        Some(s.trim_end_matches('\n').to_string())
+    } else {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim_end_matches('\n').to_string())
+    }
+}
+
+/// Read lines from a file arg. Returns None if absent; Some(vec) with one item per non-empty line.
+/// P5-m2: used by --open-questions-from-file.
+fn read_lines_from_file(sub: &ArgMatches, from_file: &str) -> Option<Vec<String>> {
+    let content = read_file_content(sub, from_file)?;
+    let lines: Vec<String> = content
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() { None } else { Some(lines) }
 }
 
 /// Read notes from --notes-from-file (if present).

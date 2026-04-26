@@ -246,6 +246,12 @@ fn build_submit_plan_review_cmd() -> Command {
                 .help("Load summary from file (use '-' for stdin)")
                 .required(false),
         )
+        .arg(
+            Arg::new("open-questions-from-file")
+                .long("open-questions-from-file")
+                .help("Load open questions from file (one per line)")
+                .required(false),
+        )
 }
 
 /// Build the `submit-execute` command.
