@@ -498,7 +498,7 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 - Fixture `triage.notes` renamed to `triage_notes` to resolve leaf-name collision with `details.notes` (install-time uniqueness check rejects collisions).
 - `--invoker` global flag added to `dynamic.rs` and wired in `dispatch.rs` to unblock actor-override E2E testing (plan noted Phase 6 would add it, but DONE_WHEN #11 requires it in Phase 5's E2E).
 
-**Commits:** (pending)
+**Commits:** `ebd667b` feat(T001 phase5): enforcement engine — real validator with all rule types
 
 ---
 
