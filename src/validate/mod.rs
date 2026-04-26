@@ -26,6 +26,20 @@ pub enum Op {
     /// Lifecycle transition verb (e.g. "triage", "close") carrying the diff.
     /// Actor checks scope to the diff only; required/enum/pattern use the merged entry.
     Transition(String, EntryMap),
+    /// Write the plan (record) after planning — verb: submit-plan.
+    /// Actor checks scope to diff only (per A15).
+    SubmitPlan(EntryMap),
+    /// Write a plan-review entry — verb: submit-plan-review.
+    /// gate ∈ {READY, NEEDS_WORK, NOT_READY}.
+    /// Actor checks scope to diff only.
+    SubmitPlanReview(String, EntryMap),
+    /// Write an execution entry — verb: submit-execute.
+    /// Actor checks scope to diff only.
+    SubmitExecute(EntryMap),
+    /// Write a code-review entry — verb: submit-review.
+    /// gate ∈ {PASS, REVISE, FAIL}.
+    /// Actor checks scope to diff only.
+    SubmitReview(String, EntryMap),
 }
 
 /// Validate an entry map against a schema for the given operation and invoker.
@@ -50,9 +64,14 @@ pub fn validate(
         Op::Transition(verb, diff) => (Some(verb.as_str()), diff),
         Op::Update(diff) => (None, diff),
         Op::Add => (None, entry),
+        // Submit ops: actor checks scoped to diff only (A15), verb used for transition check.
+        Op::SubmitPlan(diff) => (Some("submit-plan"), diff),
+        Op::SubmitPlanReview(_, diff) => (Some("submit-plan-review"), diff),
+        Op::SubmitExecute(diff) => (Some("submit-execute"), diff),
+        Op::SubmitReview(_, diff) => (Some("submit-review"), diff),
     };
 
-    // If this is a Transition op, check the transition's declared actor first.
+    // If this is a Transition or Submit op, check the transition's declared actor first.
     if let Some(verb) = verb_opt {
         if let Some(transition) = schema.lifecycle.transitions.iter().find(|t| t.verb == verb) {
             if let Some(transition_actor) = transition.actor {
