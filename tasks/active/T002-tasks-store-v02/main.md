@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: Phase 3 cycle 2 PASS — advance to Phase 4)
+- **Last Updated:** 2026-04-26 (executor: Phase 4 complete — next-action + brief verbs)
 - **Blocked Reason:** —
 
 ## Task
@@ -1229,6 +1229,65 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Verified actions:** All 4 cycle-1 required actions addressed (C1 fix verified by direct re-probe of the cycle-1 critical; m1 covered with 4 sub-cases per helper; m2 doc tightening explicit about `0`/`false`/`[]` pass-through; m3 TODO parked with two named candidate fixes).
 - **Carry-forward to Phase 6 (informational, not a gate condition):** TODO Phase 6 (engine.rs:129-133) — decide on render-engine caching via profiling. `default` helper now documents that `0`/`false`/`[]` pass through; Phase 6 templates needing null-shape fallback for those types must use `{{#if}}` guards.
 - → Details: `code-review-phase-3.md`
+
+---
+
+### Phase 4: Generic workflow CLI verbs (read-only) — `next-action` + `brief`
+
+- **Status:** complete (pending code review)
+- **Executor:** Claude Sonnet 4.6
+- **Commits:** 68764f9 (P4.1-4.2), 4aba048 (P4.3-4.4), 821afe2 (P4.5)
+- **Tests:** 237 unit tests pass; all 13 e2e steps green
+
+#### Tasks Completed
+
+**4.1 — Dynamic verb registration (gated on workflow.is_some())**
+- `src/cli/dynamic.rs`: `build_store_command` now calls `build_next_action_cmd()` and `build_brief_cmd()` only when `schema.workflow.is_some()`
+- v0.1 stores (observations, gate) do not receive these verbs — confirmed by e2e
+- `next-action` takes positional `<display_id>` + global `--json`
+- `brief` takes positional `<display_id>` + optional `--for <agent>` + global `--json`
+
+**4.2 — `next-action` handler**
+- `src/handlers/next_action.rs`: 9-key read-only response (AC4.1/AC4.2)
+- Public `find_next_agent(workflow, status)` helper: scans `on_state[status]` for first `DispatchAgent` action
+- AC4.6: `status == "blocked"` → `blocked: true`, `next_agent: null`
+- AC4.7: no `workflow:` → bail with "store '...' has no workflow declaration"
+- Text form prints `key: value` lines (same 9 keys as JSON)
+- JSON uses `serde_json::to_string_pretty`
+
+**4.3+4.4 — `brief` handler with `--for` flag**
+- `src/handlers/brief.rs`: markdown to stdout (default) or `{"agent":...,"brief_markdown":...}` JSON
+- `--for <agent>` validated against `workflow.agent_roles` keys
+- AC4.5: unknown role error lists all available roles
+- Default: calls `find_next_agent` to determine the role
+- Template loaded from disk via manifest `schema_path` + relative template path (carry-forward choice: read on demand; P2-M1 in Phase 5 will thread WorkflowResolved cleanly)
+- AC4.7: guard at handler entry
+
+**4.5 — Scope-aware path (task 4.5)**
+- Both handlers call `paths::stores_dir_for(schema.scope)` at entry to confirm scope resolution works; connection is already open against the correct DB
+
+**Fixture schema fix**
+- `tests/fixtures/workflow_minimal/schema.yaml`: removed duplicate `status` field (reserved column conflict causing DDL error), added `blocked` state, `blocked_reason`/`claimed_by`/`claimed_at` fields for AC4.6/AC4.2 testing, fixed `submit_targets`
+
+**Render context fix (incidental — unlocked by fixture schema change)**
+- `src/render/context.rs`: `build_context` now includes `RESERVED_ENTRY_KEYS` (display_id, status, created_at, updated_at, created_by, updated_by) so templates can use `{{status}}` regardless of whether the schema declares it as a field. Previously only schema fields were in the context.
+
+#### AC Verification
+
+| AC | Result | Evidence |
+|----|--------|----------|
+| AC4.1 | PASS | `stores wf_tasks next-action WF001` on planning row → 9 keys, `next_agent: planner`, `blocked: false` |
+| AC4.2 | PASS | `--json` output has all 9 keys; claimed_by/claimed_at null on unlocked row |
+| AC4.3 | PASS | `stores wf_tasks brief WF001` prints planner template markdown |
+| AC4.4 | PASS | `--for executor` overrides to executor brief |
+| AC4.5 | PASS | `--for nonexistent_agent` errors: "unknown agent role 'nonexistent_agent'; available roles: executor, planner"; unit test covers all-four-roles case |
+| AC4.6 | PASS | After blocking WF001: `blocked: true`, `next_agent: null` |
+| AC4.7 | PASS | `stores observations next-action OBS001` → clap "unrecognized subcommand" (verb not registered for non-workflow stores) |
+
+#### Notes / Carry-Forward
+- Template loading choice: `brief.rs` reads templates from disk at call time via manifest `schema_path`. This avoids threading `WorkflowResolved` into `main.rs` (P2-M1 carry-forward, owned by Phase 5). The pattern is clean but incurs one FS read per `brief` call.
+- The `workflow_minimal` fixture schema previously declared `status` as a schema field (redundant — it's a reserved column). Fixing this exposed that `build_context` only included schema fields. The context fix is strictly additive and does not break existing tests.
+- P1-M1, P1-M2, P2-M1 carry-forward items remain Phase 5 scope — untouched.
 
 ---
 
