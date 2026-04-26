@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_5
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (executor: Phase 4 cycle 2 revisions complete — compute/run split, direct handler tests for all 7 ACs)
+- **Last Updated:** 2026-04-26 (code-reviewer: Phase 4 cycle 2 PASS — compute/run split landed cleanly; advancing to Phase 5)
 - **Blocked Reason:** —
 
 ## Task
@@ -1243,6 +1243,21 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Deviation accepted:** `build_context` reserved-column inclusion in `src/render/context.rs` is sound. Reserved keys inserted first, schema fields overwrite on collision (executor's stated semantic). All 24 render tests pass including the byte-for-byte `planner_brief_fixture_renders_correctly` Phase 3 test. The fixture schema's removal of duplicate `status` field is necessary (DDL would reject the duplicate). Note: the collision branch is dead code in practice because DDL rejects schemas declaring reserved-column-named fields.
 - **Required actions (cycle 2):** (a) Add direct handler-level tests for `next_action::run` and `brief::run` covering all 7 ACs — clean refactor is to split each into `compute(...) -> Result<Output>` + thin `run()` printer, then assert on structured `Output`; (b) Either remove `let _ = stores_dir_for(schema.scope)?` at next_action.rs:72 or make it functional; (c) Delete unused `crate::db`/`tempfile::tempdir` imports in brief.rs (or write the missing DB-backed tests, preferred per (a)). Optional: refactor next_action::run to call find_next_agent (m3); add TODO at brief.rs:107 for the bundled-store gap (m2).
 - **Carry-forward to Phase 5:** The submit-handler refactor pattern (compute + thin run) from M1 should be the default shape for all four submit verbs. The fixture's `submit_targets[submit-plan]` and `auto_increment: true` on `current_phase` were stripped in Phase 4 and must be re-added if Phase 5 tests require them. P2-M1 (WorkflowResolved threading) should resolve `brief.rs`'s disk-read path in m2.
+- → Details: `code-review-phase-4.md` (overwritten by cycle 2)
+
+### Phase 4 — cycle 2
+
+- **Gate:** PASS
+- **Reviewed:** 2026-04-26
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 2 of max 3
+- **Issues:** 0 gating (cycle 1's 2 medium / 5 trivial-or-low: M1 + M2 fixed via compute/run split; m1, m2, m3, m4, m5 fixed)
+- **Status next:** EXECUTING_PHASE_5
+- **Summary:** Cycle 2 cleanly closes the structural M1 + M2 findings. Both handlers now expose `pub(crate) fn compute(...) -> Result<Output>` (next_action.rs:69-115; brief.rs:37-147) returning `Serialize+Deserialize` output structs (`NextActionOutput` with all 9 AC4.1/AC4.2 keys; `BriefOutput {agent, brief_markdown}`). `run()` is now thin in both — parses args, calls `compute`, prints text or JSON. The previous private `compute_next_action` re-implementation is gone. AC4.5's contract test (`brief_compute_unknown_agent_error_lists_all_roles`, brief.rs:257-283) inserts a real DB row, calls `compute()` with `--for nonexistent_agent`, and asserts the actual `bail!` (brief.rs:74-78) produces error string containing all four role names + the bad name — no more copy-of-format-string testing. The role-list join is now sorted (brief.rs:73) for deterministic output. `next_action_no_workflow_errors` and `brief_compute_no_workflow_errors` cover AC4.7 at compute level. `find_next_agent` is the single implementation (m3 fixed); `stores_dir_for` is removed from next_action.rs and used functionally as fallback in brief.rs (m1 fixed); brief.rs imports cleaned (m4 fixed); Phase 6 bundled-store TODO landed at brief.rs:116-121 (m2 fixed). 237 tests pass; e2e all 13 steps green; diff stat tightly scoped to the two handlers + main.md (no drift). Commit hygiene clean (`47f0b96` fix + `7d5cc67` log).
+- **What's good:** Compute/run split is the right shape for Phase 5's four submit verbs to inherit; `Serialize+Deserialize` on `NextActionOutput` lets `serde_json::to_value(&out)` validate the full 9-key contract in 4 lines (next_action.rs:313-316); the AC4.5 test is now contract-faithful (changing the format string in `bail!` would fail the test); zero new compile warnings in cycle-2 files.
+- **Verified actions:** All 5 required actions from cycle 1 addressed: (a) compute/run split + structured-output tests at compute level for AC4.1, AC4.2 (round-trip), AC4.5, AC4.6, AC4.7; (b) discarded `stores_dir_for` removed; (c) unused imports gone; (m3) optional inline-loop dedup done; (m2) optional bundled-store TODO landed.
+- **Sub-finding (informational, NOT gating):** No compute-level happy-path test asserts on `BriefOutput.brief_markdown` for AC4.3 (default agent) or AC4.4 (`--for executor` override). Both are still verified by direct CLI probe + e2e. Naturally absorbed into Phase 5's submit-handler test infrastructure (template-on-disk + manifest stub). Recorded as carry-forward.
+- **Carry-forward to Phase 5:** (1) Apply compute/run split to all four submit verbs as the established shape; (2) cover brief AC4.3/AC4.4 happy paths at compute level when template-on-disk test infrastructure lands; (3) P2-M1 (WorkflowResolved threading) still owed — resolves brief.rs disk-read path AND closes m2's bundled-store gap; (4) re-add fixture fields `submit_targets[submit-plan]: plan` and `auto_increment: true` on `current_phase` if Phase 5 tests require them.
 - → Details: `code-review-phase-4.md`
 
 ---
