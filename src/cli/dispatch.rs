@@ -49,6 +49,87 @@ pub fn dispatch(
                 Some(("brief", sub)) => {
                     handlers::brief::run(schema, &conn, sub, invoker)?;
                 }
+                Some(("submit-plan", sub)) => {
+                    let display_id = sub.get_one::<String>("display_id")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let plan_json = read_plan_json(sub)?;
+                    handlers::submit::run_submit_plan(schema, &conn, display_id, plan_json, invoker)?;
+                }
+                Some(("submit-plan-review", sub)) => {
+                    let display_id = sub.get_one::<String>("display_id")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let gate = sub.get_one::<String>("gate")
+                        .ok_or_else(|| anyhow::anyhow!("submit-plan-review requires --gate"))?
+                        .as_str();
+                    let summary = read_text_or_file(sub, "summary", "summary-from-file")
+                        .unwrap_or_default();
+                    handlers::submit::run_submit_plan_review(
+                        schema, &conn, display_id, gate, &summary, invoker,
+                    )?;
+                }
+                Some(("submit-execute", sub)) => {
+                    let display_id = sub.get_one::<String>("display_id")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let exec_summary = read_text_or_file(sub, "summary", "summary-from-file")
+                        .unwrap_or_default();
+                    let commit_sha = sub.get_one::<String>("commit").map(|s| s.as_str());
+                    let files_changed = sub.get_one::<String>("files-changed").map(|s| s.as_str());
+                    let notes = read_notes_from_file(sub);
+                    handlers::submit::run_submit_execute(
+                        schema, &conn, display_id,
+                        &exec_summary, commit_sha, files_changed,
+                        notes.as_deref(),
+                        invoker,
+                    )?;
+                }
+                Some(("submit-review", sub)) => {
+                    let display_id = sub.get_one::<String>("display_id")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let gate = sub.get_one::<String>("gate")
+                        .ok_or_else(|| anyhow::anyhow!("submit-review requires --gate"))?
+                        .as_str();
+                    let summary = read_text_or_file(sub, "summary", "details-from-file")
+                        .unwrap_or_default();
+                    let critical = sub.get_one::<i64>("critical").copied().unwrap_or(0);
+                    let major = sub.get_one::<i64>("major").copied().unwrap_or(0);
+                    let minor = sub.get_one::<i64>("minor").copied().unwrap_or(0);
+                    handlers::submit::run_submit_review(
+                        schema, &conn, display_id,
+                        gate, &summary, critical, major, minor,
+                        invoker,
+                    )?;
+                }
+                Some(("resume", sub)) => {
+                    let display_id = sub.get_one::<String>("display_id")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    // Resume: blocked → ready → executing
+                    // Implemented via the transition handler with the "resume" verb,
+                    // plus a follow-on via fire_on_entry_follow_ons.
+                    // We do this inline here to stay within the dispatch boundary.
+                    let tx = conn.unchecked_transaction()?;
+                    let (row_id, current_entry) = handlers::row::read_row(schema, &tx, display_id)?;
+                    let current_status = current_entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    if current_status != "blocked" {
+                        anyhow::bail!("cannot resume: row is in state '{}', expected 'blocked'", current_status);
+                    }
+                    // Reset current_cycle to 1; current_phase unchanged
+                    let mut fw_fields: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+                    fw_fields.insert("current_cycle".to_string(), 1);
+                    let txt_fields: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+                    handlers::submit::write_status_and_fields(
+                        &tx, &schema.name, row_id, "ready", &invoker.to_string(), &fw_fields, &txt_fields,
+                    )?;
+                    handlers::submit::fire_on_entry_follow_ons(&tx, schema, display_id, row_id, "ready")?;
+                    let (_, final_entry) = handlers::row::read_row(schema, &tx, display_id)?;
+                    let final_status = final_entry.get("status").and_then(|v| v.as_str()).unwrap_or("executing");
+                    tx.commit()?;
+                    println!("Resumed {display_id}; status now: {final_status}");
+                }
                 Some((verb, sub)) => {
                     // Check if this is a declared lifecycle transition verb
                     if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {
@@ -68,6 +149,58 @@ pub fn dispatch(
     }
 
     bail!("no store subcommand matched")
+}
+
+/// Read a text value from either a direct arg or a "-from-file" companion.
+fn read_text_or_file(sub: &ArgMatches, direct: &str, from_file: &str) -> Option<String> {
+    // Check the direct arg first
+    if let Some(v) = sub.get_one::<String>(direct) {
+        return Some(v.clone());
+    }
+    // Then check the from-file companion
+    if let Some(path) = sub.get_one::<String>(from_file) {
+        if path == "-" {
+            use std::io::Read;
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s).ok();
+            return Some(s.trim_end_matches('\n').to_string());
+        }
+        return std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim_end_matches('\n').to_string());
+    }
+    None
+}
+
+/// Read plan JSON from --plan-from-file.
+fn read_plan_json(sub: &ArgMatches) -> anyhow::Result<serde_json::Value> {
+    let path = sub
+        .get_one::<String>("plan-from-file")
+        .ok_or_else(|| anyhow::anyhow!("submit-plan requires --plan-from-file"))?;
+    let text = if path == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s)?;
+        s
+    } else {
+        std::fs::read_to_string(path)?
+    };
+    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("plan JSON parse error: {e}"))
+}
+
+/// Read notes from --notes-from-file (if present).
+fn read_notes_from_file(sub: &ArgMatches) -> Option<String> {
+    let path = sub.get_one::<String>("notes-from-file")?;
+    if path == "-" {
+        use std::io::Read;
+        let mut s = String::new();
+        std::io::stdin().read_to_string(&mut s).ok();
+        Some(s.trim_end_matches('\n').to_string())
+    } else {
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim_end_matches('\n').to_string())
+    }
 }
 
 /// Detect invoker: check --invoker flag first, then fall back to $CLAUDECODE env var.

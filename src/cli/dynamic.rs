@@ -137,7 +137,12 @@ fn build_store_command(schema: &Schema) -> Command {
     if schema.workflow.is_some() {
         store_cmd = store_cmd
             .subcommand(build_next_action_cmd())
-            .subcommand(build_brief_cmd());
+            .subcommand(build_brief_cmd())
+            .subcommand(build_submit_plan_cmd())
+            .subcommand(build_submit_plan_review_cmd())
+            .subcommand(build_submit_execute_cmd())
+            .subcommand(build_submit_review_cmd())
+            .subcommand(build_resume_cmd());
     }
 
     // Register one subcommand per transition verb
@@ -182,6 +187,140 @@ fn build_brief_cmd() -> Command {
             Arg::new("for")
                 .long("for")
                 .help("Agent role to generate the briefing for (defaults to next-action answer)")
+                .required(false),
+        )
+}
+
+/// Build the `submit-plan` command.
+fn build_submit_plan_cmd() -> Command {
+    Command::new("submit-plan")
+        .about("Submit the plan for a workflow entry (planning → plan_review)")
+        .arg(Arg::new("display_id").help("Display ID").required(true))
+        .arg(
+            Arg::new("plan-from-file")
+                .long("plan-from-file")
+                .help("Path to plan JSON file (use '-' for stdin)")
+                .required(false),
+        )
+}
+
+/// Build the `submit-plan-review` command.
+fn build_submit_plan_review_cmd() -> Command {
+    Command::new("submit-plan-review")
+        .about("Submit a plan review (plan_review → ready | planning | blocked)")
+        .arg(Arg::new("display_id").help("Display ID").required(true))
+        .arg(
+            Arg::new("gate")
+                .long("gate")
+                .help("Gate decision: READY | NEEDS_WORK | NOT_READY")
+                .required(true),
+        )
+        .arg(
+            Arg::new("summary")
+                .long("summary")
+                .help("Review summary")
+                .required(false),
+        )
+        .arg(
+            Arg::new("summary-from-file")
+                .long("summary-from-file")
+                .help("Load summary from file (use '-' for stdin)")
+                .required(false),
+        )
+}
+
+/// Build the `submit-execute` command.
+fn build_submit_execute_cmd() -> Command {
+    Command::new("submit-execute")
+        .about("Submit execution results (executing → code_review)")
+        .arg(Arg::new("display_id").help("Display ID").required(true))
+        .arg(
+            Arg::new("summary")
+                .long("summary")
+                .help("Execution summary")
+                .required(false),
+        )
+        .arg(
+            Arg::new("summary-from-file")
+                .long("summary-from-file")
+                .help("Load summary from file")
+                .required(false),
+        )
+        .arg(
+            Arg::new("commit")
+                .long("commit")
+                .help("Git commit SHA")
+                .required(false),
+        )
+        .arg(
+            Arg::new("files-changed")
+                .long("files-changed")
+                .help("Comma-separated list of changed files")
+                .required(false),
+        )
+        .arg(
+            Arg::new("notes-from-file")
+                .long("notes-from-file")
+                .help("Load additional notes from file")
+                .required(false),
+        )
+}
+
+/// Build the `submit-review` command.
+fn build_submit_review_cmd() -> Command {
+    Command::new("submit-review")
+        .about("Submit a code review (code_review → executing | complete | blocked)")
+        .arg(Arg::new("display_id").help("Display ID").required(true))
+        .arg(
+            Arg::new("gate")
+                .long("gate")
+                .help("Gate decision: PASS | REVISE | FAIL")
+                .required(true),
+        )
+        .arg(
+            Arg::new("critical")
+                .long("critical")
+                .help("Number of critical findings")
+                .value_parser(clap::value_parser!(i64))
+                .required(false),
+        )
+        .arg(
+            Arg::new("major")
+                .long("major")
+                .help("Number of major findings")
+                .value_parser(clap::value_parser!(i64))
+                .required(false),
+        )
+        .arg(
+            Arg::new("minor")
+                .long("minor")
+                .help("Number of minor findings")
+                .value_parser(clap::value_parser!(i64))
+                .required(false),
+        )
+        .arg(
+            Arg::new("summary")
+                .long("summary")
+                .help("Review summary")
+                .required(false),
+        )
+        .arg(
+            Arg::new("details-from-file")
+                .long("details-from-file")
+                .help("Load detailed findings from file")
+                .required(false),
+        )
+}
+
+/// Build the `resume` command.
+fn build_resume_cmd() -> Command {
+    Command::new("resume")
+        .about("Resume a blocked workflow entry (blocked → ready → executing)")
+        .arg(Arg::new("display_id").help("Display ID").required(true))
+        .arg(
+            Arg::new("summary")
+                .long("summary")
+                .help("Optional reason for resuming")
                 .required(false),
         )
 }
