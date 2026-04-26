@@ -11,6 +11,11 @@ use crate::validate::EntryMap;
 /// Build a nested EntryMap from flat CLI args.
 /// `get_arg` returns the raw string value for a given cli_name (e.g. "done-when"),
 /// or None if the arg was not provided.
+///
+/// Depth support: paths of length 1 (top-level) or 2 (Record sub-field) are the
+/// only shapes produced by the flat CLI arg surface for v0.1/v0.2.  ListRecord
+/// and ListFk fields cannot be set via flat CLI args; they are written programmatically
+/// by the submit handlers (Phase 5) using JSON directly.
 pub fn build_entry_map<F>(schema: &Schema, get_arg: F) -> Result<EntryMap>
 where
     F: Fn(&str) -> Option<String>,
@@ -30,24 +35,53 @@ where
 
         let value = coerce_value(&leaf.field.ty, &raw);
 
-        // Nest into entry map following the path.
-        // path can be ["field"] or ["record", "subfield"]
-        if leaf.path.len() == 1 {
-            entry.insert(leaf.path[0].clone(), value);
-        } else {
-            // path.len() == 2 for Record sub-fields (v0.1 only one level deep)
-            let parent = leaf.path[0].clone();
-            let child = leaf.path[1].clone();
-            let rec = entry
-                .entry(parent)
-                .or_insert_with(|| Value::Object(serde_json::Map::new()));
-            if let Value::Object(ref mut map) = rec {
-                map.insert(child, value);
-            }
-        }
+        // Insert value at the correct depth.
+        insert_at_path(&mut entry, &leaf.path, value);
     }
 
     Ok(entry)
+}
+
+/// Insert `value` into `entry` following `path` (any depth ≥ 1).
+///
+/// Creates intermediate `Value::Object` nodes as needed.  Silently ignores
+/// writes into non-object intermediates (schema validation catches those
+/// separately).
+pub fn insert_at_path(entry: &mut EntryMap, path: &[String], value: Value) {
+    match path.len() {
+        0 => {} // nothing to do
+        1 => {
+            entry.insert(path[0].clone(), value);
+        }
+        _ => {
+            // Ensure the intermediate node is an Object
+            let parent = entry
+                .entry(path[0].clone())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(ref mut map) = parent {
+                insert_at_path_value(map, &path[1..], value);
+            }
+            // If the intermediate node is not an Object (type mismatch), silently
+            // skip — schema validation will catch the misshapen entry.
+        }
+    }
+}
+
+fn insert_at_path_value(map: &mut serde_json::Map<String, Value>, path: &[String], value: Value) {
+    match path.len() {
+        0 => {}
+        1 => {
+            map.insert(path[0].clone(), value);
+        }
+        _ => {
+            let parent = map
+                .entry(path[0].clone())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(ref mut child_map) = parent {
+                insert_at_path_value(child_map, &path[1..], value);
+            }
+        }
+    }
 }
 
 /// Coerce a raw string to a typed serde_json::Value.
@@ -124,6 +158,11 @@ fn days_in_month(y: u32, m: u32) -> u32 {
 }
 
 /// Read a row from the DB by display_id and reconstruct an EntryMap.
+///
+/// All JSON TEXT columns (Record, List, ListRecord, ListFk) are deserialized
+/// back into their native `serde_json::Value` shapes.  Depth ≥ 3 nesting
+/// (e.g. `cycles[0].executor.summary`) is preserved verbatim — the JSON
+/// round-trip is identity for arbitrary nesting.
 pub fn read_row(
     schema: &Schema,
     conn: &Connection,
@@ -173,7 +212,7 @@ pub fn read_row(
         }
     })?;
 
-    // Reconstruct nested EntryMap: for Record/List fields, parse JSON text column
+    // Reconstruct nested EntryMap: for JSON TEXT columns, parse the stored JSON.
     let mut entry: EntryMap = BTreeMap::new();
 
     // Copy reserved columns
@@ -187,8 +226,15 @@ pub fn read_row(
     for field in &schema.fields {
         if let Some(raw_val) = raw_map.get(&field.name) {
             match &field.ty {
-                FieldType::Record(_) | FieldType::List(_) => {
-                    // Column is JSON-as-TEXT; deserialize it
+                // All JSON TEXT column types — deserialize as opaque JSON.
+                // For Record: Value::Object (arbitrary depth).
+                // For List: Value::Array of scalars.
+                // For ListRecord: Value::Array of Objects (arbitrary depth per element).
+                // For ListFk: Value::Array of display_id strings.
+                FieldType::Record(_)
+                | FieldType::List(_)
+                | FieldType::ListRecord(_)
+                | FieldType::ListFk { .. } => {
                     if let Value::String(json_str) = raw_val {
                         if !json_str.is_empty() {
                             if let Ok(parsed) = serde_json::from_str::<Value>(json_str) {
@@ -197,7 +243,7 @@ pub fn read_row(
                             }
                         }
                     }
-                    // Null / empty
+                    // Null / empty / unparseable
                     entry.insert(field.name.clone(), Value::Null);
                 }
                 _ => {
@@ -221,5 +267,181 @@ fn sqlite_to_json(v: rusqlite::types::Value) -> Value {
         rusqlite::types::Value::Blob(b) => {
             Value::String(String::from_utf8_lossy(&b).to_string())
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests (Task 1.9 — AC1.9: depth-3 round-trip)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use crate::schema::Schema;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    // Schema with depth-3 nesting: plan.phases[N].name and cycles[N].executor.summary
+    const DEPTH3_SCHEMA: &str = r#"
+name: tasks
+id_format: "T{:03d}"
+lifecycle:
+  states: [open, done]
+  transitions: []
+fields:
+  - name: title
+    type: text
+  - name: plan
+    type: record
+    fields:
+      - name: done_when
+        type: text
+      - name: phases
+        type: list_record
+        fields:
+          - name: name
+            type: text
+          - name: objective
+            type: text
+  - name: cycles
+    type: list_record
+    fields:
+      - name: phase
+        type: integer
+      - name: cycle
+        type: integer
+      - name: executor
+        type: record
+        fields:
+          - name: summary
+            type: text
+          - name: commit
+            type: text
+  - name: depends_on
+    type: list_fk
+    ref: tasks
+"#;
+
+    fn open_test_db() -> (tempfile::TempDir, rusqlite::Connection) {
+        let dir = tempdir().unwrap();
+        let db_file = dir.path().join("test.db");
+        let conn = db::open(&db_file).unwrap();
+        (dir, conn)
+    }
+
+    fn setup_schema_and_db() -> (Schema, tempfile::TempDir, rusqlite::Connection) {
+        let schema = Schema::from_yaml(DEPTH3_SCHEMA).unwrap();
+        let (dir, conn) = open_test_db();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, dir, conn)
+    }
+
+    #[test]
+    fn list_record_and_list_fk_ddl_is_text() {
+        let schema = Schema::from_yaml(DEPTH3_SCHEMA).unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        assert!(ddl.contains("plan TEXT"), "plan should be TEXT: {ddl}");
+        assert!(ddl.contains("cycles TEXT"), "cycles should be TEXT: {ddl}");
+        assert!(ddl.contains("depends_on TEXT"), "depends_on should be TEXT: {ddl}");
+    }
+
+    /// AC1.9: plan.phases[2].name (record → list_record → element → string) round-trips.
+    #[test]
+    fn depth3_plan_phases_round_trips() {
+        let (schema, _dir, conn) = setup_schema_and_db();
+
+        let plan_json = json!({
+            "done_when": "All phases pass review",
+            "phases": [
+                {"name": "Phase 1", "objective": "Foundation"},
+                {"name": "Phase 2", "objective": "Engine"},
+                {"name": "Phase 3", "objective": "Integration"}
+            ]
+        });
+
+        // Insert row directly
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, title, plan, cycles, depends_on) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                "T001", "open", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                "human", "human", "Test Task",
+                serde_json::to_string(&plan_json).unwrap(),
+                serde_json::to_string(&json!([])).unwrap(),
+                serde_json::to_string(&json!([])).unwrap(),
+            ],
+        ).unwrap();
+
+        let (_id, entry) = read_row(&schema, &conn, "T001").unwrap();
+
+        // Verify plan.phases[2].name round-trips
+        let plan = entry.get("plan").expect("plan should be present");
+        let phases = plan.get("phases").expect("phases should be present");
+        let phase3_name = phases[2]["name"].as_str().expect("phase 3 name should be a string");
+        assert_eq!(phase3_name, "Phase 3", "plan.phases[2].name should round-trip");
+    }
+
+    /// AC1.9: cycles[1].executor.summary (list_record → record → string) round-trips.
+    #[test]
+    fn depth3_cycles_executor_summary_round_trips() {
+        let (schema, _dir, conn) = setup_schema_and_db();
+
+        let cycles_json = json!([
+            {
+                "phase": 1,
+                "cycle": 1,
+                "executor": { "summary": "First cycle done", "commit": "abc123" }
+            },
+            {
+                "phase": 1,
+                "cycle": 2,
+                "executor": { "summary": "Revised cycle", "commit": "def456" }
+            }
+        ]);
+
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, title, plan, cycles, depends_on) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                "T002", "open", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                "human", "human", "Cycle Test",
+                serde_json::to_string(&json!({"done_when": "", "phases": []})).unwrap(),
+                serde_json::to_string(&cycles_json).unwrap(),
+                serde_json::to_string(&json!([])).unwrap(),
+            ],
+        ).unwrap();
+
+        let (_id, entry) = read_row(&schema, &conn, "T002").unwrap();
+
+        let cycles = entry.get("cycles").expect("cycles should be present");
+        let summary = cycles[1]["executor"]["summary"].as_str()
+            .expect("cycles[1].executor.summary should be a string");
+        assert_eq!(summary, "Revised cycle", "cycles[1].executor.summary should round-trip");
+    }
+
+    /// AC1.8: depends_on list_fk round-trips as Vec<String>.
+    #[test]
+    fn list_fk_round_trips() {
+        let (schema, _dir, conn) = setup_schema_and_db();
+
+        let depends_on = json!(["T001", "T002"]);
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, title, plan, cycles, depends_on) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                "T003", "open", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                "human", "human", "FK Test",
+                serde_json::to_string(&json!({"done_when": "", "phases": []})).unwrap(),
+                serde_json::to_string(&json!([])).unwrap(),
+                serde_json::to_string(&depends_on).unwrap(),
+            ],
+        ).unwrap();
+
+        let (_id, entry) = read_row(&schema, &conn, "T003").unwrap();
+        let dep = entry.get("depends_on").expect("depends_on should be present");
+        let ids: Vec<&str> = dep.as_array().unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["T001", "T002"]);
     }
 }
