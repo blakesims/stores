@@ -1,0 +1,21 @@
+{
+  "objective": "Smoke test the workflow",
+  "phases": [
+    {
+      "name": "Phase 1",
+      "objective": "first phase",
+      "tasks": ["t1.1: do the first thing"],
+      "acceptance_criteria": ["ac1: first thing done"],
+      "files": ["src/f1.rs"],
+      "dependencies": []
+    },
+    {
+      "name": "Phase 2",
+      "objective": "second phase",
+      "tasks": ["t2.1: do the second thing"],
+      "acceptance_criteria": ["ac2: second thing done"],
+      "files": ["src/f2.rs"],
+      "dependencies": []
+    }
+  ]
+}

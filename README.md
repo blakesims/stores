@@ -165,6 +165,39 @@ sqlite3 .stores/db.sqlite ".schema gate"
 
 The `manifest.yaml` at `.stores/manifest.yaml` records installed stores with their schema path and install timestamp.
 
+## How to test
+
+```bash
+# Run all unit tests (298+)
+cargo test
+
+# Run the v0.1 13-step demo (observations + gate)
+bash tests/e2e.sh
+
+# Run the tasks workflow smoke test (full lifecycle: plan → revise → BLOCKED → resume → complete)
+bash tests/tasks_e2e.sh
+```
+
+Both e2e scripts require the `stores` binary on `PATH`. Run `cargo install --path .` first.
+
+## Workflow stores
+
+The `tasks` store ships as a bundled workflow store (`stores list-installable`):
+
+```bash
+stores install tasks
+stores tasks add --title "My task" --slug "my-task" --done-when "..." --scope-in "..." --scope-out "..."
+stores tasks next-action T001 --json   # which agent acts next?
+stores tasks brief T001               # get the agent's briefing
+stores tasks submit-plan T001 --plan-from-file plan.json
+stores tasks submit-plan-review T001 --gate READY --summary "approved"
+stores tasks submit-execute T001 --summary "done" --commit abc --files-changed "f.rs"
+stores tasks submit-review T001 --gate PASS --critical 0 --major 0 --minor 0 --summary "ok"
+stores tasks render T001              # write tasks/active/T001-slug/main.md from DB
+```
+
+The `tasks:start` skill (`stores skills install tasks:start`) is an orchestrator that drives this loop automatically via Claude subagents.
+
 ## Next steps / not in v0.1
 
 - **Provenance log (`runs` store)** — per-operation log for AI audit trails
