@@ -15,7 +15,7 @@ pub fn dispatch(
     schemas: &HashMap<String, Schema>,
 ) -> Result<()> {
     // init and install are handled before dispatch; only store subcommands reach here
-    let invoker = detect_invoker(matches);
+    let invoker = detect_invoker(matches)?;
 
     // Find which store subcommand was invoked
     for store in &manifest.stores {
@@ -62,20 +62,83 @@ pub fn dispatch(
 }
 
 /// Detect invoker: check --invoker flag first, then fall back to $CLAUDECODE env var.
-fn detect_invoker(matches: &ArgMatches) -> Actor {
+///
+/// Returns `Err` if `--invoker` was explicitly supplied with an unrecognised value (including
+/// the empty string).  If the flag is absent, env-detection runs and always succeeds.
+fn detect_invoker(matches: &ArgMatches) -> Result<Actor> {
     // --invoker explicit override
     if let Some(inv) = matches.get_one::<String>("invoker") {
-        match inv.as_str() {
-            "human" => return Actor::Human,
-            "ai_autonomous" => return Actor::AiAutonomous,
-            "ai_with_human" => return Actor::AiWithHuman,
-            _ => {} // fall through to env detection
-        }
+        return match inv.as_str() {
+            "human" => Ok(Actor::Human),
+            "ai_autonomous" => Ok(Actor::AiAutonomous),
+            "ai_with_human" => Ok(Actor::AiWithHuman),
+            other => bail!(
+                "unknown --invoker value '{}'; valid: human, ai_autonomous, ai_with_human",
+                other
+            ),
+        };
     }
     // Auto-detect from environment
     if std::env::var("CLAUDECODE").is_ok() {
-        Actor::AiAutonomous
+        Ok(Actor::AiAutonomous)
     } else {
-        Actor::Human
+        Ok(Actor::Human)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{Arg, Command};
+
+    /// Build a minimal ArgMatches with an optional --invoker value.
+    fn matches_with_invoker(value: Option<&str>) -> ArgMatches {
+        let cmd = Command::new("test").arg(
+            Arg::new("invoker")
+                .long("invoker")
+                .value_name("INVOKER")
+                .required(false),
+        );
+        match value {
+            Some(v) => cmd.get_matches_from(["test", "--invoker", v]),
+            None => cmd.get_matches_from(["test"]),
+        }
+    }
+
+    #[test]
+    fn invoker_flag_rejects_unknown_value() {
+        let m = matches_with_invoker(Some("zorblax"));
+        let err = detect_invoker(&m).unwrap_err();
+        assert!(
+            err.to_string().contains("zorblax"),
+            "error should name the bad value: {err}"
+        );
+        assert!(
+            err.to_string().contains("unknown --invoker value"),
+            "error should state the flag: {err}"
+        );
+    }
+
+    #[test]
+    fn invoker_flag_rejects_empty_string() {
+        let m = matches_with_invoker(Some(""));
+        let err = detect_invoker(&m).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown --invoker value"),
+            "error should reject empty string: {err}"
+        );
+    }
+
+    #[test]
+    fn invoker_flag_accepts_human() {
+        let m = matches_with_invoker(Some("human"));
+        assert_eq!(detect_invoker(&m).unwrap(), Actor::Human);
+    }
+
+    #[test]
+    fn invoker_flag_falls_back_to_env_when_absent() {
+        let m = matches_with_invoker(None);
+        // env detection always returns Ok — we just check it doesn't error
+        assert!(detect_invoker(&m).is_ok());
     }
 }
