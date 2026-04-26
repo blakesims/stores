@@ -111,6 +111,7 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
 
 /// Build a subcommand for a single store with add/show/list/update/schema verbs
 /// plus one verb per lifecycle transition declared in the schema.
+/// If the schema has `workflow: Some(_)`, also registers `next-action` and `brief`.
 fn build_store_command(schema: &Schema) -> Command {
     // Get leaf args — uniqueness already enforced at install time
     let leaves = leaf_args(schema).unwrap_or_default();
@@ -132,6 +133,13 @@ fn build_store_command(schema: &Schema) -> Command {
         .subcommand(update_cmd)
         .subcommand(schema_cmd);
 
+    // Workflow-only verbs: only when schema has a workflow declaration.
+    if schema.workflow.is_some() {
+        store_cmd = store_cmd
+            .subcommand(build_next_action_cmd())
+            .subcommand(build_brief_cmd());
+    }
+
     // Register one subcommand per transition verb
     for transition in &schema.lifecycle.transitions {
         let verb = &transition.verb;
@@ -148,6 +156,34 @@ fn build_store_command(schema: &Schema) -> Command {
     }
 
     store_cmd
+}
+
+/// Build the `next-action` command: positional <id> + --json (global).
+fn build_next_action_cmd() -> Command {
+    Command::new("next-action")
+        .about("Show which agent should act next on a workflow entry (read-only)")
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the entry")
+                .required(true),
+        )
+}
+
+/// Build the `brief` command: positional <id> + optional --for <agent> + --json (global).
+fn build_brief_cmd() -> Command {
+    Command::new("brief")
+        .about("Print the agent briefing for a workflow entry (read-only)")
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the entry")
+                .required(true),
+        )
+        .arg(
+            Arg::new("for")
+                .long("for")
+                .help("Agent role to generate the briefing for (defaults to next-action answer)")
+                .required(false),
+        )
 }
 
 /// Build a transition verb subcommand: positional display_id + all leaf args.
