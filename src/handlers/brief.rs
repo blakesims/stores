@@ -15,7 +15,7 @@
 use anyhow::{bail, Result};
 use clap::ArgMatches;
 use rusqlite::Connection;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 
 use crate::manifest::Manifest;
 use crate::paths::stores_dir_for;
@@ -25,12 +25,21 @@ use crate::schema::{actor::Actor, Schema};
 use super::next_action::find_next_agent;
 use super::row::read_row;
 
-pub fn run(
+/// Structured output returned by `compute`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BriefOutput {
+    pub agent: String,
+    pub brief_markdown: String,
+}
+
+/// Pure logic: determine the target agent, load and render the template, return
+/// the structured output.  Does NOT print anything.  `run` calls this.
+pub(crate) fn compute(
     schema: &Schema,
     conn: &Connection,
     matches: &ArgMatches,
     _invoker: Actor,
-) -> Result<()> {
+) -> Result<BriefOutput> {
     // AC4.7: must have a workflow declaration.
     let workflow = match &schema.workflow {
         Some(wf) => wf,
@@ -40,7 +49,7 @@ pub fn run(
         ),
     };
 
-    // Task 4.5: scope-aware path — confirms resolvability.
+    // Task 4.5: scope-aware path — used as the fallback store root below.
     let stores_dir = stores_dir_for(schema.scope)?;
 
     let display_id = matches
@@ -50,19 +59,18 @@ pub fn run(
 
     let for_agent = matches.get_one::<String>("for").map(|s| s.as_str());
 
-    let json_flag = matches.get_flag("json");
-
     let (_id, entry) = read_row(schema, conn, display_id)?;
 
     // Determine the target agent role.
     let agent_role: String = if let Some(explicit) = for_agent {
         // AC4.5: validate against known roles.
         if !workflow.agent_roles.contains_key(explicit) {
-            let available: Vec<&str> = workflow
+            let mut available: Vec<&str> = workflow
                 .agent_roles
                 .keys()
                 .map(|k| k.as_str())
                 .collect();
+            available.sort();
             bail!(
                 "unknown agent role '{}'; available roles: {}",
                 explicit,
@@ -104,16 +112,19 @@ pub fn run(
     // Design choice (documented in task notes): read template from disk on demand
     // using the installed store's schema_path directory.  P2-M1 (Phase 5) will
     // thread WorkflowResolved cleanly; for now we resolve once per call.
+    //
+    // TODO (Phase 6): when schema_path starts with "bundled:" (e.g. the `tasks`
+    // store), joining it with template_path produces a nonsensical filesystem path
+    // ("bundled:tasks/templates/planner-brief.md.tpl").  Fix: detect the sentinel
+    // and route to the in-memory BUNDLED_STORE_TEMPLATES map instead.  No bundled
+    // store has a workflow today so this is latent; Phase 6 plan-review should
+    // verify the fix is in place before the `tasks` schema is wired up.
     let manifest = Manifest::load()?;
     let store_root = manifest
         .stores
         .iter()
         .find(|s| s.name == schema.name)
-        .map(|s| {
-            // schema_path in the manifest is the store directory (not schema.yaml itself).
-            // Template paths in briefing_templates are relative to this directory.
-            s.schema_path.clone()
-        })
+        .map(|s| s.schema_path.clone())
         .unwrap_or_else(|| stores_dir.clone());
 
     let full_template_path = store_root.join(template_path);
@@ -129,14 +140,30 @@ pub fn run(
     let ctx = build_context(schema, &entry);
     let rendered = render_template(&template_text, &ctx)?;
 
+    Ok(BriefOutput {
+        agent: agent_role,
+        brief_markdown: rendered,
+    })
+}
+
+pub fn run(
+    schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    invoker: Actor,
+) -> Result<()> {
+    let json_flag = matches.get_flag("json");
+
+    let out = compute(schema, conn, matches, invoker)?;
+
     if json_flag {
-        let out = json!({
-            "agent": agent_role,
-            "brief_markdown": rendered,
+        let json_out = serde_json::json!({
+            "agent": out.agent,
+            "brief_markdown": out.brief_markdown,
         });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&json_out)?);
     } else {
-        print!("{rendered}");
+        print!("{}", out.brief_markdown);
     }
 
     Ok(())
@@ -151,55 +178,11 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::schema::Schema;
+    use clap::{Arg, ArgAction, Command};
+    use rusqlite::Connection;
     use tempfile::tempdir;
 
-    fn wf_schema() -> Schema {
-        let yaml = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/workflow_minimal/schema.yaml"),
-        )
-        .unwrap();
-        Schema::from_yaml(&yaml).unwrap()
-    }
-
-    // AC4.5: unknown agent role error lists all known roles
-    #[test]
-    fn brief_unknown_agent_error_lists_all_roles() {
-        let schema = wf_schema();
-        let workflow = schema.workflow.as_ref().unwrap();
-
-        // Simulate the error message we produce for an unknown role.
-        let bad_role = "nonexistent_agent";
-        let is_known = workflow.agent_roles.contains_key(bad_role);
-        assert!(!is_known, "nonexistent_agent should not be a known role");
-
-        // Construct the error message as the handler would.
-        let available: Vec<&str> = workflow.agent_roles.keys().map(|k| k.as_str()).collect();
-        let msg = format!(
-            "unknown agent role '{}'; available roles: {}",
-            bad_role,
-            available.join(", ")
-        );
-
-        // All four required roles from the minimal fixture must appear in the message.
-        // (The fixture has planner + executor; real tasks store has all four.)
-        assert!(
-            msg.contains("planner"),
-            "error must mention 'planner': {msg}"
-        );
-        assert!(
-            msg.contains("executor"),
-            "error must mention 'executor': {msg}"
-        );
-        assert!(
-            msg.contains("nonexistent_agent"),
-            "error must mention the bad role: {msg}"
-        );
-    }
-
-    // AC4.5 (full four roles): test with a schema that declares all four agent roles
-    #[test]
-    fn brief_unknown_agent_error_with_all_four_roles() {
+    fn four_role_schema() -> Schema {
         let yaml = r#"
 name: full_wf
 id_format: "T{:03d}"
@@ -237,28 +220,105 @@ workflow:
   submit_targets: {}
   max_revise_cycles: 3
 "#;
-        let schema = Schema::from_yaml(yaml).unwrap();
-        let workflow = schema.workflow.as_ref().unwrap();
+        Schema::from_yaml(yaml).unwrap()
+    }
 
-        let bad_role = "unknown_agent";
-        let available: Vec<&str> = workflow.agent_roles.keys().map(|k| k.as_str()).collect();
-        let msg = format!(
-            "unknown agent role '{}'; available roles: {}",
-            bad_role,
-            available.join(", ")
-        );
+    fn open_db_with_schema(schema: &Schema) -> (tempfile::TempDir, Connection) {
+        let dir = tempdir().unwrap();
+        let db_file = dir.path().join("test.db");
+        let conn = db::open(&db_file).unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(schema);
+        conn.execute_batch(&ddl).unwrap();
+        (dir, conn)
+    }
 
-        // AC4.5: all four roles must appear in the error.
+    /// Build minimal ArgMatches for the `brief` subcommand with a given `--for` value.
+    fn matches_for(display_id: &str, for_agent: Option<&str>) -> clap::ArgMatches {
+        let cmd = Command::new("brief")
+            .arg(Arg::new("display_id").required(true))
+            .arg(Arg::new("for").long("for").required(false))
+            .arg(
+                Arg::new("json")
+                    .long("json")
+                    .action(ArgAction::SetTrue)
+                    .required(false),
+            );
+        let mut args = vec!["brief", display_id];
+        if let Some(agent) = for_agent {
+            args.push("--for");
+            args.push(agent);
+        }
+        cmd.get_matches_from(args)
+    }
+
+    // AC4.5 (M2 fix): call compute() with unknown agent; assert error contains all
+    // four role names AND the bad agent name.  This exercises the actual bail! in
+    // brief.rs, not a copy of the format string.
+    #[test]
+    fn brief_compute_unknown_agent_error_lists_all_roles() {
+        let schema = four_role_schema();
+        let (_dir, conn) = open_db_with_schema(&schema);
+
+        // Insert a row so read_row doesn't error before we hit the agent check.
+        conn.execute(
+            "INSERT INTO full_wf (display_id, status, created_at, updated_at, created_by, updated_by, title) \
+             VALUES ('T001','planning','2026-01-01','2026-01-01','human','human','Test')",
+            [],
+        ).unwrap();
+
+        let matches = matches_for("T001", Some("nonexistent_agent"));
+        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous)
+            .unwrap_err();
+        let msg = err.to_string();
+
+        // AC4.5: all four roles AND the unknown role must appear in the real error.
         assert!(msg.contains("planner"), "must contain 'planner': {msg}");
         assert!(msg.contains("plan_reviewer"), "must contain 'plan_reviewer': {msg}");
         assert!(msg.contains("executor"), "must contain 'executor': {msg}");
         assert!(msg.contains("code_reviewer"), "must contain 'code_reviewer': {msg}");
+        assert!(
+            msg.contains("nonexistent_agent"),
+            "must contain the bad role name: {msg}"
+        );
     }
 
-    // find_next_agent helper test
+    // AC4.7: non-workflow schema → compute returns error naming the store.
+    #[test]
+    fn brief_compute_no_workflow_errors() {
+        let yaml = r#"
+name: obs
+id_format: "O{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let (_dir, conn) = open_db_with_schema(&schema);
+
+        let matches = matches_for("O001", None);
+        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("obs"), "error must name the store: {msg}");
+        assert!(
+            msg.contains("no workflow declaration"),
+            "error must mention workflow: {msg}"
+        );
+    }
+
+    // find_next_agent helper test — kept for regression coverage.
     #[test]
     fn find_next_agent_returns_first_dispatch() {
-        let schema = wf_schema();
+        // Use the workflow_minimal fixture (2 roles) for this helper test.
+        let yaml = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/workflow_minimal/schema.yaml"),
+        )
+        .unwrap();
+        let schema = Schema::from_yaml(&yaml).unwrap();
         let workflow = schema.workflow.as_ref().unwrap();
 
         let agent = find_next_agent(workflow, "planning");

@@ -24,12 +24,26 @@
 use anyhow::{bail, Result};
 use clap::ArgMatches;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::schema::{actor::Actor, workflow::{StateAction, Workflow}, Schema};
 
 use super::row::read_row;
-use crate::paths::stores_dir_for;
+
+/// Structured output returned by `compute`.  All 9 keys from the AC4.1/AC4.2 contract.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NextActionOutput {
+    pub id: String,
+    pub status: String,
+    pub current_phase: Value,
+    pub current_cycle: Value,
+    pub next_agent: Option<String>,
+    pub blocked: bool,
+    pub blocked_reason: Value,
+    pub claimed_by: Value,
+    pub claimed_at: Value,
+}
 
 /// Find the first `DispatchAgent` role for the given status in the workflow's
 /// `on_state` map.  Returns `None` for unknown states, blocked, or states with
@@ -50,12 +64,13 @@ pub fn find_next_agent(workflow: &Workflow, status: &str) -> Option<String> {
     })
 }
 
-pub fn run(
+/// Pure logic: read the row and compute the 9-key output.
+/// Does NOT print anything.  `run` calls this and formats the result.
+pub(crate) fn compute(
     schema: &Schema,
     conn: &Connection,
-    matches: &ArgMatches,
-    _invoker: Actor,
-) -> Result<()> {
+    display_id: &str,
+) -> Result<NextActionOutput> {
     // AC4.7: must have a workflow declaration.
     let workflow = match &schema.workflow {
         Some(wf) => wf,
@@ -65,22 +80,7 @@ pub fn run(
         ),
     };
 
-    // AC4.5 (task 4.5): validate scope-aware path resolution is consistent.
-    // We call stores_dir_for to satisfy the "both verbs call paths::stores_dir_for(scope)"
-    // requirement.  The result is used only to confirm the path is resolvable; the
-    // caller has already opened `conn` against the correct DB.
-    let _ = stores_dir_for(schema.scope)?;
-
-    let display_id = matches
-        .get_one::<String>("display_id")
-        .map(|s| s.as_str())
-        .unwrap_or("");
-
-    let json_flag = matches.get_flag("json");
-
     let (_id, entry) = read_row(schema, conn, display_id)?;
-
-    // --- Derive the 9 fields ---
 
     let status = entry
         .get("status")
@@ -88,85 +88,75 @@ pub fn run(
         .unwrap_or("")
         .to_string();
 
-    let current_phase = entry
-        .get("current_phase")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let current_phase = entry.get("current_phase").cloned().unwrap_or(Value::Null);
+    let current_cycle = entry.get("current_cycle").cloned().unwrap_or(Value::Null);
+    let claimed_by = entry.get("claimed_by").cloned().unwrap_or(Value::Null);
+    let claimed_at = entry.get("claimed_at").cloned().unwrap_or(Value::Null);
+    let blocked_reason = entry.get("blocked_reason").cloned().unwrap_or(Value::Null);
 
-    let current_cycle = entry
-        .get("current_cycle")
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    // claimed_by / claimed_at: optional schema fields; null when absent.
-    let claimed_by = entry
-        .get("claimed_by")
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    let claimed_at = entry
-        .get("claimed_at")
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    // blocked_reason: optional schema field; null when absent.
-    let blocked_reason = entry
-        .get("blocked_reason")
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    // AC4.6: blocked status → no agent acts.
     let is_blocked = status == "blocked";
-
-    // Find the first DispatchAgent in on_state[status].
-    // Engine-fired actions (Increment, TransitionTo) are never the "next agent".
-    let next_agent: Value = if is_blocked {
-        Value::Null
+    let next_agent = if is_blocked {
+        None
     } else {
-        let agent = workflow
-            .on_state
-            .get(&status)
-            .and_then(|actions| {
-                actions.iter().find_map(|a| {
-                    if let StateAction::DispatchAgent(role) = a {
-                        Some(role.as_str())
-                    } else {
-                        None
-                    }
-                })
-            });
-        match agent {
-            Some(role) => Value::String(role.to_string()),
-            None => Value::Null,
-        }
+        find_next_agent(workflow, &status)
     };
 
-    let blocked_val = Value::Bool(is_blocked);
+    Ok(NextActionOutput {
+        id: display_id.to_string(),
+        status,
+        current_phase,
+        current_cycle,
+        next_agent,
+        blocked: is_blocked,
+        blocked_reason,
+        claimed_by,
+        claimed_at,
+    })
+}
+
+pub fn run(
+    schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    _invoker: Actor,
+) -> Result<()> {
+    let display_id = matches
+        .get_one::<String>("display_id")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    let json_flag = matches.get_flag("json");
+
+    // AC4.7 guard + all logic live in compute().
+    let out = compute(schema, conn, display_id)?;
 
     if json_flag {
-        let out = json!({
-            "id": display_id,
-            "status": status,
-            "current_phase": current_phase,
-            "current_cycle": current_cycle,
-            "next_agent": next_agent,
-            "blocked": blocked_val,
-            "blocked_reason": blocked_reason,
-            "claimed_by": claimed_by,
-            "claimed_at": claimed_at,
+        let json_out = json!({
+            "id": out.id,
+            "status": out.status,
+            "current_phase": out.current_phase,
+            "current_cycle": out.current_cycle,
+            "next_agent": out.next_agent,
+            "blocked": out.blocked,
+            "blocked_reason": out.blocked_reason,
+            "claimed_by": out.claimed_by,
+            "claimed_at": out.claimed_at,
         });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&json_out)?);
     } else {
         // Text form: key: value lines (same 9 keys).
-        println!("id: {display_id}");
-        println!("status: {status}");
-        println!("current_phase: {}", json_value_to_text(&current_phase));
-        println!("current_cycle: {}", json_value_to_text(&current_cycle));
-        println!("next_agent: {}", json_value_to_text(&next_agent));
-        println!("blocked: {is_blocked}");
-        println!("blocked_reason: {}", json_value_to_text(&blocked_reason));
-        println!("claimed_by: {}", json_value_to_text(&claimed_by));
-        println!("claimed_at: {}", json_value_to_text(&claimed_at));
+        println!("id: {}", out.id);
+        println!("status: {}", out.status);
+        println!("current_phase: {}", json_value_to_text(&out.current_phase));
+        println!("current_cycle: {}", json_value_to_text(&out.current_cycle));
+        println!(
+            "next_agent: {}",
+            out.next_agent.as_deref().unwrap_or("null")
+        );
+        println!("blocked: {}", out.blocked);
+        println!("blocked_reason: {}", json_value_to_text(&out.blocked_reason));
+        println!("claimed_by: {}", json_value_to_text(&out.claimed_by));
+        println!("claimed_at: {}", json_value_to_text(&out.claimed_at));
     }
 
     Ok(())
@@ -197,9 +187,6 @@ mod tests {
     use tempfile::tempdir;
 
     /// A workflow schema without reserved-column duplicates for DB tests.
-    /// The workflow_minimal fixture has `status` as a schema field (historical
-    /// quirk) which would duplicate the reserved `status TEXT NOT NULL` column.
-    /// This inline schema avoids that for handler-level DB tests.
     fn wf_schema() -> Schema {
         let yaml = r#"
 name: wf_tasks
@@ -258,14 +245,10 @@ workflow:
         current_phase: i64,
         current_cycle: i64,
     ) {
-        // Use a schema that doesn't have reserved columns (display_id, status, etc.)
-        // as schema fields to avoid duplicates in DDL.
-        // Reserve list: columns added by RESERVED_COLUMNS in ddl.rs.
         const RESERVED: &[&str] = &[
             "display_id", "status", "created_at", "updated_at", "created_by", "updated_by",
         ];
 
-        // Build the column list: reserved first, then schema fields that are not reserved.
         let mut cols: Vec<String> = vec![
             "display_id".to_string(),
             "status".to_string(),
@@ -280,7 +263,6 @@ workflow:
             }
         }
 
-        // Build params: reserved values first
         let mut params: Vec<rusqlite::types::Value> = vec![
             rusqlite::types::Value::Text(display_id.to_string()),
             rusqlite::types::Value::Text(status.to_string()),
@@ -290,7 +272,6 @@ workflow:
             rusqlite::types::Value::Text("human".to_string()),
         ];
 
-        // Known schema fields we have values for
         for f in &schema.fields {
             if RESERVED.contains(&f.name.as_str()) {
                 continue;
@@ -322,12 +303,17 @@ workflow:
         let (_dir, conn) = open_db_with_schema(&schema);
         insert_wf_row(&conn, &schema, "WF001", "executing", 2, 1);
 
-        let na = compute_next_action(&schema, &conn, "WF001").unwrap();
-        assert_eq!(na.status, "executing");
-        assert_eq!(na.next_agent, Some("executor".to_string()));
-        assert!(!na.blocked);
-        assert_eq!(na.current_phase, json!(2));
-        assert_eq!(na.current_cycle, json!(1));
+        let out = compute(&schema, &conn, "WF001").unwrap();
+        assert_eq!(out.status, "executing");
+        assert_eq!(out.next_agent, Some("executor".to_string()));
+        assert!(!out.blocked);
+        assert_eq!(out.current_phase, json!(2));
+        assert_eq!(out.current_cycle, json!(1));
+        // AC4.2: JSON round-trip — all 9 keys present
+        let v = serde_json::to_value(&out).unwrap();
+        for key in &["id","status","current_phase","current_cycle","next_agent","blocked","blocked_reason","claimed_by","claimed_at"] {
+            assert!(v.get(key).is_some(), "missing key in JSON output: {key}");
+        }
     }
 
     // AC4.1: planning row → next_agent: planner
@@ -337,9 +323,9 @@ workflow:
         let (_dir, conn) = open_db_with_schema(&schema);
         insert_wf_row(&conn, &schema, "WF002", "planning", 1, 0);
 
-        let na = compute_next_action(&schema, &conn, "WF002").unwrap();
-        assert_eq!(na.next_agent, Some("planner".to_string()));
-        assert!(!na.blocked);
+        let out = compute(&schema, &conn, "WF002").unwrap();
+        assert_eq!(out.next_agent, Some("planner".to_string()));
+        assert!(!out.blocked);
     }
 
     // AC4.6: blocked row → blocked: true, next_agent: null
@@ -349,12 +335,16 @@ workflow:
         let (_dir, conn) = open_db_with_schema(&schema);
         insert_wf_row(&conn, &schema, "WF003", "blocked", 1, 1);
 
-        let na = compute_next_action(&schema, &conn, "WF003").unwrap();
-        assert!(na.blocked);
-        assert_eq!(na.next_agent, None);
+        let out = compute(&schema, &conn, "WF003").unwrap();
+        assert!(out.blocked);
+        assert_eq!(out.next_agent, None);
+        // JSON round-trip: blocked: true, next_agent: null
+        let v = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["blocked"], json!(true));
+        assert_eq!(v["next_agent"], Value::Null);
     }
 
-    // AC4.7: non-workflow schema errors clearly
+    // AC4.7: non-workflow schema → compute returns error naming the store
     #[test]
     fn next_action_no_workflow_errors() {
         let yaml = r#"
@@ -368,67 +358,17 @@ fields:
     type: text
 "#;
         let schema = Schema::from_yaml(yaml).unwrap();
-        let err = schema.workflow.is_none();
-        assert!(err, "non-workflow schema must have workflow == None");
-        // The actual error is checked at the handler level; here we just verify the schema
-        // is None which the handler uses to bail.
-    }
-
-    // Helper: compute the next-action result without going through CLI plumbing.
-    struct NextActionResult {
-        status: String,
-        next_agent: Option<String>,
-        blocked: bool,
-        current_phase: Value,
-        current_cycle: Value,
-    }
-
-    fn compute_next_action(
-        schema: &Schema,
-        conn: &Connection,
-        display_id: &str,
-    ) -> Result<NextActionResult> {
-        let workflow = schema
-            .workflow
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no workflow"))?;
-
-        let (_id, entry) = read_row(schema, conn, display_id)?;
-
-        let status = entry
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let current_phase = entry.get("current_phase").cloned().unwrap_or(Value::Null);
-        let current_cycle = entry.get("current_cycle").cloned().unwrap_or(Value::Null);
-
-        let is_blocked = status == "blocked";
-
-        let next_agent = if is_blocked {
-            None
-        } else {
-            workflow
-                .on_state
-                .get(&status)
-                .and_then(|actions| {
-                    actions.iter().find_map(|a| {
-                        if let StateAction::DispatchAgent(role) = a {
-                            Some(role.clone())
-                        } else {
-                            None
-                        }
-                    })
-                })
-        };
-
-        Ok(NextActionResult {
-            status,
-            next_agent,
-            blocked: is_blocked,
-            current_phase,
-            current_cycle,
-        })
+        let (_dir, conn) = open_db_with_schema(&schema);
+        // compute() must return an error; the message names the store.
+        let err = compute(&schema, &conn, "O001").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("obs"),
+            "error must name the store: {msg}"
+        );
+        assert!(
+            msg.contains("no workflow declaration"),
+            "error must mention workflow: {msg}"
+        );
     }
 }
