@@ -47,7 +47,8 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
     root
 }
 
-/// Build a subcommand for a single store with add/show/list/update verbs.
+/// Build a subcommand for a single store with add/show/list/update verbs
+/// plus one verb per lifecycle transition declared in the schema.
 fn build_store_command(schema: &Schema) -> Command {
     // Get leaf args — uniqueness already enforced at install time
     let leaves = leaf_args(schema).unwrap_or_default();
@@ -57,12 +58,96 @@ fn build_store_command(schema: &Schema) -> Command {
     let show_cmd = build_show_cmd();
     let list_cmd = build_list_cmd();
 
-    Command::new(schema.name.clone())
+    // Base verb names reserved by the framework
+    const BASE_VERBS: &[&str] = &["add", "show", "list", "update"];
+
+    let mut store_cmd = Command::new(schema.name.clone())
         .about(format!("Operate on the '{}' store", schema.name))
         .subcommand(add_cmd)
         .subcommand(show_cmd)
         .subcommand(list_cmd)
-        .subcommand(update_cmd)
+        .subcommand(update_cmd);
+
+    // Register one subcommand per transition verb
+    for transition in &schema.lifecycle.transitions {
+        let verb = &transition.verb;
+        // Warn if verb collides with a base verb; skip it (don't crash)
+        if BASE_VERBS.contains(&verb.as_str()) {
+            eprintln!(
+                "warning: transition verb '{}' in store '{}' collides with a base verb; skipping",
+                verb, schema.name
+            );
+            continue;
+        }
+        let transition_cmd = build_transition_cmd(verb, &leaves);
+        store_cmd = store_cmd.subcommand(transition_cmd);
+    }
+
+    store_cmd
+}
+
+/// Build a transition verb subcommand: positional display_id + all leaf args.
+fn build_transition_cmd(
+    verb: &str,
+    leaves: &[crate::schema::flatten::LeafArg<'_>],
+) -> Command {
+    build_leaf_cmd_owned(verb.to_string(), leaves, true)
+}
+
+/// Same as `build_leaf_cmd` but accepts an owned verb String (for transition verbs).
+fn build_leaf_cmd_owned(
+    verb: String,
+    leaves: &[crate::schema::flatten::LeafArg<'_>],
+    needs_display_id: bool,
+) -> Command {
+    let about = format!("{verb} an entry");
+    let mut cmd = Command::new(verb).about(about);
+
+    if needs_display_id {
+        cmd = cmd.arg(
+            Arg::new("display_id")
+                .help("Display ID of the entry")
+                .required(true),
+        );
+    }
+
+    for leaf in leaves {
+        if is_reserved(&leaf.cli_name) {
+            continue;
+        }
+
+        let is_text_like = matches!(
+            leaf.field.ty,
+            FieldType::Text | FieldType::Timestamp | FieldType::DisplayId
+        );
+
+        cmd = cmd.arg(
+            Arg::new(leaf.cli_name.clone())
+                .long(leaf.cli_name.clone())
+                .help(
+                    leaf.field
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| leaf.cli_name.clone()),
+                )
+                .required(false),
+        );
+
+        if is_text_like {
+            let from_file_name = format!("{}-from-file", leaf.cli_name);
+            cmd = cmd.arg(
+                Arg::new(from_file_name.clone())
+                    .long(from_file_name)
+                    .help(format!(
+                        "Load '{}' from a file path (use '-' for stdin)",
+                        leaf.cli_name
+                    ))
+                    .required(false),
+            );
+        }
+    }
+
+    cmd
 }
 
 /// Build the `add` command with leaf args.

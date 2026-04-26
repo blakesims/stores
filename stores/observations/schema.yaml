@@ -1,0 +1,65 @@
+name: observations
+id_format: "L{:03d}"
+default_actor: ai_with_human
+lifecycle:
+  states: [open, triaged, resolved, wont_fix]
+  transitions:
+    - from: open
+      to: triaged
+      verb: triage
+      actor: ai_with_human
+    - from: triaged
+      to: resolved
+      verb: resolve
+      actor: ai_autonomous
+    - from: triaged
+      to: wont_fix
+      verb: wont_fix
+      actor: ai_with_human
+
+fields:
+  - name: summary
+    type: text
+    required: true
+    description: "One-line summary of the observation"
+
+  - name: body
+    type: text
+    required: false
+    description: "Extended description; supports --body-from-file"
+
+  - name: triage
+    type: record
+    fields:
+      - name: verdict
+        type: enum
+        enum_values: [T1, T2, T3]
+        description: "Triage verdict: T1=ignore, T2=track, T3=full task"
+      - name: notes
+        type: text
+        required: false
+        description: "Free-form triage notes"
+    description: "Triage information"
+
+  - name: contract
+    type: record
+    fields:
+      - name: done_when
+        type: text
+        required_when: "triage.verdict == 'T3'"
+        description: "Done criteria — required when verdict is T3"
+      - name: scope_in
+        type: text
+        required_when: "triage.verdict == 'T3'"
+        description: "In-scope work — required when verdict is T3"
+      - name: scope_out
+        type: text
+        required_when: "triage.verdict == 'T3'"
+        description: "Out-of-scope work — required when verdict is T3"
+    description: "Intent contract; sub-fields required when verdict == T3"
+
+  - name: tags
+    type:
+      list: text
+    required: false
+    description: "Tags for filtering"

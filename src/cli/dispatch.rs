@@ -40,8 +40,13 @@ pub fn dispatch(
                 Some(("update", sub)) => {
                     handlers::update::run(schema, &conn, sub, invoker)?;
                 }
-                Some((other, _)) => {
-                    bail!("unknown verb '{}' for store '{}'", other, store.name);
+                Some((verb, sub)) => {
+                    // Check if this is a declared lifecycle transition verb
+                    if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {
+                        handlers::transition::run(schema, &conn, sub, invoker, verb)?;
+                    } else {
+                        bail!("unknown verb '{}' for store '{}'", verb, store.name);
+                    }
                 }
                 None => {
                     // No verb: print store help

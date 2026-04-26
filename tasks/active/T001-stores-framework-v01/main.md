@@ -502,6 +502,43 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 
 ---
 
+### Phase 6: Lifecycle transitions + bundled `observations` store
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+
+**Files Created:**
+- `src/handlers/transition.rs` — transition handler: resolves verb → Transition from schema; checks `current_status == transition.from` (state-machine legality, bails early with `"cannot {verb}: row is in state '{current}', expected '{from}'"` message); builds diff EntryMap from flat CLI args; deep-merges into existing row (Record sub-fields preserved per Phase 4 fix pattern); calls `validate(schema, &merged, Op::Transition(verb), invoker)`; executes UPDATE setting merged diff fields + `status = transition.to` + `updated_at`/`updated_by` in one statement; prints `Transitioned {display_id}: {from} → {to}`.
+- `stores/observations/schema.yaml` — full observations schema: `summary` (text, required), `body` (text, optional), `triage` (record: `verdict` enum T1/T2/T3, `notes` text optional), `contract` (record: `done_when`/`scope_in`/`scope_out` text with `required_when: "triage.verdict == 'T3'"`), `tags` (list<text>); `id_format: "L{:03d}"`; `default_actor: ai_with_human`; lifecycle transitions: `open→triaged` verb `triage` actor `ai_with_human`, `triaged→resolved` verb `resolve` actor `ai_autonomous`, `triaged→wont_fix` verb `wont_fix` actor `ai_with_human`.
+- `stores/observations/README.md` — bundled store mini-README with fields, lifecycle, and quick-start commands.
+
+**Files Modified:**
+- `src/handlers/mod.rs` — added `pub mod transition;`
+- `src/cli/dynamic.rs` — `build_store_command` extended: after base verb subcommands are added, iterates `schema.lifecycle.transitions`; registers one clap subcommand per transition verb (positional `display_id` + all leaf args reused from `leaf_args(schema)`); collision with base verbs emits a warning to stderr and skips (no crash). New helpers `build_transition_cmd` and `build_leaf_cmd_owned` added.
+- `src/cli/dispatch.rs` — `Some((verb, sub))` arm now checks `schema.lifecycle.transitions.iter().any(|t| t.verb == verb)` before falling through to "unknown verb" error; matching verbs route to `handlers::transition::run(schema, &conn, sub, invoker, verb)`.
+
+**ACs verified:**
+- [x] AC1: `stores install ./stores/observations` → table has expected columns (reserved + `summary`, `body`, `triage`, `contract`, `tags`). DONE_WHEN #2 fully.
+- [x] AC2: `stores observations add --summary "thing broke"` → `L001`; `status = open`. DONE_WHEN #4 fully.
+- [x] AC3: `stores observations triage L001 --verdict T3` fails citing `contract.done_when`, `contract.scope_in`, `contract.scope_out` with `required_when` rule. DONE_WHEN #5 fully.
+- [x] AC4: Full `triage` with `--done-when/--scope-in/--scope-out` succeeds; status → `triaged`. DONE_WHEN #6.
+- [x] AC5: `stores observations show L001` text shows nested `triage:` and `contract:` blocks; `--json` valid JSON with `triage.verdict="T3"` and nested `contract.*`. DONE_WHEN #7.
+- [x] AC6: `stores observations list` shows row. DONE_WHEN #8.
+- [x] AC7: Re-triage after `triaged` rejected: `"cannot triage: row is in state 'triaged', expected 'open'"`.
+- [x] AC8: `CLAUDECODE=1 stores observations resolve L001` succeeds (actor `ai_autonomous` auto-detected; transition allows it); status → `resolved`.
+
+**Test count:** 83 tests (4 new in `handlers::transition::tests`), all pass.
+
+**Deviations:**
+- `build_leaf_cmd_owned` introduced (owned-String variant of `build_leaf_cmd`) to avoid needing `&'static str` for transition verb names. No behavioral change.
+- Transition verb dispatch uses `schema.lifecycle.transitions.iter().any(|t| t.verb == verb)` in `dispatch.rs` rather than a separate lookup table; the actual Transition struct is re-looked-up inside the handler. Minimal duplication; no behavioral change.
+- `wont_fix` verb: clap accepts underscores in subcommand names natively — no kebab conversion needed. Verified: `stores observations wont_fix` (with underscores) parses correctly.
+
+**Commits:** (pending)
+
+---
+
 ## Code Review Log
 
 ### Phase 1: Cargo scaffold + `stores init`
