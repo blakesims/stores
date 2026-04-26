@@ -6,7 +6,6 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T002 | Tasks store on β architecture | high | 3 | EXECUTING_PHASE_3 | [main.md](./active/T002-tasks-store-v02/main.md) |
 
 Next available task id: T003
 
@@ -16,6 +15,7 @@ Next available task id: T003
 
 | ID | Task Name | Completed | Link |
 |:---|:----------|:----------|:-----|
+| T002 | Tasks store on β architecture (workflow engine) | 2026-04-26 | [main.md](./completed/T002-tasks-store-v02/main.md) |
 | T001 | Stores Framework v0.1 | 2026-04-26 | [main.md](./completed/T001-stores-framework-v01/main.md) |
 
 ---

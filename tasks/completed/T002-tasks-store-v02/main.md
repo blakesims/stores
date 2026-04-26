@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** MERGE_REVIEW
+- **Status:** COMPLETE
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-27 (code-reviewer: Phase 10 cycle 1 PASS — 0c/0M/2m informational; all 4 ACs verified; 298 unit + 13 e2e + 16 tasks_e2e all green; final phase — handoff to MERGE_REVIEW)
+- **Last Updated:** 2026-04-27 (orchestrator: T002 COMPLETE; CodeRabbit Stage 6 skipped per user direction; moved to completed/)
 - **Blocked Reason:** —
 
 ## Task
@@ -1913,4 +1913,60 @@ Replaced the v0.1 forward-looking stub. Uses `stores tasks list --status ready -
 
 ## Completion
 
-_Final summary when task is complete._
+- **Completed:** 2026-04-26
+- **Total commits:** 75 with `T002` prefix
+- **Final test count:** 298 unit tests + 13 e2e steps + 16 tasks_e2e steps — all green
+- **LOC delta:** ~5500 lines added (framework + schema + templates + skill + tests)
+- **Marquee DONE_WHEN proven:** end-to-end smoke (`tests/tasks_e2e.sh`) passes 21 assertions in 1.1s. 4th REVISE attempt rejected by schema-level guard `current_cycle <= 4`; status auto-set to BLOCKED with populated `blocked_reason`. main.md regeneratable any time from DB rows; two consecutive renders byte-identical.
+- **Stage 6 CodeRabbit:** skipped per user direction (CodeRabbit deferred to a future `tasks:wrap` skill; not part of T002).
+
+### What shipped
+
+1. **New schema features** (Phase 1): `actor: framework`, `auto_increment` / `auto_increment_within`, `Expr` AST + `parse_guard`, `expr_eval::eval`, `scope: repo|worktree|user` resolution via `git rev-parse --git-common-dir`, `FieldType::ListRecord(Vec<Field>)`, `FieldType::ListFk { ref_store }`, `requires_gate: Option<String>` on Transition, depth-3 walker in `read_row`/`build_entry_map`.
+2. **`workflow:` opt-in block** (Phase 2): `agent_roles`, `briefing_templates`, `render_template`, `render_target_path`, `on_state`, `submit_targets`, `max_revise_cycles`. Stores without `workflow:` keep v0.1 behavior unchanged.
+3. **Briefing template engine** (Phase 3): handlebars 5; `eq` / `default` / `gt` / `lt` helpers (all returning `ScopedJson<Derived(bool)>` for `{{#if}}` correctness); `current_cycle_for_phase` derived map; missing-key → empty contract.
+4. **Read-only workflow CLI** (Phase 4): `next-action` (9-key text + JSON), `brief` (markdown for LLM, `--json` for orchestrator), gated on `schema.workflow.is_some()`.
+5. **Write-path workflow CLI** (Phase 5): `submit-execute`, `submit-review`, `submit-plan`, `submit-plan-review`, `resume`. Single SQLite transaction per submit; `claimed_by`/`claimed_at` lock with 5-min auto-expiry; framework-actor field writes (current_phase, current_cycle); follow-on transitions in same tx via `transition::run_in_tx`.
+6. **`render` verb** (Phase 6): atomic write (`.tmp` + rename); directory move on `status_dir` change; `--dry-run`; idempotent.
+7. **`tasks` bundled store** (Phase 7): full schema using every framework feature; 4 briefing templates + 1 main.md template, all `include_str!`'d for fresh-install reproducibility.
+8. **`tasks:start` bundled skill** (Phase 8): drives the loop via the new CLI verbs only; cuts CodeRabbit/merge/phase-reviewer from the source plugin's pattern.
+9. **Smoke test** (Phase 9): `tests/tasks_e2e.sh` — 16 steps, 21 assertions, 4th-REVISE→BLOCKED + resume + complete. Plus observations lifecycle expansion (4 new states) + gate priority field.
+10. **Docs + version bump** (Phase 10): README "Workflow stores" section; handoff updated with DELIVERED + post-T002 changelog + legacy boundary + v0.3 candidates; `Cargo.toml` 0.1.0 → 0.2.0.
+
+### Cycle counts
+
+| Phase | Code-review cycles | Notes |
+|---|---|---|
+| Plan | 2 | Cycle 1 NEEDS_WORK (4 critical incl. C2 marquee guard math); cycle 2 READY |
+| Phase 1 | 2 | Cycle 1 REVISE (parse_guard gap); cycle 2 PASS |
+| Phase 2 | 1 | PASS first try |
+| Phase 3 | 2 | Cycle 1 REVISE (gt/lt helper crash); cycle 2 PASS |
+| Phase 4 | 2 | Cycle 1 REVISE (test coverage gap); cycle 2 PASS — locked in compute/run pattern |
+| Phase 5 | 2 | Cycle 1 REVISE (resume bypass + AC5.13/AC5.11 test gaps); cycle 2 PASS |
+| Phase 6 | 1 | PASS first try |
+| Phase 7 | 2 | Cycle 1 REVISE (files_changed CSV bug + missing `at` timestamps); cycle 2 PASS |
+| Phase 8 | 1 | PASS first try |
+| Phase 9 | 1 | PASS first try — DONE_WHEN proven independently |
+| Phase 10 | 1 | PASS first try |
+
+### Lessons learned
+
+1. **Worked-example transcript caught the marquee bug.** Plan cycle 2 first-pass wrote `current_cycle <= 3` (allowing only 2 REVISEs); the transcript audit caught the off-by-one before any code was written. Plan-reviewer's request for the transcript was load-bearing.
+2. **compute/run split is essential.** Phase 4 cycle 1 had 7 ACs but actual `run()` functions had zero test coverage because tests called private helpers. Refactoring all subsequent handlers to `compute(...) -> Result<Output>` + thin `run(...)` printer made every AC testable. Phase 5's 4 submit handlers inherited this pattern.
+3. **Adversarial code review surfaces real bugs not just polish.** Phase 7 cycle 1 caught two user-visible bugs (CSV not stored as list; `at` timestamps missing entirely) only by going past the test suite into live `submit-execute` + `render` smoke. Tests were green; bugs would have shipped.
+4. **Carry-forward chains work but need explicit propagation.** Each cycle-2 review's Learnings listed Phase-N-targeted carry-forwards by name; the next phase's executor briefing repeated them. Without that, P5-m3 (submit_targets lookup) would have shipped hardcoded.
+5. **Smoke test in 1.1s is the right pace.** A 30-second cap was conservative; the full workflow exercises ~25 CLI invocations in ~1 second. Keeping e2e fast keeps the developer loop tight.
+
+### v0.3 candidates (deferred per Intent Contract scope-out)
+
+- Phase-reviewer agent + lifecycle state
+- Merge-reviewer agent + MERGE_REVIEW / MERGE_READY states
+- `tasks:wrap` skill (Stage 6 CodeRabbit + Stage 7 Completion summary)
+- `runs` event log store (provenance audit trail)
+- `notes` store (10.06 worklog port)
+- HTTP/JSON API for tasks store
+- 10.06 capability YAML reconciliation in `/task:open` wrapper skill
+- 6 deferred bugs from v0.1 handoff (lock primitive partially subsumed)
+- WorkflowResolved threading into main.rs schema map (P2-M1 final close)
+- Documentation polish (skill gate enumeration, frontmatter dependency declaration)
+
