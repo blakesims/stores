@@ -109,16 +109,16 @@ pub(crate) fn compute(
         })?;
 
     // Resolve the store root from the manifest to find the template on disk.
-    // Design choice (documented in task notes): read template from disk on demand
-    // using the installed store's schema_path directory.  P2-M1 (Phase 5) will
-    // thread WorkflowResolved cleanly; for now we resolve once per call.
+    // Design choice (P2-M1 carry-forward closure): re-read template from disk
+    // on each call using the installed store's schema_path directory.
+    // WorkflowResolved threading into main.rs is deferred (option 2 chosen);
+    // both brief.rs and render.rs use this on-demand pattern.
     //
-    // TODO (Phase 6): when schema_path starts with "bundled:" (e.g. the `tasks`
-    // store), joining it with template_path produces a nonsensical filesystem path
-    // ("bundled:tasks/templates/planner-brief.md.tpl").  Fix: detect the sentinel
-    // and route to the in-memory BUNDLED_STORE_TEMPLATES map instead.  No bundled
-    // store has a workflow today so this is latent; Phase 6 plan-review should
-    // verify the fix is in place before the `tasks` schema is wired up.
+    // NOTE (Phase 7): when schema_path starts with "bundled:" (e.g. the `tasks`
+    // store), joining it with template_path produces a nonsensical filesystem path.
+    // Fix: detect the sentinel and route to the in-memory BUNDLED_STORE_TEMPLATES
+    // map.  No bundled store has a workflow today so this is latent; Phase 7
+    // must fix this when the `tasks` schema (workflow-shaped) is wired up.
     let manifest = Manifest::load()?;
     let store_root = manifest
         .stores
