@@ -2,49 +2,157 @@ name: wf_tasks
 id_format: "WF{:03d}"
 
 lifecycle:
-  states: [planning, executing, blocked, done]
+  states: [planning, plan_review, ready, executing, code_review, blocked, complete]
   transitions:
+    # Planning → plan submitted
     - from: planning
-      to: executing
-      verb: start-execute
+      to: plan_review
+      verb: submit-plan
       actor: ai_autonomous
-    - from: executing
-      to: done
-      verb: finish
+    # Plan review → executing (via ready on-entry)
+    - from: plan_review
+      to: ready
+      verb: submit-plan-review
+      requires_gate: READY
       actor: ai_autonomous
-    - from: executing
+    # Plan review → back to planning (NEEDS_WORK, guarded by attempt count)
+    - from: plan_review
+      to: planning
+      verb: submit-plan-review
+      requires_gate: NEEDS_WORK
+      guard: "plan_review_log.length < 3"
+      actor: ai_autonomous
+    # Plan review → blocked (NEEDS_WORK guard fail fallback)
+    - from: plan_review
       to: blocked
-      verb: block
-      actor: human
+      verb: submit-plan-review
+      requires_gate: NEEDS_WORK
+      actor: ai_autonomous
+    # Plan review → blocked (NOT_READY explicit)
+    - from: plan_review
+      to: blocked
+      verb: submit-plan-review
+      requires_gate: NOT_READY
+      actor: ai_autonomous
+    # Ready → executing (on-entry follow-on, fired by framework)
+    - from: ready
+      to: executing
+      verb: ready-enter
+      actor: framework
+    # Execution submitted
+    - from: executing
+      to: code_review
+      verb: submit-execute
+      actor: ai_autonomous
+    # REVISE (guarded — within cycle limit)
+    - from: code_review
+      to: executing
+      verb: submit-review
+      requires_gate: REVISE
+      guard: "current_cycle <= 4"
+      actor: ai_autonomous
+    # REVISE fallback (no guard — catches when guard above fails)
+    - from: code_review
+      to: blocked
+      verb: submit-review
+      requires_gate: REVISE
+      actor: ai_autonomous
+    # PASS on non-last phase → next phase
+    - from: code_review
+      to: executing
+      verb: submit-review
+      requires_gate: PASS
+      guard: "current_phase < plan.phases.length"
+      actor: ai_autonomous
+    # PASS on last phase → complete
+    - from: code_review
+      to: complete
+      verb: submit-review
+      requires_gate: PASS
+      guard: "current_phase >= plan.phases.length"
+      actor: ai_autonomous
+    # FAIL → blocked
+    - from: code_review
+      to: blocked
+      verb: submit-review
+      requires_gate: FAIL
+      actor: ai_autonomous
+    # Resume from blocked (human-initiated)
+    - from: blocked
+      to: ready
+      verb: resume
+      actor: ai_with_human
 
 fields:
   - name: title
     type: text
     required: true
+  - name: slug
+    type: text
   - name: description
     type: text
   - name: current_phase
     type: integer
     actor: framework
+    auto_increment: true
   - name: current_cycle
     type: integer
     actor: framework
+    auto_increment: true
+    auto_increment_within: current_phase
   - name: blocked_reason
     type: text
+    actor: framework
   - name: claimed_by
     type: text
+    actor: framework
   - name: claimed_at
     type: timestamp
+    actor: framework
   - name: plan
     type: record
     fields:
       - name: summary
         type: text
+      - name: phases
+        type: list_record
+        fields:
+          - name: name
+            type: text
   - name: cycles
     type: list_record
     fields:
       - name: phase
         type: integer
+      - name: cycle
+        type: integer
+      - name: executor
+        type: record
+        fields:
+          - name: summary
+            type: text
+          - name: commit
+            type: text
+          - name: files_changed
+            type: text
+      - name: review
+        type: record
+        fields:
+          - name: gate
+            type: text
+          - name: summary
+            type: text
+          - name: critical
+            type: integer
+          - name: major
+            type: integer
+          - name: minor
+            type: integer
+  - name: plan_review_log
+    type: list_record
+    fields:
+      - name: gate
+        type: text
       - name: summary
         type: text
 
@@ -54,16 +162,31 @@ workflow:
       description: "Creates the implementation plan"
     executor:
       description: "Implements the plan"
+    code_reviewer:
+      description: "Reviews the execution"
+    plan_reviewer:
+      description: "Reviews the plan"
   briefing_templates:
     planner: templates/planner-brief.md.tpl
     executor: templates/executor-brief.md.tpl
+    code_reviewer: templates/executor-brief.md.tpl
+    plan_reviewer: templates/planner-brief.md.tpl
   render_template: templates/main.md.tpl
   render_target_path: "tasks/{{status_dir}}/{{display_id}}-{{slug}}/main.md"
   on_state:
     planning:
       - dispatch_agent: planner
+    ready:
+      - transition_to: executing
     executing:
       - dispatch_agent: executor
+    code_review:
+      - dispatch_agent: code_reviewer
+    plan_review:
+      - dispatch_agent: plan_reviewer
   submit_targets:
+    submit-plan: plan
     submit-execute: cycles
+    submit-review: cycles
+    submit-plan-review: plan_review_log
   max_revise_cycles: 3

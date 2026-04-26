@@ -68,6 +68,18 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// Load the manifest from an explicit root directory (instead of cwd).
+    /// Useful in tests and callers that manage their own working root.
+    pub fn load_from(root: &std::path::Path) -> Result<Self> {
+        let path = root.join(".stores").join("manifest.yaml");
+        if !path.exists() {
+            return Ok(Manifest::empty());
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let manifest: Manifest = serde_yaml::from_str(&content)?;
+        Ok(manifest)
+    }
+
     pub fn save(&self) -> Result<()> {
         let path = manifest_path()?;
         // Atomic write: write to tmp then rename

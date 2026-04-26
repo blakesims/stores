@@ -2,6 +2,7 @@ pub mod add;
 pub mod brief;
 pub mod list;
 pub mod next_action;
+pub mod render;
 pub mod row;
 pub mod schema_show;
 pub mod show;
