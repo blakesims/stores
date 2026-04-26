@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_7
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-27 (code-reviewer: Phase 7 cycle 1 — REVISE, 0 critical / 2 major / 4 minor / 1 info; M1 files_changed CSV→string mismatch breaks render; M2 `at` timestamps not set on any list_record entry; m1 executor-brief instructs main.md edits contra DB-as-truth; m2 carry-forward closures lack dedicated tests)
+- **Last Updated:** 2026-04-26 (executor: Phase 7 cycle 2 — all 6 REVISE items addressed; M1 files_changed CSV→array; M2 at timestamps on 3 sub-records; m1 executor-brief CLI-only; m2 4 carry-forward tests; m3 framework-actor filter; m4 README 29 lines; 297 tests pass)
 - **Blocked Reason:** —
 
 ## Task
@@ -1329,6 +1329,32 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Optional / accept:** m3 prefer generic `actor == framework` filter in dynamic.rs's transition registration loop (~3 LOC, future-proof for any framework verb); m4 trim README to 30 lines or document the deviation.
 - **Carry-forward to Phase 8 (binding):** None new — the Phase 7 fixes above must land before Phase 8 begins. The orchestrator skill exercises submit-execute / submit-review end-to-end and would surface M1/M2 immediately as "render output is wrong" / "no audit timestamps."
 - → Details: `code-review-phase-7.md`
+
+#### Cycle 2 revisions (code-review cycle 1 REVISE — 2026-04-26)
+
+- **Executor:** Claude Sonnet 4.6
+- **Commits:** 27a4302 (M1+M2 fixes + tests), aaf2717 (m1 executor-brief), bab3e93 (m3 framework-actor filter), 8891210 (m4 README trim)
+- **Tests:** 297 unit tests pass (288 prior + 9 new); all 13 e2e steps green
+
+**M1 — files_changed CSV → JSON array (submit.rs:727-733):**
+`compute_submit_execute` now splits the CSV on comma, trims whitespace, drops empties, and stores `Value::Array(Vec<Value::String>)`. Mirrors the `open_questions` list pattern. Live smoke: `sqlite3` shows `"files_changed": ["src/foo.rs", "src/bar.rs"]` (array); rendered main.md shows `- \`src/foo.rs\`` under `**Files:**` heading. Two new tests: `m1_files_changed_stored_as_json_array` and `m1_files_changed_trims_whitespace_and_drops_empties`.
+
+**M2 — `at` timestamps on all three sub-records:**
+`compute_submit_plan_review` inserts `"at": now_iso8601()` into `log_entry_obj`. `compute_submit_execute` inserts `"at": now_iso8601()` into `executor_obj`. `compute_submit_review` inserts `"at": now_iso8601()` into `review_obj_map`. Live smoke: sqlite shows `"at": "2026-04-26T17:12:47Z"` in cycles[0].executor; rendered main.md shows `- **At:** 2026-04-26T17:12:47Z`. Three new tests: `m2_plan_review_log_entry_has_at_timestamp`, `m2_executor_entry_has_at_timestamp`, `m2_review_entry_has_at_timestamp`.
+
+**m1 — executor-brief.md.tpl CLI-only:**
+Removed "SET Status to EXECUTING_PHASE_N in main.md" (line 68) and "Set Status: BLOCKED with reason in main.md" (line 94). Replaced with CLI submit-execute flow and `stores tasks render` call. "When Blocked" now instructs `submit-execute --summary "BLOCKED: <reason>"`. Template mirrors plan-reviewer-brief.md.tpl structure.
+
+**m2 — carry-forward unit tests (4 new):**
+- `ac7_p5m2_open_questions_appended_to_plan_review_log_entry`: asserts open_questions stored as JSON array with correct strings.
+- `ac7_p5m3_submit_targets_consulted_for_field_lookup`: custom schema with `submit_targets: {submit-execute: my_exec_log}`; asserts entry written to `my_exec_log` (not canonical "cycles"). Proves lookup fires.
+- `ac7_p5m4_review_summary_and_details_separate_keys`: asserts `review.summary == "short summary S"` and `review.details == "long detailed report D"` as distinct keys.
+- `ac7_p6m2_bundled_sentinel_routes_to_in_memory_template`: loads planner template from `BUNDLED_STORE_TEMPLATES`, calls `build_context + render_template`, asserts "Methodical and thorough" in output. Exercises sentinel-detection code path.
+
+**m3 — framework-actor filter (dynamic.rs:181-184):**
+Added `if transition.actor == Some(Actor::Framework) { continue; }` before the BASE_VERBS check. Generic: handles all current and future framework transitions. Live: `stores tasks --help` no longer lists `start`.
+
+**m4 — README trimmed to 29 lines** (was 36; limit 30). Merged Workflow states + Cycle limits into one paragraph; removed blank lines between sequential quick-start commands.
 
 ---
 
