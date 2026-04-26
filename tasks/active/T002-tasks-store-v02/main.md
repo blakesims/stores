@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_10
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-27 (code-reviewer: Phase 9 cycle 1 PASS — 0c/0M/2m informational; smoke test proves DONE_WHEN; advance to EXECUTING_PHASE_10)
+- **Last Updated:** 2026-04-27 (executor: Phase 10 complete — docs + version bump; all ACs verified; 298 unit + 13 e2e + 16 tasks_e2e all green)
 - **Blocked Reason:** —
 
 ## Task
@@ -1850,6 +1850,49 @@ Replaced the v0.1 forward-looking stub. Uses `stores tasks list --status ready -
 
 - None. Plan spec was followed exactly. Tasks 8.1 and 8.2 are inherently merged (frontmatter is in SKILL.md authored in 8.1).
 - `all_four_skills_bundled` test renamed to `all_skills_bundled` and count updated to 5 — a necessary rename to avoid a misleading assertion; not a behavioral change.
+
+### Phase 10: Documentation update + version bump
+
+- **Status:** complete (pending code review)
+- **Executor:** Claude Sonnet 4.6
+- **Commits:**
+  - `bc6abd2` T002 P10.3: bump Cargo.toml version 0.1.0 → 0.2.0
+  - `9393286` T002 P10.1: README install steps + v0.2 description
+  - `3b03317` T002 P10.2/10.4/10.6: handoff-v0.2.md — tasks DELIVERED, v0.3 candidates, legacy boundary
+
+#### Tasks Completed
+
+**10.1 — `README.md`**
+- Updated opening blurb from "v0.1 ships with two built-in stores" to "v0.2 ships with three built-in stores (observations, gate, tasks)" with a brief workflow engine mention.
+- Expanded the Install section from a single `cargo install --path .` to a four-command sequence: install binary, `stores init`, `stores install observations`, `stores install gate`, `stores install tasks`.
+- "Workflow stores" section and "How to test" section were already present from Phase 9 (P9.4); verified they remain intact.
+
+**10.2 + 10.4 + 10.6 — `docs/handoff-v0.2.md`**
+- Supersession table: row for "v0.2 priority list → item #2 (tasks store)" updated from `Superseded` to `DELIVERED — see T002 main.md for the audit trail`.
+- New dated changelog entry added: `2026-04-26 (final, post-T002 ship) — tasks store DELIVERED` with full landed-pieces list, test count (298 unit + 13 e2e + 16 tasks_e2e), marquee DONE_WHEN confirmation, legacy boundary note, and v0.3 candidates list.
+
+**10.3 — `Cargo.toml`**
+- `version = "0.1.0"` → `version = "0.2.0"`. One line.
+
+**10.5 — `stores/tasks/README.md`**
+- Already existed (authored Phase 7, 29 lines). Verified present and correct. No changes needed.
+
+#### AC Verification
+
+| AC | Result | Evidence |
+|----|--------|----------|
+| AC10.1 | PASS | `env -u CLAUDECODE bash tests/e2e.sh` exits 0; all 13 steps green |
+| AC10.2 | PASS | `grep 'version = "0.2.0"' Cargo.toml` returns match; `cargo build` confirms `Compiling stores v0.2.0` |
+| AC10.3 | PASS | `grep DELIVERED docs/handoff-v0.2.md` returns the supersession table row with DELIVERED tag |
+| AC10.4 | PASS | README "Workflow stores" section present (verified lines 183-199); "How to test" present |
+| Tasks e2e | PASS | `env -u CLAUDECODE bash tests/tasks_e2e.sh` exits 0; all 16 steps green |
+| Unit tests | PASS | `cargo test` → 298 passed; 0 failed |
+
+#### Deviations from Plan
+
+- None. All 6 tasks executed as specified. `stores/tasks/README.md` was already present from Phase 7 (task 10.5 was verify-only as expected). Handoff tasks 10.2, 10.4, and 10.6 were batched into one commit because they all touch `docs/handoff-v0.2.md`.
+
+---
 
 ## Completion
 
