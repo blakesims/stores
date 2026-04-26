@@ -535,7 +535,7 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 - Transition verb dispatch uses `schema.lifecycle.transitions.iter().any(|t| t.verb == verb)` in `dispatch.rs` rather than a separate lookup table; the actual Transition struct is re-looked-up inside the handler. Minimal duplication; no behavioral change.
 - `wont_fix` verb: clap accepts underscores in subcommand names natively — no kebab conversion needed. Verified: `stores observations wont_fix` (with underscores) parses correctly.
 
-**Commits:** (pending)
+**Commits:** `400ab8b` feat(T001 phase6): lifecycle transitions + observations store
 
 ---
 
