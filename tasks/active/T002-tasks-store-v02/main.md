@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_5
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: Phase 4 cycle 2 PASS — compute/run split landed cleanly; advancing to Phase 5)
+- **Last Updated:** 2026-04-26 (executor: Phase 5 complete — 4 submit verbs + 15 AC tests + CLI wiring; CODE_REVIEW)
 - **Blocked Reason:** —
 
 ## Task
@@ -1349,6 +1349,76 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Warnings:** 0 new warnings in `src/handlers/brief.rs` or `src/handlers/next_action.rs` post-edit; 3 pre-existing `unused crate::db` warnings in unrelated files (`add.rs`, `transition.rs`, `update.rs`)
 
 ---
+
+### Phase 5: Generic workflow CLI verbs (write) — submit-execute, submit-review, submit-plan, submit-plan-review
+
+- **Status:** CODE_REVIEW
+- **Executor:** Claude Sonnet 4.6
+- **Commits:**
+  - `70b0ef2` T002 P5.3-5.8: submit handler — 4 verbs, engine post-actions, guard math, locking
+  - `a153d24` T002 P5.6: wire submit-* verbs into CLI (dynamic + dispatch)
+- **Tests:** 259 unit tests pass (244 prior + 15 new); all 13 e2e steps green
+
+#### Carry-forward closures
+
+**P1-M2 (ListRecord validator walker) — CLOSED before Phase 5 start**
+The `list_record_required_sub_field_not_validated_phase1` pinning test was already inverted to `list_record_required_sub_field_validated_phase5` with `unwrap_err()` expectation. `validate/mod.rs` walks `FieldType::ListRecord` elements recursively, building a flat `elem_entry` per element and validating each sub-field. Error paths are prefixed with the list field name for readable diagnostics. Three tests: `list_record_required_sub_field_validated_phase5` (element missing required sub-field → error), `list_record_required_sub_field_present_passes`, `list_record_empty_list_passes`. All were in place before Phase 5 execution began.
+
+**P1-M1 (single AST unification) — ACCEPTED DEVIATION**
+Decision: option (b), document and proceed. The two ASTs (`required_when::Expr { lhs_path, rhs_literal }` and `expr::Expr { lhs, op, rhs }`) remain distinct. `required_when.rs` re-exports `expr::Expr as GuardExpr` (unused in practice). Phase 5's guard evaluator uses `expr::Expr` directly via `lifecycle.rs::Transition.guard: Option<Expr>` and `expr_eval::eval`. The `required_when::Expr` is used only for `required_when` field checks via `required.rs`. No code path requires bridging the two ASTs in Phase 5 — the guard evaluator and the required_when evaluator are separate code paths. Carrying to Phase 6/7 if unification ever becomes load-bearing.
+
+**P2-M1 (WorkflowResolved threading) — PARTIALLY DEFERRED**
+Submit handlers need `workflow.submit_targets` (to know which field each verb targets) and `workflow.on_state` (to fire follow-on transitions). Both are available on `Schema.workflow: Option<Workflow>` (the unresolved/paths form). Template text is NOT needed by submit handlers (briefing rendering is Phase 4/brief.rs; render is Phase 6). The `require_workflow()` helper in `submit.rs` uses `schema.workflow.as_ref()` directly. Full WorkflowResolved threading to `main.rs` deferred to Phase 6 when brief.rs templates need the resolved form.
+
+#### Tasks completed
+
+**5.1 — Op::Submit* variants** — already landed before Phase 5 execution (present in validate/mod.rs).
+
+**5.2 — guard: Option<Expr> on Transition** — already landed before Phase 5 execution (present in schema/lifecycle.rs with deserialize_guard).
+
+**5.3 / 5.4 / 5.5 / 5.5b / 5.8 — submit handler (src/handlers/submit.rs, NEW)**
+
+Four compute/run pairs following the strict 11-step sequence (open tx → acquire lock → read row → build diff → validate → engine post-actions → write → follow-ons → release lock → commit → print):
+
+- `compute_submit_plan` / `run_submit_plan`: planning → plan_review; writes plan record as JSON-as-TEXT.
+- `compute_submit_plan_review` / `run_submit_plan_review`: plan_review → ready → executing (on-entry follow-on); gate=READY fires `fire_on_entry_follow_ons` which finds the framework transition `ready → executing` and sets current_phase=1, current_cycle=1 when current_phase==0 (initial entry; resume path preserves phase); gate=NEEDS_WORK guard evaluated on PRE-append `plan_review_log.length < 3`; gate=NOT_READY → blocked.
+- `compute_submit_execute` / `run_submit_execute`: executing → code_review; appends new `cycles[]` entry with `executor` sub-record.
+- `compute_submit_review` / `run_submit_review`: gate=REVISE uses post-increment working copy for guard eval (bumped_cycle in guard_entry only; not written to DB on guard fail); gate=PASS uses `find_transition` which evaluates both PASS guards (`current_phase < plan.phases.length` / `current_phase >= plan.phases.length`) against merged; gate=FAIL → blocked.
+
+Design choice for cycles[]: `submit-execute` appends a new entry with `executor` sub-record and null `review`. `submit-review` finds the entry by `(phase, cycle)` rposition match and patches `review` in-place. Single entry per (phase, cycle) pair; review is co-located with the execution it reviews.
+
+**5.6 — drop next-action-as-validator** — verified: `submit.rs` has no reference to `next_action`. Validator's actor model is the only invariant enforcement.
+
+**5.7 — transition::run refactor** — Already landed in prior phase (transition.rs has `run` + `run_in_tx` split, used by submit handlers' `fire_on_entry_follow_ons`).
+
+**5.6 CLI / dispatch** — `dynamic.rs` registers submit-plan, submit-plan-review, submit-execute, submit-review, resume as workflow-only subcommands. `dispatch.rs` routes each to the handler; inline resume logic for `blocked → ready → executing` using `write_status_and_fields` + `fire_on_entry_follow_ons`.
+
+#### AC Verification
+
+| AC | Result | Evidence |
+|----|--------|----------|
+| AC5.1 | PASS | `ac5_1_submit_execute_writes_cycle_and_transitions`: cycles[0] has executor.summary, commit, phase=1, cycle=1; status=code_review; claimed_by=NULL |
+| AC5.2 | PASS | `ac5_2_submit_review_pass_non_last_phase_advances`: status=executing, current_phase=2, current_cycle=1; lock released |
+| AC5.3 | PASS | `ac5_3_submit_review_pass_last_phase_completes`: status=complete; current_phase stays 1 (not bumped past last) |
+| AC5.4 | PASS | `ac5_4_fourth_revise_blocked`: 3 REVISEs (cycles 2,3,4) succeed; 4th → blocked; current_cycle stays 4; blocked_reason cites "4th revise rejected", phase 1, cycle 4 |
+| AC5.4b | PASS | `ac5_4b_cross_phase_cycle_counter_resets_on_pass`: 2 REVISEs in phase 1; PASS → phase 2, cycle reset to 1; first REVISE in phase 2 bumps to 2 (2 <= 4 true) — per-phase isolation confirmed |
+| AC5.5 | PASS | `ac5_5_lock_contention_second_submit_fails`: concurrent submit fails naming holder; after 6-min-ago manipulation, succeeds |
+| AC5.6 | PASS | `ac5_6_submit_plan_writes_record_and_transitions`: plan.summary="my plan", plan.phases.length=2; status=plan_review; lock released |
+| AC5.7 | PASS | `ac5_7_submit_plan_review_ready_fires_on_entry_follow_on`: status=executing (not just ready); current_phase=1, current_cycle=1; both writes inside one tx |
+| AC5.8 | PASS | `ac5_8_submit_plan_review_needs_work_cycle_limit`: 3rd NEEDS_WORK → planning (pre-append guard 2<3 true); 4th → blocked (pre-append guard 3<3 false) |
+| AC5.9 | PASS | `ac5_9_submit_plan_review_not_ready_blocks`: status=blocked; blocked_reason contains "NOT_READY" |
+| AC5.10 | PASS | `ac5_10_submit_on_no_workflow_store_errors`: error contains "no workflow" |
+| AC5.11 | PASS | `ac5_11_atomic_boundary_rollback_leaves_db_unchanged`: tx dropped without commit → all fields identical to pre-tx; claimed_by rolled back |
+| AC5.12 | PASS | `ac5_12_post_commit_reads_are_consistent`: two reads after commit return same status |
+| AC5.13 | PASS | `ac5_13_lock_released_after_commit_with_follow_on`: after plan_review→ready→executing (two writes), claimed_by/claimed_at=NULL |
+| AC5.14 | PASS | `ac5_14_blocked_to_ready_recovery`: after resume, status=executing, current_phase=1 (unchanged), current_cycle=1 (reset), cycles.len()=4 (audit trail preserved) |
+
+#### Deviations
+
+- **AC5.11 test approach**: The test simulates the atomic boundary by directly opening a transaction, writing inside it, then dropping it (rollback). This is equivalent to a mid-process crash from the DB's perspective. A full `panic!()` hook was considered but would require either thread isolation or unsafe code; the drop-without-commit approach is semantically identical.
+- **AC5.13 mid-tx read**: The plan specifies verifying `claimed_by` is populated during the tx by reading from a second connection. SQLite's WAL mode makes mid-tx reads from a second connection show the pre-tx state (reads see last committed snapshot). Instead, the test verifies (a) the submitted transition fires both writes inside one tx (status=executing proves the follow-on fired), and (b) after commit, claimed_by=NULL. The "during-tx" invariant is structurally guaranteed by the code: lock is acquired in step 2 and released in step 10, with all writes in steps 8-9 between them.
+- **P2-M1 (WorkflowResolved threading)**: Not completed for Phase 5. Submit handlers use `schema.workflow.as_ref()` (unresolved paths form) for `submit_targets` and `on_state` lookups. Template text is not needed until Phase 6. Deferred.
+- **P1-M1 (AST unification)**: Accepted deviation — two ASTs coexist. Phase 5 functionality does not require bridging them.
 
 ## Completion
 
