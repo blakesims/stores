@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_1
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (executor: phase 1 complete)
+- **Last Updated:** 2026-04-26 (code-reviewer: cycle 1 REVISE — AC1.4 parser gap; see Code Review Log)
 - **Blocked Reason:** —
 
 ## Task
@@ -1102,7 +1102,17 @@ Rendered tasks/completed/T003-smoke-test/main.md
 
 ## Code Review Log
 
-_Code-reviewer agent fills this section per phase._
+### Phase 1 — cycle 1
+
+- **Gate:** REVISE
+- **Reviewed:** 2026-04-26
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 1 of max 3
+- **Issues:** 1 critical / 2 major / 3 minor
+- **Summary:** Phase 1 lands cleanly on 11 of 12 ACs (test count, e2e, depth-3 walker, ambiguity validation, framework-actor DDL, scope/manifest plumbing, `--invoker framework` rejection, `from_env`-never-Framework, outside-git hard error). The diff is honest — 18 source files match the plan's file list and the mechanical extras (Field-init updates, two match arms in `schema_show.rs`) are defensible. The critical issue is **AC1.4**: the plan and worked-example transcript require `parse_guard("current_phase < plan.phases.length")` (path-vs-path-length form). The parser only accepts single-quoted literals or bare integers on the RHS, so the schema YAML Phase 5/Phase 7 will write CANNOT load. The executor's test renames the AC into a parseable form (`plan.phases.length > 1`) without flagging the substitution. A small grammar extension (~30 LOC + 3 tests) closes the gap. Two majors flag downstream-Phase-5 risks (single-AST intent deferred; ListRecord runtime validation skipped) — neither blocks Phase 1 in isolation.
+- **What's good:** 174 tests pass, 0 failed; e2e green; depth-3 round-trip tests exercise `plan.phases[2].name` and `cycles[1].executor.summary` directly; ambiguity validation covers both pathological and one-unguarded-allowed cases; outside-git error is hard, not a silent fallback.
+- **Required actions (executor):** see "Required Actions for REVISE" in detail file. Priority 1 is the AC1.4 parser/eval extension.
+- → Details: `code-review-phase-1.md`
 
 ---
 
