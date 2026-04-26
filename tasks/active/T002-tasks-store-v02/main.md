@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_9
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: Phase 8 cycle 1 PASS — all 4 ACs verified; 0 critical / 0 major / 3 minor informational; advance to Phase 9)
+- **Last Updated:** 2026-04-27 (executor: Phase 9 complete — 6 ACs verified; 298 tests pass; both e2e scripts exit 0; advance to CODE_REVIEW)
 - **Blocked Reason:** —
 
 ## Task
@@ -1382,6 +1382,79 @@ Removed "SET Status to EXECUTING_PHASE_N in main.md" (line 68) and "Set Status: 
 Added `if transition.actor == Some(Actor::Framework) { continue; }` before the BASE_VERBS check. Generic: handles all current and future framework transitions. Live: `stores tasks --help` no longer lists `start`.
 
 **m4 — README trimmed to 29 lines** (was 36; limit 30). Merged Workflow states + Cycle limits into one paragraph; removed blank lines between sequential quick-start commands.
+
+---
+
+### Phase 9: Smoke test — observations lifecycle expansion + real T3 task end-to-end
+
+- **Status:** complete (pending code review)
+- **Executor:** Claude Sonnet 4.6
+- **Commits:**
+  - `0bcdb9d` T002 P9.1+P9.2: observations lifecycle expansion, gate priority field, submit-review non-zero exit on blocked
+  - `745c132` T002 P9.3+P9.4: tasks_e2e.sh smoke test + README how-to-test section
+- **Tests:** 298 unit tests pass (unchanged from Phase 8 — no new unit tests added for Phase 9 schema changes; tests run via e2e scripts); both `bash tests/e2e.sh` and `bash tests/tasks_e2e.sh` exit 0 with clean environment
+
+#### Tasks Completed
+
+**9.1 — observations lifecycle expansion (`stores/observations/schema.yaml`)**
+- Added 4 states: `investigating, confirmed, needs_info, in_progress`
+- States list now: `[open, triaged, investigating, confirmed, needs_info, in_progress, resolved, wont_fix]`
+- Added 7 new transitions:
+  - `triaged → investigating` (verb: investigate, actor: ai_with_human)
+  - `investigating → confirmed` (verb: confirm, actor: ai_with_human)
+  - `investigating → needs_info` (verb: request_info, actor: ai_autonomous)
+  - `needs_info → confirmed` (verb: provide_info, actor: human)
+  - `confirmed → in_progress` (verb: claim, actor: ai_autonomous)
+  - `in_progress → resolved` (verb: resolve, actor: ai_autonomous)
+  - `confirmed → wont_fix` (verb: wont_fix, actor: ai_with_human)
+- Original `triaged → resolved` (verb: resolve, actor: ai_autonomous) kept for backward compat
+- Original e2e.sh walks `open → triaged → (resolved via the direct path)` — unchanged
+
+**9.2 — gate priority field (`stores/gate/schema.yaml`)**
+- Added `priority: enum [high, normal, low], required: false`
+- No breaking change to existing rows (optional field)
+
+**9.2 (companion) — submit-review non-zero exit on BLOCKED routing (`src/handlers/submit.rs`)**
+- Added `blocked_reason: Option<String>` to `SubmitOutput` struct
+- `compute_submit_review`: populates `blocked_reason` from `text_fields` when routing to blocked
+- `run_submit_review`: returns `Err(...)` when `new_status == "blocked"` so CLI exits non-zero
+- Error message format: `"submit-review routed T001 to blocked: 4th revise rejected by guard current_cycle <= 4 on phase 1 cycle 4: <summary>"`
+- Verified: exit code 1, error contains "guard" and "current_cycle <= 4" (AC9.4)
+
+**9.3 — `tests/tasks_e2e.sh` (new)**
+- 16-step bash smoke test in a fresh `mktemp -d` + `git init` directory
+- All steps use explicit `--invoker` flags (CLAUDECODE unset throughout)
+- Step 11 (4th REVISE → BLOCKED) is the marquee assertion:
+  - `$?` is non-zero
+  - Error contains "guard" AND "current_cycle"
+  - `status` reads back as "blocked"
+  - `blocked_reason` non-empty and contains guard/phase/cycle context
+- Step 12 (resume): current_cycle=1, current_phase=1 unchanged, cycles=4 preserved
+- Step 14 (idempotency): two renders → `diff /tmp/render1.sha /tmp/render2.sha` empty
+- Step 16 (atomicity): `cargo test ac5_11b` + `ac5_13` + `ac5_14` all pass
+- AC9.6 (verb allowlist): script-internal grep confirms only allowed verbs used
+- Runs in <2 seconds (measured 0.8s on test hardware)
+
+**9.4 — README update**
+- Added "How to test" section: `cargo test`, `bash tests/e2e.sh`, `bash tests/tasks_e2e.sh`
+- Added "Workflow stores" section showing tasks CLI usage and `tasks:start` skill reference
+
+#### AC Verification
+
+| AC | Result | Evidence |
+|----|--------|----------|
+| AC9.1 | PASS | 298 unit tests pass (all phases 1-8); `bash tests/e2e.sh` (clean env) exits 0 |
+| AC9.2 | PASS | `bash tests/e2e.sh` (clean env) exits 0 byte-identically — all 13 steps green |
+| AC9.3 | PASS | `bash tests/tasks_e2e.sh` exits 0 in <2 seconds (well under 30s cap) |
+| AC9.4 | PASS | Step 11: exit code 1; error contains "guard" + "current_cycle"; status=blocked; blocked_reason populated |
+| AC9.5 | PASS | Step 14: `diff /tmp/render1.sha /tmp/render2.sha` empty — two renders byte-identical |
+| AC9.6 | PASS | Step 16 grep: only allowed verbs (next-action, brief, submit-*, render, add, show, resume) in script |
+
+#### Deviations from Plan
+
+- **9.2 companion fix (not in plan):** `run_submit_review` returning non-zero on blocked routing was not explicitly listed in Plan Phase 9 tasks, but is required by AC9.4 ("CLI returns non-zero exit code"). Added `blocked_reason: Option<String>` to `SubmitOutput` and the `bail!` in `run_submit_review` to satisfy the AC. Functionally correct per spec; code-reviewer should note as minor additive change.
+- **Step 16 implementation:** Plan specified `cargo test --test submit_atomicity` (separate integration test file). This test file doesn't exist; atomicity is covered by unit tests `ac5_11b`, `ac5_13`, `ac5_14` in `src/handlers/submit.rs`. Script runs these directly. No behavioral difference.
+- **Step 2 installs observations+gate** per plan spec; not strictly required for tasks workflow but matches the plan's step 2 text verbatim.
 
 ---
 
