@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** EXECUTING_PHASE_1
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
 - **Blocked Reason:** —
@@ -367,7 +367,7 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 - `Commands::Install` stub added (phase 3 will implement) so `stores install` gives a clear "not yet implemented" error instead of "unknown subcommand".
 - The dead_code warning on `Manifest::load()` is expected; Phase 3 will consume it.
 
-**Commits:** (see below)
+**Commits:** `6bcfc08` feat(T001 phase 1): cargo scaffold + stores init
 
 ---
 
