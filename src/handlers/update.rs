@@ -39,9 +39,25 @@ pub fn run(
         matches.get_one::<String>(cli_name).cloned()
     })?;
 
-    // Merge diff into existing
+    // Merge diff into existing; deep-merge Record-typed fields so sibling
+    // sub-fields not present in the diff are preserved.
     let mut merged = existing.clone();
     for (k, v) in &diff {
+        let is_record = schema.fields.iter().any(|f| {
+            f.name == *k && matches!(f.ty, crate::schema::FieldType::Record(_))
+        });
+        if is_record {
+            if let (Some(Value::Object(existing_obj)), Value::Object(new_obj)) =
+                (merged.get(k).cloned(), v)
+            {
+                let mut combined = existing_obj.clone();
+                for (sk, sv) in new_obj {
+                    combined.insert(sk.clone(), sv.clone());
+                }
+                merged.insert(k.clone(), Value::Object(combined));
+                continue;
+            }
+        }
         merged.insert(k.clone(), v.clone());
     }
 
@@ -68,7 +84,15 @@ pub fn run(
             param_idx += 1;
 
             match &field.ty {
-                FieldType::Record(_) | FieldType::List(_) => {
+                FieldType::Record(_) => {
+                    // Use the deep-merged value (not the partial diff) so sibling
+                    // sub-fields preserved in `merged` are written to the DB.
+                    let write_val = merged.get(&field.name).unwrap_or(new_val);
+                    let json_str = serde_json::to_string(write_val)
+                        .unwrap_or_else(|_| "null".to_string());
+                    sql_values.push(rusqlite::types::Value::Text(json_str));
+                }
+                FieldType::List(_) => {
                     let json_str = serde_json::to_string(new_val)
                         .unwrap_or_else(|_| "null".to_string());
                     sql_values.push(rusqlite::types::Value::Text(json_str));
@@ -114,4 +138,76 @@ pub fn run(
 
     println!("Updated {display_id}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use crate::schema::Schema;
+
+    const RECORD_SCHEMA: &str = r#"
+name: rstore
+id_format: "R{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: details
+    type: record
+    fields:
+      - name: notes
+        type: text
+      - name: severity
+        type: text
+"#;
+
+    fn build_cmd(schema: &Schema, verb: &'static str, with_display_id: bool) -> clap::Command {
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd = clap::Command::new(verb);
+        if with_display_id {
+            cmd = cmd.arg(clap::Arg::new("display_id").required(true));
+        }
+        for leaf in &leaves {
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name.clone())
+                    .required(false),
+            );
+        }
+        cmd
+    }
+
+    fn setup() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(RECORD_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    #[test]
+    fn update_record_subfield_preserves_siblings() {
+        let (schema, conn) = setup();
+
+        // INSERT row with both sub-fields populated (cli_name = sub-field name only)
+        let add_cmd = build_cmd(&schema, "add", false);
+        let add_matches = add_cmd
+            .get_matches_from(["add", "--notes", "keep-me", "--severity", "info"]);
+        crate::handlers::add::run(&schema, &conn, &add_matches, Actor::Human).unwrap();
+
+        // UPDATE only severity
+        let upd_cmd = build_cmd(&schema, "update", true);
+        let upd_matches = upd_cmd
+            .get_matches_from(["update", "R001", "--severity", "warning"]);
+        run(&schema, &conn, &upd_matches, Actor::Human).unwrap();
+
+        // Read back and assert notes is preserved, severity is updated
+        let json_str: String = conn
+            .query_row("SELECT details FROM rstore WHERE display_id = 'R001'", [], |r| r.get(0))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["notes"], "keep-me", "notes must be preserved after partial Record update");
+        assert_eq!(v["severity"], "warning", "severity must reflect the update");
+    }
 }

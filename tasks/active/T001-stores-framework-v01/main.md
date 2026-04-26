@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Phase 4 Start:** 2026-04-26
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
@@ -270,6 +270,7 @@ Ship a single Rust binary `stores` that loads YAML schemas, generates SQLite DDL
 | Re-install handling | (a) silent no-op on path-match; (b) reject path-match with "no migrations in v0.1" + reject same-name-different-path collision | **(b) reject both** | Migrations are explicitly out of scope; silent skip hides schema drift. Same-name-different-path is even more dangerous — two folders racing the same table. Both rejected with clear errors. (Resolves m4.) |
 | Validator returns first error vs all errors | (a) bail on first; (b) collect all violations and return them together | (b) collect all | The T3-without-contract case has 3 missing fields; users want them all in one shot, especially under AI-driven retries. |
 | `Bool` storage | (a) INTEGER 0/1; (b) TEXT 'true'/'false' | (a) INTEGER | SQLite idiom; `json_extract` returns numbers cleanly; one less serialization branch. |
+| **Record vs List update merge semantics** | (a) deep-merge sub-keys for Record, replace-wholesale for List and scalars; (b) always replace wholesale | **(a) deep-merge Record, replace-wholesale List/scalar** | Record sub-fields are independent leaves — a user updating `severity` should not lose `notes`. List replacement is intentional (e.g. correcting a tag list means the new value supersedes the old). Scalar replacement is unchanged behaviour. (Fixes M1 in Phase 4 Revise cycle 1.) |
 | Where bundled store schemas live in the repo | (a) `stores/observations/`, `stores/gate/` at repo root; (b) `examples/`; (c) `assets/` embedded into the binary | (a) repo-root `stores/` | Matches the literal DONE_WHEN install commands (`stores install ./stores/observations`); discoverable; no embed-vs-disk divergence. |
 | Error type | (a) `anyhow::Error` everywhere; (b) `thiserror`-derived enums at module boundaries, `anyhow` in CLI | (b) hybrid | The validator's errors are structured (`ValidationError { field_path, rule, message }`) and need to be programmatically aggregated; CLI top-level can flatten via `anyhow`. |
 | Manifest format | (a) YAML (matches schema files); (b) JSON; (c) TOML | (a) YAML | One format for users to edit by hand; symmetric with schema files; serde_yaml already a dep. |
@@ -508,6 +509,13 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
   - **DONE_WHEN:** Phase 4 contributes #4 (`add` returns L001-shaped display_id), #7 (`show` with nested Records), #8 (`list`); sets up #6 (flat leaf args for `triage --verdict T3 --done-when X --scope-in Y --scope-out Z` — Phase 6 wires the lifecycle transition). All four are demonstrably present at this layer; M1 puts #6 at risk for any subsequent partial-Record update but does not block #4/#7/#8.
   - **Status:** Stay at `EXECUTING_PHASE_4` until M1 is fixed. Action items: (1) fix Record sub-field merge in `update.rs`; (2) add a unit test that explicitly asserts `update --severity X` preserves sibling `notes` in `details`; (3) recommit, then re-review.
 - → Details: code-review-phase-4.md
+
+**Revise cycle 1 (2026-04-26):**
+- **Bug fixed (M1):** `src/handlers/update.rs` lines 42–46. Merge loop now deep-merges Record-typed fields: when both `existing[k]` and `diff[k]` are `Value::Object`, sub-keys are merged (existing sub-keys preserved unless the diff provides them). For all other types the existing replace-wholesale behaviour is unchanged. SQL write for Record fields was also updated to serialize the merged value (not the partial diff Object). Net change: +16 LOC to merge block + +1 LOC for `FieldType::Record` split in the SQL writer.
+- **Regression test added:** `handlers::update::tests::update_record_subfield_preserves_siblings` — builds in-memory `rstore` schema with `details { notes: text, severity: text }`, INSERTs row with both sub-fields, UPDATEs only `--severity`, asserts `details.notes == "keep-me"` and `details.severity == "warning"` post-update.
+- **Tests:** 42/42 pass (41 pre-existing + 1 new).
+- **Live repro verified:** `stores kitchen_sink add --notes "keep-me" --severity "info"` → `K001`; `stores kitchen_sink update K001 --severity "warning"`; `stores kitchen_sink show K001` shows `details.notes: keep-me`, `details.severity: warning`.
+- **Commit:** (see git log — fix(T001 phase 4): deep-merge Record updates to preserve sibling sub-fields)
 
 ---
 
