@@ -848,4 +848,182 @@ fields:
             "err: {err}"
         );
     }
+
+    // ---- Task 2.2 AC tests: workflow: opt-in ----
+
+    /// AC2.1: A schema without `workflow:` parses identically to v0.1;
+    /// `schema.workflow.is_none()` and no regression on existing schemas.
+    #[test]
+    fn schema_without_workflow_is_none() {
+        let schema = Schema::from_yaml(FULL_FIXTURE).unwrap();
+        assert!(schema.workflow.is_none(), "v0.1 schema must have workflow == None");
+    }
+
+    /// AC2.2: A schema with a complete `workflow:` block parses and all key
+    /// fields round-trip.
+    #[test]
+    fn schema_with_workflow_parses() {
+        let yaml = r#"
+name: wf_test
+id_format: "WF{:03d}"
+lifecycle:
+  states: [planning, executing, done]
+  transitions: []
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: plan
+    type: record
+    fields:
+      - name: summary
+        type: text
+  - name: cycles
+    type: list_record
+    fields:
+      - name: phase
+        type: integer
+workflow:
+  agent_roles:
+    planner:
+      description: "Creates the plan"
+    executor:
+      description: "Implements the plan"
+  briefing_templates:
+    planner: templates/planner.md.tpl
+    executor: templates/executor.md.tpl
+  render_template: templates/main.md.tpl
+  render_target_path: "tasks/{{status_dir}}/{{display_id}}/main.md"
+  on_state:
+    planning:
+      - dispatch_agent: planner
+    executing:
+      - dispatch_agent: executor
+  submit_targets:
+    submit-plan: plan
+    submit-execute: cycles
+  max_revise_cycles: 3
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let wf = schema.workflow.as_ref().expect("workflow must be Some");
+        assert_eq!(wf.agent_roles.len(), 2);
+        assert!(wf.agent_roles.contains_key("planner"));
+        assert_eq!(
+            wf.briefing_templates["planner"],
+            std::path::PathBuf::from("templates/planner.md.tpl")
+        );
+        assert_eq!(
+            wf.render_target_path.as_deref(),
+            Some("tasks/{{status_dir}}/{{display_id}}/main.md")
+        );
+        assert_eq!(wf.submit_targets["submit-plan"], "plan");
+        assert_eq!(wf.submit_targets["submit-execute"], "cycles");
+        assert_eq!(wf.max_revise_cycles, Some(3));
+    }
+
+    /// AC2.3: A schema referencing an unknown lifecycle state in `on_state` errors
+    /// with that state name in the message.
+    #[test]
+    fn schema_workflow_unknown_on_state_errors() {
+        let yaml = r#"
+name: wf_test
+id_format: "WF{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields: []
+workflow:
+  agent_roles:
+    planner: {}
+  briefing_templates:
+    planner: templates/p.md.tpl
+  on_state:
+    nonexistent_state:
+      - dispatch_agent: planner
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("nonexistent_state"),
+            "err must name the unknown state: {err}"
+        );
+    }
+
+    /// AC2.4: A schema referencing an unknown agent role in DispatchAgent errors clearly.
+    #[test]
+    fn schema_workflow_unknown_dispatch_agent_errors() {
+        let yaml = r#"
+name: wf_test
+id_format: "WF{:03d}"
+lifecycle:
+  states: [planning]
+  transitions: []
+fields: []
+workflow:
+  agent_roles:
+    planner: {}
+  briefing_templates:
+    planner: templates/p.md.tpl
+  on_state:
+    planning:
+      - dispatch_agent: ghost_role
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("ghost_role"),
+            "err must name the unknown role: {err}"
+        );
+    }
+
+    /// AC2.6: submit_targets pointing at non-existent field errors with field name.
+    #[test]
+    fn schema_workflow_submit_target_unknown_field_errors() {
+        let yaml = r#"
+name: wf_test
+id_format: "WF{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields: []
+workflow:
+  agent_roles: {}
+  briefing_templates: {}
+  on_state: {}
+  submit_targets:
+    submit-plan: nonexistent_field
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("nonexistent_field"),
+            "err must name the missing field: {err}"
+        );
+    }
+
+    /// AC2.6: submit_targets["submit-plan"] pointing at a list_record field errors with type info.
+    #[test]
+    fn schema_workflow_submit_plan_wrong_type_errors() {
+        let yaml = r#"
+name: wf_test
+id_format: "WF{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: cycles
+    type: list_record
+    fields:
+      - name: phase
+        type: integer
+workflow:
+  agent_roles: {}
+  briefing_templates: {}
+  on_state: {}
+  submit_targets:
+    submit-plan: cycles
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("submit-plan") && err.to_string().contains("record"),
+            "err must mention submit-plan and record: {err}"
+        );
+    }
 }

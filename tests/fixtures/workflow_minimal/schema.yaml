@@ -1,0 +1,63 @@
+name: wf_tasks
+id_format: "WF{:03d}"
+
+lifecycle:
+  states: [planning, executing, done]
+  transitions:
+    - from: planning
+      to: executing
+      verb: submit-plan
+      actor: ai_autonomous
+    - from: executing
+      to: done
+      verb: submit-execute
+      actor: ai_autonomous
+
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: description
+    type: text
+  - name: status
+    type: text
+  - name: current_phase
+    type: integer
+    actor: framework
+    auto_increment: true
+  - name: current_cycle
+    type: integer
+    actor: framework
+  - name: plan
+    type: record
+    fields:
+      - name: summary
+        type: text
+  - name: cycles
+    type: list_record
+    fields:
+      - name: phase
+        type: integer
+      - name: summary
+        type: text
+
+workflow:
+  agent_roles:
+    planner:
+      description: "Creates the implementation plan"
+    executor:
+      description: "Implements the plan"
+  briefing_templates:
+    planner: templates/planner-brief.md.tpl
+    executor: templates/executor-brief.md.tpl
+  render_template: templates/main.md.tpl
+  render_target_path: "tasks/{{status_dir}}/{{display_id}}-{{slug}}/main.md"
+  on_state:
+    planning:
+      - dispatch_agent: planner
+    executing:
+      - dispatch_agent: executor
+  submit_targets:
+    submit-plan: plan
+    submit-execute: cycles
+  max_revise_cycles: 3

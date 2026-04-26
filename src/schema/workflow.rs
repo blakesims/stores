@@ -219,6 +219,76 @@ impl<'de> Deserialize<'de> for Workflow {
 }
 
 // ---------------------------------------------------------------------------
+// Resolution — path → text
+// ---------------------------------------------------------------------------
+
+impl Workflow {
+    /// Resolve a `Workflow` into a `WorkflowResolved` by reading template files
+    /// from `store_root`.  Called at install time for path-installed stores.
+    pub fn resolve_from_disk(
+        &self,
+        store_root: &std::path::Path,
+    ) -> anyhow::Result<WorkflowResolved> {
+        let mut briefing_templates = BTreeMap::new();
+        for (role, path) in &self.briefing_templates {
+            let full = store_root.join(path);
+            let text = std::fs::read_to_string(&full).map_err(|e| {
+                anyhow::anyhow!(
+                    "workflow: cannot read briefing template '{}' for role '{}': {}",
+                    full.display(),
+                    role,
+                    e
+                )
+            })?;
+            briefing_templates.insert(role.clone(), text);
+        }
+
+        let render_template = self
+            .render_template
+            .as_ref()
+            .map(|path| {
+                let full = store_root.join(path);
+                std::fs::read_to_string(&full).map_err(|e| {
+                    anyhow::anyhow!(
+                        "workflow: cannot read render template '{}': {}",
+                        full.display(),
+                        e
+                    )
+                })
+            })
+            .transpose()?;
+
+        Ok(WorkflowResolved {
+            agent_roles: self.agent_roles.clone(),
+            briefing_templates,
+            render_template,
+            render_target_path: self.render_target_path.clone(),
+            on_state: self.on_state.clone(),
+            submit_targets: self.submit_targets.clone(),
+            max_revise_cycles: self.max_revise_cycles.unwrap_or(3),
+        })
+    }
+
+    /// Build a `WorkflowResolved` from pre-loaded template strings (for bundled
+    /// stores where templates are embedded via `include_str!` at compile time).
+    pub fn resolve_from_strings(
+        &self,
+        briefing_texts: BTreeMap<String, String>,
+        render_text: Option<String>,
+    ) -> WorkflowResolved {
+        WorkflowResolved {
+            agent_roles: self.agent_roles.clone(),
+            briefing_templates: briefing_texts,
+            render_template: render_text,
+            render_target_path: self.render_target_path.clone(),
+            on_state: self.on_state.clone(),
+            submit_targets: self.submit_targets.clone(),
+            max_revise_cycles: self.max_revise_cycles.unwrap_or(3),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
@@ -590,5 +660,69 @@ on_state:
         let w: Workflow = serde_yaml::from_str(yaml).unwrap();
         let actions = w.on_state.get("planning").unwrap();
         assert_eq!(actions[0], StateAction::TransitionTo("executing".to_string()));
+    }
+
+    // ---- Task 2.3+2.4: resolve_from_disk ----
+
+    #[test]
+    fn resolve_from_disk_reads_templates() {
+        // Use the workflow_minimal fixture directory
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/workflow_minimal");
+        let yaml = std::fs::read_to_string(fixture.join("schema.yaml")).unwrap();
+        // Extract the workflow sub-block from the fixture YAML
+        let full: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let wf_yaml = serde_yaml::to_string(full.get("workflow").unwrap()).unwrap();
+        let wf: Workflow = serde_yaml::from_str(&wf_yaml).unwrap();
+        let resolved = wf.resolve_from_disk(&fixture).unwrap();
+        assert!(resolved.briefing_templates.contains_key("planner"));
+        assert!(resolved.briefing_templates.contains_key("executor"));
+        assert!(resolved.briefing_templates["planner"].contains("Planner Briefing"));
+        assert!(resolved.render_template.is_some());
+        assert_eq!(resolved.max_revise_cycles, 3);
+    }
+
+    #[test]
+    fn resolve_from_disk_missing_template_errors() {
+        let yaml = r#"
+agent_roles:
+  planner: {}
+briefing_templates:
+  planner: templates/nonexistent.md.tpl
+on_state: {}
+"#;
+        let wf: Workflow = serde_yaml::from_str(yaml).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let err = wf.resolve_from_disk(tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("nonexistent.md.tpl"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_from_strings_sets_max_revise_cycles_default() {
+        let yaml = r#"
+agent_roles: {}
+briefing_templates: {}
+on_state: {}
+"#;
+        let wf: Workflow = serde_yaml::from_str(yaml).unwrap();
+        let resolved = wf.resolve_from_strings(BTreeMap::new(), None);
+        // default when max_revise_cycles is None
+        assert_eq!(resolved.max_revise_cycles, 3);
+    }
+
+    #[test]
+    fn resolve_from_strings_custom_max_revise_cycles() {
+        let yaml = r#"
+agent_roles: {}
+briefing_templates: {}
+on_state: {}
+max_revise_cycles: 5
+"#;
+        let wf: Workflow = serde_yaml::from_str(yaml).unwrap();
+        let resolved = wf.resolve_from_strings(BTreeMap::new(), None);
+        assert_eq!(resolved.max_revise_cycles, 5);
     }
 }

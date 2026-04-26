@@ -43,6 +43,13 @@ pub fn run(path: &Path) -> Result<()> {
         format!("schema '{}' has leaf-arg collisions", schema.name)
     })?;
 
+    // 3b. If the schema declares a workflow, resolve templates from disk to
+    //     verify they all exist and are readable (AC2.5).
+    if let Some(ref wf) = schema.workflow {
+        wf.resolve_from_disk(&canonical)
+            .with_context(|| format!("workflow template resolution failed for '{}'", schema.name))?;
+    }
+
     // 4. Ensure .stores/ is initialized; open DB
     ensure_initialized()?;
     let db = db_path()?;
