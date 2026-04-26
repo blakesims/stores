@@ -371,8 +371,56 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 
 ---
 
+### Phase 2: Schema parser
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+
+**Files Created:**
+- `src/schema/mod.rs` — `Schema`, `Field`, `FieldType` (with custom Deserialize); `Schema::from_yaml`; full unit test suite
+- `src/schema/actor.rs` — `Actor` enum; custom `Deserialize`; `from_env()`
+- `src/schema/required_when.rs` — `Expr { lhs_path, rhs_literal }`; hand-rolled parser rejecting `!=`, `&&`, `||`, `OR`, double-quoted RHS
+- `src/schema/lifecycle.rs` — `Lifecycle { states, initial_state, transitions }`; `resolved_initial_state()` defaulting to `states[0]`
+- `src/schema/flatten.rs` — `LeafArg`, `leaf_args(schema)`; kebab-case leaf names; uniqueness check naming both paths on collision
+- `src/schema/parse.rs` — re-export shim + error-message test
+- `src/schema/types.rs` — re-export shim (FieldType lives in mod.rs to avoid circular dep)
+- `src/id_format.rs` — `validate(template)`; accepts exactly one `{:0Nd}` placeholder
+
+**Files Modified:**
+- `src/main.rs` — added `pub mod schema;` and `pub mod id_format;`
+
+**ACs:**
+- [x] AC1: Unit tests parse YAML covering every FieldType, required_when, enum, actor, transition
+- [x] AC2: Record `contract` sub-field `done_when` carries required_when on sub-Field, not parent
+- [x] AC3: `"triage.verdict == 'T3'"` → `Expr { lhs_path: ["triage","verdict"], rhs_literal: "T3" }`
+- [x] AC4: Malformed required_when (`a != b`, `a == b OR c == d`) returns error naming unsupported token
+- [x] AC5: Unknown field type / actor returns error pointing at offending key
+- [x] AC6: `leaf_args` for `triage{verdict,notes}` + `contract{done_when,scope_in,scope_out}` → 5 leaves with correct cli_names
+- [x] AC7: `leaf_args` returns error naming both parent paths on collision
+- [x] AC8: `id_format: "L{:03d}"` validates; format-string validation passes
+- [x] AC9: `Lifecycle::initial_state` defaults to `states[0]`; explicit value overrides
+
+**Test count:** 31 tests, all pass (dev + release)
+
+**Deviations:**
+- `FieldType` defined in `mod.rs` rather than `types.rs` to avoid the circular dependency `FieldType::Record(Vec<Field>)` ↔ `Field`. `types.rs` is a re-export shim. No behavioral change.
+- `parse.rs` is a re-export shim; `Schema::from_yaml` lives in `mod.rs` for the same reason. No behavioral change.
+
+**Commits:** TBD (committed below)
+
+---
+
 ## Code Review Log
-_Code-reviewer agent fills this section per phase._
+
+### Phase 1: Cargo scaffold + `stores init`
+
+- **Gate:** PASS
+- **Reviewed:** 2026-04-26 by `code-reviewer`
+- **Commit:** `6bcfc08`
+- **Issues:** 0 critical / 0 major / 3 minor
+- **Summary:** All five Phase 1 ACs verified end-to-end in a fresh tmp dir: `cargo build` clean (one acknowledged `dead_code` warning on `Manifest::load()` — genuine Phase-3-only consumption, not broken design); `cargo install --path .` replaces the binary cleanly without touching `.stores/`; `stores init` creates valid SQLite with WAL persisted in the file header (verified across reopen), and an empty `stores: []` manifest; re-init is idempotent and preserves manifest content even when polluted. Three minor findings: (1) the `args: Vec<String>` catch-all in `main.rs` is throwaway scaffolding that Phase 4 will discard when it switches to the `clap::Command` builder for dynamic subcommand injection — not a clean seam, just expected churn; (2) `db::open` uses `pragma_update` for `journal_mode` which works but silently swallows the return value (defer; file-backed DB exercises it correctly); (3) status messages go to stdout instead of stderr (defer to Phase 4 output-convention work). None gate-blocking. DONE_WHEN #1 fully satisfied. Status: advance to Phase 2.
+- → Details: code-review-phase-1.md
 
 ---
 

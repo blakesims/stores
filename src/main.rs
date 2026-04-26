@@ -1,7 +1,9 @@
 mod cli;
 mod db;
+pub mod id_format;
 mod manifest;
 mod paths;
+pub mod schema;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
