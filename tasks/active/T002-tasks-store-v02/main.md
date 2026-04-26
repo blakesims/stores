@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (executor: Phase 4 complete — next-action + brief verbs)
+- **Last Updated:** 2026-04-26 (code-reviewer: Phase 4 cycle 1 → REVISE; handler `run()` functions have no direct test coverage)
 - **Blocked Reason:** —
 
 ## Task
@@ -1229,6 +1229,21 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Verified actions:** All 4 cycle-1 required actions addressed (C1 fix verified by direct re-probe of the cycle-1 critical; m1 covered with 4 sub-cases per helper; m2 doc tightening explicit about `0`/`false`/`[]` pass-through; m3 TODO parked with two named candidate fixes).
 - **Carry-forward to Phase 6 (informational, not a gate condition):** TODO Phase 6 (engine.rs:129-133) — decide on render-engine caching via profiling. `default` helper now documents that `0`/`false`/`[]` pass through; Phase 6 templates needing null-shape fallback for those types must use `{{#if}}` guards.
 - → Details: `code-review-phase-3.md`
+
+### Phase 4 — cycle 1
+
+- **Gate:** REVISE
+- **Reviewed:** 2026-04-26
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 1 of max 3
+- **Issues:** 2 medium / 5 trivial-or-low
+- **Status next:** EXECUTING_PHASE_4
+- **Summary:** Functional behavior is correct — every AC was verified by direct CLI probe against a fresh `.stores/` install of the workflow_minimal fixture (9-key text + JSON shape exactly right; --for default + override + unknown-error all work; AC4.6 blocked path produces `blocked: true, next_agent: null`; AC4.7 gated at clap layer — plan-review pre-allowed both gating styles). 237 unit tests pass; e2e all 13 steps green. **However**, the new handlers' `run()` functions have ZERO direct test coverage. All AC-related tests in `next_action.rs` and `brief.rs` exercise re-implementations of the handler logic via private helpers (`compute_next_action` for next_action; inline `format!` reconstruction of the bail! template for brief), not the actual `run()` functions. Two consequences: (1) the 9-key JSON / text output is never asserted on the wire — a regression that drops a key would not fail any test; (2) AC4.5's "test asserts the strings planner/plan_reviewer/executor/code_reviewer all appear" is checked against a *copy* of the format string the handler also uses — the actual `bail!` site at brief.rs:66 is dead code from the test suite's perspective. Compile-time evidence: brief.rs has unused `crate::db` and `tempfile::tempdir` imports — staged for handler-level tests the executor never wrote.
+- **Findings:** M1 (medium, no direct handler tests for any of the 7 ACs); M2 (medium, AC4.5 contract test asserts a re-implementation, not the handler); m1 (minor, `next_action::run` calls `stores_dir_for` and discards the result purely to satisfy task wording); m2 (low/latent, `brief::run` will fail for bundled workflow stores because `schema_path` is a `bundled:<name>` sentinel — Phase 6 risk); m3 (trivial, `next_action::run` duplicates `find_next_agent` inline); m4 (trivial, unused test imports in brief.rs); m5 (trivial/info, AC4.7's exact bail! string is unreachable from CLI but acceptable per plan-review note).
+- **Deviation accepted:** `build_context` reserved-column inclusion in `src/render/context.rs` is sound. Reserved keys inserted first, schema fields overwrite on collision (executor's stated semantic). All 24 render tests pass including the byte-for-byte `planner_brief_fixture_renders_correctly` Phase 3 test. The fixture schema's removal of duplicate `status` field is necessary (DDL would reject the duplicate). Note: the collision branch is dead code in practice because DDL rejects schemas declaring reserved-column-named fields.
+- **Required actions (cycle 2):** (a) Add direct handler-level tests for `next_action::run` and `brief::run` covering all 7 ACs — clean refactor is to split each into `compute(...) -> Result<Output>` + thin `run()` printer, then assert on structured `Output`; (b) Either remove `let _ = stores_dir_for(schema.scope)?` at next_action.rs:72 or make it functional; (c) Delete unused `crate::db`/`tempfile::tempdir` imports in brief.rs (or write the missing DB-backed tests, preferred per (a)). Optional: refactor next_action::run to call find_next_agent (m3); add TODO at brief.rs:107 for the bundled-store gap (m2).
+- **Carry-forward to Phase 5:** The submit-handler refactor pattern (compute + thin run) from M1 should be the default shape for all four submit verbs. The fixture's `submit_targets[submit-plan]` and `auto_increment: true` on `current_phase` were stripped in Phase 4 and must be re-added if Phase 5 tests require them. P2-M1 (WorkflowResolved threading) should resolve `brief.rs`'s disk-read path in m2.
+- → Details: `code-review-phase-4.md`
 
 ---
 
