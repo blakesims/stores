@@ -407,7 +407,7 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 - `FieldType` defined in `mod.rs` rather than `types.rs` to avoid the circular dependency `FieldType::Record(Vec<Field>)` ↔ `Field`. `types.rs` is a re-export shim. No behavioral change.
 - `parse.rs` is a re-export shim; `Schema::from_yaml` lives in `mod.rs` for the same reason. No behavioral change.
 
-**Commits:** TBD (committed below)
+**Commits:** `169480f` feat(T001 phase 2): YAML schema parser with Record sub-field flattening
 
 ---
 
