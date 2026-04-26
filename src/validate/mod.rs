@@ -73,15 +73,62 @@ pub fn validate(
                 validate_field(sub, entry, actor_entry, &parent_path, &schema.default_actor, invoker, &mut errors);
             }
         }
-        // TODO(phase-5): recurse into ListRecord sub-fields so that per-leaf
-        // validation rules (required, enum, pattern, actor) fire on list element
-        // fields.  Currently a ListRecord's element fields are stored as opaque
-        // JSON TEXT and the per-field walker never descends into them.  Phase 5's
-        // submit handlers write into ListRecord cells (e.g. cycles[].executor.summary)
-        // and will need this walk to enforce required/actor rules on those writes.
-        // The current behaviour (Phase 1): required fields inside a ListRecord
-        // element do NOT produce validation errors — this is intentional for now
-        // because Phase 1 has no submit path that targets individual list elements.
+
+        // Phase 5 (P1-M2 closed): recurse into ListRecord sub-fields.
+        // For each element in the list, build a flat sub-entry and validate each sub-field.
+        // The sub-field path for lookup uses just the sub-field name (root of elem_entry);
+        // the error path is prefixed with the list field name for readable diagnostics.
+        // Actor checks use diff-scoped semantics: if the actor_entry's list doesn't
+        // contain an element at this index, actor checks are skipped for that element.
+        if let FieldType::ListRecord(sub_fields) = &field.ty {
+            let list_val = entry.get(&field.name);
+            let actor_list_val = actor_entry.get(&field.name);
+
+            if let Some(serde_json::Value::Array(elements)) = list_val {
+                for (elem_idx, elem) in elements.iter().enumerate() {
+                    if let serde_json::Value::Object(elem_map) = elem {
+                        // Flat elem-level entry: lookup uses just the sub-field name
+                        let elem_entry: EntryMap = elem_map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+
+                        // Corresponding actor-scoped elem-level entry
+                        let actor_elem_entry: EntryMap = match actor_list_val {
+                            Some(serde_json::Value::Array(actor_elems)) => {
+                                if let Some(serde_json::Value::Object(ae)) = actor_elems.get(elem_idx) {
+                                    ae.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                                } else {
+                                    BTreeMap::new() // not in diff → skip actor checks
+                                }
+                            }
+                            _ => BTreeMap::new(), // list not in diff → skip actor checks
+                        };
+
+                        // parent_path=[] so field_path = [sub.name]; validate_field
+                        // uses elem_entry for lookup (correct — elem is the root).
+                        // But we want errors to show "field_name.sub_name" not just
+                        // "sub_name", so we rewrite paths after collection.
+                        let before = errors.len();
+                        for sub in sub_fields {
+                            validate_field(
+                                sub,
+                                &elem_entry,
+                                &actor_elem_entry,
+                                &[], // no parent — elem_entry is flat at sub-field level
+                                &schema.default_actor,
+                                invoker,
+                                &mut errors,
+                            );
+                        }
+                        // Prefix all newly added errors with the list field name
+                        for err in errors[before..].iter_mut() {
+                            err.field_path.insert(0, field.name.clone());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if errors.is_empty() {
@@ -447,16 +494,16 @@ fields:
         );
     }
 
-    // ---- M2: ListRecord sub-fields are NOT validated in Phase 1 (pinning test) ----
+    // ---- P1-M2 closed in Phase 5: ListRecord sub-fields ARE now validated ----
 
-    /// Pins the current Phase-1 behaviour: a `required: true` field inside a
-    /// `list_record` element does NOT trigger a validation error.
+    /// Phase 5 added the ListRecord walker.  A `required: true` field inside a
+    /// `list_record` element now triggers a validation error when the element
+    /// is present but the sub-field is missing.
     ///
-    /// TODO(phase-5): When Phase 5 adds the ListRecord walker, this test's
-    /// expectation will INVERT from `unwrap()` to `unwrap_err()`.  The change
-    /// will be visible here, making the Phase-5 diff obvious.
+    /// (This test was pinned as `list_record_required_sub_field_not_validated_phase1`
+    /// with `unwrap()` expectation during Phase 1.  Phase 5 inverts it to `unwrap_err()`.)
     #[test]
-    fn list_record_required_sub_field_not_validated_phase1() {
+    fn list_record_required_sub_field_validated_phase5() {
         const LR_SCHEMA: &str = r#"
 name: items
 id_format: "X{:03d}"
@@ -483,8 +530,67 @@ fields:
             ("title", str_val("hello")),
             ("entries", serde_json::json!([{}])), // element missing required `note`
         ]);
-        // Phase 1: no error (ListRecord sub-fields skipped).
+        // Phase 5: error expected (ListRecord sub-fields are now walked).
         validate(&s, &entry, Op::Add, Actor::Human)
-            .expect("Phase 1: ListRecord required sub-field not validated — expected no error");
+            .expect_err("Phase 5: ListRecord required sub-field must produce validation error");
+    }
+
+    #[test]
+    fn list_record_required_sub_field_present_passes() {
+        const LR_SCHEMA: &str = r#"
+name: items
+id_format: "X{:03d}"
+default_actor: ~
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: entries
+    type: list_record
+    fields:
+      - name: note
+        type: text
+        required: true
+"#;
+        let s = Schema::from_yaml(LR_SCHEMA).unwrap();
+        let entry = entry_from(&[
+            ("title", str_val("hello")),
+            ("entries", serde_json::json!([{"note": "present"}])), // required field present
+        ]);
+        validate(&s, &entry, Op::Add, Actor::Human)
+            .expect("list_record element with required sub-field present should pass");
+    }
+
+    #[test]
+    fn list_record_empty_list_passes() {
+        const LR_SCHEMA: &str = r#"
+name: items
+id_format: "X{:03d}"
+default_actor: ~
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: entries
+    type: list_record
+    fields:
+      - name: note
+        type: text
+        required: true
+"#;
+        let s = Schema::from_yaml(LR_SCHEMA).unwrap();
+        // Empty list — no elements to validate, so no required errors
+        let entry = entry_from(&[
+            ("title", str_val("hello")),
+            ("entries", serde_json::json!([])),
+        ]);
+        validate(&s, &entry, Op::Add, Actor::Human)
+            .expect("empty list_record should pass even with required sub-fields");
     }
 }
