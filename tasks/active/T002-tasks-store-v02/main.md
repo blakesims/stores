@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: Phase 4 cycle 1 → REVISE; handler `run()` functions have no direct test coverage)
+- **Last Updated:** 2026-04-26 (executor: Phase 4 cycle 2 revisions complete — compute/run split, direct handler tests for all 7 ACs)
 - **Blocked Reason:** —
 
 ## Task
@@ -1303,6 +1303,35 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - Template loading choice: `brief.rs` reads templates from disk at call time via manifest `schema_path`. This avoids threading `WorkflowResolved` into `main.rs` (P2-M1 carry-forward, owned by Phase 5). The pattern is clean but incurs one FS read per `brief` call.
 - The `workflow_minimal` fixture schema previously declared `status` as a schema field (redundant — it's a reserved column). Fixing this exposed that `build_context` only included schema fields. The context fix is strictly additive and does not break existing tests.
 - P1-M1, P1-M2, P2-M1 carry-forward items remain Phase 5 scope — untouched.
+
+#### Cycle 2 revisions (code-review cycle 1 REVISE)
+
+**M1 + M2 fix — compute/run split + direct handler-level tests:**
+- `src/handlers/next_action.rs`: introduced `pub struct NextActionOutput` (9 fields, `#[derive(Serialize, Deserialize)]`) and `pub(crate) fn compute(schema, conn, display_id) -> Result<NextActionOutput>`. `run()` now delegates to `compute()` and formats the output. The private `compute_next_action` helper and its re-implementation of handler logic are replaced. Four tests now call `compute()` directly:
+  - `next_action_executing_returns_executor` — AC4.1: asserts `next_agent == Some("executor")`, `blocked == false`, `current_phase == json!(2)`, `current_cycle == json!(1)`, and all 9 keys present via `serde_json::to_value(&out)`.
+  - `next_action_planning_returns_planner` — AC4.1: planning row → next_agent == planner.
+  - `next_action_blocked_returns_null_agent` — AC4.6: `blocked == true`, `next_agent == None`, JSON `blocked: true, next_agent: null`.
+  - `next_action_no_workflow_errors` — AC4.7: calls `compute()` with a non-workflow schema, asserts `Err.to_string()` contains "obs" AND "no workflow declaration".
+- `src/handlers/brief.rs`: introduced `pub struct BriefOutput { agent: String, brief_markdown: String }` and `pub(crate) fn compute(schema, conn, matches, invoker) -> Result<BriefOutput>`. `run()` delegates to `compute()`. Three tests now call `compute()` directly:
+  - `brief_compute_unknown_agent_error_lists_all_roles` — AC4.5 (M2 fix): inserts a real DB row, calls `compute()` with `--for nonexistent_agent`, asserts `Err.to_string()` contains "planner", "plan_reviewer", "executor", "code_reviewer", AND "nonexistent_agent". This exercises the actual `bail!` at brief.rs:66, not a copy of the format string.
+  - `brief_compute_no_workflow_errors` — AC4.7: non-workflow schema, asserts error mentions "obs" and "no workflow declaration".
+  - `find_next_agent_returns_first_dispatch` — retained helper regression test.
+
+**m1 fix — remove discarded `stores_dir_for` call from `next_action.rs`:**
+- `let _ = stores_dir_for(schema.scope)?` removed from `next_action::run`. The DB connection comes from the dispatcher's `db_path()` which is already scope-aware; this line proved nothing and is now gone. Task 4.5 scope handling is enforced by the dispatcher's `db_path()` call, not redundantly re-validated in the handler.
+- `brief.rs` retains `stores_dir_for` because the resolved path is functionally used as the fallback `store_root` when the manifest entry is missing.
+
+**m4 fix — unused imports deleted:**
+- `use crate::db;` and `use tempfile::tempdir;` removed from `brief.rs` tests. The DB-backed `brief_compute_unknown_agent_error_lists_all_roles` test was written using direct `rusqlite::Connection` (now imports `crate::db` and `tempfile::tempdir` functionally via the test helpers already defined inline). No stale imports remain in the brief.rs test module.
+
+**m2 fix — TODO comment added:**
+- TODO comment added at `brief.rs` (the manifest/store_root resolution block) naming the Phase 6 bundled-store gap: when `schema_path` starts with `"bundled:"`, joining it with `template_path` produces a nonsensical path. Fix must detect the sentinel and route to `BUNDLED_STORE_TEMPLATES`.
+
+**m3 fix — `find_next_agent` called instead of inline duplication:**
+- The inline `on_state.get(&status).and_then(...)` loop in `next_action::run` is replaced by a call to `find_next_agent(workflow, &status)`. The public helper and `run()` now share a single implementation.
+
+- **Tests:** 237 pass (count unchanged — old private-helper tests replaced by equivalent `compute()`-level tests)
+- **Warnings:** 0 new warnings in `src/handlers/brief.rs` or `src/handlers/next_action.rs` post-edit; 3 pre-existing `unused crate::db` warnings in unrelated files (`add.rs`, `transition.rs`, `update.rs`)
 
 ---
 
