@@ -343,6 +343,9 @@ impl Schema {
         // Validate auto_increment fields (Task 1.2)
         validate_auto_increment(&fields)?;
 
+        // Validate transition ambiguity (Task 1.10)
+        raw.lifecycle.validate_transition_ambiguity()?;
+
         Ok(Schema {
             name: raw.name,
             id_format: raw.id_format,
