@@ -22,6 +22,10 @@ pub static BUNDLED_SKILLS: &[(&str, &str)] = &[
         "task:next",
         include_str!("../../skills/task:next/SKILL.md"),
     ),
+    (
+        "tasks:start",
+        include_str!("../../skills/tasks:start/SKILL.md"),
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -299,15 +303,33 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // BUNDLED_SKILLS must contain all 4 expected names
+    // BUNDLED_SKILLS must contain all expected names
     // -----------------------------------------------------------------------
     #[test]
-    fn all_four_skills_bundled() {
+    fn all_skills_bundled() {
         let names: Vec<&str> = BUNDLED_SKILLS.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"observation:log"));
         assert!(names.contains(&"observation:triage"));
         assert!(names.contains(&"gate:walk"));
         assert!(names.contains(&"task:next"));
-        assert_eq!(names.len(), 4);
+        assert!(names.contains(&"tasks:start"));
+        assert_eq!(names.len(), 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // tasks:start install writes byte-identical content (AC8.1)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tasks_start_install_byte_identical() {
+        let base = make_tmp_base();
+        let name = "tasks:start";
+        install_to(name, &base, false).unwrap();
+
+        let dest = skill_path(&base, name);
+        assert!(dest.exists(), "SKILL.md should exist after install");
+
+        let on_disk = fs::read_to_string(&dest).unwrap();
+        let bundled = BUNDLED_SKILLS.iter().find(|(n, _)| *n == name).unwrap().1;
+        assert_eq!(on_disk, bundled, "installed content must be byte-identical to bundled");
     }
 }
