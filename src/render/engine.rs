@@ -9,7 +9,7 @@
 use anyhow::Result;
 use handlebars::{
     Context, Handlebars, Helper, HelperDef, HelperResult, JsonRender, Output, RenderContext,
-    RenderError, RenderErrorReason, ScopedJson,
+    RenderError, ScopedJson,
 };
 use serde_json::{json, Value};
 
@@ -43,15 +43,14 @@ impl HelperDef for GtHelper {
         _: &'rc Context,
         _: &mut RenderContext<'reg, 'rc>,
     ) -> std::result::Result<ScopedJson<'rc>, RenderError> {
-        let a = h
-            .param(0)
-            .and_then(|p| p.value().as_f64())
-            .ok_or_else(|| RenderError::from(RenderErrorReason::ParamNotFoundForIndex("gt", 0)))?;
-        let b = h
-            .param(1)
-            .and_then(|p| p.value().as_f64())
-            .ok_or_else(|| RenderError::from(RenderErrorReason::ParamNotFoundForIndex("gt", 1)))?;
-        Ok(ScopedJson::Derived(json!(a > b)))
+        // Missing or non-numeric param → false (never error). Mirrors EqHelper
+        // leniency: render must never crash on partial DB rows (plan task 3.4).
+        let a = h.param(0).and_then(|p| p.value().as_f64());
+        let b = h.param(1).and_then(|p| p.value().as_f64());
+        match (a, b) {
+            (Some(a), Some(b)) => Ok(ScopedJson::Derived(json!(a > b))),
+            _ => Ok(ScopedJson::Derived(json!(false))),
+        }
     }
 }
 
@@ -64,19 +63,20 @@ impl HelperDef for LtHelper {
         _: &'rc Context,
         _: &mut RenderContext<'reg, 'rc>,
     ) -> std::result::Result<ScopedJson<'rc>, RenderError> {
-        let a = h
-            .param(0)
-            .and_then(|p| p.value().as_f64())
-            .ok_or_else(|| RenderError::from(RenderErrorReason::ParamNotFoundForIndex("lt", 0)))?;
-        let b = h
-            .param(1)
-            .and_then(|p| p.value().as_f64())
-            .ok_or_else(|| RenderError::from(RenderErrorReason::ParamNotFoundForIndex("lt", 1)))?;
-        Ok(ScopedJson::Derived(json!(a < b)))
+        // Missing or non-numeric param → false (never error). Mirrors EqHelper
+        // leniency: render must never crash on partial DB rows (plan task 3.4).
+        let a = h.param(0).and_then(|p| p.value().as_f64());
+        let b = h.param(1).and_then(|p| p.value().as_f64());
+        match (a, b) {
+            (Some(a), Some(b)) => Ok(ScopedJson::Derived(json!(a < b))),
+            _ => Ok(ScopedJson::Derived(json!(false))),
+        }
     }
 }
 
-/// `{{default value "fallback"}}` — emits fallback when value is missing / null / empty.
+/// `{{default value "fallback"}}` — emits fallback when value is missing / null / empty string.
+/// Note: `0`, `false`, and empty arrays/objects are NOT treated as empty and pass through as-is.
+/// Template authors that need those cases should guard with `{{#if}}` instead.
 fn helper_default(
     h: &Helper<'_>,
     _: &Handlebars<'_>,
@@ -125,6 +125,12 @@ fn helper_default(
 ///
 /// - Missing keys render as empty string (Handlebars default, strict mode off).
 /// - Returns `Err` only on template syntax errors, not on missing data.
+///
+/// # Performance note (TODO Phase 6)
+/// A fresh `Handlebars` registry and four helpers are constructed on every call.
+/// If profiling shows this is a bottleneck for bulk renders, consider a
+/// `OnceLock<Handlebars<'static>>` or a `RenderEngine` struct that wraps a
+/// reusable registry (helpers hold no per-render state).
 pub fn render_template(text: &str, ctx: &Value) -> Result<String> {
     let mut hbs = Handlebars::new();
     // Strict mode OFF — missing keys → empty string, never an error.
@@ -273,6 +279,78 @@ mod tests {
         let tpl = "{{#if (lt a b)}}yes{{else}}no{{/if}}";
         let ctx = json!({"a": 5, "b": 3});
         let out = render_template(tpl, &ctx).unwrap();
+        assert_eq!(out, "no");
+    }
+
+    // Regression: gt missing first arg → false, no error (plan task 3.4 contract).
+    #[test]
+    fn gt_helper_missing_key_returns_false() {
+        // Missing top-level key on first arg.
+        let out = render_template(
+            "{{#if (gt missing_key 3)}}yes{{else}}no{{/if}}",
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(out, "no");
+
+        // Missing key on second arg.
+        let out = render_template(
+            "{{#if (gt 5 missing_key)}}yes{{else}}no{{/if}}",
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(out, "no");
+
+        // Non-numeric value (string) → false.
+        let out = render_template(
+            "{{#if (gt val 3)}}yes{{else}}no{{/if}}",
+            &json!({"val": "hello"}),
+        )
+        .unwrap();
+        assert_eq!(out, "no");
+
+        // Both keys missing → false.
+        let out = render_template(
+            "{{#if (gt a b)}}yes{{else}}no{{/if}}",
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(out, "no");
+    }
+
+    // Regression: lt missing first arg → false, no error (plan task 3.4 contract).
+    #[test]
+    fn lt_helper_missing_key_returns_false() {
+        // Missing top-level key on first arg.
+        let out = render_template(
+            "{{#if (lt missing_key 3)}}yes{{else}}no{{/if}}",
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(out, "no");
+
+        // Missing key on second arg.
+        let out = render_template(
+            "{{#if (lt 1 missing_key)}}yes{{else}}no{{/if}}",
+            &json!({}),
+        )
+        .unwrap();
+        assert_eq!(out, "no");
+
+        // Non-numeric value (string) → false.
+        let out = render_template(
+            "{{#if (lt val 3)}}yes{{else}}no{{/if}}",
+            &json!({"val": "hello"}),
+        )
+        .unwrap();
+        assert_eq!(out, "no");
+
+        // Both keys missing → false.
+        let out = render_template(
+            "{{#if (lt a b)}}yes{{else}}no{{/if}}",
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(out, "no");
     }
 }
