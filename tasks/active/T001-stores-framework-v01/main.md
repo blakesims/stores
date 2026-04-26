@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_7
 - **Phase 4 Start:** 2026-04-26
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
@@ -617,6 +617,21 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
   - **DONE_WHEN:** Phase 5 contributes #5 partially (validator gates correctly; full integration uses `observations` store in Phase 6), #11 directly (actor mismatch under CLAUDECODE without `--invoker` produces documented error), #13 directly (invoker resolution via `--invoker` flag → CLAUDECODE env fallback; field-level actor enforcement). Sets up #6 (validator ready for Phase 6's transition handler).
   - **Status:** Advance to Phase 6 — `EXECUTING_PHASE_6`.
 - → Details: code-review-phase-5.md
+
+---
+
+### Phase 6: Lifecycle transitions + bundled `observations` store
+
+- **Gate:** PASS
+- **Reviewed:** 2026-04-26 by `code-reviewer`
+- **Commit:** `400ab8b`
+- **Issues:** 0 critical / 0 major / 4 minor
+- **Summary:** All 10 Phase 6 ACs verified end-to-end against the bundled `observations` store in a fresh tmp dir. `cargo test` 83/83 pass (matches executor claim — 4 new in `handlers::transition::tests`: state-machine reject, T3-without-contract fail, T3-with-contract success, resolve-from-triaged success). Live E2E walks the full marquee DONE_WHEN flow: (AC1) `stores install ./stores/observations` registers the store; `sqlite3 ".schema observations"` shows reserved cols + `summary`/`body`/`triage`/`contract`/`tags` (closes #2). (AC2) `stores observations add --summary "thing broke"` → `L001`, status=`open` (initial_state defaults to states[0]; closes #4). (AC3) `stores observations triage L001 --verdict T3` (no contract) → exit 1 with three errors aggregated in one pass: `contract.done_when`, `contract.scope_in`, `contract.scope_out` each citing `(because triage.verdict == 'T3')` — required_when rule named (closes #5). (AC4) Full triage with `--done-when X --scope-in Y --scope-out Z` succeeds; status moves to `triaged` (closes #6). (AC5) `show L001` text mode renders Records nested under `triage:` and `contract:` blocks; `--json` validates with `python3 -m json.tool` and contains both as **real nested JSON objects, not escaped strings** — M2 from cycle 1 ties off here (closes #7). (AC6) `list` shows the row; `--json` list emits proper nested array (closes #8). (AC7) Re-triage after `triaged` is rejected with `Error: cannot triage: row is in state 'triaged', expected 'open'` — both states named. (AC8) `CLAUDECODE=1 stores observations resolve L001` succeeds (transition actor `ai_autonomous` matches CLAUDECODE-resolved invoker); `env -u CLAUDECODE` → resolve fails with `transition 'resolve' requires actor 'ai_autonomous'; invoker is 'human'`. (AC10) `stores observations --help` lists 7 verbs: `add show list update triage resolve wont_fix` — clean codegen. The transition handler (`transition.rs`) reuses the Phase 4 cycle-2 deep-merge pattern correctly: Record-typed fields preserve sibling sub-keys; type-mismatch guard `(Some(Value::Object(_)), Value::Object(_))` falls through safely to wholesale insert; validator runs before SQL execute (no DB write on validation failure); single-statement UPDATE makes status + diff fields + updated_* atomic. Schema YAML correctness verified: `required_when` declared on each contract sub-field (NOT parent Record); 4 states / 3 transitions with declared actors; `id_format: "L{:03d}"`; `default_actor: ai_with_human` lets Human call `add` even though no field-level actor is declared. Multi-store coexistence still works (verified by installing kitchen_sink alongside observations into the same DB) — Phase 7's `gate` install path is unbroken. The `wont_fix` underscore-verb works in clap natively (no kebab needed); `--invoker human` is honored by transition verbs (verified `updated_by=human` after explicit override). Both executor deviations are defensible: D1 (`build_leaf_cmd_owned` owned-String variant — same `clap "string"` feature pattern as Phase 4) and D2 (`wont_fix` underscore parses natively in clap).
+  - **4 Minors:** (m1) Base-verb collision detection (`dynamic.rs:75`) is at parse-tree-build time only — emits stderr warning and silently skips colliding transition verbs; should be promoted to install-time hard rejection so users learn at install rather than first-CLI-call. v0.1 bundled stores (`triage`/`resolve`/`wont_fix`) don't trigger it. Deferrable. (m2) No de-duplication across transition verbs themselves — two transitions with the same verb would silently overwrite (clap level). Bundled schema doesn't trigger this; deferrable. (m3) `--invoker bogus` falls through silently to env detection (`dispatch.rs:67-74` `_ => {}` arm) instead of erroring on unknown values. Phase 5 m1c2 carried; not introduced here. Deferrable. (m4) Reserved-column-name install-time check (Phase 2 m5 / 3 m2 / 4 m5 / 5 m3) still not caught at install — `is_reserved` list lives in `dynamic.rs` only. Phase 6 didn't touch this; carries forward.
+  - **Forward-compat for Phase 7 (gate store):** Phase 6 didn't touch the actor enforcement engine — `validate::actor::check_actor` and `check_transition_actor` are unchanged from Phase 5. The `probe_store` test in Phase 5 already exercised `actor: human` field-level enforcement; Phase 7 just ships the schema. Per-transition verb codegen now generates uniformly, so `gate answer G001 --answer hard --invoker human` and `gate cancel G001 --invoker ai_autonomous` will work for free once `gate/schema.yaml` is dropped in. Multi-store coexistence verified empirically with two installed stores; manifest layout accommodates both cleanly.
+  - **DONE_WHEN:** Phase 6 fully closes #2, #4, #5, #6, #7, #8 (all six per the plan). Sets up #3 (multi-store coexistence — final verification with `gate` is Phase 7's responsibility).
+  - **Status:** Advance to Phase 7 — `EXECUTING_PHASE_7`.
+- → Details: code-review-phase-6.md
 
 ---
 
