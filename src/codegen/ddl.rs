@@ -188,4 +188,49 @@ mod tests {
         );
         assert_eq!(ddl, expected, "DDL snapshot mismatch.\nGot:\n{ddl}");
     }
+
+    /// AC1.11 (Task 1.11): A field with actor: framework produces the same DDL column
+    /// type as an equivalent field without the actor constraint.  Storage is type-only;
+    /// actor scoping is enforced by the validator, not the database.
+    #[test]
+    fn framework_actor_field_ddl_same_as_non_framework() {
+        // Schema with claimed_by (text, actor: framework) and title (text, no actor)
+        let yaml_framework = r#"
+name: tasks
+id_format: "T{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: claimed_by
+    type: text
+    actor: framework
+  - name: current_phase
+    type: integer
+    actor: framework
+"#;
+        let yaml_no_actor = r#"
+name: tasks
+id_format: "T{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: claimed_by
+    type: text
+  - name: current_phase
+    type: integer
+"#;
+        let schema_fw = Schema::from_yaml(yaml_framework).unwrap();
+        let schema_no = Schema::from_yaml(yaml_no_actor).unwrap();
+        let ddl_fw = ddl_for(&schema_fw);
+        let ddl_no = ddl_for(&schema_no);
+        assert_eq!(
+            ddl_fw, ddl_no,
+            "framework-actor fields must produce identical DDL to non-actor fields.\nFW:\n{ddl_fw}\nNO:\n{ddl_no}"
+        );
+        // Specifically check that claimed_by is TEXT (not modified by actor attribute)
+        assert!(ddl_fw.contains("claimed_by TEXT"), "claimed_by must be TEXT: {ddl_fw}");
+        assert!(ddl_fw.contains("current_phase INTEGER"), "current_phase must be INTEGER: {ddl_fw}");
+    }
 }
