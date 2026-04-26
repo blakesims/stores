@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** PLANNING
+- **Status:** READY
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
 - **Blocked Reason:** —
@@ -31,7 +31,7 @@ This task is the framework, with **observations** as the worked example store. O
 6. `stores observations triage L001 --verdict T3 --done-when "X works after fix" --scope-in "backend handler" --scope-out "frontend"` — succeeds.
 7. `stores observations show L001` — prints the entry, contract embedded.
 8. `stores observations list` — prints all entries.
-9. `stores gate add --type decision --question "Soft or hard delete on cleanup?" --options "soft|hard" --task-ref T042` — succeeds; returns `G001`.
+9. `stores gate add --type decision --question "Soft or hard delete on cleanup?" --options "soft|hard" --task-ref L001` — succeeds; returns `G001`. (`task_ref` points at the observation just created — v0.1 has no task store yet; the field accepts any display_id from any installed store, so the demo uses L001 to make the JOIN in step #12 return rows.)
 10. `stores gate answer G001 --answer hard --invoker human` — succeeds (the `--invoker human` is required because the `answer` field's actor is `human`; without override it would be auto-detected as `ai_autonomous` from `$CLAUDECODE` and rejected).
 11. `stores gate answer G001 --answer hard` (without `--invoker`) under `CLAUDECODE=1` — **fails** with a clear actor-mismatch error.
 12. `sqlite3 .stores/db.sqlite "select o.display_id, o.status, json_extract(o.triage,'$.verdict'), g.display_id from observations o left join gate g on g.task_ref = o.display_id"` — returns rows, demonstrating both stores live in one DB and cross-store SQL JOIN works.
@@ -93,18 +93,247 @@ This task is the framework, with **observations** as the worked example store. O
 ---
 
 ## Plan
-_Planner agent fills this section._
+
+### Objective
+
+Ship a single Rust binary `stores` that loads YAML schemas, generates SQLite DDL + a `clap` subcommand tree per installed store, and enforces required / required_when / regex / per-field actor rules at insert time. Two stores (`observations`, `gate`) ship in-tree as bundled fixtures and together prove all 13 DONE_WHEN items end-to-end. Record-typed fields project their leaf sub-fields as flat top-level CLI flags so the literal demo path (`--verdict`, `--done-when`, `--scope-in`, `--scope-out`) works without dotted args.
+
+### Scope
+
+- **In Scope:** Cargo binary crate `stores`; YAML schema parser; in-memory typed schema model shared by validator + DDL codegen + CLI codegen; `init` / `install` / `<store> {add,show,list,update,<transition>}` commands; insert-time validator (required, enum, regex, `required_when` with the restricted single-equality grammar, per-field actor); hybrid identity (PK + `id_format`); single SQLite at `.stores/db.sqlite` via `rusqlite` bundled; manifest at `.stores/manifest.yaml`; `$CLAUDECODE` env detection + `--invoker` override; bundled `observations` and `gate` stores as YAML schema files in repo; `--<field>-from-file` / stdin inputs for long markdown; `--json` output flag; `show`/`list` round-trip JSON columns back into nested structures; README walking the demo path.
+- **Out of Scope:** third store (`runs`), skill-side dependency declarations, schema migrations, cross-repo identity, sync TTY ask_user, distribution beyond local folder paths, HTTP API, external read-direct-from-SQLite (reads via CLI only).
+
+### Phases
+
+| Phase | Description | Estimated Complexity |
+|-------|-------------|---------------------|
+| 1 | Cargo scaffold + `stores init` (manifest + empty SQLite) | Low |
+| 2 | Schema parser (YAML → typed Rust model, including Record sub-field semantics) | Medium |
+| 3 | `stores install <path>`: DDL codegen + manifest registration | Medium |
+| 4 | Dynamic CLI codegen + `add` / `show` / `list` / `update` verbs (Record-flattening + List parsing) | High |
+| 5 | Enforcement engine: required / required_when (cross-Record paths) / regex / per-field actor | High |
+| 6 | Lifecycle transitions + bundled `observations` store (T3 contract gate) | Medium |
+| 7 | Bundled `gate` store + human-only actor enforcement demo | Medium |
+| 8 | End-to-end demo verification, `--json` polish, README | Low |
+
+### Phase Details
+
+#### Phase 1: Cargo scaffold + `stores init`
+
+- **Objective:** Stand up the binary crate, wire `clap`, get `stores init` creating `.stores/db.sqlite` and `.stores/manifest.yaml` in the cwd. No schemas yet.
+- **Files to create:**
+  - `Cargo.toml` (workspace-less single-binary; deps: `clap` v4 with `derive`, `serde` + `serde_yaml`, `rusqlite` with `bundled`, `regex`, `anyhow`, `thiserror`, `serde_json`)
+  - `src/main.rs` (entry point; `clap::Command` with top-level `init` subcommand and a placeholder for dynamically added store subcommands)
+  - `src/cli/mod.rs`, `src/cli/init.rs` (the `init` handler)
+  - `src/manifest.rs` (`Manifest { stores: Vec<InstalledStore> }`, load/save to `.stores/manifest.yaml`)
+  - `src/db.rs` (open/create connection, set WAL pragma)
+  - `src/paths.rs` (resolve `.stores/` under cwd; helpers)
+  - `.gitignore` (target/, .stores/)
+- **Acceptance Criteria:**
+  - [ ] `cargo build` succeeds.
+  - [ ] `cargo install --path .` installs a `stores` binary.
+  - [ ] **Re-running `cargo install --path .` after a code change replaces the binary cleanly without touching `.stores/`** (resolves minor m1).
+  - [ ] `stores init` in an empty dir creates `.stores/db.sqlite` (valid SQLite file, WAL on) and `.stores/manifest.yaml` (empty `stores: []`). **(DONE_WHEN #1)**
+  - [ ] Re-running `stores init` is idempotent (does not error, does not clobber existing manifest).
+
+#### Phase 2: Schema parser (YAML → typed Rust model)
+
+- **Objective:** Parse a store-schema YAML file into a single canonical in-memory model that downstream phases (DDL codegen, CLI codegen, validator) all consume. Decide field-type → SQLite-column-type mapping here. **Lock in the Record-sub-field semantics that drive both flat CLI args and required_when enforcement.**
+- **Files to create:**
+  - `src/schema/mod.rs` — public `Schema { name, id_format, fields, lifecycle, transitions }` plus `Field { name, ty, required, required_when, pattern, actor, enum_values, description }`. Crucially, when `ty == Record(Vec<Field>)`, **each inner `Field` is a full `Field` struct** that may carry its own `required`, `required_when`, `pattern`, and `actor` — Record sub-fields are first-class Fields, not opaque blobs.
+  - `src/schema/types.rs` — `FieldType` enum: `Text`, `Integer`, `Bool`, `Enum(Vec<String>)`, `List(Box<FieldType>)`, `Record(Vec<Field>)`, `DisplayId` (FK), `Timestamp`
+  - `src/schema/actor.rs` — `Actor` enum `{ Human, AiAutonomous, AiWithHuman }`, with `from_env() -> Actor` reading `$CLAUDECODE`
+  - `src/schema/required_when.rs` — minimal AST: `Expr { lhs_path: Vec<String>, rhs_literal: String }`; parser accepts only `dotted.path == 'literal'` with single quotes; rejects everything else with a clear error. The `lhs_path` may cross Record boundaries (e.g. a `required_when` declared on `contract.done_when` whose `lhs_path = ["triage","verdict"]` resolves out of the `contract` Record into the sibling `triage` Record).
+  - `src/schema/lifecycle.rs` — `Lifecycle { states: Vec<String>, initial_state: Option<String>, transitions: Vec<Transition { from, to, verb, actor }> }`. `initial_state` defaults to `states[0]` if omitted (resolves M3).
+  - `src/schema/parse.rs` — `Schema::from_yaml(&str) -> Result<Schema>`; surface line numbers in errors via `serde_yaml::Error`
+  - `src/schema/flatten.rs` — `fn leaf_args(schema: &Schema) -> Vec<LeafArg { cli_name: String, path: Vec<String>, field: &Field }>`; walks each top-level Field and, for Records, recurses to enumerate leaf sub-fields. Asserts uniqueness of `cli_name` across all leaves at install-time (errors if two leaves collide). The `cli_name` is the **leaf field's own name converted to kebab-case** (e.g. Record `contract` with sub-field `done_when` → `--done-when`; Record `triage` with sub-field `verdict` → `--verdict`). Parent Record name is NOT included in the flag; this matches the literal DONE_WHEN demo (`--verdict`, `--done-when`, not `--triage-verdict`).
+  - `src/id_format.rs` (parser only — renderer lives in Phase 4): parse `id_format` template, validate that it contains exactly one `{:0Nd}` placeholder.
+- **Acceptance Criteria:**
+  - [ ] Unit tests parse a hand-written YAML covering every `FieldType`, `required_when`, an enum field, an actor tag, and a transition; assert the round-tripped struct.
+  - [ ] **A YAML fixture defines a Record `contract` whose sub-field `done_when` carries `required_when: triage.verdict == 'T3'`; the parsed model exposes that `required_when` on the sub-`Field` instance, not on the parent Record** (resolves C3 model side).
+  - [ ] `required_when: "triage.verdict == 'T3'"` parses to `Expr { lhs_path: ["triage","verdict"], rhs_literal: "T3" }`.
+  - [ ] Malformed `required_when` (e.g. `a == b OR c == d`, `a != b`) returns an error naming the unsupported token.
+  - [ ] Unknown field type or unknown actor value returns an error pointing at the offending key.
+  - [ ] `leaf_args(schema)` for a fixture with Records `triage{verdict, notes}` and `contract{done_when, scope_in, scope_out}` returns 5 leaf args with `cli_name`s `verdict, notes, done-when, scope-in, scope-out` (resolves C2 model side).
+  - [ ] `leaf_args` returns an error if two leaves collide (e.g. two Records both containing a sub-field named `notes`); error message names both parent paths.
+  - [ ] **`id_format: "L{:03d}"` parses; rendering with `pk=1` yields `L001`** (resolves m3). Renderer impl lives in Phase 4 but the format-string validation lives here.
+  - [ ] `Lifecycle::initial_state` defaults to `states[0]` when YAML omits the field; explicit value overrides.
+
+#### Phase 3: `stores install <path>`: DDL codegen + manifest registration
+
+- **Objective:** Given a folder containing `schema.yaml`, generate and apply SQLite DDL for the store, then append it to `.stores/manifest.yaml`. This phase introduces the field-type → column-type mapping concretely, plus a fixture exercise covering all field-types.
+- **Files to create:**
+  - `src/install.rs` — entry point: read `<path>/schema.yaml`, parse, run `leaf_args` uniqueness check, codegen DDL, execute against `.stores/db.sqlite`, update manifest
+  - `src/codegen/ddl.rs` — `fn ddl_for(schema: &Schema) -> String`; mapping rules: scalar (`Text`→TEXT, `Integer`→INTEGER, `Bool`→INTEGER 0/1, `Timestamp`→TEXT ISO-8601, `Enum`→TEXT with CHECK constraint, `DisplayId`→TEXT) become real columns; `List(_)` and `Record(_)` collapse to a single TEXT column holding JSON (rusqlite reads/writes via `serde_json::Value::to_string`); reserved columns: `id INTEGER PRIMARY KEY AUTOINCREMENT`, `display_id TEXT UNIQUE NOT NULL`, `status TEXT NOT NULL`, `created_at TEXT`, `updated_at TEXT`, `created_by TEXT`, `updated_by TEXT`
+  - Manifest gains a per-store entry: `{ name, schema_path (canonical absolute), installed_at, table_name }`
+  - `tests/fixtures/all_types_store/schema.yaml` — synthetic fixture exercising every `FieldType` variant (Text, Integer, Bool, Enum, List<Text>, Record with sub-fields including a `required_when`, DisplayId, Timestamp). Used by Phase 3 + Phase 5 unit tests (resolves cross-cutting #3).
+- **Acceptance Criteria:**
+  - [ ] `stores install <path-to-all_types_store-fixture>` succeeds; resulting table's column list matches the expected DDL (snapshot test); CHECK constraints on `Enum` columns present; JSON columns are TEXT.
+  - [ ] `stores install ./stores/gate` after the first install succeeds and produces a second table in the same `db.sqlite` (full validation in Phase 7). **(DONE_WHEN #3 contributes)**
+  - [ ] Re-installing the same store path is rejected with a clear "already installed; v0.1 has no migrations" error.
+  - [ ] **Installing a different folder whose `schema.yaml` declares the same `name:` as an installed store is rejected with a name-collision error in the same error class** (resolves m4).
+  - [ ] DDL emitted is deterministic (snapshot test on the SQL string).
+
+#### Phase 4: Dynamic CLI codegen + `add` / `show` / `list` / `update` verbs
+
+- **Objective:** On every CLI invocation, after parsing the manifest, dynamically build the `clap::Command` tree by adding one `Command` per installed store with subcommands `add`, `show <display_id>`, `list`, `update <display_id>`. **Each generated subcommand exposes one `--<cli_name>` arg per leaf returned by `leaf_args(schema)` — Record sub-fields appear as flat top-level flags, not as `--<record>` taking JSON.** All args are optional at the clap level — `required` is enforced by the validator in Phase 5, which gives better error messages than clap's built-in required check.
+- **Files to create:**
+  - `src/cli/dynamic.rs` — `fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> clap::Command`; per store, a `clap::Command::new(store.name)` with the four base verbs; per verb, iterate `leaf_args(schema)` and emit `clap::Arg::new(leaf.cli_name).long(&leaf.cli_name)` plus the `--<cli-name>-from-file <path>` companion arg and stdin (`-`) handling for `Text` leaves; **for `List(_)` leaves, the arg accepts a single string and is split on `|` at parse time (e.g. `--options "soft|hard"` → `["soft", "hard"]`)** (resolves M1); `--json` flag at the top level.
+  - `src/cli/dispatch.rs` — given the parsed `ArgMatches`, route to the right handler with the correct store schema in hand. **Reassembly:** as args are read off `ArgMatches`, leaf values are nested back into their parent Record paths to build the in-memory `EntryMap` the validator + writer consume (so the validator sees `entry["contract"]["done_when"]`, not a flat key).
+  - `src/handlers/add.rs`, `src/handlers/show.rs`, `src/handlers/list.rs`, `src/handlers/update.rs` — each takes `(&Schema, &Connection, &ArgMatches, Actor)`, builds an entry map, calls the validator (Phase 5 stub returns Ok for now), writes the row, prints result. **`add` writes `status = lifecycle.initial_state` (default `states[0]`)** (resolves M3). **`add` and `update` populate `created_at`/`updated_at` (ISO-8601 UTC) and `created_by`/`updated_by` (`invoker.to_string()`); `update` only touches `updated_*`** (resolves m2). On `show`/`list`, `Record` and `List` columns are deserialized from their stored JSON string back into nested `serde_json::Value` so output preserves the nested shape (resolves M2).
+  - `src/id_format.rs` — render `id_format: "L{:03d}"` template against the new PK to produce `display_id`; runs inside the same DB transaction as the INSERT to avoid races
+  - `src/output.rs` — text + `--json` formatters; `--json` for `show` emits the entry as a single JSON object with Records nested under their parent keys; `--json` for `list` emits a JSON array of such objects.
+- **Acceptance Criteria:**
+  - [ ] After installing a fixture store, `stores <store> add --<field> value` writes a row, returns the rendered display_id (e.g. `L001`), and exits 0. **(DONE_WHEN #4 contributes)**
+  - [ ] **`leaf_args` are emitted as flat `--<cli_name>` flags; a fixture with Record `contract{done_when, scope_in, scope_out}` accepts `--done-when X --scope-in Y --scope-out Z` (no dotted args, no `--contract <json>`)** (resolves C2 codegen side).
+  - [ ] **`--options "soft|hard"` against a `list<text>` field deserializes to `["soft","hard"]`** (resolves M1).
+  - [ ] `stores <store> show <display_id>` prints the entry; `--json` emits valid JSON. **`Record` and `List` columns are decoded back to nested structures** so output includes (e.g.) a `triage` parent key with `verdict='T3'` nested inside, and a `contract` parent key with the three sub-fields nested inside — verified end-to-end in Phase 6 against the real schema (resolves M2). **(DONE_WHEN #7 contributes)**
+  - [ ] `stores <store> list` prints all rows; `--json` emits a JSON array. **(DONE_WHEN #8 contributes)**
+  - [ ] `--summary-from-file path/to/text.md` and piping via `--summary -` both populate the field correctly.
+  - [ ] **`stores <store> update <display_id> --<field> value` mutates the row through the validator and bumps `updated_at`/`updated_by`** (resolves M4).
+  - [ ] On every `add`, `status = lifecycle.initial_state` (defaulting to `lifecycle.states[0]`); asserted in a unit test (resolves M3).
+  - [ ] On every `add`, `created_at`/`updated_at`/`created_by`/`updated_by` are populated; on every `update`, `updated_at`/`updated_by` are bumped (resolves m2).
+  - [ ] `stores --help` shows installed stores; `stores observations --help` shows verbs.
+
+#### Phase 5: Enforcement engine
+
+- **Objective:** Replace the Phase 4 validator stub with the real one. This is the load-bearing correctness phase. The validator owns all four rule types and produces error messages that cite the offending field and rule. **The validator runs against the in-memory typed `EntryMap` (nested) — never against the SQLite row — so dotted-path lookup in `required_when` traverses the typed entry-map representation, including descent into Record sub-fields and ascent back out to sibling Records** (resolves M5 third bullet).
+- **Files to create:**
+  - `src/validate/mod.rs` — `fn validate(schema: &Schema, entry: &EntryMap, op: Op, invoker: Actor) -> Result<(), Vec<ValidationError>>`; `Op` is `Add | Update | Transition(verb)`. The validator walks both top-level `Field`s and Record sub-`Field`s recursively so per-leaf rules fire.
+  - `src/validate/required.rs` — required + `required_when` evaluation against the partially-built `EntryMap`; uses the AST from Phase 2; dotted-path lookup walks the typed nested structure (Record → sub-field → value). **A `required_when` declared on a Record sub-field whose `lhs_path` resolves into a sibling Record's leaf (e.g. `contract.done_when`'s `required_when: triage.verdict == 'T3'`) must evaluate correctly** (resolves C3 enforcement side).
+  - `src/validate/enum_check.rs`, `src/validate/regex_check.rs`
+  - `src/validate/actor.rs` — for each field present in the entry (and for the transition itself, on transition ops), check `invoker` is allowed by the field's / transition's declared actor; error message: `"field 'answer' requires actor 'human'; invoker is 'ai_autonomous' (auto-detected from $CLAUDECODE; pass --invoker human to override if appropriate)"`
+  - `src/validate/error.rs` — `ValidationError { field_path, rule, message }`; pretty-print as a bullet list
+- **Acceptance Criteria:**
+  - [ ] Unit tests cover each rule type with passing + failing fixtures.
+  - [ ] **A dedicated `required_when` unit test uses a Record sub-field whose `lhs_path` crosses into a sibling Record (`contract.done_when` declared with `required_when: triage.verdict == 'T3'`); the test asserts the rule fires when `triage.verdict='T3'` and is silent otherwise** (resolves item #7 / C3 enforcement).
+  - [ ] `stores observations triage L001 --verdict T3` (without contract fields) errors out citing the three missing fields and the `required_when` that triggered them. **(DONE_WHEN #5 — full integration in Phase 6)**
+  - [ ] An `add` against a Text field with a `pattern` regex that doesn't match is rejected.
+  - [ ] An invoker mismatch produces the actor-mismatch error format above. **(DONE_WHEN #11, #13 contribute)**
+  - [ ] Errors aggregate (multiple violations reported in one pass, not one-at-a-time).
+
+#### Phase 6: Lifecycle transitions + bundled `observations` store
+
+- **Objective:** Generate one CLI verb per declared lifecycle transition (e.g. `triage`, `close`), wire transition validation (current state → declared `from`; transition actor; field updates from the same call go through the validator), and ship the real `observations` schema in-tree.
+- **Files to create:**
+  - `src/cli/dynamic.rs` — extended: per `Transition` in the schema, add a verb subcommand `<verb> <display_id> [--<leaf_arg> value ...]` (where `--<leaf_arg>` are the same flat leaf-args used by `add`/`update`); the verb has implicit semantics "set status to `to`, then run validator with `Op::Transition(verb)`, then write".
+  - `src/handlers/transition.rs`
+  - `stores/observations/schema.yaml` — fields: `summary` (text, required), `body` (text, optional, supports `--body-from-file`), `triage` (record: sub-fields `verdict` (enum: T1,T2,T3) and `notes` (text)), `contract` (record: sub-fields `done_when` (text), `scope_in` (text), `scope_out` (text), **each carrying `required_when: triage.verdict == 'T3'` at the sub-field level** — matching the C3 model), `tags` (list<text>); `lifecycle.states: [open, triaged, resolved, wont_fix]`; `initial_state` omitted (defaults to `open`); transitions `open→triaged` verb `triage` actor `ai_with_human`, `triaged→resolved` verb `resolve` actor `ai_autonomous`, `triaged→wont_fix` verb `wont_fix` actor `ai_with_human`; `id_format: "L{:03d}"`
+  - `stores/observations/README.md` — the bundled-store mini-README
+- **Acceptance Criteria:**
+  - [ ] `stores install ./stores/observations` succeeds and the table has the expected schema. **(DONE_WHEN #2 fully)**
+  - [ ] `stores observations add --summary "thing broke"` returns `L001` and writes `status='open'` (initial_state default applied). **(DONE_WHEN #4 fully)**
+  - [ ] `stores observations triage L001 --verdict T3` fails with the contract-required error, citing `contract.done_when`, `contract.scope_in`, `contract.scope_out`, and the `required_when` rule. **(DONE_WHEN #5 fully)**
+  - [ ] `stores observations triage L001 --verdict T3 --done-when "..." --scope-in "..." --scope-out "..."` succeeds; entry status moves to `triaged`. **(DONE_WHEN #6)**
+  - [ ] `stores observations show L001` shows the entry with `triage` and `contract` Records nested under their parent keys; `--json` output validates as JSON and contains `triage.verdict='T3'` plus the three `contract.*` sub-fields under their parent keys (ties off M2). **(DONE_WHEN #7)**
+  - [ ] `stores observations list` shows the row. **(DONE_WHEN #8)**
+
+#### Phase 7: Bundled `gate` store + human-only actor enforcement demo
+
+- **Objective:** Ship the `gate` schema, exercise multi-store coexistence in one DB, and prove the per-field actor enforcement on the `answer` field. **Demo uses `--task-ref L001` so the cross-store JOIN in DONE_WHEN #12 returns matched rows.**
+- **Files to create:**
+  - `stores/gate/schema.yaml` — fields: `type` (enum: `decision|script`, required), `question` (text, required), `options` (list<text>, optional), `answer` (text, optional, **actor: human**), `task_ref` (display_id, optional, no FK constraint at SQL level — cross-store reference by convention; accepts any display_id from any installed store); `lifecycle.states: [pending, answered, cancelled]`; transitions `pending→answered` verb `answer` actor `human`, `pending→cancelled` verb `cancel` actor `ai_autonomous`; `id_format: "G{:03d}"`
+  - `stores/gate/README.md`
+- **Acceptance Criteria:**
+  - [ ] `stores install ./stores/gate` succeeds; both tables coexist in `.stores/db.sqlite`. **(DONE_WHEN #3 fully)**
+  - [ ] **`stores gate add --type decision --question "..." --options "soft|hard" --task-ref L001` returns `G001`** (DONE_WHEN #9 — task-ref is `L001` per updated DONE_WHEN; resolves C1 user-side).
+  - [ ] `stores gate answer G001 --answer hard --invoker human` succeeds. **(DONE_WHEN #10)**
+  - [ ] Under `CLAUDECODE=1`, `stores gate answer G001 --answer hard` (no `--invoker`) is rejected with the actor-mismatch message naming `answer` and the required actor `human`. **(DONE_WHEN #11)**
+
+#### Phase 8: End-to-end demo verification, `--json` polish, README
+
+- **Objective:** Run every numbered DONE_WHEN step from a fresh shell against a fresh dir; fix gaps. Write the README. Validate the cross-store SQL JOIN returns real matches.
+- **Files to create:**
+  - `README.md` — install + the 13-step demo path verbatim, expected output for each
+  - `tests/e2e.sh` — bash script that runs the 13 steps in a temp dir against the freshly-installed binary; `set -euo pipefail`; greps for expected display_ids and error substrings; **executes the exact `sqlite3` JOIN query from DONE_WHEN #12 and asserts the result contains a non-NULL gate `display_id` matching `G001` joined to observation `L001` via `g.task_ref = o.display_id`**.
+- **Acceptance Criteria:**
+  - [ ] `tests/e2e.sh` exits 0. **(DONE_WHEN #1–#13 all)**
+  - [ ] **The `sqlite3` JOIN query returns ≥1 row matching the `L001` observation with a non-NULL gate `display_id` (`G001`) — i.e. a real JOIN match exists, not just a LEFT-JOIN row with NULL gate columns** (DONE_WHEN #12; resolves C1 verification side).
+  - [ ] **`tests/e2e.sh` is a literal copy of the README's numbered command list — same commands, same order, no extra setup/seeding steps outside what the README shows. The script includes a top-of-file comment block listing the README's commands in order so README↔script correspondence is auditable at a glance** (resolves item #11 / cross-cutting #2).
+  - [ ] README renders the install + demo flow with no missing steps; copy-paste from README into a fresh shell reproduces e2e success.
+  - [ ] `--json` output validates as JSON for every read/write verb (script pipes to `jq .`); `show` and `list` JSON include nested `triage`/`contract` keys (ties off M2).
+
+### Decision Matrix
+
+| Decision | Options Considered | Choice | Rationale |
+|----------|-------------------|--------|-----------|
+| In-memory schema model: shared vs split per consumer (validator / DDL codegen / CLI codegen) | (a) one canonical `Schema` struct shared by all three; (b) per-consumer view structs derived from the YAML | (a) one shared `Schema` | The schema is small (≤ a few hundred fields total across all installed stores) and the three consumers all need the same data; splitting invites drift. Phase 2 produces it once at startup. |
+| List / Record field storage in SQLite | (a) child tables with FKs; (b) JSON in a TEXT column, queried via `json_extract` | (b) JSON in TEXT | v0.1 has no migrations and reads via CLI only; child tables explode the codegen surface and force join logic into every read. The DONE_WHEN #12 SQL example already uses `json_extract`, signalling JSON is the intended shape. **Accepted technical debt:** any future structured query like `where contract.scope_in like '%backend%'` needs `json_extract` everywhere; tracked as a v0.2 friction point. |
+| **Record sub-field treatment (CLI + validator + storage round-trip)** — covers C2 + C3 + M2 cohesively | (a) flatten leaves to top-level `--<cli_name>` args + sub-fields are first-class `Field`s with their own rules + nested round-trip on read; (b) dotted args (`--triage.verdict`) + Record-level rules only; (c) `--<record> <json>` opaque blob | **(a) flatten + first-class sub-fields + nested round-trip** | The literal DONE_WHEN demo uses `--verdict`, `--done-when`, `--scope-in`, `--scope-out` — only (a) matches. Sub-fields carrying their own `required_when` is the spine of the T3-contract enforcement (the motivating story). Nested round-trip on `show`/`list` is needed for `--json` to be useful. **Naming rule:** the CLI flag for a leaf is the leaf's own field name converted to kebab-case (e.g. `done_when` → `--done-when`); parent Record name is NOT prefixed. **Uniqueness rule:** all leaf names within a single store must be unique; install-time check (`leaf_args` in Phase 2) rejects collisions with a message naming both parent paths. (Resolves C2 + C3 + M2.) |
+| **List CLI input format** | (a) `\|`-separated single string; (b) comma-separated; (c) repeated `--flag value --flag value` | **(a) `\|`-separated** | Matches DONE_WHEN #9 literally (`--options "soft\|hard"`). Parser splits on `\|` for `List(Text)` fields. Repeated-flag form deferred. (Resolves M1.) |
+| **Initial-status convention** | (a) explicit `initial_state` field in lifecycle (optional); (b) always implicit `states[0]`; (c) require explicit `initial_state` always | **(a) optional explicit, defaults to `states[0]`** | Most stores want the obvious default; allowing override is cheap and forward-compatible. (Resolves M3.) |
+| **`update` verb scope in v0.1** | (a) drop entirely; (b) keep with a real AC | **(b) keep with AC** | Already wired in Phase 4; cost to test is low; gives users a generic write path beyond transitions. Real AC in Phase 4 closes M4. |
+| Building the `clap::Command` tree | (a) build statically with derive macros, hard-code each store; (b) build dynamically at runtime from manifest + parsed schemas | (b) dynamic | Stores are user-installed; static derive can't see them. `clap::Command::new(...).subcommand(...)` is fully dynamic and well-supported. **Accepted risk:** runtime construction bypasses derive macros' compile-time checks; argument-name collisions across Record sub-fields within one store are runtime-discoverable only — install-time `leaf_args` uniqueness check is the backstop. Cross-store collisions are scoped (store names are clap-level subcommand boundaries) so two stores each owning a `--notes` leaf is fine. |
+| `required_when` AST scope | (a) full expression language (AND/OR/NOT, comparisons); (b) single equality only | (b) single equality | Locked by user; mirrored in the YAML grammar to fail-fast on unsupported expressions and avoid building a precedence parser. |
+| Display-id generation timing | (a) compute outside the transaction from `last_insert_rowid`; (b) compute inside the same transaction as the INSERT, then `UPDATE display_id` | (b) same transaction | Concurrent writers under WAL could otherwise interleave. One transaction: INSERT stub row, read `rowid`, render template, UPDATE display_id, COMMIT. |
+| Re-install handling | (a) silent no-op on path-match; (b) reject path-match with "no migrations in v0.1" + reject same-name-different-path collision | **(b) reject both** | Migrations are explicitly out of scope; silent skip hides schema drift. Same-name-different-path is even more dangerous — two folders racing the same table. Both rejected with clear errors. (Resolves m4.) |
+| Validator returns first error vs all errors | (a) bail on first; (b) collect all violations and return them together | (b) collect all | The T3-without-contract case has 3 missing fields; users want them all in one shot, especially under AI-driven retries. |
+| `Bool` storage | (a) INTEGER 0/1; (b) TEXT 'true'/'false' | (a) INTEGER | SQLite idiom; `json_extract` returns numbers cleanly; one less serialization branch. |
+| Where bundled store schemas live in the repo | (a) `stores/observations/`, `stores/gate/` at repo root; (b) `examples/`; (c) `assets/` embedded into the binary | (a) repo-root `stores/` | Matches the literal DONE_WHEN install commands (`stores install ./stores/observations`); discoverable; no embed-vs-disk divergence. |
+| Error type | (a) `anyhow::Error` everywhere; (b) `thiserror`-derived enums at module boundaries, `anyhow` in CLI | (b) hybrid | The validator's errors are structured (`ValidationError { field_path, rule, message }`) and need to be programmatically aggregated; CLI top-level can flatten via `anyhow`. |
+| Manifest format | (a) YAML (matches schema files); (b) JSON; (c) TOML | (a) YAML | One format for users to edit by hand; symmetric with schema files; serde_yaml already a dep. |
+
+### Risks / Assumptions (expanded — resolves M5)
+
+Carried from `## Task` (Cargo toolchain, rusqlite-bundled binary size, 2200–2800 LOC estimate, both stores in v0.1, `required_when` grammar restriction, GTM still tracks this task externally), plus three implementation-level risks the reviewer surfaced:
+
+- **Dynamic clap construction surface area.** Building the `Command` tree at runtime means clap's derive-macro compile-time checks don't fire. Argument-name collisions across Record sub-fields within one store are runtime-discoverable only. **Mitigation:** the `leaf_args(schema)` uniqueness check in Phase 2 runs at install time and refuses to add a store whose leaf names would collide internally. Cross-store collisions are inherently scoped (store names are clap-level subcommand boundaries) so two stores each defining a `--notes` leaf is fine — the conflict only matters within a store.
+- **JSON-in-TEXT vs structured columns for nested types.** Storing Record/List as JSON-in-TEXT (Decision Matrix row 2) means future structured queries like `where contract.scope_in like '%backend%'` need `json_extract` everywhere; aggregation, indexes, and FK enforcement on nested values are all friction points. **Accepted as known cost** for v0.1; promote to a v0.2 design choice if pain shows up.
+- **`required_when` evaluator straddles two representations.** The validator runs against the in-memory typed `EntryMap` (Phase 5) — never the SQLite row. Dotted-path lookup must therefore traverse the typed entry-map representation, including nesting into Record sub-fields. Phase 5's `required.rs` is explicitly clarified to walk `EntryMap`, not `serde_json::Value` from a stored column. Re-validation on `update` re-reads the row, deserializes JSON columns back into the `EntryMap` shape, applies the diff, then runs the validator against the merged in-memory form.
+
+### Open Questions
+
+None. All nine locked decisions cover the load-bearing architectural choices; the eleven plan-review items are addressed in-phase or via Decision Matrix entries (see change-log below). No new user input required to start execution.
+
+### Revise Cycle 1
+
+Change-log mapping each numbered item from `plan-review.md` to its fix:
+
+1. **JOIN-zero-rows (C1) →** DONE_WHEN #9 already updated to `--task-ref L001` (see `## Task`, line 34). Phase 7 AC #2 now uses `--task-ref L001`. Phase 8 AC #2 now requires `≥1 row with non-NULL gate display_id` (a real JOIN match), not merely "≥1 row" (which a LEFT JOIN with NULL gate columns would satisfy hollowly). Phase 8 AC #3 pins README↔script correspondence.
+2. **Record sub-field treatment (C2 + C3 + M2) →** New Decision Matrix row "Record sub-field treatment" with explicit (a) flatten leaves to flat `--<kebab-name>` flags; (b) install-time uniqueness check; (c) sub-fields are first-class `Field`s with their own `required_when`/`pattern`/`actor`; (d) `show`/`list` round-trip JSON columns back to nested form. Phase 2 adds `src/schema/flatten.rs` + ACs for sub-field rules and uniqueness. Phase 4 ACs cover flat flag emission and JSON round-trip on read. Phase 5 walks Record sub-fields recursively.
+3. **List CLI input format (M1) →** New Decision Matrix row "List CLI input format" choosing `|`-separated. Phase 4 AC asserts `--options "soft|hard"` parses to `["soft","hard"]`.
+4. **Initial-status convention (M3) →** Phase 2 schema model adds `Lifecycle.initial_state: Option<String>` defaulting to `states[0]`; Phase 4 handler text + AC require `add` to write `status = lifecycle.initial_state`; Phase 6 AC explicitly checks `add` produces `status='open'`.
+5. **`update` verb fate (M4) →** Kept; new Phase 4 AC exercises it (`update <display_id> --<field> value` mutates row through validator and bumps `updated_*`).
+6. **Reserved-column population (m2) →** Phase 4 handler text + AC require `created_at`/`updated_at`/`created_by`/`updated_by` populated on every insert/update.
+7. **Phase 5 `required_when` Record-sub-field test (C3 enforcement) →** New Phase 5 AC: dedicated unit test where a Record sub-field's `required_when` LHS path crosses into a sibling Record (`contract.done_when`'s `required_when: triage.verdict == 'T3'`), asserting the rule fires correctly when triggered and is silent otherwise.
+8. **`id_format` round-trip test (m3) →** New Phase 2 AC: `id_format: "L{:03d}"` parses; rendering with `pk=1` yields `L001`.
+9. **Same-name-different-path install rejection (m4) →** New Phase 3 AC: installing a different folder whose schema declares an existing store's `name:` is rejected with the same "already installed" error class. Decision Matrix "Re-install handling" updated to cover both cases.
+10. **Risks expansion (M5) →** Risks/Assumptions section expanded with the three named risks (dynamic clap surface, JSON-vs-column tradeoff as accepted debt, `required_when` evaluator on `EntryMap` not the row).
+11. **README-as-test pinning (cross-cutting #2) →** New Phase 8 AC: `tests/e2e.sh` is a literal copy of README's numbered command list — no extra setup steps; auditable via top-of-file correspondence comment.
+
+Adjacent fixes not numbered but addressed alongside the above: m1 (subsequent `cargo install --path .` replaces binary cleanly without touching `.stores/`) added as a Phase 1 AC. Cross-cutting #3 (Phase 3 fixture covering all field-types) addressed by adding `tests/fixtures/all_types_store/schema.yaml` with the explicit AC that the install snapshot covers every `FieldType` variant.
+
+No disagreements with the reviewer; all 11 items got in-phase fixes or new Decision Matrix entries.
 
 ---
 
 ## Plan Review
-_Plan-reviewer agent fills this section._
 
-- **Gate:** READY | NEEDS_WORK | NOT_READY
-- **Open Questions Finalized:** —
-- **Issues Found:** —
+- **Gate:** `READY` (cycle 2 of 3)
+- **Reviewed:** 2026-04-26 by `plan-reviewer`
+- **Summary:** All 11 numbered cycle-1 items are genuinely addressed in the revised Plan, not just claimed in the change-log. The load-bearing new work — `src/schema/flatten.rs` (item 2) — solves C2 + C3 + M2 cohesively: leaf args flatten to flat `--<kebab>` flags with install-time uniqueness check; Record sub-fields are first-class `Field`s carrying their own rules; Phase 4 reassembles flat CLI input back into a nested `EntryMap`; Phase 5 walks that nested form so cross-Record `required_when` paths (`contract.done_when` ← `triage.verdict == 'T3'`) resolve correctly. The pieces fit. Fresh-eye pass turned up only minor edge cases (reserved-column-name vs leaf-name collision check is implicit; no `|`-escape in List parser; `update` doesn't explicitly reject status mutations) — none gate-blocking. Cycle-1's 3 critical / 5 major / 4 minor reduces to 0 / 0 / 3 nits, all deferrable. Advance to executor.
+- **Issues (cycle 2):** 0 critical / 0 major / 3 minor (deferrable nits, see plan-review.md cycle 2)
+- **Open Questions Finalized:** None.
 
-> Details: plan-review.md
+### Per-item verification (cycle 1 → cycle 2)
+
+| # | Cycle-1 item | Cycle-1 status | Cycle-2 verdict | Note |
+|---|---|---|---|---|
+| 1 | JOIN-zero-rows (C1) | Critical | PASS | Task line 34, Phase 7 AC, Phase 8 AC all use `--task-ref L001`; Phase 8 AC requires real (non-NULL) JOIN match |
+| 2 | Record sub-field treatment (C2+C3+M2) | Critical | PASS | New `flatten.rs` + Decision Matrix row; sub-fields first-class `Field`s; Phase 4 reassembles nested EntryMap; Phase 5 walks recursively |
+| 3 | List CLI input format (M1) | Major | PASS | Decision Matrix row + Phase 4 AC for `--options "soft\|hard"` → `["soft","hard"]` |
+| 4 | Initial-status convention (M3) | Major | PASS | `Lifecycle.initial_state: Option<String>` defaults to `states[0]`; Phase 4 + Phase 6 ACs exercise it |
+| 5 | `update` verb fate (M4) | Major | PASS | Kept; Phase 4 AC mutates row + bumps `updated_*` |
+| 6 | Reserved-column population (m2) | Minor | PASS | Phase 4 handler text + AC for `created_at`/`updated_at`/`created_by`/`updated_by` |
+| 7 | Phase 5 cross-Record `required_when` test (C3 enforcement) | Critical | PASS | Phase 5 AC line 209 — dedicated test for `contract.done_when` with sibling-Record LHS path |
+| 8 | `id_format` round-trip (m3) | Minor | PASS | Phase 2 AC: `"L{:03d}"` parses + renders `pk=1` → `L001` |
+| 9 | Same-name-different-path rejection (m4) | Minor | PASS | Phase 3 AC + Decision Matrix Re-install row covers both cases |
+| 10 | Risks expansion (M5) | Major | PASS | All three named risks (dynamic clap, JSON-vs-column debt, EntryMap-not-row) added |
+| 11 | README-as-test pinning | Major | PASS | Phase 8 AC: e2e.sh is literal copy of README; top-of-file correspondence comment |
+| — | Adjacent: m1 (`cargo install` re-run) | Minor | PASS | Phase 1 AC added |
+| — | Adjacent: cross-cutting #3 (all-types fixture) | Minor | PASS | Phase 3 `tests/fixtures/all_types_store/schema.yaml` added with snapshot AC |
+
+> Details: plan-review.md (cycle 2 section appended; cycle 1 preserved)
 
 ---
 
