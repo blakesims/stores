@@ -41,3 +41,9 @@ fields:
     type: text
     required: false
     description: "Cross-store reference to a task display_id (e.g. L001); no FK enforced"
+
+  - name: priority
+    type: enum
+    enum_values: [high, normal, low]
+    required: false
+    description: "Filing priority — used by /task:open's Blake-only-step pattern (D1/Q1)"

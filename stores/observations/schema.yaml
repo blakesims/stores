@@ -2,17 +2,47 @@ name: observations
 id_format: "OBS{:03d}"
 # No store-level default_actor — fields are unguarded by default; explicit actor per-field only.
 lifecycle:
-  states: [open, triaged, resolved, wont_fix]
+  states: [open, triaged, investigating, confirmed, needs_info, in_progress, resolved, wont_fix]
   transitions:
     - from: open
       to: triaged
       verb: triage
       actor: ai_with_human
+    # Original v0.1 direct path: kept for backward compatibility (tests/e2e.sh walks this path)
     - from: triaged
       to: resolved
       verb: resolve
       actor: ai_autonomous
     - from: triaged
+      to: wont_fix
+      verb: wont_fix
+      actor: ai_with_human
+    # Extended lifecycle (v0.2 / D4 — 10.06 full set)
+    - from: triaged
+      to: investigating
+      verb: investigate
+      actor: ai_with_human
+    - from: investigating
+      to: confirmed
+      verb: confirm
+      actor: ai_with_human
+    - from: investigating
+      to: needs_info
+      verb: request_info
+      actor: ai_autonomous
+    - from: needs_info
+      to: confirmed
+      verb: provide_info
+      actor: human
+    - from: confirmed
+      to: in_progress
+      verb: claim
+      actor: ai_autonomous
+    - from: in_progress
+      to: resolved
+      verb: resolve
+      actor: ai_autonomous
+    - from: confirmed
       to: wont_fix
       verb: wont_fix
       actor: ai_with_human

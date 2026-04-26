@@ -55,6 +55,8 @@ pub struct SubmitOutput {
     pub gate: Option<String>,
     /// For submit-plan-review: gate value used.
     pub plan_review_gate: Option<String>,
+    /// Populated when new_status == "blocked" — the reason text written to the row.
+    pub blocked_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +511,7 @@ pub(crate) fn compute_submit_plan(
         cycles_idx: None,
         gate: None,
         plan_review_gate: None,
+        blocked_reason: None,
     })
 }
 
@@ -658,6 +661,7 @@ pub(crate) fn compute_submit_plan_review(
         cycles_idx: None,
         gate: None,
         plan_review_gate: Some(gate.to_string()),
+        blocked_reason: None,
     })
 }
 
@@ -796,6 +800,7 @@ pub(crate) fn compute_submit_execute(
         cycles_idx: Some(cycles_idx),
         gate: None,
         plan_review_gate: None,
+        blocked_reason: None,
     })
 }
 
@@ -993,6 +998,10 @@ pub(crate) fn compute_submit_review(
     release_lock(&tx, &schema.name, display_id)?;
     tx.commit().context("submit-review: commit")?;
 
+    let blocked_reason = text_fields.get("blocked_reason").and_then(|r| {
+        if r.is_empty() { None } else { Some(r.clone()) }
+    });
+
     Ok(SubmitOutput {
         display_id: display_id.to_string(),
         new_status: new_status.clone(),
@@ -1002,6 +1011,7 @@ pub(crate) fn compute_submit_review(
         cycles_idx: Some(cycle_idx),
         gate: Some(gate.to_string()),
         plan_review_gate: None,
+        blocked_reason,
     })
 }
 
@@ -1021,6 +1031,15 @@ pub fn run_submit_review(
         schema, conn, display_id, gate, review_summary, review_details, critical, major, minor, invoker,
     )?;
     println!("{}", out.summary);
+    // Non-zero exit when the submit routes the row to blocked (e.g. 4th REVISE guard failure).
+    // The blocked_reason already contains the guard expression and context.
+    if out.new_status == "blocked" {
+        if let Some(reason) = &out.blocked_reason {
+            bail!("submit-review routed {} to blocked: {}", display_id, reason);
+        } else {
+            bail!("submit-review routed {} to blocked", display_id);
+        }
+    }
     Ok(())
 }
 
