@@ -97,26 +97,37 @@ pub(crate) fn compute_render_in(
             false
         };
 
-    // Load the render template from disk (relative to the store's schema_path).
-    // We re-read from disk on each call (option 2 from the P2-M1 carry-forward note).
-    // This keeps the main.rs schema map simple (no WorkflowResolved threading needed)
-    // and avoids the cwd coupling that would require WorkflowResolved in the schema map.
+    // Load the render template.
+    // P6-m2: detect "bundled:<name>" sentinel in schema_path; if present, look up
+    // the template from BUNDLED_STORE_TEMPLATES instead of reading from disk.
     let manifest = Manifest::load_from(manifest_root)?;
-    let store_root_opt = manifest
-        .stores
-        .iter()
-        .find(|s| s.name == schema.name)
-        .map(|s| s.schema_path.clone());
+    let store_entry = manifest.stores.iter().find(|s| s.name == schema.name);
 
-    let template_text = if let Some(store_root) = store_root_opt {
-        let full_path = store_root.join(render_tpl_path);
-        std::fs::read_to_string(&full_path).map_err(|e| {
-            anyhow::anyhow!(
-                "cannot read render template '{}': {}",
-                full_path.display(),
-                e
-            )
-        })?
+    let template_text = if let Some(entry) = store_entry {
+        let schema_path_str = entry.schema_path.to_string_lossy();
+        if let Some(bundled_name) = schema_path_str.strip_prefix("bundled:") {
+            let tpl_key = render_tpl_path.to_string_lossy();
+            crate::cli::dynamic::BUNDLED_STORE_TEMPLATES
+                .iter()
+                .find(|(name, _)| *name == bundled_name)
+                .and_then(|(_, templates)| {
+                    templates.iter().find(|(path, _)| *path == tpl_key.as_ref()).map(|(_, content)| content.to_string())
+                })
+                .ok_or_else(|| anyhow::anyhow!(
+                    "bundled store '{}': no render template '{}' in BUNDLED_STORE_TEMPLATES",
+                    bundled_name,
+                    tpl_key
+                ))?
+        } else {
+            let full_path = entry.schema_path.join(render_tpl_path);
+            std::fs::read_to_string(&full_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "cannot read render template '{}': {}",
+                    full_path.display(),
+                    e
+                )
+            })?
+        }
     } else {
         bail!(
             "store '{}' not found in manifest; cannot locate render template",

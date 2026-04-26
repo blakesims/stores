@@ -74,6 +74,21 @@ impl HelperDef for LtHelper {
     }
 }
 
+struct AddHelper;
+impl HelperDef for AddHelper {
+    fn call_inner<'reg: 'rc, 'rc>(
+        &self,
+        h: &Helper<'rc>,
+        _: &'reg Handlebars<'reg>,
+        _: &'rc Context,
+        _: &mut RenderContext<'reg, 'rc>,
+    ) -> std::result::Result<ScopedJson<'rc>, RenderError> {
+        let a = h.param(0).and_then(|p| p.value().as_i64()).unwrap_or(0);
+        let b = h.param(1).and_then(|p| p.value().as_i64()).unwrap_or(0);
+        Ok(ScopedJson::Derived(json!(a + b)))
+    }
+}
+
 /// `{{default value "fallback"}}` — emits fallback when value is missing / null / empty string.
 /// Note: `0`, `false`, and empty arrays/objects are NOT treated as empty and pass through as-is.
 /// Template authors that need those cases should guard with `{{#if}}` instead.
@@ -139,6 +154,7 @@ pub fn render_template(text: &str, ctx: &Value) -> Result<String> {
     hbs.register_helper("eq", Box::new(EqHelper));
     hbs.register_helper("gt", Box::new(GtHelper));
     hbs.register_helper("lt", Box::new(LtHelper));
+    hbs.register_helper("add", Box::new(AddHelper));
     hbs.register_helper("default", Box::new(helper_default));
 
     let rendered = hbs

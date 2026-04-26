@@ -108,33 +108,47 @@ pub(crate) fn compute(
             )
         })?;
 
-    // Resolve the store root from the manifest to find the template on disk.
-    // Design choice (P2-M1 carry-forward closure): re-read template from disk
-    // on each call using the installed store's schema_path directory.
-    // WorkflowResolved threading into main.rs is deferred (option 2 chosen);
-    // both brief.rs and render.rs use this on-demand pattern.
-    //
-    // NOTE (Phase 7): when schema_path starts with "bundled:" (e.g. the `tasks`
-    // store), joining it with template_path produces a nonsensical filesystem path.
-    // Fix: detect the sentinel and route to the in-memory BUNDLED_STORE_TEMPLATES
-    // map.  No bundled store has a workflow today so this is latent; Phase 7
-    // must fix this when the `tasks` schema (workflow-shaped) is wired up.
+    // Resolve the store root from the manifest to find the template.
+    // P6-m2: detect "bundled:<name>" sentinel and route to BUNDLED_STORE_TEMPLATES;
+    // otherwise read from disk as before.
     let manifest = Manifest::load()?;
-    let store_root = manifest
+    let schema_path_str = manifest
         .stores
         .iter()
         .find(|s| s.name == schema.name)
-        .map(|s| s.schema_path.clone())
-        .unwrap_or_else(|| stores_dir.clone());
+        .map(|s| s.schema_path.to_string_lossy().to_string())
+        .unwrap_or_default();
 
-    let full_template_path = store_root.join(template_path);
-    let template_text = std::fs::read_to_string(&full_template_path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot read briefing template '{}': {}",
-            full_template_path.display(),
-            e
-        )
-    })?;
+    let template_text = if let Some(bundled_name) = schema_path_str.strip_prefix("bundled:") {
+        // Look up from BUNDLED_STORE_TEMPLATES
+        let tpl_key = template_path.to_string_lossy();
+        crate::cli::dynamic::BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == bundled_name)
+            .and_then(|(_, templates)| {
+                templates.iter().find(|(path, _)| *path == tpl_key.as_ref()).map(|(_, content)| content.to_string())
+            })
+            .ok_or_else(|| anyhow::anyhow!(
+                "bundled store '{}': no template '{}' in BUNDLED_STORE_TEMPLATES",
+                bundled_name,
+                tpl_key
+            ))?
+    } else {
+        let store_root = manifest
+            .stores
+            .iter()
+            .find(|s| s.name == schema.name)
+            .map(|s| s.schema_path.clone())
+            .unwrap_or_else(|| stores_dir.clone());
+        let full_template_path = store_root.join(template_path);
+        std::fs::read_to_string(&full_template_path).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot read briefing template '{}': {}",
+                full_template_path.display(),
+                e
+            )
+        })?
+    };
 
     // Build the render context and render the template.
     let ctx = build_context(schema, &entry);

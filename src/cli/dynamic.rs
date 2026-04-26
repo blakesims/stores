@@ -10,7 +10,7 @@ use crate::schema::flatten::leaf_args;
 // ---------------------------------------------------------------------------
 
 /// Names of bundled stores (the subdirectory name == schema name).
-pub static BUNDLED_STORE_NAMES: &[&str] = &["observations", "gate"];
+pub static BUNDLED_STORE_NAMES: &[&str] = &["observations", "gate", "tasks"];
 
 /// Embedded schema.yaml content for each bundled store (same order as BUNDLED_STORE_NAMES).
 pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
@@ -22,6 +22,30 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
         "gate",
         include_str!("../../stores/gate/schema.yaml"),
     ),
+    (
+        "tasks",
+        include_str!("../../stores/tasks/schema.yaml"),
+    ),
+];
+
+/// Embedded template content for bundled workflow stores.
+///
+/// Map: store-name → list of (template-relative-path, content).
+/// Path keys must match schema's `briefing_templates` and `render_template` values.
+/// Used by brief.rs and render.rs when `schema_path` starts with `"bundled:"`.
+pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[
+    ("tasks", &[
+        ("templates/planner-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/planner-brief.md.tpl")),
+        ("templates/plan-reviewer-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/plan-reviewer-brief.md.tpl")),
+        ("templates/executor-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/executor-brief.md.tpl")),
+        ("templates/code-reviewer-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/code-reviewer-brief.md.tpl")),
+        ("templates/main.md.tpl",
+            include_str!("../../stores/tasks/templates/main.md.tpl")),
+    ]),
 ];
 
 /// Build the root `stores` Command with all installed stores added as subcommands.

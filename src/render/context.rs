@@ -58,7 +58,41 @@ pub fn build_context(schema: &Schema, entry: &EntryMap) -> Value {
     let ccfp = derive_current_cycle_for_phase(entry);
     obj.insert("current_cycle_for_phase".to_string(), ccfp);
 
+    // Derive `plan_phases_count` — number of phases in plan.phases (0 if absent).
+    // Derive `current_phase_idx` — current_phase minus 1 (for 0-based {{#each}} index matching).
+    let plan_phases_count = entry
+        .get("plan")
+        .and_then(|v| parse_json_if_string(v))
+        .and_then(|v| v.get("phases").and_then(|p| p.as_array()).map(|a| a.len()))
+        .unwrap_or(0);
+    obj.insert("plan_phases_count".to_string(), Value::from(plan_phases_count as i64));
+
+    let current_phase = entry
+        .get("current_phase")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let current_phase_idx = if current_phase > 0 { current_phase - 1 } else { 0 };
+    obj.insert("current_phase_idx".to_string(), Value::from(current_phase_idx));
+
+    // Derive `cycles_have_reviews` — true if any cycle has a non-null review.
+    let cycles_have_reviews = entry
+        .get("cycles")
+        .and_then(|v| parse_json_if_string(v))
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .any(|c| c.get("review").map(|r| !r.is_null()).unwrap_or(false));
+    obj.insert("cycles_have_reviews".to_string(), Value::from(cycles_have_reviews));
+
     Value::Object(obj)
+}
+
+/// Parse a Value if it's a JSON string, or clone it if already a Value.
+fn parse_json_if_string(v: &Value) -> Option<Value> {
+    match v {
+        Value::String(s) => serde_json::from_str(s).ok(),
+        other => Some(other.clone()),
+    }
 }
 
 /// Scan the `cycles` field of the entry and compute the max cycle_number per
@@ -176,7 +210,9 @@ mod tests {
         }
         // Engine-only key must be present.
         assert!(obj.contains_key("current_cycle_for_phase"));
-        // Total count: unique(reserved ∪ schema_fields) + engine key.
+        // Total count: unique(reserved ∪ schema_fields) + engine-derived keys.
+        // Engine-derived keys: current_cycle_for_phase, plan_phases_count,
+        // current_phase_idx, cycles_have_reviews (4 total).
         // Some schema fields may overlap with reserved names (e.g. display_id);
         // use a set to count unique keys.
         let mut expected_keys: std::collections::BTreeSet<&str> =
@@ -184,7 +220,8 @@ mod tests {
         for f in &schema.fields {
             expected_keys.insert(f.name.as_str());
         }
-        let expected_count = expected_keys.len() + 1; // +1 for current_cycle_for_phase
+        const ENGINE_DERIVED_KEY_COUNT: usize = 4; // current_cycle_for_phase, plan_phases_count, current_phase_idx, cycles_have_reviews
+        let expected_count = expected_keys.len() + ENGINE_DERIVED_KEY_COUNT;
         assert_eq!(
             obj.len(),
             expected_count,
