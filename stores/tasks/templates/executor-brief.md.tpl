@@ -65,12 +65,13 @@ Your output goes to the Code Reviewer. Document what you did accurately.
 
 ## Critical Actions (Checklist)
 1. **READ** the entire phase above before starting
-2. **SET** Status to `EXECUTING_PHASE_{{current_phase}}` in tasks/active/{{display_id}}-{{slug}}/main.md
-3. **EXECUTE** tasks in order — do not skip or reorder
-4. **RUN** tests after each task
-5. **COMMIT** after each logical unit of work
-6. **OUTPUT** Execution Log section to main.md
-7. Call `stores tasks submit-execute {{display_id}} --summary "..." --commit <sha>` when done
+2. **EXECUTE** tasks in order — do not skip or reorder
+3. **RUN** tests after each task
+4. **COMMIT** after each logical unit of work
+5. When done, submit via: `stores tasks submit-execute {{display_id}} --summary "..." --commit <sha> --files-changed "a.rs,b.rs"`
+6. Then regenerate main.md: `stores tasks render {{display_id}}`
+
+**Do NOT edit main.md directly.** The framework regenerates it from DB rows via `render`. Status transitions are framework-managed — do NOT set Status manually.
 
 ## Execution Rules
 **DO:**
@@ -91,4 +92,4 @@ Your output goes to the Code Reviewer. Document what you did accurately.
 1. Document exactly what's blocking
 2. Note what you tried
 3. **STOP** — do not improvise
-4. Set Status: `BLOCKED` with reason in main.md
+4. Call `stores tasks submit-execute {{display_id}} --summary "BLOCKED: <reason>" --commit <sha-or-none>` to record the block, then halt. The orchestrator will route from there.
