@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** COMPLETE
 - **Phase 4 Start:** 2026-04-26
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
@@ -715,6 +715,23 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 **Notes:**
 - The carry-forward Op::Update fix is the same root-cause fix as Phase 7's `Op::TransitionWithDiff` work: actor checks must scope to the diff (fields being written this call), not the merged row. The fix also took the opportunity to rename `Op::TransitionWithDiff(verb, diff)` → `Op::Transition(verb, diff)` (cleaning up the vestigial split that Phase 7 left), making the Op enum tight: Add | Update(diff) | Transition(verb, diff).
 - `--json` polish: all show/list commands on both stores pipe to `python3 -m json.tool` cleanly. Gate's `options` List is a real JSON array (not an escaped string). Observations' `triage` and `contract` Records are nested JSON objects.
+
+---
+
+### Phase 8: End-to-end demo verification, `--json` polish, README (Code Review)
+
+- **Gate:** PASS — **T001 v0.1 COMPLETE**
+- **Reviewed:** 2026-04-26 by `code-reviewer`
+- **Commits:** `06fbaf0` (Op::Update fix), `d52d186` (e2e + README + completion), `9cdd285` (status + SHA fixes)
+- **Issues:** 0 critical / 0 major / 2 minor
+- **Summary:** All 13 DONE_WHEN steps verified by `bash tests/e2e.sh` from a fresh shell after `cargo install --path .` — exit code 0, every assertion passes (JOIN output is exactly `L001|triaged|T3|G001`, the real non-NULL gate match required by Phase 8 AC #2). `cargo test --release` 85/85 pass (matches executor's claim — 83 prior + 2 new regression tests for the Op::Update fix). **Op::Update fix verified directly:** Op enum is now the tight 3-variant `Add | Update(EntryMap) | Transition(String, EntryMap)` shape; `validate::validate` resolves `actor_entry` to the diff for both Update and Transition; both call sites (`update.rs:65`, `transition.rs:89`) pass the actual diff. Live regression in fresh tmp dir: `gate add → gate answer --invoker human → CLAUDECODE=1 stores gate update G001 --question "X"` now succeeds (was failing pre-fix per Phase 7 review M1 callout — exact bug Phase 7 review predicted, exact fix landed). Both new tests are real (distinct merged + diff maps with realistic schema) and exercise both directions. `--json` polish verified live: `show --json` and `list --json` on both stores pipe cleanly to `jq .`; `triage` and `contract` are nested JSON objects (not escaped strings — closes M2 from cycle 1); `options` is a real JSON array. `tests/e2e.sh` quality is good: `set -euo pipefail` at line 28, top-of-file comment block lists all 13 README commands in canonical order (auditable correspondence per Phase 8 AC #3), each step asserts something specific (exact display_id matches, multiple required_when fields named in error, JOIN row contains all of `L001`/`G001`/`T3`). README quality is good: install + 13-step walk + "What this demonstrates" (named both required_when T3 contract + per-field actor on gate.answer) + "Where the data lives" + "Next steps / not in v0.1" (8 deferred items, including the long-carried reserved-column-name install check). Manual README repro from a fresh tmp dir: copy-pasted commands behave identically to e2e script. **G002 deviation is defensible:** literal DONE_WHEN #11 says "fail to answer G001" but G001 is already `answered` after step #10 — a literal #11 would hit the state-machine reject before the actor check fires (testing the wrong layer). Using G002 (fresh pending gate) for the actor-mismatch demo is the correct interpretation; Phase 7 review made the same call; README documents the substitution transparently in step 11 prose. Completion section of main.md is populated with date, specific summary (4400 LOC, 85 tests, real JOIN match, --json validation), 10-commit list, and 5 specific Lessons Learned bullets (no platitudes — each names a thing someone would actually use to make a future decision).
+  - **2 Minors (both deferrable to v0.2):**
+    - **m1** README's expected-error block in step 11 shows the documented two-line format (transition-actor + field-actor); actual error matches in shape and content but not asserted byte-identically by the script (which only greps for `actor` + `human` substrings). Documentary, not enforcement; not gate-blocking.
+    - **m2** Reserved-column-name leaf collision (carried since Phase 2 m5 / Phase 3 m2 / Phase 4 m5 / Phase 5 m3 / Phase 6 m4 / Phase 7 m3) still uncaught at install time — surfaces as SQLite's own `duplicate column name`. **Now explicitly documented as deferred** in README's "Next steps" section. v0.1 bundled stores don't trigger it; punt to v0.2.
+  - **DONE_WHEN closed:** All 13 (full task closure). Step #1 (init), #2 (install observations), #3 (install gate / multi-store), #4 (`L001`), #5 (T3 without contract rejected), #6 (T3 with contract succeeds), #7 (show with nested triage+contract), #8 (list), #9 (G001 with task-ref L001), #10 (human answer succeeds), #11 (CLAUDECODE actor-mismatch rejected), #12 (cross-store JOIN returns non-NULL G001), #13 (invoker detection + override + schema enforcement throughout).
+  - **Stage 6 / CodeRabbit:** T001 is single-branch development on an experiment repo; no merge-to-main step. CodeRabbit final review can be skipped for this task. v0.1 is complete here.
+  - **Status:** `COMPLETE`. Move task directory `tasks/active/T001-stores-framework-v01/` → `tasks/completed/T001-stores-framework-v01/`; update global-task-manager.md.
+- → Details: code-review-phase-8.md
 
 ---
 

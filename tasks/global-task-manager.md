@@ -6,7 +6,6 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T001 | Stores Framework v0.1 | 1 | 7 | EXECUTING_PHASE_7 | [main.md](./active/T001-stores-framework-v01/main.md) |
 
 Next available task id: T002
 
@@ -16,6 +15,7 @@ Next available task id: T002
 
 | ID | Task Name | Completed | Link |
 |:---|:----------|:----------|:-----|
+| T001 | Stores Framework v0.1 | 2026-04-26 | [main.md](./completed/T001-stores-framework-v01/main.md) |
 
 ---
 
