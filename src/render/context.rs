@@ -223,4 +223,71 @@ mod tests {
         // description is not in entry — should appear as null
         assert_eq!(ctx["description"], Value::Null);
     }
+
+    // AC3.5 fixture: render planner-brief.md.tpl byte-for-byte against a known context.
+    #[test]
+    fn planner_brief_fixture_renders_correctly() {
+        use crate::render::render_template;
+
+        let tpl_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/workflow_minimal/templates/planner-brief.md.tpl");
+        let tpl = std::fs::read_to_string(&tpl_path).unwrap();
+
+        let schema = wf_schema();
+        // cycles is the list_record field in the schema; use it for {{#each}} iteration.
+        let entry = entry_from(json!({
+            "title": "Implement feature X",
+            "status": "planning",
+            "current_phase": 1,
+            "description": "Build something great.",
+            "cycles": [
+                {"phase": 1, "summary": "Research done"},
+                {"phase": 2, "summary": "Code written"}
+            ]
+        }));
+        let ctx = build_context(&schema, &entry);
+        let rendered = render_template(&tpl, &ctx).unwrap();
+
+        // Verify all four substitution patterns are exercised:
+        // 1. Text passthrough — the heading text "Planner Briefing" is literal.
+        assert!(rendered.contains("# Planner Briefing —"), "static text missing");
+        // 2. Variable substitution — {{title}}.
+        assert!(rendered.contains("Implement feature X"), "title substitution failed");
+        // 3. {{#each cycles}} list iteration.
+        assert!(rendered.contains("- Phase 1: Research done"), "each cycles item 1 failed");
+        assert!(rendered.contains("- Phase 2: Code written"), "each cycles item 2 failed");
+        // 4. {{#if (eq status "BLOCKED")}} — status is "planning" so else branch fires.
+        assert!(rendered.contains("Not blocked."), "eq conditional failed");
+        assert!(!rendered.contains("This task is blocked"), "eq true branch should not fire");
+
+        // Full byte-for-byte expected output.
+        // Note: Handlebars {{#each}} emits each item with its trailing newline
+        // but does NOT add a blank line after the block — the blank line before
+        // "## Blocked Reason" comes from the template line that follows {{/each}}.
+        let expected = "# Planner Briefing — Implement feature X\n\
+\n\
+**Status:** planning\n\
+**Phase:** 1\n\
+\n\
+## Objective\n\
+\n\
+Build something great.\n\
+\n\
+## Prior Cycles\n\
+\n\
+- Phase 1: Research done\n\
+- Phase 2: Code written\n\
+## Blocked Reason\n\
+\n\
+Not blocked.\n\
+\n\
+## Instructions\n\
+\n\
+You are the planner. Create an implementation plan.\n";
+
+        assert_eq!(
+            rendered, expected,
+            "rendered output does not match expected byte-for-byte"
+        );
+    }
 }
