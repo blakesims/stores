@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
 - **Blocked Reason:** —
@@ -433,6 +433,17 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
   - **4 Minors:** (m1) AC8 promised "rendering pk=1 → L001" but renderer is Phase 4 territory; only validation tested here — Phase 4 must close. (m2) `RawField` lacks `#[serde(deny_unknown_fields)]` so YAML typos like `requried_when:` parse silently. (m3) `Schema.default_actor` field added without plan mention; unused, possible YAGNI — confirm Phase 5 plan consumes it or drop. (m4) `parse.rs` test has dead `let bad = ...; let _ = bad;` cosmetic leftover. (m5) Reserved-column-name collision (cycle-2 fresh-eye m1c2: a user leaf named `status`/`display_id`/`created_at` etc.) is NOT caught here; deferrable to Phase 3 where DDL emission owns the reserved-column list. v0.1 bundled stores don't trigger it (status is store-managed, not declared as a user field).
   - DONE_WHEN: Phase 2 enables, doesn't directly demo. Marquee `triage --verdict T3 --done-when X` enforcement is genuinely supported by this model — verified end-to-end at the type level. Status: advance to Phase 3.
 - → Details: code-review-phase-2.md
+
+### Phase 3: `stores install` + DDL codegen + manifest registration
+
+- **Gate:** PASS
+- **Reviewed:** 2026-04-26 by `code-reviewer`
+- **Commit:** `9469d77`
+- **Issues:** 0 critical / 0 major / 4 minor
+- **Summary:** All 6 Phase 3 ACs verified. `cargo test` 38/38 passes (matches executor claim). Live E2E in a fresh `mktemp -d`: `stores init` → `stores install …/all_types_store` → `sqlite3 ".schema kitchen_sink"` matches the snapshot byte-for-byte (reserved cols → user scalars → JSON cols, Enum CHECK present, Bool CHECK present, List/Record collapsed to TEXT). Manifest contains canonical absolute `schema_path` + ISO-8601 `installed_at` + correct `name`/`table_name`. Re-install same path → clear path-collision message; copying the fixture under a different folder name then installing → distinguishable name-collision message. Probed `canonicalize` round-trip via `…/foo/../foo` — collapses to the same absolute path so the same-path check fires correctly. Probed install-before-init → clean `run \`stores init\` first` error. DDL runs in a SQLite `BEGIN; … COMMIT;` transaction and the manifest write uses tmp+rename — both atomic individually but not jointly atomic with each other; the orphan failure mode (DDL committed, manifest write fails) is benign because `CREATE TABLE IF NOT EXISTS` makes a retry self-healing. Forward-compat for Phase 4/5 is clean — reserved cols are pre-populated for `created_by`/`updated_by` from the validator's invoker; the table layout (reserved → scalars → JSON) maps naturally to `add`/`show`/`list`/`update`. The `kitchen_sink` fixture exercises all 8 `FieldType` variants; the Record sub-field carries `required_when` for Phase 5's C3 unit test (LHS is a non-Record path; the cross-Record case will be exercised by the real `observations` schema in Phase 6).
+  - **4 Minors:** (m1) DDL execute and manifest save are not jointly atomic — orphan state is self-healing via `IF NOT EXISTS` but undocumented; recommend a comment in `install::run`. (m2) Reserved-column-name collision (user declares a field named `status`/`id`/`created_at` etc.) surfaces only as SQLite's own `duplicate column name` error — Phase 2's m5 deferred this here, Phase 3 didn't pick it up. Recommend rolling into Phase 4 alongside the leaf-name vs CLI-flag collision check. (m3) `Schema.default_actor` still unused (carried from Phase 2 m3); confirm Phase 5 wires it or drop. (m4) `chrono_now` hand-rolls UTC calendar arithmetic to avoid a chrono dep — correct + tested but Phase 4 will need timestamps everywhere; recommend pulling in `time` (smaller than chrono) at that point and deleting the hand-rolled code.
+  - DONE_WHEN: #2 fully (install path-side); #3 partially (multi-store coexistence empirically demonstrated by installing the same fixture into the same DB under a renamed copy; full verification with `gate` is Phase 7's job). Status: advance to Phase 4.
+- → Details: code-review-phase-3.md
 
 ---
 
