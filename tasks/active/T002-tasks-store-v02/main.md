@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_6
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: Phase 5 cycle 2 PASS — C1 compute_resume verified; M1 mid-tx lock probe verified; M2 handler-path rollback verified; m1 GuardExpr removed; 263 tests + 13 e2e green)
+- **Last Updated:** 2026-04-26 (executor: Phase 6 — render verb + idempotent main.md projection; 284 tests + 13 e2e green)
 - **Blocked Reason:** —
 
 ## Task
@@ -1404,6 +1404,82 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **M2 fix:** Added `ac5_11b_handler_path_validator_failure_rolls_back`: inserts row in `executing` state, calls `compute_submit_execute` with `Actor::AiWithHuman` (rejected by `actor: ai_autonomous` on `submit-execute` transition — `actor_allowed` returns false) → Err. Post-call DB: status, current_phase, current_cycle, cycles, claimed_by all identical to pre-call. Proves the handler's own `tx` does the rollback work, not just SQLite semantics.
 - **m1 fix:** Deleted `pub use crate::schema::expr::Expr as GuardExpr;` from `src/schema/required_when.rs`. `cargo build` clean — zero references to `GuardExpr` anywhere.
 - **Deferrals to Phase 7:** m2 (`--open-questions-from-file` on submit-plan-review); m3 (`submit_targets` lookup vs. hardcoded field names); m4 (`--details-from-file` / `--summary` conflation on submit-review).
+
+---
+
+### Phase 6: `render` verb + idempotent main.md projection
+
+- **Status:** CODE_REVIEW
+- **Executor:** Claude Sonnet 4.6
+- **Commits:**
+  - `763c8fe` T002 P6.1+P6.2+P6.3: render handler, atomic write, directory move
+  - `3c05cfe` T002 P6.4: author main.md.tpl fixture template
+  - `507d461` T002 P6.5: register render verb in CLI + dispatch
+  - `d802afd` T002 P6.cf-p2m1: close P2-M1 carry-forward (option 2: on-demand template load)
+- **Tests:** 284 unit tests pass (263 prior + 21 new); all 13 e2e steps green
+- **Files Modified:**
+  - `src/render/path.rs` — NEW: `status_to_dir`, `resolve_render_path`, `find_existing_task_dir`, `maybe_move_dir`
+  - `src/render/mod.rs` — export `path` module
+  - `src/handlers/render.rs` — NEW: `RenderOutput`, `compute_render_in`, `compute_render`, `run_render_in`, `run_render`, `run`
+  - `src/handlers/mod.rs` — register `render` module
+  - `src/manifest.rs` — add `Manifest::load_from(root)` (avoids cwd dependency in tests)
+  - `src/cli/dynamic.rs` — `build_render_cmd()` + add to workflow-only verb group
+  - `src/cli/dispatch.rs` — route `("render", sub)` → `handlers::render::run`
+  - `src/handlers/brief.rs` — update TODO comment to reflect P2-M1 closure (option 2 chosen; Phase 7 action item documented)
+  - `tests/fixtures/workflow_minimal/schema.yaml` — add `slug` field (required by `render_target_path` `{{slug}}` substitution)
+  - `tests/fixtures/workflow_minimal/templates/main.md.tpl` — rewrite with canonical layout (Meta, Task, Plan, Plan Review, Execution Log, Code Review Log, Completion)
+
+#### Tasks Completed
+
+**6.1 — `src/handlers/render.rs`**
+- `compute_render_in(schema, conn, display_id, dry_run, invoker, repo_root, manifest_root)`: pure logic; reads row, builds context, resolves path, detects dir-move, loads template from disk, renders. No DB writes.
+- `run_render_in(...)`: calls compute, then performs dir-move (if needed) + atomic write `.tmp → rename`.
+- `run_render(...)` / `compute_render(...)`: cwd wrappers for production use.
+- `run(schema, conn, matches, invoker)`: CLI entry point; reads `display_id` + `dry-run` flag.
+
+**6.2 — Atomic write**
+- Write to `<path>.md.tmp` then `std::fs::rename` to `<path>`. Parent directory created with `create_dir_all` if absent. Pattern mirrors `manifest.rs::save`.
+
+**6.3 — Directory move on status_dir change**
+- `src/render/path.rs::find_existing_task_dir`: globs `tasks/*/{{display_id}}-*` under repo_root. Returns `None` on zero matches; `Some(path)` on exactly one match; `None` + warning on multiple matches (render proceeds to canonical path, no error).
+- `maybe_move_dir(src, dst)`: `std::fs::rename` with parent creation; propagates error as warning (render continues to canonical path).
+- Detection in `compute_render_in`: `existing != target_dir && existing.exists()` → `was_directory_move = true`.
+
+**6.4 — `main.md.tpl` authoring**
+- `tests/fixtures/workflow_minimal/templates/main.md.tpl` rewritten with canonical layout matching `~/repos/plugins/task-workflow-plugin/templates/main.md` (minus merge-review section).
+- Sections: Meta (status_dir-aware path), Task (description), Plan (objective + phases via `{{#each plan.phases}}`), Plan Review (`{{#each plan_review_log}}`), Execution Log (`{{#each cycles}}`), Code Review Log (filtered by `{{#if this.review}}`), Completion (eq status "complete" guard).
+- Empty sections use `{{else}}` branch for `_placeholder_` text per convention.
+- `{{default}}` helper provides "—" fallbacks for optional fields.
+
+**6.5 — CLI registration + --dry-run flag**
+- `dynamic.rs::build_render_cmd()`: positional `display_id` + `--dry-run` (SetTrue).
+- Added to workflow-only verb group in `build_store_command`.
+- `dispatch.rs`: `("render", sub)` → `handlers::render::run`.
+
+**P2-M1 carry-forward closure**
+- Chose option 2 (on-demand template load): both `brief.rs` and `render.rs` re-read templates from disk at call time via `schema_path` from manifest. No `WorkflowResolved` threading into `main.rs`.
+- `brief.rs` TODO comment updated: Phase 7 must add bundled-store sentinel detection when `tasks` schema (workflow-shaped) is wired up.
+- `Manifest::load_from(root: &Path)` added to support test isolation without `set_current_dir`.
+
+#### AC Verification
+
+| AC | Result | Evidence |
+|----|--------|----------|
+| AC6.1 | PASS | `run_render_atomic_write_creates_file` writes `tasks/active/WF001-render-test/main.md`; content non-empty |
+| AC6.2 | PASS | `compute_render_dry_run_no_write` asserts `dry_run=true`, content non-empty, file absent on disk |
+| AC6.3 | PASS | `run_render_moves_directory_on_status_change`: complete-status row moves `tasks/active/WF001-dir-move-task/` → `tasks/completed/WF001-dir-move-task/`; old dir absent, main.md present in new |
+| AC6.4 | PASS | `run_render_idempotent_content`: two renders with unchanged DB → byte-identical content |
+| AC6.5 | PASS | `compute_render_blocked_reason_in_context`: blocked_reason in context; path routes to `tasks/paused/` |
+| AC6.6 | PASS | `render_is_read_only_against_db`: entry_before == entry_after after run_render_in |
+
+#### Notes / Deviations
+
+- **P2-M1 closure choice:** Option 2 (on-demand template load) chosen over Option 1 (thread WorkflowResolved). Rationale: main.rs schema map stores `Schema` (with `Workflow` path references); threading `WorkflowResolved` would require either a parallel HashMap or extending `Schema`. Option 2 adds one FS read per `render` call (acceptable; render is not in a hot loop) and keeps the main.rs schema loading loop unchanged.
+- **Manifest::load_from**: added to avoid `set_current_dir` in tests (which causes test isolation failures when run in parallel). This is a minor additive API addition not in the original plan.
+- **Test isolation**: all render tests use explicit `repo_root`/`manifest_root` parameters via `compute_render_in`/`run_render_in` instead of cwd-dependent wrappers. No `set_current_dir` calls.
+- **Performance note (TODO carried forward):** `render_template` rebuilds Handlebars registry on each call (noted in Phase 3 code review carry-forward). Still deferred — render is not called in a hot loop.
+- **`stores/tasks/templates/main.md.tpl`**: not created. Phase 7 will author the bundled tasks store; this Phase authors only the fixture template. The plan spec referred to `stores/tasks/templates/main.md.tpl` in task 6.4, but Phase 7 is the correct scope for the bundled store.
+- **Context test count:** 21 new tests (13 path tests + 8 render handler tests). Total: 284.
 
 #### Carry-forward closures
 
