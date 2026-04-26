@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
 - **Blocked Reason:** —
@@ -421,6 +421,18 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 - **Issues:** 0 critical / 0 major / 3 minor
 - **Summary:** All five Phase 1 ACs verified end-to-end in a fresh tmp dir: `cargo build` clean (one acknowledged `dead_code` warning on `Manifest::load()` — genuine Phase-3-only consumption, not broken design); `cargo install --path .` replaces the binary cleanly without touching `.stores/`; `stores init` creates valid SQLite with WAL persisted in the file header (verified across reopen), and an empty `stores: []` manifest; re-init is idempotent and preserves manifest content even when polluted. Three minor findings: (1) the `args: Vec<String>` catch-all in `main.rs` is throwaway scaffolding that Phase 4 will discard when it switches to the `clap::Command` builder for dynamic subcommand injection — not a clean seam, just expected churn; (2) `db::open` uses `pragma_update` for `journal_mode` which works but silently swallows the return value (defer; file-backed DB exercises it correctly); (3) status messages go to stdout instead of stderr (defer to Phase 4 output-convention work). None gate-blocking. DONE_WHEN #1 fully satisfied. Status: advance to Phase 2.
 - → Details: code-review-phase-1.md
+
+### Phase 2: Schema parser (YAML → typed Rust model)
+
+- **Gate:** PASS
+- **Reviewed:** 2026-04-26 by `code-reviewer`
+- **Commit:** `169480f`
+- **Issues:** 0 critical / 1 major / 4 minor
+- **Summary:** All 9 Phase 2 ACs verified by re-running `cargo test` (31/31 pass, matches executor's claim). Spot-checks confirm the load-bearing pieces are real, not just test-name-shaped: `Field { ty: FieldType::Record(Vec<Field>) }` literally nests full `Field` structs so sub-fields are first-class with their own `required`/`required_when`/`pattern`/`actor` (C3 model side, fixture asserts `contract.required_when.is_none()` AND `done_when.required_when` carries the sibling-Record path); `flatten::to_kebab` strips parent prefix, producing `--done-when`/`--scope-in`/`--scope-out`/`--verdict` exactly as the marquee DONE_WHEN demo demands (C2 model side); `required_when` parser path-agnostic so cross-Record `lhs_path = ["triage","verdict"]` from inside `contract.done_when` parses cleanly (Phase 5 owns resolution); `Lifecycle.resolved_initial_state()` defaults to `states[0]` and explicit override works; custom `RawFieldType` Visitor cleanly handles both string-form (`type: text`) and map-form (`type: { list: text }`/`{ record: ... }`). The deviation putting `FieldType` + `Schema::from_yaml` in `mod.rs` instead of `types.rs`/`parse.rs` is defensible (genuine `FieldType::Record(Vec<Field>)` ↔ `Field` circular-dep) and the shims are tiny. Forward-compat for Phases 3/4/5 is clean — no awkward seams.
+  - **1 Major (M1) — `OR`/`AND` substring rejection in `required_when::parse` produces false positives.** `s.contains("OR")` falsely rejects legitimate values like `'NORTH'`, `'AUTHORIZED'`, `'CONNECTOR'`; `s.contains("AND")` falsely rejects `'BRANDY'`. Verified empirically. v0.1 bundled stores (T1/T2/T3, decision/script, human, etc.) don't trigger this so the demo path is unaffected — but the foot-gun is live for any user-authored store. Fix is ≤10 lines (token-aware split or `\bOR\b` regex). **Not gate-blocking;** recommend rolling into Phase 5's `required_when` work block since that phase is already extending the parser surface.
+  - **4 Minors:** (m1) AC8 promised "rendering pk=1 → L001" but renderer is Phase 4 territory; only validation tested here — Phase 4 must close. (m2) `RawField` lacks `#[serde(deny_unknown_fields)]` so YAML typos like `requried_when:` parse silently. (m3) `Schema.default_actor` field added without plan mention; unused, possible YAGNI — confirm Phase 5 plan consumes it or drop. (m4) `parse.rs` test has dead `let bad = ...; let _ = bad;` cosmetic leftover. (m5) Reserved-column-name collision (cycle-2 fresh-eye m1c2: a user leaf named `status`/`display_id`/`created_at` etc.) is NOT caught here; deferrable to Phase 3 where DDL emission owns the reserved-column list. v0.1 bundled stores don't trigger it (status is store-managed, not declared as a user field).
+  - DONE_WHEN: Phase 2 enables, doesn't directly demo. Marquee `triage --verdict T3 --done-when X` enforcement is genuinely supported by this model — verified end-to-end at the type level. Status: advance to Phase 3.
+- → Details: code-review-phase-2.md
 
 ---
 
