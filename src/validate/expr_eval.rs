@@ -24,6 +24,25 @@ pub fn eval(expr: &Expr, entry: &EntryMap) -> bool {
     }
 }
 
+/// Resolve an `Rhs` value to an `i64` for numeric comparison.
+/// Returns `None` when the RHS is a path that is missing/wrong-type.
+fn rhs_as_i64(rhs: &Rhs, entry: &EntryMap) -> Option<i64> {
+    match rhs {
+        Rhs::Integer(n) => Some(*n),
+        Rhs::PathLength(path) => {
+            let val = lookup_path(path, entry)?;
+            Some(match val {
+                Value::Array(arr) => arr.len() as i64,
+                Value::String(s) => s.chars().count() as i64,
+                Value::Object(map) => map.len() as i64,
+                _ => return None,
+            })
+        }
+        // Path and Literal are not numeric — callers handle them separately
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -92,6 +111,51 @@ fn eval_path(path: &[String], op: &Op, rhs: &Rhs, entry: &EntryMap) -> bool {
             };
             compare_i64(i, *n, op)
         }
+        // RHS is a path or path.length — resolve the LHS as i64 first, then compare.
+        // Handles `current_phase < plan.phases.length` and `a == b`.
+        Rhs::PathLength(_) => {
+            // LHS must be numeric (integer) for a path < path.length comparison.
+            let lhs_i = match val {
+                Value::Number(num) => match num.as_i64() {
+                    Some(i) => i,
+                    None => return false,
+                },
+                _ => return false,
+            };
+            let rhs_i = match rhs_as_i64(rhs, entry) {
+                Some(n) => n,
+                None => return false,
+            };
+            compare_i64(lhs_i, rhs_i, op)
+        }
+        Rhs::Path(rhs_path) => {
+            // Both sides resolved from the entry.  Try numeric comparison first
+            // (both are integers), then string comparison.
+            let rhs_val = match lookup_path(rhs_path, entry) {
+                Some(v) => v,
+                None => return false,
+            };
+            match (val, rhs_val) {
+                (Value::Number(l), Value::Number(r)) => {
+                    match (l.as_i64(), r.as_i64()) {
+                        (Some(li), Some(ri)) => compare_i64(li, ri, op),
+                        _ => false,
+                    }
+                }
+                (Value::String(l), Value::String(r)) => {
+                    let (ls, rs) = (l.as_str(), r.as_str());
+                    match op {
+                        Op::Eq => ls == rs,
+                        Op::Neq => ls != rs,
+                        Op::Lt => ls < rs,
+                        Op::Le => ls <= rs,
+                        Op::Gt => ls > rs,
+                        Op::Ge => ls >= rs,
+                    }
+                }
+                _ => false,
+            }
+        }
     }
 }
 
@@ -111,6 +175,24 @@ fn eval_length(path: &[String], op: &Op, rhs: &Rhs, entry: &EntryMap) -> bool {
     let n = match rhs {
         Rhs::Integer(n) => *n,
         Rhs::Literal(_) => return false, // parse_guard already rejects this
+        Rhs::PathLength(_) => match rhs_as_i64(rhs, entry) {
+            Some(n) => n,
+            None => return false,
+        },
+        // path.length compared to a bare path would be unusual; resolve as integer if possible
+        Rhs::Path(rhs_path) => {
+            let rhs_val = match lookup_path(rhs_path, entry) {
+                Some(v) => v,
+                None => return false,
+            };
+            match rhs_val {
+                Value::Number(num) => match num.as_i64() {
+                    Some(i) => i,
+                    None => return false,
+                },
+                _ => return false,
+            }
+        }
     };
 
     compare_i64(len, n, op)
@@ -158,9 +240,11 @@ mod tests {
         assert!(!eval(&expr, &entry), "5 <= 4 should be false");
     }
 
+    /// Renamed from `current_phase_lt_plan_phases_length_depth3` (was misleading — tested
+    /// `plan.phases.length > 1`, not the AC1.4-required form).  Kept as a regression.
     #[test]
-    fn current_phase_lt_plan_phases_length_depth3() {
-        // plan.phases is a list with 2 elements; current_phase = 1 → true
+    fn plan_phases_length_gt_constant_depth3() {
+        // plan.phases is a list with 2 elements; 2 > 1 → true
         let expr = parse_guard("plan.phases.length > 1").unwrap();
         let entry = entry_from_json(json!({
             "plan": {
@@ -173,13 +257,75 @@ mod tests {
         assert!(eval(&expr, &entry), "length 2 > 1 should be true");
     }
 
+    /// Renamed from `current_phase_lt_plan_phases_length_false` (was misleading).
     #[test]
-    fn current_phase_lt_plan_phases_length_false() {
+    fn plan_phases_length_gt_constant_false() {
         let expr = parse_guard("plan.phases.length > 3").unwrap();
         let entry = entry_from_json(json!({
             "plan": { "phases": [{"name": "p1"}, {"name": "p2"}] }
         }));
         assert!(!eval(&expr, &entry), "length 2 > 3 should be false");
+    }
+
+    // ---- AC1.4: path-vs-path-length form (C1 fix) ----
+
+    #[test]
+    fn current_phase_lt_plan_phases_length_true() {
+        // The exact AC1.4-required form: current_phase < plan.phases.length
+        // Entry: current_phase=1, plan.phases has 2 elements → 1 < 2 → true
+        let expr = parse_guard("current_phase < plan.phases.length").unwrap();
+        let entry = entry_from_json(json!({
+            "current_phase": 1,
+            "plan": {
+                "phases": [
+                    { "name": "Phase 1" },
+                    { "name": "Phase 2" }
+                ]
+            }
+        }));
+        assert!(eval(&expr, &entry), "1 < 2 (length) should be true");
+    }
+
+    #[test]
+    fn current_phase_lt_plan_phases_length_false_equal() {
+        // current_phase=2, plan.phases has 2 elements → 2 < 2 → false
+        let expr = parse_guard("current_phase < plan.phases.length").unwrap();
+        let entry = entry_from_json(json!({
+            "current_phase": 2,
+            "plan": {
+                "phases": [
+                    { "name": "Phase 1" },
+                    { "name": "Phase 2" }
+                ]
+            }
+        }));
+        assert!(!eval(&expr, &entry), "2 < 2 should be false");
+    }
+
+    #[test]
+    fn current_phase_lt_plan_phases_length_missing_phase_returns_false() {
+        // Missing current_phase → false (not a crash)
+        let expr = parse_guard("current_phase < plan.phases.length").unwrap();
+        let entry = entry_from_json(json!({
+            "plan": { "phases": [{"name": "p1"}, {"name": "p2"}] }
+        }));
+        assert!(!eval(&expr, &entry), "missing current_phase should return false");
+    }
+
+    // ---- path == path form ----
+
+    #[test]
+    fn path_eq_path_true() {
+        let expr = parse_guard("a == b").unwrap();
+        let entry = entry_from_json(json!({ "a": 1, "b": 1 }));
+        assert!(eval(&expr, &entry), "a==b when both are 1 should be true");
+    }
+
+    #[test]
+    fn path_eq_path_false() {
+        let expr = parse_guard("a == b").unwrap();
+        let entry = entry_from_json(json!({ "a": 1, "b": 2 }));
+        assert!(!eval(&expr, &entry), "a==b when a=1 b=2 should be false");
     }
 
     // ---- All operators ----

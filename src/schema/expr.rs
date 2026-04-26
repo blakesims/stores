@@ -51,6 +51,12 @@ pub enum Rhs {
     Literal(String),
     /// An unquoted integer, e.g. `4`.
     Integer(i64),
+    /// A dotted path into the entry (same semantics as `Lhs::Path`), e.g.
+    /// `current_phase` or `plan.current`.  Allows path == path comparisons.
+    Path(Vec<String>),
+    /// The `.length` of a dotted-path value (same semantics as `Lhs::PathLength`),
+    /// e.g. `plan.phases.length`.  Used in `current_phase < plan.phases.length`.
+    PathLength(Vec<String>),
 }
 
 /// A single (non-compound) guard predicate.
@@ -93,7 +99,9 @@ fn contains_keyword(s: &str, keyword: &str) -> bool {
 /// - `dotted.path == 'literal'`
 /// - `dotted.path != integer`
 /// - `dotted.path.length <= integer`
-/// - (etc. for all six Op variants and both Rhs types)
+/// - `dotted.path < other.path.length`   ← RHS may be a path or path.length
+/// - `dotted.path == other.path`         ← RHS may be a bare path (path == path)
+/// - (etc. for all six Op variants and both Lhs/Rhs combinations)
 ///
 /// Rejections (for clear error messages):
 /// - Double-quoted RHS
@@ -139,7 +147,7 @@ pub fn parse_guard(input: &str) -> Result<Expr> {
     // Parse RHS — single-quoted literal OR bare integer.
     let rhs = parse_rhs(rhs_raw, input)?;
 
-    // Length operators only make sense with integer RHS.
+    // Length operators require a numeric (integer or path-length) RHS, not a string literal.
     if matches!(lhs, Lhs::PathLength(_)) && matches!(rhs, Rhs::Literal(_)) {
         bail!(
             "length comparison requires an integer RHS, got a string literal: {:?}",
@@ -227,13 +235,34 @@ fn parse_rhs(raw: &str, original: &str) -> Result<Rhs> {
         return Ok(Rhs::Literal(literal));
     }
     // Attempt to parse as integer
-    match raw.parse::<i64>() {
-        Ok(n) => Ok(Rhs::Integer(n)),
-        Err(_) => bail!(
-            "guard RHS must be a single-quoted literal or an integer; got: {:?}",
-            raw
-        ),
+    if let Ok(n) = raw.parse::<i64>() {
+        return Ok(Rhs::Integer(n));
     }
+    // Attempt to parse as a dotted-identifier path (possibly ending in .length).
+    // This mirrors parse_lhs so that `current_phase < plan.phases.length` works.
+    let (path_str, is_length) = if raw.ends_with(".length") {
+        (&raw[..raw.len() - ".length".len()], true)
+    } else {
+        (raw, false)
+    };
+    if !path_str.is_empty()
+        && path_str
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        && !path_str.starts_with('.')
+        && !path_str.ends_with('.')
+    {
+        let parts: Vec<String> = path_str.split('.').map(|s| s.to_string()).collect();
+        if is_length {
+            return Ok(Rhs::PathLength(parts));
+        } else {
+            return Ok(Rhs::Path(parts));
+        }
+    }
+    bail!(
+        "guard RHS must be a single-quoted literal, an integer, or a dotted path (optionally ending in .length); got: {:?}",
+        raw
+    )
 }
 
 #[cfg(test)]
@@ -344,5 +373,39 @@ mod tests {
     fn parse_accepts_quoted_and_in_literal() {
         let e = parse_guard("status == 'BAND'").unwrap();
         assert_eq!(e.rhs, Rhs::Literal("BAND".to_string()));
+    }
+
+    // ---- AC1.4: path-vs-path-length RHS (C1 fix) ----
+
+    #[test]
+    fn parse_current_phase_lt_plan_phases_length() {
+        // The exact form required by AC1.4 and the Phase 7 tasks schema.
+        let e = parse_guard("current_phase < plan.phases.length").unwrap();
+        assert_eq!(e.lhs, Lhs::Path(vec!["current_phase".to_string()]));
+        assert_eq!(e.op, Op::Lt);
+        assert_eq!(
+            e.rhs,
+            Rhs::PathLength(vec!["plan".to_string(), "phases".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_current_phase_ge_plan_phases_length() {
+        let e = parse_guard("current_phase >= plan.phases.length").unwrap();
+        assert_eq!(e.lhs, Lhs::Path(vec!["current_phase".to_string()]));
+        assert_eq!(e.op, Op::Ge);
+        assert_eq!(
+            e.rhs,
+            Rhs::PathLength(vec!["plan".to_string(), "phases".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_path_eq_path() {
+        // path == path form
+        let e = parse_guard("a == b").unwrap();
+        assert_eq!(e.lhs, Lhs::Path(vec!["a".to_string()]));
+        assert_eq!(e.op, Op::Eq);
+        assert_eq!(e.rhs, Rhs::Path(vec!["b".to_string()]));
     }
 }

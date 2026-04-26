@@ -1,7 +1,7 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_1
+- **Status:** EXECUTING_PHASE_1 (cycle 2 revisions)
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26 (code-reviewer: cycle 1 REVISE — AC1.4 parser gap; see Code Review Log)
 - **Blocked Reason:** —
@@ -1089,7 +1089,8 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **e2e:** All 13 steps pass when CLAUDECODE is unset from environment. Pre-existing: e2e fails when CLAUDECODE is inherited from Claude Code session (ai_autonomous vs ai_with_human mismatch on observations triage step) — identical behavior on unmodified baseline.
 - **Deviations from plan:**
   - Tasks 1.2, 1.3, 1.5, 1.7, 1.8 batched into one commit (all in schema/mod.rs and new expr.rs — logically coherent unit)
-  - `required_when.rs` re-exports `GuardExpr` (= `expr::Expr`) but keeps its own narrower `Expr` struct for backwards compatibility. Existing call sites use `RequiredWhenExpr` alias unchanged. The plan's "single AST type" intent is satisfied at the module level via re-export without breaking `e.lhs_path` / `e.rhs_literal` access.
+  - **M1 (deferred — two ASTs, not one):** `required_when.rs` re-exports `GuardExpr` (= `expr::Expr`) but keeps its own narrower `Expr { lhs_path, rhs_literal }` struct for backwards compatibility. Existing call sites in `validate/required.rs` and `handlers/schema_show.rs` use `.lhs_path` / `.rhs_literal` on the narrower type. The plan's "single AST type" intent is **genuinely deferred to Phase 5**, not satisfied here. Phase 5 will need to either (a) widen `required_when.rs::Expr` to an alias of `expr::Expr` and update the 8 existing call sites, or (b) add `impl From<required_when::Expr> for expr::Expr` as a bridge. The two ASTs coexist without conflict in Phase 1 because no code path compares or passes them interchangeably yet; that changes in Phase 5's transition handler.
+  - **M2 (deferred — ListRecord sub-fields not validated at runtime):** `validate/mod.rs::validate_field` does not recurse into `FieldType::ListRecord` element fields. A `required: true` field inside a list element does NOT trigger a validation error. This is safe in Phase 1 (no submit path writes individual list elements). Phase 5 must add the ListRecord walker before `submit-execute` writes `cycles[].executor.summary`. A TODO comment at `validate/mod.rs` line ~80 and a pinning test (`list_record_required_sub_field_not_validated_phase1`) document this contract; when Phase 5 adds the walker the test expectation inverts from `unwrap()` to `unwrap_err()`.
   - `tempfile = "3"` added as dev-dependency for paths.rs tests (needed for `tempfile::tempdir()`). Not in plan's file list but consistent with the test requirement.
   - CWD-mutating path tests use a `Mutex<()>` guard rather than `#[serial_test]` crate (avoided adding an extra test dep).
 - **Notes:**

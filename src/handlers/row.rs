@@ -444,4 +444,54 @@ fields:
             .collect();
         assert_eq!(ids, vec!["T001", "T002"]);
     }
+
+    /// m2 (AC1.7): update overwrites a `cycles` JSON cell and reads it back correctly.
+    /// Covers add → update → show round-trip for a list_record column.
+    #[test]
+    fn cycles_update_round_trips() {
+        let (schema, _dir, conn) = setup_schema_and_db();
+
+        // Initial cycles: one element
+        let initial_cycles = json!([
+            { "phase": 1, "cycle": 1, "executor": { "summary": "first draft", "commit": "abc" } }
+        ]);
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, title, plan, cycles, depends_on) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                "T004", "open", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                "human", "human", "Update Test",
+                serde_json::to_string(&json!({"done_when": "", "phases": []})).unwrap(),
+                serde_json::to_string(&initial_cycles).unwrap(),
+                serde_json::to_string(&json!([])).unwrap(),
+            ],
+        ).unwrap();
+
+        // Read back initial
+        let (_id, entry) = read_row(&schema, &conn, "T004").unwrap();
+        let cycles = entry.get("cycles").expect("cycles present").as_array().unwrap();
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(cycles[0]["executor"]["summary"], "first draft");
+
+        // Update: replace cycles with two elements (add an element, modify the first)
+        let updated_cycles = json!([
+            { "phase": 1, "cycle": 1, "executor": { "summary": "revised draft", "commit": "def" } },
+            { "phase": 1, "cycle": 2, "executor": { "summary": "final", "commit": "ghi" } }
+        ]);
+        conn.execute(
+            "UPDATE tasks SET cycles = ?1 WHERE display_id = ?2",
+            rusqlite::params![
+                serde_json::to_string(&updated_cycles).unwrap(),
+                "T004",
+            ],
+        ).unwrap();
+
+        // Read back updated
+        let (_id, entry2) = read_row(&schema, &conn, "T004").unwrap();
+        let cycles2 = entry2.get("cycles").expect("cycles present").as_array().unwrap();
+        assert_eq!(cycles2.len(), 2, "should have 2 cycles after update");
+        assert_eq!(cycles2[0]["executor"]["summary"], "revised draft");
+        assert_eq!(cycles2[0]["executor"]["commit"], "def");
+        assert_eq!(cycles2[1]["executor"]["summary"], "final");
+        assert_eq!(cycles2[1]["executor"]["commit"], "ghi");
+    }
 }

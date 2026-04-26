@@ -73,6 +73,15 @@ pub fn validate(
                 validate_field(sub, entry, actor_entry, &parent_path, &schema.default_actor, invoker, &mut errors);
             }
         }
+        // TODO(phase-5): recurse into ListRecord sub-fields so that per-leaf
+        // validation rules (required, enum, pattern, actor) fire on list element
+        // fields.  Currently a ListRecord's element fields are stored as opaque
+        // JSON TEXT and the per-field walker never descends into them.  Phase 5's
+        // submit handlers write into ListRecord cells (e.g. cycles[].executor.summary)
+        // and will need this walk to enforce required/actor rules on those writes.
+        // The current behaviour (Phase 1): required fields inside a ListRecord
+        // element do NOT produce validation errors — this is intentional for now
+        // because Phase 1 has no submit path that targets individual list elements.
     }
 
     if errors.is_empty() {
@@ -436,5 +445,46 @@ fields:
             done_when_pos < scope_in_pos && scope_in_pos < scope_out_pos,
             "contract sub-fields should be in alphabetical order:\n{output}"
         );
+    }
+
+    // ---- M2: ListRecord sub-fields are NOT validated in Phase 1 (pinning test) ----
+
+    /// Pins the current Phase-1 behaviour: a `required: true` field inside a
+    /// `list_record` element does NOT trigger a validation error.
+    ///
+    /// TODO(phase-5): When Phase 5 adds the ListRecord walker, this test's
+    /// expectation will INVERT from `unwrap()` to `unwrap_err()`.  The change
+    /// will be visible here, making the Phase-5 diff obvious.
+    #[test]
+    fn list_record_required_sub_field_not_validated_phase1() {
+        const LR_SCHEMA: &str = r#"
+name: items
+id_format: "X{:03d}"
+default_actor: ~
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: entries
+    type: list_record
+    fields:
+      - name: note
+        type: text
+        required: true
+"#;
+        let s = Schema::from_yaml(LR_SCHEMA).unwrap();
+        // Entry has `title` (required top-level) but `entries` list element
+        // is missing its required `note` field.  In Phase 1 this PASSES because
+        // the validator does not walk into ListRecord elements.
+        let entry = entry_from(&[
+            ("title", str_val("hello")),
+            ("entries", serde_json::json!([{}])), // element missing required `note`
+        ]);
+        // Phase 1: no error (ListRecord sub-fields skipped).
+        validate(&s, &entry, Op::Add, Actor::Human)
+            .expect("Phase 1: ListRecord required sub-field not validated — expected no error");
     }
 }
