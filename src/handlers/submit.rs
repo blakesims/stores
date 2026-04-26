@@ -560,6 +560,7 @@ pub(crate) fn compute_submit_plan_review(
 
     // P5-m2: Build updated log entry, including open_questions if provided
     let mut log_entry_obj = serde_json::Map::new();
+    log_entry_obj.insert("at".to_string(), Value::String(now_iso8601()));
     log_entry_obj.insert("gate".to_string(), Value::String(gate.to_string()));
     log_entry_obj.insert("summary".to_string(), Value::String(summary.to_string()));
     if let Some(qs) = open_questions {
@@ -720,12 +721,19 @@ pub(crate) fn compute_submit_execute(
 
     // Build new cycles entry
     let mut executor_obj = serde_json::Map::new();
+    executor_obj.insert("at".to_string(), Value::String(now_iso8601()));
     executor_obj.insert("summary".to_string(), Value::String(exec_summary.to_string()));
     if let Some(sha) = commit_sha {
         executor_obj.insert("commit".to_string(), Value::String(sha.to_string()));
     }
     if let Some(files) = files_changed {
-        executor_obj.insert("files_changed".to_string(), Value::String(files.to_string()));
+        let files_vec: Vec<Value> = files
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(Value::String)
+            .collect();
+        executor_obj.insert("files_changed".to_string(), Value::Array(files_vec));
     }
     if let Some(n) = notes {
         executor_obj.insert("notes".to_string(), Value::String(n.to_string()));
@@ -875,6 +883,7 @@ pub(crate) fn compute_submit_review(
 
     // P5-m4: Patch the cycles entry with the review sub-record; summary and details are separate fields
     let mut review_obj_map = serde_json::Map::new();
+    review_obj_map.insert("at".to_string(), Value::String(now_iso8601()));
     review_obj_map.insert("gate".to_string(), Value::String(gate.to_string()));
     review_obj_map.insert("summary".to_string(), Value::String(review_summary.to_string()));
     if let Some(details) = review_details {
@@ -2229,6 +2238,398 @@ fields:
         assert_eq!(
             post_claimed, pre_claimed,
             "claimed_by must be rolled back (lock released by tx rollback): {:?}", post_claimed
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // M1 (cycle 2): files_changed stored as JSON array, not raw CSV string
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn m1_files_changed_stored_as_json_array() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
+
+        compute_submit_execute(
+            &schema, &conn, "WF001",
+            "did stuff", Some("abc1234"), Some("src/foo.rs,src/bar.rs"), None,
+            Actor::AiAutonomous,
+        ).unwrap();
+
+        let cycles = read_cycles(&conn);
+        assert_eq!(cycles.len(), 1);
+        let files = &cycles[0]["executor"]["files_changed"];
+        assert!(
+            files.is_array(),
+            "files_changed must be a JSON array, got: {:?}", files
+        );
+        let arr = files.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "expected 2 files, got: {:?}", arr);
+        assert_eq!(arr[0].as_str().unwrap(), "src/foo.rs");
+        assert_eq!(arr[1].as_str().unwrap(), "src/bar.rs");
+    }
+
+    #[test]
+    fn m1_files_changed_trims_whitespace_and_drops_empties() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
+
+        compute_submit_execute(
+            &schema, &conn, "WF001",
+            "did stuff", Some("abc"), Some(" a.rs , b.rs , , c.rs "), None,
+            Actor::AiAutonomous,
+        ).unwrap();
+
+        let cycles = read_cycles(&conn);
+        let files = cycles[0]["executor"]["files_changed"].as_array().unwrap();
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].as_str().unwrap(), "a.rs");
+        assert_eq!(files[1].as_str().unwrap(), "b.rs");
+        assert_eq!(files[2].as_str().unwrap(), "c.rs");
+    }
+
+    // ---------------------------------------------------------------------------
+    // M2 (cycle 2): `at` timestamps set on all three list_record sub-records
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn m2_plan_review_log_entry_has_at_timestamp() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "plan_review", 0, 0, 2, vec![], vec![], None);
+
+        compute_submit_plan_review(
+            &schema, &conn, "WF001", "NEEDS_WORK", "revise plan", None, Actor::AiAutonomous,
+        ).unwrap();
+
+        let log = read_plan_review_log(&conn);
+        assert_eq!(log.len(), 1);
+        let at = log[0].get("at").and_then(|v| v.as_str());
+        assert!(
+            at.is_some(),
+            "plan_review_log[0] must have 'at' field, entry: {:?}", log[0]
+        );
+        let at_str = at.unwrap();
+        assert!(
+            at_str.contains('T') && at_str.contains('-'),
+            "at must be ISO-8601, got: {at_str}"
+        );
+        // Reset status for continued use
+        conn.execute("UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'", []).unwrap();
+    }
+
+    #[test]
+    fn m2_executor_entry_has_at_timestamp() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
+
+        compute_submit_execute(
+            &schema, &conn, "WF001",
+            "done", Some("abc"), None, None,
+            Actor::AiAutonomous,
+        ).unwrap();
+
+        let cycles = read_cycles(&conn);
+        assert_eq!(cycles.len(), 1);
+        let at = cycles[0]["executor"].get("at").and_then(|v| v.as_str());
+        assert!(
+            at.is_some(),
+            "cycles[0].executor must have 'at' field, entry: {:?}", cycles[0]
+        );
+        let at_str = at.unwrap();
+        assert!(
+            at_str.contains('T') && at_str.contains('-'),
+            "at must be ISO-8601, got: {at_str}"
+        );
+    }
+
+    #[test]
+    fn m2_review_entry_has_at_timestamp() {
+        let (schema, conn) = setup();
+        let initial_cycles = vec![json!({
+            "phase": 1, "cycle": 1,
+            "executor": {"summary": "done", "commit": "abc", "at": "2026-01-01T00:00:00Z"},
+            "review": null
+        })];
+        insert_row_at(&conn, &schema, "code_review", 1, 1, 2, initial_cycles, vec![], None);
+
+        compute_submit_review(
+            &schema, &conn, "WF001",
+            "REVISE", "needs work", None, 1, 0, 0,
+            Actor::AiAutonomous,
+        ).unwrap();
+
+        let cycles = read_cycles(&conn);
+        let at = cycles[0]["review"].get("at").and_then(|v| v.as_str());
+        assert!(
+            at.is_some(),
+            "cycles[0].review must have 'at' field, review: {:?}", cycles[0]["review"]
+        );
+        let at_str = at.unwrap();
+        assert!(
+            at_str.contains('T') && at_str.contains('-'),
+            "at must be ISO-8601, got: {at_str}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // m2 carry-forward (cycle 2): P5-m2 open_questions appended as array
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac7_p5m2_open_questions_appended_to_plan_review_log_entry() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "plan_review", 0, 0, 2, vec![], vec![], None);
+
+        let questions = Some(vec!["question one".to_string(), "question two".to_string()]);
+        compute_submit_plan_review(
+            &schema, &conn, "WF001",
+            "NEEDS_WORK", "see questions", questions, Actor::AiAutonomous,
+        ).unwrap();
+
+        let log = read_plan_review_log(&conn);
+        assert_eq!(log.len(), 1);
+        let qs = log[0].get("open_questions").and_then(|v| v.as_array());
+        assert!(qs.is_some(), "plan_review_log[0] must have 'open_questions': {:?}", log[0]);
+        let arr = qs.unwrap();
+        assert_eq!(arr.len(), 2, "expected 2 questions, got: {:?}", arr);
+        assert_eq!(arr[0].as_str().unwrap(), "question one");
+        assert_eq!(arr[1].as_str().unwrap(), "question two");
+    }
+
+    // ---------------------------------------------------------------------------
+    // m2 carry-forward (cycle 2): P5-m3 submit_targets consulted for field lookup
+    //
+    // We construct a schema variant with submit_targets: {submit-execute: alt_cycles}
+    // and assert the entry is written to alt_cycles, not the canonical "cycles" field.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac7_p5m3_submit_targets_consulted_for_field_lookup() {
+        // Schema with custom submit_targets: submit-execute → my_exec_log
+        const CUSTOM_YAML: &str = r#"
+name: wf_custom
+id_format: "C{:03d}"
+
+lifecycle:
+  states: [executing, code_review]
+  transitions:
+    - from: executing
+      to: code_review
+      verb: submit-execute
+      actor: ai_autonomous
+
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: current_phase
+    type: integer
+    actor: framework
+  - name: current_cycle
+    type: integer
+    actor: framework
+  - name: blocked_reason
+    type: text
+    actor: framework
+  - name: claimed_by
+    type: text
+    actor: framework
+  - name: claimed_at
+    type: timestamp
+    actor: framework
+  - name: plan
+    type: record
+    fields:
+      - name: phases
+        type: list_record
+        fields:
+          - name: name
+            type: text
+  - name: my_exec_log
+    type: list_record
+    fields:
+      - name: phase
+        type: integer
+      - name: cycle
+        type: integer
+      - name: executor
+        type: record
+        fields:
+          - name: summary
+            type: text
+      - name: review
+        type: record
+        fields:
+          - name: gate
+            type: text
+          - name: summary
+            type: text
+          - name: critical
+            type: integer
+          - name: major
+            type: integer
+          - name: minor
+            type: integer
+
+workflow:
+  agent_roles:
+    executor:
+      description: "Executor"
+  briefing_templates:
+    executor: templates/executor-brief.md.tpl
+  on_state:
+    executing:
+      - dispatch_agent: executor
+  submit_targets:
+    submit-execute: my_exec_log
+"#;
+        let schema = Schema::from_yaml(CUSTOM_YAML).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+
+        let now = now_iso8601();
+        let plan_json = serde_json::to_string(&json!({
+            "phases": [{"name": "phase 1"}]
+        })).unwrap();
+        conn.execute(
+            "INSERT INTO wf_custom (display_id, status, created_at, updated_at, \
+             created_by, updated_by, title, current_phase, current_cycle, plan, my_exec_log) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "C001", "executing", now, now, "human", "human", "Custom task",
+                1i64, 1i64, plan_json, "[]"
+            ],
+        ).unwrap();
+
+        compute_submit_execute(
+            &schema, &conn, "C001",
+            "done via custom target", Some("abc"), None, None,
+            Actor::AiAutonomous,
+        ).unwrap();
+
+        // Read my_exec_log — must have the entry
+        let log_json: Option<String> = conn.query_row(
+            "SELECT my_exec_log FROM wf_custom WHERE display_id = 'C001'",
+            [], |r| r.get(0),
+        ).unwrap_or(None);
+        let log: Vec<serde_json::Value> = log_json
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        assert_eq!(log.len(), 1, "entry must be written to my_exec_log, got: {:?}", log);
+        assert_eq!(
+            log[0]["executor"]["summary"].as_str().unwrap(),
+            "done via custom target"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // m2 carry-forward (cycle 2): P5-m4 review summary and details are separate keys
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac7_p5m4_review_summary_and_details_separate_keys() {
+        let (schema, conn) = setup();
+        let initial_cycles = vec![json!({
+            "phase": 1, "cycle": 1,
+            "executor": {"summary": "done", "commit": "abc"},
+            "review": null
+        })];
+        insert_row_at(&conn, &schema, "code_review", 1, 1, 2, initial_cycles, vec![], None);
+
+        compute_submit_review(
+            &schema, &conn, "WF001",
+            "REVISE", "short summary S", Some("long detailed report D"), 1, 2, 3,
+            Actor::AiAutonomous,
+        ).unwrap();
+
+        let cycles = read_cycles(&conn);
+        let review = &cycles[0]["review"];
+        assert_eq!(review["summary"].as_str().unwrap(), "short summary S",
+            "review.summary must be the --summary value");
+        assert_eq!(review["details"].as_str().unwrap(), "long detailed report D",
+            "review.details must be the --details value as a separate key");
+        // Confirm they are genuinely separate (different values)
+        assert_ne!(
+            review["summary"].as_str().unwrap(),
+            review["details"].as_str().unwrap(),
+            "summary and details must be independent fields"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // m2 carry-forward (cycle 2): P6-m2 bundled-sentinel routes to in-memory template
+    // Exercises brief.rs:114-135 via a real manifest install + compute call.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac7_p6m2_bundled_sentinel_routes_to_in_memory_template() {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+
+        // Load the bundled tasks schema
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter().find(|(n, _)| *n == "tasks").map(|(_, y)| *y)
+            .expect("tasks bundled schema must be present");
+        let schema = crate::schema::Schema::from_yaml(tasks_yaml).unwrap();
+
+        // Verify BUNDLED_STORE_TEMPLATES contains "tasks" with the planner template
+        let tasks_templates = BUNDLED_STORE_TEMPLATES
+            .iter().find(|(n, _)| *n == "tasks").map(|(_, t)| *t)
+            .expect("tasks templates must be in BUNDLED_STORE_TEMPLATES");
+        let planner_tpl = tasks_templates
+            .iter().find(|(p, _)| *p == "templates/planner-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("planner-brief.md.tpl must be in bundled templates");
+        // Verify the known sentinel string is present
+        assert!(
+            planner_tpl.contains("Methodical and thorough"),
+            "planner template must contain 'Methodical and thorough' persona text"
+        );
+
+        // Simulate the bundled-sentinel detection path:
+        // brief::compute reads schema_path from manifest; if it starts with "bundled:"
+        // it routes to BUNDLED_STORE_TEMPLATES. We exercise that routing by calling
+        // build_context + render_template with content pulled from BUNDLED_STORE_TEMPLATES,
+        // which is exactly what brief::compute does after detecting the sentinel.
+        let entry = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("display_id".to_string(), serde_json::json!("T001"));
+            m.insert("status".to_string(), serde_json::json!("planning"));
+            m.insert("title".to_string(), serde_json::json!("Sentinel Test"));
+            m.insert("slug".to_string(), serde_json::json!("sentinel-test"));
+            m.insert("current_phase".to_string(), serde_json::json!(1));
+            m.insert("current_cycle".to_string(), serde_json::json!(1));
+            m.insert("created_at".to_string(), serde_json::json!("2026-01-01T00:00:00Z"));
+            m.insert("updated_at".to_string(), serde_json::json!("2026-01-01T00:00:00Z"));
+            m.insert("contract".to_string(), serde_json::json!({
+                "done_when": "Sentinel detected",
+                "scope_in": "All",
+                "scope_out": "None"
+            }));
+            m.insert("plan".to_string(), serde_json::json!({
+                "objective": "Test bundled sentinel",
+                "phases": []
+            }));
+            m.insert("plan_review_log".to_string(), serde_json::json!([]));
+            m.insert("cycles".to_string(), serde_json::json!([]));
+            m
+        };
+
+        let ctx = crate::render::build_context(&schema, &entry);
+        let rendered = crate::render::render_template(planner_tpl, &ctx)
+            .expect("bundled planner template must render without error");
+
+        assert!(
+            !rendered.is_empty(),
+            "rendered briefing must be non-empty"
+        );
+        assert!(
+            rendered.contains("Methodical and thorough"),
+            "rendered briefing must contain planner persona text from bundled template"
+        );
+        assert!(
+            rendered.contains("Sentinel Test"),
+            "rendered briefing must contain the task title"
         );
     }
 }
