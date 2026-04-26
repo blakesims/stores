@@ -49,6 +49,9 @@ pub fn dispatch(
                 Some(("brief", sub)) => {
                     handlers::brief::run(schema, &conn, sub, invoker)?;
                 }
+                Some(("render", sub)) => {
+                    handlers::render::run(schema, &conn, sub, invoker)?;
+                }
                 Some(("submit-plan", sub)) => {
                     let display_id = sub.get_one::<String>("display_id")
                         .map(|s| s.as_str())

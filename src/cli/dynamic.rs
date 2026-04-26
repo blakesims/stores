@@ -138,6 +138,7 @@ fn build_store_command(schema: &Schema) -> Command {
         store_cmd = store_cmd
             .subcommand(build_next_action_cmd())
             .subcommand(build_brief_cmd())
+            .subcommand(build_render_cmd())
             .subcommand(build_submit_plan_cmd())
             .subcommand(build_submit_plan_review_cmd())
             .subcommand(build_submit_execute_cmd())
@@ -187,6 +188,24 @@ fn build_brief_cmd() -> Command {
             Arg::new("for")
                 .long("for")
                 .help("Agent role to generate the briefing for (defaults to next-action answer)")
+                .required(false),
+        )
+}
+
+/// Build the `render` command: positional <id> + optional --dry-run.
+fn build_render_cmd() -> Command {
+    Command::new("render")
+        .about("Render main.md for a workflow entry to disk (read-only against DB)")
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the entry")
+                .required(true),
+        )
+        .arg(
+            Arg::new("dry-run")
+                .long("dry-run")
+                .action(ArgAction::SetTrue)
+                .help("Print rendered content to stdout without writing to disk")
                 .required(false),
         )
 }
