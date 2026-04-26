@@ -56,9 +56,18 @@ pub fn dispatch(
     bail!("no store subcommand matched")
 }
 
-/// Detect invoker: if CLAUDECODE env var is set, AiAutonomous; otherwise Human.
-fn detect_invoker(_matches: &ArgMatches) -> Actor {
-    // --invoker override (not a clap arg yet; Phase 6+ adds it; read from env for now)
+/// Detect invoker: check --invoker flag first, then fall back to $CLAUDECODE env var.
+fn detect_invoker(matches: &ArgMatches) -> Actor {
+    // --invoker explicit override
+    if let Some(inv) = matches.get_one::<String>("invoker") {
+        match inv.as_str() {
+            "human" => return Actor::Human,
+            "ai_autonomous" => return Actor::AiAutonomous,
+            "ai_with_human" => return Actor::AiWithHuman,
+            _ => {} // fall through to env detection
+        }
+    }
+    // Auto-detect from environment
     if std::env::var("CLAUDECODE").is_ok() {
         Actor::AiAutonomous
     } else {

@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::schema::{actor::Actor, FieldType, Schema};
-use crate::validate;
+use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601, read_row};
 
@@ -61,8 +61,10 @@ pub fn run(
         merged.insert(k.clone(), v.clone());
     }
 
-    // Run validator (stub)
-    validate::validate(schema, &merged, invoker)?;
+    // Run validator against merged entry
+    validate::validate(schema, &merged, Op::Update, invoker).map_err(|errs| {
+        anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
+    })?;
 
     // Build SET clause for only the fields in diff + updated_*
     let now = now_iso8601();

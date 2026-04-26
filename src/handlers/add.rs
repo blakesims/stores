@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::id_format;
 use crate::schema::{actor::Actor, FieldType, Schema};
-use crate::validate;
+use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601};
 
@@ -33,8 +33,10 @@ pub fn run(
         matches.get_one::<String>(cli_name).cloned()
     })?;
 
-    // Run validator (stub — always Ok in Phase 4)
-    validate::validate(schema, &entry, invoker)?;
+    // Run validator
+    validate::validate(schema, &entry, Op::Add, invoker).map_err(|errs| {
+        anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
+    })?;
 
     // Populate reserved fields
     let now = now_iso8601();

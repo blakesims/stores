@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** EXECUTING_PHASE_5
+- **Status:** CODE_REVIEW
 - **Phase 4 Start:** 2026-04-26
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
@@ -455,6 +455,48 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 - `ArgMatches::contains_id` panics in clap 4.6 for unregistered IDs; used `try_contains_id` instead (returns `Result<bool>`, safer API). No behavioral change.
 - `build_write_cmd` split into `build_add_cmd`/`build_update_cmd`/`build_leaf_cmd` to avoid passing `&str` to `Command::new` (which requires `&'static str` without the `string` feature); lifetime issue was pre-existing clap 4.6 constraint. No behavioral change.
 - ISO-8601 UTC math duplicated from `install.rs` into `handlers/row.rs` (both are stdlib-only). Minor code smell; deferred to Phase 5 or later.
+
+**Commits:** (pending)
+
+---
+
+### Phase 5: Enforcement engine
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+
+**Files Created:**
+- `src/validate/error.rs` — `RuleKind` enum (`Required | RequiredWhen { expr } | Enum | Pattern { pattern } | Actor`); `ValidationError { field_path, rule, message }`; `pretty_print` (sorted by field_path)
+- `src/validate/required.rs` — `lookup(entry, path)` dotted-path walker; `check_required` evaluates `required` flag + `required_when` expression against the top-level EntryMap (so cross-Record lhs_path like `triage.verdict` resolves from inside `contract.done_when`)
+- `src/validate/enum_check.rs` — `check_enum` validates field value against `enum_values` list
+- `src/validate/regex_check.rs` — `check_pattern` validates Text fields against `pattern` regex
+- `src/validate/actor.rs` — `check_actor` enforces field-level and store-default actor; `check_transition_actor` enforces transition actor; error message includes `$CLAUDECODE` hint for AI-autonomous invoker
+
+**Files Modified:**
+- `src/validate/mod.rs` — replaced stub with real `validate(schema, entry, Op, Actor) -> Result<(), Vec<ValidationError>>`; `Op` enum: `Add | Update | Transition(String)`; walks top-level fields + Record sub-fields; delegates to required/enum/pattern/actor checks; aggregates all errors before returning
+- `src/handlers/add.rs` — uses `Op::Add`; maps `Err(errs)` to pretty-printed anyhow error
+- `src/handlers/update.rs` — uses `Op::Update` against merged entry; maps `Err(errs)` to pretty-printed anyhow error
+- `src/cli/dynamic.rs` — added `--invoker` global flag for explicit actor override
+- `src/cli/dispatch.rs` — `detect_invoker` now reads `--invoker` arg before falling back to `$CLAUDECODE`
+- `tests/fixtures/all_types_store/schema.yaml` — added `triage` record (verdict, triage_notes), `contract` record (done_when/scope_in/scope_out with `required_when: triage.verdict == 'T3'`), and `slug` text field with `pattern: "^[a-z0-9-]+$"`; renamed `triage.notes` → `triage_notes` to avoid `notes` leaf-name collision with `details.notes`
+- `src/codegen/ddl.rs` — updated `ddl_snapshot` test to include new `slug`, `triage`, `contract` columns
+
+**ACs verified:**
+- [x] AC1: Unit tests cover all rule types (required, required_when, enum, pattern, actor) with passing + failing fixtures
+- [x] AC2: Cross-Record `required_when` test — `contract.done_when` with `triage.verdict == 'T3'` lhs: fires on T3, silent on T1/T2 (tested in `validate::required::tests` and `validate::tests`)
+- [x] AC3: E2E — `stores kitchen_sink add --title hello --verdict T3` without contract fields → error citing `contract.done_when`, `contract.scope_in`, `contract.scope_out` with `required_when` rule named
+- [x] AC4: `--slug "Bad Slug!"` against `^[a-z0-9-]+$` pattern → rejected with pattern cited
+- [x] AC5: `CLAUDECODE=1 stores gate add ... --answer yes` → actor mismatch error with `$CLAUDECODE` hint + `--invoker human` override instruction
+- [x] AC6: Multiple violations reported in a single pass (verified E2E with 6 simultaneous errors)
+- [x] AC7: Phase 2 M1 fix already present in `required_when.rs` (tokenized keyword check; regression tests `parse_accepts_quoted_or_in_literal` and `parse_accepts_quoted_and_in_literal` pass)
+- [x] AC8: All 79 tests pass (44 pre-existing + 35 new validation tests)
+
+**Deviations:**
+- `RuleKind::Pattern` was a unit variant in the pre-existing `error.rs`; promoted to `Pattern { pattern: String }` to match the plan's intent and allow the error message to cite the pattern. No behavior change to existing callers (there were none).
+- `pretty_print_sorted_by_field_path` test assertion corrected: alphabetically `contract.*` < `summary`, not the reverse. The sort logic itself is correct.
+- Fixture `triage.notes` renamed to `triage_notes` to resolve leaf-name collision with `details.notes` (install-time uniqueness check rejects collisions).
+- `--invoker` global flag added to `dynamic.rs` and wired in `dispatch.rs` to unblock actor-override E2E testing (plan noted Phase 6 would add it, but DONE_WHEN #11 requires it in Phase 5's E2E).
 
 **Commits:** (pending)
 

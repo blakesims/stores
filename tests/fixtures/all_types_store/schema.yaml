@@ -19,6 +19,11 @@ fields:
     required: true
     description: "Short title"
 
+  - name: slug
+    type: text
+    pattern: "^[a-z0-9-]+$"
+    description: "URL-safe slug; must match ^[a-z0-9-]+$"
+
   - name: count
     type: integer
     description: "An integer field"
@@ -44,6 +49,34 @@ fields:
   - name: observed_at
     type: timestamp
     description: "A Timestamp field stored as ISO-8601 TEXT"
+
+  - name: triage
+    type: record
+    fields:
+      - name: verdict
+        type: text
+        description: "Triage verdict (e.g. T1, T2, T3)"
+      - name: triage_notes
+        type: text
+        description: "Free-form triage notes"
+    description: "Triage information"
+
+  - name: contract
+    type: record
+    fields:
+      - name: done_when
+        type: text
+        required_when: "triage.verdict == 'T3'"
+        description: "Done criteria — required when verdict is T3"
+      - name: scope_in
+        type: text
+        required_when: "triage.verdict == 'T3'"
+        description: "In-scope work — required when verdict is T3"
+      - name: scope_out
+        type: text
+        required_when: "triage.verdict == 'T3'"
+        description: "Out-of-scope work — required when verdict is T3"
+    description: "Contract fields; sub-fields required when verdict == T3"
 
   - name: details
     type: record

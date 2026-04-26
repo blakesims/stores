@@ -16,6 +16,12 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .global(true)
                 .help("Output as JSON"),
         )
+        .arg(
+            Arg::new("invoker")
+                .long("invoker")
+                .global(true)
+                .help("Override actor detection: human | ai_autonomous | ai_with_human"),
+        )
         // Init subcommand
         .subcommand(
             Command::new("init").about("Initialize .stores/ in the current directory"),

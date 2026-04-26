@@ -171,12 +171,15 @@ mod tests {
             "    created_by TEXT,\n",
             "    updated_by TEXT,\n",
             "    title TEXT,\n",
+            "    slug TEXT,\n",
             "    count INTEGER,\n",
             "    active INTEGER CHECK (active IN (0,1)),\n",
             "    priority TEXT CHECK (priority IN ('low', 'medium', 'high')),\n",
             "    ref_id TEXT,\n",
             "    observed_at TEXT,\n",
             "    tags TEXT,\n",
+            "    triage TEXT,\n",
+            "    contract TEXT,\n",
             "    details TEXT\n",
             ");"
         );
