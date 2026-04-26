@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_10
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-27 (executor: Phase 9 complete — 6 ACs verified; 298 tests pass; both e2e scripts exit 0; advance to CODE_REVIEW)
+- **Last Updated:** 2026-04-27 (code-reviewer: Phase 9 cycle 1 PASS — 0c/0M/2m informational; smoke test proves DONE_WHEN; advance to EXECUTING_PHASE_10)
 - **Blocked Reason:** —
 
 ## Task
@@ -1382,6 +1382,22 @@ Removed "SET Status to EXECUTING_PHASE_N in main.md" (line 68) and "Set Status: 
 Added `if transition.actor == Some(Actor::Framework) { continue; }` before the BASE_VERBS check. Generic: handles all current and future framework transitions. Live: `stores tasks --help` no longer lists `start`.
 
 **m4 — README trimmed to 29 lines** (was 36; limit 30). Merged Workflow states + Cycle limits into one paragraph; removed blank lines between sequential quick-start commands.
+
+---
+
+### Phase 9 — cycle 1
+
+- **Gate:** PASS
+- **Reviewed:** 2026-04-27
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 1 of max 3
+- **Issues:** 0 critical / 0 major / 2 minor (informational)
+- **Status next:** EXECUTING_PHASE_10
+- **Summary:** Phase 9 is the marquee end-to-end proof and lands cleanly. `tests/tasks_e2e.sh` (16 steps, 21 PASS markers) drives a real T001 task through the full lifecycle via `stores tasks` CLI only — `add → next-action → brief → submit-plan → submit-plan-review READY → 3× (submit-execute + submit-review REVISE) → 4th submit-execute + submit-review REVISE → BLOCKED → resume → submit-execute + submit-review PASS (phase 1) → submit-execute + submit-review PASS (phase 2 / PASS-last) → render × 2 → render idempotency check → SQLite final-state assertion`. Independent live re-run from a fresh `mktemp -d`: exit 0 in 0.81s (well under the 30s cap; AC9.3). The 4th-REVISE marquee step (AC9.4 / DONE_WHEN bold clause) was probed in detail: exit code 1, error contains "guard" + "current_cycle", row status reads back as "blocked", `blocked_reason` populated as `"4th revise rejected by guard current_cycle <= 4 on phase 1 cycle 4: still broken after 3 revises"`. Step 12 verifies resume recovery: status=executing, current_cycle=1 (reset by 5.4 post-action), current_phase=1 (UNCHANGED), `cycles` audit trail length=4 (preserved per M10), `blocked_reason` cleared. Step 13 verifies PASS-last routes to `complete` via M9 / 5.5b dual-PASS guard disambiguation (`current_phase >= plan.phases.length`). Step 14 verifies `render` idempotency by sha1-comparing two consecutive renders — `diff` returns empty (AC9.5). The `observations` lifecycle expansion adds 4 states + 7 transitions while preserving the original `triaged → resolved` direct path; the v0.1 `tests/e2e.sh` was independently re-run with `env -u CLAUDECODE` and exited 0 with all 13 demo steps green (AC9.2). The `gate.priority` enum field is optional with no default; existing rows unaffected. **Tests:** 298 unit tests pass (unchanged from Phase 8 — Phase 9 schema changes are exercised via the e2e scripts; AC9.1). **Verb hygiene:** AC9.6's allowlist grep returns empty for forbidden verbs; the e2e uses `add, next-action, brief, submit-plan, submit-plan-review, submit-execute, submit-review, resume, show, render` only. **Commit hygiene:** 3 functional commits (`0bcdb9d` 9.1+9.2 schema/submit, `745c132` 9.3+9.4 e2e/README, `956fab1` execution log). No amends, no force-push.
+- **What's good:** The marquee assertion in step 11 is genuinely contract-faithful — non-zero exit code, error text, row status, and `blocked_reason` content are all checked, not just one of the four. Step 12's cycles-audit-trail assertion (`len(cycles) == 4`) directly proves the M10 audit-preservation property. Step 14's `sha1sum + diff` is the right test shape for idempotency (compares the bytes, not just "did it run"). Deviation 1 (`run_submit_review` returning Err on blocked) is well-bounded: the compute path commits the tx FIRST so the row is durably blocked before the bail fires; the existing `ac5_4_fourth_revise_blocked` unit test calls `compute_submit_review` directly and asserts on `Ok(...)` — unaffected by the run-layer bail. The `blocked_reason: Option<String>` field was added cleanly to `SubmitOutput` and is `None` for the four other compute fns. The original `triaged → resolved` transition was kept in `observations/schema.yaml` (not replaced) so v0.1 e2e back-compat is preserved without conditional logic. Smoke test runtime (0.81s) is 37× under the 30s cap — leaves headroom.
+- **Findings (informational, non-binding):** (m1) Step 16's `cargo test ac5_11b` filter only matches `ac5_11b_handler_path_validator_failure_rolls_back` and skips the original `ac5_11_atomic_boundary_rollback_leaves_db_unchanged` (also under AC5.11). Additionally, `cargo test <typo>` reports `"test result: ok. 0 passed"` and the script's `grep -q "test result: ok"` would silently pass — a future filter typo would degrade coverage without failing. The full `cargo test` invocation in AC9.1 still covers everything, so this doesn't gate. Suggest widening to `ac5_11` or adding a `grep -q "[1-9][0-9]* passed"` guard. (m2) Step 11's "phase context" check `assert '1' in br` is satisfied by ANY '1' substring; a renumber from "phase 1" → "p1" would not break the assertion despite being a regression. Recommend tightening to `'phase 1' in br` for contract faithfulness. Today's behaviour is correct, so this is a hardening note, not a real defect.
+- **Carry-forward to Phase 10 (informational):** Either widen step 16's cargo-test filters or materialize the originally-planned `tests/submit_atomicity.rs` integration test crate (m1). Tighten step 11's phase-context substring check (m2).
+- → Details: `code-review-phase-9.md`
 
 ---
 
