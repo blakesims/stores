@@ -75,6 +75,10 @@ fn detect_invoker(matches: &ArgMatches) -> Result<Actor> {
             "human" => Ok(Actor::Human),
             "ai_autonomous" => Ok(Actor::AiAutonomous),
             "ai_with_human" => Ok(Actor::AiWithHuman),
+            "framework" => bail!(
+                "'framework' is an internal actor used only by the workflow engine; \
+                it cannot be passed via --invoker"
+            ),
             other => bail!(
                 "unknown --invoker value '{}'; valid: human, ai_autonomous, ai_with_human",
                 other
@@ -106,6 +110,20 @@ mod tests {
             Some(v) => cmd.get_matches_from(["test", "--invoker", v]),
             None => cmd.get_matches_from(["test"]),
         }
+    }
+
+    #[test]
+    fn invoker_flag_rejects_framework() {
+        let m = matches_with_invoker(Some("framework"));
+        let err = detect_invoker(&m).unwrap_err();
+        assert!(
+            err.to_string().contains("internal actor"),
+            "error should cite 'internal actor': {err}"
+        );
+        assert!(
+            err.to_string().contains("framework"),
+            "error should name 'framework': {err}"
+        );
     }
 
     #[test]

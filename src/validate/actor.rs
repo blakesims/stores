@@ -77,6 +77,8 @@ pub fn check_transition_actor(
 /// - `ai_autonomous` required → only `ai_autonomous` is acceptable.
 /// - `ai_with_human` required → `human` or `ai_with_human` is acceptable;
 ///   bare `ai_autonomous` is NOT sufficient (human oversight must be declared).
+/// - `framework` required → only `framework` (the engine) is acceptable;
+///   no human or agent invoker can satisfy this.
 fn actor_allowed(invoker: Actor, required: Actor) -> bool {
     match required {
         Actor::Human => invoker == Actor::Human,
@@ -84,6 +86,7 @@ fn actor_allowed(invoker: Actor, required: Actor) -> bool {
         Actor::AiWithHuman => {
             invoker == Actor::Human || invoker == Actor::AiWithHuman
         }
+        Actor::Framework => invoker == Actor::Framework,
     }
 }
 
@@ -206,6 +209,25 @@ mod tests {
         check_actor(&field, &["notes".to_string()], &entry, Actor::AiAutonomous, None, &mut errors);
         assert_eq!(errors.len(), 1, "bare ai_autonomous must be rejected for ai_with_human field");
         assert!(errors[0].message.contains("requires actor 'ai_with_human'"), "msg: {}", errors[0].message);
+    }
+
+    #[test]
+    fn framework_field_only_satisfied_by_framework_invoker() {
+        let field = text_field_with_actor("current_phase", Some(Actor::Framework));
+        let entry = entry_with("current_phase", "1");
+        // Human invoker must be rejected
+        let mut errors = vec![];
+        check_actor(&field, &["current_phase".to_string()], &entry, Actor::Human, None, &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("framework"));
+        // AiAutonomous invoker must be rejected
+        let mut errors2 = vec![];
+        check_actor(&field, &["current_phase".to_string()], &entry, Actor::AiAutonomous, None, &mut errors2);
+        assert_eq!(errors2.len(), 1);
+        // Framework invoker must pass
+        let mut errors3 = vec![];
+        check_actor(&field, &["current_phase".to_string()], &entry, Actor::Framework, None, &mut errors3);
+        assert!(errors3.is_empty(), "Framework invoker must satisfy framework field");
     }
 
     // ---- check_transition_actor tests ----
