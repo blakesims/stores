@@ -344,13 +344,25 @@ fields:
     // ---- transition actor check ----
 
     #[test]
-    fn transition_actor_mismatch_caught() {
+    fn transition_actor_ai_autonomous_rejected_for_ai_with_human() {
         let s = schema();
         let entry = entry_from(&[("summary", str_val("hello"))]);
-        // "triage" transition requires ai_with_human; both actors are valid
-        let diff = entry_from(&[("summary", str_val("hello"))]);
-        validate(&s, &entry, Op::Transition("triage".to_string(), diff.clone()), Actor::Human).unwrap();
-        validate(&s, &entry, Op::Transition("triage".to_string(), diff.clone()), Actor::AiAutonomous).unwrap();
+        // "triage" transition requires ai_with_human; bare ai_autonomous must be rejected
+        let diff = entry_from(&[]);
+        let errs = validate(&s, &entry, Op::Transition("triage".to_string(), diff), Actor::AiAutonomous)
+            .unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.rule == error::RuleKind::Actor && e.message.contains("ai_with_human")),
+            "expected actor error citing ai_with_human; got: {:?}", errs
+        );
+    }
+
+    #[test]
+    fn transition_actor_human_accepted_for_ai_with_human() {
+        let s = schema();
+        let entry = entry_from(&[("summary", str_val("hello"))]);
+        let diff = entry_from(&[]);
+        validate(&s, &entry, Op::Transition("triage".to_string(), diff), Actor::Human).unwrap();
     }
 
     // ---- Op::Update actor scoping — regression test for carry-forward fix ----

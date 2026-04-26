@@ -72,16 +72,17 @@ pub fn check_transition_actor(
 
 /// Returns true when `invoker` satisfies `required`.
 ///
-/// Rule: `ai_with_human` means both actors are acceptable.  If the required
-/// actor is `human`, only `human` is acceptable.  If required is
-/// `ai_autonomous`, only `ai_autonomous` is acceptable.  `ai_with_human`
-/// required means either `human` or `ai_autonomous` may write.
+/// Rule:
+/// - `human` required → only `human` is acceptable.
+/// - `ai_autonomous` required → only `ai_autonomous` is acceptable.
+/// - `ai_with_human` required → `human` or `ai_with_human` is acceptable;
+///   bare `ai_autonomous` is NOT sufficient (human oversight must be declared).
 fn actor_allowed(invoker: Actor, required: Actor) -> bool {
     match required {
         Actor::Human => invoker == Actor::Human,
         Actor::AiAutonomous => invoker == Actor::AiAutonomous,
         Actor::AiWithHuman => {
-            invoker == Actor::Human || invoker == Actor::AiAutonomous
+            invoker == Actor::Human || invoker == Actor::AiWithHuman
         }
     }
 }
@@ -186,15 +187,25 @@ mod tests {
     }
 
     #[test]
-    fn ai_with_human_field_allows_both_actors() {
+    fn ai_with_human_field_allows_human_and_ai_with_human() {
         let field = text_field_with_actor("notes", Some(Actor::AiWithHuman));
         let entry = entry_with("notes", "text");
         let mut errors = vec![];
         check_actor(&field, &["notes".to_string()], &entry, Actor::Human, None, &mut errors);
         assert!(errors.is_empty(), "human should be allowed for ai_with_human");
         let mut errors2 = vec![];
-        check_actor(&field, &["notes".to_string()], &entry, Actor::AiAutonomous, None, &mut errors2);
-        assert!(errors2.is_empty(), "ai_autonomous should be allowed for ai_with_human");
+        check_actor(&field, &["notes".to_string()], &entry, Actor::AiWithHuman, None, &mut errors2);
+        assert!(errors2.is_empty(), "ai_with_human invoker should be allowed for ai_with_human");
+    }
+
+    #[test]
+    fn ai_with_human_field_rejects_ai_autonomous() {
+        let field = text_field_with_actor("notes", Some(Actor::AiWithHuman));
+        let entry = entry_with("notes", "text");
+        let mut errors = vec![];
+        check_actor(&field, &["notes".to_string()], &entry, Actor::AiAutonomous, None, &mut errors);
+        assert_eq!(errors.len(), 1, "bare ai_autonomous must be rejected for ai_with_human field");
+        assert!(errors[0].message.contains("requires actor 'ai_with_human'"), "msg: {}", errors[0].message);
     }
 
     // ---- check_transition_actor tests ----

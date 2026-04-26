@@ -336,6 +336,51 @@ fields:
     }
 
     #[test]
+    fn transition_actor_rejects_ai_autonomous_when_required_ai_with_human() {
+        let (schema, conn) = setup();
+        insert_open_row(&schema, &conn);
+
+        let cmd = build_cmd(&schema, "triage");
+        let matches = cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
+        let err = run(&schema, &conn, &matches, Actor::AiAutonomous, "triage").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ai_with_human"),
+            "expected error citing actor 'ai_with_human'; got: {msg}"
+        );
+        assert!(
+            msg.contains("ai_autonomous"),
+            "expected error citing invoker 'ai_autonomous'; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn transition_actor_accepts_human_for_ai_with_human_transition() {
+        let (schema, conn) = setup();
+        insert_open_row(&schema, &conn);
+
+        let cmd = build_cmd(&schema, "triage");
+        let matches = cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
+        run(&schema, &conn, &matches, Actor::Human, "triage").unwrap();
+    }
+
+    #[test]
+    fn transition_actor_accepts_ai_autonomous_for_ai_autonomous_transition() {
+        let (schema, conn) = setup();
+        insert_open_row(&schema, &conn);
+
+        // First triage with Human (ai_with_human transition)
+        let triage_cmd = build_cmd(&schema, "triage");
+        let triage_matches = triage_cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
+        run(&schema, &conn, &triage_matches, Actor::Human, "triage").unwrap();
+
+        // resolve is ai_autonomous; invoker AiAutonomous should succeed
+        let resolve_cmd = build_cmd(&schema, "resolve");
+        let resolve_matches = resolve_cmd.get_matches_from(["resolve", "L001"]);
+        run(&schema, &conn, &resolve_matches, Actor::AiAutonomous, "resolve").unwrap();
+    }
+
+    #[test]
     fn resolve_transition_from_triaged_succeeds() {
         let (schema, conn) = setup();
         insert_open_row(&schema, &conn);
