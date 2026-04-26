@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** MERGE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-27 (executor: Phase 10 complete — docs + version bump; all ACs verified; 298 unit + 13 e2e + 16 tasks_e2e all green)
+- **Last Updated:** 2026-04-27 (code-reviewer: Phase 10 cycle 1 PASS — 0c/0M/2m informational; all 4 ACs verified; 298 unit + 13 e2e + 16 tasks_e2e all green; final phase — handoff to MERGE_REVIEW)
 - **Blocked Reason:** —
 
 ## Task
@@ -1400,6 +1400,23 @@ Added `if transition.actor == Some(Actor::Framework) { continue; }` before the B
 - → Details: `code-review-phase-9.md`
 
 ---
+
+### Phase 10 — cycle 1
+
+- **Gate:** PASS
+- **Reviewed:** 2026-04-27
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 1 of max 3
+- **Issues:** 0 critical / 0 major / 2 minor (informational, non-gating)
+- **Status next:** MERGE_REVIEW
+- **Summary:** Doc-only phase lands cleanly. `git diff a2def55..HEAD --name-only` returns exactly 4 files (`Cargo.toml`, `README.md`, `docs/handoff-v0.2.md`, `tasks/active/T002-tasks-store-v02/main.md`) — no src/ or tests/ drift. All 4 numbered ACs verified by direct reviewer probe: AC10.1 — `env -u CLAUDECODE bash tests/e2e.sh` exits 0 with all 13 demo steps green; AC10.2 — `Cargo.toml` reads `version = "0.2.0"` and `cargo build` succeeds at that version; AC10.3 — `docs/handoff-v0.2.md:24` supersession table row reads `**DELIVERED — see T002 main.md for the audit trail**` (was `Superseded`), plus a new dated changelog entry at line 43 enumerates landed schema features, generic CLI verbs, bundled artifacts, test counts, and the marquee DONE_WHEN confirmation; the legacy boundary paragraph at line 53 explicitly tells future agents NOT to import T001/T002; the v0.3 candidates list (lines 55-64) folds back Intent-Contract Out items, original v0.2 deferred bugs, and Phase 8's polish minors; AC10.4 — `README.md:187-203` Workflow stores section present with all 9 CLI verbs and a pointer to the `tasks:start` skill. Regression: `cargo test` → 298 passed / 0 failed; `tests/tasks_e2e.sh` exits 0 on all 16 steps. Commit hygiene: 4 commits, each tightly scoped (`bc6abd2` Cargo bump, `9393286` README, `3b03317` handoff, `a5459fb` log); no amends, no force-push.
+- **What's good:** README opening blurb correctly upgrades v0.1 → v0.2 framing and adds the third bundled store mention without disturbing the 13-step demo path. Install section now lists all five startup commands. Handoff supersession table flip is the right signal at the top of the doc. Post-T002 changelog entry is a model for future task-completion entries. The "Legacy boundary" note is genuinely useful — closes a likely future-agent mistake. v0.3 candidates list is comprehensive.
+- **Findings (informational, non-gating):**
+  - **m1 — Cargo.lock not committed alongside Cargo.toml bump:** `bc6abd2` committed only `Cargo.toml`; `Cargo.lock` still says `stores 0.1.0` at HEAD. Cargo regenerates on next build, so users aren't blocked, but `cargo publish --locked` would flag the inconsistency. Release-time hygiene only.
+  - **m2 — Legacy "94 tests pass" preserved at handoff line 97:** the original v0.2 TL;DR was preserved verbatim per the "Skip superseded sections" instruction at line 91. The new authoritative count "~298 unit tests + 13 e2e + 16 tasks_e2e" lives at line 50. Defensible — readers following the doc's own read-order land on the new entry first. Optional polish: add `(superseded — see line 50)` to line 97 in a future pass.
+- **Deviations check:** Executor's "Deviations: None" claim is accurate. Batching tasks 10.2/10.4/10.6 into one commit is correct hygiene (same file), not a deviation.
+- **Carry-forward:** None. Phase 10 is the final phase. Status hands off to MERGE_REVIEW.
+- → Details: `code-review-phase-10.md`
 
 ### Phase 9: Smoke test — observations lifecycle expansion + real T3 task end-to-end
 
