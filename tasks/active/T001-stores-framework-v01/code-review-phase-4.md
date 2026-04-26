@@ -146,3 +146,126 @@ A schema that declares a leaf named `status` / `id` / `display_id` / `created_at
 4. **Re-review.** Re-run `cargo test` and the live partial-Record update reproduction.
 
 The five minors are all deferrable — none blocks moving to Phase 5 once M1 is fixed. m1 (silent integer→0 coercion) and m4 (`--invoker` flag wiring) should be carried into Phase 5/6 explicitly.
+
+---
+
+## Cycle 2 Review
+
+- **Reviewed:** 2026-04-26 by `code-reviewer`
+- **Commit under review:** `0ba36d1` ("fix(T001 phase 4): deep-merge Record updates to preserve sibling sub-fields (M1)")
+- **Verdict:** **PASS** — advance to Phase 5.
+- **Issues:** 0 critical / 0 major / 5 minor (cycle 1 minors carried, untouched as expected).
+
+### M1 fix verification
+
+**Code review of `src/handlers/update.rs:42–62` (merge block):**
+```rust
+let mut merged = existing.clone();
+for (k, v) in &diff {
+    let is_record = schema.fields.iter().any(|f| {
+        f.name == *k && matches!(f.ty, crate::schema::FieldType::Record(_))
+    });
+    if is_record {
+        if let (Some(Value::Object(existing_obj)), Value::Object(new_obj)) =
+            (merged.get(k).cloned(), v)
+        {
+            let mut combined = existing_obj.clone();
+            for (sk, sv) in new_obj {
+                combined.insert(sk.clone(), sv.clone());
+            }
+            merged.insert(k.clone(), Value::Object(combined));
+            continue;
+        }
+    }
+    merged.insert(k.clone(), v.clone());
+}
+```
+
+- **Schema-driven Record detection (line 46–48):** Correct. `schema.fields.iter().any(...)` walks the top-level field declarations and matches `FieldType::Record(_)` exactly. Sub-fields don't need this treatment because the diff already nests them inside the parent Object.
+- **Type-safety guard (line 50–51):** Pattern `(Some(Value::Object(existing_obj)), Value::Object(new_obj))` ensures both sides are Objects before merging. If either side is non-Object (e.g. existing row has `null` because the column was never populated, or the diff somehow produced a non-Object for a Record key), the `if let` falls through and the wholesale `merged.insert(k.clone(), v.clone())` runs at line 61 — no panic surface, no silent corruption. Defensible.
+- **Non-Record types unchanged:** The `is_record` guard is the only branch that diverts; List, scalar, Enum, Bool, Integer, Timestamp, DisplayId all fall through to the existing `merged.insert(k, v)` at line 61. Matches the Decision Matrix row exactly ("deep-merge Record, replace-wholesale List/scalar").
+
+**Code review of `src/handlers/update.rs:86–99` (SQL writer split):**
+```rust
+FieldType::Record(_) => {
+    let write_val = merged.get(&field.name).unwrap_or(new_val);
+    let json_str = serde_json::to_string(write_val).unwrap_or_else(|_| "null".to_string());
+    sql_values.push(rusqlite::types::Value::Text(json_str));
+}
+FieldType::List(_) => {
+    let json_str = serde_json::to_string(new_val).unwrap_or_else(|_| "null".to_string());
+    sql_values.push(rusqlite::types::Value::Text(json_str));
+}
+```
+
+- **Critical detail:** the Record branch serializes `merged.get(field.name)` (the deep-merged map) instead of `new_val` (the partial diff). This is the second half of the fix — without this, the merge above would happen in the in-memory `merged` map but the SQL writer would still write the partial diff to disk. The `unwrap_or(new_val)` fallback is harmless because we only enter the loop when `diff.contains(field.name)` (line 82), so `merged.get(field.name)` will always be `Some` for any field on the SQL writer path.
+- **List branch unchanged:** Still serializes `new_val` (the partial diff = the full new list, since List is replace-wholesale). Correct per Decision Matrix.
+
+### Regression test verification (`update.rs:189–212`)
+
+```rust
+#[test]
+fn update_record_subfield_preserves_siblings() { ... }
+```
+
+- **Setup:** Schema `rstore` with `details: record { notes: text, severity: text }` parsed from inline YAML, in-memory SQLite, DDL applied via `codegen::ddl::ddl_for`.
+- **Flow:** `add --notes "keep-me" --severity info` → row `R001` → `update R001 --severity warning` → SELECT `details` from row → assert `v["notes"] == "keep-me"` AND `v["severity"] == "warning"`.
+- **Verdict:** Test exercises exactly the bug from cycle 1. Passes.
+
+### Live repro (run by reviewer)
+
+```
+$ stores init
+$ stores install .../tests/fixtures/all_types_store
+$ stores kitchen_sink add --title "first" --priority low --notes "keep-me" --severity info
+K001
+$ sqlite3 .stores/db.sqlite "select details from kitchen_sink where display_id='K001'"
+{"notes":"keep-me","severity":"info"}
+$ stores kitchen_sink update K001 --severity warning
+Updated K001
+$ sqlite3 .stores/db.sqlite "select details from kitchen_sink where display_id='K001'"
+{"notes":"keep-me","severity":"warning"}    # <- notes PRESERVED (was the bug)
+$ stores kitchen_sink show K001
+... details: { notes: keep-me, severity: warning } ...
+```
+
+M1 is fully resolved at the storage layer (DB content is correct), the read path (`show`), and the JSON path.
+
+### Decision Matrix entry verification
+
+Confirmed at `main.md` line 273:
+> | **Record vs List update merge semantics** | (a) deep-merge sub-keys for Record, replace-wholesale for List and scalars; (b) always replace wholesale | **(a) deep-merge Record, replace-wholesale List/scalar** | Record sub-fields are independent leaves — a user updating `severity` should not lose `notes`. List replacement is intentional (e.g. correcting a tag list means the new value supersedes the old). Scalar replacement is unchanged behaviour. (Fixes M1 in Phase 4 Revise cycle 1.) |
+
+Citation back to the bug it fixes is included.
+
+### Scope discipline
+
+`git show 0ba36d1 --stat`:
+```
+src/handlers/update.rs                         | 100 ++++++++++++++++++++++++-
+tasks/active/T001-stores-framework-v01/main.md |  10 ++-
+tasks/global-task-manager.md                   |   2 +-
+3 files changed, 108 insertions(+), 4 deletions(-)
+```
+
+- Only `update.rs` touched in source. No helper migration, no other file edits. Tight scope.
+- Cycle 1 minors NOT silently fixed (verified by inspection):
+  - **m1 (silent integer→0 coercion):** `update.rs:108–114` is byte-identical to cycle 1. Carried.
+  - **m2 (Records text-format separator):** `output.rs` not touched. Carried.
+  - **m3 (timestamp duplication):** `install.rs::chrono_now` and `handlers/row.rs::now_iso8601` not touched. Carried.
+  - **m4 (`--invoker` flag wiring):** `dispatch.rs` not touched. Carried.
+  - **m5 (List `|` escape):** `coerce_value` not touched. Carried.
+- Good separation discipline: the executor stayed within the bug.
+
+### Tests
+
+`cargo test`: 42/42 pass (was 41/41 cycle 1; new test `update_record_subfield_preserves_siblings` is the +1). No regressions in the other 41.
+
+### Carry-forward to Phase 5/6
+
+- **Phase 5 (validator):** unchanged from cycle 1 — `validate(&Schema, &EntryMap, Actor)` signature stable; nested EntryMap shape preserved by the deep-merge (the validator now sees the full merged map, including preserved sibling sub-fields). The cycle-1 m1 (Integer→0) is now an explicit Phase 5 carry: validator should reject the unparseable Integer before the SQL writer fires.
+- **Phase 6 (transitions):** the `transition` handler will share update's merge shape. Recommend extracting the merge loop to a helper (`merge_diff(schema, existing, diff) -> EntryMap`) when Phase 6 lands so both `update` and `transition` share the M1 fix. Not gate-blocking now; mention in Phase 6 plan.
+
+### Verdict: PASS
+
+Fix is correct, tightly scoped, well-tested, and forward-compat. Status flips to `EXECUTING_PHASE_5`.
