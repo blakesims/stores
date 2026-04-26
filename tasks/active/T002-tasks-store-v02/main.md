@@ -1,7 +1,7 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26 (code-reviewer: Phase 2 PASS — advance to Phase 3)
 - **Blocked Reason:** —
@@ -1133,6 +1133,40 @@ Rendered tasks/completed/T003-smoke-test/main.md
   - The `workflow_minimal` fixture schema deliberately uses `auto_increment: true` on `current_phase` without `auto_increment_within` (valid: top-level auto-incrementor). This is the simplest valid shape for Phase 2 tests.
   - No CLI verbs added (deferred to Phases 4-6 per plan).
   - No engine logic added (deferred to Phase 5 per plan).
+
+### Phase 3: Briefing template engine
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+- **Commits:**
+  - `074ffa8` T002 P3.1: add handlebars = "5" to Cargo.toml
+  - `fb9b1a3` T002 P3.2+3.3: implement render module — engine.rs and context.rs
+  - `854d028` T002 P3.4+3.5: unit tests and planner-brief fixture template
+- **Files Modified:**
+  - `Cargo.toml` — `handlebars = "5"` dependency added
+  - `Cargo.lock` — lockfile updated
+  - `src/main.rs` — `pub mod render;` wired in
+  - `src/render/mod.rs` — NEW: module root, re-exports `render_template` and `build_context`
+  - `src/render/engine.rs` — NEW: `render_template(text, ctx)` wrapping Handlebars; `EqHelper`, `GtHelper`, `LtHelper` via `call_inner` (subexpression-safe); `helper_default` via `call`
+  - `src/render/context.rs` — NEW: `build_context(schema, entry)` emitting JSON mirroring schema fields + `current_cycle_for_phase` engine-only key
+  - `tests/fixtures/workflow_minimal/templates/planner-brief.md.tpl` — updated to exercise all 4 substitution patterns
+- **Test count:** 228 (207 baseline + 21 new; all pass)
+- **e2e:** All 13 steps pass
+- **AC verification:**
+  - **AC3.1** (`static_template_roundtrips`): byte-identical passthrough confirmed
+  - **AC3.2** (`variable_substitution`, `missing_variable_renders_empty`, `null_variable_renders_empty`): substitution and empty-on-missing confirmed
+  - **AC3.3** (`each_iterates_list`): `{{#each phases}}…{{this.name}}…{{/each}}` iterates array correctly
+  - **AC3.4** (`if_eq_helper_true_branch`, `if_eq_helper_false_branch`): `{{#if (eq status "BLOCKED")}}` works in both branches
+  - **AC3.5** (`context_top_level_keys_match_schema_plus_engine_key`): top-level keys = schema field names + `current_cycle_for_phase`; `planner_brief_fixture_renders_correctly`: byte-for-byte fixture assertion
+- **Deviations from plan:**
+  - `eq`/`gt`/`lt` helpers implemented via `HelperDef::call_inner` (returning `ScopedJson`) rather than bare function. Bare functions write string output; `call_inner` returns proper JSON booleans. When a helper is used as a subexpression in `{{#if (eq …)}}`, Handlebars evaluates the `ScopedJson` truthiness directly — a bare function returning the string `"false"` would be truthy (non-empty string), breaking the conditional. `call_inner` is the correct API for composable subexpression helpers in handlebars 5. Behavior is identical from the template author's perspective.
+  - `planner-brief.md.tpl` updated to use `{{#each cycles}}` (existing schema field) instead of `{{#each phases}}` (which has no schema backing field). `build_context` only emits schema-declared fields; putting `phases` in the entry would not produce a context key. Using `cycles` is schema-correct and exercises the identical template pattern.
+  - The byte-for-byte assertion expected string accounts for Handlebars' `{{#each}}` block behavior: the block emits each item's trailing newline but does not insert an additional blank line after `{{/each}}`; the blank line separation before `## Blocked Reason` comes from the single blank line in the template after `{{/each}}`, not from the `each` block itself.
+- **Notes:**
+  - `handlebars::JsonRender` trait must be in scope for `.render()` method on `JsonValue`; imported in engine.rs.
+  - `RenderErrorReason::ParamNotFoundForIndex` used instead of deprecated `RenderError::new`.
+  - Strict mode is OFF: missing template variables produce empty string, never an error (AC3.2 + task 3.4 "render must never crash on partial DB rows").
 
 ---
 
