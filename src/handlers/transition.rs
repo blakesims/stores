@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::ArgMatches;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 use serde_json::Value;
 
 use crate::schema::{actor::Actor, FieldType, Schema};
@@ -8,9 +8,26 @@ use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601, read_row};
 
+/// Entry point for direct CLI use: opens its own transaction and delegates to `run_in_tx`.
 pub fn run(
     schema: &Schema,
     conn: &Connection,
+    matches: &ArgMatches,
+    invoker: Actor,
+    verb: &str,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction().context("transition: begin tx")?;
+    run_in_tx(&tx, schema, matches, invoker, verb)?;
+    tx.commit().context("transition: commit tx")?;
+    Ok(())
+}
+
+/// Transaction-agnostic core.  All DB access uses `tx` (which is `Deref<Target=Connection>`).
+/// Called by `run` (single-call CLI path) and by submit handlers that pass their own `tx`
+/// for atomic multi-step operations (Phase 5 / task 5.7).
+pub(crate) fn run_in_tx(
+    tx: &Transaction,
+    schema: &Schema,
     matches: &ArgMatches,
     invoker: Actor,
     verb: &str,
@@ -28,10 +45,10 @@ pub fn run(
         .map(|s| s.as_str())
         .unwrap_or("");
 
-    // Read existing row
-    let (row_id, existing) = read_row(schema, conn, display_id)?;
+    // Read existing row (inside tx)
+    let (row_id, existing) = read_row(schema, tx, display_id)?;
 
-    // State-machine legality check (in handler, not validator per Phase 5 review)
+    // State-machine legality check
     let current_status = existing
         .get("status")
         .and_then(|v| v.as_str())
@@ -91,18 +108,38 @@ pub fn run(
     )?;
 
     // Write: UPDATE merged fields + status = transition.to + updated_*
+    execute_transition_write(tx, schema, row_id, &transition.to, &diff, &merged, invoker)?;
+
+    println!(
+        "Transitioned {display_id}: {} → {}",
+        transition.from, transition.to
+    );
+    Ok(())
+}
+
+/// Write the transition state change into the DB (inside a caller-supplied transaction).
+/// Used by both `run_in_tx` (CLI path) and submit handlers (engine path).
+pub(crate) fn execute_transition_write(
+    tx: &Transaction,
+    schema: &Schema,
+    row_id: i64,
+    new_status: &str,
+    diff: &crate::validate::EntryMap,
+    merged: &crate::validate::EntryMap,
+    invoker: Actor,
+) -> Result<()> {
     let now = now_iso8601();
     let invoker_str = invoker.to_string();
 
     let mut set_parts: Vec<String> = vec![
         "updated_at = ?1".to_string(),
         "updated_by = ?2".to_string(),
-        format!("status = ?3"),
+        "status = ?3".to_string(),
     ];
     let mut sql_values: Vec<rusqlite::types::Value> = vec![
         rusqlite::types::Value::Text(now),
         rusqlite::types::Value::Text(invoker_str),
-        rusqlite::types::Value::Text(transition.to.clone()),
+        rusqlite::types::Value::Text(new_status.to_string()),
     ];
     let mut param_idx = 4usize;
 
@@ -165,13 +202,9 @@ pub fn run(
         schema.name
     );
 
-    conn.execute(&sql, rusqlite::params_from_iter(sql_values.iter()))
+    tx.execute(&sql, rusqlite::params_from_iter(sql_values.iter()))
         .context("transition update row")?;
 
-    println!(
-        "Transitioned {display_id}: {} → {}",
-        transition.from, transition.to
-    );
     Ok(())
 }
 
@@ -400,5 +433,48 @@ fields:
             .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(status, "resolved");
+    }
+
+    // Test that run_in_tx works with an explicit transaction (AC5.7 / C3 pattern)
+    #[test]
+    fn run_in_tx_uses_caller_transaction() {
+        let (schema, conn) = setup();
+        insert_open_row(&schema, &conn);
+
+        let cmd = build_cmd(&schema, "triage");
+        let matches = cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
+
+        // Use run_in_tx directly with caller-owned transaction
+        let tx = conn.unchecked_transaction().unwrap();
+        run_in_tx(&tx, &schema, &matches, Actor::Human, "triage").unwrap();
+        // Before commit, status in tx is triaged; outside tx (other connection) still sees open
+        // Commit
+        tx.commit().unwrap();
+
+        let status: String = conn
+            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "triaged");
+    }
+
+    // Test that rolled-back transaction leaves row unchanged (AC5.11 pattern)
+    #[test]
+    fn rolled_back_transaction_leaves_row_unchanged() {
+        let (schema, conn) = setup();
+        insert_open_row(&schema, &conn);
+
+        let cmd = build_cmd(&schema, "triage");
+        let matches = cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
+
+        {
+            let tx = conn.unchecked_transaction().unwrap();
+            run_in_tx(&tx, &schema, &matches, Actor::Human, "triage").unwrap();
+            // tx drops without commit → rollback
+        }
+
+        let status: String = conn
+            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "open", "rollback must restore original status");
     }
 }
