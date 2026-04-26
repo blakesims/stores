@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_7
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (executor: Phase 6 — render verb + idempotent main.md projection; 284 tests + 13 e2e green)
+- **Last Updated:** 2026-04-26 (code-reviewer: Phase 6 cycle 1 — PASS, 0 critical / 0 major / 3 minor; one binding carry-forward to Phase 7: P6-m2 bundled-sentinel detection in render.rs + brief.rs)
 - **Blocked Reason:** —
 
 ## Task
@@ -1295,6 +1295,25 @@ Rendered tasks/completed/T003-smoke-test/main.md
   - **P5-m4:** Decide between (a) schema a `cycles[].review.details` sub-field on Phase 7's tasks schema and thread `--details-from-file` separately from `--summary`, or (b) explicitly accept the conflation in Phase 7 with a documented note. Today `submit-review` collapses both flags into one string via `read_text_or_file(sub, "summary", "details-from-file")`.
 - **Carry-forward to Phase 6 (still owed from cycle 1):** P2-M1 (WorkflowResolved threading) — Phase 6 brief.rs disk-read AND render template need the resolved form. Phase 6 plan-review must verify P2-M1 lands.
 - → Details: `code-review-phase-5.md`
+
+### Phase 6 — cycle 1
+
+- **Gate:** PASS
+- **Reviewed:** 2026-04-26
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 1 of max 3
+- **Issues:** 0 critical / 0 major / 3 minor (all deferrable; one binding carry-forward to Phase 7)
+- **Status next:** EXECUTING_PHASE_7
+- **Summary:** All six ACs PASS by named compute-level + run-level tests (284 unit tests, 263 prior + 21 new; e2e all 13 steps green). The marquee AC6.4 idempotency test (`run_render_idempotent_content`, render.rs:388-406) is structurally airtight: `compute_render_in` is deterministic given a fixed DB row, atomic write (`std::fs::write` to `<path>.md.tmp` + `std::fs::rename`) replaces byte-for-byte each call. AC6.3 directory move (`run_render_moves_directory_on_status_change`, render.rs:361-385) verifies a `complete` row's `tasks/active/WF001-dir-move-task/` is moved to `tasks/completed/WF001-dir-move-task/` BEFORE the write; old path absent post-render; main.md present in new path. Glob detection (`find_existing_task_dir`, path.rs:87-142) handles zero/one/multi match cleanly — multi-match returns None + warning + canonical-path fallback (path.rs:283-292 pins the contract). AC6.6 read-only structurally enforced by `&Connection` type; no SQL write paths exist in render.rs. Compute/run split applied (`compute_render_in` pure + `run_render_in` write); explicit `repo_root`/`manifest_root` params avoid `set_current_dir` (test isolation under parallel runs preserved); new additive `Manifest::load_from(root: &Path)` is the right tool. Status mapping (path.rs:29-37) covers all seven workflow states + safe `"active"` fallback (5 dedicated tests pin each branch). Atomic-write pattern mirrors `manifest.rs::save` (lines 196-200; `with_extension("md.tmp")` correctly produces `main.md.tmp`). CLI registration minimal: `build_render_cmd()` (dynamic.rs:196-211) declares positional `display_id` + `--dry-run`; wired into workflow-only verb group; dispatch routes cleanly. **P2-M1 closure via Option 2 (on-demand template load) accepted** — adds one FS read per render/brief call, render is not in a hot loop, on-demand pattern is symmetric across both handlers; Option 1's WorkflowResolved threading would have touched the schema-loading hot path for marginal benefit. Commit hygiene clean (`763c8fe`+`3c05cfe`+`507d461`+`d802afd`+`f2c474f`; no amends, no force-push).
+- **What's good:** Compute/run split is the established Phase-4-cycle-2 pattern, applied uniformly here; explicit-root design (taking `repo_root`/`manifest_root` parameters) avoids `set_current_dir` test-isolation hazards and is the right shape for future thread-safety; multi-match glob handled gracefully (warning + canonical fallback rather than error); directory-move failure non-fatal (cross-device or permission failure → warning + write to canonical path; idempotency preserved); read-only contract structurally enforced by `&Connection` rather than just AC test; render context picks up `status` and `blocked_reason` via existing `RESERVED_ENTRY_KEYS` (Phase 4 plumbing reused).
+- **Findings (all minor, none gating):**
+  - **m1:** `compute_render_dry_run_no_write` test calls `compute_render_in` (which never writes regardless of dry_run flag) instead of `run_render_in`; the actual `if output.dry_run { print + return }` guard at run_render_in:166-169 is not directly exercised by any unit test. A regression removing the guard would not fail the suite. Low risk — behavior is structurally simple, e2e covers via CLI in Phase 7.
+  - **m2 (binding carry-forward to Phase 7):** `render.rs:100-125` lacks the explicit Phase-7 bundled-sentinel TODO comment that `brief.rs:117-121` has. Phase 7 will install bundled `tasks` with `schema_path = "bundled:tasks"`; joining with `render_tpl_path` (`store_root.join(render_tpl_path)` at render.rs:112) produces nonsensical path. Symmetric gap to brief.rs's m2 from Phase 4 — but brief.rs documents loudly at the load site; render.rs does not.
+  - **m3:** `was_directory_move` recomputes `find_existing_task_dir` in `run_render_in` (line 173) after `compute_render_in` already called it (line 89). Negligible perf cost; minor TOCTOU race (handled gracefully). Optional refactor: plumb `existing_dir: Option<PathBuf>` into `RenderOutput`.
+- **Carry-forward to Phase 7 (binding):** **P6-m2** — bundled-store sentinel detection at the template load site in BOTH `brief.rs` AND `render.rs`. When `schema_path` starts with `"bundled:"`, route to in-memory `BUNDLED_STORE_TEMPLATES` map (introduced in Phase 7.6) instead of joining with disk path. Without this, `stores tasks render T003` and `stores tasks brief T003` will fail with "cannot read template" on any installed bundled `tasks` store. Phase 7 plan-review must verify both load sites are fixed.
+- **Carry-forward to Phase 7 (informational):** Plan task 6.4 referred to `stores/tasks/templates/main.md.tpl` but Phase 6 correctly authored only the fixture template; the bundled `stores/tasks/templates/main.md.tpl` is Phase 7's scope per task 7.5. Not a defect.
+- **Verified actions:** P2-M1 (WorkflowResolved threading) closed via Option 2; brief.rs already had the bundled-sentinel TODO from Phase 4 cycle 2; render.rs uses the same on-demand pattern. Both will need the binding fix in Phase 7.
+- → Details: `code-review-phase-6.md`
 
 ---
 
