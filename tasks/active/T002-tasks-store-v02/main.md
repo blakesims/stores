@@ -3,7 +3,7 @@
 ## Meta
 - **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (executor: Phase 5 complete — 4 submit verbs + 15 AC tests + CLI wiring; CODE_REVIEW)
+- **Last Updated:** 2026-04-26 (executor: Phase 5 cycle 2 — C1 compute_resume refactor; M1 lock-held mid-tx probe; M2 handler-path rollback test; m1 dead GuardExpr removed; 263 tests green)
 - **Blocked Reason:** —
 
 ## Task
@@ -1260,6 +1260,21 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Carry-forward to Phase 5:** (1) Apply compute/run split to all four submit verbs as the established shape; (2) cover brief AC4.3/AC4.4 happy paths at compute level when template-on-disk test infrastructure lands; (3) P2-M1 (WorkflowResolved threading) still owed — resolves brief.rs disk-read path AND closes m2's bundled-store gap; (4) re-add fixture fields `submit_targets[submit-plan]: plan` and `auto_increment: true` on `current_phase` if Phase 5 tests require them.
 - → Details: `code-review-phase-4.md`
 
+### Phase 5 — cycle 1
+
+- **Gate:** REVISE
+- **Reviewed:** 2026-04-26
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 1 of max 3
+- **Issues:** 1 critical / 2 major / 4 minor / 2 trivial-or-info
+- **Status next:** EXECUTING_PHASE_5
+- **Summary:** Compute-layer marquee tests (AC5.4 4th-REVISE→BLOCKED math; AC5.4b cross-phase isolation) are correct and rigorous; transaction boundary in `submit.rs` is structurally sound (lock-acquire → write → follow-on → release-lock → commit, all on the same `tx`); 259 tests green, e2e green; compute/run split applied uniformly to all four submit verbs; P1-M2 (ListRecord walker) carry-forward closed before Phase 5 began with the inverted pinning test. **However**, the `resume` handler in `src/cli/dispatch.rs:106-132` is a critical structural bug: it bypasses the row lock (5.3 step 2 / 5.8 / M11), bypasses the actor validator (the schema declares `actor: ai_with_human` but any invoker can call resume), does not clear `blocked_reason` (stale "4th revise rejected" message persists post-recovery into Phase 6's render output), and never releases a lock (because none was acquired). The `ac5_14_blocked_to_ready_recovery` compute test does not exercise `dispatch::dispatch` — it directly calls `write_status_and_fields` + `fire_on_entry_follow_ons`, bypassing the broken dispatch wiring. Two majors are AC-test-coverage gaps: AC5.13 ("lock held across follow-on") asserts only post-commit state, not the mid-tx claim the spec required; AC5.11 ("atomic boundary") simulates with raw SQL inside an unrelated tx and never invokes any `compute_submit_*` handler, so the test could not catch a bug like "submit handler accidentally writes outside tx". Minors: dead `GuardExpr` re-export (`required_when.rs:6`); missing `--open-questions-from-file` flag (spec 5.3 step 4); `submit_targets` not actually consulted (handlers hardcode `"plan"`/`"cycles"`/`"plan_review_log"`); `--details-from-file` / `--summary` conflated to one string in `submit-review`.
+- **What's good:** AC5.4 walks all four REVISE attempts through the real lifecycle (force_status + set_cycles_json + do_execute between each), asserts new_status, current_cycle (NOT bumped on guard-fail), and three substring properties of blocked_reason; AC5.4b directly disproves the original `cycles.length < 3` cumulative bug; `find_transition` (submit.rs:234-293) handles M9 dual-PASS-transition guards correctly with explicit ambiguity detection; `tx.commit()` is the LAST write in all four compute fns (lines 495, 625, 749, 944); print summary lives OUTSIDE the tx in the `run_*` printers; the `transition::run` / `run_in_tx` split (task 5.7) is in place even though submit handlers ended up open-coding their own transition shape rather than calling `run_in_tx`.
+- **Required actions (cycle 2):** (a) [C1] Move `resume` into `src/handlers/submit.rs::compute_resume` following the 11-step pattern (acquire_lock, validator pass via `Op::Transition("resume", empty_diff)` to enforce actor, clear `blocked_reason`, fire follow-on, release lock, commit); add `ac5_14_resume_actor_mismatch_rejected` test. (b) [M1] Add `ac5_13_lock_held_during_follow_on` that probes `claimed_by` between the two writes inside the tx (same-connection probe acceptable). (c) [M2] Either add a forced-failure test hook between step 8 and step 9 in `compute_submit_plan_review`, OR add `ac5_11b_handler_path_validator_failure_rolls_back` that calls a compute fn with invalid input and asserts post-call DB == pre-call DB. (d) [m1] Delete `pub use crate::schema::expr::Expr as GuardExpr;` from `src/schema/required_when.rs:6`.
+- **Optional / accept:** m2 add `--open-questions-from-file` flag (or accept as Phase 7 carry-forward); m3 replace hardcoded target field names with `workflow.submit_targets[verb]` lookups (or accept as Phase 7 carry-forward); m4 either schema a `cycles[].review.details` field or document the `--details-from-file` / `--summary` conflation; m5 add a TODO + round-trip test for the hand-rolled date arithmetic in submit.rs:118-166.
+- **Carry-forward to Phase 6:** P2-M1 (WorkflowResolved threading) still owed — Phase 6 brief.rs disk-read AND render template need the resolved form. Phase 6 plan-review must verify P2-M1 lands. If m2/m3/m4 are accepted as-is, Phase 7's tasks-schema author will inherit them.
+- → Details: `code-review-phase-5.md`
+
 ---
 
 ### Phase 4: Generic workflow CLI verbs (read-only) — `next-action` + `brief`
@@ -1357,7 +1372,17 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Commits:**
   - `70b0ef2` T002 P5.3-5.8: submit handler — 4 verbs, engine post-actions, guard math, locking
   - `a153d24` T002 P5.6: wire submit-* verbs into CLI (dynamic + dispatch)
-- **Tests:** 259 unit tests pass (244 prior + 15 new); all 13 e2e steps green
+  - `17ab325` T002 P5.cycle2: C1+M1+M2+m1 — compute_resume, lock probe tests, handler rollback test, dead re-export removed
+- **Tests:** 263 unit tests pass (259 prior + 4 new — 3 resume tests + 1 handler-path rollback); all 13 e2e steps green
+
+#### Cycle 2 revisions (code-review cycle 1 REVISE)
+
+- **C1 fix:** `resume` moved from `dispatch.rs:106-132` inline block into `compute_resume()` / `run_resume()` in `handlers/submit.rs`, following the identical 11-step pattern as the other submit verbs: `acquire_lock` (step 2) → state-machine check (`status == "blocked"`) → `validate::validate(Op::Transition("resume", empty_diff), invoker)` (step 6, enforces `actor: ai_with_human` — rejects `ai_autonomous`) → `current_cycle=1`, `blocked_reason=""` (step 7) → `write_status_and_fields("ready")` (step 8) → `fire_on_entry_follow_ons("ready")` → executing (step 9) → `release_lock` (step 10) → commit (step 11). `dispatch.rs:resume` is now a 2-line thin caller.
+- **C1 tests (REPLACE + ADD):** `ac5_14_blocked_to_ready_recovery` now calls `compute_resume` directly (not `write_status_and_fields`); asserts status=executing, current_phase unchanged, current_cycle=1, blocked_reason cleared to empty, lock=NULL, cycles audit trail length=4. Added `ac5_14_resume_actor_mismatch_rejected`: `compute_resume` with `Actor::AiAutonomous` → Err containing "ai_with_human" and "resume"; DB state unchanged (status still blocked, lock NULL). Added `ac5_14_resume_acquires_lock`: pre-claim row as "other-agent"; `compute_resume` → Err naming "other-agent" or "claimed".
+- **M1 fix:** Added `ac5_13_lock_held_during_follow_on`: manually reproduces the acquire_lock → write_status_and_fields → fire_on_entry_follow_ons → release_lock sequence on a live tx, probing `claimed_by` from the same connection at three points: (a) after acquire — "ai_autonomous" held; (b) between step 8 and step 9 (BETWEEN write and follow-on) — still "ai_autonomous"; (c) after step 9 (after follow-on, before release_lock) — still "ai_autonomous". Final post-commit read → NULL. Proves `release_lock` is AFTER `fire_on_entry_follow_ons`, not inside it.
+- **M2 fix:** Added `ac5_11b_handler_path_validator_failure_rolls_back`: inserts row in `executing` state, calls `compute_submit_execute` with `Actor::AiWithHuman` (rejected by `actor: ai_autonomous` on `submit-execute` transition — `actor_allowed` returns false) → Err. Post-call DB: status, current_phase, current_cycle, cycles, claimed_by all identical to pre-call. Proves the handler's own `tx` does the rollback work, not just SQLite semantics.
+- **m1 fix:** Deleted `pub use crate::schema::expr::Expr as GuardExpr;` from `src/schema/required_when.rs`. `cargo build` clean — zero references to `GuardExpr` anywhere.
+- **Deferrals to Phase 7:** m2 (`--open-questions-from-file` on submit-plan-review); m3 (`submit_targets` lookup vs. hardcoded field names); m4 (`--details-from-file` / `--summary` conflation on submit-review).
 
 #### Carry-forward closures
 
