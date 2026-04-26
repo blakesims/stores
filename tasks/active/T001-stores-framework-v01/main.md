@@ -467,7 +467,7 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
 - ISO-8601 UTC timestamp implemented via minimal stdlib-only calendar math (no chrono dep); avoids adding a new dependency for a single formatting call. Correct for dates from 1970 onward; no leap-second handling (out of scope for v0.1).
 - `col_defs_for_field` helper elided — logic inlined into `ddl_for` directly; fewer indirection layers, same result.
 
-**Commits:** _(see below after commit)_
+**Commits:** `9469d77` feat(T001 phase 3): stores install — DDL codegen + manifest registration
 
 ---
 
