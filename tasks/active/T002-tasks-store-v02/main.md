@@ -1,9 +1,9 @@
 # T002: Tasks store on β architecture (DB-as-truth + workflow engine)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-26
-- **Last Updated:** 2026-04-26 (code-reviewer: Phase 2 PASS — advance to Phase 3)
+- **Last Updated:** 2026-04-26 (code-reviewer: Phase 3 cycle 1 REVISE — gt/lt missing-key contract violation)
 - **Blocked Reason:** —
 
 ## Task
@@ -1199,6 +1199,24 @@ Rendered tasks/completed/T003-smoke-test/main.md
 - **Carry-forward to Phase 5:** The Phase 5 plan MUST add a third item alongside Phase-1's M1 and M2: **(P2-M1)** wire `WorkflowResolved` into the runtime schema map in `main.rs:25-50`. For filesystem paths, call `wf.resolve_from_disk(&schema_path_dir)`. For `bundled:<name>` paths, call `wf.resolve_from_strings(...)` against `BUNDLED_STORE_TEMPLATES` (introduced by Phase 7.6; Phase 5 may need to stub this map empty until Phase 7 lands). Phase 5's plan-review must verify all three carryforwards (P1-M1 expr unification, P1-M2 ListRecord walker, P2-M1 WorkflowResolved threading) are enumerated in the plan before execution begins.
 - **Carry-forward to Phase 7:** Rewrite `on_state` YAML literal in plan main.md:555-561 from `[DispatchAgent(planner)]` to `- dispatch_agent: planner`. Extend `install_bundled` (install.rs:115-171) with workflow validation analog using `BUNDLED_STORE_TEMPLATES`.
 - → Details: `code-review-phase-2.md`
+
+### Phase 3 — cycle 1
+
+- **Gate:** REVISE
+- **Reviewed:** 2026-04-26
+- **Reviewer:** code-reviewer agent
+- **Cycle:** 1 of max 3
+- **Issues:** 1 critical / 3 minor (1 test-coverage, 2 design notes)
+- **Status next:** EXECUTING_PHASE_3
+- **Summary:** All five ACs (3.1-3.5) verified by named tests; 21 new tests, 228 total green; e2e all 13 steps green. The executor's `call_inner` / `ScopedJson<Derived(bool)>` design for the `eq` helper is correct and well-justified — `if_eq_helper_false_branch` does verify the BLOCKED-conditional skip on a non-BLOCKED status (engine.rs:209-214). `current_cycle_for_phase` derivation is sound across all four shapes tested (basic, empty, short alias, JSON-string-encoded). `set_strict_mode(false)` is explicit. handlebars 5 confirmed in Cargo.toml. **However**, one critical issue breaks the universal contract that plan task 3.4 explicitly enumerates ("missing key returns empty string (NOT error — render must never crash on partial DB rows)"): `GtHelper::call_inner` and `LtHelper::call_inner` (engine.rs:46-54, 67-75) return `RenderError` when a referenced key is missing or non-numeric — confirmed by direct probe (`render_template("{{#if (gt missing 3)}}...", &json!({}))` returns `Err("Helper/Decorator gt param at index 0 required but not found")`). This is the same class of bug the executor correctly diagnosed and fixed in `EqHelper` — re-introduced via `ok_or_else(...)?`. Phase 6 `render` against PLANNING-state rows with NULL `current_phase`/`current_cycle` will crash on any `{{#if (gt …)}}` template. The fix is symmetric with `eq`: missing/non-numeric → `Ok(ScopedJson::Derived(json!(false)))`.
+- **What's good:** Test names lock to the contract they enforce (every failure points at the broken AC); the `eq` helper's `ScopedJson<Derived(bool)>` design is exactly right; `current_cycle_for_phase` is computed in Rust per plan rationale ("keeps templates dumber"); fixture template exercises all four substitution patterns at byte-for-byte resolution; explicit doc comment at engine.rs:127 promises the never-crash contract — the spec is right, only `gt`/`lt` slipped past it.
+- **Required actions for cycle 2:**
+  1. **C1 fix:** In `src/render/engine.rs`, change `GtHelper::call_inner` and `LtHelper::call_inner` so missing/non-numeric params yield `Ok(ScopedJson::Derived(json!(false)))` instead of `Err`. Mirror `EqHelper`'s lenient semantics.
+  2. **m1 fix:** Add `gt_helper_missing_key_returns_false` and `lt_helper_missing_key_returns_false` regression tests.
+  3. **m2 (optional, recommended):** Either tighten the `default` helper docstring (engine.rs:79) to `"missing / null / empty string"` (current behavior — `0`, `false`, `[]` pass through their JSON renderings), OR extend the helper to treat empty arrays/objects/zero as fallback. Either is acceptable; the contract should be explicit.
+  4. **m3 (optional, defer to Phase 6):** TODO comment near `render_template` noting per-call Handlebars + 4 helpers rebuild cost; Phase 6 decides whether to cache via `OnceLock` or wrap in a `RenderEngine` struct.
+- **Expected after fixes:** 230 tests pass (228 baseline + 2 new). e2e all 13 steps green. No other phase touched.
+- → Details: `code-review-phase-3.md`
 
 ---
 
