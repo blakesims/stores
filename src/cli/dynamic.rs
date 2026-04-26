@@ -148,6 +148,12 @@ fn build_store_command(schema: &Schema) -> Command {
 
     // Base verb names reserved by the framework
     const BASE_VERBS: &[&str] = &["add", "show", "list", "update", "schema"];
+    // Workflow verb names that are registered separately above — must not be duplicated
+    // as lifecycle transition subcommands even if the schema declares them as transition verbs.
+    const WORKFLOW_VERBS: &[&str] = &[
+        "next-action", "brief", "render",
+        "submit-plan", "submit-plan-review", "submit-execute", "submit-review", "resume",
+    ];
 
     let mut store_cmd = Command::new(schema.name.clone())
         .about(format!("Operate on the '{}' store", schema.name))
@@ -170,15 +176,24 @@ fn build_store_command(schema: &Schema) -> Command {
             .subcommand(build_resume_cmd());
     }
 
-    // Register one subcommand per transition verb
+    // Register one subcommand per transition verb (de-duplicated against base/workflow verbs)
+    let mut registered_verbs: std::collections::HashSet<String> = std::collections::HashSet::new();
     for transition in &schema.lifecycle.transitions {
         let verb = &transition.verb;
-        // Warn if verb collides with a base verb; skip it (don't crash)
+        // Skip base framework verbs
         if BASE_VERBS.contains(&verb.as_str()) {
             eprintln!(
                 "warning: transition verb '{}' in store '{}' collides with a base verb; skipping",
                 verb, schema.name
             );
+            continue;
+        }
+        // Skip workflow verbs already registered above (workflow schemas declare these in transitions)
+        if schema.workflow.is_some() && WORKFLOW_VERBS.contains(&verb.as_str()) {
+            continue;
+        }
+        // Skip duplicate transition verbs (same verb can appear multiple times for multi-gate transitions)
+        if !registered_verbs.insert(verb.clone()) {
             continue;
         }
         let transition_cmd = build_transition_cmd(verb, &leaves);

@@ -28,16 +28,16 @@ fields:
         fields:
           - {name: name, type: text}
           - {name: objective, type: text}
-          - {name: tasks, type: list_text}
-          - {name: acceptance_criteria, type: list_text}
-          - {name: files, type: list_text}
-          - {name: dependencies, type: list_text}
+          - {name: tasks, type: {list: text}}
+          - {name: acceptance_criteria, type: {list: text}}
+          - {name: files, type: {list: text}}
+          - {name: dependencies, type: {list: text}}
   - name: plan_review_log
     type: list_record
     fields:
       - {name: gate, type: enum, enum_values: [READY, NEEDS_WORK, NOT_READY]}
       - {name: summary, type: text}
-      - {name: open_questions, type: list_text}
+      - {name: open_questions, type: {list: text}}
       - {name: at, type: timestamp}
   - name: cycles
     type: list_record
@@ -49,7 +49,7 @@ fields:
         fields:
           - {name: summary, type: text}
           - {name: commit, type: text}
-          - {name: files_changed, type: list_text}
+          - {name: files_changed, type: {list: text}}
           - {name: notes, type: text}
           - {name: at, type: timestamp}
       - name: review
