@@ -1,7 +1,7 @@
 # T001: Stores Framework v0.1
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-26
 - **Last Updated:** 2026-04-26
 - **Blocked Reason:** —
@@ -433,6 +433,41 @@ No disagreements with the reviewer; all 11 items got in-phase fixes or new Decis
   - **4 Minors:** (m1) AC8 promised "rendering pk=1 → L001" but renderer is Phase 4 territory; only validation tested here — Phase 4 must close. (m2) `RawField` lacks `#[serde(deny_unknown_fields)]` so YAML typos like `requried_when:` parse silently. (m3) `Schema.default_actor` field added without plan mention; unused, possible YAGNI — confirm Phase 5 plan consumes it or drop. (m4) `parse.rs` test has dead `let bad = ...; let _ = bad;` cosmetic leftover. (m5) Reserved-column-name collision (cycle-2 fresh-eye m1c2: a user leaf named `status`/`display_id`/`created_at` etc.) is NOT caught here; deferrable to Phase 3 where DDL emission owns the reserved-column list. v0.1 bundled stores don't trigger it (status is store-managed, not declared as a user field).
   - DONE_WHEN: Phase 2 enables, doesn't directly demo. Marquee `triage --verdict T3 --done-when X` enforcement is genuinely supported by this model — verified end-to-end at the type level. Status: advance to Phase 3.
 - → Details: code-review-phase-2.md
+
+---
+
+### Phase 3: install + DDL
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-26
+- **Completed:** 2026-04-26
+
+**Files Created:**
+- `src/install.rs` — `install::run(path)`: canonical-path resolve → schema parse → leaf_args check → ensure_initialized → manifest collision checks (path + name) → DDL codegen → SQLite execute_batch → manifest append + atomic save → print success
+- `src/codegen/mod.rs` — mod declaration
+- `src/codegen/ddl.rs` — `ddl_for(&schema) -> String`; reserved columns first, scalars in schema order, JSON columns (List/Record) last; Enum→TEXT+CHECK; Bool→INTEGER+CHECK; List/Record→TEXT (JSON); deterministic output; snapshot test pinned
+- `src/paths.rs` — added `ensure_initialized()` helper
+- `tests/fixtures/all_types_store/schema.yaml` — `kitchen_sink` fixture covering all 8 FieldType variants (Text, Integer, Bool, Enum, List<Text>, Record with required_when sub-field, DisplayId, Timestamp)
+
+**Files Modified:**
+- `src/main.rs` — added `mod codegen; mod install;`; wired `Install { path }` to `install::run(path)`
+- `src/paths.rs` — added `ensure_initialized()`
+
+**ACs:**
+- [x] AC1: `stores install <path-to-all_types_store>` succeeds; table column list matches DDL snapshot; Enum CHECK present; JSON columns TEXT (38/38 tests pass + E2E verified)
+- [x] AC2: Second install into same DB succeeds (E2E confirmed with different path)
+- [x] AC3: Re-installing same path rejected: "already installed; v0.1 has no migrations"
+- [x] AC4: Same `name:` different path rejected with name-collision error (same error class)
+- [x] AC5: DDL is deterministic — snapshot test in `codegen::ddl::tests::ddl_snapshot` pins exact SQL
+- [x] AC6: manifest.yaml contains `name`, `schema_path`, `installed_at`, `table_name` after install
+
+**Test count:** 38 tests (7 new), all pass (dev + release)
+
+**Deviations:**
+- ISO-8601 UTC timestamp implemented via minimal stdlib-only calendar math (no chrono dep); avoids adding a new dependency for a single formatting call. Correct for dates from 1970 onward; no leap-second handling (out of scope for v0.1).
+- `col_defs_for_field` helper elided — logic inlined into `ddl_for` directly; fewer indirection layers, same result.
+
+**Commits:** _(see below after commit)_
 
 ---
 

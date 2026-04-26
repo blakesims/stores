@@ -1,0 +1,59 @@
+name: kitchen_sink
+id_format: "K{:03d}"
+lifecycle:
+  states: [open, reviewed, closed]
+  initial_state: open
+  transitions:
+    - from: open
+      to: reviewed
+      verb: review
+      actor: human
+    - from: reviewed
+      to: closed
+      verb: close
+      actor: ai_autonomous
+
+fields:
+  - name: title
+    type: text
+    required: true
+    description: "Short title"
+
+  - name: count
+    type: integer
+    description: "An integer field"
+
+  - name: active
+    type: bool
+    description: "A boolean field stored as INTEGER 0/1"
+
+  - name: priority
+    type: enum
+    enum_values: [low, medium, high]
+    description: "An enum field with CHECK constraint"
+
+  - name: tags
+    type:
+      list: text
+    description: "A List<Text> field stored as JSON TEXT"
+
+  - name: ref_id
+    type: display_id
+    description: "A DisplayId FK field"
+
+  - name: observed_at
+    type: timestamp
+    description: "A Timestamp field stored as ISO-8601 TEXT"
+
+  - name: details
+    type: record
+    fields:
+      - name: notes
+        type: text
+        description: "Free-form notes"
+      - name: severity
+        type: enum
+        enum_values: [info, warning, error]
+        required_when: "priority == 'high'"
+        description: "Severity, required when priority is high"
+    description: "A Record field stored as JSON TEXT"

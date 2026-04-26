@@ -1,6 +1,8 @@
 mod cli;
+mod codegen;
 mod db;
 pub mod id_format;
+mod install;
 mod manifest;
 mod paths;
 pub mod schema;
@@ -35,8 +37,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Init) => cli::init::run(),
-        Some(Commands::Install { path: _ }) => {
-            anyhow::bail!("stores install: not yet implemented (Phase 3)")
+        Some(Commands::Install { path }) => {
+            install::run(std::path::Path::new(&path))
         }
         None => {
             if cli.args.is_empty() {
