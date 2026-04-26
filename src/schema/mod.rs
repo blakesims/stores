@@ -1026,4 +1026,91 @@ workflow:
             "err must mention submit-plan and record: {err}"
         );
     }
+
+    // ---------------------------------------------------------------------------
+    // AC7.3: bundled tasks schema parses without errors
+    // ---------------------------------------------------------------------------
+
+    /// AC7.3: The bundled tasks schema YAML must parse cleanly — no type errors,
+    /// no missing-state errors, no missing-agent-role errors.
+    #[test]
+    fn ac7_3_bundled_tasks_schema_parses() {
+        let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "tasks")
+            .map(|(_, content)| *content)
+            .expect("tasks schema must be in BUNDLED_STORE_SCHEMAS");
+        let schema = Schema::from_yaml(yaml).expect("tasks schema must parse without errors");
+        assert_eq!(schema.name, "tasks");
+        assert_eq!(schema.scope, StoreScope::Repo);
+        assert!(schema.workflow.is_some(), "tasks schema must have a workflow block");
+
+        let wf = schema.workflow.as_ref().unwrap();
+        // All four agent roles must be present
+        assert!(wf.agent_roles.contains_key("planner"), "planner role missing");
+        assert!(wf.agent_roles.contains_key("plan_reviewer"), "plan_reviewer role missing");
+        assert!(wf.agent_roles.contains_key("executor"), "executor role missing");
+        assert!(wf.agent_roles.contains_key("code_reviewer"), "code_reviewer role missing");
+
+        // All four briefing templates must be declared
+        assert!(wf.briefing_templates.contains_key("planner"), "planner template missing");
+        assert!(wf.briefing_templates.contains_key("plan_reviewer"), "plan_reviewer template missing");
+        assert!(wf.briefing_templates.contains_key("executor"), "executor template missing");
+        assert!(wf.briefing_templates.contains_key("code_reviewer"), "code_reviewer template missing");
+
+        // render_template must be present
+        assert!(wf.render_template.is_some(), "render_template missing");
+
+        // submit_targets must map all four submit verbs
+        assert_eq!(wf.submit_targets.get("submit-plan").map(|s| s.as_str()), Some("plan"));
+        assert_eq!(wf.submit_targets.get("submit-plan-review").map(|s| s.as_str()), Some("plan_review_log"));
+        assert_eq!(wf.submit_targets.get("submit-execute").map(|s| s.as_str()), Some("cycles"));
+        assert_eq!(wf.submit_targets.get("submit-review").map(|s| s.as_str()), Some("cycles"));
+
+        // lifecycle must have all expected states
+        let states = &schema.lifecycle.states;
+        for expected in &["planning", "plan_review", "ready", "executing", "code_review", "blocked", "complete"] {
+            assert!(states.iter().any(|s| s == expected), "missing state: {}", expected);
+        }
+    }
+
+    /// AC7.3b: All bundled task templates are present in BUNDLED_STORE_TEMPLATES.
+    #[test]
+    fn ac7_3b_bundled_tasks_templates_present() {
+        let templates = crate::cli::dynamic::BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == "tasks")
+            .map(|(_, t)| *t)
+            .expect("tasks must be in BUNDLED_STORE_TEMPLATES");
+
+        let template_names: Vec<&str> = templates.iter().map(|(name, _)| *name).collect();
+        assert!(template_names.contains(&"templates/planner-brief.md.tpl"), "planner template missing");
+        assert!(template_names.contains(&"templates/plan-reviewer-brief.md.tpl"), "plan-reviewer template missing");
+        assert!(template_names.contains(&"templates/executor-brief.md.tpl"), "executor template missing");
+        assert!(template_names.contains(&"templates/code-reviewer-brief.md.tpl"), "code-reviewer template missing");
+        assert!(template_names.contains(&"templates/main.md.tpl"), "main.md template missing");
+
+        // Each template must have non-empty content
+        for (name, content) in templates {
+            assert!(!content.is_empty(), "template '{}' is empty", name);
+        }
+    }
+
+    /// AC7.5: current_phase and current_cycle have actor: framework and cannot be
+    /// set by non-framework invokers.
+    #[test]
+    fn ac7_5_framework_fields_have_framework_actor() {
+        let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "tasks")
+            .map(|(_, content)| *content)
+            .expect("tasks schema must be in BUNDLED_STORE_SCHEMAS");
+        let schema = Schema::from_yaml(yaml).unwrap();
+
+        let current_phase = schema.fields.iter().find(|f| f.name == "current_phase").unwrap();
+        assert_eq!(current_phase.actor, Some(Actor::Framework), "current_phase must have actor: framework");
+
+        let current_cycle = schema.fields.iter().find(|f| f.name == "current_cycle").unwrap();
+        assert_eq!(current_cycle.actor, Some(Actor::Framework), "current_cycle must have actor: framework");
+    }
 }

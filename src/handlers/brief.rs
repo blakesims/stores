@@ -323,6 +323,84 @@ fields:
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // AC7.4: All four briefing templates render successfully on a fixture row.
+    // Uses the bundled tasks schema + BUNDLED_STORE_TEMPLATES, installs to a temp
+    // manifest so brief.rs's bundled-sentinel detection is exercised.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac7_4_all_four_briefing_templates_render_successfully() {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+        use crate::render::{build_context, render_template};
+
+        // Load the tasks schema
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter().find(|(n, _)| *n == "tasks").map(|(_, y)| *y)
+            .expect("tasks schema");
+        let schema = Schema::from_yaml(tasks_yaml).unwrap();
+
+        // Build a minimal fixture entry (planning state)
+        let entry: crate::validate::EntryMap = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("display_id".to_string(), serde_json::json!("T001"));
+            m.insert("status".to_string(), serde_json::json!("planning"));
+            m.insert("title".to_string(), serde_json::json!("Test Task"));
+            m.insert("slug".to_string(), serde_json::json!("test-task"));
+            m.insert("current_phase".to_string(), serde_json::json!(1));
+            m.insert("current_cycle".to_string(), serde_json::json!(1));
+            m.insert("created_at".to_string(), serde_json::json!("2026-01-01T00:00:00Z"));
+            m.insert("updated_at".to_string(), serde_json::json!("2026-01-01T00:00:00Z"));
+            m.insert("contract".to_string(), serde_json::json!({
+                "done_when": "Feature X works end-to-end",
+                "scope_in": "All API endpoints",
+                "scope_out": "UI changes"
+            }));
+            m.insert("plan".to_string(), serde_json::json!({
+                "objective": "Implement the feature",
+                "phases": [
+                    {"name": "Phase 1: Setup", "objective": "Configure", "tasks": [], "acceptance_criteria": [], "files": [], "dependencies": []}
+                ]
+            }));
+            m.insert("plan_review_log".to_string(), serde_json::json!([]));
+            m.insert("cycles".to_string(), serde_json::json!([]));
+            m
+        };
+        let ctx = build_context(&schema, &entry);
+
+        // Get templates from BUNDLED_STORE_TEMPLATES
+        let templates = BUNDLED_STORE_TEMPLATES
+            .iter().find(|(n, _)| *n == "tasks").map(|(_, t)| *t)
+            .expect("tasks templates");
+
+        let roles = ["planner", "plan_reviewer", "executor", "code_reviewer"];
+        let template_paths = [
+            "templates/planner-brief.md.tpl",
+            "templates/plan-reviewer-brief.md.tpl",
+            "templates/executor-brief.md.tpl",
+            "templates/code-reviewer-brief.md.tpl",
+        ];
+
+        for (role, tpl_path) in roles.iter().zip(template_paths.iter()) {
+            let content = templates
+                .iter().find(|(p, _)| p == tpl_path).map(|(_, c)| *c)
+                .unwrap_or_else(|| panic!("template {} missing", tpl_path));
+            let rendered = render_template(content, &ctx)
+                .unwrap_or_else(|e| panic!("{} render failed: {}", role, e));
+            // Critical sections: title and done_when must appear
+            assert!(
+                rendered.contains("Test Task"),
+                "{} brief must contain title: {}",
+                role, &rendered[..200.min(rendered.len())]
+            );
+            assert!(
+                rendered.contains("Feature X works end-to-end"),
+                "{} brief must contain done_when",
+                role
+            );
+        }
+    }
+
     // find_next_agent helper test — kept for regression coverage.
     #[test]
     fn find_next_agent_returns_first_dispatch() {
