@@ -1,4 +1,5 @@
 pub mod actor;
+pub mod expr;
 pub mod flatten;
 pub mod lifecycle;
 pub mod parse;
@@ -10,6 +11,34 @@ pub use lifecycle::{Lifecycle, Transition};
 pub use required_when::Expr as RequiredWhenExpr;
 
 use serde::{Deserialize, Deserializer};
+
+// ---------------------------------------------------------------------------
+// StoreScope  (Task 1.5)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreScope {
+    /// Default: `.stores/` lives at the current worktree root (cwd).
+    Worktree,
+    /// `.stores/` lives at the canonical `.git/` common-dir parent (repo-wide).
+    Repo,
+    /// `.stores/` lives in `$HOME/.stores` (user-global).
+    User,
+}
+
+impl<'de> Deserialize<'de> for StoreScope {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.as_str() {
+            "worktree" => Ok(StoreScope::Worktree),
+            "repo" => Ok(StoreScope::Repo),
+            "user" => Ok(StoreScope::User),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown scope '{other}'; expected one of: worktree, repo, user"
+            ))),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // FieldType
@@ -27,6 +56,14 @@ pub enum FieldType {
     Record(Vec<Field>),
     DisplayId,
     Timestamp,
+    /// A list of inline sub-records (stored as JSON TEXT).  Each element has
+    /// the same shape defined by `Vec<Field>`.  Elements may themselves
+    /// contain Record / ListRecord nests (depth ≥ 3 supported).  (Task 1.7)
+    ListRecord(Vec<Field>),
+    /// A soft foreign-key list stored as JSON TEXT containing an array of
+    /// display_ids referencing another store.  No referential-integrity
+    /// enforcement at write time.  (Task 1.8)
+    ListFk { ref_store: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -34,7 +71,7 @@ pub enum FieldType {
 // ---------------------------------------------------------------------------
 
 /// A single field in a store schema, including optional sub-fields when
-/// `ty == Record(...)`.
+/// `ty == Record(...)` or `ty == ListRecord(...)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
@@ -45,6 +82,13 @@ pub struct Field {
     pub actor: Option<Actor>,
     pub enum_values: Option<Vec<String>>,
     pub description: Option<String>,
+    /// Declarative: when true the engine auto-bumps this integer on each cycle.
+    /// Validated: must be `ty == Integer` AND `actor == Some(Framework)`.  (Task 1.2)
+    pub auto_increment: bool,
+    /// Declarative: this field resets to 1 whenever the named field increments.
+    /// Validated: target must exist, be an integer with actor==Framework, and
+    /// must not name itself.  (Task 1.2)
+    pub auto_increment_within: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +103,8 @@ pub struct Schema {
     pub lifecycle: Lifecycle,
     /// Store-level default actor (individual fields may override).
     pub default_actor: Option<Actor>,
+    /// Storage scope resolution hint.  Absent → Worktree (v0.1 default).  (Task 1.5)
+    pub scope: StoreScope,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,9 +129,18 @@ struct RawField {
     enum_values: Option<Vec<String>>,
     #[serde(default)]
     description: Option<String>,
-    /// Sub-fields for Record type (alternative representation)
+    /// Sub-fields for Record / ListRecord type
     #[serde(default)]
     fields: Option<Vec<RawField>>,
+    /// For list_fk: the store name being referenced.
+    #[serde(rename = "ref", default)]
+    ref_store: Option<String>,
+    /// auto_increment attribute (Task 1.2)
+    #[serde(default)]
+    auto_increment: bool,
+    /// auto_increment_within attribute (Task 1.2)
+    #[serde(default)]
+    auto_increment_within: Option<String>,
 }
 
 /// Raw field type before full resolution.
@@ -94,11 +149,13 @@ enum RawFieldType {
     Scalar(String),
     ListOf(String),
     Record,
+    ListRecord,
+    ListFk,
 }
 
 impl<'de> Deserialize<'de> for RawFieldType {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        use serde::de::{self, Visitor, MapAccess};
+        use serde::de::{self, MapAccess, Visitor};
         use std::fmt;
 
         struct RFTVisitor;
@@ -111,15 +168,23 @@ impl<'de> Deserialize<'de> for RawFieldType {
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<RawFieldType, E> {
-                Ok(RawFieldType::Scalar(v.to_string()))
+                match v {
+                    "list_record" => Ok(RawFieldType::ListRecord),
+                    "list_fk" => Ok(RawFieldType::ListFk),
+                    other => Ok(RawFieldType::Scalar(other.to_string())),
+                }
             }
 
             fn visit_string<E: de::Error>(self, v: String) -> Result<RawFieldType, E> {
-                Ok(RawFieldType::Scalar(v))
+                match v.as_str() {
+                    "list_record" => Ok(RawFieldType::ListRecord),
+                    "list_fk" => Ok(RawFieldType::ListFk),
+                    _ => Ok(RawFieldType::Scalar(v)),
+                }
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawFieldType, A::Error> {
-                // Expect exactly one key: "list" or "record"
+                // Expect exactly one key: "list", "record", "list_record", or "list_fk"
                 let key: String = map
                     .next_key()?
                     .ok_or_else(|| de::Error::custom("empty type map"))?;
@@ -132,6 +197,14 @@ impl<'de> Deserialize<'de> for RawFieldType {
                         // consume the value (sub-fields come from the parent `fields` key)
                         let _: serde::de::IgnoredAny = map.next_value()?;
                         Ok(RawFieldType::Record)
+                    }
+                    "list_record" => {
+                        let _: serde::de::IgnoredAny = map.next_value()?;
+                        Ok(RawFieldType::ListRecord)
+                    }
+                    "list_fk" => {
+                        let _: serde::de::IgnoredAny = map.next_value()?;
+                        Ok(RawFieldType::ListFk)
                     }
                     other => Err(de::Error::custom(format!(
                         "unknown type map key '{other}'"
@@ -148,6 +221,7 @@ fn resolve_field_type(
     raw_ty: &RawFieldType,
     enum_values: &Option<Vec<String>>,
     sub_fields: &Option<Vec<RawField>>,
+    ref_store: &Option<String>,
 ) -> anyhow::Result<FieldType> {
     match raw_ty {
         RawFieldType::Scalar(s) => match s.as_str() {
@@ -170,14 +244,29 @@ fn resolve_field_type(
                     subs.iter().map(raw_to_field).collect();
                 Ok(FieldType::Record(converted?))
             }
+            "list_record" => {
+                let subs = sub_fields.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("field type 'list_record' requires a 'fields' list")
+                })?;
+                let converted: anyhow::Result<Vec<Field>> =
+                    subs.iter().map(raw_to_field).collect();
+                Ok(FieldType::ListRecord(converted?))
+            }
+            "list_fk" => {
+                let store = ref_store.clone().ok_or_else(|| {
+                    anyhow::anyhow!("field type 'list_fk' requires a 'ref' store name")
+                })?;
+                Ok(FieldType::ListFk { ref_store: store })
+            }
             other => anyhow::bail!(
-                "unknown field type '{other}'; expected one of: text, integer, bool, enum, list, record, display_id, timestamp"
+                "unknown field type '{other}'; expected one of: text, integer, bool, enum, list, record, list_record, list_fk, display_id, timestamp"
             ),
         },
         RawFieldType::ListOf(inner) => {
             // inner must be a scalar type name
             let inner_ty = resolve_field_type(
                 &RawFieldType::Scalar(inner.clone()),
+                &None,
                 &None,
                 &None,
             )?;
@@ -190,11 +279,24 @@ fn resolve_field_type(
             let converted: anyhow::Result<Vec<Field>> = subs.iter().map(raw_to_field).collect();
             Ok(FieldType::Record(converted?))
         }
+        RawFieldType::ListRecord => {
+            let subs = sub_fields.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("field type 'list_record' requires a 'fields' list")
+            })?;
+            let converted: anyhow::Result<Vec<Field>> = subs.iter().map(raw_to_field).collect();
+            Ok(FieldType::ListRecord(converted?))
+        }
+        RawFieldType::ListFk => {
+            let store = ref_store.clone().ok_or_else(|| {
+                anyhow::anyhow!("field type 'list_fk' requires a 'ref' store name")
+            })?;
+            Ok(FieldType::ListFk { ref_store: store })
+        }
     }
 }
 
 fn raw_to_field(r: &RawField) -> anyhow::Result<Field> {
-    let ty = resolve_field_type(&r.ty, &r.enum_values, &r.fields)?;
+    let ty = resolve_field_type(&r.ty, &r.enum_values, &r.fields, &r.ref_store)?;
     let required_when = r
         .required_when
         .as_deref()
@@ -206,9 +308,11 @@ fn raw_to_field(r: &RawField) -> anyhow::Result<Field> {
         required: r.required,
         required_when,
         pattern: r.pattern.clone(),
-        actor: r.actor.clone(),
+        actor: r.actor,
         enum_values: r.enum_values.clone(),
         description: r.description.clone(),
+        auto_increment: r.auto_increment,
+        auto_increment_within: r.auto_increment_within.clone(),
     })
 }
 
@@ -221,6 +325,8 @@ struct RawSchema {
     default_actor: Option<Actor>,
     fields: Vec<RawField>,
     lifecycle: Lifecycle,
+    #[serde(default)]
+    scope: Option<StoreScope>,
 }
 
 impl Schema {
@@ -232,15 +338,79 @@ impl Schema {
         crate::id_format::validate(&raw.id_format)?;
 
         let fields: anyhow::Result<Vec<Field>> = raw.fields.iter().map(raw_to_field).collect();
+        let fields = fields?;
+
+        // Validate auto_increment fields (Task 1.2)
+        validate_auto_increment(&fields)?;
 
         Ok(Schema {
             name: raw.name,
             id_format: raw.id_format,
-            fields: fields?,
+            fields,
             lifecycle: raw.lifecycle,
             default_actor: raw.default_actor,
+            scope: raw.scope.unwrap_or(StoreScope::Worktree),
         })
     }
+}
+
+/// Validate auto_increment / auto_increment_within constraints (Task 1.2).
+fn validate_auto_increment(fields: &[Field]) -> anyhow::Result<()> {
+    for field in fields {
+        if field.auto_increment {
+            // Must be Integer
+            if field.ty != FieldType::Integer {
+                anyhow::bail!(
+                    "field '{}': auto_increment requires type 'integer', got '{:?}'",
+                    field.name,
+                    field.ty
+                );
+            }
+            // Must have actor: framework
+            if field.actor != Some(Actor::Framework) {
+                anyhow::bail!(
+                    "field '{}': auto_increment requires actor 'framework'",
+                    field.name
+                );
+            }
+        }
+
+        if let Some(within) = &field.auto_increment_within {
+            // Cannot name itself
+            if within == &field.name {
+                anyhow::bail!(
+                    "field '{}': auto_increment_within cannot reference itself",
+                    field.name
+                );
+            }
+            // Target must exist as a top-level integer field with actor: framework
+            let target = fields.iter().find(|f| &f.name == within);
+            match target {
+                None => anyhow::bail!(
+                    "field '{}': auto_increment_within target '{}' not found in schema",
+                    field.name,
+                    within
+                ),
+                Some(t) => {
+                    if t.ty != FieldType::Integer {
+                        anyhow::bail!(
+                            "field '{}': auto_increment_within target '{}' must be type 'integer'",
+                            field.name,
+                            within
+                        );
+                    }
+                    if t.actor != Some(Actor::Framework) {
+                        anyhow::bail!(
+                            "field '{}': auto_increment_within target '{}' must have actor 'framework'",
+                            field.name,
+                            within
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -400,6 +570,257 @@ fields:
         assert!(
             err.to_string().contains("robot"),
             "error should mention the bad actor: {err}"
+        );
+    }
+
+    // ---- Task 1.2: auto_increment validation ----
+
+    fn make_ai_schema(extra_fields: &str) -> String {
+        format!(
+            r#"
+name: x
+id_format: "X{{:01d}}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: current_phase
+    type: integer
+    actor: framework
+  - name: current_cycle
+    type: integer
+    actor: framework
+{extra_fields}
+"#
+        )
+    }
+
+    #[test]
+    fn auto_increment_valid() {
+        let yaml = make_ai_schema(
+            "  - name: n\n    type: integer\n    actor: framework\n    auto_increment: true\n    auto_increment_within: current_phase",
+        );
+        Schema::from_yaml(&yaml).expect("valid auto_increment schema should parse");
+    }
+
+    #[test]
+    fn auto_increment_non_integer_fails() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: n
+    type: text
+    actor: framework
+    auto_increment: true
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("auto_increment requires type 'integer'"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn auto_increment_without_framework_actor_fails() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: n
+    type: integer
+    actor: human
+    auto_increment: true
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("auto_increment requires actor 'framework'"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn auto_increment_within_missing_target_fails() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: current_cycle
+    type: integer
+    actor: framework
+    auto_increment: true
+    auto_increment_within: nonexistent_field
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("auto_increment_within target 'nonexistent_field' not found"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn auto_increment_within_self_fails() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: n
+    type: integer
+    actor: framework
+    auto_increment: true
+    auto_increment_within: n
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("auto_increment_within cannot reference itself"),
+            "err: {err}"
+        );
+    }
+
+    // ---- Task 1.5: scope parsing ----
+
+    #[test]
+    fn scope_defaults_to_worktree() {
+        let schema = Schema::from_yaml(FULL_FIXTURE).unwrap();
+        assert_eq!(schema.scope, StoreScope::Worktree);
+    }
+
+    #[test]
+    fn scope_repo_parses() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+scope: repo
+lifecycle:
+  states: [open]
+  transitions: []
+fields: []
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        assert_eq!(schema.scope, StoreScope::Repo);
+    }
+
+    #[test]
+    fn scope_user_parses() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+scope: user
+lifecycle:
+  states: [open]
+  transitions: []
+fields: []
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        assert_eq!(schema.scope, StoreScope::User);
+    }
+
+    #[test]
+    fn scope_unknown_errors() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+scope: global
+lifecycle:
+  states: [open]
+  transitions: []
+fields: []
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown scope 'global'"),
+            "err: {err}"
+        );
+    }
+
+    // ---- Task 1.7: ListRecord parsing ----
+
+    #[test]
+    fn list_record_parses() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: cycles
+    type: list_record
+    fields:
+      - name: phase
+        type: integer
+      - name: executor
+        type: record
+        fields:
+          - name: summary
+            type: text
+          - name: commit
+            type: text
+      - name: tags
+        type:
+          list: text
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let cycles = schema.fields.iter().find(|f| f.name == "cycles").unwrap();
+        match &cycles.ty {
+            FieldType::ListRecord(sub_fields) => {
+                assert_eq!(sub_fields.len(), 3);
+                // executor is a nested Record
+                let executor = sub_fields.iter().find(|f| f.name == "executor").unwrap();
+                assert!(matches!(executor.ty, FieldType::Record(_)));
+            }
+            _ => panic!("expected ListRecord, got {:?}", cycles.ty),
+        }
+    }
+
+    // ---- Task 1.8: ListFk parsing ----
+
+    #[test]
+    fn list_fk_parses() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: depends_on
+    type: list_fk
+    ref: tasks
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let dep = schema.fields.iter().find(|f| f.name == "depends_on").unwrap();
+        assert_eq!(dep.ty, FieldType::ListFk { ref_store: "tasks".to_string() });
+    }
+
+    #[test]
+    fn list_fk_missing_ref_errors() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: depends_on
+    type: list_fk
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a 'ref' store name"),
+            "err: {err}"
         );
     }
 }

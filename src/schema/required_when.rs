@@ -1,5 +1,10 @@
 use anyhow::{bail, Result};
 
+/// Re-export the general-purpose guard Expr from `expr.rs` so callers can
+/// access it via this module (per m1: single AST type, no churn on existing
+/// call sites that use the narrower `required_when::Expr`).
+pub use crate::schema::expr::Expr as GuardExpr;
+
 /// Returns true only when `keyword` appears as a standalone word (surrounded by
 /// non-alphanumeric/non-underscore boundaries) in `s`. This prevents false
 /// positives on enum literals like 'NORTH' (contains "OR") or 'BAND' (contains "AND").

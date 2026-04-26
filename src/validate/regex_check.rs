@@ -66,6 +66,8 @@ mod tests {
             actor: None,
             enum_values: None,
             description: None,
+            auto_increment: false,
+            auto_increment_within: None,
         }
     }
 
@@ -115,6 +117,8 @@ mod tests {
             actor: None,
             enum_values: None,
             description: None,
+            auto_increment: false,
+            auto_increment_within: None,
         };
         let mut entry: BTreeMap<String, serde_json::Value> = BTreeMap::new();
         entry.insert("title".into(), serde_json::Value::String("anything".into()));

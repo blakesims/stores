@@ -54,6 +54,8 @@ mod tests {
             actor: None,
             enum_values: Some(values.iter().map(|s| s.to_string()).collect()),
             description: None,
+            auto_increment: false,
+            auto_increment_within: None,
         }
     }
 

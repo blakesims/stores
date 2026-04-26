@@ -47,7 +47,7 @@ fn scalar_col_def(field_name: &str, ty: &FieldType) -> Option<String> {
                 "{field_name} TEXT CHECK ({field_name} IN ({list}))"
             ))
         }
-        FieldType::List(_) | FieldType::Record(_) => None,
+        FieldType::List(_) | FieldType::Record(_) | FieldType::ListRecord(_) | FieldType::ListFk { .. } => None,
     }
 }
 
@@ -66,7 +66,10 @@ pub fn ddl_for(schema: &Schema) -> String {
 
     for field in &schema.fields {
         match &field.ty {
-            FieldType::Record(_) | FieldType::List(_) => {
+            FieldType::Record(_)
+            | FieldType::List(_)
+            | FieldType::ListRecord(_)
+            | FieldType::ListFk { .. } => {
                 json_defs.push(format!("{} TEXT", field.name));
             }
             ty => {

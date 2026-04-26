@@ -108,6 +108,8 @@ fn field_type_str(ty: &FieldType) -> &'static str {
         FieldType::Record(_) => "record",
         FieldType::DisplayId => "display_id",
         FieldType::Timestamp => "timestamp",
+        FieldType::ListRecord(_) => "list_record",
+        FieldType::ListFk { .. } => "list_fk",
     }
 }
 

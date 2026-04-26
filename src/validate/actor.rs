@@ -117,6 +117,8 @@ mod tests {
             actor,
             enum_values: None,
             description: None,
+            auto_increment: false,
+            auto_increment_within: None,
         }
     }
 
