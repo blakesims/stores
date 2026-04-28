@@ -1,9 +1,9 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-28
-- **Last Updated:** 2026-04-28
+- **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
 
 ## Task
@@ -463,6 +463,17 @@ _Code-reviewer agent fills this section per phase._
 - **Note:** executor reported "5 tests" but actual count is 6 (the bonus `flat_layout_not_nested` test). Cosmetic discrepancy, no impact.
 
 > Details: code-review-phase-1.md
+
+### Phase 2
+- **Gate:** PASS
+- **Issues Found:** 0c/1M/2m
+- **Revision Count:** 1/3
+- **Verified:** All 6 ACs (2.1–2.6). Test matrix matches claimed: `cargo test runner` 8/8, `cargo test --features runner-claude-code runner` 14/14. Full suite 312/318 (no-feature/with-feature) green. Dev + release builds clean both ways. AC2.6 leakage clean — `claude_code` referenced only inside `src/runner/`. Phase 1 regression (`cli::agents`, `stores agents list`, `stores skills list`) passes.
+- **Major (M1):** `unsafe impl Send for MockRunner` at `src/runner/mock.rs:49-52` is redundant. `RefCell<Vec<RunnerOutput>>` is naturally `Send` via auto-trait derivation (verified by isolated `assert_send` probe). The impl is sound today but is dead code that masks any future `!Send` field regression. Recommend deletion (two-line fix) before or as part of Phase 3 P0 commit.
+- **Minor findings:** (m1) reverse-then-pop FIFO is correct but `VecDeque::pop_front` would be idiomatic — style only; (m2) stale doc-comment in `runner_uses_path_shim_not_real_claude` (`src/runner/claude_code.rs:208-212`) references "the runner integration test below" that does not exist.
+- **Note:** Executor's "RefCell not shared across threads" justification confuses `!Sync` with `!Send`. `RefCell<T>` is `!Sync` but `Send`-when-`T:Send` by auto-trait — no manual impl needed.
+
+> Details: code-review-phase-2.md
 
 ---
 
