@@ -224,3 +224,96 @@ The Intent Contract listed 5 risks. Coverage:
 5. **`drive --auto` task selection policy** — Phase 3 AC3.2 attempts but conflicts with schema (C1). ✗ blocker.
 
 3 of 5 risks well-covered, 2 need work (M3 + C1).
+
+---
+
+# Cycle 2 Review
+
+## Gate: READY
+
+The planner applied all 4 criticals and all 7 majors verbatim per the cycle-1 adjudications. 5 of 6 minors landed; one drifted (cosmetic — see below). No new criticals were introduced during the revision pass. The DONE_WHEN trace is solid: every previously-blocked clause now has a concrete, schema-honest AC. The plan is ready for the executor.
+
+## Cycle-1 finding landing report
+
+| ID | Adjudicated fix | Landed |
+|---|---|---|
+| C1 | drop priority; AC3.2 FIFO `created_at ASC`; remove Plan Notes #1; Decision Matrix row corrected | **CLEAN** — line 113 explanation, AC3.2 line 247 with full WHERE clause incl. claim-skip, Decision Matrix line 383, Plan Notes #1 line 403 reframed as adjudication record |
+| C2 | frontmatter `name`/`description`/optional `tools`; drop `effort`; new Decision Matrix row for `claude_code` runner spawn path | **CLEAN** — AC1.6 line 179 spells out exactly this; two new Decision Matrix rows (Agent frontmatter line 385, Runner spawn path line 386) |
+| C3 | AC7.7 reclassified as manual soft gate captured in completion summary, NOT in executor PASS/REVISE/FAIL | **CLEAN** — AC7.7 line 369 explicitly says "Manual soft gate (NOT a hard executor gate)"; Phase 7 prose line 327 confirms; Decision Matrix gains "Real-`claude` smoke gate" row (line 395) |
+| C4 | AC7.1 rewritten to assert state-machine traversal with concrete final-state checks; AC7.1b for one-REVISE-cycle | **CLEAN** — AC7.1 line 362 + AC7.1b line 363; fixture list line 332 includes both `happy_2phase.jsonl` and `revise_once.jsonl` |
+| M1 | strike "expose `compute(...)` publicly"; reuse existing `pub(crate)` | **CLEAN** — Phase 3 prose line 226 explicitly says "**No `pub` widening is required.**"; AC3.8 line 253 reasserts |
+| M2 | Phase 3 sub-AC for JSON envelope; AC1.7 specifies role-keyed JSON; fixture path in Phase 1 file list | **CLEAN** — AC3.10 line 255, AC1.7 line 180 (fully role-keyed schema with examples), fixture list line 168, parser logic in Phase 3 step 2(e) |
+| M3 | prompt content quality ACs (verbs+JSON shape, failure modes, planner mirrors Stage-1-7, length 400-1200) | **CLEAN** — AC1.7a/7b/7c/7d at lines 181-184 |
+| M4 | one-line note in Phase 3 about manual install path until Phase 4 | **CLEAN** — Phase 3 prose line 224 |
+| M5 | AC6.5 collapsed to single-bit DB-state check | **CLEAN** — AC6.5 line 322 ("transitions from `pending` to `answered`... otherwise exits 1") |
+| M6 | AC3.3 — always built, hidden via clap `.hide(true)`, accepts fixture path; `--claude-code` requires feature | **CLEAN** — AC3.3 line 248 reads exactly this; Decision Matrix "Mock runner availability" row line 389 |
+| M7 | guide prompt authored in Phase 1; AC1.1 says "5 entries"; Phase 6 builds handlers only | **CLEAN** — Phase 1 file list line 166, AC1.1 line 174, AC1.8 line 185 (count == 5), Phase 6 prose line 300 ("no new prompt authoring") |
+| m1 | sketch the 30-line wrapper in Phase 7 | **CLEAN** — wrapper sketch at lines 339-359 (~18 lines, budget confirmed) |
+| m2 | document `status` vs `show` distinction | **CLEAN** — Phase 5 prose lines 277-279 |
+| m3 | Decision Matrix row for agent output protocol | **CLEAN** — line 387 |
+| m4 | quickstart includes `--features runner-claude-code` | **CLEAN** — AC7.4 line 366; Decision Matrix "README quickstart command" row line 396 |
+| m5 | Phase 3 sub-AC for skip-if-claimed in `--auto` | **CLEAN** — AC3.2 line 247 WHERE clause includes `(claimed_by IS NULL OR claimed_at < now - lock_window)`; AC3.7 line 252 covers via "live-claim skip" test |
+| m6 | AC3.6 references the runner-error fixture path | **CLEAN** — AC3.6 line 251 names `tests/handlers/drive_runner_error.rs`; Files-to-create list line 230 includes the path |
+
+**Tally:** 4 critical / 7 major / 6 minor = 17 findings. **17 landed cleanly, 0 partial, 0 missed.**
+
+## Cycle-2-only checks
+
+### DONE_WHEN trace (re-verify)
+
+| Clause | Phase(s) | Cycle 1 | Cycle 2 |
+|---|---|---|---|
+| Fresh repo with stores installed | Phase 7 | OK (assuming AC7.1 fixed) | **OK** — AC7.1 now asserts via `stores setup` + tempdir |
+| No `task-workflow` plugin | Phase 1 | OK | OK |
+| No Claude Code skill manually wired | Phase 4 | OK | OK |
+| `stores setup` works | Phase 4 (AC4.1–4.6) | OK | OK |
+| `--auto` selects a task | Phase 3 (AC3.2) | **C1 blocker** | **FIXED** — FIFO `created_at ASC`, schema-honest |
+| `--claude-code` runner | Phase 2 + Phase 3 | **C2 blocker** | **FIXED** — frontmatter spec correct, runner spawn-path documented |
+| Drives state machine to `complete` | Phase 3 + Phase 7 | **C3+C4 blockers** | **FIXED** — AC7.1 asserts state transitions; AC7.7 is soft merge gate |
+| Surfaces real `blocked` cleanly | Phase 3 (AC3.9) | OK | OK |
+| `gate guide` available | Phase 6 | M5 (exit-code-2) | **FIXED** — AC6.5 single-bit gate-status |
+| `status --follow` shows progress | Phase 5 (AC5.1–5.6) | OK | OK |
+
+**Net: 10 of 10 clauses now covered. Trace is solid.**
+
+### Internal consistency
+
+- **AC3.2 ↔ Decision Matrix row 1**: identical WHERE clause and ordering. ✓
+- **AC1.1 ↔ AC1.8 ↔ AC4.1**: all assert 5 agents with the same names. ✓
+- **AC1.6 ↔ Decision Matrix "Agent prompt frontmatter"**: identical fields (`name` + `description` + optional `tools`, no `effort`). ✓
+- **AC3.10 ↔ AC1.7 ↔ Decision Matrix "Agent output protocol"**: identical envelope shape and parsing rule (last non-empty stdout line, role-keyed JSON). ✓
+- **AC7.7 ↔ Phase 7 prose ↔ Decision Matrix "Real-`claude` smoke gate"**: all consistently call this a manual soft gate at the merge level. ✓
+
+The Intent Contract (`## Task` section, lines 27-92) still uses pre-cycle-1 language ("highest-priority", "4 agent prompts", "highest-priority then oldest" risk mitigation). The planner correctly added a clarifying note at line 113 that explicitly reconciles the DONE_WHEN with the FIFO selection. The Intent Contract is human-ratified and not a planner editing surface; the divergence is acknowledged and bridged. Acceptable.
+
+### 5-prompt consistency
+
+All 5 prompts (`planner`, `plan-reviewer`, `executor`, `code-reviewer`, `guide`) are listed in:
+- Phase 1 Files-to-create (line 162-166) ✓
+- Phase 1 fixture list (line 168) ✓
+- AC1.1 (line 174 — "exactly 5 entries", names enumerated) ✓
+- AC1.2 (line 175 — "writes 5 files") ✓
+- AC1.7/7a (lines 180-181 — JSON envelope schemas given for each role including guide) ✓
+- AC1.8 (line 185 — `BUNDLED_AGENTS.len() == 5`) ✓
+- AC4.1 (line 268 — "all 5 bundled agents", names enumerated) ✓
+- AC6.4 (line 321 — guide prompt's authorized-verbs list) ✓
+
+No off-by-one drift anywhere.
+
+## Cycle-2 issues
+
+### Critical: 0
+### Major: 0
+### Minor: 1
+
+**m7 (cycle 2). AC5.6 references a `--max-iters` flag that Phase 5 does not define.** The status handler's Phase 5 ACs only define `--follow`, `<id>`, and `--interval`. AC5.6 line 296 says "Follow-loop tests are bounded by `--max-iters` test-only flag to avoid flakiness" — but `--max-iters` belongs to `drive`, not `status`. Either add a hidden `--max-iters` to `status` for tests, or rephrase AC5.6 to say "tests use a bounded loop via test-only injection (e.g. capping the polling iteration count via a `cfg(test)` constant or env var)." Cosmetic; the executor will figure it out. Not blocking.
+
+## Top 3 remaining concerns (post-READY)
+
+1. **AC5.6 cycle-2 nit** — wording mismatch with Phase 5's flag set. Fix at executor's discretion; not blocking.
+2. **Authoring 5 prompts at 400-1200 lines each is real work** — AC1.7d locks the floor/ceiling; reviewer must enforce at code-review time, not waved past. Risk #2 in the Intent Contract; mitigated by AC1.7a-d but execution-risky.
+3. **AC7.7's manual soft gate depends on a working `claude -p` + credentials at the executor's machine** — now a soft gate (good), but the executor should still record evidence (transcript or screenshot) in the completion summary as AC7.7 specifies. Watch for "I ran it locally and it worked" hand-waves at PR time.
+
+## Confirmation
+
+DONE_WHEN trace is now solid: all 10 clauses covered, all 4 prior blockers resolved, no new criticals introduced.

@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** PLAN_REVIEW
+- **Status:** READY
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -412,9 +412,9 @@ No open items remain for the plan-reviewer.
 
 ## Plan Review
 
-- **Gate:** NEEDS_WORK
-- **Open Questions Finalized:** Q1 → drop priority entirely, sort by `created_at ASC` (no schema migration in v0.3); Q2 → `--mock` always built, hidden via clap `.hide(true)`, takes fixture-path arg; Q3 → flat `agents/<name>.md` (Claude Code platform convention; doc the asymmetry with skills); Q4 → planner produces the verb list (`gate show/answer`, `tasks show/list/next-action`) and embeds it in the guide prompt; Q5 → keep `setup` in Phase 4, no reorder.
-- **Issues Found:** 4c / 7M / 6m
+- **Gate:** READY
+- **Open Questions Finalized:** All Q1–Q5 locked in cycle 1; cycle 2 verifies application. (Q1 → drop priority, FIFO `created_at ASC`; Q2 → `--mock` always built, hidden via clap `.hide(true)`; Q3 → flat `agents/<name>.md`; Q4 → 5-verb authorized list embedded in `agents/guide.md`; Q5 → `setup` stays in Phase 4.)
+- **Issues Found:** cycle 1: 4c / 7M / 6m → cycle 2: 0c / 0M / 1m. All 17 cycle-1 findings landed cleanly. One cosmetic cycle-2 nit (AC5.6 references a `--max-iters` flag not defined in Phase 5) — non-blocking. DONE_WHEN trace is solid: 10 of 10 clauses covered.
 
 > Details: plan-review.md
 
