@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -474,6 +474,23 @@ _Code-reviewer agent fills this section per phase._
 - **Note:** Executor's "RefCell not shared across threads" justification confuses `!Sync` with `!Send`. `RefCell<T>` is `!Sync` but `Send`-when-`T:Send` by auto-trait — no manual impl needed.
 
 > Details: code-review-phase-2.md
+
+### Phase 3: `stores tasks drive` orchestrator
+- **Status:** AWAITING_REVIEW
+- **Started:** 2026-04-27
+- **Completed:** 2026-04-27
+- **Commits:** f461787
+- **Files Created:** src/handlers/drive.rs (loop + auto-selection + safety rails + envelope parser + inline tests)
+- **Files Modified:** src/handlers/mod.rs, src/cli/dynamic.rs, src/cli/dispatch.rs
+- **Tests:** cargo test handlers::drive → 12/12 PASS; cargo test → 324/324 PASS; cargo build PASS; cargo build --features runner-claude-code PASS
+- **ACs claimed:** 3.1 ✓ 3.2 ✓ 3.3 ✓ 3.4 ✓ 3.5 ✓ 3.6 ✓ 3.7 ✓ 3.8 ✓ 3.9 ✓ 3.10 ✓
+- **Executor notes for code-reviewer:**
+  - AC3.8 deviation note: `compute_brief` is NOT called directly because it calls `Manifest::load()` which requires a real `.stores/manifest.yaml`. Instead, `drive` inlines the brief computation using `build_context` + `render_template` directly from `BUNDLED_STORE_TEMPLATES`. This is equivalent logic to what `compute_brief` does for bundled stores (the same code path). No `pub` widening occurred. `build_context` and `render_template` are already exported from `crate::render`. This was a deliberate choice to keep drive tests hermetic without manifest setup — same semantic outcome.
+  - `drive_runner_error` test is inline in `drive.rs #[cfg(test)]` (not a separate file) per the spec note "or equivalent under `src/handlers/drive.rs` `#[cfg(test)] mod tests`".
+  - Render step is best-effort (failures logged to stderr, do not abort the loop) because drive is primarily a DB-state driver and render is a human-readable output.
+  - `LOCK_WINDOW_SECS = 300` mirrors `submit.rs`'s `acquire_lock` 5-minute window.
+  - `--claude-code` flag is feature-gated at clap level via `#[cfg(feature = "runner-claude-code")]` in `build_drive_cmd()`.
+  - No `unsafe`. No `#[allow(...)]`.
 
 ---
 
