@@ -1,7 +1,7 @@
 # T004: Schema-validated agent envelope via `--json-schema`
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-28
 - **Blocked Reason:** —
@@ -405,6 +405,25 @@ The codebase already follows tight bottom-up layering — `runner` knows nothing
 **Counts:** {critical: 0, major: 0, minor: 0}
 
 
+
+### Phase 2
+
+**Gate:** PASS
+
+**Summary:** Phase 2 correctly wires drive to the schema-validated envelope contract laid down by Phase 1. Drive looks up `BUNDLED_AGENT_SCHEMAS` and threads the schema text through `runner.spawn` (`src/handlers/drive.rs:419-434`); when the role is not in the registry, `Option::find().map()` produces `None` and the runner falls back to the legacy path, exactly as the plan prescribes. `parse_envelope` now prefers `RunnerOutput.structured_output`, then `final_message`, then a last-line stdout scan (`src/handlers/drive.rs:540-563`) — legacy mock fixtures still work, which `tests/drive_e2e.sh` confirms (both AC7.1 and AC7.1b pass). The AC2.7 retry-exhausted surface at lines 442-454 is positioned BEFORE the non-zero-exit bail, so the eprintln is reached on the failure path; the eprintln body contains both required substrings (`"schema validation retries exhausted"` and `.stores/runs/<sid>.jsonl`). Phase boundary discipline is observed: no `Cargo.toml` version bump (still `0.3.0`), no schema files added or modified, no Runner/RunnerOutput trait shape changes (Phase 2 only touches drive, briefs, agent prompts — `git diff 58e959f..64f1903 --name-only` confirms 11 files, all in scope). Brief templates are pruned to non-imperative `EMIT` phrasing (5 insertions, 6 deletions across 4 templates — minimal, surgical); agent prompts in all 5 roles replace "last non-empty line" boilerplate with schema-conformance language while retaining the `do NOT invoke stores tasks submit-*` warnings. Both AC2.5 and AC2.6 greps return empty. `cargo build --features runner-claude-code` succeeds; `cargo test --features runner-claude-code` reports 372 unit + 2 integration = 374 passed, 0 failed (both new Phase-2 tests `structured_output_takes_precedence_over_final_message` and `retries_exhausted_surfaces_transcript_path` are present and green). Phase-2 DONE_WHEN portion (drive consumes structured output without behavioural regression on the legacy fallback) is satisfied; Phase 3's haiku smoke will close the loop on the live stderr capture.
+
+**AC verification:**
+- AC2.1: ✅ `cargo build --features runner-claude-code` succeeds (verified locally — no warnings or errors).
+- AC2.2: ✅ `cargo test --features runner-claude-code` passes 372+2=374 tests, 0 failed; drive unit tests include the two new Phase-2 tests at `src/handlers/drive.rs:1095` (`structured_output_takes_precedence_over_final_message`) and `src/handlers/drive.rs:1124` (`retries_exhausted_surfaces_transcript_path`).
+- AC2.3: ✅ `bash tests/drive_e2e.sh` passes both AC7.1 and AC7.1b on the legacy fixtures; mock runner sets `structured_output: None`, drive falls back to `final_message`, behaviour unchanged from v0.3.
+- AC2.4: ✅ `structured_output_takes_precedence_over_final_message` (`src/handlers/drive.rs:1095-1119`) constructs a `RunnerOutput` with `final_message: Some("this is not valid json {{{{".to_string())` AND `structured_output: Some(valid_envelope)`, then asserts `parse_envelope` succeeds via `structured_output` and yields a `Planner` envelope — exactly the precedence the plan requires.
+- AC2.5: ✅ `grep -rE '^\s*[0-9]+\.\s*Call\s+\`stores tasks submit-' stores/tasks/templates/` returns empty (verified locally). Replacement text starts with `EMIT` rather than `Call` and uses the bare token `submit-*` rather than the literal `stores tasks submit-`, slipping past the regex by construction.
+- AC2.6: ✅ `grep -r 'last non-empty line' agents/` returns empty across all 5 agent prompts. Schema-conformance one-liner is added to all 5 (`agents/{planner,plan-reviewer,executor,code-reviewer,guide}.md`); `do NOT invoke stores tasks submit-*` warnings remain in all 5.
+- AC2.7: ✅ Code path verified at `src/handlers/drive.rs:444-454` — the eprintln contains the literal substring `"schema validation retries exhausted"` AND interpolates the `.stores/runs/<sid>.jsonl` transcript path (with a sensible `<no session-id>` fallback when `session_id` is `None`). The unit test `retries_exhausted_surfaces_transcript_path` exercises this code path end-to-end via drive_loop with a fail RunnerOutput and verifies the non-zero-exit bail fires correctly afterward. The executor's deviation note (test cannot capture `eprintln!` fd2 text directly without redirection) is reasonable; the eprintln body is correct and Phase 3's smoke will validate the live stderr capture. Acceptable as PASS.
+
+**Findings:** none.
+
+**Counts:** {critical: 0, major: 0, minor: 0}
 
 ### Phase 2 — Drive consumes structured output, briefs and prompts updated
 
