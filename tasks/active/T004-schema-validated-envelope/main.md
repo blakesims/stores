@@ -1,7 +1,7 @@
 # T004: Schema-validated agent envelope via `--json-schema`
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** EXECUTING_PHASE_1_REVISE
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-28
 - **Blocked Reason:** —
@@ -300,7 +300,50 @@ The codebase already follows tight bottom-up layering — `runner` knows nothing
 
 ---
 
-## Plan Review
+### Plan Revisions (post-Phase-3 attempt 1, 2026-04-28)
+
+Phase 3 smoke surfaced three real issues that invalidate the original "schema validation alone is sufficient" premise. Replanning Phases 1 and 2 in light of fresh research; Phase 3 unchanged.
+
+**What we learned:**
+
+1. **Bug A — `--json-schema` arg shape.** Phase 1 wrote the schema to `/tmp/stores-schema-<uuid>.json` and passed the file path. `claude --json-schema` takes the schema TEXT inline (per `claude --help` example: `--json-schema '{"type":"object",...}'`). Path-mode caused claude to hang silently for 15+ minutes per spawn. **Already fixed inline** during Phase 3 attempt 1 (commit pending in revise).
+2. **Bug B — Stream-json parser extracts wrong event.** The runner's `extract_structured_output_from_stream_json` pulls intermediate `user` events (e.g. tool_result for a denied bash call) and feeds them to drive as `final_message`. Drive then fails to parse with `missing field 'role' at line 1 column 3568`. The parser must walk the JSONL, find the terminal `result` event, and extract `structured_output` / `result` (text) / `error` from THAT event only. Phase 1 unit tests had only synthetic single-event fixtures; they missed this.
+3. **Architectural premise correction.** Research (delegated agent, summarised in conversation) shows that `claude --json-schema` is **post-hoc validation with re-prompting**, NOT constrained decoding. Multi-turn tool-using agents that emit final answers as prose (markdown-fenced JSON) bypass schema validation entirely — `result.structured_output` stays `null`. Industry consensus (BAML, Pydantic AI, OpenAI Agents SDK, Anthropic SDK docs) is a **belt-and-braces** stack: schema validation as preferred path, schema-aligned-parsing of `result.text` as fallback, optional submit-tool layer for v1.0.
+   - BAML's "Structured Outputs Create False Confidence" post explicitly argues prose + SAP outperforms strict schema mode in some cases (92% vs 87.5% on gpt-3.5).
+   - Anthropic Claude Code subagents (Task tool) have ZERO schema support; community workaround is prose contract only.
+   - The original T004 premise of "delete the parser, use the schema" was wrong — the parser must stay, hardened.
+
+**Phase 1 revise — additional ACs (in addition to AC1.1–AC1.7):**
+
+- **AC1.8 — `--json-schema` inline (Bug A).** `claude_code::spawn` passes `--json-schema=<schema_text>` directly with no temp file. Verified by reading the spawn function's `cmd.arg` calls; no `fs::write` for schemas. (Already applied in this session; executor confirms.)
+- **AC1.9 — `extract_structured_output_from_stream_json` walks to terminal `result` event (Bug B fix).** New unit test `extract_structured_output_skips_intermediate_user_events` constructs a realistic 26-line stream-json fixture with `system` + `assistant` + `user` (tool_use_result) + `assistant` + `result` events, and asserts the extractor returns the `result` event's `structured_output` (when present) or `result.result` text (when not), NEVER an intermediate `user` event's content. The fixture should mirror the structure observed in `/tmp/t003-smoke/.stores/runs/5fc73fef-3b3f-47b7-aa53-a7e9d0dc8687.jsonl` from the Phase 3 attempt 1 smoke.
+- **AC1.10 — SAP-style parser added.** New module `src/runner/sap.rs` (or top-level helper in `claude_code.rs`) exposes `extract_envelope_from_text(text: &str, schema: Option<&Value>) -> Option<Value>` that:
+  - Strips markdown fences (```json ... ``` and bare ``` ... ```);
+  - Walks the cleaned text for balanced `{...}` candidates;
+  - Returns the first candidate that parses as valid JSON;
+  - When `schema.is_some()`, additionally validates the candidate against the schema using the existing `jsonschema` dev-dep (or, if dev-only, lift to a runtime dep behind the same `runner-claude-code` feature flag);
+  - Returns `None` if no candidate found.
+  Unit tests cover: (a) plain JSON, (b) markdown-fenced JSON, (c) JSON inside prose with leading/trailing commentary, (d) two candidates where the first fails schema and the second passes, (e) malformed-everything returns None.
+- **AC1.11 — `RunnerOutput` exposes `structured_output_source: Option<&'static str>`.** When the runner extracts data, it records which layer caught it: `"sdk"` (claude returned `result.structured_output`), `"sap"` (extracted from `result.result` text via SAP), or `None` (legacy `final_message` / drive's last-line fallback). Drive logs this on submit for postmortem.
+
+**Phase 2 revise — additional ACs (in addition to AC2.1–AC2.7):**
+
+- **AC2.8 — `parse_envelope` is three-layer.** Drive prefers `RunnerOutput.structured_output` (Layer 1: SDK-validated); on null, falls through to SAP applied to the runner's extracted final-message text (Layer 2); on SAP-failure, falls through to existing `final_message` last-line scan (Layer 3: legacy mock-fixture compat). New unit test `three_layer_fallback_for_markdown_fenced_planner_output` constructs a `RunnerOutput` mirroring the Phase 3 attempt 1 transcript (structured_output: None, final_message: markdown-fenced JSON) and asserts SAP recovers the planner envelope cleanly.
+- **AC2.9 — Runner records `structured_output_source` and drive surfaces it.** When drive submits, stderr includes `[T<id>] phase N cycle M: <role> → submitted (gate=...; source=sdk|sap|legacy)`. Helps diagnose which layer is doing the work in production.
+
+**What does NOT change:**
+- Phase 3 unchanged (smoke + version bump). Same DONE_WHEN.
+- Cargo bump 0.3.0 → 0.4.0 still on Phase 3 success.
+- Submit-tool layer (Pydantic AI's force-final-tool pattern) is **deferred to a future task (v0.5+)**. Three-layer SAP-fallback is sufficient for v0.4 robustness.
+- Bug C (planner tried `./scripts/hi` and hit bash approval) is **not addressed**. It's incidental to T001's contract; not all task contracts have a pre-existing executable to verify. If it recurs in Phase 3 attempt 2, tighten the planner's allowed-tools whitelist as a follow-up patch.
+
+**Decision Matrix additions:**
+
+| Decision | Options | Chosen | Rationale |
+|---|---|---|---|
+| `--json-schema` arg shape | (a) file path; (b) inline text | **(b) inline text** | `claude --help` example shows inline JSON. Path mode silently hangs claude for 15+ minutes — confirmed empirically Phase 3 attempt 1. |
+| Multi-turn-agent failure recovery | (a) schema validation only; (b) submit-tool terminator (Pydantic AI); (c) SAP fallback (BAML); (d) two-pass extraction | **(c) SAP fallback** | Schema-only doesn't engage when agent ends in prose (observed in Phase 3 attempt 1). Submit-tool is v1.0 design (deferred). Two-pass adds API cost. SAP is parser-only, zero API cost, restores v0.3's text-extraction capability while keeping schema as preferred path when it fires. Industry precedent: BAML's Schema-Aligned Parsing. |
+| `structured_output_source` field | (a) skip; (b) `Option<&'static str>` on RunnerOutput | **(b) add** | Diagnostic gold for v0.4: when an agent regresses or a prompt drifts, we can see which layer is doing the work and intervene at the right level. Costs nothing. |
 
 **Gate:** NEEDS_WORK
 
@@ -380,6 +423,33 @@ The codebase already follows tight bottom-up layering — `runner` knows nothing
 1. `runner_uses_path_shim_not_real_claude` test shim used a regular Rust string initially, causing "Unterminated quoted string" in sh due to literal backslash escapes. Fixed by switching to a raw string literal `r#"..."#` matching the pattern used in `command_construction_and_final_message_parsing`. No behavioral deviation.
 2. Schema `reasoning`/`notes` fields are listed in `properties` but NOT in `required` — required would have broken fixture validation since the v0.3 fixtures predate the reasoning field. This follows plan rule 5 (fixture-first fidelity) and is the correct interpretation.
 3. Schema temp-file for `--json-schema` uses manual `std::fs::write` to `/tmp/stores-schema-<uuid>.json` instead of the `tempfile` crate (which is dev-dep only). Cleanup happens after child exits. No behavioral difference.
+
+---
+
+### Phase 3 — Attempt 1 (FAILED, surfaces 2 bugs + architectural correction)
+
+**Date:** 2026-04-28 (orchestrator-driven, no executor commit — direct repro by orchestrator after task-workflow:executor subagent failed to capture the live drive output and returned an empty status message after ~10min wall-clock).
+
+**What was tried:**
+1. Reinstalled `stores 0.3.0` binary from the Phase 1+2 codebase (`cargo install --path . --features runner-claude-code --force`).
+2. In `/tmp/t003-smoke`: wiped `.stores tasks`, ran `stores setup`, `stores tasks add ... "Hello world" hello "echo hi prints hi" scripts/ src/`, then `nohup stores tasks drive --auto --claude-code --testing > /tmp/t004-smoke.log`.
+3. Attempt 1: planner spawn hung for 15+ minutes with no output. Drive process alive (SN), claude child (PID 2159087) alive but idle (`/proc/<pid>/fd` showed only `/dev/null` and `/dev/urandom`; no open output files). Killed via `kill 2159087 2159085`.
+4. Diagnosed: runner passed `--json-schema=/tmp/stores-schema-<uuid>.json` (file path) but `claude --help` shows `--json-schema <schema>` takes inline JSON text (example value: `'{"type":"object",...}'`). Verified empirically with two direct `claude -p` invocations: inline schema returned `result.structured_output: {...}` in 4s; file-path returned empty stdout, exit 0. **Bug A.**
+5. Applied minimal inline fix to `src/runner/claude_code.rs` (removed temp-file write, pass schema text directly via `--json-schema=<text>`). Rebuilt, reinstalled, re-ran smoke.
+6. Attempt 2: planner returned in 64s. Drive then failed envelope parse: `final_message JSON parse failed: missing field 'role' at line 1 column 3568` — content was an intermediate `user` event (a tool_result for a denied bash call), not the terminal `result` event. **Bug B.**
+7. Inspected `.stores/runs/5fc73fef-3b3f-47b7-aa53-a7e9d0dc8687.jsonl` (26 events: 1 system, 16 assistant, 7 user, 1 rate_limit, 1 result):
+   - `result.subtype = "success"`, `is_error = false`, but `structured_output: null`.
+   - `result.result` (text field) contained a markdown-fenced JSON envelope with valid `role: "planner"`, phases, decision_matrix, plan_notes — i.e. the plan was actually correct, just emitted as prose, not via the structured-output tool.
+   - `permission_denials` contained one entry: planner tried `ls -la scripts/hi && ./scripts/hi` (Bug C — incidental).
+8. **Architectural finding:** `--json-schema` does post-hoc validation + re-prompt on mismatch, NOT constrained decoding. When a multi-turn tool-using agent ends in prose, the structured-output tool is never invoked, so schema validation never engages. Confirmed by delegated research (BAML, Pydantic AI, Anthropic SDK docs, OpenAI Agents SDK docs all converge on belt-and-braces stack).
+
+**Three findings → three remediation buckets:**
+- Bug A: fixed inline (5-line edit, remove temp-file path). Stays in Phase 1 revise commit.
+- Bug B: Phase 1 revise — harden `extract_structured_output_from_stream_json` to walk to terminal `result` event, with realistic multi-event fixture.
+- Bug C: not addressed (incidental).
+- Architectural correction: Phase 1 revise adds SAP-style fallback (`extract_envelope_from_text`); Phase 2 revise rewrites `parse_envelope` as 3-layer fallback (sdk → sap → legacy). Submit-tool layer (Pydantic AI pattern) deferred to v0.5+.
+
+**Status moved to `EXECUTING_PHASE_1_REVISE`. New ACs (AC1.8–AC1.11, AC2.8–AC2.9) appended to Plan section under "Plan Revisions".**
 
 ---
 

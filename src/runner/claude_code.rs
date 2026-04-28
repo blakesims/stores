@@ -269,19 +269,12 @@ impl Runner for ClaudeCodeRunner {
         }
 
         // Optional JSON schema for structured output validation.
-        // Write schema to a temp file (claude CLI expects a file path).
-        // We write to a unique path under the system temp dir and clean it up
-        // after the child exits (no tempfile crate dependency in production).
-        let schema_tmp_path: Option<PathBuf>;
+        // The claude CLI's `--json-schema <schema>` takes the schema as inline
+        // JSON text (per `claude --help`), NOT a file path. Earlier prototypes
+        // wrote to a temp file and passed the path — claude then silently
+        // produced no output and the runner hung.
         if let Some(schema_text) = schema {
-            let path = std::env::temp_dir()
-                .join(format!("stores-schema-{}.json", session_id));
-            fs::write(&path, schema_text)
-                .context("failed to write schema to temp file")?;
-            cmd.arg(format!("--json-schema={}", path.display()));
-            schema_tmp_path = Some(path);
-        } else {
-            schema_tmp_path = None;
+            cmd.arg(format!("--json-schema={schema_text}"));
         }
 
         // Per-role tool whitelist from the agent's frontmatter (preferred).
@@ -315,11 +308,6 @@ impl Runner for ClaudeCodeRunner {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let exit_code = output.status.code().unwrap_or(-1);
-
-        // Clean up schema temp file.
-        if let Some(p) = schema_tmp_path {
-            let _ = fs::remove_file(p);
-        }
 
         // Write the full stream-json transcript.
         write_transcript(&cwd, &session_id, &stdout);
