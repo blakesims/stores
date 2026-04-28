@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -265,12 +265,12 @@ DONE_WHEN-tracing language: `--auto` selects the **next non-complete task by `cr
   - `src/cli/dynamic.rs` — register `setup` subcommand
   - `src/main.rs` — dispatch
 - **Acceptance Criteria:**
-  - [ ] AC4.1: `stores setup` in a fresh directory creates `.stores/db.sqlite`, `.stores/manifest.yaml`, installs all 3 bundled stores (`observations`, `gate`, `tasks`), installs all 5 bundled skills under `./.claude/skills/`, installs all 5 bundled agents (`planner`, `plan-reviewer`, `executor`, `code-reviewer`, `guide`) under `./.claude/agents/`.
-  - [ ] AC4.2: Re-running `stores setup` is idempotent — exits 0, prints idempotency notes per layer ("Already initialized" / "Already installed: X").
-  - [ ] AC4.3: `stores setup --global` writes skills+agents to `~/.claude/` instead of local; the store DB still goes to `./.stores/`.
-  - [ ] AC4.4: Partial-state recovery: if `.stores/` exists but agents are missing, re-running `setup` only adds the missing layer (does not error or wipe).
-  - [ ] AC4.5: `cargo test cli::setup` covers fresh-bootstrap and idempotent-rerun in a tempdir.
-  - [ ] AC4.6: A failure in any layer (e.g. one bundled store install errors) aborts subsequent layers and surfaces the underlying error — no half-installed state is silently left behind.
+  - [x] AC4.1: `stores setup` in a fresh directory creates `.stores/db.sqlite`, `.stores/manifest.yaml`, installs all 3 bundled stores (`observations`, `gate`, `tasks`), installs all 5 bundled skills under `./.claude/skills/`, installs all 5 bundled agents (`planner`, `plan-reviewer`, `executor`, `code-reviewer`, `guide`) under `./.claude/agents/`.
+  - [x] AC4.2: Re-running `stores setup` is idempotent — exits 0, prints idempotency notes per layer ("Already initialized" / "Already installed: X").
+  - [x] AC4.3: `stores setup --global` writes skills+agents to `~/.claude/` instead of local; the store DB still goes to `./.stores/`.
+  - [x] AC4.4: Partial-state recovery: if `.stores/` exists but agents are missing, re-running `setup` only adds the missing layer (does not error or wipe).
+  - [x] AC4.5: `cargo test cli::setup` covers fresh-bootstrap and idempotent-rerun in a tempdir.
+  - [x] AC4.6: A failure in any layer (e.g. one bundled store install errors) aborts subsequent layers and surfaces the underlying error — no half-installed state is silently left behind.
 
 #### Phase 5: `stores tasks status --follow`
 
@@ -433,6 +433,22 @@ _Executor agent fills this section per phase._
 - **Tests:** cargo test cli::agents PASSED (6 tests); cargo test PASSED (304 tests); cargo build PASSED
 - **ACs claimed:** 1.1 ✓ 1.2 ✓ 1.3 ✓ 1.4 ✓ 1.5 ✓ 1.6 ✓ 1.7 ✓ 1.7a ✓ 1.7b ✓ 1.7c ✓ 1.7d ✓ 1.8 ✓ 1.9 ✓
 - **Executor notes for code-reviewer:** uninstall_removes_file test mirrors skills' inline-fs pattern; agents.rs has no parent-dir cleanup since flat layout (no subdir to prune); prompt line counts at the lower end of 400-1200 range (415-502).
+
+### Phase 4: `stores setup` quickstart
+- **Status:** AWAITING_REVIEW
+- **Started:** 2026-04-27
+- **Completed:** 2026-04-27
+- **Commits:** 718f5e3
+- **Files Created:** src/cli/setup.rs
+- **Files Modified:** src/cli/mod.rs, src/cli/dynamic.rs, src/main.rs, src/paths.rs (promoted CWD_LOCK to pub(crate) test_cwd_lock)
+- **Tests:** cargo test cli::setup 2/2 PASS; cargo test 326/326 PASS; cargo build PASS
+- **ACs claimed:** 4.1 ✓ 4.2 ✓ 4.3 ✓ 4.4 ✓ 4.5 ✓ 4.6 ✓
+- **Executor notes for code-reviewer:**
+  - Idempotent store re-install: install_bundled errors with "already installed" message; composer catches that substring and continues (treats it as success). No other error patterns from that function are suppressed.
+  - Skills/agents install_all already passes `silent_if_same=true` — same-content files are silently skipped; different-content bails with error (propagated as AC4.6 abort).
+  - Test isolation: both tests hold the shared `paths::test_cwd_lock()` mutex (process-wide) + call `set_current_dir` + restore CWD+HOME. This serialises against all other CWD-mutating tests in the binary (paths::tests uses the same lock). `unwrap_or_else(|e| e.into_inner())` on poison avoids cascading failures from prior panics.
+  - AC4.3 (--global) is wired through all three sub-layers (skills, agents); init always uses local .stores/ regardless.
+  - AC4.4 (partial recovery) falls out naturally from idempotency of each layer — no special composer logic needed.
 
 ### Phase 2: Runner abstraction
 - **Status:** AWAITING_REVIEW
