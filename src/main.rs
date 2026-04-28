@@ -98,6 +98,31 @@ fn main() -> Result<()> {
             };
             skills_run(cmd)?;
         }
+        Some(("agents", sub)) => {
+            use cli::agents::{AgentsCmd, run as agents_run};
+            let cmd = match sub.subcommand() {
+                Some(("list", _)) => AgentsCmd::List,
+                Some(("install", isub)) => AgentsCmd::Install {
+                    name: isub.get_one::<String>("name").cloned(),
+                    all: *isub.get_one::<bool>("all").unwrap_or(&false),
+                    global: *isub.get_one::<bool>("global").unwrap_or(&false),
+                },
+                Some(("uninstall", usub)) => AgentsCmd::Uninstall {
+                    name: usub.get_one::<String>("name").unwrap().clone(),
+                    global: *usub.get_one::<bool>("global").unwrap_or(&false),
+                },
+                _ => {
+                    // Print agents help
+                    let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
+                    if let Some(agents_cmd) = cmd2.find_subcommand_mut("agents") {
+                        agents_cmd.print_help()?;
+                        println!();
+                    }
+                    return Ok(());
+                }
+            };
+            agents_run(cmd)?;
+        }
         Some((store_name, _)) => {
             // Must be a store subcommand — dispatch
             // Check store is known

@@ -121,6 +121,44 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .help("Remove from ~/.claude/skills/ instead of ./.claude/skills/"),
                         ),
                 ),
+        )
+        // Agents subcommand (parallel to skills; installs flat <name>.md files to .claude/agents/)
+        .subcommand(
+            Command::new("agents")
+                .about("Manage bundled workflow agent system prompts")
+                .subcommand(Command::new("list").about("List available bundled agents"))
+                .subcommand(
+                    Command::new("install")
+                        .about("Install a bundled agent into .claude/agents/")
+                        .arg(Arg::new("name").help("Agent name").required(false))
+                        .arg(
+                            Arg::new("all")
+                                .long("all")
+                                .action(ArgAction::SetTrue)
+                                .help("Install all bundled agents"),
+                        )
+                        .arg(
+                            Arg::new("global")
+                                .long("global")
+                                .action(ArgAction::SetTrue)
+                                .help("Install to ~/.claude/agents/ instead of ./.claude/agents/"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("uninstall")
+                        .about("Remove an installed bundled agent")
+                        .arg(
+                            Arg::new("name")
+                                .help("Agent name")
+                                .required(true),
+                        )
+                        .arg(
+                            Arg::new("global")
+                                .long("global")
+                                .action(ArgAction::SetTrue)
+                                .help("Remove from ~/.claude/agents/ instead of ./.claude/agents/"),
+                        ),
+                ),
         );
 
     // Add one subcommand per installed store
