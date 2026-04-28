@@ -189,7 +189,7 @@ fn build_store_command(schema: &Schema) -> Command {
     // Workflow verb names that are registered separately above — must not be duplicated
     // as lifecycle transition subcommands even if the schema declares them as transition verbs.
     const WORKFLOW_VERBS: &[&str] = &[
-        "next-action", "brief", "render",
+        "next-action", "brief", "render", "drive",
         "submit-plan", "submit-plan-review", "submit-execute", "submit-review", "resume",
     ];
 
@@ -207,6 +207,7 @@ fn build_store_command(schema: &Schema) -> Command {
             .subcommand(build_next_action_cmd())
             .subcommand(build_brief_cmd())
             .subcommand(build_render_cmd())
+            .subcommand(build_drive_cmd())
             .subcommand(build_submit_plan_cmd())
             .subcommand(build_submit_plan_review_cmd())
             .subcommand(build_submit_execute_cmd())
@@ -429,6 +430,61 @@ fn build_resume_cmd() -> Command {
                 .help("Optional reason for resuming")
                 .required(false),
         )
+}
+
+/// Build the `drive` command.
+///
+/// Drives a workflow task through the state machine to a terminal state using a
+/// runner backend.  `--auto` selects the next non-terminal task by `created_at ASC`
+/// (`WHERE status NOT IN ('complete', 'blocked') AND (claimed_by IS NULL OR
+/// claimed_at < now - lock_window) ORDER BY created_at ASC LIMIT 1`).
+fn build_drive_cmd() -> Command {
+    let cmd = Command::new("drive")
+        .about(
+            "Drive a workflow task to a terminal state via a runner \
+             (next-action → brief → spawn → submit-* → render loop)",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Task display ID to drive (mutually exclusive with --auto)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("auto")
+                .long("auto")
+                .action(ArgAction::SetTrue)
+                .help(
+                    "Auto-select the next non-complete task by created_at ASC \
+                     (skips live-claimed rows within the 5-minute lock window)",
+                )
+                .required(false),
+        )
+        .arg(
+            Arg::new("max-iters")
+                .long("max-iters")
+                .help("Maximum loop iterations before aborting (default: 50)")
+                .value_parser(clap::value_parser!(usize))
+                .required(false),
+        )
+        .arg(
+            Arg::new("mock")
+                .long("mock")
+                .help("Path to a JSON fixture file for the mock runner (for testing)")
+                .hide(true) // AC3.3: always built, hidden from --help
+                .required(false),
+        );
+
+    // --claude-code only available when the feature is compiled in (AC3.3).
+    #[cfg(feature = "runner-claude-code")]
+    let cmd = cmd.arg(
+        Arg::new("claude-code")
+            .long("claude-code")
+            .action(ArgAction::SetTrue)
+            .help("Use the claude-code runner (requires runner-claude-code feature)")
+            .required(false),
+    );
+
+    cmd
 }
 
 /// Build a transition verb subcommand: positional display_id + all leaf args.

@@ -117,6 +117,23 @@ pub fn dispatch(
                         .unwrap_or("");
                     handlers::submit::run_resume(schema, &conn, display_id, invoker)?;
                 }
+                Some(("drive", sub)) => {
+                    let display_id = sub.get_one::<String>("display_id").cloned();
+                    let auto = sub.get_flag("auto");
+                    let max_iters = sub.get_one::<usize>("max-iters").copied().unwrap_or(50);
+                    let mock_fixture = sub.get_one::<String>("mock").map(std::path::PathBuf::from);
+                    #[cfg(feature = "runner-claude-code")]
+                    let claude_code = sub.get_flag("claude-code");
+                    let args = handlers::drive::DriveArgs {
+                        display_id,
+                        auto,
+                        mock_fixture,
+                        #[cfg(feature = "runner-claude-code")]
+                        claude_code,
+                        max_iters,
+                    };
+                    handlers::drive::run_drive(schema, args)?;
+                }
                 Some((verb, sub)) => {
                     // Check if this is a declared lifecycle transition verb
                     if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {
