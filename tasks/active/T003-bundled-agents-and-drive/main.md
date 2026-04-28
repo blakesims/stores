@@ -1,9 +1,9 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** READY
+- **Status:** EXECUTING_PHASE_1
 - **Created:** 2026-04-28
-- **Last Updated:** 2026-04-27
+- **Last Updated:** 2026-04-28
 - **Blocked Reason:** —
 
 ## Task
