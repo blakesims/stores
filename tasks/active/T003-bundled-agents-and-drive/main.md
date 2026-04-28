@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_6
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -528,6 +528,17 @@ _Code-reviewer agent fills this section per phase._
 - **Minor findings (non-blocking):** (m1) skills/agents layers print no per-item idempotency message on re-run because `install_all` passes `silent_if_same: true` (`src/cli/skills.rs:135-140`, `src/cli/agents.rs:148-153`); init and stores layers comply, skills/agents are silent. Spec-cosmetic, not correctness. (m2) `with_isolated_env` (`src/cli/setup.rs:94-123`) is not panic-safe — CWD/HOME restoration is sequential after the closure body, so an `assert!` panic skips it; the shared `test_cwd_lock` is poison-recovered so the suite won't deadlock but state can leak. Use a `Drop` guard. (m3) Substring match `"already installed"` (setup.rs:37) is brittle; a typed `InstallOutcome::AlreadyInstalled` would be more robust — punch-list, not a defect.
 
 > Details: code-review-phase-4.md
+
+### Phase 5: `stores tasks status --follow`
+- **Gate:** PASS
+- **Issues Found:** 0c/0M/4m
+- **Revision Count:** 0/3
+- **Verified:** All 6 ACs (5.1–5.6). `cargo test handlers::status` 12/12; full suite 338/338 (was 326 → +12 new); two consecutive runs no flakes; `cargo build` clean. Live e2e in `/tmp/p5-e2e`: single-frame exits 0; `--follow` on terminal task exits 0; multi-task indented frame matches spec; `kill -INT $PID` → exit 130 with last frame retained; `--max-iters 3 --interval 0.1` runs deterministic. Frame format byte-matches spec: `[HH:MM:SS] T001 status=executing phase=2/3 cycle=1 next=executor blocked=false`. `--max-iters` confirmed hidden in `--help`. `run_follow_loop(&Path, StatusArgs)` is the test injection seam — used by all three loop tests.
+- **libc + signal handling verdict:** ACCEPT. libc was already transitive (`getrandom` + `tempfile`); promoting to direct dep is honest. Signal handler is sound — `static AtomicBool` const-init, handler does only `store(true, SeqCst)` (async-signal-safe; no allocation, no locks). 50ms chunked sleep keeps Ctrl-C latency bounded. Portability adequate for advertised Linux+macOS surface (no `#[cfg(unix)]` guard recorded as m1-equivalent for v0.4).
+- **Public-API delta:** 10 new `pub` items, all in `handlers::status` (binary-internal module reachable only from `dispatch.rs` and the test harness). No leakage into installed CLI surface.
+- **Minor findings (non-blocking):** (m1) plan with empty `phases:[]` array renders `phase=N/0` instead of `N/-` — `Some(0)` should fall back to None in the formatter (live-verified edge case); (m2) no `should_print` test for `blocked_reason` change — coverage gap in an otherwise-complete matrix; (m3) two `clippy::map_identity` instances `prev_keys.get(id).map(|k| k)` at status.rs:331, 344; (m4) sleep loop subtracts `chunk` instead of `sleep_for` from remaining — equivalent under saturating-sub but reads sloppily.
+
+> Details: code-review-phase-5.md
 
 ---
 
