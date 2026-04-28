@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** PLANNING
+- **Status:** PLAN_REVIEW
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -108,16 +108,18 @@ The planner will turn this into ordered phases with acceptance criteria.
 
 ### Objective
 
-Close the L1/L2 architectural inversion in stores: the framework owns the workflow engine but currently borrows the agent prompts from the external `task-workflow` Claude Code plugin. T003 bundles the four workflow agents into the binary as plain markdown, ships a `Runner` trait with a feature-gated `claude_code` impl, builds a `stores tasks drive` orchestrator that composes existing CLI verbs into the `next-action → brief → spawn → submit-* → render` loop, and adds two human-boundary affordances (`status --follow` polled telemetry, `gate <id> guide` curated context bundle). After T003 ships, a fresh repo can run `stores setup && stores tasks drive --auto --claude-code` with zero external plugin dependencies.
+Close the L1/L2 architectural inversion in stores: the framework owns the workflow engine but currently borrows the agent prompts from the external `task-workflow` Claude Code plugin. T003 bundles the five workflow agents into the binary as plain markdown (4 workflow + 1 guide), ships a `Runner` trait with a feature-gated `claude_code` impl, builds a `stores tasks drive` orchestrator that composes existing CLI verbs into the `next-action → brief → spawn → submit-* → render` loop, and adds two human-boundary affordances (`status --follow` polled telemetry, `gate <id> guide` curated context bundle). After T003 ships, a fresh repo can run `stores setup && stores tasks drive --auto --claude-code` with zero external plugin dependencies.
+
+DONE_WHEN-tracing language: `--auto` selects the **next non-complete task by `created_at ASC`** (priority dropped from v0.3 — see Decision Matrix). The DONE_WHEN clause "highest-priority non-complete task" is satisfied in v0.3 by FIFO selection; queueing/fairness/priority lands in v0.4 if needed.
 
 ### Scope
 
 - **In Scope:**
-  - 4 bundled agent prompts (`agents/{planner,plan-reviewer,executor,code-reviewer}.md`) authored to be CLI-native — they receive a brief, follow it, and submit via `stores tasks submit-*`. Lift CLI-protocol language out of the brief templates and into the agent prompts; briefs become lighter and store-specific.
+  - 5 bundled agent prompts (`agents/{planner,plan-reviewer,executor,code-reviewer,guide}.md`) authored to be CLI-native — they receive a brief, follow it, and submit via `stores tasks submit-*` (or, for `guide`, via `stores gate answer`). Lift CLI-protocol language out of the brief templates and into the agent prompts; briefs become lighter and store-specific.
   - `BUNDLED_AGENTS` registry + `cli/agents.rs` (clone of `cli/skills.rs`).
   - `runner` module: `Runner` trait + always-on `runner/mock.rs` + feature-gated `runner/claude_code.rs` (Cargo feature `runner-claude-code`).
   - `stores tasks drive [<id>] [--auto] [--<runner>] [--max-iters N]` handler — composes existing handlers; spawns the runner; loops until terminal state.
-  - Auto-task-selection policy (`--auto`): highest priority, then oldest non-complete in the current scope.
+  - Auto-task-selection policy (`--auto`): oldest non-complete task by `created_at ASC`, skipping tasks with a live claim lock.
   - `stores setup [--global]` convenience — composes `init` + bundled-store installs + `skills install --all` + `agents install --all`. Idempotent. Local-only by default.
   - `stores tasks status --follow [<id>]` — polled text frames at 1-2 s; exits on terminal state or Ctrl-C.
   - `stores gate <id> guide [--<runner>]` — full guide handler: builds context bundle (gate row + linked task rows + recent reviews), spawns guide agent that has read access via `stores ... show` and write access via `stores gate answer`.
@@ -128,6 +130,7 @@ Close the L1/L2 architectural inversion in stores: the framework owns the workfl
   - README updates: `stores setup` quickstart, `drive`/`status`/`guide` usage, runner feature flags.
 
 - **Out of Scope (deferred to v0.4 unless noted):**
+  - `priority` column on the `tasks` schema (FIFO `created_at ASC` only in v0.3).
   - `runs` event-log store; streaming inside-agent telemetry.
   - Phase-reviewer / merge-reviewer agents + lifecycle states.
   - `tasks:wrap` skill.
@@ -141,7 +144,7 @@ Close the L1/L2 architectural inversion in stores: the framework owns the workfl
 
 | Phase | Description | Estimated Complexity |
 |-------|-------------|---------------------|
-| 1 | Bundled agents registry + `agents` CLI subcommand + author 4 agent prompts | Medium |
+| 1 | Bundled agents registry + `agents` CLI subcommand + author 5 agent prompts (incl. guide) | Medium |
 | 2 | Runner trait + mock impl + feature-gated `claude_code` impl | Medium |
 | 3 | `stores tasks drive` orchestrator handler (incl. `--auto` selection) | High |
 | 4 | `stores setup` convenience composer | Low |
@@ -153,28 +156,34 @@ Close the L1/L2 architectural inversion in stores: the framework owns the workfl
 
 #### Phase 1: Bundled agents registry + author agent prompts
 
-- **Objective:** Ship the 4 agent system prompts as plain markdown files embedded in the binary, with an `agents` CLI subcommand that mirrors `skills` line-for-line. Establishes the bundling story end-to-end and proves the install/uninstall surface before any orchestrator work.
+- **Objective:** Ship 5 agent system prompts as plain markdown files embedded in the binary (4 workflow agents + the `guide` agent — handlers for `guide` land in Phase 6, but the prompt is authored here alongside its peers), with an `agents` CLI subcommand that mirrors `skills` line-for-line. Establishes the bundling story end-to-end and proves the install/uninstall surface before any orchestrator work.
 - **Dependencies:** None.
 - **Files to create:**
   - `agents/planner.md`
   - `agents/plan-reviewer.md`
   - `agents/executor.md`
   - `agents/code-reviewer.md`
+  - `agents/guide.md` (prompt body authored here; guide *handler* arrives in Phase 6)
   - `src/cli/agents.rs` (clone of `src/cli/skills.rs`, with `AGENTS_DIR_GLOBAL = ~/.claude/agents/`, `AGENTS_DIR_LOCAL = ./.claude/agents/`)
+  - `tests/fixtures/agent_outputs/planner.json`, `tests/fixtures/agent_outputs/plan-reviewer.json`, `tests/fixtures/agent_outputs/executor.json`, `tests/fixtures/agent_outputs/code-reviewer.json`, `tests/fixtures/agent_outputs/guide.json` — canonical role-keyed JSON envelope examples that Phase 3's parser asserts against.
 - **Files to modify:**
   - `src/cli/mod.rs` — add `pub mod agents;`
   - `src/cli/dynamic.rs` — register `agents` subcommand parallel to `skills` in `build_root`
   - `src/main.rs` — dispatch `agents` matches to `cli::agents::run` (parallel to `skills`)
 - **Acceptance Criteria:**
-  - [ ] AC1.1: `stores agents list` prints exactly 4 entries (`planner`, `plan-reviewer`, `executor`, `code-reviewer`) with installed/uninstalled annotations matching the `skills list` format.
-  - [ ] AC1.2: `stores agents install --all` writes 4 files to `.claude/agents/<name>.md` and re-running is idempotent (same content → no error).
+  - [ ] AC1.1: `stores agents list` prints exactly 5 entries (`planner`, `plan-reviewer`, `executor`, `code-reviewer`, `guide`) with installed/uninstalled annotations matching the `skills list` format.
+  - [ ] AC1.2: `stores agents install --all` writes 5 files to `.claude/agents/<name>.md` and re-running is idempotent (same content → no error).
   - [ ] AC1.3: `stores agents install <name>` writes that single file; `--global` writes to `~/.claude/agents/` instead.
   - [ ] AC1.4: `stores agents uninstall <name>` removes the file; uninstalling non-existent is non-fatal.
   - [ ] AC1.5: Conflict detection — if a file exists at the destination with different content, the installer errors with the same message format used by skills (`exists with different content; remove or use --force`).
-  - [ ] AC1.6: Each agent prompt YAML frontmatter declares `name`, `description`, `effort` (mirroring task-workflow plugin shape) so Claude Code's Task tool can register them.
-  - [ ] AC1.7: Each agent prompt body specifies the CLI-native protocol: (a) read your brief from stdin/argv, (b) do the work, (c) submit via the named `stores tasks submit-*` verb, (d) print a structured one-line success/failure summary. The prompt does NOT rely on a Task tool, plugin, or harness-specific construct.
-  - [ ] AC1.8: `cargo build` succeeds with the new `include_str!` paths; `cargo test cli::agents` covers fresh-install / idempotent-reinstall / conflict / uninstall (mirroring the existing `cli::skills::tests`).
-  - [ ] AC1.9: `cli/agents.rs` is a near-mechanical clone of `cli/skills.rs`. Differences limited to: registry contents, target directory (`agents/` vs `skills/`), file extension (`.md` direct, no `SKILL.md` subdirectory).
+  - [ ] AC1.6: Each agent prompt's YAML frontmatter declares `name` (the role), `description` (one-line trigger description), and optionally a `tools` whitelist of tools the agent may call. The `effort` field is NOT used (Claude Code's first-party subagent spec does not define it). The frontmatter exists so the parallel `/tasks:start` Task-tool path can register agents in Claude Code's subagent registry; the `claude_code` runner spawn-path (Phase 3) does NOT depend on registry registration — see Decision Matrix row "Runner spawn path".
+  - [ ] AC1.7: Each agent prompt body specifies the CLI-native protocol: (a) read your brief from stdin/argv, (b) do the work, (c) submit via the named `stores tasks submit-*` verb (or `stores gate answer` for the guide), (d) emit a **single JSON object as the last line of stdout**, schema-keyed by role (`{"role": "planner", "phases": [...], "decision_matrix": [...]}`, `{"role": "plan-reviewer", "gate": "READY", "summary": "...", "open_questions": [...]}`, `{"role": "executor", "commit": "...", "files_changed": [...], "summary": "..."}`, `{"role": "code-reviewer", "gate": "PASS", "counts": {"critical": 0, "major": 0, "minor": 0}, "summary": "...", "details": "..."}`, `{"role": "guide", "action": "answered" | "blocked" | "noop", "summary": "..."}`). The prompt does NOT rely on a Task tool, plugin, or harness-specific construct. Fixtures at `tests/fixtures/agent_outputs/<role>.json` are canonical references.
+  - [ ] AC1.7a: Each prompt explicitly names the schema verb(s) it submits to (e.g. planner → `stores tasks submit-plan`; plan-reviewer → `stores tasks submit-plan-review`; executor → `stores tasks submit-execute`; code-reviewer → `stores tasks submit-review`; guide → `stores gate answer`) and shows the JSON-envelope shape it must emit on its final stdout line.
+  - [ ] AC1.7b: Each prompt has a section addressing failure modes — what to emit when there are open questions, when the agent is blocked, and when context is insufficient. The guide prompt additionally documents authorized vs forbidden CLI verbs.
+  - [ ] AC1.7c: The planner prompt mirrors the Stage-1-7 structure of the existing `task-workflow` plugin's planner (objective → scope → phases → phase details → decision matrix → plan-notes → review handoff) without copying verbatim — read for shape, do not duplicate (license + drift hygiene).
+  - [ ] AC1.7d: Per-prompt length budget is **400-1200 lines**. Prompts shorter than 400 lines are presumed under-specified; longer than 1200 invites bloat. Reviewer enforces this floor/ceiling at code review.
+  - [ ] AC1.8: `cargo build` succeeds with the new `include_str!` paths; `cargo test cli::agents` covers fresh-install / idempotent-reinstall / conflict / uninstall (mirroring the existing `cli::skills::tests`). An `all_agents_bundled` test asserts `BUNDLED_AGENTS.len() == 5` (parallel to `all_skills_bundled`).
+  - [ ] AC1.9: `cli/agents.rs` is a near-mechanical clone of `cli/skills.rs`. Differences limited to: registry contents, target directory (`agents/` vs `skills/`), file extension (`.md` direct, no `SKILL.md` subdirectory). Doc-comment on the file notes that the asymmetry with skills' nested `<name>/SKILL.md` is intentional and platform-driven (Claude Code's subagent loader scans flat).
 
 #### Phase 2: Runner abstraction
 
@@ -211,35 +220,39 @@ Close the L1/L2 architectural inversion in stores: the framework owns the workfl
 #### Phase 3: `stores tasks drive` orchestrator
 
 - **Objective:** Add a new workflow handler that composes existing `next-action`, `brief`, `submit-*`, and `render` handlers into the loop, picks a runner via flag, and drives a task to a terminal state. This is the centerpiece phase.
-- **Dependencies:** Phase 1 (agent prompts), Phase 2 (runner trait).
+
+  Tests in this phase install the bundled agents via `stores agents install --all` directly; the user-facing `stores setup` convenience composer arrives in Phase 4.
+
+  The `compute_*` functions on `brief.rs`, `submit.rs`, and `render.rs` are already `pub(crate)` — `drive` lives in the same crate, so direct in-process function calls work without any visibility changes. **No `pub` widening is required.**
+- **Dependencies:** Phase 1 (agent prompts + `BUNDLED_AGENTS` registry + JSON envelope fixtures), Phase 2 (runner trait).
 - **Files to create:**
-  - `src/handlers/drive.rs` — main loop + `--auto` selection + safety rails (max-iters, cycle detection)
+  - `src/handlers/drive.rs` — main loop + `--auto` selection + safety rails (max-iters, cycle detection) + **role-keyed JSON-envelope parser** that decodes the runner's final-stdout-line into a typed enum and dispatches to the correct `compute_submit_*`.
+  - `tests/handlers/drive_runner_error.rs` (or equivalent under `src/handlers/drive.rs` `#[cfg(test)] mod tests`) — fixture asserting that when the mock runner returns a non-zero exit mid-loop, the task row is byte-identical to its pre-iteration state (no partial `submit-*`).
 - **Files to modify:**
   - `src/handlers/mod.rs` — register module
   - `src/cli/dynamic.rs` — register `drive` subcommand on workflow-shaped stores (parallel to `next-action`/`brief`)
   - `src/cli/dispatch.rs` — route `drive` to handler
-  - `src/handlers/brief.rs` — expose `compute(...)` publicly so `drive` can call it without re-shelling
-  - `src/handlers/render.rs`, `src/handlers/submit.rs` — same expose-`compute` treatment if not already public
 - **Drive loop (pseudocode):**
-  1. Resolve target id: explicit positional arg, else `--auto` selects by `(priority DESC, created_at ASC)` filtered to non-terminal (`status NOT IN ('complete','blocked')`); on tie pick first; bail with explicit error when no candidates.
+  1. Resolve target id: explicit positional arg, else `--auto` selects by `created_at ASC` filtered to non-terminal (`status NOT IN ('complete','blocked')`) **and skipping rows where `claimed_by IS NOT NULL` AND `claimed_at` is within the lock-expiry window**; pick first; bail with explicit error when no candidates remain after the live-claim skip.
   2. Loop:
      a. Compute `next_action`. If terminal (`complete`/`blocked`), exit with appropriate exit code.
      b. Compute `brief` for the next agent.
      c. Read agent system prompt from the bundled `agents/<role>.md` (NOT from disk — `include_str!` via `BUNDLED_AGENTS`).
      d. `runner.spawn(role, system_prompt, brief)`.
-     e. Parse runner output → invoke the appropriate `submit-*` handler in-process.
+     e. Parse runner output: take the **last non-empty line of stdout**, attempt to parse it as a role-keyed JSON object, and route to the matching `compute_submit_*` (planner → `compute_submit_plan`, plan-reviewer → `compute_submit_plan_review`, executor → `compute_submit_execute`, code-reviewer → `compute_submit_review`). On parse failure, surface the runner stdout/stderr and exit non-zero **without** invoking any `submit-*`.
      f. Render. Emit one-line stderr progress (`[T001] phase 2 cycle 1: executor → submitted`).
      g. Increment iter counter; bail if `--max-iters` hit (default 50).
 - **Acceptance Criteria:**
-  - [ ] AC3.1: `stores tasks drive <id> --mock` (mock runner with a pre-loaded queue) drives a fixture task from `planning` to `complete` in a single invocation; final `next-action` reports `status=complete`.
-  - [ ] AC3.2: `stores tasks drive --auto --mock` selects the highest-priority non-complete task; with priorities tied, picks the oldest by `created_at`; with no candidates, errors with a clear message ("no non-complete tasks available").
-  - [ ] AC3.3: `--mock` is a hidden test-only flag (or always-available; document the choice). `--claude-code` requires the cargo feature; when missing, prints a remediation message ("rebuild with `cargo install --features runner-claude-code`").
+  - [ ] AC3.1: `stores tasks drive <id> --mock <fixture>` (mock runner with a pre-loaded queue) drives a fixture task from `planning` to `complete` in a single invocation; final `next-action` reports `status=complete`.
+  - [ ] AC3.2: `stores tasks drive --auto --mock <fixture>` selects the **next non-complete task by `created_at ASC`** (`WHERE status NOT IN ('complete', 'blocked') AND (claimed_by IS NULL OR claimed_at < now - lock_window) ORDER BY created_at ASC LIMIT 1`); with no candidates, errors with a clear message ("no non-complete tasks available"). The selection criterion is documented in `--help`.
+  - [ ] AC3.3: `--mock` is **always built**, **hidden from `--help`** (clap `.hide(true)`), and accepts a path to a queued-response fixture file. `--claude-code` requires the `runner-claude-code` cargo feature; when missing, prints a remediation message ("rebuild with `cargo install --features runner-claude-code`").
   - [ ] AC3.4: Progress lines go to stderr (one per iteration); no progress noise on stdout. Stdout reserved for any structured output (`--json` aware).
   - [ ] AC3.5: `--max-iters N` (default 50) bounds the loop; on hit, exits non-zero with a clear "max iterations exceeded" message and current state summary.
-  - [ ] AC3.6: When the runner errors mid-loop, drive surfaces the runner's stderr verbatim and exits non-zero — does NOT corrupt task state (no `submit-*` is called for that iteration).
-  - [ ] AC3.7: `cargo test handlers::drive` covers: happy path through 1 phase (mock); auto-selection ordering; max-iters bound; runner-error abort; terminal-state early exit.
-  - [ ] AC3.8: Drive composes existing handlers via in-process function calls — does NOT shell out to itself.
+  - [ ] AC3.6: When the runner errors mid-loop (non-zero exit, panic, or unparseable JSON envelope), drive surfaces the runner's stderr verbatim and exits non-zero — does NOT corrupt task state (no `submit-*` is called for that iteration). The fixture test at `tests/handlers/drive_runner_error.rs` (or equivalent path noted in Files-to-create) asserts the task row is unchanged across the failed iteration.
+  - [ ] AC3.7: `cargo test handlers::drive` covers: happy path through 1 phase (mock); auto-selection ordering by `created_at ASC`; live-claim skip; max-iters bound; runner-error abort (mid-loop); terminal-state early exit.
+  - [ ] AC3.8: Drive composes existing handlers via in-process function calls — does NOT shell out to itself. Calls go through the existing `pub(crate) compute_*` functions on `brief.rs`, `submit.rs`, and `render.rs`; no public-API widening is performed.
   - [ ] AC3.9: When the next-action result is a `blocked` status, drive exits 0 (not an error — block surfaced cleanly) and prints a one-line "blocked: <reason>; run `stores gate <id> guide` for help" hint.
+  - [ ] AC3.10: **Agent output protocol**: each agent's final message is a single JSON object on the last line of stdout, schema-keyed by role. Drive parses that JSON and calls the matching `compute_submit_*`. Asserted against the role fixtures at `tests/fixtures/agent_outputs/<role>.json` shipped in Phase 1. Agent commentary above the final line is tolerated and discarded.
 
 #### Phase 4: `stores setup` quickstart
 
@@ -252,7 +265,7 @@ Close the L1/L2 architectural inversion in stores: the framework owns the workfl
   - `src/cli/dynamic.rs` — register `setup` subcommand
   - `src/main.rs` — dispatch
 - **Acceptance Criteria:**
-  - [ ] AC4.1: `stores setup` in a fresh directory creates `.stores/db.sqlite`, `.stores/manifest.yaml`, installs all 3 bundled stores (`observations`, `gate`, `tasks`), installs all 5 bundled skills under `./.claude/skills/`, installs all 4 bundled agents under `./.claude/agents/`.
+  - [ ] AC4.1: `stores setup` in a fresh directory creates `.stores/db.sqlite`, `.stores/manifest.yaml`, installs all 3 bundled stores (`observations`, `gate`, `tasks`), installs all 5 bundled skills under `./.claude/skills/`, installs all 5 bundled agents (`planner`, `plan-reviewer`, `executor`, `code-reviewer`, `guide`) under `./.claude/agents/`.
   - [ ] AC4.2: Re-running `stores setup` is idempotent — exits 0, prints idempotency notes per layer ("Already initialized" / "Already installed: X").
   - [ ] AC4.3: `stores setup --global` writes skills+agents to `~/.claude/` instead of local; the store DB still goes to `./.stores/`.
   - [ ] AC4.4: Partial-state recovery: if `.stores/` exists but agents are missing, re-running `setup` only adds the missing layer (does not error or wipe).
@@ -262,6 +275,8 @@ Close the L1/L2 architectural inversion in stores: the framework owns the workfl
 #### Phase 5: `stores tasks status --follow`
 
 - **Objective:** Polled text-frame observability. No TUI.
+
+  **`status` vs `show` distinction (intentional noun choice):** `stores tasks show <id>` prints the **full task row** (every column, JSON-shaped — the existing v0.2 verb). `stores tasks status <id>` prints a **workflow telemetry frame** — a compact one-line view of `current_phase / current_cycle / status / next-action / blocked` aimed at humans watching live. They are not redundant: `show` is a debug dump; `status --follow` is a live tail.
 - **Dependencies:** None hard, but conceptually pairs with `drive` from phase 3.
 - **Files to create:**
   - `src/handlers/status.rs` — single handler with a polling loop
@@ -282,13 +297,11 @@ Close the L1/L2 architectural inversion in stores: the framework owns the workfl
 
 #### Phase 6: Guide handlers — `gate <id> guide` (full) + `tasks <id> guide` (stub)
 
-- **Objective:** Human-boundary affordance. When the user faces a blocked task or gate, `guide` curates the relevant rows + spawns a guide agent that can read/write back via the same CLI verbs.
-- **Dependencies:** Phase 1 (need a guide agent prompt) and Phase 2 (runner trait).
+- **Objective:** Human-boundary affordance. When the user faces a blocked task or gate, `guide` curates the relevant rows + spawns the guide agent (whose prompt was authored in Phase 1) and routes its JSON-envelope output back through the CLI. This phase is purely handler/dispatch work — no new prompt authoring.
+- **Dependencies:** Phase 1 (`guide` agent prompt is already authored and registered in `BUNDLED_AGENTS`) and Phase 2 (runner trait).
 - **Files to create:**
-  - `agents/guide.md` — guide agent system prompt (read-mostly, can call `stores ... show`, `stores gate answer`, `stores tasks show`).
-  - `src/handlers/guide.rs` — context-bundle builder + runner spawn
+  - `src/handlers/guide.rs` — context-bundle builder + runner spawn for both `gate <id> guide` (full) and `tasks <id> guide` (stub)
 - **Files to modify:**
-  - `src/cli/agents.rs` — add `guide` to `BUNDLED_AGENTS` (so it ships in `setup`)
   - `src/cli/dynamic.rs` — register `guide` subcommand on `gate` store (full) and `tasks` store (stub)
   - `src/cli/dispatch.rs` — route both
 - **Context bundle (gate full form):**
@@ -302,32 +315,58 @@ Close the L1/L2 architectural inversion in stores: the framework owns the workfl
   - The last cycle review (if any)
   - No specialized tooling beyond "ask the user clarifying questions and document them in `stores gate add` if a decision is needed"
 - **Acceptance Criteria:**
-  - [ ] AC6.1: `stores gate <id> guide --mock` builds a context bundle (verifiable via mock runner capturing the prompt) that includes the gate row, the linked task row (if any), and the list of authorized CLI verbs.
-  - [ ] AC6.2: `stores tasks <id> guide --mock` builds a context bundle that includes the task row, last `next-action`, and last review.
+  - [ ] AC6.1: `stores gate <id> guide --mock <fixture>` builds a context bundle (verifiable via mock runner capturing the prompt) that includes the gate row, the linked task row (if any), and the list of authorized CLI verbs.
+  - [ ] AC6.2: `stores tasks <id> guide --mock <fixture>` builds a context bundle that includes the task row, last `next-action`, and last review.
   - [ ] AC6.3: `cargo test handlers::guide` covers both bundle shapes with fixture rows.
-  - [ ] AC6.4: The guide agent prompt explicitly forbids editing main.md directly and instructs writes via `stores gate answer` / `stores tasks <verb>`.
-  - [ ] AC6.5: `gate guide` exits 0 when the gate is `answered` (target reached); exits 1 if the runner errors; exits 2 if the user escapes (signal — best-effort capture).
+  - [ ] AC6.4: The guide agent prompt (authored in Phase 1) explicitly forbids editing main.md directly and instructs writes via `stores gate answer` / `stores tasks <verb>`. Phase 6 verifies via a parser-level test that the prompt body still contains the authorized-verbs list (`stores gate show`, `stores gate answer`, `stores tasks show`, `stores tasks list`, `stores tasks next-action`) and the explicit forbid-everything-else clause.
+  - [ ] AC6.5: `gate guide` exits 0 if the gate row's `status` transitions from `pending` to `answered` during the session; otherwise exits 1 (covers runner crashes, user escape, and "agent ran but didn't answer" uniformly — no exit-code-2 / signal-capture distinction).
   - [ ] AC6.6: `tasks guide` is documented (in the agent prompt + README) as v0.3 stub-quality; expected expansion in v0.4.
 
 #### Phase 7: Skill rewrite + version bump + README + drive e2e
 
-- **Objective:** Final wire-up. Tighten the user-facing surface, prove the DONE_WHEN with a mock-runner-driven e2e, and ship 0.3.0.
+- **Objective:** Final wire-up. Tighten the user-facing surface, prove the DONE_WHEN with a mock-runner-driven e2e (executor-side automation), and ship 0.3.0. A real-`claude` smoke is captured separately as a **manual soft gate** (see AC7.7 below) — it is recorded as evidence in the completion summary, not part of the executor's PASS/REVISE/FAIL cycle. The executor demonstrates DONE_WHEN coverage via the mock-runner e2e (AC7.1, AC7.1b) plus inspected agent prompts (Phase 1 ACs).
 - **Dependencies:** Phases 1-6.
 - **Files to create:**
-  - `tests/drive_e2e.sh` — mock-runner-driven full-loop test (mirrors `tests/tasks_e2e.sh` shape, but uses `stores tasks drive --mock` instead of manual `submit-*` calls)
+  - `tests/drive_e2e.sh` — mock-runner-driven full-loop test (mirrors `tests/tasks_e2e.sh` shape, but uses `stores tasks drive --mock <fixture>` instead of manual `submit-*` calls)
+  - `tests/fixtures/drive_e2e/happy_2phase.jsonl` — queued mock-runner responses for the AC7.1 happy path (N=2 phases, zero REVISE)
+  - `tests/fixtures/drive_e2e/revise_once.jsonl` — queued responses for AC7.1b (one REVISE cycle on phase 2)
 - **Files to modify:**
   - `skills/tasks:start/SKILL.md` — rewrite as a one-line wrapper: instructs the harness to invoke `stores tasks drive --auto --claude-code` (preserves the `/tasks:start` invocation surface; body shrinks ~95%).
   - `Cargo.toml` — version `0.2.0` → `0.3.0`.
   - `README.md` — replace the "13-step demo walk" intro with a `stores setup` quickstart at the top; add new sections for `drive`, `status --follow`, `gate guide`, `tasks guide`, and the runner feature flag.
   - `src/cli/skills.rs` — bump `BUNDLED_SKILLS` re-export count assertion (`all_skills_bundled` test) if needed.
+
+- **Wrapper sketch (for AC7.3 — confirm 30-line budget realism):**
+  ```markdown
+  ---
+  name: tasks:start
+  description: Drive the next workflow task to completion via Claude Code.
+  ---
+
+  Invoke from the shell:
+
+      stores tasks drive --auto --claude-code
+
+  This selects the next non-complete task by `created_at ASC`, spawns the
+  appropriate agent for the current workflow state via `claude -p`, and loops
+  until the task reaches `complete` or `blocked`.
+
+  If `blocked`, run `stores gate <id> guide --claude-code` to invoke the
+  guide agent on the blocking gate.
+
+  See `stores tasks drive --help` for flags (`--max-iters`, `--mock`).
+  ```
+  That's ~18 lines including frontmatter — well under 30. Budget confirmed.
+
 - **Acceptance Criteria:**
-  - [ ] AC7.1: `tests/drive_e2e.sh` runs end-to-end against a fresh tempdir: `stores setup` → seed task row → `stores tasks drive --mock` (with a queued mock runner script) → final `stores tasks show` reports `status=complete`. All 16 step-equivalents from `tasks_e2e.sh` validated through this single drive call.
+  - [ ] AC7.1: `tests/drive_e2e.sh` (running against the **mock runner**) drives a fixture task with **N=2 phases and zero REVISE cycles** from `planning` to `complete` in a single `stores tasks drive` invocation. Final `stores tasks show` reports `status=complete`, `current_phase=2`, and both phases have one cycle each with PASS gates. The script seeds the task via `stores setup` + `stores tasks new`, runs `drive --mock <fixture>`, and asserts the final DB state.
+  - [ ] AC7.1b: A second `tests/drive_e2e.sh` scenario (or a sibling fixture) drives a task with **one REVISE cycle** from `planning` to `complete`; the revised phase ends with cycle count = 2 and the final review gate is PASS.
   - [ ] AC7.2: `Cargo.toml` version is `0.3.0`; `cargo build` produces a `stores --version` of `0.3.0`.
-  - [ ] AC7.3: New `tasks:start` body is ≤ 30 lines; runs the harness equivalent of `stores tasks drive --auto --claude-code` with no in-skill orchestration logic.
-  - [ ] AC7.4: README quickstart starts with `cargo install --path . && stores setup && stores tasks drive --auto --claude-code`. The 13-step legacy walk moves to a "Manual workflow walk-through" subsection.
+  - [ ] AC7.3: New `tasks:start` body is ≤ 30 lines; runs the harness equivalent of `stores tasks drive --auto --claude-code` with no in-skill orchestration logic. (Wrapper sketch above demonstrates feasibility.)
+  - [ ] AC7.4: README quickstart starts with `cargo install --path . --features runner-claude-code && stores setup && stores tasks drive --auto --claude-code` (the `--features` flag is part of the headline command — without it, the runtime emits a remediation message). The 13-step legacy walk moves to a "Manual workflow walk-through" subsection.
   - [ ] AC7.5: README documents the cargo feature flag (`--features runner-claude-code`) and lists the available runners (`mock`, `claude-code`).
   - [ ] AC7.6: `cargo test --all` passes; `cargo test --features runner-claude-code` also passes; `bash tests/tasks_e2e.sh` still passes (regression); `bash tests/drive_e2e.sh` passes.
-  - [ ] AC7.7: A final manual smoke (run-and-screenshot in the completion summary) confirms `stores setup && stores tasks drive --auto --claude-code` against a fresh test repo with a single seeded task drives to `complete` using a real `claude -p` runner. (This step is the DONE_WHEN proof; it gates the merge.)
+  - [ ] AC7.7: **Manual soft gate** (NOT a hard executor gate). A `stores setup && stores tasks drive --auto --claude-code` run against a fresh test repo with a single seeded task is captured (transcript or screenshot) in the completion summary using a real `claude -p` runner. This is recorded as **v0.3 acceptance evidence at the merge level**, separate from the executor's PASS/REVISE/FAIL cycle. The executor proves DONE_WHEN via AC7.1 + AC7.1b + inspected agent prompts; AC7.7 is the human-driven smoke that verifies the prompts work with a real model. If the smoke fails, the right response is a follow-up issue against the prompts, not a rollback of the executor's PASS.
   - [ ] AC7.8: Version bump commit message states `T003 COMPLETE: framework-bundled agents + drive orchestrator on β architecture`.
 
 ### Decision Matrix
@@ -341,29 +380,33 @@ Close the L1/L2 architectural inversion in stores: the framework owns the workfl
 | `tasks <id> guide` depth | (a) full; (b) stub; (c) defer to v0.4 | (b) | Locked. Stub establishes the surface; full form needs `runs` and is too speculative for v0.3. |
 | Quickstart name | (a) `stores setup`; (b) `stores quickstart`; (c) `stores bootstrap` | (a) | Locked. Matches industry idiom (`gh setup`, `npm setup`). |
 | `setup` default scope | (a) local; (b) global; (c) ask | (a) | Locked. Crossing `~/.claude/` boundary requires explicit `--global` opt-in. |
-| `--auto` task selection | (a) priority+oldest; (b) FIFO; (c) explicit queue | (a) | Locked. Simplest sensible policy; queues land in v0.4 if needed. |
-| Agent prompt format | (a) `agents/<name>.md` flat; (b) `agents/<name>/AGENT.md` mirror of skills | (a) | Claude Code's plugin convention is flat `.md` files in `agents/`; mirroring skills' subdirectory adds noise without payoff. |
+| `--auto` task selection | (a) priority+oldest; (b) FIFO by `created_at ASC`; (c) explicit queue | (b) | Locked. The `tasks` schema has no `priority` column in v0.3 — adding one would require a schema bump + migration story (out of scope). FIFO via `WHERE status NOT IN ('complete','blocked') ORDER BY created_at ASC LIMIT 1` is testable today. Priority/queueing/fairness lands in v0.4 if needed. |
+| Agent prompt format | (a) `agents/<name>.md` flat; (b) `agents/<name>/AGENT.md` mirror of skills | (a) | Claude Code's subagent loader scans flat `<base>/<name>.md` — nesting would prevent registry registration. Asymmetry with `cli/skills.rs` is intentional and platform-driven; `cli/agents.rs` doc-comment notes this. |
+| Agent prompt frontmatter | (a) `name` + `description` + optional `tools`; (b) `name` + `description` + `effort` (task-workflow plugin shape); (c) free-form | (a) | Locked. Claude Code's first-party subagent spec uses `name` / `description` / optional `tools` / optional `model`. There is no `effort` field. The frontmatter only matters for the parallel `/tasks:start` Task-tool path (subagent registry); the `claude_code` runner spawn-path bypasses the registry. |
+| Runner spawn path (`claude_code`) | (a) Task-tool / subagent-registry; (b) `claude -p` with prompt body via stdin or `--append-system-prompt`; (c) Claude SDK in-process | (b) | Locked for v0.3. The runner shells out to `claude -p`, feeding the bundled agent's prompt body directly (NOT relying on the agent being registered as a Claude Code subagent). The frontmatter exists for the orthogonal `/tasks:start` Task-tool path. (a) and (c) are deferred. |
+| Agent output protocol | (a) trailing JSON object on stdout last line; (b) JSON-only stdout (strict); (c) sentinel-delimited blocks (e.g. `<<<BEGIN>>>...<<<END>>>`) | (a) | Locked. Tolerant of agent commentary above the final line; trivially generatable by both real and mock runners; parse logic is "take the last non-empty line, attempt JSON.parse, route by `role` key." Fixtures at `tests/fixtures/agent_outputs/<role>.json` are canonical. |
 | `Runner` trait method | (a) `spawn(role, sys, brief) -> Result<Output>`; (b) async trait; (c) channel-based streaming | (a) | v0.3 deliberate minimalism; sync, single-shot, easy to mock. Streaming + async land at second-runner moment. |
-| Mock runner availability | (a) always built; (b) cfg(test)-only; (c) feature-gated | (a) | Always built. `tests/drive_e2e.sh` is a shell script — needs the mock runner accessible from a release binary. |
-| Drive loop composition | (a) in-process function calls; (b) shell out to self; (c) mixed | (a) | In-process is testable, atomic, and avoids fork overhead. The CLI verbs are thin wrappers around handler::run anyway. |
+| Mock runner availability | (a) always built, hidden via clap `.hide(true)`, takes `--mock <fixture-path>`; (b) `cfg(test)`-only; (c) feature-gated | (a) | Locked. `tests/drive_e2e.sh` is a shell script driving a release-mode binary; needs the mock runner accessible without a feature rebuild. Hidden visibility (clap `.hide(true)`) keeps it out of `--help` so it is not advertised as a stable user surface. |
+| Drive loop composition | (a) in-process function calls; (b) shell out to self; (c) mixed | (a) | In-process is testable, atomic, and avoids fork overhead. The CLI verbs are thin wrappers around `compute_*` (`pub(crate)`) — `drive` calls those directly without `pub` widening. |
 | `--max-iters` default | (a) 50; (b) 100; (c) unbounded | (a) | A 3-phase task with full revise budget hits ~12 iters; 50 is generous safety but bounded. |
 | `drive` exit code on `blocked` | (a) 0 with hint; (b) non-zero error | (a) | A real `blocked` is a successful drive outcome — surfacing the block to the human is the deliverable. Reserve non-zero for runner failures and bugs. |
-| `guide` write-access verbs | (a) only `gate answer`; (b) full task verbs; (c) read-only | (a) for gate; restrictive list documented in prompt | Smallest blast radius. v0.4 expands as the trust model develops. |
+| `guide` write-access verbs | (a) only `gate answer`; (b) full task verbs; (c) read-only | (a) for gate; restrictive list documented in prompt | Smallest blast radius. Authorized list embedded in `agents/guide.md`: `stores gate show`, `stores gate answer`, `stores tasks show`, `stores tasks list`, `stores tasks next-action`. All other `stores` verbs explicitly forbidden. v0.4 expands as the trust model develops. |
+| `guide` exit-code policy | (a) 0 on answered / 1 on runner error / 2 on user escape; (b) 0 if gate row transitions `pending→answered` else 1; (c) always 0 | (b) | Locked. Distinguishing "user escape" from "runner crash" requires signal handling that is unreliable across spawn paths. Single semantic check (DB transition) is testable and unambiguous. |
+| Real-`claude` smoke gate | (a) hard merge-blocker inside Phase 7 PASS/REVISE; (b) manual soft gate captured as evidence in completion summary; (c) defer to v0.4 | (b) | Locked. (a) made executor success depend on a working `claude` CLI + credentials + non-deterministic model output — brittle and out of scope for executor automation. The mock-runner e2e (AC7.1/7.1b) + inspected agent prompts (Phase 1 ACs) prove DONE_WHEN at the executor level; the real-claude smoke is human-driven evidence at the merge level. |
+| README quickstart command | (a) `cargo install --path . && stores setup && stores tasks drive --auto --claude-code`; (b) `cargo install --path . --features runner-claude-code && stores setup && stores tasks drive --auto --claude-code` | (b) | (a) silently fails at runtime because `--claude-code` requires the cargo feature. The headline command must be a working command. |
 | README quickstart vs 13-step walk | (a) replace; (b) keep both with quickstart on top; (c) delete walk | (b) | Quickstart is the headline; the walk remains valuable for users debugging the framework internals. |
 
-### Plan Notes (open items flagged for plan-reviewer / user)
+### Plan Notes
 
-These do not block execution; sensible defaults are documented above. Flagged for visibility:
+All open questions from the prior plan-review cycle have been adjudicated and folded into the ACs and Decision Matrix above. Specifically:
 
-1. **`tasks` store schema lacks a `priority` column.** The Intent Contract's locked decision #8 is "highest-priority then oldest." The current schema has no priority field. **Default chosen:** in v0.3, `--auto` falls back to "oldest non-complete" (purely `created_at ASC`). Adding a `priority` column requires a schema migration and is out of scope for T003. Plan-reviewer/user: please confirm the `created_at`-only fallback is acceptable, or scope-in a `priority` column addition (would add ~Low complexity to phase 3).
+- **Q1** (priority column) → dropped from v0.3 entirely; FIFO `created_at ASC`. AC3.2 + Decision Matrix row updated.
+- **Q2** (`--mock` exposure) → always built, hidden via clap `.hide(true)`, takes `--mock <fixture-path>` arg. AC3.3 updated.
+- **Q3** (flat `agents/<name>.md` layout) → flat; `cli/agents.rs` doc-comment notes the platform-driven asymmetry with skills.
+- **Q4** (guide authorized verbs) → exactly five verbs listed in `agents/guide.md` (Phase 1 authoring): `stores gate show`, `stores gate answer`, `stores tasks show`, `stores tasks list`, `stores tasks next-action`. All other `stores` verbs forbidden. AC6.4 verifies.
+- **Q5** (`setup` phase ordering) → keep in Phase 4. Phase 1/2/3 tests use `stores agents install --all` directly until `setup` lands.
 
-2. **Runner-stub for tests in a release binary.** AC3.3 mentions `--mock` as a flag exposed on the release binary so `tests/drive_e2e.sh` can invoke it. Alternative: gate `--mock` behind a `runner-mock` Cargo feature that is `default = ["runner-mock"]` (always on unless explicitly disabled). **Default chosen:** always available, undocumented in user-facing help, documented in `--help` only via a hidden flag. Plan-reviewer: confirm this is acceptable, or push for a feature gate.
-
-3. **`agents/<name>.md` flat vs nested layout.** Mirrors Claude Code plugin convention but diverges from `skills/<name>/SKILL.md`. `BUNDLED_AGENTS` registry would carry `(&str, &str)` tuples mapping name → markdown content, parallel to `BUNDLED_SKILLS`. Plan-reviewer: confirm the flat layout — alternative would be `agents/<name>/AGENT.md` for symmetry with skills, at the cost of fighting Claude Code's convention.
-
-4. **Guide agent's authorized-verbs surface.** AC6.4 says the prompt forbids direct main.md edits. The system prompt should also enumerate the exact CLI verbs the guide may invoke. **Default chosen:** `stores gate show`, `stores gate answer`, `stores tasks show`, `stores tasks list`, `stores tasks next-action`. Plan-reviewer: confirm this list, or scope adjustments.
-
-5. **Phase ordering for `setup`.** Phase 4 builds `setup` after the agents/runner phases. Alternative: build a thin `setup` early (phase 2) so subsequent phases can dogfood it. **Default chosen:** keep the listed order — `setup` is a thin composer; building it last avoids re-touching it as new pieces land.
+No open items remain for the plan-reviewer.
 
 ---
 
