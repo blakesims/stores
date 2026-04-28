@@ -1,9 +1,9 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** PLAN_REVIEW
+- **Status:** PLANNING
 - **Created:** 2026-04-28
-- **Last Updated:** 2026-04-28
+- **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
 
 ## Task
@@ -368,11 +368,10 @@ These do not block execution; sensible defaults are documented above. Flagged fo
 ---
 
 ## Plan Review
-_Plan-reviewer agent fills this section._
 
-- **Gate:** READY | NEEDS_WORK | NOT_READY
-- **Open Questions Finalized:** —
-- **Issues Found:** —
+- **Gate:** NEEDS_WORK
+- **Open Questions Finalized:** Q1 → drop priority entirely, sort by `created_at ASC` (no schema migration in v0.3); Q2 → `--mock` always built, hidden via clap `.hide(true)`, takes fixture-path arg; Q3 → flat `agents/<name>.md` (Claude Code platform convention; doc the asymmetry with skills); Q4 → planner produces the verb list (`gate show/answer`, `tasks show/list/next-action`) and embeds it in the guide prompt; Q5 → keep `setup` in Phase 4, no reorder.
+- **Issues Found:** 4c / 7M / 6m
 
 > Details: plan-review.md
 
