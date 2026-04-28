@@ -410,7 +410,7 @@ The codebase already follows tight bottom-up layering — `runner` knows nothing
 
 **Status:** CODE_REVIEW
 
-**Commit:** (see below)
+**Commit:** 64f1903
 
 **Files changed:**
 - `src/handlers/drive.rs` (schema lookup via BUNDLED_AGENT_SCHEMAS; schema_text threaded to runner.spawn; parse_envelope rewired to prefer structured_output; AC2.7 retry-exhausted surface; new tests: structured_output_takes_precedence_over_final_message, retries_exhausted_surfaces_transcript_path)
