@@ -241,8 +241,9 @@ Use when:
 
 ## Output Protocol
 
-Your final action is to **emit the review verdict as a JSON envelope on the
-last non-empty line of stdout**. The drive orchestrator parses this envelope
+Your output is validated against a JSON schema. Emit the envelope as a single
+JSON object — formatting (fences, surrounding text) is irrelevant; only
+structural conformance matters. The drive orchestrator parses this envelope
 and calls `compute_submit_review` in-process — you do NOT invoke
 `stores tasks submit-review` yourself, and you do NOT call
 `stores tasks render`.
@@ -254,9 +255,9 @@ The full findings text goes inside the envelope's `details` field as a
 single multiline string (newlines escaped with `\n` in JSON). No separate
 review-details.md file is needed — drive persists the entire envelope.
 
-### Final stdout line (JSON envelope)
+### JSON envelope
 
-The last non-empty line of your stdout MUST be a single JSON object:
+Emit a single JSON object conforming to the schema. Example:
 
 ```json
 {"role": "code-reviewer", "gate": "PASS", "counts": {"critical": 0, "major": 0, "minor": 2}, "summary": "All 5 ACs pass. cargo build succeeds; cargo test cli::agents passes (5 tests). Two minor style nits documented in details.", "details": "MINOR: doc-comment on agent_path() is thin — consider expanding. MINOR: uninstall_removes_file test does not assert println output (informational)."}
@@ -278,9 +279,9 @@ Schema:
 }
 ```
 
-The runner reads this last line, validates `role == "code-reviewer"`, and
-routes to `compute_submit_review`. Any text above the final line is tolerated
-and discarded. Do NOT emit multiple JSON objects.
+Drive validates the output against the bundled JSON Schema and routes to
+`compute_submit_review`. Formatting (markdown fences, surrounding prose) is
+ignored — only the JSON structure matters.
 
 ---
 
@@ -337,7 +338,7 @@ Before emitting the final JSON envelope:
 - [ ] Classified all findings (critical / major / minor)
 - [ ] Checked re-review consistency (prior REVISE feedback addressed?)
 - [ ] Code quality spot-check (follows patterns, tests cover happy + error)
-- [ ] Final stdout line is the JSON envelope (nothing after it)
+- [ ] JSON envelope emitted as structured output conforming to the schema
 - [ ] Did NOT invoke `stores tasks submit-*` — drive submits in-process
 - [ ] Did NOT invoke `stores tasks render` — drive renders in-process
 

@@ -153,9 +153,11 @@ Emit `action: "noop"` (task mode does not write back to the DB in v0.3).
 stores gate answer <gate_id> --answer "<answer text>"
 ```
 
-### Final stdout line (JSON envelope)
+### JSON envelope
 
-The last non-empty line of your stdout MUST be a single JSON object:
+Your output is validated against a JSON schema. Emit the envelope as a single
+JSON object — formatting (fences, surrounding text) is irrelevant; only
+structural conformance matters. Example:
 
 ```json
 {"role": "guide", "action": "answered", "summary": "Gate G001 answered: confirmed that flat file layout is correct per Claude Code subagent spec. Workflow can resume."}
@@ -176,9 +178,9 @@ Schema:
 - `"blocked"` — you need more information from the human; gate is NOT resolved
 - `"noop"` — no action was needed (gate already answered, or task mode stub)
 
-The runner reads this last line, validates `role == "guide"`, and routes
-accordingly. Any text above the final line is tolerated and discarded. Do NOT
-emit multiple JSON objects.
+Drive validates the output against the bundled JSON Schema and routes
+accordingly. Formatting (markdown fences, surrounding prose) is ignored —
+only the JSON structure matters.
 
 ---
 
@@ -338,7 +340,7 @@ Before emitting the final JSON envelope:
 - [ ] If blocked: formulated precise clarifying questions
 - [ ] If noop: explained why no action was needed
 - [ ] Did NOT call any forbidden verb
-- [ ] Final stdout line is the JSON envelope (nothing after it)
+- [ ] JSON envelope emitted as structured output conforming to the schema
 
 ---
 

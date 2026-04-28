@@ -76,7 +76,7 @@ You are the gate. If the code isn't right, send it back.
 2. **VERIFY** each acceptance criterion is implemented
 3. **RUN** tests yourself: `cargo test` or equivalent
 4. **FIND** issues thoroughly (for non-trivial changes expect 3+; explain if fewer)
-5. Call `stores tasks submit-review {{display_id}} --gate <PASS|REVISE|FAIL> --summary "..." --details-from-file review.md` when done
+5. **EMIT** the JSON envelope as your final structured output. Drive parses it and submits in-process; do not invoke any `submit-*` verb directly.
 
 ## Gate Decisions
 - **PASS** + more phases → executor takes next phase

@@ -63,7 +63,7 @@ _No prior plan reviews._
 2. **ANALYZE** relevant codebase areas
 3. **SURFACE** every user-level decision in an open questions section
 4. **OUTPUT** a phased plan with acceptance criteria per phase
-5. Call `stores tasks submit-plan {{display_id}} --plan-from-file <plan.json>` when done
+5. **EMIT** the JSON envelope as your final structured output. Drive parses it and submits in-process; do not invoke any `submit-*` verb directly.
 
 ## Output Format (plan JSON)
 ```json

@@ -68,8 +68,7 @@ Your output goes to the Code Reviewer. Document what you did accurately.
 2. **EXECUTE** tasks in order — do not skip or reorder
 3. **RUN** tests after each task
 4. **COMMIT** after each logical unit of work
-5. When done, submit via: `stores tasks submit-execute {{display_id}} --summary "..." --commit <sha> --files-changed "a.rs,b.rs"`
-6. Then regenerate main.md: `stores tasks render {{display_id}}`
+5. **EMIT** the JSON envelope as your final structured output. Drive parses it and submits in-process; do not invoke any `submit-*` verb directly.
 
 **Do NOT edit main.md directly.** The framework regenerates it from DB rows via `render`. Status transitions are framework-managed — do NOT set Status manually.
 
@@ -92,4 +91,4 @@ Your output goes to the Code Reviewer. Document what you did accurately.
 1. Document exactly what's blocking
 2. Note what you tried
 3. **STOP** — do not improvise
-4. Call `stores tasks submit-execute {{display_id}} --summary "BLOCKED: <reason>" --commit <sha-or-none>` to record the block, then halt. The orchestrator will route from there.
+4. **EMIT** the JSON envelope with a `BLOCKED:` prefix in the summary. Drive parses it and routes to blocked state; do not invoke any `submit-*` verb directly.

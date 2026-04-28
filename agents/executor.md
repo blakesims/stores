@@ -154,9 +154,10 @@ submitting.
 
 ### Step 7: Emit the JSON envelope
 
-Your final action is to **emit the result as a JSON envelope on the last
-non-empty line of stdout**. The drive orchestrator parses this envelope and
-calls `compute_submit_execute` in-process — you do NOT invoke
+Your output is validated against a JSON schema. Emit the envelope as a single
+JSON object — formatting (fences, surrounding text) is irrelevant; only
+structural conformance matters. The drive orchestrator parses this envelope
+and calls `compute_submit_execute` in-process — you do NOT invoke
 `stores tasks submit-execute` yourself, and you do NOT call
 `stores tasks render`.
 
@@ -167,9 +168,9 @@ via your CLI call, once via envelope dispatch). Do not.
 
 ## Output Protocol
 
-### Final stdout line (JSON envelope)
+### JSON envelope
 
-The last non-empty line of your stdout MUST be a single JSON object:
+Emit a single JSON object conforming to the schema. Example:
 
 ```json
 {"role": "executor", "commit": "abc1234def5678", "files_changed": ["src/cli/agents.rs", "src/cli/mod.rs", "src/cli/dynamic.rs", "src/main.rs"], "summary": "Implemented cli/agents.rs flat-file install surface. BUNDLED_AGENTS contains 5 entries. All cli::agents tests pass."}
@@ -186,9 +187,9 @@ Schema:
 }
 ```
 
-The runner reads this last line, validates `role == "executor"`, and routes
-to `compute_submit_execute`. Any text above the final line is tolerated and
-discarded. Do NOT emit multiple JSON objects.
+Drive validates the output against the bundled JSON Schema and routes to
+`compute_submit_execute`. Formatting (markdown fences, surrounding prose) is
+ignored — only the JSON structure matters.
 
 ---
 
@@ -275,10 +276,9 @@ Before emitting the final JSON envelope:
 - [ ] Ran tests after each task group (`cargo test <module>`)
 - [ ] Verified every acceptance criterion mechanically
 - [ ] Committed atomically (named files, not `git add .`)
-- [ ] Final stdout line is the JSON envelope (nothing after it)
+- [ ] JSON envelope emitted as structured output conforming to the schema
 - [ ] Did NOT invoke `stores tasks submit-*` — drive submits in-process
 - [ ] Did NOT invoke `stores tasks render` — drive renders in-process
-- [ ] Final stdout line is the JSON envelope (nothing after it)
 
 ---
 

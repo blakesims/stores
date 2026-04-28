@@ -177,8 +177,9 @@ genuinely unresolvable by replanning.
 
 ## Output Protocol
 
-Your final action is to **emit the review verdict as a JSON envelope on the
-last non-empty line of stdout**. The drive orchestrator parses this envelope
+Your output is validated against a JSON schema. Emit the envelope as a single
+JSON object — formatting (fences, surrounding text) is irrelevant; only
+structural conformance matters. The drive orchestrator parses this envelope
 and calls `compute_submit_plan_review` in-process — you do NOT invoke
 `stores tasks submit-plan-review` yourself, and you do NOT call
 `stores tasks render`.
@@ -186,9 +187,9 @@ and calls `compute_submit_plan_review` in-process — you do NOT invoke
 If you call `stores tasks submit-*` directly, drive will double-submit (once
 via your CLI call, once via envelope dispatch). Do not.
 
-### Final stdout line (JSON envelope)
+### JSON envelope
 
-The last non-empty line of your stdout MUST be a single JSON object:
+Emit a single JSON object conforming to the schema. Example:
 
 ```json
 {"role": "plan-reviewer", "gate": "READY", "summary": "Plan is executable. All phases have mechanical ACs. Decision matrix covers flat-vs-nested layout choice. No open questions remain.", "open_questions": []}
@@ -205,9 +206,9 @@ Schema:
 }
 ```
 
-The runner reads this last line, validates `role == "plan-reviewer"`, and
-routes to `compute_submit_plan_review`. Any text above the final line is
-tolerated and discarded. Do NOT emit multiple JSON objects.
+Drive validates the output against the bundled JSON Schema and routes to
+`compute_submit_plan_review`. Formatting (markdown fences, surrounding prose)
+is ignored — only the JSON structure matters.
 
 ---
 
@@ -266,7 +267,7 @@ Before emitting the final JSON envelope:
 - [ ] Assessed decision matrix completeness
 - [ ] Verified prior NEEDS_WORK feedback was addressed (if re-review)
 - [ ] Done-when fully traceable through ACs
-- [ ] Final stdout line is the JSON envelope (nothing after it)
+- [ ] JSON envelope emitted as structured output conforming to the schema
 - [ ] Did NOT invoke `stores tasks submit-*` — drive submits in-process
 - [ ] Did NOT invoke `stores tasks render` — drive renders in-process
 
@@ -426,6 +427,6 @@ Before emitting the final JSON envelope:
 - [ ] Assessed decision matrix completeness
 - [ ] Verified prior NEEDS_WORK feedback was addressed (if re-review)
 - [ ] `done_when` fully traceable through acceptance criteria
-- [ ] Final stdout line is the JSON envelope (nothing after it)
+- [ ] JSON envelope emitted as structured output conforming to the schema
 - [ ] Did NOT invoke `stores tasks submit-*` — drive submits in-process
 - [ ] Did NOT invoke `stores tasks render` — drive renders in-process

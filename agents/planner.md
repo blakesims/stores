@@ -204,9 +204,10 @@ brief paragraph (3-8 sentences) explaining:
 
 ## Stage 7: Review Handoff
 
-Your final action is to **emit the plan as a JSON envelope on the last
-non-empty line of stdout**. The drive orchestrator parses this envelope and
-calls `compute_submit_plan` in-process — you do NOT invoke
+Your output is validated against a JSON schema. Emit the envelope as a single
+JSON object — formatting (fences, surrounding text) is irrelevant; only
+structural conformance matters. The drive orchestrator parses this envelope
+and calls `compute_submit_plan` in-process — you do NOT invoke
 `stores tasks submit-plan` yourself, and you do NOT call `stores tasks render`.
 
 If you call `stores tasks submit-*` directly, drive will double-submit (once
@@ -216,9 +217,9 @@ via your CLI call, once via envelope dispatch). Do not.
 
 ## Output Protocol
 
-### Final stdout line (JSON envelope)
+### JSON envelope
 
-The last non-empty line of your stdout MUST be a single JSON object:
+Emit a single JSON object conforming to the schema. Example:
 
 ```json
 {"role": "planner", "phases": [{"name": "Phase 1: ...", "objective": "...", "tasks": ["..."], "acceptance_criteria": ["..."], "files": ["..."], "dependencies": []}], "decision_matrix": [{"decision": "...", "options": ["..."], "chosen": "...", "rationale": "..."}]}
@@ -234,10 +235,9 @@ Schema:
 }
 ```
 
-The runner (Phase 3 `drive` handler) reads this last line, validates
-`role == "planner"`, and routes to `compute_submit_plan`. Any text above the
-final line is tolerated and discarded. Do NOT emit multiple JSON objects —
-only the last line is parsed.
+Drive validates the output against the bundled JSON Schema and routes to
+`compute_submit_plan`. Formatting (markdown fences, surrounding prose) is
+ignored — only the JSON structure matters.
 
 ---
 
@@ -330,7 +330,7 @@ Before emitting the final JSON envelope:
 - [ ] Each phase has ≥1 mechanical acceptance criterion
 - [ ] Decision matrix covers all non-trivial choices
 - [ ] Open questions are genuine user-level decisions
-- [ ] Final stdout line is the JSON envelope (nothing after it)
+- [ ] JSON envelope emitted as structured output conforming to the schema
 - [ ] Did NOT invoke `stores tasks submit-*` — drive submits in-process
 - [ ] Did NOT invoke `stores tasks render` — drive renders in-process
 

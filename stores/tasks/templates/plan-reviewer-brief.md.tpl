@@ -84,7 +84,7 @@ _No prior plan reviews — first review cycle._
 2. **VALIDATE** each open question — genuine user-level impact?
 3. **HUNT** for gaps, edge cases, missing phases
 4. **CHECK** that acceptance criteria are actually verifiable
-5. Call `stores tasks submit-plan-review {{display_id}} --gate <READY|NEEDS_WORK|NOT_READY> --summary "..."` when done
+5. **EMIT** the JSON envelope as your final structured output. Drive parses it and submits in-process; do not invoke any `submit-*` verb directly.
 
 ## Gate Decisions
 - **READY** — Plan is complete and executable; proceed to execution

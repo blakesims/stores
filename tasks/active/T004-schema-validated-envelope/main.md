@@ -384,7 +384,61 @@ The codebase already follows tight bottom-up layering — `runner` knows nothing
 ---
 
 ## Code Review Log
-_Code-reviewer agent fills this section per phase._
+
+### Phase 1
+
+**Gate:** PASS
+
+**Summary:** Phase 1 is complete and correctly scoped. All 7 ACs (AC1.1–AC1.7) have concrete evidence in the diff and verifiable test coverage. `cargo build --features runner-claude-code` succeeds (one expected `dead_code` warning on `BUNDLED_AGENT_SCHEMAS` that Phase 2 will consume). `cargo test --features runner-claude-code` runs 372 tests (370 unit + 2 integration), 0 failed, exactly matching the executor's claim. `bash tests/drive_e2e.sh` passes both AC7.1 and AC7.1b — no v0.3 regression. Schema/AgentEnvelope alignment is tight: every field the deserializer reads is declared with the right type and matches each fixture byte-for-byte; `additionalProperties: false` is enforced positively (validate) and negatively (stray-field rejection). `claude_code::spawn` mints the UUID itself, canonicalises cwd via the testable `resolve_cwd()` helper, writes the JSONL transcript to `.stores/runs/<uuid>.jsonl`, and surfaces `error_max_structured_output_retries` to stderr. **Phase boundary discipline is observed**: `src/handlers/drive.rs` and `src/handlers/guide.rs` only adapt to the new spawn signature (pass `None`, default `structured_output: None` and `session_id: None`) — there is no schema lookup or `BUNDLED_AGENT_SCHEMAS` consumer code in drive (those belong to Phase 2). The Phase-1 portion of DONE_WHEN — the foundational refactor that lets Phase 2/3 wire the schema through — is satisfied. Mock runner accepts `structured_output` round-trip and ignores the schema arg. Cargo version remains `0.3.0` (correctly deferred to Phase 3).
+
+**AC verification:**
+- AC1.1: PASS — `cargo build --features runner-claude-code` succeeds; `uuid = { version = "1", features = ["v4"] }` in `Cargo.toml:21` (regular dep, correct since the runner uses it).
+- AC1.2: PASS — exactly 5 schema files under `agents/schemas/`; all five declare `"$schema": "https://json-schema.org/draft/2020-12/schema"` and parse as valid JSON (asserted by `bundled_schemas_count_matches_agents` in `src/cli/agents.rs:355`).
+- AC1.3: PASS — `tests/schemas_validate_fixtures.rs` exists with two tests: `all_fixtures_validate_against_schemas` (positive round-trip for all 5 roles) and `fixtures_with_stray_field_rejected_by_schema` (negative `additionalProperties: false` enforcement). Both pass. `jsonschema = "0.18"` is correctly placed as a dev-dep on `Cargo.toml:29`.
+- AC1.4: PASS — `BUNDLED_AGENT_SCHEMAS` in `src/cli/agents.rs:46-67` contains exactly 5 entries; `bundled_schemas_count_matches_agents` asserts both length and role-name parity with `BUNDLED_AGENTS`.
+- AC1.5: PASS — all four sub-ACs covered: (a) `extract_structured_output_returns_some_when_present` in `src/runner/claude_code.rs:527`, (b) `extract_structured_output_returns_none_and_error_subtype_on_retries_exhausted` at line 542, (c) `cwd_canonicalised_before_spawn` at line 557 (asserts `resolve_cwd()` equals `current_dir().canonicalize()`), (d) `session_id_is_valid_uuid_v4_propagated_to_output` at line 572 (parses as UUID v4 and confirms propagation through `RunnerOutput.session_id`).
+- AC1.6: PASS — `structured_output_round_trip` in `src/runner/mock.rs:141` asserts `MockRunner` accepts `structured_output: Some(...)` and returns it verbatim with the schema arg ignored.
+- AC1.7: PASS — `runner_uses_path_shim_not_real_claude` (line 484) and `command_construction_and_final_message_parsing` (line 369) both pass; the shim was correctly migrated to a raw-string literal `r#"..."#` emitting a stream-json `result` event with `text`, and the assertion path now flows through `extract_structured_output_from_stream_json`.
+
+**Findings:** none.
+
+**Counts:** {critical: 0, major: 0, minor: 0}
+
+
+
+### Phase 2 — Drive consumes structured output, briefs and prompts updated
+
+**Status:** CODE_REVIEW
+
+**Commit:** (see below)
+
+**Files changed:**
+- `src/handlers/drive.rs` (schema lookup via BUNDLED_AGENT_SCHEMAS; schema_text threaded to runner.spawn; parse_envelope rewired to prefer structured_output; AC2.7 retry-exhausted surface; new tests: structured_output_takes_precedence_over_final_message, retries_exhausted_surfaces_transcript_path)
+- `stores/tasks/templates/planner-brief.md.tpl` (removed imperative submit line)
+- `stores/tasks/templates/plan-reviewer-brief.md.tpl` (removed imperative submit line)
+- `stores/tasks/templates/executor-brief.md.tpl` (removed imperative submit lines × 2)
+- `stores/tasks/templates/code-reviewer-brief.md.tpl` (removed imperative submit line)
+- `agents/planner.md` (removed "last non-empty line" / "Final stdout line is the JSON envelope" boilerplate; replaced with schema-conformance language)
+- `agents/plan-reviewer.md` (same — 2 checklist occurrences)
+- `agents/executor.md` (same — 2 checklist occurrences)
+- `agents/code-reviewer.md` (same)
+- `agents/guide.md` (same)
+
+**AC checklist:**
+- ✅ AC2.1 — `cargo build --features runner-claude-code` succeeds.
+- ✅ AC2.2 — `cargo test` (default features) passes; 358 unit + 2 integration = 360 passed. With `--features runner-claude-code`: 372 + 2 = 374 passed. Drive unit tests include 2 new tests.
+- ✅ AC2.3 — `bash tests/drive_e2e.sh` passes both AC7.1 and AC7.1b on legacy fixtures.
+- ✅ AC2.4 — `structured_output_takes_precedence_over_final_message` test asserts parse_envelope succeeds via structured_output when final_message is malformed.
+- ✅ AC2.5 — `grep -rE '^\s*[0-9]+\.\s*Call\s+`stores tasks submit-' stores/tasks/templates/` returns zero matches.
+- ✅ AC2.6 — `grep -r 'last non-empty line' agents/` returns zero matches.
+- ✅ AC2.7 — drive_loop surfaces "schema validation retries exhausted" + transcript path when runner stderr contains that substring; `retries_exhausted_surfaces_transcript_path` test verifies drive_loop errors correctly on non-zero exit from such a runner.
+
+**AC2.5 grep evidence:** `<empty>`
+
+**AC2.6 grep evidence:** `<empty>`
+
+**Deviations from plan:**
+1. AC2.7 unit test (`retries_exhausted_surfaces_transcript_path`) verifies the drive_loop error path (non-zero exit + correct error message) rather than intercepting `eprintln!` output directly — Rust unit tests cannot capture stderr from `eprintln!` without redirecting fd2. The runner output's stderr field is set to contain the exact substring "schema validation retries exhausted" matching what `claude_code::spawn` emits; the AC2.7 drive-layer eprintln is exercised by the test via the `run_out.stderr.contains(...)` branch in drive_loop. Full e2e verification of the exact stderr text belongs to Phase 3's smoke.
 
 ---
 
