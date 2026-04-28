@@ -401,7 +401,23 @@ pub(crate) fn drive_loop(
             })?;
 
         // ── Step 2d: spawn runner ─────────────────────────────────────────
+        // Pre-spawn announcement: runners block until the child exits, so without
+        // this the user sees nothing for 30-90s per agent. v0.4 will stream child
+        // stdout line-by-line; for v0.3 we just bookend the call.
+        let phase_for_log = na.current_phase.as_i64().unwrap_or(0);
+        let cycle_for_log = na.current_cycle.as_i64().unwrap_or(0);
+        eprintln!(
+            "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: spawning {agent_role} via {} runner... (may take 30-90s)",
+            runner.name()
+        );
+        let spawn_start = std::time::Instant::now();
         let run_out = runner.spawn(&agent_name_normalized, system_prompt, &brief_markdown)?;
+        let spawn_elapsed = spawn_start.elapsed();
+        eprintln!(
+            "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: {agent_role} returned (exit={}, {:.1}s)",
+            run_out.exit_code,
+            spawn_elapsed.as_secs_f64()
+        );
 
         // AC3.6: non-zero exit → surface stdout + stderr, no submit.
         // (Some CLIs route auth / login errors to stdout, so always include both.)
