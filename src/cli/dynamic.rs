@@ -200,7 +200,7 @@ fn build_store_command(schema: &Schema) -> Command {
     // Workflow verb names that are registered separately above — must not be duplicated
     // as lifecycle transition subcommands even if the schema declares them as transition verbs.
     const WORKFLOW_VERBS: &[&str] = &[
-        "next-action", "brief", "render", "drive", "status",
+        "next-action", "brief", "render", "drive", "status", "guide",
         "submit-plan", "submit-plan-review", "submit-execute", "submit-review", "resume",
     ];
 
@@ -224,7 +224,13 @@ fn build_store_command(schema: &Schema) -> Command {
             .subcommand(build_submit_plan_review_cmd())
             .subcommand(build_submit_execute_cmd())
             .subcommand(build_submit_review_cmd())
-            .subcommand(build_resume_cmd());
+            .subcommand(build_resume_cmd())
+            .subcommand(build_guide_cmd());
+    }
+
+    // `guide` is also registered on the `gate` store (full form), which has no workflow.
+    if schema.name == "gate" {
+        store_cmd = store_cmd.subcommand(build_guide_cmd());
     }
 
     // Register one subcommand per transition verb (de-duplicated against base/workflow verbs)
@@ -486,6 +492,42 @@ fn build_status_cmd() -> Command {
                 .hide(true)
                 .required(false),
         )
+}
+
+/// Build the `guide` command.
+///
+/// Registered on both `gate` (full form: gate row + linked task + authorized verbs)
+/// and `tasks` (stub form: task row + next-action + last review, v0.3 quality).
+fn build_guide_cmd() -> Command {
+    let cmd = Command::new("guide")
+        .about(
+            "Spawn the guide agent with a curated context bundle \
+             (gate form: full context + write-back check; \
+             tasks form: v0.3 stub — context only, no write-back)",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the gate or task to guide on")
+                .required(true),
+        )
+        .arg(
+            Arg::new("mock")
+                .long("mock")
+                .help("Path to a JSON fixture file for the mock runner (for testing)")
+                .hide(true)
+                .required(false),
+        );
+
+    #[cfg(feature = "runner-claude-code")]
+    let cmd = cmd.arg(
+        Arg::new("claude-code")
+            .long("claude-code")
+            .action(ArgAction::SetTrue)
+            .help("Use the claude-code runner (requires runner-claude-code feature)")
+            .required(false),
+    );
+
+    cmd
 }
 
 /// Build the `drive` command.

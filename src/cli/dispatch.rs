@@ -134,6 +134,34 @@ pub fn dispatch(
                     };
                     handlers::drive::run_drive(schema, args)?;
                 }
+                Some(("guide", sub)) => {
+                    let display_id = sub
+                        .get_one::<String>("display_id")
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("guide requires a display_id"))?;
+                    let mock_fixture = sub.get_one::<String>("mock").map(std::path::PathBuf::from);
+                    #[cfg(feature = "runner-claude-code")]
+                    let claude_code = sub.get_flag("claude-code");
+
+                    if store.name == "gate" {
+                        let args = handlers::guide::GateGuideArgs {
+                            display_id,
+                            mock_fixture,
+                            #[cfg(feature = "runner-claude-code")]
+                            claude_code,
+                        };
+                        handlers::guide::run_gate_guide(schema, args)?;
+                    } else {
+                        // tasks (stub form)
+                        let args = handlers::guide::TasksGuideArgs {
+                            display_id,
+                            mock_fixture,
+                            #[cfg(feature = "runner-claude-code")]
+                            claude_code,
+                        };
+                        handlers::guide::run_tasks_guide(schema, args)?;
+                    }
+                }
                 Some(("status", sub)) => {
                     let display_id = sub.get_one::<String>("display_id").cloned();
                     let follow = sub.get_flag("follow");
