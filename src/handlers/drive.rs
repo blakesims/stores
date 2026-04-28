@@ -832,6 +832,8 @@ mod tests {
             display_id: None,
             auto: true,
             mock_fixture: None,
+            #[cfg(feature = "runner-claude-code")]
+            claude_code: false,
             max_iters: 50,
         };
 
@@ -877,6 +879,8 @@ mod tests {
             display_id: None,
             auto: true,
             mock_fixture: None,
+            #[cfg(feature = "runner-claude-code")]
+            claude_code: false,
             max_iters: 50,
         };
 
