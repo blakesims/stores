@@ -52,6 +52,7 @@ pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[
 pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Command {
     let mut root = Command::new("stores")
         .about("Schema-driven store framework")
+        .version(env!("CARGO_PKG_VERSION"))
         .arg(
             Arg::new("json")
                 .long("json")
