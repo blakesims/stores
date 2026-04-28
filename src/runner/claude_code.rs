@@ -1,25 +1,30 @@
 /// Claude Code runner — feature-gated behind `runner-claude-code`.
 ///
-/// Shells out to `claude -p` with the brief on stdin, the system prompt via
-/// `--append-system-prompt`, and `--output-format stream-json` for structured
-/// output. Parses `final_message` defensively from the last JSON-keyed line of
-/// stdout.
+/// Shells out to `claude -p` with the brief as the trailing prompt arg, the
+/// system prompt via `--append-system-prompt`, and `--output-format text` (the
+/// default — text on stdout, no claude-side JSON wrapping). Parses
+/// `final_message` defensively from the last JSON object line of stdout, which
+/// by contract is the agent's role-keyed envelope.
 ///
 /// # Command construction
 ///
 /// ```text
 /// claude -p \
 ///   --append-system-prompt <system_prompt> \
-///   --output-format stream-json \
+///   --output-format text \
 ///   --bare \
 ///   <brief>
 /// ```
 ///
 /// `--bare` disables CLAUDE.md auto-discovery, hook firing, and background
-/// prefetches so the runner is fully deterministic in CI. `--output-format
-/// stream-json` causes every response event to be emitted as a newline-delimited
-/// JSON object; the runner scans for the last object with a `"role"` key emitted
-/// by the agent (which by convention is the agent's final-line JSON envelope).
+/// prefetches so the runner is fully deterministic. `--output-format text`
+/// emits the agent's response verbatim (default — no claude-event wrapper);
+/// the agent's contract is to terminate its output with a single role-keyed
+/// JSON object on its final non-empty line.
+///
+/// Note: `--output-format stream-json` would require pairing with `--verbose`
+/// per the current claude CLI; text mode is simpler and matches the agent
+/// contract one-to-one.
 ///
 /// Brief is passed as the positional prompt argument (not stdin) because `claude
 /// -p` accepts the prompt as a trailing CLI argument and that path does not
@@ -86,7 +91,7 @@ impl Runner for ClaudeCodeRunner {
             .arg("--append-system-prompt")
             .arg(system_prompt)
             .arg("--output-format")
-            .arg("stream-json")
+            .arg("text")
             .arg("--bare")
             .arg(brief)
             .output()
@@ -119,18 +124,19 @@ mod tests {
     ///   echoes back),
     /// - `final_message` is correctly extracted from the fixture output.
     ///
-    /// The shim ignores all arguments and emits a fixed stream-json-style
-    /// response ending with the agent's JSON envelope on the final line.
+    /// The shim ignores all arguments and emits agent commentary followed by
+    /// the role-keyed JSON envelope on the final line (matching the contract
+    /// `claude -p --output-format text` produces with a real agent).
     #[test]
     fn command_construction_and_final_message_parsing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let shim_path = dir.path().join("claude");
 
-        // The shim emits two lines: a stream-json event line and the
-        // role-keyed JSON envelope on the last line (mimicking claude -p
-        // --output-format stream-json output).
+        // The shim emits agent commentary followed by the role-keyed JSON
+        // envelope on the last non-empty line (matching the contract
+        // `claude -p --output-format text` produces with a real agent).
         let shim_script = r#"#!/bin/sh
-echo '{"type":"content_block_delta","delta":{"type":"text_delta","text":"thinking..."}}'
+echo 'thinking through the plan...'
 echo '{"role":"planner","phases":[],"decision_matrix":[]}'
 exit 0
 "#;
@@ -151,7 +157,7 @@ exit 0
             .arg("--append-system-prompt")
             .arg("You are a planner.")
             .arg("--output-format")
-            .arg("stream-json")
+            .arg("text")
             .arg("--bare")
             .arg("Plan this task.")
             .output()
@@ -228,7 +234,7 @@ exit 0
             .env("PATH", &new_path)
             .arg("-p")
             .arg("--append-system-prompt").arg("sys")
-            .arg("--output-format").arg("stream-json")
+            .arg("--output-format").arg("text")
             .arg("--bare")
             .arg("do work")
             .output()
