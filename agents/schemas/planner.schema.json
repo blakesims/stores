@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stores.local/schemas/planner",
+  "title": "PlannerEnvelope",
+  "description": "Structured output envelope for the planner agent role.",
+  "type": "object",
+  "required": ["role", "phases"],
+  "additionalProperties": false,
+  "properties": {
+    "reasoning": {
+      "type": "string",
+      "description": "Free-text reasoning and planning notes before structured output (field-ordering recovery pattern)."
+    },
+    "role": {
+      "const": "planner",
+      "description": "Identifies this envelope as the planner output."
+    },
+    "phases": {
+      "type": "array",
+      "description": "Ordered list of implementation phases.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "decision_matrix": {
+      "type": "array",
+      "description": "Decisions made during planning, each with options, chosen, and rationale.",
+      "items": {
+        "type": "object"
+      }
+    }
+  }
+}

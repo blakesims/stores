@@ -22,9 +22,11 @@ use super::{Runner, RunnerOutput};
 ///     stderr: String::new(),
 ///     exit_code: 0,
 ///     final_message: Some(r#"{"role":"planner"}"#.to_string()),
+///     structured_output: None,
+///     session_id: None,
 /// }];
 /// let runner = MockRunner::new(queue);
-/// let out = runner.spawn("planner", "sys", "brief").unwrap();
+/// let out = runner.spawn("planner", "sys", "brief", None).unwrap();
 /// assert_eq!(out.exit_code, 0);
 /// ```
 pub struct MockRunner {
@@ -56,7 +58,7 @@ impl Runner for MockRunner {
         "mock"
     }
 
-    fn spawn(&self, role: &str, _system_prompt: &str, _brief: &str) -> Result<RunnerOutput> {
+    fn spawn(&self, role: &str, _system_prompt: &str, _brief: &str, _schema: Option<&str>) -> Result<RunnerOutput> {
         let mut queue = self.queue.borrow_mut();
         match queue.pop() {
             Some(output) => Ok(output),
@@ -75,6 +77,8 @@ mod tests {
             stderr: String::new(),
             exit_code,
             final_message: final_message.map(|s| s.to_string()),
+            structured_output: None,
+            session_id: None,
         }
     }
 
@@ -90,12 +94,12 @@ mod tests {
         let second = make_output("second output", 0, Some(r#"{"role":"executor"}"#));
         let runner = MockRunner::new(vec![first, second]);
 
-        let out1 = runner.spawn("planner", "sys", "brief1").unwrap();
+        let out1 = runner.spawn("planner", "sys", "brief1", None).unwrap();
         assert_eq!(out1.stdout, "first output");
         assert_eq!(out1.exit_code, 0);
         assert_eq!(out1.final_message.as_deref(), Some(r#"{"role":"planner"}"#));
 
-        let out2 = runner.spawn("executor", "sys", "brief2").unwrap();
+        let out2 = runner.spawn("executor", "sys", "brief2", None).unwrap();
         assert_eq!(out2.stdout, "second output");
         assert_eq!(out2.final_message.as_deref(), Some(r#"{"role":"executor"}"#));
     }
@@ -103,7 +107,7 @@ mod tests {
     #[test]
     fn empty_queue_returns_error() {
         let runner = MockRunner::new(vec![]);
-        let err = runner.spawn("planner", "sys", "brief").unwrap_err();
+        let err = runner.spawn("planner", "sys", "brief", None).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("queue exhausted"),
@@ -118,16 +122,40 @@ mod tests {
     #[test]
     fn queue_exhaustion_after_consuming_all() {
         let runner = MockRunner::new(vec![make_output("only", 0, None)]);
-        runner.spawn("r", "s", "b").unwrap(); // consumes the one item
-        let err = runner.spawn("r", "s", "b").unwrap_err();
+        runner.spawn("r", "s", "b", None).unwrap(); // consumes the one item
+        let err = runner.spawn("r", "s", "b", None).unwrap_err();
         assert!(err.to_string().contains("queue exhausted"));
     }
 
     #[test]
     fn non_zero_exit_code_returned_not_errored() {
         let runner = MockRunner::new(vec![make_output("fail output", 1, None)]);
-        let out = runner.spawn("executor", "sys", "brief").unwrap();
+        let out = runner.spawn("executor", "sys", "brief", None).unwrap();
         assert_eq!(out.exit_code, 1);
         assert_eq!(out.stdout, "fail output");
+    }
+
+    /// AC1.6: MockRunner accepts a RunnerOutput with structured_output: Some(...)
+    /// and spawn returns it verbatim. The schema arg is ignored.
+    #[test]
+    fn structured_output_round_trip() {
+        let structured = serde_json::json!({
+            "role": "planner",
+            "phases": [],
+            "decision_matrix": []
+        });
+        let output = RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: None,
+            structured_output: Some(structured.clone()),
+            session_id: None,
+        };
+        let runner = MockRunner::new(vec![output]);
+        // schema arg is ignored by mock
+        let out = runner.spawn("planner", "sys", "brief", Some(r#"{"$schema":"ignored"}"#)).unwrap();
+        assert_eq!(out.structured_output.as_ref(), Some(&structured));
+        assert_eq!(out.session_id, None);
     }
 }

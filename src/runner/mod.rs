@@ -57,7 +57,25 @@ pub struct RunnerOutput {
     /// The last non-empty stdout line that parses as a JSON object. `None` when
     /// no such line exists or the JSON is malformed. Populated by defensive
     /// scanning — malformed JSON does not cause `spawn` to return `Err`.
+    ///
+    /// # Deprecated
+    /// Prefer `structured_output` when available. `final_message` is kept for
+    /// backwards compatibility with mock fixtures and the legacy last-line-scan
+    /// path. Will be removed in v0.5.
     pub final_message: Option<String>,
+    /// Parsed JSON value from `--json-schema`-validated structured output
+    /// (`result.structured_output` in the stream-json event). `None` when the
+    /// runner did not use `--json-schema` (e.g. mock runner with no schema, or
+    /// a legacy runner path).
+    ///
+    /// Drive prefers this field over `final_message` when both are present.
+    pub structured_output: Option<serde_json::Value>,
+    /// Runner-generated UUID (`uuid::Uuid::new_v4()`) minted at spawn time.
+    /// Names the `.stores/runs/<session_id>.jsonl` transcript. `None` for mock
+    /// runner (no session concept) and for runners that do not generate
+    /// session IDs. Drive uses this for logging on failure and for human
+    /// `--resume` workflows.
+    pub session_id: Option<String>,
 }
 
 /// A synchronous, blocking agent runner.
@@ -77,11 +95,24 @@ pub trait Runner: Send {
     /// - `brief`: the per-task briefing text (passed to the agent as the user
     ///   turn or via stdin depending on the runner).
     ///
+    /// # Parameters
+    /// - `schema`: optional JSON-schema text to pass via `--json-schema`. When
+    ///   `Some`, the runner requests schema-validated structured output and
+    ///   populates `RunnerOutput.structured_output` from the result event.
+    ///   When `None`, the runner falls through to the legacy line-scan path
+    ///   and `structured_output` is `None`.
+    ///
     /// # Errors
     /// Returns `Err` only for infrastructure failures (process failed to launch,
     /// mock queue exhausted, etc.). A non-zero `exit_code` in `RunnerOutput` is
     /// not an `Err` — callers must inspect `exit_code` themselves.
-    fn spawn(&self, role: &str, system_prompt: &str, brief: &str) -> Result<RunnerOutput>;
+    fn spawn(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+    ) -> Result<RunnerOutput>;
 }
 
 /// Returns a comma-separated list of always-available runners (no feature gate).

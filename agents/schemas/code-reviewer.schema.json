@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stores.local/schemas/code-reviewer",
+  "title": "CodeReviewerEnvelope",
+  "description": "Structured output envelope for the code-reviewer agent role.",
+  "type": "object",
+  "required": ["role", "gate", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "reasoning": {
+      "type": "string",
+      "description": "Free-text review reasoning before structured output (field-ordering recovery pattern)."
+    },
+    "role": {
+      "const": "code-reviewer",
+      "description": "Identifies this envelope as the code-reviewer output."
+    },
+    "gate": {
+      "type": "string",
+      "description": "Review gate: PASS or REVISE."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Human-readable summary of the code review outcome."
+    },
+    "details": {
+      "type": "string",
+      "description": "Detailed findings, one per line, tagged [CRITICAL], [MAJOR], or [MINOR]."
+    },
+    "counts": {
+      "type": "object",
+      "description": "Finding counts by severity.",
+      "additionalProperties": false,
+      "properties": {
+        "critical": {
+          "type": "integer"
+        },
+        "major": {
+          "type": "integer"
+        },
+        "minor": {
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

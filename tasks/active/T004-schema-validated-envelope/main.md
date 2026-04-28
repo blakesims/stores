@@ -1,7 +1,7 @@
 # T004: Schema-validated agent envelope via `--json-schema`
 
 ## Meta
-- **Status:** EXECUTING_PHASE_1
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-28
 - **Blocked Reason:** —
@@ -341,7 +341,45 @@ The codebase already follows tight bottom-up layering — `runner` knows nothing
 ---
 
 ## Execution Log
-_Executor agent fills this section per phase._
+
+### Phase 1 — Schemas + runner refactor
+
+**Status:** CODE_REVIEW
+
+**Commit:** (see git log)
+
+**Dialect decision:** Draft 2020-12 retained. The `jsonschema = "0.18"` crate accepted all 5 schemas with `"$schema": "https://json-schema.org/draft/2020-12/schema"` without error. No Draft-07 fallback was required.
+
+**Files changed:**
+- `agents/schemas/planner.schema.json` (created)
+- `agents/schemas/plan-reviewer.schema.json` (created)
+- `agents/schemas/executor.schema.json` (created)
+- `agents/schemas/code-reviewer.schema.json` (created)
+- `agents/schemas/guide.schema.json` (created)
+- `tests/schemas_validate_fixtures.rs` (created)
+- `Cargo.toml` (uuid dep, jsonschema dev-dep)
+- `src/runner/mod.rs` (RunnerOutput: +structured_output, +session_id; Runner::spawn: +schema param)
+- `src/runner/claude_code.rs` (full rewrite: stream-json, --session-id, --json-schema, cwd canonicalisation, JSONL transcript write)
+- `src/runner/mock.rs` (spawn sig updated; structured_output round-trip test added)
+- `src/cli/agents.rs` (BUNDLED_AGENT_SCHEMAS added; bundled_schemas_count_matches_agents test added)
+- `src/handlers/drive.rs` (spawn call updated to None; RunnerOutput literals updated)
+- `src/handlers/guide.rs` (spawn calls updated to None; RunnerOutput literals updated)
+
+**AC checklist:**
+- ✅ AC1.1 — `cargo build --features runner-claude-code` succeeds; `uuid` dep resolves.
+- ✅ AC1.2 — 5 schemas under `agents/schemas/`; valid JSON Schema; dialect = Draft 2020-12.
+- ✅ AC1.3 — `tests/schemas_validate_fixtures.rs` validates all 5 fixtures (positive + negative stray-field test).
+- ✅ AC1.4 — `BUNDLED_AGENT_SCHEMAS` has 5 entries; `bundled_schemas_count_matches_agents` test passes.
+- ✅ AC1.5 — New tests cover: (a) structured_output extraction; (b) error_max_structured_output_retries surfacing; (c) cwd canonicalisation; (d) session-id is valid v4 UUID propagated to RunnerOutput.
+- ✅ AC1.6 — `MockRunner` structured_output round-trip test passes.
+- ✅ AC1.7 — `runner_uses_path_shim_not_real_claude` and `command_construction_and_final_message_parsing` pass (adapted to new spawn signature and stream-json parsing).
+
+**Test summary:** `cargo test --features runner-claude-code` → 370 unit tests + 2 integration tests = 372 passed, 0 failed.
+
+**Deviations from plan:**
+1. `runner_uses_path_shim_not_real_claude` test shim used a regular Rust string initially, causing "Unterminated quoted string" in sh due to literal backslash escapes. Fixed by switching to a raw string literal `r#"..."#` matching the pattern used in `command_construction_and_final_message_parsing`. No behavioral deviation.
+2. Schema `reasoning`/`notes` fields are listed in `properties` but NOT in `required` — required would have broken fixture validation since the v0.3 fixtures predate the reasoning field. This follows plan rule 5 (fixture-first fidelity) and is the correct interpretation.
+3. Schema temp-file for `--json-schema` uses manual `std::fs::write` to `/tmp/stores-schema-<uuid>.json` instead of the `tempfile` crate (which is dev-dep only). Cleanup happens after child exits. No behavioral difference.
 
 ---
 

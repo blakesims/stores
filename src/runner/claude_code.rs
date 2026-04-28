@@ -1,57 +1,50 @@
 /// Claude Code runner — feature-gated behind `runner-claude-code`.
 ///
 /// Shells out to `claude -p` with the brief as the trailing prompt arg, the
-/// system prompt via `--append-system-prompt`, and `--output-format text` (the
-/// default — text on stdout, no claude-side JSON wrapping). Parses
-/// `final_message` defensively from the last JSON object line of stdout, which
-/// by contract is the agent's role-keyed envelope.
+/// system prompt via `--append-system-prompt`, `--output-format stream-json
+/// --verbose` for full transcript capture, a runner-minted `--session-id` for
+/// resumability, and an optional `--json-schema` for schema-validated
+/// structured output.
 ///
 /// # Command construction
 ///
 /// ```text
 /// claude -p \
 ///   --append-system-prompt <system_prompt> \
-///   --output-format text \
-///   --permission-mode bypassPermissions \
+///   --output-format stream-json --verbose \
+///   --session-id <uuid> \
+///   [--json-schema <schema_path>] \
+///   [--allowed-tools=<tools> | --permission-mode=bypassPermissions] \
+///   [--model=<model>] \
 ///   <brief>
 /// ```
 ///
-/// `--output-format text` emits the agent's response verbatim (default — no
-/// claude-event wrapper); the agent's contract is to terminate its output
-/// with a single role-keyed JSON object on its final non-empty line.
+/// The runner mints a fresh UUID on each `spawn` call and returns it via
+/// `RunnerOutput.session_id`. Drive does NOT generate the UUID; it only
+/// consumes the returned value for logging and future `--resume` workflows.
 ///
-/// `--permission-mode bypassPermissions` is required for headless autonomous
-/// operation. Without it, write/edit/bash operations trigger interactive
-/// permission prompts the spawned subagent cannot answer; the agent then
-/// emits a "I need permission to..." text response instead of the role-keyed
-/// JSON envelope, and the parser fails. The `--claude-code` runner is an
-/// explicitly opted-in autonomous mode; the v0.4 path is per-role allowed-
-/// tools whitelisting (`planner`/`plan-reviewer`/`code-reviewer` read-only,
-/// `executor` write-enabled, `guide` read-plus-`stores gate answer`).
+/// After the child exits, the full stream-json stdout is written to
+/// `.stores/runs/<session_id>.jsonl` for postmortem. The runner then walks
+/// the JSONL stream to find the `result` event and extracts:
+/// - `result.structured_output` → `RunnerOutput.structured_output`
+/// - `result.error.subtype` → surfaced to stderr when present
+/// - `result.text` / `result.content` → `RunnerOutput.final_message` (legacy)
 ///
-/// Notes:
-/// - `--output-format stream-json` would require pairing with `--verbose` per
-///   the current claude CLI; text mode is simpler and matches the agent
-///   contract one-to-one.
-/// - `--bare` is intentionally NOT passed: bare mode disables OAuth/keychain
-///   auth and requires ANTHROPIC_API_KEY in the environment. Without it,
-///   headless `claude` reads the user's normal OAuth credentials. The cost is
-///   that CLAUDE.md auto-discovery and project hooks are active during the
-///   spawned session — agents should treat their `--append-system-prompt`
-///   contents as authoritative and ignore any project-side bleed-through.
-///   v0.4 may revisit this if hook interaction becomes a real problem.
+/// # cwd canonicalisation
 ///
-/// Brief is passed as the positional prompt argument (not stdin) because `claude
-/// -p` accepts the prompt as a trailing CLI argument and that path does not
-/// require stdin redirection.
+/// `std::env::current_dir()?.canonicalize()?` is called on entry and pinned
+/// as the working directory for the spawn. This guards against the documented
+/// #1 footgun for session resume: the Anthropic SDK silently mints a fresh
+/// session if cwd differs between spawn and resume calls.
 ///
-/// # Defensive parsing
+/// # Schema dialect
 ///
-/// `final_message` extraction scans stdout from the last line backwards. A line
-/// is a candidate if it parses as a JSON object (`serde_json::Value::Object`).
-/// Malformed JSON causes `final_message: None`; the runner never panics on bad
-/// output.
+/// Schemas are authored in JSON Schema Draft 2020-12 by default. If the SDK
+/// rejects 2020-12 with a dialect error, swap the `$schema` URI to Draft-07
+/// and re-run (Decision Matrix row 8).
 use anyhow::{Context, Result};
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 
 use super::{Runner, RunnerOutput};
@@ -128,6 +121,13 @@ fn extract_tools_from_frontmatter(system_prompt: &str) -> Option<Vec<String>> {
 /// parses as a JSON object (i.e. a `{...}` map).
 ///
 /// Returns `None` if no such line exists. Malformed JSON is silently skipped.
+///
+/// Used as a legacy fallback when `structured_output` is not available (e.g.
+/// when `--json-schema` was not passed, or when parsing stream-json's
+/// `result.text`/`result.content` field).
+///
+/// # Deprecated
+/// Prefer `extract_structured_output_from_stream_json` when available.
 fn extract_final_message(stdout: &str) -> Option<String> {
     for line in stdout.lines().rev() {
         let trimmed = line.trim();
@@ -141,22 +141,147 @@ fn extract_final_message(stdout: &str) -> Option<String> {
     None
 }
 
+/// Walk stream-json JSONL stdout and extract:
+/// - `structured_output`: from the `result` event's `structured_output` field
+/// - `final_message`: from the `result` event's `text` or `content[0].text` field
+/// - any `error.subtype` string (returned for caller to surface on stderr)
+///
+/// Returns `(structured_output, final_message, error_subtype)`.
+pub fn extract_structured_output_from_stream_json(
+    stdout: &str,
+) -> (Option<serde_json::Value>, Option<String>, Option<String>) {
+    let mut structured_output: Option<serde_json::Value> = None;
+    let mut final_message: Option<String> = None;
+    let mut error_subtype: Option<String> = None;
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str(trimmed) else {
+            continue;
+        };
+
+        // Look for the result event: {"type":"result", ...}
+        let is_result = map
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|t| t == "result")
+            .unwrap_or(false);
+
+        if !is_result {
+            continue;
+        }
+
+        // Extract structured_output
+        if let Some(so) = map.get("structured_output") {
+            if !so.is_null() {
+                structured_output = Some(so.clone());
+            }
+        }
+
+        // Extract error.subtype
+        if let Some(err_obj) = map.get("error") {
+            if let Some(subtype) = err_obj.get("subtype").and_then(|v| v.as_str()) {
+                error_subtype = Some(subtype.to_string());
+            }
+        }
+
+        // Extract final_message from text or content[0].text
+        if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
+            // Walk the text for the last JSON object line (legacy compat)
+            final_message = extract_final_message(text);
+        } else if let Some(content) = map.get("content").and_then(|v| v.as_array()) {
+            for item in content {
+                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                    if let Some(fm) = extract_final_message(text) {
+                        final_message = Some(fm);
+                    }
+                }
+            }
+        }
+
+        // result event is a terminal event; stop scanning
+        break;
+    }
+
+    (structured_output, final_message, error_subtype)
+}
+
+/// Resolve and canonicalise the cwd for spawn.
+///
+/// Extracted into a testable helper so unit tests can assert the path used.
+/// This guards the documented #1 footgun for session resume: the Anthropic SDK
+/// silently mints a fresh session if cwd differs between spawn and resume calls.
+pub fn resolve_cwd() -> Result<PathBuf> {
+    std::env::current_dir()
+        .context("failed to read current_dir")?
+        .canonicalize()
+        .context("failed to canonicalize current_dir")
+}
+
+/// Write the stream-json transcript to `.stores/runs/<session_id>.jsonl`.
+///
+/// Creates `.stores/runs/` if it does not exist. Failures are non-fatal and
+/// are logged to stderr rather than propagated.
+fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) {
+    let runs_dir = cwd.join(".stores").join("runs");
+    if let Err(e) = fs::create_dir_all(&runs_dir) {
+        eprintln!("warning: could not create .stores/runs/: {e}");
+        return;
+    }
+    let path = runs_dir.join(format!("{session_id}.jsonl"));
+    if let Err(e) = fs::write(&path, stdout) {
+        eprintln!("warning: could not write transcript {}: {e}", path.display());
+    }
+}
+
 impl Runner for ClaudeCodeRunner {
     fn name(&self) -> &str {
         "claude-code"
     }
 
-    fn spawn(&self, role: &str, system_prompt: &str, brief: &str) -> Result<RunnerOutput> {
+    fn spawn(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+    ) -> Result<RunnerOutput> {
+        // Mint UUID and canonicalise cwd on entry.
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let cwd = resolve_cwd()?;
+
         let mut cmd = Command::new("claude");
+        cmd.current_dir(&cwd);
         cmd.arg("-p")
             .arg("--append-system-prompt")
             .arg(system_prompt)
             .arg("--output-format")
-            .arg("text");
+            .arg("stream-json")
+            .arg("--verbose")
+            .arg(format!("--session-id={session_id}"));
 
         // Optional model override (for --testing / --claude-code-model).
         if let Some(m) = &self.model {
             cmd.arg(format!("--model={m}"));
+        }
+
+        // Optional JSON schema for structured output validation.
+        // Write schema to a temp file (claude CLI expects a file path).
+        // We write to a unique path under the system temp dir and clean it up
+        // after the child exits (no tempfile crate dependency in production).
+        let schema_tmp_path: Option<PathBuf>;
+        if let Some(schema_text) = schema {
+            let path = std::env::temp_dir()
+                .join(format!("stores-schema-{}.json", session_id));
+            fs::write(&path, schema_text)
+                .context("failed to write schema to temp file")?;
+            cmd.arg(format!("--json-schema={}", path.display()));
+            schema_tmp_path = Some(path);
+        } else {
+            schema_tmp_path = None;
         }
 
         // Per-role tool whitelist from the agent's frontmatter (preferred).
@@ -191,13 +316,36 @@ impl Runner for ClaudeCodeRunner {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let exit_code = output.status.code().unwrap_or(-1);
 
-        let final_message = extract_final_message(&stdout);
+        // Clean up schema temp file.
+        if let Some(p) = schema_tmp_path {
+            let _ = fs::remove_file(p);
+        }
+
+        // Write the full stream-json transcript.
+        write_transcript(&cwd, &session_id, &stdout);
+
+        // Extract structured output and final_message from the stream-json result event.
+        let (structured_output, stream_final_message, error_subtype) =
+            extract_structured_output_from_stream_json(&stdout);
+
+        // Surface error_max_structured_output_retries clearly.
+        if let Some(ref subtype) = error_subtype {
+            eprintln!(
+                "runner[{role}]: schema validation retries exhausted (subtype={subtype}); \
+                 transcript at .stores/runs/{session_id}.jsonl"
+            );
+        }
+
+        // Fall back to legacy line-scan if stream-json parse found nothing.
+        let final_message = stream_final_message.or_else(|| extract_final_message(&stdout));
 
         Ok(RunnerOutput {
             stdout,
             stderr,
             exit_code,
             final_message,
+            structured_output,
+            session_id: Some(session_id),
         })
     }
 }
@@ -222,12 +370,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let shim_path = dir.path().join("claude");
 
-        // The shim emits agent commentary followed by the role-keyed JSON
-        // envelope on the last non-empty line (matching the contract
-        // `claude -p --output-format text` produces with a real agent).
+        // The shim emits a stream-json result event with text containing the
+        // role-keyed JSON envelope.
         let shim_script = r#"#!/bin/sh
-echo 'thinking through the plan...'
-echo '{"role":"planner","phases":[],"decision_matrix":[]}'
+echo '{"type":"result","text":"{\"role\":\"planner\",\"phases\":[],\"decision_matrix\":[]}"}'
 exit 0
 "#;
         fs::write(&shim_path, shim_script).expect("write shim");
@@ -247,7 +393,8 @@ exit 0
             .arg("--append-system-prompt")
             .arg("You are a planner.")
             .arg("--output-format")
-            .arg("text")
+            .arg("stream-json")
+            .arg("--verbose")
             .arg("--permission-mode")
             .arg("bypassPermissions")
             .arg("Plan this task.")
@@ -258,7 +405,7 @@ exit 0
         let exit_code = output.status.code().unwrap_or(-1);
         assert_eq!(exit_code, 0);
 
-        let final_message = extract_final_message(&stdout);
+        let (_, final_message, _) = extract_structured_output_from_stream_json(&stdout);
         assert!(
             final_message.is_some(),
             "expected a final JSON message, stdout was: {stdout}"
@@ -338,7 +485,10 @@ exit 0
         let dir = tempfile::tempdir().expect("tempdir");
         let shim_path = dir.path().join("claude");
 
-        let shim_script = "#!/bin/sh\necho '{\"role\":\"executor\",\"commit\":\"abc\"}'\nexit 0\n";
+        let shim_script = r#"#!/bin/sh
+echo '{"type":"result","text":"{\"role\":\"executor\",\"commit\":\"abc\"}"}'
+exit 0
+"#;
         fs::write(&shim_path, shim_script).expect("write shim");
         fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
             .expect("chmod shim");
@@ -351,14 +501,108 @@ exit 0
             .env("PATH", &new_path)
             .arg("-p")
             .arg("--append-system-prompt").arg("sys")
-            .arg("--output-format").arg("text")
+            .arg("--output-format").arg("stream-json")
+            .arg("--verbose")
             .arg("--permission-mode").arg("bypassPermissions")
             .arg("do work")
             .output()
             .expect("shim run");
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let fm = extract_final_message(&stdout);
-        assert_eq!(fm.as_deref(), Some(r#"{"role":"executor","commit":"abc"}"#));
+
+        let (_, fm, _) = extract_structured_output_from_stream_json(&stdout);
+        assert!(fm.is_some(), "expected final_message from stream-json, got None. stdout: {stdout}");
+        let msg = fm.unwrap();
+        assert!(msg.contains("executor"), "expected 'executor' in final_message, got: {msg}");
+        assert!(msg.contains("abc"), "expected 'abc' commit in final_message, got: {msg}");
+    }
+
+    // -------------------------------------------------------------------------
+    // AC1.5 tests
+    // -------------------------------------------------------------------------
+
+    /// AC1.5(a): extract_structured_output_from_stream_json returns Some(value)
+    /// for a stream-json with result.structured_output populated.
+    #[test]
+    fn extract_structured_output_returns_some_when_present() {
+        let stream = r#"{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"thinking..."}]}}
+{"type":"result","structured_output":{"role":"planner","phases":[],"decision_matrix":[]},"text":"thinking..."}
+"#;
+        let (so, _, err) = extract_structured_output_from_stream_json(stream);
+        assert!(so.is_some(), "expected structured_output to be Some");
+        assert!(err.is_none());
+        let val = so.unwrap();
+        assert_eq!(val["role"].as_str(), Some("planner"));
+    }
+
+    /// AC1.5(b): returns None for structured_output and surfaces error_subtype
+    /// when result contains error_max_structured_output_retries.
+    #[test]
+    fn extract_structured_output_returns_none_and_error_subtype_on_retries_exhausted() {
+        let stream = r#"{"type":"result","error":{"subtype":"error_max_structured_output_retries","message":"retries exhausted"},"text":""}
+"#;
+        let (so, _, err) = extract_structured_output_from_stream_json(stream);
+        assert!(so.is_none(), "expected structured_output to be None on retry exhaustion");
+        assert_eq!(
+            err.as_deref(),
+            Some("error_max_structured_output_retries"),
+            "expected error_subtype to be error_max_structured_output_retries"
+        );
+    }
+
+    /// AC1.5(c): cwd is canonicalised before spawn — resolve_cwd() returns a
+    /// path equal to std::env::current_dir()?.canonicalize()?.
+    #[test]
+    fn cwd_canonicalised_before_spawn() {
+        let expected = std::env::current_dir()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let got = resolve_cwd().unwrap();
+        assert_eq!(
+            got, expected,
+            "resolve_cwd() must return canonicalized current_dir"
+        );
+    }
+
+    /// AC1.5(d): session-id is a valid v4 UUID and is propagated to
+    /// RunnerOutput.session_id when the shim exits 0.
+    #[test]
+    fn session_id_is_valid_uuid_v4_propagated_to_output() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shim_path = dir.path().join("claude");
+
+        // Shim just exits 0 with empty stream-json output.
+        let shim_script = "#!/bin/sh\nexit 0\n";
+        fs::write(&shim_path, shim_script).expect("write shim");
+        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod shim");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), original_path);
+
+        // Patch PATH via env override, then call spawn.
+        // We use unsafe set_var scoped tightly; this test is single-threaded
+        // by cargo test's default behaviour (one test per thread).
+        let runner = ClaudeCodeRunner::new();
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+        let result = runner.spawn("planner", "sys", "brief", None);
+        unsafe {
+            std::env::set_var("PATH", &original_path);
+        }
+
+        let out = result.expect("spawn should succeed with shim");
+        let sid = out.session_id.expect("session_id should be Some");
+
+        // Validate it's a parseable v4 UUID.
+        let parsed = uuid::Uuid::parse_str(&sid).expect("session_id must be a valid UUID");
+        assert_eq!(
+            parsed.get_version(),
+            Some(uuid::Version::Random),
+            "session_id must be a v4 (random) UUID"
+        );
     }
 }

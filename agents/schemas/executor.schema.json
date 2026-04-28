@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stores.local/schemas/executor",
+  "title": "ExecutorEnvelope",
+  "description": "Structured output envelope for the executor agent role.",
+  "type": "object",
+  "required": ["role", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "notes": {
+      "type": "string",
+      "description": "Free-text implementation notes before structured output (field-ordering recovery pattern)."
+    },
+    "role": {
+      "const": "executor",
+      "description": "Identifies this envelope as the executor output."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Human-readable summary of the work completed."
+    },
+    "commit": {
+      "type": "string",
+      "description": "Git commit SHA of the work committed, if any."
+    },
+    "files_changed": {
+      "type": "array",
+      "description": "List of files changed in this execution cycle.",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

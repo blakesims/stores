@@ -18,6 +18,7 @@ anyhow = "1"
 thiserror = "1"
 handlebars = "5"
 libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
@@ -25,3 +26,4 @@ runner-claude-code = []
 
 [dev-dependencies]
 tempfile = "3"
+jsonschema = "0.18"

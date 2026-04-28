@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stores.local/schemas/guide",
+  "title": "GuideEnvelope",
+  "description": "Structured output envelope for the guide agent role.",
+  "type": "object",
+  "required": ["role", "action", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Free-text answer/guidance summary — doubles as the reasoning slot for the guide (leads first per field-ordering recovery pattern)."
+    },
+    "role": {
+      "const": "guide",
+      "description": "Identifies this envelope as the guide output."
+    },
+    "action": {
+      "type": "string",
+      "description": "Action taken: answered, escalated, etc."
+    }
+  }
+}

@@ -33,6 +33,39 @@ pub static BUNDLED_AGENTS: &[(&str, &str)] = &[
     ("guide", include_str!("../../agents/guide.md")),
 ];
 
+/// Bundled JSON Schemas for agent envelopes — embedded at compile time.
+///
+/// Each entry is `(role_name, schema_json_text)` and mirrors `BUNDLED_AGENTS`
+/// role-for-role. The schema text is the raw JSON Schema Draft 2020-12 document
+/// (or Draft-07 if the SDK rejected 2020-12 during AC1.5 testing — see Phase 1
+/// executor summary for the chosen dialect).
+///
+/// These schemas are threaded by drive into `runner.spawn(..., Some(schema))`
+/// to request schema-validated structured output from the claude CLI via
+/// `--json-schema`.
+pub static BUNDLED_AGENT_SCHEMAS: &[(&str, &str)] = &[
+    (
+        "planner",
+        include_str!("../../agents/schemas/planner.schema.json"),
+    ),
+    (
+        "plan-reviewer",
+        include_str!("../../agents/schemas/plan-reviewer.schema.json"),
+    ),
+    (
+        "executor",
+        include_str!("../../agents/schemas/executor.schema.json"),
+    ),
+    (
+        "code-reviewer",
+        include_str!("../../agents/schemas/code-reviewer.schema.json"),
+    ),
+    (
+        "guide",
+        include_str!("../../agents/schemas/guide.schema.json"),
+    ),
+];
+
 // ---------------------------------------------------------------------------
 // CLI args (parsed by caller from clap matches)
 // ---------------------------------------------------------------------------
@@ -312,6 +345,38 @@ mod tests {
         assert!(names.contains(&"code-reviewer"));
         assert!(names.contains(&"guide"));
         assert_eq!(names.len(), 5, "BUNDLED_AGENTS must contain exactly 5 entries");
+    }
+
+    // -----------------------------------------------------------------------
+    // AC1.4: BUNDLED_AGENT_SCHEMAS has 5 entries; role-name set matches
+    // BUNDLED_AGENTS.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn bundled_schemas_count_matches_agents() {
+        let agent_names: std::collections::BTreeSet<&str> =
+            BUNDLED_AGENTS.iter().map(|(n, _)| *n).collect();
+        let schema_names: std::collections::BTreeSet<&str> =
+            BUNDLED_AGENT_SCHEMAS.iter().map(|(n, _)| *n).collect();
+
+        assert_eq!(
+            BUNDLED_AGENT_SCHEMAS.len(),
+            5,
+            "BUNDLED_AGENT_SCHEMAS must contain exactly 5 entries"
+        );
+        assert_eq!(
+            agent_names, schema_names,
+            "BUNDLED_AGENT_SCHEMAS role names must match BUNDLED_AGENTS role names"
+        );
+
+        // Each schema must be valid JSON.
+        for (name, text) in BUNDLED_AGENT_SCHEMAS {
+            let parsed: serde_json::Result<serde_json::Value> = serde_json::from_str(text);
+            assert!(
+                parsed.is_ok(),
+                "schema for '{name}' is not valid JSON: {}",
+                parsed.err().unwrap()
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

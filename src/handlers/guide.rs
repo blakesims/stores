@@ -146,6 +146,8 @@ fn build_runner_from_args(
                 stderr: item.stderr,
                 exit_code: item.exit_code,
                 final_message: item.final_message,
+                structured_output: None,
+                session_id: None,
             })
             .collect();
         return Ok(Box::new(MockRunner::new(outputs)));
@@ -258,7 +260,7 @@ pub(crate) fn run_gate_guide_with_runner(
     );
 
     // Spawn runner.
-    let run_out = runner.spawn("guide", system_prompt, &brief)?;
+    let run_out = runner.spawn("guide", system_prompt, &brief, None)?;
 
     if run_out.exit_code != 0 {
         eprintln!("[guide] runner exited with code {}", run_out.exit_code);
@@ -314,7 +316,7 @@ pub(crate) fn run_tasks_guide_with_runner(
     let brief = build_tasks_brief(display_id, &task_entry, &next_action_text, &last_review);
 
     // Spawn runner.
-    let run_out = runner.spawn("guide", system_prompt, &brief)?;
+    let run_out = runner.spawn("guide", system_prompt, &brief, None)?;
 
     if run_out.exit_code != 0 {
         eprintln!("[guide] runner exited with code {}", run_out.exit_code);
@@ -562,6 +564,8 @@ mod tests {
             stderr: String::new(),
             exit_code,
             final_message: last_line,
+            structured_output: None,
+            session_id: None,
         }
     }
 
@@ -969,6 +973,8 @@ mod tests {
             stderr: "runner crashed".to_string(),
             exit_code: 1,
             final_message: None,
+            structured_output: None,
+            session_id: None,
         };
         let runner = MockRunner::new(vec![runner_out]);
 
@@ -1016,6 +1022,8 @@ mod tests {
             stderr: "crash".to_string(),
             exit_code: 1,
             final_message: None,
+            structured_output: None,
+            session_id: None,
         };
         let runner = MockRunner::new(vec![runner_out]);
 

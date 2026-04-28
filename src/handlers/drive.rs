@@ -287,6 +287,8 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
                 stderr: item.stderr,
                 exit_code: item.exit_code,
                 final_message: item.final_message,
+                structured_output: None,
+                session_id: None,
             })
             .collect();
         return Ok(Box::new(MockRunner::new(outputs)));
@@ -422,7 +424,8 @@ pub(crate) fn drive_loop(
             runner.name()
         );
         let spawn_start = std::time::Instant::now();
-        let run_out = runner.spawn(&agent_name_normalized, system_prompt, &brief_markdown)?;
+        // Phase 2 will pass the schema here; for now pass None (legacy path).
+        let run_out = runner.spawn(&agent_name_normalized, system_prompt, &brief_markdown, None)?;
         let spawn_elapsed = spawn_start.elapsed();
         eprintln!(
             "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: {agent_role} returned (exit={}, {:.1}s)",
@@ -786,6 +789,8 @@ mod tests {
             stderr: String::new(),
             exit_code,
             final_message: last_line,
+            structured_output: None,
+            session_id: None,
         }
     }
 
@@ -978,6 +983,8 @@ mod tests {
             stderr: "runner crashed".to_string(),
             exit_code: 1,
             final_message: None,
+            structured_output: None,
+            session_id: None,
         };
         let runner = MockRunner::new(vec![fail_out]);
 
@@ -1064,6 +1071,8 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             final_message: None,
+            structured_output: None,
+            session_id: None,
         };
         let env = parse_envelope(&out).expect("should parse with commentary above");
         assert!(
