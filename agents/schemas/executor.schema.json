@@ -4,7 +4,9 @@
   "title": "ExecutorEnvelope",
   "description": "Structured output envelope for the executor agent role.",
   "type": "object",
-  "required": ["role", "summary"],
+  "required": [
+    "summary"
+  ],
   "additionalProperties": false,
   "properties": {
     "notes": {

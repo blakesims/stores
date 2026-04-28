@@ -4,7 +4,10 @@
   "title": "PlanReviewerEnvelope",
   "description": "Structured output envelope for the plan-reviewer agent role.",
   "type": "object",
-  "required": ["role", "gate", "summary"],
+  "required": [
+    "gate",
+    "summary"
+  ],
   "additionalProperties": false,
   "properties": {
     "reasoning": {

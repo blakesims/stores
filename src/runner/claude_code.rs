@@ -124,12 +124,11 @@ fn extract_tools_from_frontmatter(system_prompt: &str) -> Option<Vec<String>> {
 ///
 /// Returns `None` if no such line exists. Malformed JSON is silently skipped.
 ///
-/// Used as a legacy fallback when `structured_output` is not available (e.g.
-/// when `--json-schema` was not passed, or when parsing stream-json's
-/// `result.text`/`result.content` field).
-///
-/// # Deprecated
-/// Prefer `extract_structured_output_from_stream_json` when available.
+/// Kept available for tests that exercise the historic last-line scan
+/// behaviour. Drive's Layer 3 owns the legacy fallback against
+/// `RunnerOutput.stdout`; the runner does not pre-scan stdout because
+/// intermediate stream-json events would be mistaken for the envelope.
+#[cfg(test)]
 fn extract_final_message(stdout: &str) -> Option<String> {
     for line in stdout.lines().rev() {
         let trimmed = line.trim();
@@ -217,14 +216,12 @@ pub fn extract_structured_output_from_stream_json(
                 .map(|s| s.to_string())
         });
 
-    // For legacy compat: extract_final_message scans the text for the last JSON
-    // object line. This is used when structured_output is None and SAP is not
-    // available (e.g. in older tests that don't use SAP).
-    // When text is prose (markdown-fenced), the scan returns None and SAP
-    // handles recovery at the spawn level.
-    let final_message_out = final_message_text.as_deref().and_then(extract_final_message);
-
-    (structured_output, final_message_out, error_subtype)
+    // Return the raw result.result text directly. Earlier versions filtered
+    // through extract_final_message (last-line JSON scan) which returned None
+    // for multi-line pretty-printed envelopes — drive's Layer 2 then had no
+    // text to feed SAP. The raw text lets SAP do its work; legacy line-scan
+    // is still available as drive's Layer 3 against `RunnerOutput.stdout`.
+    (structured_output, final_message_text, error_subtype)
 }
 
 /// Walk stream-json JSONL stdout and return the raw text from the terminal
@@ -379,20 +376,28 @@ impl Runner for ClaudeCodeRunner {
             );
         }
 
-        // Three-layer extraction:
+        // Three-layer extraction at the runner level:
         // Layer 1 (SDK): result.structured_output populated by claude CLI schema validation.
-        // Layer 2 (SAP): extract envelope from result.result text (markdown-fenced prose fallback).
-        // Layer 3 (legacy): extract_final_message last-line scan (mock/legacy compat).
+        // Layer 2 (SAP): extract envelope from result.result text without schema enforcement —
+        //                inject the agent role after extraction (the model often omits the
+        //                role-tag because it treats it as orchestrator metadata, not envelope
+        //                content). Drive's `AgentEnvelope` uses `serde(tag = "role")` so the
+        //                role must be present at deserialise time.
+        // Layer 3 (legacy): drive owns this layer; runner does not pre-scan stdout for stray
+        //                JSON because intermediate stream-json events parse as JSON objects
+        //                and would be mistaken for the envelope.
         let (structured_output, structured_output_source) = if sdk_structured_output.is_some() {
             (sdk_structured_output, Some("sdk"))
         } else {
-            // Try SAP on the raw result text.
             let result_text = extract_result_text_from_stream_json(&stdout);
             let sap_result = result_text.as_deref().and_then(|text| {
-                // Parse schema for validation if available.
-                let schema_val = schema
-                    .and_then(|s| serde_json::from_str(s).ok());
-                extract_envelope_from_text(text, schema_val.as_ref())
+                extract_envelope_from_text(text, None).map(|mut value| {
+                    if let serde_json::Value::Object(ref mut map) = &mut value {
+                        map.entry("role".to_string())
+                            .or_insert_with(|| serde_json::Value::String(role.to_string()));
+                    }
+                    value
+                })
             });
             if sap_result.is_some() {
                 (sap_result, Some("sap"))
@@ -401,8 +406,10 @@ impl Runner for ClaudeCodeRunner {
             }
         };
 
-        // Fall back to legacy line-scan if stream-json parse found nothing.
-        let final_message = stream_final_message.or_else(|| extract_final_message(&stdout));
+        // final_message holds the raw result.result text from the terminal result event.
+        // Drive's Layer 3 falls back to its own last-line scan over `stdout` if needed
+        // (mock fixtures construct RunnerOutput directly and bypass this path).
+        let final_message = stream_final_message;
 
         Ok(RunnerOutput {
             stdout,

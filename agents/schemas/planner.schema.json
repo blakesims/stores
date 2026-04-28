@@ -4,7 +4,9 @@
   "title": "PlannerEnvelope",
   "description": "Structured output envelope for the planner agent role.",
   "type": "object",
-  "required": ["role", "phases"],
+  "required": [
+    "phases"
+  ],
   "additionalProperties": false,
   "properties": {
     "reasoning": {

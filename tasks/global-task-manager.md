@@ -6,7 +6,6 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T004 | Schema-validated agent envelope via `--json-schema` | High | 3 | EXECUTING_PHASE_3 (attempt 2) | [main.md](./active/T004-schema-validated-envelope/main.md) |
 
 Next available task id: T005
 
@@ -16,6 +15,7 @@ Next available task id: T005
 
 | ID | Task Name | Completed | Link |
 |:---|:----------|:----------|:-----|
+| T004 | Schema-validated agent envelope via `--json-schema` | 2026-04-28 | [main.md](./completed/T004-schema-validated-envelope/main.md) |
 | T003 | Framework-bundled workflow agents + runtime-agnostic orchestrator | 2026-04-28 | [main.md](./completed/T003-bundled-agents-and-drive/main.md) |
 | T002 | Tasks store on β architecture (workflow engine) | 2026-04-26 | [main.md](./completed/T002-tasks-store-v02/main.md) |
 | T001 | Stores Framework v0.1 | 2026-04-26 | [main.md](./completed/T001-stores-framework-v01/main.md) |

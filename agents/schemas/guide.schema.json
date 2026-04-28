@@ -4,7 +4,10 @@
   "title": "GuideEnvelope",
   "description": "Structured output envelope for the guide agent role.",
   "type": "object",
-  "required": ["role", "action", "summary"],
+  "required": [
+    "action",
+    "summary"
+  ],
   "additionalProperties": false,
   "properties": {
     "summary": {

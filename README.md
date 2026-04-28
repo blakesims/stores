@@ -1,6 +1,8 @@
 # stores
 
-`stores` is a schema-driven store framework with a single binary CLI. v0.3 ships with three built-in stores (`observations`, `gate`, `tasks`) and a runtime-agnostic workflow orchestrator. Define a YAML schema, `stores install` it, and every field rule (required, enum, pattern, `required_when`, per-field actor authority) is enforced at write time. The `tasks` store adds a full multi-agent workflow engine with state machine, cycle guards, briefing templates, and deterministic main.md rendering.
+`stores` is a schema-driven store framework with a single binary CLI. v0.4 ships with three built-in stores (`observations`, `gate`, `tasks`) and a runtime-agnostic workflow orchestrator. Define a YAML schema, `stores install` it, and every field rule (required, enum, pattern, `required_when`, per-field actor authority) is enforced at write time. The `tasks` store adds a full multi-agent workflow engine with state machine, cycle guards, briefing templates, and deterministic main.md rendering.
+
+**v0.4 — schema-validated agent envelope.** Bundled agents are validated via `claude -p --json-schema` (Anthropic SDK structured outputs). When the SDK validates an envelope, drive consumes `result.structured_output` directly. When the agent emits its envelope as prose (markdown-fenced JSON in the assistant text), drive falls back to a Schema-Aligned Parser (BAML-style). Full stream-json transcripts of every spawn are written to `.stores/runs/<session-id>.jsonl` for postmortem.
 
 ## Quickstart
 
@@ -62,6 +64,8 @@ stores tasks T001 guide --claude-code
 |---|---|---|
 | *(none, default)* | `--mock` only | Testing, CI, offline |
 | `--features runner-claude-code` | `--mock`, `--claude-code` | Production autonomous runs |
+
+The `runner-claude-code` runner requires a recent `claude` CLI (with `--json-schema`, `--session-id`, and `--output-format stream-json --verbose` support). Each spawn writes a JSONL transcript to `.stores/runs/<session-id>.jsonl`; drive logs the parse layer that won (`source=sdk|sap|legacy`) on each submit.
 
 Build for testing only:
 ```bash

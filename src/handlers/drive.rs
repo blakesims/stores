@@ -556,19 +556,22 @@ fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(Ag
         return Ok((envelope, "sdk"));
     }
 
-    // ── Layer 2: SAP — extract from final_message text with schema ───────────
+    // ── Layer 2: SAP — extract from final_message text, inject role ──────────
+    // Schema validation is intentionally NOT applied here. Models often emit
+    // the envelope without the `role` tag (treating role as orchestrator
+    // metadata); we extract any well-formed JSON object from the prose and
+    // inject the role ourselves. AgentEnvelope's `serde(tag = "role")`
+    // deserialiser is the authoritative shape gate.
     if let Some(fm) = &out.final_message {
         if !fm.trim().is_empty() {
-            // Look up the bundled schema for this role.
-            let schema_value: Option<serde_json::Value> = BUNDLED_AGENT_SCHEMAS
-                .iter()
-                .find(|(n, _)| *n == agent_role_normalized)
-                .and_then(|(_, s)| serde_json::from_str(s).ok());
-
-            if let Some(candidate) = crate::runner::sap::extract_envelope_from_text(
-                fm,
-                schema_value.as_ref(),
-            ) {
+            if let Some(mut candidate) =
+                crate::runner::sap::extract_envelope_from_text(fm, None)
+            {
+                if let serde_json::Value::Object(ref mut map) = &mut candidate {
+                    map.entry("role".to_string()).or_insert_with(|| {
+                        serde_json::Value::String(agent_role_normalized.to_string())
+                    });
+                }
                 let envelope = serde_json::from_value::<AgentEnvelope>(candidate.clone())
                     .map_err(|e| {
                         anyhow::anyhow!("SAP candidate deserialise failed: {e}\nvalue: {candidate}")
