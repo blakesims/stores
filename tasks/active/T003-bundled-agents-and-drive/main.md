@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_7
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -555,6 +555,18 @@ _Code-reviewer agent fills this section per phase._
 - **Minor findings (non-blocking):** (m1) plan with empty `phases:[]` array renders `phase=N/0` instead of `N/-` — `Some(0)` should fall back to None in the formatter (live-verified edge case); (m2) no `should_print` test for `blocked_reason` change — coverage gap in an otherwise-complete matrix; (m3) two `clippy::map_identity` instances `prev_keys.get(id).map(|k| k)` at status.rs:331, 344; (m4) sleep loop subtracts `chunk` instead of `sleep_for` from remaining — equivalent under saturating-sub but reads sloppily.
 
 > Details: code-review-phase-5.md
+
+### Phase 6: Guide handlers — `gate <id> guide` (full) + `tasks <id> guide` (stub)
+- **Gate:** PASS
+- **Issues Found:** 0c/0M/4m
+- **Revision Count:** 0/3
+- **Verified:** All 6 ACs (6.1–6.6). `cargo test handlers::guide` 16/16 (re-run 2× no flakes); full suite 354/354 (was 338 → +16 new); `cargo build` clean (default + `runner-claude-code` + `--no-default-features`). Live: `stores gate G001 guide --claude-code` rejected with "unexpected argument '--claude-code'" when feature absent → feature gating proven. `agents/guide.md` parser-test substrings all hit (5 verbs + "FORBIDDEN" + "stores gate answer" write-back verb). `build_gate_brief` emits gate row + linked-task + recent-plan-reviews + last-2-cycles + verbs-list; `build_tasks_brief` emits task row + next-action + last review.
+- **AC6.5 verdict:** ACCEPTED. `check_gate_transition` pure-function decomposition cleanly tests the policy (4 transitions covered); handler-wiring tests exercise spawn → status-after read → policy check; integration loop with real DB-write-back is correctly out-of-scope for unit tests in v0.3.
+- **`gate`-store special-case verdict:** ACCEPTED as clean-enough seam. Hard-coded `if schema.name == "gate"` in `dynamic.rs:232-234` is honest about being v0.3-only; alternative (schema-level `extra_verbs:`) would over-engineer for one consumer. Subtle dedup asymmetry recorded as m1 — unreachable today, flag for v0.4.
+- **Public-API delta:** 6 new pub items, all in `handlers::guide` (`pub mod`, `pub MockFixtureItem`, `pub GateGuideArgs`, `pub TasksGuideArgs`, `pub run_gate_guide`, `pub run_tasks_guide`). Internal helpers properly `pub(crate)`. No leakage to installed CLI surface beyond the `guide` subcommand on `gate` + `tasks`.
+- **Minor findings (non-blocking):** (m1) `WORKFLOW_VERBS` dedup at `dynamic.rs:253` only fires for workflow schemas — `gate` branch bypasses it; harmless today but asymmetric. (m2) `MockFixtureItem` is duplicated as `pub struct` in `handlers::drive` and `handlers::guide`; lift to common module in v0.4. (m3) `extract_plan_review_log` dumps the entire array, not "recent" — spec wording loose, not a defect, but consider `.take(2)` like cycles. (m4) Test `gate_guide_exits_zero_when_gate_answered_by_db_update` is misnamed — body comment admits it only verifies `read_gate_status` round-trip; the 4 `check_gate_transition_*` tests carry the actual policy coverage.
+
+> Details: code-review-phase-6.md
 
 ---
 
