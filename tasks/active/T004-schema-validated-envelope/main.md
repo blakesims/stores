@@ -488,7 +488,7 @@ Phase 3 smoke surfaced three real issues that invalidate the original "schema va
 
 **Status:** CODE_REVIEW
 
-**Commit:** TBD (filled after commit)
+**Commit:** c4c8fb5
 
 **Files changed:**
 - `src/handlers/drive.rs` (parse_envelope rewritten as 3-layer sdk→sap→legacy fallback; call site updated to destructure (envelope, source_tag); submitted eprintln extended with `source=...`; 4 new tests; existing test call sites updated to new signature)
