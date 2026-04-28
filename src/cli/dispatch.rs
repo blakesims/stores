@@ -124,12 +124,16 @@ pub fn dispatch(
                     let mock_fixture = sub.get_one::<String>("mock").map(std::path::PathBuf::from);
                     #[cfg(feature = "runner-claude-code")]
                     let claude_code = sub.get_flag("claude-code");
+                    #[cfg(feature = "runner-claude-code")]
+                    let testing = sub.get_flag("testing");
                     let args = handlers::drive::DriveArgs {
                         display_id,
                         auto,
                         mock_fixture,
                         #[cfg(feature = "runner-claude-code")]
                         claude_code,
+                        #[cfg(feature = "runner-claude-code")]
+                        testing,
                         max_iters,
                     };
                     handlers::drive::run_drive(schema, args)?;

@@ -575,13 +575,25 @@ fn build_drive_cmd() -> Command {
 
     // --claude-code only available when the feature is compiled in (AC3.3).
     #[cfg(feature = "runner-claude-code")]
-    let cmd = cmd.arg(
-        Arg::new("claude-code")
-            .long("claude-code")
-            .action(ArgAction::SetTrue)
-            .help("Use the claude-code runner (requires runner-claude-code feature)")
-            .required(false),
-    );
+    let cmd = cmd
+        .arg(
+            Arg::new("claude-code")
+                .long("claude-code")
+                .action(ArgAction::SetTrue)
+                .help("Use the claude-code runner (requires runner-claude-code feature)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("testing")
+                .long("testing")
+                .action(ArgAction::SetTrue)
+                .help(
+                    "Force all agents to use the haiku model (cheap iteration / \
+                     prompt + runner contract smoke testing). Only meaningful with \
+                     --claude-code.",
+                )
+                .required(false),
+        );
 
     cmd
 }

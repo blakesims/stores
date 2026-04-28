@@ -58,17 +58,28 @@ use super::{Runner, RunnerOutput};
 
 /// Runner that shells out to the `claude` CLI (`claude -p`).
 ///
-/// Constructed via `ClaudeCodeRunner::new()`. The `claude` binary must be on
-/// `PATH` at `spawn` time; if it is not found, `spawn` returns `Err`.
-pub struct ClaudeCodeRunner;
+/// Constructed via `ClaudeCodeRunner::new()` (default model) or
+/// `ClaudeCodeRunner::with_model(...)` (forces a specific model — useful for
+/// `--testing` / `haiku` smoke runs). The `claude` binary must be on `PATH` at
+/// `spawn` time; if it is not found, `spawn` returns `Err`.
+pub struct ClaudeCodeRunner {
+    /// If `Some`, passes `--model=<value>` to claude on every spawn. If `None`,
+    /// claude uses its default model.
+    model: Option<String>,
+}
 
 impl ClaudeCodeRunner {
-    /// Create a new `ClaudeCodeRunner`.
-    ///
-    /// No arguments are needed for v0.3. Future versions may accept model
-    /// selection, budget caps, etc.
+    /// Create a runner that uses claude's default model.
     pub fn new() -> Self {
-        Self
+        Self { model: None }
+    }
+
+    /// Create a runner that forces a specific model (e.g. `"haiku"`, `"sonnet"`,
+    /// `"opus"`, or a full model id).
+    pub fn with_model(model: impl Into<String>) -> Self {
+        Self {
+            model: Some(model.into()),
+        }
     }
 }
 
@@ -143,20 +154,31 @@ impl Runner for ClaudeCodeRunner {
             .arg("--output-format")
             .arg("text");
 
+        // Optional model override (for --testing / --claude-code-model).
+        if let Some(m) = &self.model {
+            cmd.arg(format!("--model={m}"));
+        }
+
         // Per-role tool whitelist from the agent's frontmatter (preferred).
         // Falls back to bypassPermissions if frontmatter is absent — this is a
         // safety net for unbundled agents; bundled agents always declare tools.
+        //
+        // NOTE: `--allowed-tools` is variadic in the claude CLI (`<tools...>`):
+        // passed as two args (`--allowed-tools VALUE`) it greedily consumes any
+        // subsequent positional, including the trailing `brief`. Use the
+        // `--flag=value` form so it binds tightly and `brief` stays the
+        // positional prompt. Same for `--permission-mode`.
         match extract_tools_from_frontmatter(system_prompt) {
             Some(tools) => {
-                cmd.arg("--allowed-tools").arg(tools.join(" "));
+                cmd.arg(format!("--allowed-tools={}", tools.join(" ")));
             }
             None => {
                 eprintln!(
                     "warning: agent '{}' has no `tools:` in frontmatter; \
-                     falling back to --permission-mode bypassPermissions",
+                     falling back to --permission-mode=bypassPermissions",
                     role
                 );
-                cmd.arg("--permission-mode").arg("bypassPermissions");
+                cmd.arg("--permission-mode=bypassPermissions");
             }
         }
 

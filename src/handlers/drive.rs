@@ -144,6 +144,11 @@ pub struct DriveArgs {
     /// Use claude-code runner (feature-gated).
     #[cfg(feature = "runner-claude-code")]
     pub claude_code: bool,
+    /// Force all agents to use the `haiku` model — cheap iteration / smoke
+    /// testing of the runner+prompt contract. Only meaningful with
+    /// `--claude-code`.
+    #[cfg(feature = "runner-claude-code")]
+    pub testing: bool,
     /// Maximum loop iterations before hard-abort (AC3.5, default 50).
     pub max_iters: usize,
 }
@@ -287,9 +292,15 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
         return Ok(Box::new(MockRunner::new(outputs)));
     }
 
-    // --claude-code (feature-gated).
+    // --claude-code (feature-gated). `--testing` forces the haiku model for
+    // every spawn, equivalent to `--claude-code-model=haiku`.
     #[cfg(feature = "runner-claude-code")]
     if args.claude_code {
+        if args.testing {
+            return Ok(Box::new(crate::runner::ClaudeCodeRunner::with_model(
+                "haiku",
+            )));
+        }
         return crate::runner::select("claude-code");
     }
 
@@ -854,6 +865,8 @@ mod tests {
             mock_fixture: None,
             #[cfg(feature = "runner-claude-code")]
             claude_code: false,
+            #[cfg(feature = "runner-claude-code")]
+            testing: false,
             max_iters: 50,
         };
 
@@ -901,6 +914,8 @@ mod tests {
             mock_fixture: None,
             #[cfg(feature = "runner-claude-code")]
             claude_code: false,
+            #[cfg(feature = "runner-claude-code")]
+            testing: false,
             max_iters: 50,
         };
 

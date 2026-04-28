@@ -41,6 +41,9 @@ pub mod mock;
 #[cfg(feature = "runner-claude-code")]
 pub mod claude_code;
 
+#[cfg(feature = "runner-claude-code")]
+pub use claude_code::ClaudeCodeRunner;
+
 /// The output produced by a single `Runner::spawn` call.
 #[derive(Debug, Clone)]
 pub struct RunnerOutput {
