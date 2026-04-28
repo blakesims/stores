@@ -403,12 +403,16 @@ pub(crate) fn drive_loop(
         // ── Step 2d: spawn runner ─────────────────────────────────────────
         let run_out = runner.spawn(&agent_name_normalized, system_prompt, &brief_markdown)?;
 
-        // AC3.6: non-zero exit → surface stderr, no submit.
+        // AC3.6: non-zero exit → surface stdout + stderr, no submit.
+        // (Some CLIs route auth / login errors to stdout, so always include both.)
         if run_out.exit_code != 0 {
             eprintln!(
                 "[{display_id}] runner exited with code {}; aborting without submitting",
                 run_out.exit_code
             );
+            if !run_out.stdout.is_empty() {
+                eprintln!("runner stdout:\n{}", run_out.stdout);
+            }
             if !run_out.stderr.is_empty() {
                 eprintln!("runner stderr:\n{}", run_out.stderr);
             }

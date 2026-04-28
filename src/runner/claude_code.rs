@@ -12,19 +12,24 @@
 /// claude -p \
 ///   --append-system-prompt <system_prompt> \
 ///   --output-format text \
-///   --bare \
 ///   <brief>
 /// ```
 ///
-/// `--bare` disables CLAUDE.md auto-discovery, hook firing, and background
-/// prefetches so the runner is fully deterministic. `--output-format text`
-/// emits the agent's response verbatim (default — no claude-event wrapper);
-/// the agent's contract is to terminate its output with a single role-keyed
-/// JSON object on its final non-empty line.
+/// `--output-format text` emits the agent's response verbatim (default — no
+/// claude-event wrapper); the agent's contract is to terminate its output
+/// with a single role-keyed JSON object on its final non-empty line.
 ///
-/// Note: `--output-format stream-json` would require pairing with `--verbose`
-/// per the current claude CLI; text mode is simpler and matches the agent
-/// contract one-to-one.
+/// Notes:
+/// - `--output-format stream-json` would require pairing with `--verbose` per
+///   the current claude CLI; text mode is simpler and matches the agent
+///   contract one-to-one.
+/// - `--bare` is intentionally NOT passed: bare mode disables OAuth/keychain
+///   auth and requires ANTHROPIC_API_KEY in the environment. Without it,
+///   headless `claude` reads the user's normal OAuth credentials. The cost is
+///   that CLAUDE.md auto-discovery and project hooks are active during the
+///   spawned session — agents should treat their `--append-system-prompt`
+///   contents as authoritative and ignore any project-side bleed-through.
+///   v0.4 may revisit this if hook interaction becomes a real problem.
 ///
 /// Brief is passed as the positional prompt argument (not stdin) because `claude
 /// -p` accepts the prompt as a trailing CLI argument and that path does not
@@ -92,7 +97,6 @@ impl Runner for ClaudeCodeRunner {
             .arg(system_prompt)
             .arg("--output-format")
             .arg("text")
-            .arg("--bare")
             .arg(brief)
             .output()
             .context("failed to launch `claude`; ensure it is installed and on PATH")?;
@@ -158,7 +162,6 @@ exit 0
             .arg("You are a planner.")
             .arg("--output-format")
             .arg("text")
-            .arg("--bare")
             .arg("Plan this task.")
             .output()
             .expect("shim should run");
@@ -235,7 +238,6 @@ exit 0
             .arg("-p")
             .arg("--append-system-prompt").arg("sys")
             .arg("--output-format").arg("text")
-            .arg("--bare")
             .arg("do work")
             .output()
             .expect("shim run");
