@@ -74,6 +74,10 @@ fn main() -> Result<()> {
                 println!("  {name}");
             }
         }
+        Some(("setup", sub)) => {
+            let global = *sub.get_one::<bool>("global").unwrap_or(&false);
+            cli::setup::run(global)?;
+        }
         Some(("skills", sub)) => {
             use cli::skills::{SkillsCmd, run as skills_run};
             let cmd = match sub.subcommand() {

@@ -113,18 +113,32 @@ fn dirs_home() -> Result<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Process-wide CWD lock for tests
+//
+// Any test module that calls `std::env::set_current_dir` must hold this lock
+// for the duration of the CWD-sensitive code to prevent races with other
+// parallel tests.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub(crate) fn test_cwd_lock() -> &'static std::sync::Mutex<()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+// ---------------------------------------------------------------------------
 // Tests  (Task 1.6 — AC1.6)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     #[allow(unused_imports)]
     use std::path::Path;
 
     /// Serialize tests that mutate `current_dir` so they don't race.
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
+    fn cwd_lock() -> &'static std::sync::Mutex<()> { test_cwd_lock() }
 
     /// Create a temporary directory containing a bare git repo and test worktree.
     /// Returns (tmp_dir, worktree_path, expected_stores_dir).
@@ -162,7 +176,7 @@ mod tests {
 
     #[test]
     fn git_common_dir_errors_outside_git() {
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = cwd_lock().lock().unwrap();
         // Run in a temp dir that is not a git repo.
         let tmp = tempfile::tempdir().expect("tempdir failed");
         let old_cwd = std::env::current_dir().unwrap();
@@ -186,7 +200,7 @@ mod tests {
 
     #[test]
     fn stores_dir_for_repo_errors_outside_git() {
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = cwd_lock().lock().unwrap();
         let tmp = tempfile::tempdir().expect("tempdir failed");
         let old_cwd = std::env::current_dir().unwrap();
 
@@ -203,7 +217,7 @@ mod tests {
 
     #[test]
     fn stores_dir_for_repo_in_git_repo() {
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = cwd_lock().lock().unwrap();
         // Only run if git is available.
         if std::process::Command::new("git").arg("--version").output().is_err() {
             return;

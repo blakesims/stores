@@ -84,6 +84,17 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
             Command::new("list-installable")
                 .about("List stores bundled with the binary (run `stores install <name>` to install one)"),
         )
+        // Setup subcommand — single-command bootstrap
+        .subcommand(
+            Command::new("setup")
+                .about("Bootstrap: init + install all bundled stores + install all skills and agents")
+                .arg(
+                    Arg::new("global")
+                        .long("global")
+                        .action(ArgAction::SetTrue)
+                        .help("Install skills and agents to ~/.claude/ instead of ./.claude/"),
+                ),
+        )
         // Skills subcommand
         .subcommand(
             Command::new("skills")
