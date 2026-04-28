@@ -1,0 +1,50 @@
+[
+  {
+    "stdout": "{\"role\": \"planner\", \"phases\": [{\"name\": \"Phase 1: first phase\", \"objective\": \"Do first thing\", \"tasks\": [\"t1.1: first task\"], \"acceptance_criteria\": [\"ac1.1: first done\"], \"files\": [\"src/f1.rs\"], \"dependencies\": []}, {\"name\": \"Phase 2: second phase\", \"objective\": \"Do second thing\", \"tasks\": [\"t2.1: second task\"], \"acceptance_criteria\": [\"ac2.1: second done\"], \"files\": [\"src/f2.rs\"], \"dependencies\": []}], \"decision_matrix\": []}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"planner\", \"phases\": [{\"name\": \"Phase 1: first phase\", \"objective\": \"Do first thing\", \"tasks\": [\"t1.1: first task\"], \"acceptance_criteria\": [\"ac1.1: first done\"], \"files\": [\"src/f1.rs\"], \"dependencies\": []}, {\"name\": \"Phase 2: second phase\", \"objective\": \"Do second thing\", \"tasks\": [\"t2.1: second task\"], \"acceptance_criteria\": [\"ac2.1: second done\"], \"files\": [\"src/f2.rs\"], \"dependencies\": []}], \"decision_matrix\": []}"
+  },
+  {
+    "stdout": "{\"role\": \"plan-reviewer\", \"gate\": \"READY\", \"summary\": \"Plan approved. Both phases have clear objectives and testable ACs.\", \"open_questions\": []}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"plan-reviewer\", \"gate\": \"READY\", \"summary\": \"Plan approved. Both phases have clear objectives and testable ACs.\", \"open_questions\": []}"
+  },
+  {
+    "stdout": "{\"role\": \"executor\", \"summary\": \"Phase 1 complete. Implemented first thing.\", \"commit\": \"aabbcc1\", \"files_changed\": [\"src/f1.rs\"]}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"executor\", \"summary\": \"Phase 1 complete. Implemented first thing.\", \"commit\": \"aabbcc1\", \"files_changed\": [\"src/f1.rs\"]}"
+  },
+  {
+    "stdout": "{\"role\": \"code-reviewer\", \"gate\": \"PASS\", \"summary\": \"Phase 1 clean. No issues.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 0}}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"code-reviewer\", \"gate\": \"PASS\", \"summary\": \"Phase 1 clean. No issues.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 0}}"
+  },
+  {
+    "stdout": "{\"role\": \"executor\", \"summary\": \"Phase 2 first attempt. Needs more work.\", \"commit\": \"aabbcc2a\", \"files_changed\": [\"src/f2.rs\"]}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"executor\", \"summary\": \"Phase 2 first attempt. Needs more work.\", \"commit\": \"aabbcc2a\", \"files_changed\": [\"src/f2.rs\"]}"
+  },
+  {
+    "stdout": "{\"role\": \"code-reviewer\", \"gate\": \"REVISE\", \"summary\": \"Phase 2 has a minor issue in the implementation.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 1}}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"code-reviewer\", \"gate\": \"REVISE\", \"summary\": \"Phase 2 has a minor issue in the implementation.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 1}}"
+  },
+  {
+    "stdout": "{\"role\": \"executor\", \"summary\": \"Phase 2 revised. Fixed the minor issue.\", \"commit\": \"aabbcc2b\", \"files_changed\": [\"src/f2.rs\"]}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"executor\", \"summary\": \"Phase 2 revised. Fixed the minor issue.\", \"commit\": \"aabbcc2b\", \"files_changed\": [\"src/f2.rs\"]}"
+  },
+  {
+    "stdout": "{\"role\": \"code-reviewer\", \"gate\": \"PASS\", \"summary\": \"Phase 2 revised implementation is correct. All ACs satisfied.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 0}}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"code-reviewer\", \"gate\": \"PASS\", \"summary\": \"Phase 2 revised implementation is correct. All ACs satisfied.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 0}}"
+  }
+]

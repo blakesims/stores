@@ -1,0 +1,38 @@
+[
+  {
+    "stdout": "{\"role\": \"planner\", \"phases\": [{\"name\": \"Phase 1: first phase\", \"objective\": \"Do first thing\", \"tasks\": [\"t1.1: first task\"], \"acceptance_criteria\": [\"ac1.1: first done\"], \"files\": [\"src/f1.rs\"], \"dependencies\": []}, {\"name\": \"Phase 2: second phase\", \"objective\": \"Do second thing\", \"tasks\": [\"t2.1: second task\"], \"acceptance_criteria\": [\"ac2.1: second done\"], \"files\": [\"src/f2.rs\"], \"dependencies\": []}], \"decision_matrix\": []}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"planner\", \"phases\": [{\"name\": \"Phase 1: first phase\", \"objective\": \"Do first thing\", \"tasks\": [\"t1.1: first task\"], \"acceptance_criteria\": [\"ac1.1: first done\"], \"files\": [\"src/f1.rs\"], \"dependencies\": []}, {\"name\": \"Phase 2: second phase\", \"objective\": \"Do second thing\", \"tasks\": [\"t2.1: second task\"], \"acceptance_criteria\": [\"ac2.1: second done\"], \"files\": [\"src/f2.rs\"], \"dependencies\": []}], \"decision_matrix\": []}"
+  },
+  {
+    "stdout": "{\"role\": \"plan-reviewer\", \"gate\": \"READY\", \"summary\": \"Plan looks good, two clear phases with testable ACs.\", \"open_questions\": []}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"plan-reviewer\", \"gate\": \"READY\", \"summary\": \"Plan looks good, two clear phases with testable ACs.\", \"open_questions\": []}"
+  },
+  {
+    "stdout": "{\"role\": \"executor\", \"summary\": \"Phase 1 complete. Implemented first thing.\", \"commit\": \"aabbcc1\", \"files_changed\": [\"src/f1.rs\"]}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"executor\", \"summary\": \"Phase 1 complete. Implemented first thing.\", \"commit\": \"aabbcc1\", \"files_changed\": [\"src/f1.rs\"]}"
+  },
+  {
+    "stdout": "{\"role\": \"code-reviewer\", \"gate\": \"PASS\", \"summary\": \"Phase 1 implementation is clean and complete.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 0}}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"code-reviewer\", \"gate\": \"PASS\", \"summary\": \"Phase 1 implementation is clean and complete.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 0}}"
+  },
+  {
+    "stdout": "{\"role\": \"executor\", \"summary\": \"Phase 2 complete. Implemented second thing.\", \"commit\": \"aabbcc2\", \"files_changed\": [\"src/f2.rs\"]}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"executor\", \"summary\": \"Phase 2 complete. Implemented second thing.\", \"commit\": \"aabbcc2\", \"files_changed\": [\"src/f2.rs\"]}"
+  },
+  {
+    "stdout": "{\"role\": \"code-reviewer\", \"gate\": \"PASS\", \"summary\": \"Phase 2 implementation is clean and complete. All ACs satisfied.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 0}}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\": \"code-reviewer\", \"gate\": \"PASS\", \"summary\": \"Phase 2 implementation is clean and complete. All ACs satisfied.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 0}}"
+  }
+]
