@@ -627,6 +627,7 @@ dependencies = [
  "anyhow",
  "clap",
  "handlebars",
+ "libc",
  "regex",
  "rusqlite",
  "serde",

@@ -1,0 +1,655 @@
+/// `status` handler — workflow telemetry frames for live tailing.
+///
+/// # `status` vs `show` distinction
+///
+/// `stores tasks show <id>` (existing v0.2 verb) prints the **full task row** —
+/// every column, as a debug dump.  `stores tasks status <id>` prints a
+/// **compact workflow telemetry frame**: a one-liner summarising
+/// `current_phase / current_cycle / status / next-action / blocked`.  They are
+/// not redundant: `show` is a debug dump; `status --follow` is a live tail.
+///
+/// # Frame format (single-task)
+/// ```text
+/// [HH:MM:SS] T001 status=executing phase=2/3 cycle=1 next=executor blocked=false
+/// ```
+///
+/// # Frame format (multi-task, no id)
+/// ```text
+/// [HH:MM:SS]
+///   T001 status=executing phase=2/3 cycle=1 next=executor blocked=false
+///   T002 status=plan_review phase=-/- cycle=- next=plan-reviewer blocked=false
+/// ```
+///
+/// # AC5.5 dedup
+/// A state key `(status, current_phase, current_cycle, blocked_reason)` is
+/// hashed per task.  If unchanged from the prior frame, the line is suppressed.
+/// The first frame is always printed.
+///
+/// # AC5.4 Ctrl-C
+/// SIGINT is caught via a static `AtomicBool`.  The last printed frame stays on
+/// screen; the loop exits with code 130.
+///
+/// # AC5.6 bounded testing
+/// `--max-iters` (hidden) caps loop iterations; tests pass a small value to
+/// avoid sleeping.
+use anyhow::{bail, Result};
+use rusqlite::Connection;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::db;
+use crate::paths::db_path;
+
+// ---------------------------------------------------------------------------
+// SIGINT flag — set by signal handler, polled by the loop
+// ---------------------------------------------------------------------------
+
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Install a SIGINT handler that sets `INTERRUPTED`.  Called once on entry.
+/// Safe to call multiple times (idempotent for tests).
+fn install_sigint_handler() {
+    // Use the `signal` syscall via libc.  This is the only direct `unsafe` block.
+    unsafe {
+        libc::signal(libc::SIGINT, sigint_handler as *const () as libc::sighandler_t);
+    }
+}
+
+extern "C" fn sigint_handler(_: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
+// Public args struct
+// ---------------------------------------------------------------------------
+
+pub struct StatusArgs {
+    /// Optional display ID.  If None → multi-task mode.
+    pub display_id: Option<String>,
+    /// If true, poll in a loop until terminal.
+    pub follow: bool,
+    /// Interval between frames in milliseconds.
+    pub interval_ms: u64,
+    /// Maximum iterations (for testing; default usize::MAX).
+    pub max_iters: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Task state row (lightweight — no EntryMap needed)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskState {
+    pub display_id: String,
+    pub status: String,
+    pub current_phase: Option<i64>,
+    pub total_phases: Option<i64>,
+    pub current_cycle: Option<i64>,
+    pub blocked_reason: Option<String>,
+}
+
+/// Dedup key: hash the fields that define "same state".
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StateKey {
+    pub status: String,
+    pub current_phase: Option<i64>,
+    pub current_cycle: Option<i64>,
+    pub blocked_reason: Option<String>,
+}
+
+impl TaskState {
+    pub fn state_key(&self) -> StateKey {
+        StateKey {
+            status: self.status.clone(),
+            current_phase: self.current_phase,
+            current_cycle: self.current_cycle,
+            blocked_reason: self.blocked_reason.clone(),
+        }
+    }
+}
+
+/// Determine `next` agent label from status string (best-effort, no schema needed).
+fn next_from_status(status: &str) -> &'static str {
+    match status {
+        "planning" => "planner",
+        "plan_review" => "plan-reviewer",
+        "ready" | "executing" => "executor",
+        "code_review" => "code-reviewer",
+        "complete" => "-",
+        "blocked" => "-",
+        _ => "?",
+    }
+}
+
+/// Is this status a terminal state?
+fn is_terminal(status: &str) -> bool {
+    status == "complete" || status == "blocked"
+}
+
+// ---------------------------------------------------------------------------
+// Frame formatting
+// ---------------------------------------------------------------------------
+
+/// Current wall-clock time as `HH:MM:SS` (UTC).
+fn hms_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
+/// Format a single task line (no timestamp prefix).
+pub fn format_task_line(task: &TaskState) -> String {
+    let phase_str = match (task.current_phase, task.total_phases) {
+        (Some(p), Some(t)) => format!("{p}/{t}"),
+        (Some(p), None) => format!("{p}/-"),
+        _ => "-/-".to_string(),
+    };
+    let cycle_str = match task.current_cycle {
+        Some(c) => c.to_string(),
+        None => "-".to_string(),
+    };
+    let next = next_from_status(&task.status);
+    let blocked = task.blocked_reason.is_some() || task.status == "blocked";
+    format!(
+        "{id} status={status} phase={phase} cycle={cycle} next={next} blocked={blocked}",
+        id = task.display_id,
+        status = task.status,
+        phase = phase_str,
+        cycle = cycle_str,
+        next = next,
+        blocked = blocked,
+    )
+}
+
+/// Format a single-task frame.
+pub fn compute_status_frame(task: &TaskState) -> String {
+    format!("[{}] {}", hms_now(), format_task_line(task))
+}
+
+/// Format a multi-task frame.
+pub fn compute_multi_frame(tasks: &[TaskState]) -> String {
+    let ts = hms_now();
+    if tasks.is_empty() {
+        return format!("[{ts}] (no non-terminal tasks)");
+    }
+    let mut lines = vec![format!("[{ts}]")];
+    for t in tasks {
+        lines.push(format!("  {}", format_task_line(t)));
+    }
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// DB fetchers
+// ---------------------------------------------------------------------------
+
+/// Fetch a single task row by display_id from an open connection.
+pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
+    let row = conn.query_row(
+        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan \
+         FROM tasks WHERE display_id = ?1",
+        rusqlite::params![display_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        },
+    );
+    match row {
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            bail!("no task with display_id '{display_id}'")
+        }
+        Err(e) => bail!("db error: {e}"),
+        Ok((id, status, current_phase, current_cycle, blocked_reason, plan_json)) => {
+            let total_phases = plan_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .and_then(|v| v.get("phases").and_then(|p| p.as_array()).map(|a| a.len() as i64));
+            Ok(TaskState {
+                display_id: id,
+                status,
+                current_phase,
+                total_phases,
+                current_cycle,
+                blocked_reason,
+            })
+        }
+    }
+}
+
+/// Fetch all non-terminal task rows ordered by created_at.
+pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
+    let mut stmt = conn.prepare(
+        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan \
+         FROM tasks \
+         WHERE status NOT IN ('complete', 'blocked') \
+         ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        let (id, status, current_phase, current_cycle, blocked_reason, plan_json) = row?;
+        let total_phases = plan_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| v.get("phases").and_then(|p| p.as_array()).map(|a| a.len() as i64));
+        result.push(TaskState {
+            display_id: id,
+            status,
+            current_phase,
+            total_phases,
+            current_cycle,
+            blocked_reason,
+        });
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// AC5.5: change detection predicate
+// ---------------------------------------------------------------------------
+
+/// Returns true if the frame should be printed for this task.
+/// Always true on first frame (prev_key is None); true when key changed.
+pub fn should_print(prev_key: Option<&StateKey>, new_key: &StateKey) -> bool {
+    match prev_key {
+        None => true,
+        Some(prev) => prev != new_key,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
+/// Entry point called from dispatch.rs.
+pub fn run_status(args: StatusArgs) -> Result<()> {
+    install_sigint_handler();
+
+    let db = db_path()?;
+
+    if args.follow {
+        run_follow_loop(&db, args)
+    } else {
+        // Single-frame mode (AC5.1 / AC5.3 one-shot)
+        let conn = db::open(&db)?;
+        match &args.display_id {
+            Some(id) => {
+                let task = fetch_task(&conn, id)?;
+                println!("{}", compute_status_frame(&task));
+            }
+            None => {
+                let tasks = fetch_all_tasks(&conn)?;
+                println!("{}", compute_multi_frame(&tasks));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Polling follow loop (AC5.2 / AC5.3 / AC5.4 / AC5.5 / AC5.6).
+fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
+    // Per-task dedup map: display_id → last printed StateKey
+    let mut prev_keys: HashMap<String, StateKey> = HashMap::new();
+
+    let interval = std::time::Duration::from_millis(args.interval_ms);
+
+    for _iter in 0..args.max_iters {
+        // Check Ctrl-C (AC5.4)
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            std::process::exit(130);
+        }
+
+        let conn = db::open(db)?;
+
+        match &args.display_id {
+            Some(id) => {
+                let task = fetch_task(&conn, id)?;
+                let key = task.state_key();
+                if should_print(prev_keys.get(id).map(|k| k), &key) {
+                    println!("{}", compute_status_frame(&task));
+                    prev_keys.insert(id.clone(), key.clone());
+                }
+                if is_terminal(&task.status) {
+                    return Ok(());
+                }
+            }
+            None => {
+                let tasks = fetch_all_tasks(&conn)?;
+                // Print multi-frame if any task state changed
+                let any_changed = tasks.iter().any(|t| {
+                    let key = t.state_key();
+                    should_print(prev_keys.get(&t.display_id).map(|k| k), &key)
+                });
+                if any_changed {
+                    println!("{}", compute_multi_frame(&tasks));
+                    for t in &tasks {
+                        prev_keys.insert(t.display_id.clone(), t.state_key());
+                    }
+                }
+                if tasks.is_empty() {
+                    // All tasks reached terminal state
+                    return Ok(());
+                }
+            }
+        }
+
+        // Sleep between frames (skipped in tests with interval_ms=0)
+        if interval.as_millis() > 0 {
+            // Poll SIGINT during sleep by sleeping in small increments
+            let chunk = std::time::Duration::from_millis(50);
+            let mut remaining = interval;
+            while remaining > std::time::Duration::ZERO {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    std::process::exit(130);
+                }
+                let sleep_for = remaining.min(chunk);
+                std::thread::sleep(sleep_for);
+                remaining = remaining.saturating_sub(chunk);
+            }
+        }
+    }
+
+    // Exhausted max_iters — exit 0 (for tests; in production max_iters is usize::MAX)
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests (AC5.6)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use tempfile::tempdir;
+
+    // Minimal tasks schema DDL for tests (matches real schema shape).
+    const TEST_DDL: &str = "
+        CREATE TABLE tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            display_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'planning',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT NOT NULL DEFAULT 'human',
+            updated_by TEXT NOT NULL DEFAULT 'human',
+            title TEXT,
+            current_phase INTEGER,
+            current_cycle INTEGER,
+            blocked_reason TEXT,
+            plan TEXT,
+            cycles TEXT,
+            depends_on TEXT,
+            claimed_by TEXT,
+            claimed_at TEXT
+        );
+    ";
+
+    fn open_test_conn() -> (tempfile::TempDir, Connection) {
+        let dir = tempdir().unwrap();
+        let db_file = dir.path().join("test.db");
+        let conn = db::open(&db_file).unwrap();
+        conn.execute_batch(TEST_DDL).unwrap();
+        (dir, conn)
+    }
+
+    fn insert_task(
+        conn: &Connection,
+        display_id: &str,
+        status: &str,
+        phase: Option<i64>,
+        cycle: Option<i64>,
+        blocked_reason: Option<&str>,
+        total_phases: Option<usize>,
+    ) {
+        let plan_json = total_phases.map(|n| {
+            let phases: Vec<serde_json::Value> = (0..n)
+                .map(|i| serde_json::json!({"name": format!("Phase {}", i + 1)}))
+                .collect();
+            serde_json::to_string(&serde_json::json!({"phases": phases})).unwrap()
+        });
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, current_phase, current_cycle, blocked_reason, plan) \
+             VALUES (?1, ?2, '2026-01-01', '2026-01-01', 'human', 'human', \
+             'Test Task', ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                display_id,
+                status,
+                phase,
+                cycle,
+                blocked_reason,
+                plan_json,
+            ],
+        )
+        .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // AC5.1: single-frame mode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn single_frame_contains_required_fields() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T001", "executing", Some(2), Some(1), None, Some(3));
+
+        let task = fetch_task(&conn, "T001").unwrap();
+        let frame = compute_status_frame(&task);
+
+        // Timestamp prefix
+        assert!(frame.contains('[') && frame.contains(']'), "frame should have timestamp: {frame}");
+        assert!(frame.contains("T001"), "frame should contain id: {frame}");
+        assert!(frame.contains("status=executing"), "frame should contain status: {frame}");
+        assert!(frame.contains("phase=2/3"), "frame should contain phase: {frame}");
+        assert!(frame.contains("cycle=1"), "frame should contain cycle: {frame}");
+        assert!(frame.contains("next=executor"), "frame should contain next: {frame}");
+        assert!(frame.contains("blocked=false"), "frame should contain blocked: {frame}");
+    }
+
+    #[test]
+    fn single_frame_blocked_task() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T002", "blocked", None, None, Some("Needs human input"), None);
+
+        let task = fetch_task(&conn, "T002").unwrap();
+        let frame = compute_status_frame(&task);
+
+        assert!(frame.contains("status=blocked"), "frame should contain status=blocked: {frame}");
+        assert!(frame.contains("blocked=true"), "frame should contain blocked=true: {frame}");
+    }
+
+    // -----------------------------------------------------------------------
+    // AC5.3: multi-task frame
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multi_frame_contains_both_tasks() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T001", "executing", Some(2), Some(1), None, Some(3));
+        insert_task(&conn, "T002", "plan_review", None, None, None, None);
+
+        let tasks = fetch_all_tasks(&conn).unwrap();
+        assert_eq!(tasks.len(), 2, "should fetch 2 non-terminal tasks");
+
+        let frame = compute_multi_frame(&tasks);
+        assert!(frame.contains("T001"), "multi-frame should contain T001: {frame}");
+        assert!(frame.contains("T002"), "multi-frame should contain T002: {frame}");
+        assert!(frame.contains("status=executing"), "multi-frame should contain executing: {frame}");
+        assert!(frame.contains("status=plan_review"), "multi-frame should contain plan_review: {frame}");
+        // Both lines indented
+        assert!(frame.contains("  T001"), "T001 line should be indented: {frame}");
+        assert!(frame.contains("  T002"), "T002 line should be indented: {frame}");
+    }
+
+    #[test]
+    fn multi_frame_excludes_terminal_tasks() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T001", "complete", None, None, None, None);
+        insert_task(&conn, "T002", "blocked", None, None, Some("reason"), None);
+        insert_task(&conn, "T003", "executing", Some(1), Some(1), None, Some(2));
+
+        let tasks = fetch_all_tasks(&conn).unwrap();
+        assert_eq!(tasks.len(), 1, "should only fetch non-terminal tasks: {tasks:?}");
+        assert_eq!(tasks[0].display_id, "T003");
+    }
+
+    // -----------------------------------------------------------------------
+    // AC5.5: change detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn should_print_first_frame_always() {
+        let key = StateKey {
+            status: "executing".into(),
+            current_phase: Some(1),
+            current_cycle: Some(1),
+            blocked_reason: None,
+        };
+        assert!(should_print(None, &key), "first frame (None prev) should always print");
+    }
+
+    #[test]
+    fn should_print_same_state_suppressed() {
+        let key = StateKey {
+            status: "executing".into(),
+            current_phase: Some(1),
+            current_cycle: Some(1),
+            blocked_reason: None,
+        };
+        assert!(!should_print(Some(&key), &key), "identical state should be suppressed");
+    }
+
+    #[test]
+    fn should_print_on_status_change() {
+        let prev = StateKey {
+            status: "executing".into(),
+            current_phase: Some(1),
+            current_cycle: Some(1),
+            blocked_reason: None,
+        };
+        let next = StateKey {
+            status: "code_review".into(),
+            current_phase: Some(1),
+            current_cycle: Some(1),
+            blocked_reason: None,
+        };
+        assert!(should_print(Some(&prev), &next), "status change should print");
+    }
+
+    #[test]
+    fn should_print_on_phase_change() {
+        let prev = StateKey {
+            status: "executing".into(),
+            current_phase: Some(1),
+            current_cycle: Some(1),
+            blocked_reason: None,
+        };
+        let next = StateKey {
+            status: "executing".into(),
+            current_phase: Some(2),
+            current_cycle: Some(1),
+            blocked_reason: None,
+        };
+        assert!(should_print(Some(&prev), &next), "phase change should print");
+    }
+
+    #[test]
+    fn should_print_on_cycle_change() {
+        let prev = StateKey {
+            status: "executing".into(),
+            current_phase: Some(1),
+            current_cycle: Some(1),
+            blocked_reason: None,
+        };
+        let next = StateKey {
+            status: "executing".into(),
+            current_phase: Some(1),
+            current_cycle: Some(2),
+            blocked_reason: None,
+        };
+        assert!(should_print(Some(&prev), &next), "cycle change should print");
+    }
+
+    // -----------------------------------------------------------------------
+    // AC5.6: bounded follow loop
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bounded_follow_loop_runs_max_iters() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T001", "executing", Some(1), Some(1), None, Some(3));
+        let db_path_val = _dir.path().join("test.db");
+
+        // Patch: we need to set the db_path context. Instead of routing through
+        // run_status (which calls db_path()), we test the loop logic directly
+        // by calling run_follow_loop with a fixed path.
+        let args = StatusArgs {
+            display_id: Some("T001".to_string()),
+            follow: true,
+            interval_ms: 0,
+            max_iters: 3,
+        };
+        // Use run_follow_loop directly (it takes a &Path)
+        let result = run_follow_loop(&db_path_val, args);
+        assert!(result.is_ok(), "bounded follow loop should succeed: {result:?}");
+    }
+
+    #[test]
+    fn bounded_follow_loop_exits_on_complete() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T001", "complete", None, None, None, None);
+        let db_path_val = _dir.path().join("test.db");
+
+        let args = StatusArgs {
+            display_id: Some("T001".to_string()),
+            follow: true,
+            interval_ms: 0,
+            max_iters: 100,  // high limit, should exit early
+        };
+        let result = run_follow_loop(&db_path_val, args);
+        // Should exit 0 immediately (terminal state on first iter)
+        assert!(result.is_ok(), "follow loop should exit 0 on complete task: {result:?}");
+    }
+
+    #[test]
+    fn bounded_follow_loop_multi_task_exits_when_all_terminal() {
+        let (_dir, conn) = open_test_conn();
+        // All tasks are terminal — multi-task loop should exit immediately
+        insert_task(&conn, "T001", "complete", None, None, None, None);
+        insert_task(&conn, "T002", "blocked", None, None, Some("reason"), None);
+        let db_path_val = _dir.path().join("test.db");
+
+        let args = StatusArgs {
+            display_id: None,
+            follow: true,
+            interval_ms: 0,
+            max_iters: 100,
+        };
+        let result = run_follow_loop(&db_path_val, args);
+        assert!(result.is_ok(), "multi follow loop should exit 0 when all terminal: {result:?}");
+    }
+}

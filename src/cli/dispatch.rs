@@ -134,6 +134,23 @@ pub fn dispatch(
                     };
                     handlers::drive::run_drive(schema, args)?;
                 }
+                Some(("status", sub)) => {
+                    let display_id = sub.get_one::<String>("display_id").cloned();
+                    let follow = sub.get_flag("follow");
+                    let interval_secs = sub.get_one::<f64>("interval").copied().unwrap_or(1.5);
+                    let interval_ms = (interval_secs * 1000.0) as u64;
+                    let max_iters = sub
+                        .get_one::<usize>("max-iters")
+                        .copied()
+                        .unwrap_or(usize::MAX);
+                    let args = handlers::status::StatusArgs {
+                        display_id,
+                        follow,
+                        interval_ms,
+                        max_iters,
+                    };
+                    handlers::status::run_status(args)?;
+                }
                 Some((verb, sub)) => {
                     // Check if this is a declared lifecycle transition verb
                     if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {

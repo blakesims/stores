@@ -200,7 +200,7 @@ fn build_store_command(schema: &Schema) -> Command {
     // Workflow verb names that are registered separately above — must not be duplicated
     // as lifecycle transition subcommands even if the schema declares them as transition verbs.
     const WORKFLOW_VERBS: &[&str] = &[
-        "next-action", "brief", "render", "drive",
+        "next-action", "brief", "render", "drive", "status",
         "submit-plan", "submit-plan-review", "submit-execute", "submit-review", "resume",
     ];
 
@@ -219,6 +219,7 @@ fn build_store_command(schema: &Schema) -> Command {
             .subcommand(build_brief_cmd())
             .subcommand(build_render_cmd())
             .subcommand(build_drive_cmd())
+            .subcommand(build_status_cmd())
             .subcommand(build_submit_plan_cmd())
             .subcommand(build_submit_plan_review_cmd())
             .subcommand(build_submit_execute_cmd())
@@ -439,6 +440,50 @@ fn build_resume_cmd() -> Command {
             Arg::new("summary")
                 .long("summary")
                 .help("Optional reason for resuming")
+                .required(false),
+        )
+}
+
+/// Build the `status` command.
+///
+/// `stores tasks status <id>` prints a compact workflow telemetry frame.
+/// Distinct from `show` (full debug dump): `status` is a live-tail view.
+///
+/// Flags:
+/// - `--follow`           poll in a loop until terminal (AC5.2 / AC5.3)
+/// - `--interval <secs>`  poll interval, default 1.5 s
+/// - `--max-iters N`      (hidden) cap iterations for tests (AC5.6)
+fn build_status_cmd() -> Command {
+    Command::new("status")
+        .about(
+            "Print a compact workflow telemetry frame for a task \
+             (use --follow to tail live; distinct from `show` which prints the full row)",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Task display ID (omit to show all non-terminal tasks)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("follow")
+                .long("follow")
+                .short('f')
+                .action(ArgAction::SetTrue)
+                .help("Poll in a loop; exit on complete/blocked or Ctrl-C (exit 130)"),
+        )
+        .arg(
+            Arg::new("interval")
+                .long("interval")
+                .help("Poll interval in seconds (default 1.5)")
+                .value_parser(clap::value_parser!(f64))
+                .required(false),
+        )
+        .arg(
+            Arg::new("max-iters")
+                .long("max-iters")
+                .help("Maximum poll iterations (for testing)")
+                .value_parser(clap::value_parser!(usize))
+                .hide(true)
                 .required(false),
         )
 }

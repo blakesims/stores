@@ -17,6 +17,7 @@ regex = "1"
 anyhow = "1"
 thiserror = "1"
 handlebars = "5"
+libc = "0.2"
 
 [features]
 default = []
