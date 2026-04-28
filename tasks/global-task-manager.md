@@ -6,8 +6,9 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
+| T003 | Framework-bundled workflow agents + runtime-agnostic orchestrator | P1 | — | PLANNING | [main.md](./planning/T003-bundled-agents-and-drive/main.md) |
 
-Next available task id: T003
+Next available task id: T004
 
 ---
 
