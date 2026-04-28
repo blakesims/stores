@@ -1,8 +1,81 @@
 # stores
 
-`stores` is a schema-driven store framework with a single binary CLI. v0.2 ships with three built-in stores (`observations`, `gate`, `tasks`) demonstrating the schema → CLI → SQLite → enforcement chain: define a YAML schema, `stores install` it, and every field rule (required, enum, pattern, `required_when`, per-field actor authority) is enforced at write time. The `tasks` store adds a full multi-agent workflow engine with state machine, cycle guards, briefing templates, and deterministic main.md rendering.
+`stores` is a schema-driven store framework with a single binary CLI. v0.3 ships with three built-in stores (`observations`, `gate`, `tasks`) and a runtime-agnostic workflow orchestrator. Define a YAML schema, `stores install` it, and every field rule (required, enum, pattern, `required_when`, per-field actor authority) is enforced at write time. The `tasks` store adds a full multi-agent workflow engine with state machine, cycle guards, briefing templates, and deterministic main.md rendering.
 
-## Install
+## Quickstart
+
+```bash
+cargo install --path . --features runner-claude-code
+stores setup
+stores tasks drive --auto --claude-code
+```
+
+- `cargo install --path . --features runner-claude-code` — builds and installs the binary with the Claude Code runner enabled. Without `--features runner-claude-code`, only `--mock` is available (useful for testing; `--claude-code` will error at runtime).
+- `stores setup` — initialises the local `.stores/` database, installs the `observations`, `gate`, and `tasks` bundled stores, and installs all bundled skills and agent prompts. Idempotent; safe to re-run.
+- `stores tasks drive --auto --claude-code` — picks the next non-complete task (by `created_at ASC`), loops `next-action → brief → spawn agent → submit → render` until the task reaches `complete` or `blocked`.
+
+## Key commands
+
+### `stores tasks drive`
+
+Autonomous workflow orchestrator. Drives a task through the full state machine (planning → plan-review → execute/review cycles → complete).
+
+```bash
+stores tasks drive --auto --claude-code          # auto-select next task, real claude runner
+stores tasks drive T001 --claude-code            # explicit task id
+stores tasks drive T001 --mock fixture.jsonl     # mock runner (for tests / CI)
+stores tasks drive --auto --claude-code --max-iters 20
+```
+
+Exits 0 on `complete` or `blocked` (both are successful outcomes); non-zero on infrastructure errors. On `blocked`, prints a hint: `run stores gate <id> guide`.
+
+### `stores tasks status --follow`
+
+Live observability. Polls the DB and prints workflow state until `complete`, `blocked`, or Ctrl-C.
+
+```bash
+stores tasks status --follow T001
+stores tasks status --follow        # follows whichever task is active
+```
+
+### `stores gate <id> guide`
+
+Human-boundary helper. When a task is `blocked`, builds a curated context bundle (gate row + linked task rows + recent reviews) and spawns a guide agent. The guide agent is authorised to read via `stores gate show`, `stores gate answer`, `stores tasks show`, `stores tasks list`, `stores tasks next-action` — all other `stores` verbs are explicitly forbidden.
+
+```bash
+stores gate G001 guide --claude-code
+```
+
+Exits 0 if the gate row transitions `pending → answered`; exits 1 otherwise (runner crash, user escape, or agent ran but didn't answer).
+
+### `stores tasks <id> guide`
+
+Context dump + guide agent for a blocked task (stub form; full expansion in v0.4).
+
+```bash
+stores tasks T001 guide --claude-code
+```
+
+### Runner feature flag
+
+| Feature flag | Available runners | Use case |
+|---|---|---|
+| *(none, default)* | `--mock` only | Testing, CI, offline |
+| `--features runner-claude-code` | `--mock`, `--claude-code` | Production autonomous runs |
+
+Build for testing only:
+```bash
+cargo install --path .
+stores tasks drive T001 --mock tests/fixtures/drive_e2e/happy_2phase.jsonl
+```
+
+Build for production:
+```bash
+cargo install --path . --features runner-claude-code
+stores tasks drive --auto --claude-code
+```
+
+## Install (manual)
 
 ```bash
 cargo install --path .
@@ -14,7 +87,7 @@ stores install tasks           # v0.2 workflow store
 
 Requires: Rust toolchain (stable). SQLite is bundled via `rusqlite-bundled` — no system SQLite dependency.
 
-## 13-step demo walk
+## Manual workflow walk-through
 
 Run these commands in any empty directory. Each step closes a numbered verification point.
 
@@ -172,17 +245,23 @@ The `manifest.yaml` at `.stores/manifest.yaml` records installed stores with the
 ## How to test
 
 ```bash
-# Run all unit tests (298+)
-cargo test
+# Run all unit tests
+cargo test --all
+
+# Also run with the claude-code runner feature (additional runner tests)
+cargo test --features runner-claude-code
 
 # Run the v0.1 13-step demo (observations + gate)
 bash tests/e2e.sh
 
 # Run the tasks workflow smoke test (full lifecycle: plan → revise → BLOCKED → resume → complete)
 bash tests/tasks_e2e.sh
+
+# Run the drive orchestrator e2e (mock-runner: happy 2-phase + revise-once)
+bash tests/drive_e2e.sh
 ```
 
-Both e2e scripts require the `stores` binary on `PATH`. Run `cargo install --path .` first.
+All e2e scripts require the `stores` binary on `PATH`. Run `cargo install --path .` first.
 
 ## Workflow stores
 
@@ -200,9 +279,9 @@ stores tasks submit-review T001 --gate PASS --critical 0 --major 0 --minor 0 --s
 stores tasks render T001              # write tasks/active/T001-slug/main.md from DB
 ```
 
-The `tasks:start` skill (`stores skills install tasks:start`) is an orchestrator that drives this loop automatically via Claude subagents.
+The `tasks:start` skill (`stores skills install tasks:start`) wraps `stores tasks drive --auto --claude-code` for users who prefer the `/tasks:start` invocation surface.
 
-## Next steps / not in v0.1
+## Next steps / not in v0.3
 
 - **Provenance log (`runs` store)** — per-operation log for AI audit trails
 - **Schema migrations** — `stores upgrade` to apply schema changes to existing tables
