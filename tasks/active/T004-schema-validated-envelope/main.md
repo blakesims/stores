@@ -346,7 +346,7 @@ The codebase already follows tight bottom-up layering — `runner` knows nothing
 
 **Status:** CODE_REVIEW
 
-**Commit:** (see git log)
+**Commit:** 58e959f
 
 **Dialect decision:** Draft 2020-12 retained. The `jsonschema = "0.18"` crate accepted all 5 schemas with `"$schema": "https://json-schema.org/draft/2020-12/schema"` without error. No Draft-07 fallback was required.
 
