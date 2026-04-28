@@ -6,7 +6,7 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T003 | Framework-bundled workflow agents + runtime-agnostic orchestrator | P1 | 7 | EXECUTING_PHASE_7 (REVISE 1/3) | [main.md](./active/T003-bundled-agents-and-drive/main.md) |
+| T003 | Framework-bundled workflow agents + runtime-agnostic orchestrator | P1 | 7 | MERGE_REVIEW | [main.md](./active/T003-bundled-agents-and-drive/main.md) |
 
 Next available task id: T004
 
