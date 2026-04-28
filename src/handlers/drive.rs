@@ -474,7 +474,7 @@ pub(crate) fn drive_loop(
         }
 
         // ── Step 2e: parse envelope + dispatch submit ─────────────────────
-        let envelope = parse_envelope(&run_out).map_err(|e| {
+        let (envelope, source_tag) = parse_envelope(&run_out, &agent_name_normalized).map_err(|e| {
             eprintln!("[{display_id}] envelope parse failed: {e}");
             if !run_out.stdout.is_empty() {
                 eprintln!("runner stdout:\n{}", run_out.stdout);
@@ -514,7 +514,7 @@ pub(crate) fn drive_loop(
             .map(|g| format!("Some({g})"))
             .unwrap_or_else(|| "None".to_string());
         eprintln!(
-            "[{display_id}] phase {current_phase} cycle {current_cycle}: {agent_role} → submitted (gate={gate_display})"
+            "[{display_id}] phase {current_phase} cycle {current_cycle}: {agent_role} → submitted (gate={gate_display}; source={source_tag})"
         );
 
         // ── Step 2g: iter counter / max-iters (AC3.5) ────────────────────
@@ -533,28 +533,57 @@ pub(crate) fn drive_loop(
 }
 
 // ---------------------------------------------------------------------------
-// Envelope parser (AC3.10)
+// Envelope parser (AC2.8 — 3-layer fallback: sdk → sap → legacy)
 // ---------------------------------------------------------------------------
 
 /// Extract and parse a JSON envelope from runner output.
 ///
-/// Prefers `RunnerOutput.structured_output` (set by `--json-schema`-validated
-/// runs). Falls back to `final_message` and then a last-line stdout scan for
-/// legacy mock-fixture compatibility (AC2.3).
-fn parse_envelope(out: &RunnerOutput) -> Result<AgentEnvelope> {
-    // Prefer structured_output when present (schema-validated path).
+/// Three-layer fallback (AC2.8):
+/// - **Layer 1 (SDK):** if `structured_output` is `Some`, deserialise directly.
+/// - **Layer 2 (SAP):** if Layer 1 misses, call `sap::extract_envelope_from_text`
+///   on `final_message` with the role's bundled schema.
+/// - **Layer 3 (Legacy):** if Layer 2 also misses, fall through to the existing
+///   `final_message` direct parse + last-line stdout scan (mock-fixture compat).
+///
+/// Returns `(AgentEnvelope, source_tag)` where `source_tag` is one of
+/// `"sdk"`, `"sap"`, or `"legacy"`.
+fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(AgentEnvelope, &'static str)> {
+    // ── Layer 1: SDK-validated structured output ─────────────────────────────
     if let Some(value) = &out.structured_output {
-        return serde_json::from_value(value.clone()).map_err(|e| {
+        let envelope = serde_json::from_value::<AgentEnvelope>(value.clone()).map_err(|e| {
             anyhow::anyhow!("structured_output deserialise failed: {e}\nvalue: {value}")
-        });
+        })?;
+        return Ok((envelope, "sdk"));
     }
 
-    // Legacy fallback: use final_message if already extracted.
+    // ── Layer 2: SAP — extract from final_message text with schema ───────────
     if let Some(fm) = &out.final_message {
         if !fm.trim().is_empty() {
-            return serde_json::from_str::<AgentEnvelope>(fm).map_err(|e| {
-                anyhow::anyhow!("final_message JSON parse failed: {e}\nraw: {fm}")
-            });
+            // Look up the bundled schema for this role.
+            let schema_value: Option<serde_json::Value> = BUNDLED_AGENT_SCHEMAS
+                .iter()
+                .find(|(n, _)| *n == agent_role_normalized)
+                .and_then(|(_, s)| serde_json::from_str(s).ok());
+
+            if let Some(candidate) = crate::runner::sap::extract_envelope_from_text(
+                fm,
+                schema_value.as_ref(),
+            ) {
+                let envelope = serde_json::from_value::<AgentEnvelope>(candidate.clone())
+                    .map_err(|e| {
+                        anyhow::anyhow!("SAP candidate deserialise failed: {e}\nvalue: {candidate}")
+                    })?;
+                return Ok((envelope, "sap"));
+            }
+        }
+    }
+
+    // ── Layer 3: Legacy — final_message direct parse then last-line stdout ───
+    if let Some(fm) = &out.final_message {
+        if !fm.trim().is_empty() {
+            if let Ok(envelope) = serde_json::from_str::<AgentEnvelope>(fm) {
+                return Ok((envelope, "legacy"));
+            }
         }
     }
 
@@ -567,14 +596,19 @@ fn parse_envelope(out: &RunnerOutput) -> Result<AgentEnvelope> {
 
     match last_line {
         None => bail!(
-            "runner produced no output (stdout is empty or all-whitespace); \
+            "all 3 parse layers failed (layers attempted: sdk, sap, legacy); \
+             runner produced no output (stdout is empty or all-whitespace); \
              expected a JSON envelope on the last line"
         ),
-        Some(line) => serde_json::from_str::<AgentEnvelope>(line).map_err(|e| {
-            anyhow::anyhow!(
-                "last stdout line is not a valid agent envelope: {e}\nraw line: {line}"
-            )
-        }),
+        Some(line) => {
+            let envelope = serde_json::from_str::<AgentEnvelope>(line).map_err(|e| {
+                anyhow::anyhow!(
+                    "all 3 parse layers failed (layers attempted: sdk, sap, legacy); \
+                     last stdout line is not a valid agent envelope: {e}\nraw line: {line}"
+                )
+            })?;
+            Ok((envelope, "legacy"))
+        }
     }
 }
 
@@ -1112,11 +1146,12 @@ mod tests {
             session_id: None,
             structured_output_source: None,
         };
-        let env = parse_envelope(&out).expect("should succeed via structured_output");
+        let (env, source) = parse_envelope(&out, "planner").expect("should succeed via structured_output");
         assert!(
             matches!(env, AgentEnvelope::Planner { .. }),
             "should be Planner envelope"
         );
+        assert_eq!(source, "sdk", "source must be sdk when structured_output is present");
     }
 
     // ---------------------------------------------------------------------------
@@ -1176,11 +1211,12 @@ mod tests {
             session_id: None,
             structured_output_source: None,
         };
-        let env = parse_envelope(&out).expect("should parse with commentary above");
+        let (env, source) = parse_envelope(&out, "planner").expect("should parse with commentary above");
         assert!(
             matches!(env, AgentEnvelope::Planner { .. }),
             "should be Planner envelope"
         );
+        assert_eq!(source, "legacy", "last-line stdout scan is legacy layer");
     }
 
     // ---------------------------------------------------------------------------
@@ -1190,28 +1226,150 @@ mod tests {
     #[test]
     fn parse_envelope_from_planner_fixture() {
         let out = make_run_output(planner_fixture_json(), 0);
-        let env = parse_envelope(&out).expect("planner fixture should parse");
+        let (env, _) = parse_envelope(&out, "planner").expect("planner fixture should parse");
         assert!(matches!(env, AgentEnvelope::Planner { .. }));
     }
 
     #[test]
     fn parse_envelope_from_plan_reviewer_fixture() {
         let out = make_run_output(plan_reviewer_fixture_json(), 0);
-        let env = parse_envelope(&out).expect("plan-reviewer fixture should parse");
+        let (env, _) = parse_envelope(&out, "plan-reviewer").expect("plan-reviewer fixture should parse");
         assert!(matches!(env, AgentEnvelope::PlanReviewer { .. }));
     }
 
     #[test]
     fn parse_envelope_from_executor_fixture() {
         let out = make_run_output(executor_fixture_json(), 0);
-        let env = parse_envelope(&out).expect("executor fixture should parse");
+        let (env, _) = parse_envelope(&out, "executor").expect("executor fixture should parse");
         assert!(matches!(env, AgentEnvelope::Executor { .. }));
     }
 
     #[test]
     fn parse_envelope_from_code_reviewer_fixture() {
         let out = make_run_output(code_reviewer_fixture_json(), 0);
-        let env = parse_envelope(&out).expect("code-reviewer fixture should parse");
+        let (env, _) = parse_envelope(&out, "code-reviewer").expect("code-reviewer fixture should parse");
         assert!(matches!(env, AgentEnvelope::CodeReviewer { .. }));
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC2.8: three_layer_fallback_for_markdown_fenced_planner_output
+    // Mirrors the Phase 3 attempt 1 transcript: structured_output=None,
+    // final_message=markdown-fenced JSON.  SAP (Layer 2) must recover the planner
+    // envelope and the source tag must be "sap".
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn three_layer_fallback_for_markdown_fenced_planner_output() {
+        // Representative slice of the haiku transcript result text (from
+        // tests/fixtures/agent_outputs/planner-haiku-multiturn.jsonl result event).
+        // The JSON envelope is wrapped in a ```json ... ``` markdown fence, which
+        // is exactly the pathology that caused the Phase 3 attempt 1 failure.
+        let fenced_text = concat!(
+            "## Plan Summary\n\n",
+            "Based on my analysis, this is a trivial single-phase task.\n\n",
+            "```json\n",
+            "{\n",
+            "  \"role\": \"planner\",\n",
+            "  \"phases\": [\n",
+            "    {\n",
+            "      \"name\": \"Phase 1: Create and test scripts/hi\",\n",
+            "      \"objective\": \"Implement a shell script that echoes hi.\",\n",
+            "      \"tasks\": [\"Task 1.1: Create scripts/hi\"],\n",
+            "      \"acceptance_criteria\": [\"AC1.1: File scripts/hi exists\"],\n",
+            "      \"files\": [\"scripts/hi\"],\n",
+            "      \"dependencies\": []\n",
+            "    }\n",
+            "  ],\n",
+            "  \"decision_matrix\": []\n",
+            "}\n",
+            "```"
+        );
+
+        let out = RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            // structured_output is None — Layer 1 (SDK) will miss.
+            structured_output: None,
+            // final_message contains the markdown-fenced JSON — Layer 2 (SAP) must recover it.
+            final_message: Some(fenced_text.to_string()),
+            session_id: None,
+            structured_output_source: None,
+        };
+
+        let (env, source) = parse_envelope(&out, "planner")
+            .expect("SAP Layer 2 must recover planner envelope from markdown-fenced text");
+
+        assert!(
+            matches!(env, AgentEnvelope::Planner { .. }),
+            "recovered envelope must be AgentEnvelope::Planner"
+        );
+        assert_eq!(
+            source, "sap",
+            "source tag must be 'sap' when Layer 2 (SAP) recovers the envelope"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC2.9: parse_envelope returns correct source tag for each of the 3 layers.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn parse_envelope_source_tag_sdk_layer() {
+        // Layer 1 (SDK): structured_output is present and valid.
+        let valid_envelope = json!({
+            "role": "executor",
+            "summary": "Done"
+        });
+        let out = RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            structured_output: Some(valid_envelope),
+            final_message: Some("garbage {{{{ not json".to_string()),
+            session_id: None,
+            structured_output_source: Some("sdk"),
+        };
+        let (_, source) = parse_envelope(&out, "executor").expect("sdk layer must succeed");
+        assert_eq!(source, "sdk");
+    }
+
+    #[test]
+    fn parse_envelope_source_tag_sap_layer() {
+        // Layer 2 (SAP): structured_output is None, final_message has markdown-fenced JSON.
+        let fenced = "Thinking...\n```json\n{\"role\":\"executor\",\"summary\":\"all done\"}\n```\n";
+        let out = RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            structured_output: None,
+            final_message: Some(fenced.to_string()),
+            session_id: None,
+            structured_output_source: None,
+        };
+        let (_, source) = parse_envelope(&out, "executor").expect("sap layer must succeed");
+        assert_eq!(source, "sap");
+    }
+
+    #[test]
+    fn parse_envelope_source_tag_legacy_layer() {
+        // Layer 3 (Legacy): structured_output is None, final_message is plain JSON
+        // (no fences, not schema-validated by SAP — but direct parse succeeds).
+        // Note: SAP also handles plain JSON, but if the schema lookup returns None
+        // for an unknown role, SAP won't validate — it will return the first
+        // parseable object anyway. To force legacy, use stdout last-line scan
+        // by passing final_message=None and putting JSON on stdout.
+        let json_line = "{\"role\":\"executor\",\"summary\":\"legacy path\"}";
+        let out = RunnerOutput {
+            stdout: format!("some commentary\n{json_line}"),
+            stderr: String::new(),
+            exit_code: 0,
+            structured_output: None,
+            final_message: None, // No final_message → skip Layers 2+3 final_message paths.
+            session_id: None,
+            structured_output_source: None,
+        };
+        let (_, source) = parse_envelope(&out, "executor").expect("legacy last-line scan must succeed");
+        assert_eq!(source, "legacy");
     }
 }

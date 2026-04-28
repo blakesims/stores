@@ -484,6 +484,26 @@ Phase 3 smoke surfaced three real issues that invalidate the original "schema va
 
 ---
 
+### Phase 2 Revise
+
+**Status:** CODE_REVIEW
+
+**Commit:** TBD (filled after commit)
+
+**Files changed:**
+- `src/handlers/drive.rs` (parse_envelope rewritten as 3-layer sdk→sap→legacy fallback; call site updated to destructure (envelope, source_tag); submitted eprintln extended with `source=...`; 4 new tests; existing test call sites updated to new signature)
+
+**AC checklist:**
+- ✅ AC2.8 — `parse_envelope` is 3-layer (sdk→sap→legacy); all-layer-fail error lists layers attempted; `three_layer_fallback_for_markdown_fenced_planner_output` test passes (Layer 2 SAP recovers markdown-fenced planner envelope; source tag is `"sap"`).
+- ✅ AC2.9 — Drive's stderr submit-line includes `source=sdk|sap|legacy`; three new unit tests (`parse_envelope_source_tag_sdk_layer`, `parse_envelope_source_tag_sap_layer`, `parse_envelope_source_tag_legacy_layer`) assert source tag for each path.
+
+**Test counts:** `cargo test --features runner-claude-code` → 386 unit + 2 integration = 388 passed, 0 failed (4 new tests).
+
+**Deviations:**
+1. `parse_envelope_source_tag_legacy_layer` test forces Layer 3 by setting `final_message: None` and putting JSON on stdout last line, rather than feeding plain-JSON through `final_message`. This is because Layer 2 (SAP) also handles plain JSON objects (returns the first parseable object when no schema matches), so using `final_message` with plain JSON would yield `source="sap"` not `"legacy"`. The stdout-last-line path exercises exactly the legacy code branch.
+
+---
+
 ## Code Review Log
 
 ### Phase 1
@@ -559,6 +579,28 @@ Phase 3 smoke surfaced three real issues that invalidate the original "schema va
 
 **Deviations from plan:**
 1. AC2.7 unit test (`retries_exhausted_surfaces_transcript_path`) verifies the drive_loop error path (non-zero exit + correct error message) rather than intercepting `eprintln!` output directly — Rust unit tests cannot capture stderr from `eprintln!` without redirecting fd2. The runner output's stderr field is set to contain the exact substring "schema validation retries exhausted" matching what `claude_code::spawn` emits; the AC2.7 drive-layer eprintln is exercised by the test via the `run_out.stderr.contains(...)` branch in drive_loop. Full e2e verification of the exact stderr text belongs to Phase 3's smoke.
+
+### Phase 1 Revise
+
+**Gate:** PASS
+
+**Summary:** The layered-fallback design is implemented correctly and the two Phase 3 attempt-1 parser bugs are demonstrably fixed. The `--json-schema=<text>` argument is now passed inline (no temp file, no `/tmp/stores-schema-` path construction); a source-level negative-assertion test (`json_schema_arg_is_passed_inline`) locks this in. `extract_structured_output_from_stream_json` walks the full JSONL stream, retains only the LAST `result` event, and returns `(structured_output, final_message_text, error_subtype)` from THAT event only — verified by both the realistic 26-event haiku fixture (`extract_structured_output_skips_intermediate_user_events`) and a synthetic stream that interleaves a `user` tool_result event with the final `result` event (`extract_structured_output_picks_result_event_with_sdk_validated_output`). The new `src/runner/sap.rs` module exposes `extract_envelope_from_text(text, schema)` with markdown-fence stripping, balanced-brace candidate walking, and optional `jsonschema` validation; seven unit tests cover plain JSON, fenced JSON, prose-wrapped JSON, candidate-skipping, schema-driven candidate selection, no-match-returns-None, and the realistic haiku-transcript recovery (loads `result.result` from the staged 26-event fixture, validates against the planner schema, asserts `role == "planner"`). `RunnerOutput.structured_output_source: Option<&'static str>` is the correct shape (not `String`) and `claude_code::spawn` populates `Some("sdk")` / `Some("sap")` / `None` based on which extraction layer fired (`src/runner/claude_code.rs:386-402`). `jsonschema` was lifted from dev-dep-only to a feature-gated optional runtime dep under `runner-claude-code`, with a no-feature stub of `validate_against_schema` that returns `false` so the no-feature build stays green (`Cargo.toml:22,26`). Phase boundary discipline is observed: `src/handlers/drive.rs` and `src/handlers/guide.rs` only add `structured_output_source: None` defaults to existing test-side `RunnerOutput` constructions — no consumer-side rewire (Phase 2 revise owns AC2.8/AC2.9). No new schema files; Cargo version remains `0.3.0`. The planner-schema deviation (adding optional `objective` and `plan_notes`) is bounded and correct: both fields land in `properties` (not `required`), `additionalProperties: false` is preserved, and the v0.3 `tests/fixtures/agent_outputs/planner.json` still validates (the fixture has no top-level `objective`/`plan_notes`, so adding them as optional is a pure superset). Regression checks all green: `cargo build --features runner-claude-code` succeeds, `cargo build` (no features) succeeds, `cargo test --features runner-claude-code` runs 382 unit + 2 integration = 384 total, 0 failed (matches executor's 382 baseline + 8 new claim), `bash tests/drive_e2e.sh` passes AC7.1 and AC7.1b. The Phase 3 smoke shape that previously failed (markdown-fenced planner envelope in `result.result` with `structured_output: null`) is now demonstrably recoverable via SAP — the `sap_recovers_planner_envelope_from_haiku_transcript` test loads the exact transcript that broke Phase 3 attempt 1 and recovers a schema-valid planner envelope.
+
+**AC verification:**
+- AC1.8: ✅ `--json-schema` is passed inline at `src/runner/claude_code.rs:331-333` (`cmd.arg(format!("--json-schema={schema_text}"))`); `grep -n 'stores-schema-\|fs::write.*schema' src/runner/claude_code.rs` returns only the negative-assertion test reference (a deliberate split-needle on line 722-724 that's structured to not match itself); negative test `json_schema_arg_is_passed_inline` (`src/runner/claude_code.rs:688-733`) parses this very file and asserts no `/tmp/stores-schema-` path construction exists.
+- AC1.9: ✅ `extract_structured_output_from_stream_json` (`src/runner/claude_code.rs:161-228`) walks ALL JSONL lines, retains the LAST event with `type == "result"`, and extracts `structured_output`, `result.error.subtype`, and `result.result` (with `text` fallback) from that event only. Intermediate `user` / `assistant` / `tool_result` events are inspected for type but never returned. Fixture-driven test `extract_structured_output_skips_intermediate_user_events` (line 744-793) reads `tests/fixtures/agent_outputs/planner-haiku-multiturn.jsonl` (26 events: 1 system, 16 assistant, 7 user, 1 rate_limit, 1 result), asserts `structured_output: None`, `error_subtype: None`, the result text contains `"role": "planner"` AND `"\`\`\`json"`, and (defensively) any returned `final_msg` does not contain `tool_use_id`. Synthetic test `extract_structured_output_picks_result_event_with_sdk_validated_output` (line 798-813) interleaves a denied tool_result `user` event before the `result` event and asserts the SDK-validated `structured_output` is correctly picked.
+- AC1.10: ✅ `src/runner/sap.rs:36-60` exposes `pub fn extract_envelope_from_text(text: &str, schema: Option<&Value>) -> Option<Value>` with the documented algorithm (strip fences → walk balanced braces → first parseable + schema-validating candidate). Seven tests at `src/runner/sap.rs:212-337` cover plain JSON (212), markdown fences (222), prose-wrapped JSON (232), candidate-skipping where first fails parse and second is valid (242), schema-driven candidate selection where first parses but fails schema and second matches (253), no-match returns None (276), and realistic haiku-transcript recovery (286-337) which loads the staged fixture's `result.result` text, validates against the on-disk `agents/schemas/planner.schema.json`, and asserts the recovered envelope has `role == "planner"`. `Cargo.toml:22` lifts `jsonschema = { version = "0.18", optional = true }` to runtime gated on `runner-claude-code = ["dep:jsonschema"]`; a no-feature stub returns `false` for schema validation, so the no-feature build stays green (verified locally).
+- AC1.11: ✅ `RunnerOutput.structured_output_source` is `Option<&'static str>` (`src/runner/mod.rs:89`), not `String`. `claude_code::spawn` (`src/runner/claude_code.rs:386-402`) populates `Some("sdk")` when `result.structured_output.is_some()`, `Some("sap")` when SAP recovers from result text, and `None` otherwise. Mock runner defaults to `None` in all constructions (`src/runner/mock.rs:83,156`); drive (`src/handlers/drive.rs`) and guide (`src/handlers/guide.rs`) test-side `RunnerOutput` literals all default to `None`. The build is green for both feature-flag configurations.
+
+**Phase boundary check:** ✅ `git show 38cc089 -- src/handlers/drive.rs` and `... src/handlers/guide.rs` show ONLY the `structured_output_source: None` default insertions (5 sites in drive, 4 sites in guide) — no consumer-side rewire of the layered fallback. AC2.8/AC2.9 remain Phase 2 revise's responsibility. No schema files were created in this commit (only `agents/schemas/planner.schema.json` was modified to add two optional properties). Cargo version is still `0.3.0` (Phase 3 owns the bump).
+
+**Schema deviation review:** ✅ Acceptable. `agents/schemas/planner.schema.json:18-21,36-39` adds `objective` and `plan_notes` to `properties` only; both fields are absent from `required` (line 7 still lists `["role", "phases"]`), and `additionalProperties: false` is preserved (line 8). The v0.3 fixture `tests/fixtures/agent_outputs/planner.json` lacks both fields and continues to validate (verified by `tests/schemas_validate_fixtures.rs` passing both `all_fixtures_validate_against_schemas` and `fixtures_with_stray_field_rejected_by_schema`). The schema is now a strict superset of the v0.3 shape and accepts what real haiku output emits.
+
+**Findings:**
+- **[minor — non-blocking, no remediation required]** Two `unwrap()` calls in `src/runner/sap.rs:82,89` inside `strip_markdown_fences`. Both are immediately preceded by an explicit `.is_none() { break; }` guard, so they are functionally safe — but idiomatic Rust would use `let Some(x) = opt else { break; };` to make the safety locally evident. Pure style; not a correctness issue.
+- **[minor — non-blocking, no remediation required]** Doc-comment at `src/runner/claude_code.rs:16` still shows `[--json-schema <schema_path>]` in the command-construction example, which is now stale (the runner passes inline text via `--json-schema=<schema>`). Cosmetic.
+
+**Counts:** {critical: 0, major: 0, minor: 2}
 
 ---
 
