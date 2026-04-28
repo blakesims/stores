@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** EXECUTING_PHASE_7
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -422,6 +422,22 @@ No open items remain for the plan-reviewer.
 
 ## Execution Log
 _Executor agent fills this section per phase._
+
+### Phase 7: Skill rewrite + version bump + README + drive e2e
+- **Status:** AWAITING_REVIEW
+- **Started:** 2026-04-27
+- **Completed:** 2026-04-27
+- **Commits:** 6a70c75 77c8398 312666a ccbe885 8a6d427
+- **Files Created:** tests/drive_e2e.sh, tests/fixtures/drive_e2e/happy_2phase.jsonl, tests/fixtures/drive_e2e/revise_once.jsonl
+- **Files Modified:** skills/tasks:start/SKILL.md, Cargo.toml, README.md, src/handlers/drive.rs (test fix)
+- **Tests:** cargo test --all 354/354 PASS; cargo test --features runner-claude-code 360/360 PASS; bash tests/tasks_e2e.sh PASS (regression); bash tests/drive_e2e.sh PASS (AC7.1 + AC7.1b)
+- **ACs claimed:** 7.1 ✓ 7.1b ✓ 7.2 ✓ 7.3 ✓ 7.4 ✓ 7.5 ✓ 7.6 ✓ 7.7 (manual soft gate — orchestrator's responsibility) 7.8 ✓
+- **Executor notes for code-reviewer:**
+  - AC7.1/7.1b: drive_e2e.sh creates isolated tmpdirs, uses `stores install <path>` (not `stores setup`) to avoid needing skills/agents dirs, seeds via `stores tasks add`, drives with `--mock <fixture>`, asserts via `show --json` + inline python3.
+  - happy_2phase.jsonl: 6-item queue; revise_once.jsonl: 8-item queue (same as happy but P2 cycle 1 = REVISE + cycle 2 = PASS).
+  - DriveArgs test initializers in drive.rs tests were missing `#[cfg(feature = "runner-claude-code")] claude_code: false` — fixed to make `cargo test --features runner-claude-code` green (354 → 360 tests).
+  - Cargo.toml version bump committed with the AC7.8-mandated message verbatim.
+  - README: quickstart block uses `--features runner-claude-code` per AC7.4/Decision Matrix; 13-step section renamed to "Manual workflow walk-through".
 
 ### Phase 6: Guide handlers — `gate <id> guide` (full) + `tasks <id> guide` (stub)
 - **Status:** AWAITING_REVIEW
