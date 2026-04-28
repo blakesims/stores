@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** EXECUTING_PHASE_5
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -288,12 +288,12 @@ DONE_WHEN-tracing language: `--auto` selects the **next non-complete task by `cr
   [HH:MM:SS] T001 status=executing phase=2/3 cycle=1 next=executor blocked=false
   ```
 - **Acceptance Criteria:**
-  - [ ] AC5.1: `stores tasks status <id>` (without `--follow`) prints a single frame and exits 0.
-  - [ ] AC5.2: `stores tasks status --follow <id>` re-prints a frame every interval; exits 0 on `complete` or `blocked`.
-  - [ ] AC5.3: `stores tasks status --follow` (no id) prints a multi-task table frame across all non-terminal tasks; exits when none remain or Ctrl-C.
-  - [ ] AC5.4: Ctrl-C is caught cleanly — last frame on screen, exit code 130.
-  - [ ] AC5.5: Frames suppress duplicate consecutive lines (same state → no spam); on state change, prints immediately.
-  - [ ] AC5.6: `cargo test handlers::status` covers single-frame mode + change detection (fixture row mutated mid-loop). Follow-loop tests are bounded by `--max-iters` test-only flag to avoid flakiness.
+  - [x] AC5.1: `stores tasks status <id>` (without `--follow`) prints a single frame and exits 0.
+  - [x] AC5.2: `stores tasks status --follow <id>` re-prints a frame every interval; exits 0 on `complete` or `blocked`.
+  - [x] AC5.3: `stores tasks status --follow` (no id) prints a multi-task table frame across all non-terminal tasks; exits when none remain or Ctrl-C.
+  - [x] AC5.4: Ctrl-C is caught cleanly — last frame on screen, exit code 130.
+  - [x] AC5.5: Frames suppress duplicate consecutive lines (same state → no spam); on state change, prints immediately.
+  - [x] AC5.6: `cargo test handlers::status` covers single-frame mode + change detection (fixture row mutated mid-loop). Follow-loop tests are bounded by `--max-iters` test-only flag to avoid flakiness.
 
 #### Phase 6: Guide handlers — `gate <id> guide` (full) + `tasks <id> guide` (stub)
 
@@ -449,6 +449,23 @@ _Executor agent fills this section per phase._
   - Test isolation: both tests hold the shared `paths::test_cwd_lock()` mutex (process-wide) + call `set_current_dir` + restore CWD+HOME. This serialises against all other CWD-mutating tests in the binary (paths::tests uses the same lock). `unwrap_or_else(|e| e.into_inner())` on poison avoids cascading failures from prior panics.
   - AC4.3 (--global) is wired through all three sub-layers (skills, agents); init always uses local .stores/ regardless.
   - AC4.4 (partial recovery) falls out naturally from idempotency of each layer — no special composer logic needed.
+
+### Phase 5: `stores tasks status --follow`
+- **Status:** AWAITING_REVIEW
+- **Started:** 2026-04-27
+- **Completed:** 2026-04-27
+- **Commits:** 5ee1809
+- **Files Created:** src/handlers/status.rs
+- **Files Modified:** src/cli/dynamic.rs, src/cli/dispatch.rs, src/handlers/mod.rs, Cargo.toml (libc direct dep)
+- **Tests:** cargo test handlers::status 12/12 PASS; cargo test 338/338 PASS; cargo build PASS
+- **ACs claimed:** 5.1 ✓ 5.2 ✓ 5.3 ✓ 5.4 ✓ 5.5 ✓ 5.6 ✓
+- **Executor notes for code-reviewer:**
+  - `libc` added as a direct dep (was already a transitive dep via rusqlite's bundled SQLite). Used only for the SIGINT handler (`libc::signal`). No other new deps.
+  - SIGINT uses `unsafe libc::signal` (not `signal_hook`) — single `extern "C" fn` sets a static `AtomicBool`; loop polls it every 50 ms chunk during the sleep interval.
+  - `run_follow_loop` is public and takes a `&Path` directly so tests bypass `db_path()` and use a tempdir path.
+  - AC5.5 dedup keys on `(status, current_phase, current_cycle, blocked_reason)` — `StateKey` is a plain `#[derive(Eq, Hash)]` struct; `should_print` is a pure predicate tested independently.
+  - `--max-iters` hidden flag: default `usize::MAX` in dispatch; tests pass 3 or 100 depending on what they test.
+  - `total_phases` extracted from `plan` JSON column (`plan.phases.length`) for the `phase=N/M` slot; falls back to `-` if plan is null/absent.
 
 ### Phase 2: Runner abstraction
 - **Status:** AWAITING_REVIEW
