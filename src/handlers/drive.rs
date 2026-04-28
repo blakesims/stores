@@ -289,6 +289,7 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
                 final_message: item.final_message,
                 structured_output: None,
                 session_id: None,
+                structured_output_source: None,
             })
             .collect();
         return Ok(Box::new(MockRunner::new(outputs)));
@@ -819,6 +820,7 @@ mod tests {
             final_message: last_line,
             structured_output: None,
             session_id: None,
+            structured_output_source: None,
         }
     }
 
@@ -1013,6 +1015,7 @@ mod tests {
             final_message: None,
             structured_output: None,
             session_id: None,
+            structured_output_source: None,
         };
         let runner = MockRunner::new(vec![fail_out]);
 
@@ -1107,6 +1110,7 @@ mod tests {
             final_message: Some("this is not valid json {{{{".to_string()),
             structured_output: Some(valid_envelope),
             session_id: None,
+            structured_output_source: None,
         };
         let env = parse_envelope(&out).expect("should succeed via structured_output");
         assert!(
@@ -1138,6 +1142,7 @@ mod tests {
             final_message: None,
             structured_output: None,
             session_id: Some("test-uuid".to_string()),
+            structured_output_source: None,
         };
         let runner = MockRunner::new(vec![fail_out]);
 
@@ -1169,6 +1174,7 @@ mod tests {
             final_message: None,
             structured_output: None,
             session_id: None,
+            structured_output_source: None,
         };
         let env = parse_envelope(&out).expect("should parse with commentary above");
         assert!(

@@ -15,6 +15,10 @@
       "const": "planner",
       "description": "Identifies this envelope as the planner output."
     },
+    "objective": {
+      "type": "string",
+      "description": "High-level objective statement for the plan (optional; produced by some model outputs)."
+    },
     "phases": {
       "type": "array",
       "description": "Ordered list of implementation phases.",
@@ -28,6 +32,10 @@
       "items": {
         "type": "object"
       }
+    },
+    "plan_notes": {
+      "type": "string",
+      "description": "Free-text plan notes, risk register, and approach rationale (optional)."
     }
   }
 }

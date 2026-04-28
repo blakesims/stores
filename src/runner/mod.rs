@@ -37,6 +37,7 @@
 use anyhow::{bail, Result};
 
 pub mod mock;
+pub mod sap;
 
 #[cfg(feature = "runner-claude-code")]
 pub mod claude_code;
@@ -76,6 +77,16 @@ pub struct RunnerOutput {
     /// session IDs. Drive uses this for logging on failure and for human
     /// `--resume` workflows.
     pub session_id: Option<String>,
+    /// Which extraction layer populated `structured_output`:
+    /// - `Some("sdk")` — `result.structured_output` from the stream-json event
+    ///   (schema-validated by the claude CLI).
+    /// - `Some("sap")` — extracted from `result.result` text via SAP fallback.
+    /// - `None` — `structured_output` is `None`; drive falls through to legacy
+    ///   `final_message` / last-line scan.
+    ///
+    /// Used for postmortem logging (Phase 2 AC2.9). Mock runner always returns
+    /// `None` unless tests explicitly set it.
+    pub structured_output_source: Option<&'static str>,
 }
 
 /// A synchronous, blocking agent runner.

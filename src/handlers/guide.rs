@@ -148,6 +148,7 @@ fn build_runner_from_args(
                 final_message: item.final_message,
                 structured_output: None,
                 session_id: None,
+                structured_output_source: None,
             })
             .collect();
         return Ok(Box::new(MockRunner::new(outputs)));
@@ -566,6 +567,7 @@ mod tests {
             final_message: last_line,
             structured_output: None,
             session_id: None,
+            structured_output_source: None,
         }
     }
 
@@ -975,6 +977,7 @@ mod tests {
             final_message: None,
             structured_output: None,
             session_id: None,
+            structured_output_source: None,
         };
         let runner = MockRunner::new(vec![runner_out]);
 
@@ -1024,6 +1027,7 @@ mod tests {
             final_message: None,
             structured_output: None,
             session_id: None,
+            structured_output_source: None,
         };
         let runner = MockRunner::new(vec![runner_out]);
 

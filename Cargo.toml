@@ -19,10 +19,11 @@ thiserror = "1"
 handlebars = "5"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
+jsonschema = { version = "0.18", optional = true }
 
 [features]
 default = []
-runner-claude-code = []
+runner-claude-code = ["dep:jsonschema"]
 
 [dev-dependencies]
 tempfile = "3"

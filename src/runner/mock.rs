@@ -24,6 +24,7 @@ use super::{Runner, RunnerOutput};
 ///     final_message: Some(r#"{"role":"planner"}"#.to_string()),
 ///     structured_output: None,
 ///     session_id: None,
+///     structured_output_source: None,
 /// }];
 /// let runner = MockRunner::new(queue);
 /// let out = runner.spawn("planner", "sys", "brief", None).unwrap();
@@ -79,6 +80,7 @@ mod tests {
             final_message: final_message.map(|s| s.to_string()),
             structured_output: None,
             session_id: None,
+            structured_output_source: None,
         }
     }
 
@@ -151,6 +153,7 @@ mod tests {
             final_message: None,
             structured_output: Some(structured.clone()),
             session_id: None,
+            structured_output_source: None,
         };
         let runner = MockRunner::new(vec![output]);
         // schema arg is ignored by mock
