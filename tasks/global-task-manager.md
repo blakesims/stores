@@ -6,7 +6,7 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T004 | Schema-validated agent envelope via `--json-schema` | High | 1r | EXECUTING_PHASE_1_REVISE | [main.md](./active/T004-schema-validated-envelope/main.md) |
+| T004 | Schema-validated agent envelope via `--json-schema` | High | 3 | EXECUTING_PHASE_3 (attempt 2) | [main.md](./active/T004-schema-validated-envelope/main.md) |
 
 Next available task id: T005
 
