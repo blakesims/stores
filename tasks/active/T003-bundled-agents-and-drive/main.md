@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -476,21 +476,15 @@ _Code-reviewer agent fills this section per phase._
 > Details: code-review-phase-2.md
 
 ### Phase 3: `stores tasks drive` orchestrator
-- **Status:** AWAITING_REVIEW
-- **Started:** 2026-04-27
-- **Completed:** 2026-04-27
-- **Commits:** f461787
-- **Files Created:** src/handlers/drive.rs (loop + auto-selection + safety rails + envelope parser + inline tests)
-- **Files Modified:** src/handlers/mod.rs, src/cli/dynamic.rs, src/cli/dispatch.rs
-- **Tests:** cargo test handlers::drive → 12/12 PASS; cargo test → 324/324 PASS; cargo build PASS; cargo build --features runner-claude-code PASS
-- **ACs claimed:** 3.1 ✓ 3.2 ✓ 3.3 ✓ 3.4 ✓ 3.5 ✓ 3.6 ✓ 3.7 ✓ 3.8 ✓ 3.9 ✓ 3.10 ✓
-- **Executor notes for code-reviewer:**
-  - AC3.8 deviation note: `compute_brief` is NOT called directly because it calls `Manifest::load()` which requires a real `.stores/manifest.yaml`. Instead, `drive` inlines the brief computation using `build_context` + `render_template` directly from `BUNDLED_STORE_TEMPLATES`. This is equivalent logic to what `compute_brief` does for bundled stores (the same code path). No `pub` widening occurred. `build_context` and `render_template` are already exported from `crate::render`. This was a deliberate choice to keep drive tests hermetic without manifest setup — same semantic outcome.
-  - `drive_runner_error` test is inline in `drive.rs #[cfg(test)]` (not a separate file) per the spec note "or equivalent under `src/handlers/drive.rs` `#[cfg(test)] mod tests`".
-  - Render step is best-effort (failures logged to stderr, do not abort the loop) because drive is primarily a DB-state driver and render is a human-readable output.
-  - `LOCK_WINDOW_SECS = 300` mirrors `submit.rs`'s `acquire_lock` 5-minute window.
-  - `--claude-code` flag is feature-gated at clap level via `#[cfg(feature = "runner-claude-code")]` in `build_drive_cmd()`.
-  - No `unsafe`. No `#[allow(...)]`.
+- **Gate:** PASS
+- **Issues Found:** 0c/0M/3m
+- **Revision Count:** 0/3
+- **Verified:** All 10 ACs (3.1–3.10). Test re-run: `cargo test handlers::drive` 12/12, `cargo test` 324/324, `cargo build` clean (default + `runner-claude-code` feature). Live `--help` confirms `--mock` hidden, `--claude-code` feature-gated. AC3.7's six required test scenarios all present and substantive (status/plan byte-equal pre/post for runner-error; live-claim uses real `now()`; max-iters asserts error message; commentary tolerated by parse_envelope; etc.). Public-API surface diff: 5 new pub items, all in drive.rs and all appropriate (DriveArgs, MockFixtureItem, run_drive, plus pub(crate) resolve_task_id/drive_loop); no widening of existing items.
+- **AC3.8 deviation verdict:** ACCEPTED. `compute_brief`'s manifest lookup is purely a bundled-vs-filesystem branch selector; drive's inlined version commits to the bundled branch only, which is equivalent for bundled stores (the only store in v0.3, and the one DONE_WHEN scopes to). Executor was right that no public-API widening occurred, but for the wrong reason — `build_context` and `render_template` are already `pub` (re-exported via `pub use` in `src/render/mod.rs:7-8`), not `pub(crate)`. The pre-existing surface absorbed the new caller cleanly.
+- **Minor findings (non-blocking):** (m1) `LOCK_WINDOW_SECS=300` in drive.rs is a redefinition, not a shared constant — submit.rs hardcodes the literal `300`; recommend lifting to one shared `pub(crate)` const in a follow-up. (m2) Drive's bundled-only limitation (filesystem-installed stores hard-fail at "drive requires a bundled store") is undocumented in `--help` — add one line. (m3) Render-failure logging is silent-by-design for v0.3, but the per-iteration progress message reads `na.current_phase`/`current_cycle` from before the submit, so the printed phase lags one step behind reality — cosmetic for `status --follow`.
+- **Phase 4–7 plug-in:** Confirmed — `run_drive(schema, DriveArgs)` is stable; CLI args are stable; downstream phases need no rework.
+
+> Details: code-review-phase-3.md
 
 ---
 
