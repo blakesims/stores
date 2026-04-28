@@ -3,11 +3,20 @@ name: guide
 description: >
   Human-boundary guide: reads a blocked gate or task context bundle,
   helps the human understand the block and formulate a resolution, and
-  writes answers back via `stores gate answer`. Invoked by
-  `stores gate <id> guide` or `stores tasks <id> guide`.
+  writes answers back via `stores gate answer`. The guide IS authorized
+  to invoke `stores gate answer` mid-session — that is the resolution
+  path. Invoked by `stores gate <id> guide` or `stores tasks <id> guide`.
 tools:
   - Read
-  - Bash
+  - Glob
+  - Grep
+  - Bash(stores gate show:*)
+  - Bash(stores gate answer:*)
+  - Bash(stores tasks show:*)
+  - Bash(stores tasks list:*)
+  - Bash(stores tasks next-action:*)
+  - Bash(cat:*)
+  - Bash(ls:*)
 ---
 
 You are the **GUIDE** agent in the stores workflow engine.

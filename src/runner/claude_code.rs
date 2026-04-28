@@ -78,6 +78,41 @@ impl Default for ClaudeCodeRunner {
     }
 }
 
+/// Extract the `tools:` whitelist from an agent's YAML frontmatter.
+///
+/// Bundled agents declare per-role allowed tools in their frontmatter. The
+/// runner reads this list and passes it via `--allowed-tools`. If no
+/// frontmatter or no `tools` field is present, returns `None` and the runner
+/// falls back to bypass mode (kept as a safety net for unbundled agents but
+/// flagged in stderr).
+///
+/// Format expected:
+/// ```yaml
+/// ---
+/// name: planner
+/// tools:
+///   - Read
+///   - Bash(git log:*)
+/// ---
+/// ```
+fn extract_tools_from_frontmatter(system_prompt: &str) -> Option<Vec<String>> {
+    let trimmed = system_prompt.trim_start();
+    let rest = trimmed.strip_prefix("---")?.trim_start_matches('\n');
+    let end = rest.find("\n---")?;
+    let frontmatter = &rest[..end];
+    let value: serde_yaml::Value = serde_yaml::from_str(frontmatter).ok()?;
+    let tools = value.get("tools")?.as_sequence()?;
+    let collected: Vec<String> = tools
+        .iter()
+        .filter_map(|t| t.as_str().map(|s| s.to_string()))
+        .collect();
+    if collected.is_empty() {
+        None
+    } else {
+        Some(collected)
+    }
+}
+
 /// Scan `stdout` from the last line backwards and return the first line that
 /// parses as a JSON object (i.e. a `{...}` map).
 ///
@@ -100,15 +135,32 @@ impl Runner for ClaudeCodeRunner {
         "claude-code"
     }
 
-    fn spawn(&self, _role: &str, system_prompt: &str, brief: &str) -> Result<RunnerOutput> {
-        let output = Command::new("claude")
-            .arg("-p")
+    fn spawn(&self, role: &str, system_prompt: &str, brief: &str) -> Result<RunnerOutput> {
+        let mut cmd = Command::new("claude");
+        cmd.arg("-p")
             .arg("--append-system-prompt")
             .arg(system_prompt)
             .arg("--output-format")
-            .arg("text")
-            .arg("--permission-mode")
-            .arg("bypassPermissions")
+            .arg("text");
+
+        // Per-role tool whitelist from the agent's frontmatter (preferred).
+        // Falls back to bypassPermissions if frontmatter is absent — this is a
+        // safety net for unbundled agents; bundled agents always declare tools.
+        match extract_tools_from_frontmatter(system_prompt) {
+            Some(tools) => {
+                cmd.arg("--allowed-tools").arg(tools.join(" "));
+            }
+            None => {
+                eprintln!(
+                    "warning: agent '{}' has no `tools:` in frontmatter; \
+                     falling back to --permission-mode bypassPermissions",
+                    role
+                );
+                cmd.arg("--permission-mode").arg("bypassPermissions");
+            }
+        }
+
+        let output = cmd
             .arg(brief)
             .output()
             .context("failed to launch `claude`; ensure it is installed and on PATH")?;
@@ -222,6 +274,32 @@ exit 0
     fn extract_final_message_empty_stdout() {
         assert!(extract_final_message("").is_none());
         assert!(extract_final_message("\n\n\n").is_none());
+    }
+
+    #[test]
+    fn extract_tools_basic() {
+        let prompt = "---\nname: planner\ntools:\n  - Read\n  - Bash(git log:*)\n---\n\nYou are a planner.";
+        let tools = extract_tools_from_frontmatter(prompt).expect("tools list");
+        assert_eq!(tools, vec!["Read".to_string(), "Bash(git log:*)".to_string()]);
+    }
+
+    #[test]
+    fn extract_tools_no_frontmatter() {
+        let prompt = "You are a planner.";
+        assert!(extract_tools_from_frontmatter(prompt).is_none());
+    }
+
+    #[test]
+    fn extract_tools_no_tools_key() {
+        let prompt = "---\nname: planner\ndescription: foo\n---\n";
+        assert!(extract_tools_from_frontmatter(prompt).is_none());
+    }
+
+    #[test]
+    fn extract_tools_empty_list() {
+        let prompt = "---\nname: planner\ntools: []\n---\n";
+        // Empty list is treated as None — bypass fallback applies.
+        assert!(extract_tools_from_frontmatter(prompt).is_none());
     }
 
     /// Verify that the ClaudeCodeRunner uses a PATH-injected shim rather than
