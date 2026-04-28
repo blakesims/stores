@@ -6,7 +6,6 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T003 | Framework-bundled workflow agents + runtime-agnostic orchestrator | P1 | 7 | MERGE_REVIEW | [main.md](./active/T003-bundled-agents-and-drive/main.md) |
 
 Next available task id: T004
 
@@ -16,6 +15,7 @@ Next available task id: T004
 
 | ID | Task Name | Completed | Link |
 |:---|:----------|:----------|:-----|
+| T003 | Framework-bundled workflow agents + runtime-agnostic orchestrator | 2026-04-28 | [main.md](./completed/T003-bundled-agents-and-drive/main.md) |
 | T002 | Tasks store on β architecture (workflow engine) | 2026-04-26 | [main.md](./completed/T002-tasks-store-v02/main.md) |
 | T001 | Stores Framework v0.1 | 2026-04-26 | [main.md](./completed/T001-stores-framework-v01/main.md) |
 
