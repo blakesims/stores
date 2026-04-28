@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_7
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -583,6 +583,19 @@ _Code-reviewer agent fills this section per phase._
 - **Minor findings (non-blocking):** (m1) `WORKFLOW_VERBS` dedup at `dynamic.rs:253` only fires for workflow schemas — `gate` branch bypasses it; harmless today but asymmetric. (m2) `MockFixtureItem` is duplicated as `pub struct` in `handlers::drive` and `handlers::guide`; lift to common module in v0.4. (m3) `extract_plan_review_log` dumps the entire array, not "recent" — spec wording loose, not a defect, but consider `.take(2)` like cycles. (m4) Test `gate_guide_exits_zero_when_gate_answered_by_db_update` is misnamed — body comment admits it only verifies `read_gate_status` round-trip; the 4 `check_gate_transition_*` tests carry the actual policy coverage.
 
 > Details: code-review-phase-6.md
+
+### Phase 7: Skill rewrite + version bump + README + drive e2e
+- **Gate:** REVISE
+- **Issues Found:** 0c/1M/3m
+- **Revision Count:** 1/3
+- **Verified:** 7 of 8 ACs PASS (7.1, 7.1b, 7.3, 7.4, 7.5, 7.6, 7.8). AC7.7 deferred to orchestrator (manual soft gate). Test matrix re-run live: `cargo test --all` 354/354; `cargo test --features runner-claude-code` 360/360 (+6 = the 6 cfg-gated tests in `src/runner/claude_code.rs`, no Phase 7 unit-test inflation); `bash tests/tasks_e2e.sh` green; `bash tests/drive_e2e.sh` green (both AC7.1 happy-path and AC7.1b revise-once scenarios pass DB-state assertions). Skill at 17 lines (≤30 budget). README quickstart at top + "Manual workflow walk-through" subsection preserves 13-step walk. Commit `ccbe885` subject matches AC7.8 exactly. Public-API surface: zero new `pub` items.
+- **Major (M1) — AC7.2 unmet:** `stores --version` errors with `unexpected argument '--version' found`. `Cargo.toml` is `0.3.0` ✓ but `Command::new("stores")` in `src/cli/dynamic.rs:53` has no `.version(...)` call, so clap doesn't auto-generate the flag. AC7.2 explicitly requires "`cargo build` produces a `stores --version` of `0.3.0`." One-line fix: add `.version(env!("CARGO_PKG_VERSION"))` to the root command builder.
+- **`tasks:start` frontmatter verdict:** ACCEPTED. Dropping `user_invocable`, `requires_stores`, `default_invoker` is correct — those are project-local convention fields not parsed by `stores` itself and not in the Claude Code first-party skill spec (which is `name + description + optional tools/model`). `/tasks:start` discovery still works via on-disk SKILL.md location. Aligns with Phase 1 decision-matrix line 385.
+- **`drive.rs` test-fix verdict:** ACCEPTED, in-scope for Phase 7. `git blame` confirms the surrounding test bodies are Phase 3 (`f461787`); the `#[cfg(feature = "runner-claude-code")] claude_code: false` field was missing from two `DriveArgs` literals. Without the fix, AC7.6's `cargo test --features runner-claude-code` fails to compile. Fix is exactly two 2-line additions, nothing else. Phase 3 latent surfaced by Phase 7's new test-matrix mandate; correct phase boundary to fix.
+- **`drive_e2e.sh` `setup` vs `install <path>` verdict:** ACCEPTED. AC7.1 mentions `stores setup` literally but the actual coverage target is "drive completes a seeded task." Using `stores install <path>` keeps the tempdir hygienic (no skills/agents directories needed for a mock-runner test) and is functionally equivalent for the assertion. The mock-runner e2e proves DONE_WHEN at the executor level; AC7.7 covers strict `stores setup` adherence at the orchestrator/manual-soft-gate level.
+- **Minor findings (non-blocking, informational):** (m1) Quickstart in README is a 3-line code block, not the AC-literal `&&`-chained one-liner — functionally equivalent, copy-pastable, recorded for transparency. (m2) `drive_e2e.sh` runs emit `multiple task directories found` warnings on every render after plan-review READY transition — latent in the drive lifecycle migrator (Phase 3 code path), DB writes go to canonical, assertions unaffected; v0.4 ticket. (m3) `Cargo.lock` is dirty in the working tree (`M Cargo.lock` per `git status --porcelain`) — should be committed alongside the version-flag fix.
+
+> Details: code-review-phase-7.md
 
 ---
 
