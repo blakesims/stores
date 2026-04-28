@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-28
 - **Blocked Reason:** —
@@ -433,6 +433,21 @@ _Executor agent fills this section per phase._
 - **Tests:** cargo test cli::agents PASSED (6 tests); cargo test PASSED (304 tests); cargo build PASSED
 - **ACs claimed:** 1.1 ✓ 1.2 ✓ 1.3 ✓ 1.4 ✓ 1.5 ✓ 1.6 ✓ 1.7 ✓ 1.7a ✓ 1.7b ✓ 1.7c ✓ 1.7d ✓ 1.8 ✓ 1.9 ✓
 - **Executor notes for code-reviewer:** uninstall_removes_file test mirrors skills' inline-fs pattern; agents.rs has no parent-dir cleanup since flat layout (no subdir to prune); prompt line counts at the lower end of 400-1200 range (415-502).
+
+### Phase 2: Runner abstraction
+- **Status:** AWAITING_REVIEW
+- **Started:** 2026-04-27
+- **Completed:** 2026-04-27
+- **Commits:** 61e4190 258251f
+- **Files Created:** src/runner/mod.rs, src/runner/mock.rs, src/runner/claude_code.rs
+- **Files Modified:** Cargo.toml (features table), src/main.rs (pub mod runner)
+- **Tests:** cargo test runner (no feature): 8/8 PASS; cargo test --features runner-claude-code runner: 14/14 PASS; cargo build: PASS; cargo build --features runner-claude-code: PASS
+- **ACs claimed:** 2.1 ✓ 2.2 ✓ 2.3 ✓ 2.4 ✓ 2.5 ✓ 2.6 ✓
+- **Executor notes for code-reviewer:**
+  - `available_runners()` uses cfg-based branching (not `mut vec + push`) to avoid unused-mut warning.
+  - `MockRunner` uses `RefCell<Vec<_>>` (reversed for O(1) pop); `unsafe impl Send` justified because RefCell is not shared across threads — only moved.
+  - `claude_code` tests avoid `std::env::set_var` (unsound in multi-threaded tests); shim is invoked directly via its absolute path; extract_final_message is tested as a pure function independently.
+  - AC2.6 enforced: no file outside src/runner/ references `claude_code` directly — only `mod.rs`'s `#[cfg(feature)] pub mod claude_code` and `select()` routing.
 
 ---
 
