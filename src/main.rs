@@ -8,6 +8,7 @@ mod manifest;
 mod output;
 mod paths;
 pub mod render;
+pub mod runner;
 pub mod schema;
 pub mod validate;
 

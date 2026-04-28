@@ -18,5 +18,9 @@ anyhow = "1"
 thiserror = "1"
 handlebars = "5"
 
+[features]
+default = []
+runner-claude-code = []
+
 [dev-dependencies]
 tempfile = "3"
