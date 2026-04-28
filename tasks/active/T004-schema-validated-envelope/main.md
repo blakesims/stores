@@ -430,7 +430,7 @@ Phase 3 smoke surfaced three real issues that invalidate the original "schema va
 
 **Status:** CODE_REVIEW
 
-**Commit:** TBD (see below)
+**Commit:** 38cc089
 
 **Files changed:**
 - `src/runner/mod.rs` (+`structured_output_source: Option<&'static str>` field on `RunnerOutput`)
