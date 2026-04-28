@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_5
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-27
 - **Blocked Reason:** —
@@ -501,6 +501,16 @@ _Code-reviewer agent fills this section per phase._
 - **Phase 4–7 plug-in:** Confirmed — `run_drive(schema, DriveArgs)` is stable; CLI args are stable; downstream phases need no rework.
 
 > Details: code-review-phase-3.md
+
+### Phase 4: `stores setup` quickstart
+- **Gate:** PASS
+- **Issues Found:** 0c/0M/3m
+- **Revision Count:** 0/3
+- **Verified:** All 6 ACs (4.1–4.6). `cargo test cli::setup` 2/2, `cargo test` 326/326 (was 324 pre-Phase-4 — +2 new, no regressions). Manual `stores setup` in tempdir creates db + manifest + 3 stores + 5 skills + 5 agents; manifest scopes correct (worktree/worktree/repo). Re-run exits 0; missing-layer recovery verified by removing `.claude/agents/` between runs (only that layer reinstalled). `--global` lands skills+agents in `$HOME/.claude/`; real `~/.claude/agents/` confirmed clean. AC4.6 abort: all four layers use `?`; bundled-stores loop only swallows `"already installed"` substring and re-raises everything else.
+- **paths.rs deviation verdict:** ACCEPT. `pub(crate) fn paths::test_cwd_lock()` under `#[cfg(test)]` is the minimum exposure: existing `paths::tests` already had a private mutex with the same role, and setup tests genuinely cannot avoid mutating CWD (the production `init::run` / `skills_run` / `agents_run` resolve via `current_dir()` internally — unlike `cli::skills::tests` which use an explicit-base helper). No release-build surface widened. Public-API delta: `pub mod setup`, `pub fn setup::run`, `pub(crate) fn paths::test_cwd_lock` (cfg-test) — three additions, all required.
+- **Minor findings (non-blocking):** (m1) skills/agents layers print no per-item idempotency message on re-run because `install_all` passes `silent_if_same: true` (`src/cli/skills.rs:135-140`, `src/cli/agents.rs:148-153`); init and stores layers comply, skills/agents are silent. Spec-cosmetic, not correctness. (m2) `with_isolated_env` (`src/cli/setup.rs:94-123`) is not panic-safe — CWD/HOME restoration is sequential after the closure body, so an `assert!` panic skips it; the shared `test_cwd_lock` is poison-recovered so the suite won't deadlock but state can leak. Use a `Drop` guard. (m3) Substring match `"already installed"` (setup.rs:37) is brittle; a typed `InstallOutcome::AlreadyInstalled` would be more robust — punch-list, not a defect.
+
+> Details: code-review-phase-4.md
 
 ---
 
