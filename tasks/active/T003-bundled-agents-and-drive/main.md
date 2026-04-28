@@ -1,7 +1,7 @@
 # T003: Framework-bundled workflow agents + runtime-agnostic orchestrator
 
 ## Meta
-- **Status:** EXECUTING_PHASE_1
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-28
 - **Blocked Reason:** —
@@ -423,13 +423,16 @@ No open items remain for the plan-reviewer.
 ## Execution Log
 _Executor agent fills this section per phase._
 
-### Phase 1: [Title]
-- **Status:** PENDING | IN_PROGRESS | COMPLETE | BLOCKED
-- **Started:** —
-- **Completed:** —
-- **Commits:** —
-- **Files Modified:** —
-- **Notes:** —
+### Phase 1: Bundled agents registry + author 5 agent prompts
+- **Status:** AWAITING_REVIEW
+- **Started:** 2026-04-28
+- **Completed:** 2026-04-28 (executor returned)
+- **Commits:** ae306cf
+- **Files Created:** agents/{planner,plan-reviewer,executor,code-reviewer,guide}.md (415-502 lines each); src/cli/agents.rs; tests/fixtures/agent_outputs/{planner,plan-reviewer,executor,code-reviewer,guide}.json
+- **Files Modified:** src/cli/mod.rs, src/cli/dynamic.rs, src/main.rs
+- **Tests:** cargo test cli::agents PASSED (6 tests); cargo test PASSED (304 tests); cargo build PASSED
+- **ACs claimed:** 1.1 ✓ 1.2 ✓ 1.3 ✓ 1.4 ✓ 1.5 ✓ 1.6 ✓ 1.7 ✓ 1.7a ✓ 1.7b ✓ 1.7c ✓ 1.7d ✓ 1.8 ✓ 1.9 ✓
+- **Executor notes for code-reviewer:** uninstall_removes_file test mirrors skills' inline-fs pattern; agents.rs has no parent-dir cleanup since flat layout (no subdir to prune); prompt line counts at the lower end of 400-1200 range (415-502).
 
 ---
 
