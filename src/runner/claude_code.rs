@@ -12,12 +12,22 @@
 /// claude -p \
 ///   --append-system-prompt <system_prompt> \
 ///   --output-format text \
+///   --permission-mode bypassPermissions \
 ///   <brief>
 /// ```
 ///
 /// `--output-format text` emits the agent's response verbatim (default — no
 /// claude-event wrapper); the agent's contract is to terminate its output
 /// with a single role-keyed JSON object on its final non-empty line.
+///
+/// `--permission-mode bypassPermissions` is required for headless autonomous
+/// operation. Without it, write/edit/bash operations trigger interactive
+/// permission prompts the spawned subagent cannot answer; the agent then
+/// emits a "I need permission to..." text response instead of the role-keyed
+/// JSON envelope, and the parser fails. The `--claude-code` runner is an
+/// explicitly opted-in autonomous mode; the v0.4 path is per-role allowed-
+/// tools whitelisting (`planner`/`plan-reviewer`/`code-reviewer` read-only,
+/// `executor` write-enabled, `guide` read-plus-`stores gate answer`).
 ///
 /// Notes:
 /// - `--output-format stream-json` would require pairing with `--verbose` per
@@ -97,6 +107,8 @@ impl Runner for ClaudeCodeRunner {
             .arg(system_prompt)
             .arg("--output-format")
             .arg("text")
+            .arg("--permission-mode")
+            .arg("bypassPermissions")
             .arg(brief)
             .output()
             .context("failed to launch `claude`; ensure it is installed and on PATH")?;
@@ -162,6 +174,8 @@ exit 0
             .arg("You are a planner.")
             .arg("--output-format")
             .arg("text")
+            .arg("--permission-mode")
+            .arg("bypassPermissions")
             .arg("Plan this task.")
             .output()
             .expect("shim should run");
@@ -238,6 +252,7 @@ exit 0
             .arg("-p")
             .arg("--append-system-prompt").arg("sys")
             .arg("--output-format").arg("text")
+            .arg("--permission-mode").arg("bypassPermissions")
             .arg("do work")
             .output()
             .expect("shim run");
