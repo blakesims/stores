@@ -1,7 +1,7 @@
 # T004: Schema-validated agent envelope via `--json-schema`
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2_REVISE
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-28
 - **Last Updated:** 2026-04-28
 - **Blocked Reason:** —
