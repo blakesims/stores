@@ -322,7 +322,7 @@ READY → orchestrator → executor. Move folder `tasks/planning/T007-port-10-06
 - **Status:** COMPLETE
 - **Start:** 2026-04-30
 - **End:** 2026-04-30
-- **Commit:** (see below)
+- **Commit:** 7dc5f48
 - **Files modified:**
   - `stores/gate/schema.yaml` — primary deliverable
   - `src/handlers/guide.rs` — test fixture update (see deviation note)
