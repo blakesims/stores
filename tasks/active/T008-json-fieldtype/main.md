@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** COMPLETE
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -510,6 +510,40 @@ Verdict: **justified, not a scope creep**.
 - **Deviation from plan:** None. `show.rs` required no modification (plan AC #3 acknowledged this case: "if `show.rs` delegates to `read_row` for the deserialisation, then no further change needed"). Tests are inline in `row.rs` and `list.rs` test modules per plan.
 
 ---
+
+### Phase 5 — Code Review (integration smoke)
+
+- **Verdict:** PASS
+- **Reviewer date:** 2026-04-30
+- **Commit reviewed:** `25c3bb8`
+
+**AC verification (against five DONE_WHEN clauses)**
+
+| AC | Verdict | Evidence |
+|---|---|---|
+| Schema declares `type: json` | PASS | `stores/observations_1006/schema.yaml:96-99` — top-level field, `required: false`, description matches plan; placement between flat fields and `evidence` record (Decision 1: top-level only — confirmed not nested in `intent_contract` or `evidence`); `cargo test --test schemas_validate_fixtures` = 2/0 (parses cleanly) |
+| Round-trip works (good JSON in, structured object out) | PASS | `artefact-1-full-with-notes.json` — `jq '.notes \| type'` → `"object"`, `jq '.notes.siblings'` → `["L210"]` (array, not quoted blob), `jq '.notes.reproed_by'` → `"agent"`, `jq '.notes.discovery_path'` → `"T271 wrap Phase 2.5"`. Exact shape matches the input `--notes` payload. |
+| `show --json` emits structured | PASS | `artefact-2-structured-roundtrip.txt` — operator-readable: original input on line 1; parsed `.notes` block (lines 4-10) is a structured 3-key object; `.notes.siblings` (lines 13-15) is `["L210"]` array; `.notes.discovery_path` (line 18) is the string `"T271 wrap Phase 2.5"`. Three-way subkey probe confirms structured shape, not blob round-trip. |
+| Bad JSON surfaces field-named error | PASS | `artefact-3-bad-json.txt` — verbatim: `Error: validation failed:\n- notes: value must be valid JSON, got string '{not json'\nexit=1`. Contains BOTH `notes` (field name) AND `valid JSON` (signal). Phase 3 validator path firing correctly through the L275 schema. |
+| L275 POC re-acquires `notes` (full integration) | PASS | (a) `artefact-4-list-json.json` — `jq '.[0].notes \| type'` → `"object"` (Phase 4 list.rs parity gap closure verified live on a Json field); (b) `artefact-5-from-file.txt` — `200` (the value of `.notes.investigation.logs[0].tail` from a multi-key from-file payload), proving `--notes-from-file` works AND nested-subkey access on read works through structured JSON. |
+
+**Other checks**
+
+1. **Schema diff is minimal.** `git show 25c3bb8 -- stores/observations_1006/schema.yaml` shows exactly 8 lines added: 3-line comment + 4-line field block + 1 blank line. No other field renamed/moved.
+2. **No `.rs` changes.** `git show 25c3bb8 --stat` lists exactly: `stores/observations_1006/schema.yaml`, `tasks/active/T008-json-fieldtype/main.md`, and 6 artefact files in `p5-smoke/`. Zero `.rs` files touched — Phase 5 is artefact-only modulo the schema field re-add. Tightly scoped.
+3. **Tests un-regressed.** Re-ran `cargo test --all` = 414 passed; 0 failed. Re-ran `bash tests/drive_e2e.sh` = both AC7.1 and AC7.1b PASS. Re-ran `bash tests/gate_e2e.sh` = all 6 DONE_WHEN clauses PASS. Re-ran `bash tests/e2e.sh` = Step 6 fails on the documented CLAUDECODE auto-detect line (pre-existing T006/T007 shape, unchanged). Re-ran `bash tests/tasks_e2e.sh` = Step 16 fails on `ac5_11b` SIGPIPE (pre-existing T005 shape, unchanged). No NEW failures.
+4. **L002 vs L003 anomaly.** Executor's deviation note (artefact-5 used `show L002 --json` not `L003`) is **confirming evidence of Phase 3, not a defect**: the bad-JSON add in artefact-3 correctly exited 1 and wrote no row, so the L-id sequence shifted by one. Sensible adaptation; documented honestly in the execution log. Not a finding.
+5. **Schema field placement.** Confirmed top-level (`fields:` array, sibling to `intent_contract` and `evidence`). NOT nested inside any record/list_record block. Decision 1 (top-level only) preserved at the consuming-schema level, mirroring the parser-level enforcement from Phase 1.
+6. **Pre-conditions verified.** Executor rebuilt the binary from current master (`stores 0.4.1`) before running smoke — artefacts reflect the actual P1-P4 implementation, not a stale binary.
+
+**Findings (non-blocking observations)**
+
+1. **Artefact-5 is one byte (`200\n`).** Tightly minimal — pins the DONE_WHEN clause but doesn't show the full from-file payload shape or the surrounding `show --json` envelope. A future variant could include the full structured `notes.investigation` subtree to make the round-trip more legible to a reader who hasn't loaded the plan into context. Not gate-failing; the `200` is the precise probe the plan requested.
+2. **`p5-smoke/` directory contains a stray `big-notes.json` (the from-file payload) at `/tmp/t008-notes-smoke/` but it was not committed to the repo's `p5-smoke/` directory** (only the 5 artefacts + regression.log were committed, per `git show 25c3bb8 --name-only`). The from-file source payload is therefore not preserved in the audit trail — only the result (`200`). Reconstructing the test from the artefacts alone requires reading the plan to know the input shape. Minor archival gap; the plan itself documents the intended shape so practical reproducibility is preserved.
+3. **Artefact-3's `exit=1` line is a manual annotation in the captured file**, not raw shell output. The shell would emit only the `Error: ...` message to stderr; the `exit=1` is appended by the executor's redirection. Honest and useful for the reviewer, but worth noting that this is interpreted output, not a verbatim transcript. Not gate-failing — the verbatim error string itself (lines 1-2) IS direct stderr.
+4. **Finding-count discipline note.** Per reviewer protocol, ≥3 findings on a non-trivial change. Phase 5 is mechanically simple (one schema field re-add + 6 artefacts), but the integration scope (proving all five DONE_WHEN clauses fire end-to-end through P1-P4 against a real shipped store) is non-trivial. Three substantive findings logged above; all are minor archival/legibility notes rather than defects. The five DONE_WHEN clauses each have direct artefact-pinned evidence.
+
+**Routing:** Status `CODE_REVIEW` → `COMPLETE`. All 5 DONE_WHEN clauses verified with live artefacts; no e2e regressions; schema change minimal and correctly placed; no `.rs` drift. Orchestrator may proceed with `git mv tasks/active/T008-json-fieldtype tasks/completed/`, GTM update, Stage 6 CodeRabbit, Stage 7 completion summary.
 
 ### Phase 5 — Integration: re-add `notes` to `observations_1006` + smoke trace
 
