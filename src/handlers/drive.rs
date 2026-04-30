@@ -470,9 +470,11 @@ pub(crate) fn drive_loop(
             let _ = std::io::stderr().flush();
             if !run_out.stdout.is_empty() {
                 eprintln!("runner stdout:\n{}", run_out.stdout);
+                let _ = std::io::stderr().flush();
             }
             if !run_out.stderr.is_empty() {
                 eprintln!("runner stderr:\n{}", run_out.stderr);
+                let _ = std::io::stderr().flush();
             }
             bail!(
                 "runner non-zero exit (code {}); task state unchanged",
@@ -486,9 +488,11 @@ pub(crate) fn drive_loop(
             let _ = std::io::stderr().flush();
             if !run_out.stdout.is_empty() {
                 eprintln!("runner stdout:\n{}", run_out.stdout);
+                let _ = std::io::stderr().flush();
             }
             if !run_out.stderr.is_empty() {
                 eprintln!("runner stderr:\n{}", run_out.stderr);
+                let _ = std::io::stderr().flush();
             }
             // Return the error so the caller sees it (no submit was called).
             anyhow::anyhow!("envelope parse error: {e}")
@@ -504,11 +508,13 @@ pub(crate) fn drive_loop(
                 if !render_out.dry_run {
                     if let Err(e) = apply_render(&render_out) {
                         eprintln!("[{display_id}] render write failed (non-fatal): {e}");
+                        let _ = std::io::stderr().flush();
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[{display_id}] render compute failed (non-fatal): {e}");
+                let _ = std::io::stderr().flush();
             }
         }
 
@@ -1427,35 +1433,10 @@ mod tests {
 
     // ---------------------------------------------------------------------------
     // Phase 2 — Bug 2: drive exits non-zero when runner returns wrong role
+    // (drive_loop_role_mismatch_message_format below is the authoritative
+    //  regression trap; it asserts the post-fix "envelope role mismatch" message
+    //  format and subsumes the weaker Err(_) check that was here.)
     // ---------------------------------------------------------------------------
-
-    #[test]
-    fn drive_loop_unroutable_role_exits_nonzero() {
-        let schema = tasks_schema();
-        let (_dir, conn) = open_db(&schema);
-
-        // Insert a task already at executing — drive expects an executor envelope.
-        insert_task(
-            &conn, &schema, "T001", "executing",
-            "2026-01-01T00:00:00Z", 1, 1, None, None,
-        );
-
-        // Runner returns a guide envelope (wrong role) with exit_code 0.
-        let misrouted = RunnerOutput {
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_code: 0,
-            final_message: Some("{\"role\":\"guide\",\"action\":\"noop\"}".to_string()),
-            structured_output: None,
-            session_id: Some("smoke-session-uuid".to_string()),
-            structured_output_source: None,
-        };
-        let runner = MockRunner::new(vec![misrouted]);
-
-        // drive_loop must return Err, not hang or return Ok.
-        drive_loop(&schema, &conn, "T001", &runner, 50)
-            .expect_err("guide envelope while executing must cause Err");
-    }
 
     #[test]
     fn drive_loop_role_mismatch_message_format() {
