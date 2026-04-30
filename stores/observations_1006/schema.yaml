@@ -1,3 +1,28 @@
+# ============================================================================
+# FROZEN FIXTURE — DO NOT EDIT
+# ============================================================================
+# This schema was the L275 proof-of-concept used to validate the substrate
+# work in T006 (transition guards, list_record write/read, hyphenated names,
+# repeatable list flags) and T008 (FieldType::Json).
+#
+# As of T009, the production observations schema lives at
+# `stores/observations/schema.yaml` — bundled, supersedes this file in
+# every operational way (full 7-state lifecycle, ~30 production fields,
+# intent_contract per 10.06 production names per D9).
+#
+# This file is preserved as:
+#   1. A regression fixture: artefacts at /tmp/t006-p5-smoke/ and
+#      /tmp/t008-notes-smoke/ reference this schema by name. Renaming or
+#      deleting it would break those historical artefacts' reproducibility.
+#   2. A documented evolution: the path from the philosophy POC to the
+#      production schema. Reading observations_1006 → observations diff
+#      shows the substrate maturation across T006-T008.
+#
+# Do NOT edit operationally. If you need to extend the production schema,
+# edit `stores/observations/schema.yaml` instead. If you need a smaller
+# fixture for a future POC, copy this file to a new name (don't reuse the
+# `_1006` suffix).
+# ============================================================================
 name: observations_1006
 id_format: "L{:03d}"
 scope: worktree

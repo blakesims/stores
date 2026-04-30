@@ -1,9 +1,9 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** EXECUTING_PHASE_5
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (Phase 4 code review cycle 2 — PASS; routing forward to Phase 5)
+- **Last Updated:** 2026-04-30 (Phase 5 COMPLETE — frozen-fixture header added to observations_1006/schema.yaml)
 - **Blocked Reason:** —
 
 ## Task
@@ -753,6 +753,53 @@ Remaining hits are exclusively in `src/validate/*`, `src/schema/*`, `src/handler
 **`cargo test --all`:** 414 unit + 2 integration = **416 PASS, 0 fail** (unchanged from Phase 3 baseline).
 
 **Philosophy thesis preservation (R6):** Confirmed. The sentence "The human is forced to bottle their context the moment they have it." is verbatim in `docs/philosophy.md:23` post-edit. Only the example field names changed.
+
+---
+
+### Phase 5 — POC fate: freeze observations_1006 as documented fixture
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (set after commit)
+- **Files modified:** `stores/observations_1006/schema.yaml`
+
+**Summary:**
+- Added 25-line frozen-fixture header comment block at the top of `stores/observations_1006/schema.yaml` (above the `name:` key).
+- Header wording matches the plan's suggested text verbatim. Content: identifies it as the L275 T006/T008 POC; redirects production work to `stores/observations/schema.yaml`; explains retention rationale (regression-fixture reproducibility + documented evolution path); prohibits operational edits; advises copy-to-new-name for future POCs.
+- `stores/observations/README.md` line 87 already contains the required one-liner (`Historical POC: stores/observations_1006/ — frozen fixture, not maintained.`) — added in Phase 4. No edit needed.
+- `stores install ./stores/observations_1006` in a fresh tempdir: **INSTALL OK** (YAML comment does not break parser).
+- `cargo test --all`: 414 unit + 2 integration = **416 PASS, 0 fail** (unchanged from Phase 4 baseline).
+
+**Header comment (verbatim):**
+```yaml
+# ============================================================================
+# FROZEN FIXTURE — DO NOT EDIT
+# ============================================================================
+# This schema was the L275 proof-of-concept used to validate the substrate
+# work in T006 (transition guards, list_record write/read, hyphenated names,
+# repeatable list flags) and T008 (FieldType::Json).
+#
+# As of T009, the production observations schema lives at
+# `stores/observations/schema.yaml` — bundled, supersedes this file in
+# every operational way (full 7-state lifecycle, ~30 production fields,
+# intent_contract per 10.06 production names per D9).
+#
+# This file is preserved as:
+#   1. A regression fixture: artefacts at /tmp/t006-p5-smoke/ and
+#      /tmp/t008-notes-smoke/ reference this schema by name. Renaming or
+#      deleting it would break those historical artefacts' reproducibility.
+#   2. A documented evolution: the path from the philosophy POC to the
+#      production schema. Reading observations_1006 → observations diff
+#      shows the substrate maturation across T006-T008.
+#
+# Do NOT edit operationally. If you need to extend the production schema,
+# edit `stores/observations/schema.yaml` instead. If you need a smaller
+# fixture for a future POC, copy this file to a new name (don't reuse the
+# `_1006` suffix).
+# ============================================================================
+```
+
+**Deviations from plan:** None. The README one-liner was already present (Phase 4 added it); skipped as specified.
 
 ---
 
