@@ -116,6 +116,15 @@ pub fn coerce_value(ty: &FieldType, raw: &str) -> Value {
                 _ => Value::String(raw.to_string()),
             }
         }
+        // Json: any valid JSON shape (object/array/scalar/null) is accepted.
+        // On parse failure, return Value::String(raw) as a sentinel so the validator's
+        // type-shape check can fire (Phase 3).  Decision 2: top-level JSON strings
+        // ('"hello"') parse to Value::String and are false-flagged as sentinels —
+        // documented limitation; users should wrap in object or use Text field type.
+        FieldType::Json => match serde_json::from_str::<Value>(raw) {
+            Ok(v) => v,
+            Err(_) => Value::String(raw.to_string()),
+        },
         _ => Value::String(raw.to_string()),
     }
 }
@@ -294,6 +303,62 @@ mod tests {
     use crate::schema::Schema;
     use serde_json::json;
     use tempfile::tempdir;
+
+    // ---- T008 Phase 2: coerce_value for Json ----
+
+    #[test]
+    fn coerce_value_json_parses_object() {
+        let ty = FieldType::Json;
+        let raw = r#"{"k":"v"}"#;
+        let result = coerce_value(&ty, raw);
+        match result {
+            Value::Object(map) => {
+                assert_eq!(map.get("k").and_then(|v| v.as_str()), Some("v"));
+            }
+            other => panic!("expected Value::Object, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn coerce_value_json_parses_array() {
+        let ty = FieldType::Json;
+        let raw = "[1,2,3]";
+        let result = coerce_value(&ty, raw);
+        match result {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], Value::from(1i64));
+                assert_eq!(arr[1], Value::from(2i64));
+                assert_eq!(arr[2], Value::from(3i64));
+            }
+            other => panic!("expected Value::Array, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn coerce_value_json_parses_scalar() {
+        let ty = FieldType::Json;
+        let raw = "42";
+        let result = coerce_value(&ty, raw);
+        match result {
+            Value::Number(n) => {
+                assert_eq!(n.as_i64(), Some(42));
+            }
+            other => panic!("expected Value::Number, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn coerce_value_json_bad_returns_sentinel_string() {
+        let ty = FieldType::Json;
+        let raw = "{not json";
+        let result = coerce_value(&ty, raw);
+        assert_eq!(
+            result,
+            Value::String(raw.to_string()),
+            "bad JSON must return sentinel String"
+        );
+    }
 
     // ---- T006 Phase 2: coerce_value for ListRecord / ListFk ----
 

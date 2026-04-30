@@ -630,7 +630,7 @@ fn build_leaf_cmd_owned(
 
         let is_text_like = matches!(
             leaf.field.ty,
-            FieldType::Text | FieldType::Timestamp | FieldType::DisplayId
+            FieldType::Text | FieldType::Timestamp | FieldType::DisplayId | FieldType::Json
         );
         let is_list = matches!(leaf.field.ty, FieldType::List(_));
 
@@ -705,7 +705,7 @@ fn build_leaf_cmd(
 
         let is_text_like = matches!(
             leaf.field.ty,
-            FieldType::Text | FieldType::Timestamp | FieldType::DisplayId
+            FieldType::Text | FieldType::Timestamp | FieldType::DisplayId | FieldType::Json
         );
         let is_list = matches!(leaf.field.ty, FieldType::List(_));
 

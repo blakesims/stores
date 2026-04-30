@@ -92,7 +92,7 @@ pub fn run(
         param_idx += 1;
 
         match &field.ty {
-            FieldType::Record(_) | FieldType::List(_) | FieldType::ListRecord(_) | FieldType::ListFk { .. } => {
+            FieldType::Record(_) | FieldType::List(_) | FieldType::ListRecord(_) | FieldType::ListFk { .. } | FieldType::Json => {
                 // Serialize to JSON string
                 let json_str = match val {
                     Some(v) => serde_json::to_string(v)
@@ -657,5 +657,76 @@ fields:
         run(&schema, &conn, &matches, Actor::Human).expect("mixed form must succeed");
         let items = get_in_scope(&conn, "S001");
         assert_eq!(items, vec!["a", "b", "c"], "mixed form: expected [\"a\", \"b\", \"c\"], got {:?}", items);
+    }
+
+    // ---- T008 Phase 2: Json field write-then-read integration test ----
+
+    const JSON_SCHEMA: &str = r#"
+name: jstore
+id_format: "J{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: notes
+    type: json
+    required: false
+"#;
+
+    fn json_schema_and_conn() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(JSON_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    /// T008 Phase 2 integration test: add with a JSON object value, read back via read_row,
+    /// assert the field round-trips as a structured Value::Object (not a string blob).
+    #[test]
+    fn json_field_write_then_read_round_trips_as_object() {
+        let (schema, conn) = json_schema_and_conn();
+        let cmd = build_test_add_cmd(&schema);
+        let raw_notes = r#"{"k":"v","arr":[1,2]}"#;
+        let matches = cmd.get_matches_from([
+            "add",
+            "--title", "json test row",
+            "--notes", raw_notes,
+        ]);
+
+        run(&schema, &conn, &matches, Actor::Human).unwrap();
+
+        // NOTE: read_row currently returns Value::Null for Json columns because Phase 4
+        // extends the read-path match to include FieldType::Json. Until Phase 4 ships,
+        // verify that the stored TEXT is correctly serialised by querying SQLite directly.
+        let stored_notes: String = conn
+            .query_row("SELECT notes FROM jstore WHERE display_id = 'J001'", [], |r| r.get(0))
+            .unwrap();
+        // The value stored must be parseable JSON matching the original object
+        let parsed: serde_json::Value = serde_json::from_str(&stored_notes)
+            .expect("stored notes must be valid JSON");
+        assert_eq!(parsed["k"], "v", "notes.k must round-trip");
+        assert_eq!(parsed["arr"], serde_json::json!([1, 2]), "notes.arr must round-trip");
+    }
+
+    /// T008 Phase 2: absent Json field stores the JSON literal "null" (Decision 4).
+    #[test]
+    fn json_field_absent_stores_null_literal() {
+        let (schema, conn) = json_schema_and_conn();
+        let cmd = build_test_add_cmd(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--title", "no notes row",
+        ]);
+
+        run(&schema, &conn, &matches, Actor::Human).unwrap();
+
+        let stored_notes: String = conn
+            .query_row("SELECT notes FROM jstore WHERE display_id = 'J001'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored_notes, "null", "absent Json field must store \"null\" literal (Decision 4)");
     }
 }

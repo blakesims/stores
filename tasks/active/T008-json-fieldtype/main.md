@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -280,7 +280,24 @@ Status: PLAN_REVIEW → READY.
   - `src/handlers/schema_show.rs` was not in the Phase 1 file list but required a one-line `Json => "json"` arm to avoid a non-exhaustive match compile error. Strictly necessary; no behavioral change.
   - Nested-rejection is implemented as a post-resolve walk in `raw_to_field` (not in `resolve_field_type` or a separate `raw_to_subfield`) because `resolve_field_type` lacked access to the parent field name. The result is identical: rejection fires at `Schema::from_yaml` time with the field path named in the error.
 
-_Executor agent fills this section per phase._
+### Phase 2 — Write path: `coerce_value` + storage match arms + CLI from-file
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (pending)
+- **Files modified:**
+  - `src/handlers/row.rs` — added `FieldType::Json` arm to `coerce_value`; parses via `serde_json::from_str::<Value>(raw)`, returns parsed `Value` on success, `Value::String(raw)` sentinel on failure. Added 4 unit tests: `coerce_value_json_parses_object`, `coerce_value_json_parses_array`, `coerce_value_json_parses_scalar`, `coerce_value_json_bad_returns_sentinel_string`.
+  - `src/handlers/add.rs` — added `FieldType::Json` to the `Record | List | ListRecord | ListFk` storage match arm at line 95. Added 2 integration tests: `json_field_write_then_read_round_trips_as_object` (verifies stored TEXT is valid JSON matching input), `json_field_absent_stores_null_literal` (Decision 4: absent field stores `"null"`).
+  - `src/handlers/update.rs` — added `FieldType::Json` to the `List | ListRecord | ListFk` storage match arm at line 107.
+  - `src/handlers/transition.rs` — added `FieldType::Json` to the `List | ListRecord | ListFk` storage match arm at line 164.
+  - `src/cli/dynamic.rs` — extended both `is_text_like` predicates (in the transition-verb builder at line 631 and `build_leaf_cmd` at line 706) to include `FieldType::Json`, giving Json fields the `--<name>-from-file` companion flag.
+
+- **Test count delta:** 400 → 406 (+6 new: 4 unit in `row.rs`, 2 integration in `add.rs`)
+
+- **Integration test note:** `json_field_write_then_read_round_trips_as_object` verifies write mechanics by querying SQLite directly (the stored TEXT is parseable JSON with the expected structure). Full `read_row` round-trip (returning `Value::Object` from `read_row`) is Phase 4's job — the read-path match arm for `FieldType::Json` is not yet added to `read_row`, so read_row currently returns `Value::Null` for Json columns. This is expected at Phase 2.
+
+- **Deviation from plan:** None. All five deliverables implemented exactly as specified. The integration test queries SQLite directly rather than via `read_row` because the read path is Phase 4 scope — this is per plan ("Don't touch: The read path (Phase 4)").
 
 ---
 
