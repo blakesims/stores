@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_5
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -456,6 +456,39 @@ Verdict: **justified, not a scope creep**.
 3. Non-trivial-finding budget: I aimed for ≥3 substantive findings on a non-trivial change. The change IS non-trivial in concept (rename + new sentinel detection block + 4 tests + documented-limitation pin), but the execution is mechanically clean: every decision was pre-locked in the Decision Matrix, the executor mirrored the T006 P2 pattern 1:1, all four AC tests pass, and the only deviation is a test rename that strictly improves accuracy. The findings above are minor cosmetic notes rather than substantive defects. Lower count is justified by the tightness of the planning + the precedent of T006 P2 (which was already through 1 REVISE cycle, so this Phase 3 inherits a battle-tested pattern).
 
 **Routing:** Status `CODE_REVIEW` → `EXECUTING_PHASE_4`.
+
+### Phase 4 — Code Review (read path)
+
+- **Gate:** PASS
+- **Reviewer date:** 2026-04-30
+- **Commit:** `f42caf6` (+ log fixup `cdf48e3`)
+
+**ACs verified**
+
+1. `read_row` Json arm (row.rs:257-261) — CONFIRMED. Json now joins `Record | List | ListRecord | ListFk` in the JSON-deserialise match. Test `read_row_json_field_returns_structured_object` asserts `Value::Object` with nested `k → "v"` + `arr → [1,2]`. PASS.
+2. `list.rs` Json arm + parity gap closure (list.rs:139-155) — CONFIRMED. Pre-P4 match was `Record | List` only; post-P4 is `Record | List | ListRecord | ListFk | Json`. `list_list_record_field_decodes_to_structured_value` covers BOTH ListRecord (array of objects with `label`/`score`) and ListFk (array of display_id strings) — pins parity. PASS.
+3. `show --json` round-trip — CONFIRMED LIVE. `show.rs` unchanged (delegates via `read_row` at `show.rs:23`). Live test in `/tmp/t008-p4-live`: `notes-test` schema with `notes: json`; `stores notes_test add --notes '{"siblings":["L210"],...}'` → `stores notes_test show N001 --json | jq '.notes.siblings'` returns `["L210"]` (structured JSON array, NOT a quoted blob). `stores notes_test list --json | jq '.[0].notes'` also emits a structured object. Marquee proof works. PASS.
+4. Test count 410 → 414, all passing. `cargo test --all` = 414/0/0. PASS.
+
+**Specific concerns addressed**
+
+1. **Live `show --json` round-trip.** Verified above; `notes.siblings` reads back as `["L210"]`, not `"[\"L210\"]"`. Bad JSON path also live-confirmed: `stores notes_test add --title bad --notes '{not json'` exits 1 with stderr `notes: value must be valid JSON, got string '{not json'` (Phase 3 + Phase 4 read-side null-fallback both intact).
+2. **Parity gap closure.** Unit test `list_list_record_field_decodes_to_structured_value` asserts `tags` (ListRecord) decodes to `Value::Array` of objects with `label/score` keys (NOT a string blob), AND `refs` (ListFk) decodes to `Value::Array` of display_id strings. Both arms exercised. The `tasks` shipped store (which has `linked_observations: list_fk` and `plan: list_record`) was not live-tested because no rows exist in the stores-repo workspace, but the unit test structurally pins the same code path that would run for that schema. Acceptable.
+3. **No regression on Record/List arms.** Diff at `list.rs:140-155` shows the only change is widening the match arm tuple — the inner decode block (`if let Value::String(json_str) = raw_val { ... if !json_str.is_empty() && json_str != "null" { ... } }`) is byte-identical pre/post. Record and List paths take the same branch as before.
+4. **Sentinel passthrough on read.** `read_row` (row.rs:262-271) gracefully degrades: if stored TEXT is non-empty AND parses as valid JSON → `parsed`; if empty OR parse-fails → `Value::Null`. No panic path. The plan AC #4 explicitly says empty/NULL Json → `Value::Null`; the implementation matches. Note: the prompt's "pass through as `Value::String`" concern is academic — Phase 3's validator now blocks sentinels at the write boundary, so a stored JSON-text column with a non-empty unparseable value is unreachable in practice (and would still safely emit `Value::Null` rather than panic).
+5. **`null` cell handling.** `read_row_json_field_null_cell_returns_null` inserts `notes = "null"` (Decision 4 default) and asserts `entry["notes"] == Value::Null`. Empty-string and SQL NULL paths also collapse to `Value::Null` per the same guard. PASS.
+6. **Out-of-scope check.** `git show f42caf6 --stat`: exactly `src/handlers/row.rs`, `src/handlers/list.rs`, `tasks/active/T008-json-fieldtype/main.md`. NO touches to `show.rs` (correctly relies on delegation), `add.rs` / `update.rs` / `transition.rs` (Phase 2), `validate/*` (Phase 3), `cli/dynamic.rs`, `codegen/ddl.rs`, or `observations_1006/schema.yaml` (Phase 5). Tightly scoped.
+7. **No T005/T006/T007 logic touched.** The list.rs widening DOES change the public output shape of `list --json` for any existing store with a ListRecord/ListFk field (T005 tasks store, T006 schema fixtures, T007 gate store) — but this is the pre-approved side-benefit fix called out in plan reviewer's verification note (line 245). No T005/T006/T007 unit test broke (cargo test --all = 414/0).
+8. **Pre-existing failures unchanged.** `cargo test --all` 414/0. Re-ran `tests/e2e.sh` Step 6: still fails on the documented CLAUDECODE auto-detect line (validator rejecting `ai_autonomous` invoker for triage transition). Not a Phase 4 regression — same shape as Phase 1/2/3 reviews.
+
+**Findings (non-blocking observations)**
+
+1. **list.rs test uses inline-decode-logic duplication, not the actual `run()` function.** Both new list.rs tests (`list_json_field_decodes_to_structured_value`, `list_list_record_field_decodes_to_structured_value`) replicate the decode loop locally rather than invoking `list::run` and capturing its output. This means the tests verify the match-arm logic in isolation but do NOT assert that the production `run()` path actually emits structured JSON. Consequence: a future refactor that accidentally drops the decode block from `run()` could break `list --json` without these tests catching it. Mitigation: the live `stores notes_test list --json` smoke I ran above DOES exercise `run()` end-to-end and confirms structured output, so the gap is currently closed by manual verification. Worth noting for the regression-trap suite — a follow-up could promote one of these to invoke `run()` via a captured stdout. Not gate-failing; the live test compensates today.
+2. **`read_row_json_field_null_cell_returns_null` only covers the `"null"` literal storage convention (Decision 4), not SQL NULL.** The test inserts `notes` as the TEXT string `"null"` (4 chars), not as `rusqlite::types::Null`. Phase 4 AC #4 wording says "Empty / NULL Json cell on read → `Value::Null`" — the test pins one branch (literal "null") but the genuinely-NULL SQL row branch (where `raw_map.get(&field.name)` would absent the entry, or insert `Value::Null`) is not separately exercised. The code path likely handles it via the early `if let Some(raw_val) = raw_map.get(&field.name)` guard, but the test doesn't pin it. Minor coverage gap; the storage convention (Decision 4) means this branch is rarely exercised in production.
+3. **`list.rs` test has 100+ lines of duplicated decode-loop boilerplate across two tests.** Each test re-implements the production match-arm logic inline (`for field in &schema.fields { if let Some(raw_val) ... match &field.ty { FieldType::Record | List | ListRecord | ListFk | Json => { ... } } }`). If the production decode logic changes, the tests will silently diverge from reality. Refactor opportunity: extract a `decode_entry_for_test(schema, raw_map) -> EntryMap` helper, OR (better) restructure the production code so both `read_row` and `list::run` share a `decode_json_text_columns(schema, &mut entry)` helper, then test the helper directly. Cosmetic; not gate-failing.
+4. **Finding-count discipline note.** Per reviewer protocol, ≥3 findings on a non-trivial change. The change is mechanically simple (one match-arm widen in row.rs, one in list.rs, four tests) but the cross-cutting impact (closing the parity gap for ALL list-shaped read paths) is non-trivial. Three substantive findings logged above; all are minor coverage/refactor notes rather than defects.
+
+**Routing:** Status `CODE_REVIEW` → `EXECUTING_PHASE_5`.
 
 ### Phase 4 — Read path: `show.rs` / `list.rs` / `read_row` round-trip
 
