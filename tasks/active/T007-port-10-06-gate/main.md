@@ -1,9 +1,9 @@
 # T007: Port the 10.06 `gate` store — first real migration
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_2
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (plan-review cycle 2 of 3 — APPROVED)
+- **Last Updated:** 2026-05-01 (Phase 1 code-review PASS)
 - **Blocked Reason:** —
 
 ## Task
@@ -361,7 +361,61 @@ READY → orchestrator → executor. Move folder `tasks/planning/T007-port-10-06
 ---
 
 ## Code Review Log
-_Code-reviewer agent fills this section per phase._
+
+### Phase 1 — Code Review (2026-05-01)
+
+- **Verdict:** PASS
+- **Reviewer:** code-reviewer agent
+- **Commit reviewed:** `7dc5f48` (Phase 1) + `2a6905b` (execution-log SHA)
+
+#### Verification against ACs
+
+- AC1 (`stores install ./stores/gate` parses cleanly + sqlite shows 9 new columns + renamed `one_liner`): **PASS**. Verified manually — fresh install succeeds; `.schema gate` shows `one_liner`, `priority_rank`, `priority_rank_at`, `defer_until`, `filed_by`, `source` (with CHECK enum), `business_reason`, `technical_detail`, `command`, `implications`. Framework-reserved audit column `created_by` coexists with the new schema-level `filed_by` (no collision after the rename — see Porting note below).
+- AC2 (`stores gate schema --json` shows lifecycle states `[pending, answered, deferred, cancelled]` and verbs `defer`/`resume`/`answer`/`cancel`): **PASS**. Confirmed JSON output:
+  - States: `[pending, answered, deferred, cancelled]`
+  - Transitions: `answer` (human, pending→answered), `cancel` (ai_autonomous, pending→cancelled), `cancel` (ai_autonomous, deferred→cancelled), `defer` (ai_with_human, pending→deferred), `resume` (ai_with_human, deferred→pending), `resume` (ai_with_human, pending→pending — self-loop).
+- AC3 (`cargo test --all` green): **PASS**. 396 unit + 2 integration = 398/0 (matches executor claim). No regressions; the 2-test bump is from the new required fields (`filed_by`, `source`) being exercised by the existing guide.rs fixtures.
+
+#### Cross-checks
+
+- `tests/drive_e2e.sh`: PASS (AC7.1 happy + AC7.1b revise-once both green; un-regressed).
+- `tests/tasks_e2e.sh`: fails at Step 16 (cargo test ac5_11b grep-piped through SIGPIPE-prone shell pipe). **Pre-existing on master** — verified by running on current `HEAD` and on `git stash` baseline (no T007 changes); same failure shape. Documented in DONE_WHEN as "modulo the pre-existing CLAUDECODE / SIGPIPE failures already documented in T006". Not introduced by Phase 1.
+- `tests/e2e.sh`: fails at Step 6 (`triage` actor check — pre-existing CLAUDECODE auto-detection issue, also documented in T006). Critically, fails BEFORE the `--question` lines (Steps 9, 11) — so we have not yet confirmed the rename-failure shape against the live e2e harness. I verified the rename failure shape directly against a fresh install: `stores gate add --type decision --question "test"` exits non-zero with `error: unexpected argument '--question' found` and a usage hint. Phase 2 has a clean failure surface to chase.
+- `tests/gate_e2e.sh`: confirmed absent (`ls tests/` shows only `drive_e2e.sh`, `e2e.sh`, `tasks_e2e.sh`, plus fixtures + `schemas_validate_fixtures.rs`). Phase 3 deliverable.
+
+#### Out-of-scope check (`git show 7dc5f48 --stat`)
+
+Three files touched: `stores/gate/schema.yaml` (the marquee deliverable), `src/handlers/guide.rs` (D2 — test fixture), `tasks/active/T007-port-10-06-gate/main.md` (execution log). NO touches to T005/T006 territory: drive.rs, lifecycle.rs, validate/, codegen/ddl.rs, parse_envelope, status, next_action, row.rs, dynamic.rs all clean.
+
+#### Locked-item compliance
+
+- Path A (extend bundled): in place — schema.yaml extended, no `gate_1006/` parallel.
+- `defer_until: text`: confirmed at line 78 of schema.yaml.
+- Resume self-loop (`pending→pending` verb `resume`): present at lines 27-30.
+- R1 (validate-pre-merge limitation): the `defer_until` field description honestly states "Operator-hygiene: not schema-enforced when transitioning to deferred (validate runs pre-merge; see R1 in task plan)". Honest documentation, no spurious `required_when` cruft.
+
+#### Deviation judgments
+
+**D1 — `created_by` → `filed_by` (executor's rename):** REASONABLE and on the safer side. Confirmed via `src/codegen/ddl.rs:18` that `"created_by TEXT"` is unconditionally prepended to every generated table; line 122 asserts this is universal in tests; line 181 documents the audit-column convention. A schema field named `created_by` would produce SQLite `duplicate column name` at install time. This was foreseeable by the planner — the gap table at lines 31-32 of main.md and DONE_WHEN clause 1 both used `created_by`/`--created-by` literally. Not a blocking finding; rename is mechanically defensible and the new name (`filed_by`) is semantically clean. Phase 2/3 must use `--filed-by` instead of `--created-by` per the executor's deviation note.
+
+**D2 — `src/handlers/guide.rs::insert_gate` fixture:** REASONABLE and necessary. Verified at lines 574-592: the `INSERT INTO gate` literal updated to use `one_liner` (instead of `question`) and now includes `filed_by = 'test-fixture'`, `source = 'dev'` to satisfy the new required columns. No new logic, no new edge cases, no behavior change — purely a fixture-shape correction. The test that previously inserted via `question` now inserts via `one_liner` with the same intent (the brief-builder tests still assert on gate-ID containment, linked-task references, and authorized verbs — none of which depend on the renamed field name).
+
+#### Findings
+
+1. **Actor specificity on new transitions** (verified, no issue). Per the plan's specific-finding-to-flag: defer / resume / resume-self-loop all use `actor: ai_with_human` (lines 22, 26, 30 of schema.yaml). The plan said "no actor restriction" for defer/resume — `ai_with_human` is the safest non-human, non-AI-autonomous reading of "no actor restriction" and is consistent with the orchestrator's locked answer ("actor should be ai_with_human or human"). PASS.
+
+2. **`cancel: deferred→cancelled` is on-spec, not scope creep.** Plan line 135 explicitly listed it: "`deferred → cancelled` verb `cancel` (per DM row 'cancel-from-deferred')". Schema lines 15-18 add it with `actor: ai_autonomous`, mirroring the existing `pending→cancelled cancel` actor. Symmetric and consistent.
+
+3. **Phase 2 failure preview (`tests/e2e.sh`).** When Phase 2 starts, the `--question` regression manifests as `error: unexpected argument '--question' found` (clean clap-level error with usage hint). Phase 2 should patch lines 139, 152, 171 of `tests/e2e.sh` (all three `stores gate add --question` call sites) plus comment lines 14 and 18. Planner already enumerated the full file list (skill SKILL.md, README.md, stores/gate/README.md). Note: Step 6 of `tests/e2e.sh` will continue to fail with the pre-existing CLAUDECODE issue regardless — Phase 2's "13/13 PASS" AC will need that pre-existing failure addressed or AC re-scoped. Heads-up for the planner / Phase 2 executor: this is an **independent** pre-existing failure, not new. (Recorded here so Phase 2 doesn't blame the rename.)
+
+#### Porting notes (10.06-vs-stores naming differences)
+
+The framework reserves `created_by` as an audit column auto-generated by DDL codegen (`src/codegen/ddl.rs:18`). Any 10.06-style schema field literally named `created_by` must be renamed when ported to stores. The T007 convention is `filed_by` (semantically: "skill or agent that filed the entry," distinct from the framework's `created_by` audit column = "actor who originally inserted the row"). When porting future stores from 10.06 (T009 observations, etc.), apply the same rename pattern. Consider adding a section to `stores/gate/README.md` in Phase 2 explaining this for operator clarity.
+
+#### Routing
+
+- Status `CODE_REVIEW` → `EXECUTING_PHASE_2`.
+- Phase 2 will need to use `--filed-by` (not `--created-by`) in any rename-pass adjacent edits. The plan's main DONE_WHEN clause 1 text on line 47 still says `--created-by morning-check`; recommend Phase 2 also fix that DONE_WHEN literal as a doc-correctness sub-edit (or planner re-issue of the clause 1 text).
 
 ---
 
