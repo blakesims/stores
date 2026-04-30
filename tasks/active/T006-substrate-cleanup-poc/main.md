@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_5
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
