@@ -306,7 +306,7 @@ All five cycle-1 revisions verified. Status advances PLAN_REVIEW → READY.
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Completed:** 2026-04-30
-- **Commit SHA:** (see below)
+- **Commit SHA:** e079400
 - **Files modified:**
   - `src/handlers/row.rs` — added `ListRecord` and `ListFk` arms to `coerce_value`; added 5 unit tests for coerce round-trip and bad-JSON fail-silent behaviour
   - `src/handlers/add.rs` — extended match arm from `Record|List` to also cover `ListRecord|ListFk`; added `LIST_RECORD_SCHEMA` fixture, `list_record_schema_and_conn` helper, `list_record_cli_round_trips_as_array` and `list_record_bad_json_returns_validator_error` tests
