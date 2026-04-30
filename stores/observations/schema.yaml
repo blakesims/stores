@@ -1,53 +1,71 @@
 name: observations
-id_format: "OBS{:03d}"
+id_format: "L{:03d}"
 # No store-level default_actor — fields are unguarded by default; explicit actor per-field only.
+# D6 audit-column collision check (T009): none of the 10.06 field names collide with reserved
+# audit columns (created_at, created_by, updated_at, updated_by). Verified: captured_at,
+# resolved_at, priority_rank_at, locked_at, drafted_at, approved_at are all distinct.
+
 lifecycle:
-  states: [open, triaged, investigating, confirmed, needs_info, in_progress, resolved, wont_fix]
+  states: [open, investigating, confirmed, needs_info, in_progress, resolved, wont_fix]
+  initial_state: open
   transitions:
+    # open → investigating: triage begins
     - from: open
-      to: triaged
-      verb: triage
-      actor: ai_with_human
-    # Original v0.1 direct path: kept for backward compatibility (tests/e2e.sh walks this path)
-    - from: triaged
-      to: resolved
-      verb: resolve
-      actor: ai_autonomous
-    - from: triaged
-      to: wont_fix
-      verb: wont_fix
-      actor: ai_with_human
-    # Extended lifecycle (v0.2 / D4 — 10.06 full set)
-    - from: triaged
       to: investigating
       verb: investigate
       actor: ai_with_human
+
+    # open → wont_fix: direct discard path (per 10.06 lifecycle diagram)
+    - from: open
+      to: wont_fix
+      verb: wont_fix
+      actor: ai_with_human
+
+    # investigating → confirmed: contract must be ready before this fires (clause 2+3 backbone)
     - from: investigating
       to: confirmed
       verb: confirm
       actor: ai_with_human
+      guard: "intent_contract.contract_state == 'ready'"
+
+    # investigating → needs_info: request more context
     - from: investigating
       to: needs_info
       verb: request_info
       actor: ai_autonomous
+
+    # confirmed → needs_info: parking (clause 7)
+    - from: confirmed
+      to: needs_info
+      verb: park
+      actor: ai_autonomous
+
+    # needs_info → confirmed: human provides the missing context (clause 7 resume)
     - from: needs_info
       to: confirmed
       verb: provide_info
       actor: human
+
+    # confirmed → in_progress: claim the work
     - from: confirmed
       to: in_progress
       verb: claim
       actor: ai_autonomous
+
+    # in_progress → resolved: work done
     - from: in_progress
       to: resolved
       verb: resolve
       actor: ai_autonomous
+
+    # confirmed → wont_fix: bailout after investigation
     - from: confirmed
       to: wont_fix
       verb: wont_fix
       actor: ai_with_human
 
 fields:
+  # --- Core identity ---
   - name: summary
     type: text
     required: true
@@ -58,38 +76,288 @@ fields:
     required: false
     description: "Extended description; supports --body-from-file"
 
-  - name: triage
-    type: record
-    fields:
-      - name: verdict
-        type: enum
-        enum_values: [T1, T2, T3]
-        description: "Triage verdict: T1=ignore, T2=track, T3=full task"
-      - name: notes
-        type: text
-        required: false
-        description: "Free-form triage notes"
-    description: "Triage information"
+  # --- Source / origin ---
+  - name: source
+    type: enum
+    enum_values: [dashboard, qa, dev, sentry, intake, converge, wrap]
+    required: true
+    description: "Where this observation originated"
 
-  - name: contract
-    type: record
-    fields:
-      - name: done_when
-        type: text
-        required_when: "triage.verdict == 'T3'"
-        description: "Done criteria — required when verdict is T3"
-      - name: scope_in
-        type: text
-        required_when: "triage.verdict == 'T3'"
-        description: "In-scope work — required when verdict is T3"
-      - name: scope_out
-        type: text
-        required_when: "triage.verdict == 'T3'"
-        description: "Out-of-scope work — required when verdict is T3"
-    description: "Intent contract; sub-fields required when verdict == T3"
+  - name: source_id
+    type: integer
+    required: false
+    description: "Primary key in the source system (dashboard row id, etc.)"
 
+  - name: prod_source_id
+    type: integer
+    required: false
+    description: "Production environment source id (dashboard sync)"
+
+  - name: sandbox_source_id
+    type: integer
+    required: false
+    description: "Sandbox environment source id (dashboard sync)"
+
+  - name: origin_db
+    type: enum
+    enum_values: [prod, sandbox]
+    required: false
+    description: "Which database the source record lives in"
+
+  # --- Priority / scheduling ---
+  - name: priority
+    type: enum
+    enum_values: [high, normal, low]
+    required: true
+    description: "Observation priority"
+
+  - name: priority_rank
+    type: integer
+    required: false
+    description: "Ordered rank within the priority tier (written by /focus)"
+
+  - name: priority_rank_at
+    type: timestamp
+    required: false
+    description: "When priority_rank was last written"
+
+  - name: scheduled_for
+    type: text
+    required: false
+    description: "Target date or sprint slot (operator-hygiene, no pattern)"
+
+  # --- Capture metadata ---
+  - name: captured_at
+    type: text
+    required: true
+    description: "ISO timestamp when the observation was captured"
+
+  - name: captured_week
+    type: text
+    required: true
+    description: "Operator week label (e.g. w11-d4); no pattern enforced per D2"
+
+  - name: contact_id
+    type: integer
+    required: false
+    description: "Contact the observation is associated with"
+
+  - name: field_name
+    type: text
+    required: false
+    description: "Specific field name within the contact record, if applicable"
+
+  # --- QA-source dedup keys ---
+  - name: qa_item_id
+    type: integer
+    required: false
+    description: "QA checklist item id (source=qa dedup)"
+
+  - name: tour_session_id
+    type: integer
+    required: false
+    description: "Tour session id (source=qa dedup)"
+
+  - name: step_index
+    type: integer
+    required: false
+    description: "Step index within tour session (source=qa dedup)"
+
+  - name: staff_user_id
+    type: integer
+    required: false
+    description: "Staff user who triggered the QA observation"
+
+  - name: message
+    type: text
+    required: false
+    description: "Raw message text from the QA step (dedup key)"
+
+  # --- Capability surface ---
+  - name: capability
+    type: text
+    required: false
+    description: "Primary capability affected (dashboard surface label)"
+
+  - name: capability_ids
+    type:
+      list: text
+    required: false
+    description: "Capability ids this observation touches"
+
+  # --- Investigation / resolution ---
+  - name: investigation_note
+    type: text
+    required: false
+    description: "Free-form notes accumulated during investigation"
+
+  - name: resolved_at
+    type: text
+    required: false
+    description: "ISO timestamp when the observation was resolved"
+
+  - name: resolution
+    type: text
+    required: false
+    description: "How the observation was resolved"
+
+  # --- Cross-store reference (soft-FK, plain text per D4) ---
+  - name: task_id
+    type: text
+    required: false
+    description: "Display id of the linked task (e.g. T123); soft-FK, no referential guard (T010)"
+
+  # --- Concurrency primitive (actor:framework, mirrors tasks claimed_by pattern, per D5) ---
+  - name: locked_by
+    type: text
+    required: false
+    actor: framework
+    description: "Agent or process that holds the lock"
+
+  - name: locked_at
+    type: timestamp
+    required: false
+    actor: framework
+    description: "When the lock was acquired"
+
+  - name: lock_reason
+    type: text
+    required: false
+    actor: framework
+    description: "Why the lock was taken"
+
+  # --- Tags ---
   - name: tags
     type:
       list: text
     required: false
     description: "Tags for filtering"
+
+  # --- Intent contract (D9-compliant; 15 sub-fields; mirrors 10.06 production) ---
+  - name: intent_contract
+    type: record
+    description: "Structured brief gating the confirmed transition; sub-fields required when contract_state == ready"
+    fields:
+      # Contract lifecycle
+      - name: contract_state
+        type: enum
+        enum_values: [draft, ready]
+        description: "draft = AI-authored; ready = Blake-approved"
+
+      - name: drafted_by
+        type: text
+        description: "Agent or skill that authored the draft"
+
+      - name: drafted_at
+        type: timestamp
+        description: "When the draft was written"
+
+      # Core scope (required_when ready)
+      - name: objective
+        type: text
+        required_when: "intent_contract.contract_state == 'ready'"
+        description: "One-line goal — what done means"
+
+      - name: type
+        type: enum
+        enum_values: [work, investigation]
+        required_when: "intent_contract.contract_state == 'ready'"
+        description: "work = known fix; investigation = root cause unknown"
+
+      - name: in_scope
+        type:
+          list: text
+        required_when: "intent_contract.contract_state == 'ready'"
+        description: "Bulleted list of in-scope items"
+
+      - name: out_of_scope
+        type:
+          list: text
+        required_when: "intent_contract.contract_state == 'ready'"
+        description: "Bulleted list of out-of-scope items (name the creep vectors)"
+
+      - name: acceptance
+        type:
+          list: text
+        required_when: "intent_contract.contract_state == 'ready'"
+        description: "Testable / observable done-criteria"
+
+      - name: tier_hint
+        type: enum
+        enum_values: [T1, T2, T3]
+        required_when: "intent_contract.contract_state == 'ready'"
+        description: "Floor tier; /task:open may step UP, never DOWN"
+
+      # Optional contract metadata
+      - name: inputs
+        type:
+          list: text
+        required: false
+        description: "Gates / observations / refs / capabilities this depends on"
+
+      - name: touches
+        type:
+          list: text
+        required: false
+        description: "Drives /task:open tier recomputation (webhook, migration, secret, capability, cross_system)"
+
+      - name: affects_capability
+        type: text
+        required: false
+        description: "Capability code (C01-C18); null if infra-only"
+
+      - name: known_solution
+        type: text
+        required: false
+        description: "Sketch of the fix; null signals investigation needed first"
+
+      # Approval (actor:human + required_when ready — only Blake can ratify)
+      - name: approved_by
+        type: text
+        actor: human
+        required_when: "intent_contract.contract_state == 'ready'"
+        description: "Who approved the contract (always blake for now)"
+
+      - name: approved_at
+        type: timestamp
+        actor: human
+        required_when: "intent_contract.contract_state == 'ready'"
+        description: "When the contract was approved"
+
+  # --- Evidence record (list_record of external refs; T006 P2 substrate) ---
+  - name: evidence
+    type: record
+    description: "Supporting evidence for the observation"
+    fields:
+      - name: observed_at
+        type: timestamp
+        required: false
+        description: "When the evidence was captured"
+
+      - name: env
+        type: text
+        required: false
+        description: "Environment in which the evidence was observed (prod, sandbox, local)"
+
+      - name: external_refs
+        type: list_record
+        description: "External system references (Sentry, JIRA, etc.)"
+        fields:
+          - name: system
+            type: text
+            required: true
+            description: "External system name (e.g. sentry, linear)"
+          - name: kind
+            type: text
+            required: true
+            description: "Reference kind (e.g. issue, event)"
+          - name: id
+            type: text
+            required: true
+            description: "Identifier in the external system"
+
+  # --- Notes (free-shape JSON; T008 substrate) ---
+  - name: notes
+    type: json
+    required: false
+    description: "Free-shape catch-all (siblings, discovery_path, related_observations, tried_repros, user_quotes, etc.)"

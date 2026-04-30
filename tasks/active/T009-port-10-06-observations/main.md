@@ -1,7 +1,7 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** READY
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30 (plan-reviewer cycle 2 — PASS; routing to executor)
 - **Blocked Reason:** —
@@ -386,7 +386,27 @@ After Issues 1-3 are resolved:
 ---
 
 ## Execution Log
-_Executor agent fills this section per phase._
+
+### Phase 1 — Schema extension
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (filled after commit)
+- **Files modified:** `stores/observations/schema.yaml`
+
+**Summary:**
+- `id_format`: `OBS{:03d}` → `L{:03d}`
+- **Lifecycle**: 7 states `[open, investigating, confirmed, needs_info, in_progress, resolved, wont_fix]` (initial: open). `triaged` state REMOVED. 9 transitions with correct actor/guard.
+- **Transitions added/changed**: `open→investigating` (investigate, ai_with_human), `open→wont_fix` (wont_fix, ai_with_human), `investigating→confirmed` (confirm, ai_with_human, guard: `intent_contract.contract_state == 'ready'`), `investigating→needs_info` (request_info, ai_autonomous), `confirmed→needs_info` (park, ai_autonomous), `needs_info→confirmed` (provide_info, human), `confirmed→in_progress` (claim, ai_autonomous), `in_progress→resolved` (resolve, ai_autonomous), `confirmed→wont_fix` (wont_fix, ai_with_human). The v0.1's `triaged` state + `triage` verb REMOVED; POC-only verbs (`ratify`, `start_t2`, `start_t3`, `resolve_t1`) not present.
+- **Fields added (new)**: `source`, `source_id`, `prod_source_id`, `sandbox_source_id`, `origin_db`, `priority_rank`, `priority_rank_at`, `scheduled_for`, `captured_at`, `captured_week`, `contact_id`, `field_name`, `qa_item_id`, `tour_session_id`, `step_index`, `staff_user_id`, `message`, `capability`, `capability_ids`, `investigation_note`, `resolved_at`, `resolution`, `task_id`, `locked_by`, `locked_at`, `lock_reason`
+- **Records dropped**: `triage`, `contract`
+- **Records added**: `intent_contract` (15 sub-fields per D9), `evidence` (list_record), `notes` (json)
+- **Fields retained**: `summary`, `body`, `tags`, `priority` (from POC)
+- **D6 audit-column collision check**: Verified — `captured_at`, `resolved_at`, `priority_rank_at`, `locked_at`, `drafted_at`, `approved_at` are all distinct from reserved set (`created_at`, `created_by`, `updated_at`, `updated_by`). No rename needed.
+- **`cargo test --all`**: 414 unit tests + 2 integration tests = 416 total, all PASS.
+- **`stores install ./stores/observations`**: DDL installs cleanly; 40 columns verified via `PRAGMA table_info(observations)`.
+- **e2e.sh expected-failure mode**: Step 4 `stores observations add` fails with `Error: validation failed: - captured_at: required - captured_week: required - priority: required - source: required`. NOT a parse error or panic. Expected per plan.
+- **Deviations from plan**: None. The plan noted `approval_invoker` (16th sub-field in the production doc audit-trail section) as an acceptable scope-narrowing; not added. `inputs` sub-field is `list: text` as specified. Schema grew to ~210 lines (plan estimated 150-200 — slightly over due to full YAML verbosity with descriptions).
 
 ---
 
