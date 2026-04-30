@@ -1,7 +1,7 @@
 # T005: Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility
 
 ## Meta
-- **Status:** READY
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -200,7 +200,21 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
 ---
 
 ## Execution Log
-_Executor agent fills this section per phase._
+
+### Phase 1 — Shared `is_blocked()` helper; reporters agree on `blocked`
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Completed:** 2026-04-30
+- **Commit:** `6aa6e12`
+- **Files modified:**
+  - `src/handlers/mod.rs` — added `pub fn is_blocked(status: &str, _blocked_reason: Option<&str>) -> bool` with doc-comment naming Bug 1 and the canonical interpretation.
+  - `src/handlers/status.rs` — replaced `task.blocked_reason.is_some() || task.status == "blocked"` (line 160) with `crate::handlers::is_blocked(&task.status, task.blocked_reason.as_deref())`. Added 4 new tests: `blocked_helper_null_reason`, `blocked_helper_empty_reason`, `blocked_helper_real_reason`, `blocked_helper_status_blocked_all_reasons`.
+  - `src/handlers/next_action.rs` — replaced `let is_blocked = status == "blocked"` (line 97) with `crate::handlers::is_blocked(&status, blocked_reason.as_str())`. Added `next_action_blocked_reason_shapes` test.
+- **Notes:**
+  - `wf_schema()` in next_action tests does not declare `blocked_reason` as a field so DDL omits it. Used `ALTER TABLE … ADD COLUMN blocked_reason TEXT` followed by UPDATE-after-INSERT pattern (same as drive.rs:1118) to exercise `""` and `"real reason"` shapes.
+  - `_blocked_reason` parameter is intentionally unused (predicate is status-only per Decision Matrix). The parameter is preserved in the signature for forward-compatibility and to make the canonical interpretation explicit at every call site.
+  - `cargo test --all`: 373 unit + 2 integration tests pass, 0 failures.
 
 ---
 
