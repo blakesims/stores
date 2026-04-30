@@ -66,6 +66,11 @@ pub enum FieldType {
     /// display_ids referencing another store.  No referential-integrity
     /// enforcement at write time.  (Task 1.8)
     ListFk { ref_store: String },
+    /// An opaque free-shape JSON payload stored as TEXT.  The framework does
+    /// not impose any sub-key shape; value must be parseable JSON.  Only valid
+    /// at the top level — not inside `record:` or `list_record:` sub-fields.
+    /// (T008)
+    Json,
 }
 
 // ---------------------------------------------------------------------------
@@ -262,8 +267,9 @@ fn resolve_field_type(
                 })?;
                 Ok(FieldType::ListFk { ref_store: store })
             }
+            "json" => Ok(FieldType::Json),
             other => anyhow::bail!(
-                "unknown field type '{other}'; expected one of: text, integer, bool, enum, list, record, list_record, list_fk, display_id, timestamp"
+                "unknown field type '{other}'; expected one of: text, integer, bool, enum, list, record, list_record, list_fk, display_id, timestamp, json"
             ),
         },
         RawFieldType::ListOf(inner) => {
@@ -301,6 +307,26 @@ fn resolve_field_type(
 
 fn raw_to_field(r: &RawField) -> anyhow::Result<Field> {
     let ty = resolve_field_type(&r.ty, &r.enum_values, &r.fields, &r.ref_store)?;
+    // Decision 1: reject `json` inside record / list_record sub-fields.
+    // After resolving, if this field is a Record or ListRecord, check that none
+    // of its sub-fields resolved to Json.  The sub-fields were already converted
+    // by recursive `raw_to_field` calls inside `resolve_field_type`; we walk the
+    // resolved types rather than the raw list so the check is always consistent.
+    let sub_fields_to_check: Option<&Vec<Field>> = match &ty {
+        FieldType::Record(subs) | FieldType::ListRecord(subs) => Some(subs),
+        _ => None,
+    };
+    if let Some(subs) = sub_fields_to_check {
+        for sub in subs {
+            if sub.ty == FieldType::Json {
+                anyhow::bail!(
+                    "field '{}.{}': type 'json' may only appear at the top level",
+                    r.name,
+                    sub.name
+                );
+            }
+        }
+    }
     let required_when = r
         .required_when
         .as_deref()
@@ -1024,6 +1050,100 @@ workflow:
         assert!(
             err.to_string().contains("submit-plan") && err.to_string().contains("record"),
             "err must mention submit-plan and record: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T008 Phase 1: FieldType::Json parser tests
+    // ---------------------------------------------------------------------------
+
+    const JSON_FIELD_SCHEMA: &str = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: notes
+    type: json
+    required: false
+"#;
+
+    #[test]
+    fn field_type_json_parses() {
+        let schema = Schema::from_yaml(JSON_FIELD_SCHEMA).expect("schema with type: json should parse");
+        let notes = schema.fields.iter().find(|f| f.name == "notes").unwrap();
+        assert_eq!(notes.ty, FieldType::Json, "type: json must resolve to FieldType::Json");
+    }
+
+    #[test]
+    fn field_type_json_unknown_type_error_lists_json() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: f
+    type: magic_type
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("json"),
+            "unknown-type error must mention 'json' as a valid type: {err}"
+        );
+    }
+
+    #[test]
+    fn field_type_json_in_record_rejected() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: outer
+    type: record
+    fields:
+      - name: inner_json
+        type: json
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("may only appear at the top level"),
+            "json inside record must error with 'may only appear at the top level': {err}"
+        );
+        assert!(
+            err.to_string().contains("outer.inner_json"),
+            "error must name the nested field path 'outer.inner_json': {err}"
+        );
+    }
+
+    #[test]
+    fn field_type_json_in_list_record_rejected() {
+        let yaml = r#"
+name: x
+id_format: "X{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: items
+    type: list_record
+    fields:
+      - name: payload
+        type: json
+"#;
+        let err = Schema::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("may only appear at the top level"),
+            "json inside list_record must error with 'may only appear at the top level': {err}"
+        );
+        assert!(
+            err.to_string().contains("items.payload"),
+            "error must name the nested field path 'items.payload': {err}"
         );
     }
 

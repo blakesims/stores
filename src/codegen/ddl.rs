@@ -54,7 +54,11 @@ fn scalar_col_def(field_name: &str, ty: &FieldType) -> Option<String> {
                 "{field_name} TEXT CHECK ({field_name} IN ({list}))"
             ))
         }
-        FieldType::List(_) | FieldType::Record(_) | FieldType::ListRecord(_) | FieldType::ListFk { .. } => None,
+        FieldType::List(_)
+        | FieldType::Record(_)
+        | FieldType::ListRecord(_)
+        | FieldType::ListFk { .. }
+        | FieldType::Json => None,
     }
 }
 
@@ -76,7 +80,8 @@ pub fn ddl_for(schema: &Schema) -> String {
             FieldType::Record(_)
             | FieldType::List(_)
             | FieldType::ListRecord(_)
-            | FieldType::ListFk { .. } => {
+            | FieldType::ListFk { .. }
+            | FieldType::Json => {
                 json_defs.push(format!("{} TEXT", field.name));
             }
             ty => {
@@ -158,6 +163,10 @@ mod tests {
         assert!(ddl.contains("tags TEXT"), "missing tags TEXT: {ddl}");
         // Record → TEXT (JSON)
         assert!(ddl.contains("details TEXT"), "missing details TEXT: {ddl}");
+        // Json → TEXT (no CHECK clause)
+        assert!(ddl.contains("metadata TEXT"), "missing metadata TEXT: {ddl}");
+        // Ensure no CHECK clause for the json column
+        assert!(!ddl.contains("metadata TEXT CHECK"), "json field must not have CHECK clause: {ddl}");
     }
 
     #[test]
@@ -190,7 +199,8 @@ mod tests {
             "    tags TEXT,\n",
             "    triage TEXT,\n",
             "    contract TEXT,\n",
-            "    details TEXT\n",
+            "    details TEXT,\n",
+            "    metadata TEXT\n",
             ");"
         );
         assert_eq!(ddl, expected, "DDL snapshot mismatch.\nGot:\n{ddl}");

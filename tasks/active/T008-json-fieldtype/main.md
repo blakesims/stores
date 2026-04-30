@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** READY
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -255,6 +255,31 @@ Status: PLAN_REVIEW → READY.
 ---
 
 ## Execution Log
+
+### Phase 1 — `FieldType::Json` parser + DDL TEXT emission
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (see below)
+- **Files modified:**
+  - `src/schema/mod.rs` — added `Json` variant to `FieldType` enum; added `"json"` arm in `resolve_field_type` Scalar branch; updated unknown-type error string to include `json`; added nested-Json rejection in `raw_to_field` (post-resolve walk of sub-fields); added 4 unit tests.
+  - `src/codegen/ddl.rs` — added `FieldType::Json` to both the `scalar_col_def` None arm and the `json_defs` TEXT arm in `ddl_for`; updated `ddl_json_columns_are_text` test; updated `ddl_snapshot` expected string.
+  - `src/handlers/schema_show.rs` — added `FieldType::Json => "json"` arm in `field_type_str` (required by non-exhaustive match; not in plan but mandatory to compile — trivial one-liner).
+  - `tests/fixtures/all_types_store/schema.yaml` — added `metadata: json` field.
+
+- **Nested-rejection error message (verbatim):**
+  `"field 'PARENT.CHILD': type 'json' may only appear at the top level"`
+  e.g. `"field 'outer.inner_json': type 'json' may only appear at the top level"`
+
+- **Test count delta:** 396 → 400 (+4 new: `field_type_json_parses`, `field_type_json_unknown_type_error_lists_json`, `field_type_json_in_record_rejected`, `field_type_json_in_list_record_rejected`)
+
+- **DDL test:** `ddl_json_columns_are_text` extended to assert `metadata TEXT` with no CHECK clause. `ddl_snapshot` updated to include `metadata TEXT` column in the kitchen_sink expected output.
+
+- **Deviation from plan:**
+  - `src/handlers/schema_show.rs` was not in the Phase 1 file list but required a one-line `Json => "json"` arm to avoid a non-exhaustive match compile error. Strictly necessary; no behavioral change.
+  - Nested-rejection is implemented as a post-resolve walk in `raw_to_field` (not in `resolve_field_type` or a separate `raw_to_subfield`) because `resolve_field_type` lacked access to the parent field name. The result is identical: rejection fires at `Schema::from_yaml` time with the field path named in the error.
+
 _Executor agent fills this section per phase._
 
 ---

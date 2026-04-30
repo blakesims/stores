@@ -90,3 +90,8 @@ fields:
         required_when: "priority == 'high'"
         description: "Severity, required when priority is high"
     description: "A Record field stored as JSON TEXT"
+
+  - name: metadata
+    type: json
+    required: false
+    description: "Free-shape JSON payload (T008)"
