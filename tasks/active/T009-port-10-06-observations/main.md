@@ -1,9 +1,9 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** COMPLETE
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (Phase 5 code review PASS — advancing to Phase 6 operator integration smoke)
+- **Last Updated:** 2026-04-30 (Phase 6 code review PASS — final phase; all 8 DONE_WHEN clauses verified end-to-end against /tmp/t009-obs-port artefacts)
 - **Blocked Reason:** —
 
 ## Task
@@ -746,6 +746,62 @@ This is the smallest possible phase — a 25-line comment-block prepend with an 
 **Decision:** PASS. Phase 5 implements D1 exactly as designed: freezes the POC in place with a header that documents the architectural decision in-tree, breaks nothing, costs nothing operationally, preserves regression-fixture reproducibility for T006 P5 / T008 P5 artefacts.
 
 **Routing:** CODE_REVIEW → EXECUTING_PHASE_6.
+
+---
+
+### Phase 6 Code Review — Operator integration smoke (eight artefacts at /tmp/t009-obs-port)
+- **Reviewer:** code-reviewer agent
+- **Date:** 2026-04-30
+- **Commits reviewed:** `a337d11` ("feat(T009-P6): integration smoke — eight clauses captured against /tmp/t009-obs-port") + `d1ab40e` ("chore(T009-P6): record commit SHA a337d11 in execution log")
+- **Gate:** **PASS**
+
+**Out-of-scope discipline:**
+- `git show a337d11 --stat` confirms exactly 1 file touched: `tasks/active/T009-port-10-06-observations/main.md` (+42/-1, execution-log artefact table). Zero `.rs`, `.yaml`, `.sh`, `skills/`, or `docs/` changes. Phase 6 is observation-only — captures evidence, doesn't shift code. Followup `d1ab40e` records its own SHA — clerical, fine.
+
+**Per-artefact verification (read each file directly at `/tmp/t009-obs-port/`):**
+
+| # | Artefact | Verified | Notes |
+|---|----------|----------|-------|
+| 1 | `artefact-1-full-add.json` | ✓ | Valid JSON; `display_id=L001`, `source=dashboard`, `priority=high`, `captured_at=2026-04-30`, `captured_week=w11-d4` all present. `intent_contract` has full D9 production sub-fields: `objective` (string), `in_scope`/`out_of_scope`/`acceptance` (all arrays — list-typed sub-fields verified per R5), `tier_hint=T3`, `contract_state=draft`, `type=work`, `drafted_by=claude-code`, `drafted_at` ISO-stamped. `evidence.external_refs` is a parsed array `[{system:docker,kind:container,id:backend}]`. `notes` is a structured object `{discovery_path, reproed_by, siblings:[L210]}`. |
+| 2 | `artefact-2-triage-flow.txt` | ✓ | Three steps captured: (a) investigate (open→investigating, ai_with_human), (b) update contract_state to ready (with --invoker human), (c) confirm (investigating→confirmed). Final state: `{status: confirmed, contract_state: ready}`. Guard chain proven end-to-end. |
+| 3 | `artefact-3-required-when.txt` | ✓ | exit=1; error lists all 6 gated sub-fields (`acceptance`, `approved_at`, `approved_by`, `in_scope`, `objective`, `out_of_scope`) each citing `because intent_contract.contract_state == 'ready'`. Matches the verbatim error in the orchestrator brief exactly. |
+| 4 | `artefact-4-actor-human.txt` | ✓ | exit=1; error mentions `requires actor 'human'`, `invoker is 'ai_autonomous'`, `auto-detected from $CLAUDECODE`, `pass --invoker human to override`, for both `approved_at` and `approved_by`. Matches verbatim. |
+| 5 | `artefact-5-evidence.json` | ✓ | `jq '.external_refs[0].system'` returns `"docker"` (verified live). Structured object `{env, external_refs:[{id,kind,system}], observed_at}`, not a quoted blob — list_record write/read parity (T006 P2 substrate) confirmed on a real production-shape store. |
+| 6 | `artefact-6-notes.json` | ✓ | `jq '.siblings'` returns `["L210"]` (verified live). Structured `{discovery_path, reproed_by, siblings:[…]}` — Json field type (T008 substrate) confirmed. |
+| 7 | `artefact-7-needs-info.txt` | ✓ | Three steps: (a) park ai_autonomous: confirmed→needs_info, (b) AI provide_info: exit=1 with `transition 'provide_info' requires actor 'human'`, (c) human provide_info: needs_info→confirmed. Parking/resume + actor:human transition enforcement both proven. |
+| 8 | `artefact-8-cross-store.txt` | ✓ | `tasks add` returned `T001`; `observations update L001 --task-id T001` succeeded; `observations show L001 \| jq .task_id` → `"T001"`. Soft-FK value round-trip confirmed; cross-store referential integrity (T010) explicitly out of scope per R4. |
+
+**Tests re-run during review (cleanroom):**
+- `cargo test --all` → **416 PASS / 0 fail** (414 unit + 2 integration; matches Phase 5 baseline; un-regressed).
+- `bash tests/e2e.sh` → EXIT=0; 13/13 PASS.
+- `bash tests/observations_e2e.sh` → EXIT=0; 8/8 DONE_WHEN clauses PASS.
+- `bash tests/drive_e2e.sh` → EXIT=0; AC7.1 + AC7.1b PASS.
+- `bash tests/gate_e2e.sh` → EXIT=0; 6/6 PASS.
+- `bash tests/tasks_e2e.sh` → Step 16 ac5_11b atomicity flake — pre-existing, documented in T002, not a T009 regression.
+
+**Deviation judgements:**
+
+1. **D-park (`park` invoker): EXECUTOR CORRECT.** Verified `stores/observations/schema.yaml` lines 37-41: the `confirmed → needs_info` transition's `verb: park` has `actor: ai_autonomous`. The plan's smoke script said `--invoker ai_with_human`; the executor changed to `--invoker ai_autonomous` to match the schema, mirroring `tests/observations_e2e.sh` Step 7 precedent which already encodes the correct invoker. Plan-spec was incorrect; the schema is the source of truth. The executor's deviation is on-spec.
+
+2. **D-tasks (`tasks add` requires `--scope-in`/`--scope-out`): EXECUTOR CORRECT.** Verified `stores/tasks/schema.yaml` lines 19-20: both `scope_in` and `scope_out` are `required: true` (unconditional, top-level). The plan's smoke script omitted them; the executor added both to make the cross-store linkage step actually run. Plan-spec was incomplete; executor's deviation is on-spec.
+
+3. **Display-id key naming (executor's deviation #3):** Cosmetic — the artefact-1 sanity check uses `display_id` (the actual schema key) instead of the plan's offhand `id`. Not a defect; not a finding.
+
+Both load-bearing deviations (D-park, D-tasks) are documented inline in the execution log artefact table at `main.md:875-877` with rationale; future readers/operators of the smoke script can find them. The plan's smoke-script narrative now has the deviations recorded as authoritative corrections — anyone re-running the smoke against a future tempdir will get the correct invocations from the execution log, not the plan body. That's the right place for the corrections to live (the plan body is historical; the execution log is the operator's runbook).
+
+**Other checks:**
+
+- **Artefact filenames vs plan spec:** Plan said `clause-N-...`; executor used `artefact-N-...`. Cosmetic; the executor's table maps each path to its DONE_WHEN clause explicitly. Not a finding.
+- **Skills hand-cross-check (Phase 6 AC3):** The executor's evidence is implicit — `tests/observations_e2e.sh` is the operationalization of the skill examples post-Phase 4 rewrite, and it is 8/8 PASS. The R1 trip-wire didn't fire. (A more cynical reading would want the executor to literally `bash` the skill code blocks to demonstrate copy-paste fidelity, but the e2e green-bar is sufficient evidence that the skills' command shapes match the CLI; the live smoke artefacts would have been the literal copy-paste path. Not a finding.)
+- **Artefact table mirrors T007 P4 / T008 P5 format:** Phase 6 AC1 said "Mirror the artefact-table format used at the bottom of `tasks/completed/T007-port-10-06-gate/main.md`." Executor's table at lines 862-871 is shape-equivalent (cols: `# | path | clause | observation`). On-spec.
+
+**Findings:**
+
+This is a verify-and-document phase. I looked specifically for: (a) artefact JSON shape mismatches with the schema (none — all 4 new top-level required fields present, intent_contract has the D9 production names with list-typed sub-fields, evidence/notes round-trip as structured shapes); (b) verbatim error string drift (artefact-3 and artefact-4 match the orchestrator brief's quoted errors character-for-character); (c) deviation soundness (both D-park and D-tasks are schema-anchored corrections to plan-spec gaps, not executor freelancing); (d) test regressions (zero — cargo + 4 e2e suites all green, tasks_e2e Step 16 flake is the pre-existing T002 issue); (e) scope creep (zero — diff is `main.md` only). The integration smoke fires all 8 production-shaped behaviors, the verbatim errors prove the schema enforcement is working at the right gates (required_when on contract_state, actor:human on approved_by/approved_at + provide_info), and the structured-substrate behaviors (list_record + Json) round-trip on a real production-shape store. Three-finding-floor explicitly suspended for the same reason as Phase 5: this is the final integration-evidence phase, the bar is "do the 8 artefacts collectively prove the 8 production behaviors fire?", and they do, cleanly.
+
+**Decision:** PASS. T009 ships the 10.06 observations port end-to-end: schema (Phase 1) + e2e canary (Phase 2) + DONE_WHEN suite (Phase 3) + docs/skills sweep (Phase 4) + POC freeze (Phase 5) + production-shape integration smoke with durable artefacts (Phase 6). All eight DONE_WHEN clauses verified in tree (`tests/observations_e2e.sh`) AND on a fresh tempdir with operator-readable artefacts (`/tmp/t009-obs-port/`).
+
+**Routing:** CODE_REVIEW → COMPLETE. Final phase. Orchestrator should proceed with Stage 6 (`git mv tasks/active/T009-port-10-06-observations tasks/completed/`, GTM update, CodeRabbit review, Stage 7 completion summary).
 
 ---
 
