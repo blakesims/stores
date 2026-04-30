@@ -1,9 +1,9 @@
 # T007: Port the 10.06 `gate` store — first real migration
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** COMPLETE
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-05-01 (Phase 3 code review PASS)
+- **Last Updated:** 2026-05-01 (Phase 4 code review PASS — all six DONE_WHEN clauses verified)
 - **Blocked Reason:** —
 
 ## Task
@@ -668,6 +668,64 @@ exit=1
 #### Deviation
 
 **D4 (defer/resume require explicit `--invoker ai_with_human`):** The smoke plan called `stores gate defer G001 --defer-until 2026-05-11` without `--invoker`. In a `CLAUDECODE=1` shell environment, the auto-detector sets invoker to `ai_autonomous`, which fails the `ai_with_human` actor guard on the `defer` and `resume` transitions. Added `--invoker ai_with_human` to both calls. This is consistent with the schema design (DM row: defer/resume use `actor: ai_with_human`) and is operator-correct behaviour. Not a code defect — the smoke plan was written assuming a non-CLAUDECODE shell. The `tests/gate_e2e.sh` already handles this correctly via `unset CLAUDECODE` at the top of the script (Phase 3 D3 context).
+
+### Phase 4 — Code Review (2026-05-01)
+
+- **Verdict:** PASS
+- **Reviewer:** code-reviewer agent
+- **Commit reviewed:** `51e59ef` ("feat(T007-P4): integration smoke — six clauses captured against /tmp/t007-gate-port")
+
+#### Verification against ACs (literal DONE_WHEN clauses)
+
+Each artefact read directly from `/tmp/t007-gate-port/`; not trusting executor's report.
+
+- **Clause 1 (full add):** PASS. `/tmp/t007-gate-port/clause-1-full-add.json` is valid JSON; `display_id == "G001"`; all 9 production fields populated and non-null (`one_liner`, `type`, `task_ref`, `filed_by`, `source`, `command`, `business_reason`, `technical_detail`, `implications`) plus `priority="high"` (10th). `status="pending"`, `created_by="ai_autonomous"`, `answer=null` (correct pre-answer state).
+- **Clause 2 (defer):** PASS. `jq '.status'` → `"deferred"`; `jq '.defer_until'` → `"2026-05-11"`. `updated_by="ai_with_human"` confirms the actor guard fired correctly with the explicit `--invoker` (see D4 below).
+- **Clause 3 (resume idempotency):** PASS. `clause-3-resume.txt` contains:
+  - Line 1: `Transitioned G001: deferred → pending` (first resume)
+  - Line 2: `exit=0`
+  - Line 3: `'pending'` (status check after first resume)
+  - Line 4: `Transitioned G001: pending → pending` (self-loop on second resume)
+  - Line 5: `second-resume-exit=0`
+  - Line 6: `'pending'` (status check after second resume)
+  Two exit-zero lines and two `pending` status assertions — idempotency proven.
+- **Clause 4 (AI invoker rejection):** PASS. `clause-4-ai-rejected.txt` shows `exit=1` and the verbatim error contains all required tokens: `actor`, `human`, field path `<transition:answer>` AND `answer:`, plus the CLAUDECODE detection hint (`auto-detected from $CLAUDECODE`). Both the transition-level and field-level checks fired (two error lines).
+- **Clause 5 (human accept):** PASS. `jq '.status'` → `"answered"`; `jq '.answer'` → `"yes"`; `updated_by="human"` (explicit `--invoker human` honored).
+- **Clause 6 (repeatable vs pipe equivalence):** PASS. `clause-6-repeatable.txt` shows G002 (repeatable form) → `['yes', 'no']`, G003 (pipe form) → `['yes', 'no']`, and the explicit `EQUAL - PASS` marker.
+
+#### Out-of-scope check (`git show 51e59ef --stat`)
+
+Single file: `tasks/active/T007-port-10-06-gate/main.md` (+42 / -1). ZERO `.rs`, ZERO `Cargo.toml`, ZERO `tests/*.sh`, ZERO schema yaml. `git diff 7260cc8..51e59ef --stat` confirms — Phase 4's artefact-only mandate honored to the byte.
+
+#### Test re-run (independent canary)
+
+- `cargo test --all`: **398 passed; 0 failed** (396 unit + 2 integration). Re-confirmed.
+- `bash tests/gate_e2e.sh`: **exit 0** (all 6 DONE_WHEN clauses PASS).
+- `bash tests/drive_e2e.sh`: **exit 0** (AC7.1 + AC7.1b PASS).
+- `bash tests/e2e.sh`: exits 0 with the pre-existing Step 6 CLAUDECODE actor-detection failure logged inline (not introduced by T007; documented in Phase 3 review). No NEW failures.
+- `bash tests/tasks_e2e.sh`: pre-existing Step 16 `ac5_11b` SIGPIPE failure (documented in T006 baseline). No NEW failures.
+
+#### D4 disposition
+
+The executor's D4 anomaly (defer/resume require explicit `--invoker ai_with_human` under `CLAUDECODE=1`) is **not a Phase 4 blocker**. Recorded here for follow-up visibility:
+
+1. The behavior is schema-correct: `defer` and `resume` transitions declare `actor: ai_with_human`, and the auto-detector correctly rejects `ai_autonomous` from a Claude Code shell.
+2. `tests/gate_e2e.sh` already handles this via `unset CLAUDECODE` at the top of the script (Phase 3 D3 context), so the per-commit canary is unaffected.
+3. Operator-friction follow-up options (NOT for this task): (a) loosen `defer`/`resume` actor to `ai_autonomous` ("any actor can defer or resume" — semantically defensible), or (b) document the `--invoker ai_with_human` requirement in `stores/gate/README.md`. Pick one in a future small task.
+
+#### Findings
+
+This is integration smoke — artefact-only, zero code changes. Per spec, finding-count expectation is relaxed. After thorough review of all six artefacts and the test canary:
+
+1. **(Informational, non-blocking) D4 operator friction undocumented in `stores/gate/README.md`.** Operators running `stores gate defer` or `stores gate resume` from a Claude Code session must remember `--invoker ai_with_human`, and the failure mode is the same `actor: ai_with_human` validation error as Clause 4 (which can mislead — they'll think they hit a different bug). README addition is a one-task follow-up. Not a Phase 4 blocker.
+2. **(Informational, non-blocking) `clause-3-resume.txt` uses `second-resume-exit=0` rather than a uniform `exit=0` token for the second invocation.** Both lines are unambiguous, but a search for `grep -c "^exit=0"` would only count one. Reviewer-cosmetic; the file is clear in human reading. Not blocking.
+3. **(Informational, non-blocking) Per-clause artefacts don't include the exact CLI command that produced them.** A reviewer reading `clause-1-full-add.json` knows the post-state but not the `stores gate add ...` invocation that produced it — they have to cross-reference the executor's main.md log. For posterity, embedding the command in a `clause-N-cmd.txt` sibling would make the artefact dir self-contained. The 10.06 cutover task can adopt this pattern. Not blocking — `tests/gate_e2e.sh` is the durable executable record of the commands.
+
+#### Routing
+
+- Status `CODE_REVIEW` → `COMPLETE`.
+- All four phases done; six DONE_WHEN clauses verified end-to-end with concrete artefacts; canary tests green.
+- Orchestrator next steps: `git mv tasks/active/T007-port-10-06-gate tasks/completed/`, update GTM, run Stage 6 CodeRabbit, write Stage 7 completion summary.
 
 ---
 
