@@ -946,7 +946,7 @@ Remaining hits are exclusively in `src/validate/*`, `src/schema/*`, `src/handler
 
 - **Completed:** 2026-05-01
 - **Code commits:** `367fca4` (P1 schema), `4cfd3ad` (P2 e2e migration), `6067e9a` (P3 observations_e2e.sh + dispatch.rs guard via D3-style fix), `b1bb6d5` (P4 docs/skills/fixture sweep), `bfde807` (P4 REVISE-1 invoker fix), `683dd9c` (P5 freeze POC), `a337d11` (P6 smoke artefacts)
-- **CodeRabbit Stage 6:** pending (running at the time of completion summary)
+- **CodeRabbit Stage 6:** ran twice on `--base f783c5b` (the T009 setup commit). First run clean; second run caught one minor doc nit in `README.md` — the demonstrations section enumerated 7 required_when-gated `intent_contract` sub-fields but missed `type` (the schema does carry required_when on it per D9). Fixed inline at `9e5da91`; re-ran CR — clean.
 - **Test count:** 416/0 throughout. New `tests/observations_e2e.sh` per-commit canary covers all eight DONE_WHEN clauses.
 - **e2e:** drive_e2e + gate_e2e green throughout; e2e.sh migrated and green; observations_e2e new and green; pre-existing tasks_e2e Step 16 SIGPIPE unchanged.
 
