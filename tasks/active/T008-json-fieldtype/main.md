@@ -395,7 +395,7 @@ Verdict: **justified, not a scope creep**.
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
-- **Commit SHA:** (see below — committed after log written)
+- **Commit SHA:** e50f2a1
 - **Files modified:**
   - `src/validate/error.rs` — renamed `InvalidJsonArray` (unit variant) to `InvalidJson { expected: String }` (struct variant). Updated doc comment.
   - `src/validate/mod.rs` — updated existing T006 P2 call site from `InvalidJsonArray` to `InvalidJson { expected: "JSON array".to_string() }` (user-facing message unchanged: `"value must be a JSON array, got string '...'"`) . Added new `FieldType::Json` sentinel-detection block immediately after the existing ListRecord/ListFk block: re-parses the string via `serde_json::from_str`; on Err emits `InvalidJson { expected: "valid JSON" }` with message `"value must be valid JSON, got string '...'"` (truncated to 60 chars) and short-circuits via `return;`. On Ok (top-level JSON string, case c) no error — documented limitation per Decision 2. Added 4 new tests.
