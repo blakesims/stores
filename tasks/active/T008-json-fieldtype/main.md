@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_2
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -285,7 +285,51 @@ _Executor agent fills this section per phase._
 ---
 
 ## Code Review Log
-_Code-reviewer agent fills this section per phase._
+
+### Phase 1 — `FieldType::Json` parser + DDL TEXT emission
+
+- **Verdict:** PASS
+- **Reviewer date:** 2026-04-30
+- **Commit reviewed:** 22eeb72
+- **Test count:** 400/0 (baseline 396 → +4 new); all four new Phase 1 tests green in isolation
+  (`field_type_json_parses`, `field_type_json_unknown_type_error_lists_json`,
+  `field_type_json_in_record_rejected`, `field_type_json_in_list_record_rejected`)
+
+**AC verification**
+
+| AC | Verdict | Evidence |
+|---|---|---|
+| `FieldType::Json` exists; top-level `type: json` parses | PASS | `src/schema/mod.rs:71`; `field_type_json_parses` asserts `notes.ty == FieldType::Json` |
+| Unknown-type error mentions `json` | PASS | `src/schema/mod.rs:272`; `field_type_json_unknown_type_error_lists_json` |
+| `ddl_for` emits `<field> TEXT` (no CHECK) for Json | PASS | `src/codegen/ddl.rs:80-84`; `ddl_json_columns_are_text` asserts `metadata TEXT` and absence of `metadata TEXT CHECK`; `ddl_snapshot` updated |
+| Nested Json (record / list_record) rejected at parse with named-path error | PASS | `src/schema/mod.rs:310-326` (`raw_to_field` post-resolve walk); error is verbatim `field 'PARENT.CHILD': type 'json' may only appear at the top level`. Two tests pin the wording AND the field path (`outer.inner_json`, `items.payload`). |
+
+**D5 deviation judgment**
+
+`src/handlers/schema_show.rs:113` — added `FieldType::Json => "json"`. Verified:
+- Exactly one line; matches the pattern of the eight surrounding arms
+- Returns the type-name string for human-readable schema dumps; no other logic in `field_type_str` or the file changed
+- Strictly mechanical: Rust's exhaustive-match check requires it once the variant is added
+- Not a behavioral change; the schema-show output gains a `json` token only when a schema actually declares a Json field
+
+Verdict: **justified, not a scope creep**.
+
+**Specific concerns addressed**
+
+1. **Nested-rejection timing.** Rejection fires in `Schema::from_yaml` via `raw_to_field`'s post-resolve walk. Because `resolve_field_type` recurses into `record:` / `list_record:` sub-fields by calling `raw_to_field` for each, deeply nested Json (e.g. `record > record > json`) is also rejected at parse time. Confirmed by reading `src/schema/mod.rs:253,261` (recursive `subs.iter().map(raw_to_field)`). Tests `field_type_json_in_record_rejected` and `field_type_json_in_list_record_rejected` execute against `Schema::from_yaml` and pass — error surfaces during parse, not during install or write.
+2. **Error wording for real-world misuse.** A schema with `intent_contract: { type: record, fields: [{ name: notes, type: json }] }` would error with `"field 'intent_contract.notes': type 'json' may only appear at the top level"`. Names parent + child clearly. Acceptable.
+3. **DDL CHECK absence.** `src/codegen/ddl.rs:80-84` puts Json in the same `json_defs` arm as `Record | List | ListRecord | ListFk`, which emits `<name> TEXT` with no CHECK. No `json_valid(...)` was added. Test `ddl_json_columns_are_text` explicitly asserts the absence of `metadata TEXT CHECK`. SQLite-JSON1 portability risk avoided.
+4. **No write-path / read-path / validator drift.** `git show 22eeb72 --name-only` lists exactly: `src/codegen/ddl.rs`, `src/handlers/schema_show.rs`, `src/schema/mod.rs`, `tasks/active/T008-json-fieldtype/main.md`, `tests/fixtures/all_types_store/schema.yaml`. No touches to row.rs / add.rs / update.rs / transition.rs / show.rs / list.rs / validate/* / cli/dynamic.rs / observations_1006/schema.yaml. Phase 1 is tightly scoped.
+5. **No T005/T006/T007 territory.** Confirmed: drive.rs, parse_envelope, status.rs, next_action.rs, lifecycle.rs, submit.rs, dispatch.rs, codegen/ddl.rs's `quote_ident`, gate schema — all untouched.
+6. **Pre-existing failures unchanged.** `tests/e2e.sh` Step 6 fails with the same CLAUDECODE auto-detect message documented in T006/T007. `tests/tasks_e2e.sh` Step 16 fails with the same `grep -q ... || fail` SIGPIPE pattern (the underlying `ac5_11b` / `ac5_13` / `ac5_14` Rust tests pass cleanly when run directly via `cargo test`). Neither failure shape is new.
+
+**Findings (non-blocking observations)**
+
+1. The post-resolve walk in `raw_to_field` (lines 310-326) is conceptually correct but slightly redundant when combined with the recursion in `resolve_field_type`: a Json sub-field one level deep is caught when `raw_to_field` is invoked on the immediate parent record, but a Json sub-field two levels deep (e.g. `record > record > json`) is caught at the *innermost* `raw_to_field` call — so the error path will name the inner record and the json field (`inner_record.json_field`), not the full chain. This matches the documented error format ("PARENT.CHILD"); the walk does what the AC requires. No fix needed for Phase 1, but if T009 ever hits a deep-nest case, the error path may be less informative than ideal. Note for future reference; not gate-failing.
+2. The Phase 1 acceptance scope correctly defers all sentinel / coerce / write-path / read-path work to later phases; the executor's commit message and Execution Log are accurate.
+3. Executor's "deviation" callout in the Execution Log (schema_show.rs one-liner; post-resolve walk vs. in-`resolve_field_type`) is honest and scoped; no hidden changes.
+
+**Routing:** Status `CODE_REVIEW` → `EXECUTING_PHASE_2`.
 
 ---
 
