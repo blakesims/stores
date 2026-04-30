@@ -75,7 +75,7 @@ stores observations update <id> \
     --tier-hint T3 \
     --approved-by <human-name> \
     --approved-at <YYYY-MM-DD> \
-    --invoker ai_with_human
+    --invoker human    # approved_by/approved_at carry actor: human; AI invokers are rejected
 
 # Step 3: confirm (guard: contract_state == 'ready')
 stores observations confirm <id> --invoker ai_with_human
