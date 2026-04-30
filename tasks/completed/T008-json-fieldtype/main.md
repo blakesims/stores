@@ -583,4 +583,59 @@ Verdict: **justified, not a scope creep**.
 ---
 
 ## Completion
-_Final summary when task is complete._
+
+- **Completed:** 2026-04-30
+- **Code commits:** `22eeb72` (P1 parser/DDL), `5450e13` (P2 write path), `e50f2a1` (P3 validator), `f42caf6` (P4 read path + list.rs parity gap closure), `25c3bb8` (P5 schema re-add + artefacts)
+- **CodeRabbit Stage 6:** pending (running at the time of completion summary)
+- **Test count delta:** 396 → 414 (+18). All green.
+- **e2e:** drive_e2e + gate_e2e green throughout; pre-existing e2e Step 6 + tasks_e2e Step 16 unchanged.
+
+### Executive summary
+
+The L275 POC against `stores/observations_1006/` had to drop the `notes` field because no `FieldType::Json` existed in stores v0.4.x. T008 added it: a top-level opaque field type that parses any valid JSON on write, stores as TEXT, surfaces a field-named "value must be valid JSON" error on bad input, and round-trips structured on read. Phase 5 re-added the field to the POC schema and captured five artefacts proving end-to-end. As a side benefit, Phase 4's read-path fix closed a pre-existing `list.rs` parity gap where `ListRecord`/`ListFk` columns were emitting raw string blobs in `list --json` (now they emit structured arrays/objects, mirroring `show --json`'s post-T006 behavior).
+
+### Deeper dive
+
+Phase 1 added `FieldType::Json` to the schema enum + parser, with hard rejection at parse time when Json appears inside Record/ListRecord (Decision 1: top-level only for v0.5; Record/ListRecord with arbitrary inner shapes is what Json is for, allowing nesting double-counts). DDL emits TEXT, no CHECK clause. One trivial deviation (D5): `src/handlers/schema_show.rs` needed a one-line `FieldType::Json => "json"` arm to satisfy Rust's exhaustive match — mechanical, no behavior change.
+
+Phase 2 added the `Json` arm to `coerce_value` (parse-then-sentinel: `serde_json::from_str` on success returns the parsed `Value` of any shape; on failure returns `Value::String(raw)` sentinel — same pattern T006 P2 established for `list_record`/`list_fk`). The three storage match arms (`add.rs`, `update.rs`, `transition.rs::execute_transition_write`) were extended to include Json. Both `is_text_like` predicate sites in `cli/dynamic.rs` got Json so `--<name>-from-file` works for large payloads.
+
+Phase 3 generalized `RuleKind::InvalidJsonArray` → `RuleKind::InvalidJson { expected: String }`. Existing T006 P2 sites pass `expected: "JSON array".into()` and emit the same user-facing message verbatim ("value must be a JSON array, got string '...'"). New Json sites pass `expected: "valid JSON".into()` and emit "value must be valid JSON, got string '...'". The validator's sentinel-detection block in `validate_field` was extended to handle Json fields — when stored value is `Value::String(raw)` AND `serde_json::from_str(raw)` fails, emit the InvalidJson error and short-circuit other checks (mirrors T006 P2 REVISE pattern: don't chain required/required_when errors on a sentinel row).
+
+Phase 4 added the read-path Json arm in `read_row` (deserialise stored TEXT to structured `Value`). `show.rs` already delegates to `read_row` so no change needed there. `list.rs` got the Json arm AND closed the pre-existing parity gap: pre-T008, `list --json` matched only `Record | List`, so `ListRecord`/`ListFk` columns fell through to `_ =>` and emitted raw string blobs (despite `show --json` doing the right thing). Phase 4's match expansion to all five JSON-TEXT types restored parity.
+
+Phase 5 re-added `notes: type: json` to `stores/observations_1006/schema.yaml` and captured five artefacts at `/tmp/t008-notes-smoke/`. The bad-JSON artefact's verbatim error: `"notes: value must be valid JSON, got string '{not json'"`. The from-file artefact verifies `--notes-from-file big-notes.json` works for large structured payloads. One small executor anomaly: Phase 5's plan referenced `show L003` for artefact-5, but the bad-JSON add (artefact-3) was correctly rejected (no row written), so the from-file add became `L002`, not `L003`. Sensible adaptation; documented honestly.
+
+### Technical things to consider
+
+- **Top-level only is locked for v0.5.** Json inside Record/ListRecord is rejected at parse time with `"field 'PARENT.CHILD': type 'json' may only appear at the top level"`. If a future use case needs nested free-shape (e.g. `evidence.metadata` is variable per-system), revisit.
+- **Decision 2's documented limitation**: a top-level JSON-string `--notes '"hello"'` (or even `--notes "hello"` without surrounding quotes) is treated as the bad-JSON sentinel because the re-parse semantic (`from_str("hello")` returns Err) cannot disambiguate it from a genuine sentinel. The production `notes` use case is always object/array, so this is acceptable. Pinned by `validate_json_top_level_string_is_treated_as_sentinel_known_limitation`.
+- **The list.rs parity gap closure** is meaningful for any existing schema with `list_fk` or `list_record` fields — `tasks/schema.yaml`'s `linked_observations` and `depends_on` will now emit as structured arrays in `stores tasks list --json` (not as quoted blobs). No data migration; the storage TEXT was already structured-on-disk; only the read-path emission changed.
+- **Sentinel pattern is now the canonical "fail-silent + diagnostic-via-validator" shape.** T006 P2 established it for list_record/list_fk; T008 P3 generalized it for Json. Future field types that need bad-input diagnostics should follow the same shape: parse-on-write returns sentinel; validator detects sentinel and emits a typed error with field name + offending input.
+- **`InvalidJson { expected }` is a small step toward** more general "value-shape mismatch" errors. If we add e.g. `FieldType::Date` with parse-on-write, the same pattern works: `expected: "ISO date".into()` → `"value must be ISO date, got string '...'"`. Worth noting for T011+.
+
+### To understand
+
+```bash
+# Round-trip a structured notes object:
+cat /tmp/t008-notes-smoke/artefact-1-full-with-notes.json | jq '.notes'
+
+# See the side-by-side: original input vs parsed structured value:
+cat /tmp/t008-notes-smoke/artefact-2-structured-roundtrip.txt
+
+# Bad-JSON error:
+cat /tmp/t008-notes-smoke/artefact-3-bad-json.txt
+
+# list --json round-trips ALL JSON-TEXT columns now (Phase 4 parity gap closure):
+cat /tmp/t008-notes-smoke/artefact-4-list-json.json | jq '.[0].notes'
+
+# --notes-from-file works:
+cat /tmp/t008-notes-smoke/artefact-5-from-file.txt   # 200
+```
+
+### Lessons learned
+
+- **Re-parse semantics for sentinel detection has a known false-flag** (top-level JSON-string), but the cost of fixing it (parser-level wrapping, e.g. always wrapping the input as `{"_": <input>}` before parse) is too high for a non-production use case. Documenting the limitation and pinning it with a regression-test is the right call.
+- **Side-benefit fixes are worth flagging in the plan**, not absorbing silently. The `list.rs` parity gap was a pre-existing bug from T006 P2 era; Phase 4 closing it is a legitimate "while we're here" but the Code Review Log records it explicitly so it's discoverable.
+- **The L002 vs L003 anomaly in Phase 5** is operational evidence Phase 3's validator works: bad write → no row → next L-id shifts. Anomaly disposition: confirming, not diagnostic.
+- **`expected: String` in `RuleKind`** is a small example of carrying enough context in a structured error to vary the message at the formatting layer. Mirrors T006 P3's `quote_ident` helper pattern: a small typed value (a string, a function) factored out so future extension is additive, not duplicative.
