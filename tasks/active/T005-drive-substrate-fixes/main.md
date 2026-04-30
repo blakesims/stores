@@ -1,7 +1,7 @@
 # T005: Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -257,6 +257,35 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
   - Layer 3 Legacy: added `serde_json::from_str::<serde_json::Value>` pre-parse to get a `Value` for peeking before the `AgentEnvelope` deserialise attempt (both final_message path and last-line stdout path).
   - `cargo test --all`: 377 tests pass (375 + 2 new), 0 failures.
   - `tests/drive_e2e.sh`: both AC7.1 and AC7.1b pass.
+
+### Phase 2 — Drive surfaces unroutable-role envelope as `(expected, received, session_id)` error
+
+- **Gate:** PASS
+- **Reviewed commit:** `2acc3b9`
+- **Reviewer:** code-reviewer (Opus 4.7 1M)
+- **Date:** 2026-04-30
+- **Counts:** 0 critical, 0 major, 3 minor
+- **Tests run (re-executed by reviewer):**
+  - `cargo test --bin stores handlers::drive::tests` → 20/20 passed (incl. both new tests + all 4 `parse_envelope_from_*_fixture` tests + `parse_envelope_source_tag_*_layer` + `structured_output_takes_precedence_over_final_message`).
+  - `cargo test --all` → 375 unit + 2 integration = 377 passed, 0 failed.
+  - `bash tests/drive_e2e.sh` → both AC7.1 and AC7.1b PASS.
+- **AC verification:**
+  - [x] `drive_loop_unroutable_role_exits_nonzero` passes.
+  - [x] `drive_loop_role_mismatch_message_format` passes (asserts `executor`, `guide`, `smoke-session-uuid` substrings).
+  - [x] All four existing `parse_envelope_from_*_fixture` tests still pass.
+  - [x] `cargo test --all` 377/377 passing.
+  - [x] `tests/drive_e2e.sh` PASS.
+- **Layer 2 ordering (the headline) — verified.** drive.rs:600 calls `check_role_mismatch(peek_role(&candidate), …)` *before* the `or_insert_with` block at 601–605. Code comment at 591–593 documents the ordering. Confirmed correct.
+- **Error message format — verified.** drive.rs:566–568 produces `"envelope role mismatch: expected {expected}, received {received}, session_id {sid}"`. Operator-readable, includes all three substrings. The test's session id `smoke-session-uuid` flows through verbatim.
+- **`<unknown>` fallback — verified.** drive.rs:565: `let sid = session_id.unwrap_or("<unknown>");`. Implemented per Phase 2 plan line 103.
+- **M1 collapse — verified safe.** Reviewer traced drive.rs:355 (`agent_role = na.next_agent`) → drive.rs:366 (`agent_name_normalized = agent_role.replace('_', "-")`) → drive.rs:477 (passed to `parse_envelope`). The runner is also spawned with `agent_name_normalized` (drive.rs:435), so the agent emitting `role: <agent_name_normalized>` is exactly what's expected. Single-parameter collapse is correct.
+- **No new AgentEnvelope variants — verified.** `git show 2acc3b9 -- src/handlers/drive.rs | grep "AgentEnvelope::"` returns nothing. Variant set Planner / PlanReviewer / Executor / CodeReviewer untouched (drive.rs:74–106).
+- **dispatch_submit untouched — verified.** Diff hunks affect only `parse_envelope` body and the tests block. No edits to dispatch_submit's status-vs-variant checks (lines 673, 694, 721, 747).
+- **Out-of-scope check — verified.** `git show 2acc3b9 --stat` shows exactly 2 files: `src/handlers/drive.rs` (+110) and `tasks/active/T005-drive-substrate-fixes/main.md` (+17). No status.rs, no mod.rs, no stderr flushing. Phase 3's eprintln-flush work is correctly deferred.
+- **Minor 1 (regression-trap weakness, deferred):** `drive_loop_unroutable_role_exits_nonzero` only asserts `Err(_)`. Under pre-Phase-2 code, the same input would also produce `Err(_)` via "all 3 parse layers failed" / "unknown variant `guide`" — so this test would have passed before the fix and does not directly catch the original bug. The real regression-trap is `drive_loop_role_mismatch_message_format`, which asserts the `executor` and `smoke-session-uuid` substrings (those would NOT appear in the pre-fix error message). The first test is therefore redundant; consider deleting it or strengthening to assert message-format fragments. Not blocking.
+- **Minor 2 (Layer 2 ordering is moot for present-but-wrong, deferred):** `Map::entry(...).or_insert_with(...)` only inserts when the key is absent, so a present-but-wrong `role:"guide"` would NOT be overwritten regardless of peek-before-vs-after-inject. The ordering comment at drive.rs:591–593 protects against a future refactor where the inject becomes unconditional. Code is still correct; the comment is forward-defensive rather than load-bearing today. No action.
+- **Minor 3 (no test for absent-role pass-through, deferred):** Per R1 in plan-review, an envelope with `role` absent should pass through Layer 2 (the `or_insert_with` injects the expected role). No test currently exercises this path explicitly — the existing fixtures and the new mismatch tests all have `role` present. Hardening test recommended for a future task. Not blocking.
+- **Verdict:** PASS. All ACs met; Layer 2 ordering correct (and documented); error format meets the DONE_WHEN clause verbatim; M1 single-parameter collapse traced and safe; no scope creep; full suite + e2e shell test green. Advance to Phase 3.
 
 ---
 
