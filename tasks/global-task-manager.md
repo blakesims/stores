@@ -6,7 +6,7 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T006 | Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags) | High | Planning | PLANNING | [main.md](./planning/T006-substrate-cleanup-poc/main.md) |
+| T006 | Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags) | High | Planning | READY | [main.md](./planning/T006-substrate-cleanup-poc/main.md) |
 
 Next available task id: T007
 
