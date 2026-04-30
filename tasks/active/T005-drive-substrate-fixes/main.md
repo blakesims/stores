@@ -1,7 +1,7 @@
 # T005: Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -301,6 +301,34 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
   - `cargo test --all`: 377 tests pass (375 unit + 2 integration), 0 failures.
   - `tests/drive_e2e.sh`: both AC7.1 and AC7.1b PASS.
   - tail-N visibility: deferred to Phase 4 smoke (operator visual confirmation). The `let _ = std::io::stderr().flush()` calls are in place.
+
+### Phase 3 — Drive progress visible through pipe wrappers (explicit stderr flush)
+
+- **Gate:** PASS
+- **Reviewed commit:** `c425e32`
+- **Reviewer:** code-reviewer (Opus 4.7 1M)
+- **Date:** 2026-04-30
+- **Counts:** 0 critical, 0 major, 3 minor
+- **Tests run (re-executed by reviewer):**
+  - `cargo test --all` → 375 unit + 2 integration = 377 passed, 0 failed.
+  - `bash tests/drive_e2e.sh` → both AC7.1 and AC7.1b PASS (full progress lines streamed; `phase N cycle M: spawning ...`, `... returned`, `... → submitted`, and `status=complete; drive finished` all observed).
+- **AC verification:**
+  - [x] `use std::io::Write;` import present at `src/handlers/drive.rs:42`.
+  - [x] All 9 progress `eprintln!` sites in `drive_loop` immediately followed by `let _ = std::io::stderr().flush();` — verified by reading the diff hunk-by-hunk: lines 339→340 (complete), 351→354 (blocked), 433→437 (spawning), 441→446 (returned), 456→460 (schema retries exhausted), 466→470 (non-zero exit announce), 485→486 (envelope parse failed inside map_err), 524→527 (submitted), 534→539 (max iterations exceeded).
+  - [x] Locked Decision Matrix option (a) honoured: explicit per-site flush, no `macro_rules!`, no `unsafe`/libc `setvbuf`, no global init.
+  - [x] Idiom consistent across all 9 sites: `let _ = std::io::stderr().flush();` (matches the "minimum diff, no macro hygiene risk" recommendation in Decision Matrix row 5).
+  - [x] No new `eprintln!` calls added — diff shows only `+` lines for the import and the 9 flushes (plus log-doc updates).
+  - [x] No `println!` / stdout flush calls — stdout was explicitly out of scope; verified `git show c425e32 -- src/handlers/drive.rs | grep -E '(println!|stdout)'` returns nothing relevant.
+  - [x] `cargo test --all` 377/377 passing.
+  - [x] `tests/drive_e2e.sh` PASS.
+- **Out-of-scope check — verified.** `git show c425e32 --stat` reports exactly 2 files: `src/handlers/drive.rs` (+10) and `tasks/active/T005-drive-substrate-fixes/main.md` (+17, log update). No `mod.rs`, no `status.rs`, no test-module touches, no other handlers.
+- **Test-module eprintln check — clean.** `grep -n "eprintln!" src/handlers/drive.rs` enumerates 16 hits; all 13 in prod code (`drive_loop`), 3 are *inside test-module comments only* (lines 1236, 1239 — no actual test-code `eprintln!` calls in the file). No setup/teardown progress was inadvertently flushed.
+- **9-vs-6 reconciliation — accepted.** Plan cited 6 anchors at lines 430/437/460/478/516/525 (pre-Phase-2 line numbers). After Phase 2's `parse_envelope` extension, line numbers shifted and the plan's "search anchors list" expanded to cover the schema-retries-exhausted, runner-non-zero-exit, envelope-parse-failed, and max-iterations-exceeded sites. Executor's reconciliation to 9 sites is consistent with the plan's intent ("flush every operator-facing progress announcement in `drive_loop`"), not scope creep.
+- **Minor 1 (deferred — non-fatal render warnings unflushed):** Two best-effort `eprintln!`s at `drive.rs:506` (`render write failed (non-fatal)`) and `drive.rs:511` (`render compute failed (non-fatal)`) are not flushed. They are operator-facing in principle, but only fire on a render error (rare) and the next iteration's `spawning ...` flush at line 437 will push them out within ms. Acceptable; the executor's "9 progress sites" framing focuses on the per-spawn lifecycle, and these are non-progress edge warnings. Recommend adding flushes when next touching this block. Not blocking.
+- **Minor 2 (deferred — raw stdout/stderr dump unflushed but bail-protected):** `drive.rs:472` and `:475` (`runner stdout:\n...` / `runner stderr:\n...` after non-zero exit) and `drive.rs:488`/`:491` (same dumps after envelope parse failure) are not directly flushed. Each is followed immediately by `bail!`/`anyhow::anyhow!`, and Rust's process unwind flushes stderr on exit, so the dumps will be visible. Functionally correct; flagged only because the bail-and-flush invariant is implicit. Not blocking.
+- **Minor 3 (deferred — no automated regression-trap for visibility):** No new test asserts that drive's stderr is line-buffered or that flush calls are present. The plan explicitly defers visibility verification to Phase 4 smoke (manual `2>&1 | tail -100` check), and unit-testing flush behaviour requires subprocess capture. Acceptable; a future task could add a shell test that backgrounds drive, polls stderr via `tail -f`, and asserts each progress line appears within N ms of the spawn returning. Not blocking.
+- **Locked-decision compliance — verified.** Decision Matrix row 5 ("Bug 3 fix shape") locked option (a): explicit `stderr().flush()` after each progress `eprintln!`. Diff is exactly that — no macro, no `unsafe`, no `libc::setvbuf`, no `BufWriter`, no global initializer. Executor stayed inside the locked option.
+- **Verdict:** PASS. All ACs met (modulo Phase-4-deferred manual visibility check); idiom uniform across 9 sites; locked Decision Matrix option (a) faithfully implemented; no scope creep; tests green; e2e green. Advance to Phase 4 (smoke + DONE_WHEN sign-off).
 
 ---
 
