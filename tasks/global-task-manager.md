@@ -6,8 +6,9 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
+| T008 | Add `FieldType::Json` for free-shape opaque payloads | High | Planning | PLANNING | [main.md](./planning/T008-json-fieldtype/main.md) |
 
-Next available task id: T008
+Next available task id: T009
 
 ---
 
