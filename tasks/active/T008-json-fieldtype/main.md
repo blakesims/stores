@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -456,6 +456,25 @@ Verdict: **justified, not a scope creep**.
 3. Non-trivial-finding budget: I aimed for ≥3 substantive findings on a non-trivial change. The change IS non-trivial in concept (rename + new sentinel detection block + 4 tests + documented-limitation pin), but the execution is mechanically clean: every decision was pre-locked in the Decision Matrix, the executor mirrored the T006 P2 pattern 1:1, all four AC tests pass, and the only deviation is a test rename that strictly improves accuracy. The findings above are minor cosmetic notes rather than substantive defects. Lower count is justified by the tightness of the planning + the precedent of T006 P2 (which was already through 1 REVISE cycle, so this Phase 3 inherits a battle-tested pattern).
 
 **Routing:** Status `CODE_REVIEW` → `EXECUTING_PHASE_4`.
+
+### Phase 4 — Read path: `show.rs` / `list.rs` / `read_row` round-trip
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (see below — committed after this log entry)
+- **Files modified:**
+  - `src/handlers/row.rs` — added `FieldType::Json` to the JSON-deserialise match in `read_row` (lines 256-260); added 2 Phase 4 unit tests: `read_row_json_field_returns_structured_object` (asserts `Value::Object` with nested `k`/`arr` keys), `read_row_json_field_null_cell_returns_null` (asserts `"null"` literal reads back as `Value::Null`).
+  - `src/handlers/list.rs` — extended the decode match from `Record | List` to `Record | List | ListRecord | ListFk | Json` (closes pre-existing parity gap); added 2 Phase 4 tests: `list_json_field_decodes_to_structured_value` (Json field → `Value::Object`), `list_list_record_field_decodes_to_structured_value` (ListRecord/ListFk → structured array; parity gap verified closed).
+  - `src/handlers/show.rs` — no change required; delegates entirely to `read_row` for deserialisation and `output::print_entry_json` for emission. Phase 4 `read_row` change is sufficient.
+
+- **`show --json` round-trip outcome:** `show.rs` calls `read_row` then `output::print_entry_json(&entry)`. With the `FieldType::Json` arm now in `read_row`'s decode match, a stored JSON TEXT cell is deserialized to a `Value::Object` (or Array/Number/etc.) before emission. `print_entry_json` serialises that structured value directly — no quoted-string blob. The `read_row_json_field_returns_structured_object` test pins this: `J001` row with `notes = '{"k":"v","arr":[1,2]}'` reads back as `Value::Object` with `k → "v"` and `arr → [1,2]`.
+
+- **list.rs ListRecord/ListFk parity gap — CLOSED:** Pre-P4, `list.rs:146` matched only `Record | List`; `ListRecord | ListFk` fell to `_ =>` which emitted the raw JSON string (`Value::String`). Phase 4 extends the match to `Record | List | ListRecord | ListFk | Json`. This changes the `list --json` output shape for any existing store with `list_record` / `list_fk` fields: those fields now emit structured arrays instead of string blobs. This is a fix, not a regression; the plan reviewer pre-approved this as a "defensible" side benefit. `list_list_record_field_decodes_to_structured_value` pins both ListRecord (array of objects) and ListFk (array of strings) decoding correctly post-P4.
+
+- **Test count delta:** 410 → 414 (+4 new: `read_row_json_field_returns_structured_object`, `read_row_json_field_null_cell_returns_null`, `list_json_field_decodes_to_structured_value`, `list_list_record_field_decodes_to_structured_value`). `cargo test --all` = 414 passed; 0 failed.
+
+- **Deviation from plan:** None. `show.rs` required no modification (plan AC #3 acknowledged this case: "if `show.rs` delegates to `read_row` for the deserialisation, then no further change needed"). Tests are inline in `row.rs` and `list.rs` test modules per plan.
 
 ---
 

@@ -253,10 +253,12 @@ pub fn read_row(
                 // For List: Value::Array of scalars.
                 // For ListRecord: Value::Array of Objects (arbitrary depth per element).
                 // For ListFk: Value::Array of display_id strings.
+                // For Json: any valid JSON value (object/array/scalar/null).
                 FieldType::Record(_)
                 | FieldType::List(_)
                 | FieldType::ListRecord(_)
-                | FieldType::ListFk { .. } => {
+                | FieldType::ListFk { .. }
+                | FieldType::Json => {
                     if let Value::String(json_str) = raw_val {
                         if !json_str.is_empty() {
                             if let Ok(parsed) = serde_json::from_str::<Value>(json_str) {
@@ -429,6 +431,79 @@ mod tests {
         let raw = "{not json";
         let result = coerce_value(&ty, raw);
         assert_eq!(result, Value::String(raw.to_string()));
+    }
+
+    // ---- T008 Phase 4: read_row round-trip for Json fields ----
+
+    const JSON_FIELD_SCHEMA: &str = r#"
+name: jstore
+id_format: "J{:03d}"
+lifecycle:
+  states: [open, done]
+  transitions: []
+fields:
+  - name: title
+    type: text
+  - name: notes
+    type: json
+    required: false
+"#;
+
+    fn setup_json_schema_and_db() -> (Schema, tempfile::TempDir, rusqlite::Connection) {
+        let schema = Schema::from_yaml(JSON_FIELD_SCHEMA).unwrap();
+        let (dir, conn) = open_test_db();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, dir, conn)
+    }
+
+    /// Phase 4 AC1: read_row returns Value::Object for a Json field stored as JSON TEXT.
+    #[test]
+    fn read_row_json_field_returns_structured_object() {
+        let (schema, _dir, conn) = setup_json_schema_and_db();
+
+        let notes_json = r#"{"k":"v","arr":[1,2]}"#;
+        conn.execute(
+            "INSERT INTO jstore (display_id, status, created_at, updated_at, created_by, updated_by, title, notes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "J001", "open", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                "human", "human", "Test", notes_json,
+            ],
+        ).unwrap();
+
+        let (_id, entry) = read_row(&schema, &conn, "J001").unwrap();
+        let notes = entry.get("notes").expect("notes should be present");
+
+        // Must be a structured object, not a string
+        match notes {
+            Value::Object(map) => {
+                assert_eq!(map.get("k").and_then(|v| v.as_str()), Some("v"), "notes.k should be 'v'");
+                let arr = map.get("arr").and_then(|v| v.as_array()).expect("notes.arr should be array");
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], Value::from(1i64));
+                assert_eq!(arr[1], Value::from(2i64));
+            }
+            other => panic!("expected Value::Object for notes, got: {:?}", other),
+        }
+    }
+
+    /// Phase 4 AC4: empty / NULL Json cell on read yields Value::Null.
+    #[test]
+    fn read_row_json_field_null_cell_returns_null() {
+        let (schema, _dir, conn) = setup_json_schema_and_db();
+
+        // Store JSON literal "null" (the Decision 4 absent-field default)
+        conn.execute(
+            "INSERT INTO jstore (display_id, status, created_at, updated_at, created_by, updated_by, title, notes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "J002", "open", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                "human", "human", "Null Test", "null",
+            ],
+        ).unwrap();
+
+        let (_id, entry) = read_row(&schema, &conn, "J002").unwrap();
+        let notes = entry.get("notes").expect("notes key should be present");
+        assert_eq!(*notes, Value::Null, "stored 'null' literal should read back as Value::Null");
     }
 
     // Schema with depth-3 nesting: plan.phases[N].name and cycles[N].executor.summary

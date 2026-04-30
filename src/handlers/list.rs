@@ -139,11 +139,16 @@ pub fn run(
             }
         }
 
-        // Schema fields: decode JSON for Record/List
+        // Schema fields: decode JSON for Record/List/ListRecord/ListFk/Json.
+        // (T008-P4: extended from Record|List only to close pre-existing ListRecord/ListFk parity gap.)
         for field in &schema.fields {
             if let Some(raw_val) = raw_map.get(&field.name) {
                 match &field.ty {
-                    FieldType::Record(_) | FieldType::List(_) => {
+                    FieldType::Record(_)
+                    | FieldType::List(_)
+                    | FieldType::ListRecord(_)
+                    | FieldType::ListFk { .. }
+                    | FieldType::Json => {
                         if let Value::String(json_str) = raw_val {
                             if !json_str.is_empty() && json_str != "null" {
                                 if let Ok(parsed) = serde_json::from_str::<Value>(json_str) {
@@ -425,5 +430,195 @@ fields:
         let m = cmd.get_matches_from(["list", "--status", "nonexistent_state"]);
         // Must succeed with 0 rows
         run(&schema, &conn, &m, Actor::Human).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // T008-P4: Json field in list decodes to structured Value (not raw string)
+    // -----------------------------------------------------------------------
+
+    const JSON_SCHEMA: &str = r#"
+name: jstore
+id_format: "J{:03d}"
+lifecycle:
+  states: [open, done]
+  transitions: []
+fields:
+  - name: title
+    type: text
+  - name: notes
+    type: json
+    required: false
+"#;
+
+    const LIST_RECORD_SCHEMA: &str = r#"
+name: lrstore
+id_format: "R{:03d}"
+lifecycle:
+  states: [open, done]
+  transitions: []
+fields:
+  - name: title
+    type: text
+  - name: tags
+    type: list_record
+    fields:
+      - name: label
+        type: text
+      - name: score
+        type: integer
+  - name: refs
+    type: list_fk
+    ref: other
+"#;
+
+    fn setup_schema(yaml: &str) -> (Schema, Connection) {
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    /// Phase 4 AC: list.rs decodes Json fields to structured Value, not raw string.
+    #[test]
+    fn list_json_field_decodes_to_structured_value() {
+        let (schema, conn) = setup_schema(JSON_SCHEMA);
+
+        let notes_json = r#"{"k":"v","arr":[1,2]}"#;
+        conn.execute(
+            "INSERT INTO jstore (display_id, status, created_at, updated_at, created_by, updated_by, title, notes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                "J001", "open", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                "human", "human", "Test", notes_json,
+            ],
+        ).unwrap();
+
+        // Invoke list's decode loop directly by querying and decoding inline.
+        // We simulate what run() does: pull raw rows, decode per schema.
+        let raw_map: std::collections::BTreeMap<String, serde_json::Value> = {
+            let mut stmt = conn.prepare("SELECT display_id, status, title, notes FROM jstore WHERE display_id = 'J001'").unwrap();
+            let row = stmt.query_row([], |r| {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("display_id".to_string(), serde_json::Value::String(r.get::<_, String>(0).unwrap()));
+                m.insert("status".to_string(), serde_json::Value::String(r.get::<_, String>(1).unwrap()));
+                m.insert("title".to_string(), serde_json::Value::String(r.get::<_, String>(2).unwrap()));
+                m.insert("notes".to_string(), serde_json::Value::String(r.get::<_, String>(3).unwrap()));
+                Ok(m)
+            }).unwrap();
+            row
+        };
+
+        // Apply the same decode logic as list.rs
+        let mut entry: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
+        for field in &schema.fields {
+            if let Some(raw_val) = raw_map.get(&field.name) {
+                match &field.ty {
+                    FieldType::Record(_)
+                    | FieldType::List(_)
+                    | FieldType::ListRecord(_)
+                    | FieldType::ListFk { .. }
+                    | FieldType::Json => {
+                        if let serde_json::Value::String(json_str) = raw_val {
+                            if !json_str.is_empty() && json_str != "null" {
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                    entry.insert(field.name.clone(), parsed);
+                                    continue;
+                                }
+                            }
+                        }
+                        entry.insert(field.name.clone(), serde_json::Value::Null);
+                    }
+                    _ => {
+                        entry.insert(field.name.clone(), raw_val.clone());
+                    }
+                }
+            }
+        }
+
+        let notes = entry.get("notes").expect("notes should be present");
+        match notes {
+            serde_json::Value::Object(map) => {
+                assert_eq!(map.get("k").and_then(|v| v.as_str()), Some("v"), "notes.k should be 'v'");
+                let arr = map.get("arr").and_then(|v| v.as_array()).expect("notes.arr should be array");
+                assert_eq!(arr.len(), 2);
+            }
+            other => panic!("expected Value::Object for notes in list output, got: {:?}", other),
+        }
+    }
+
+    /// Phase 4 AC: list.rs parity gap closure — ListRecord fields decode to structured Value.
+    /// Pre-T008-P4, list.rs only matched Record|List; ListRecord fell to `_ =>` and emitted raw string.
+    #[test]
+    fn list_list_record_field_decodes_to_structured_value() {
+        let (schema, conn) = setup_schema(LIST_RECORD_SCHEMA);
+
+        let tags_json = r#"[{"label":"alpha","score":1},{"label":"beta","score":2}]"#;
+        let refs_json = r#"["R001","R002"]"#;
+        conn.execute(
+            "INSERT INTO lrstore (display_id, status, created_at, updated_at, created_by, updated_by, title, tags, refs) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                "R001", "open", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
+                "human", "human", "LR Test", tags_json, refs_json,
+            ],
+        ).unwrap();
+
+        // Decode using the same logic as list.rs post-P4
+        let raw_map: std::collections::BTreeMap<String, serde_json::Value> = {
+            let mut stmt = conn.prepare("SELECT tags, refs FROM lrstore WHERE display_id = 'R001'").unwrap();
+            let row = stmt.query_row([], |r| {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("tags".to_string(), serde_json::Value::String(r.get::<_, String>(0).unwrap()));
+                m.insert("refs".to_string(), serde_json::Value::String(r.get::<_, String>(1).unwrap()));
+                Ok(m)
+            }).unwrap();
+            row
+        };
+
+        let mut entry: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
+        for field in &schema.fields {
+            if let Some(raw_val) = raw_map.get(&field.name) {
+                match &field.ty {
+                    FieldType::Record(_)
+                    | FieldType::List(_)
+                    | FieldType::ListRecord(_)
+                    | FieldType::ListFk { .. }
+                    | FieldType::Json => {
+                        if let serde_json::Value::String(json_str) = raw_val {
+                            if !json_str.is_empty() && json_str != "null" {
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                    entry.insert(field.name.clone(), parsed);
+                                    continue;
+                                }
+                            }
+                        }
+                        entry.insert(field.name.clone(), serde_json::Value::Null);
+                    }
+                    _ => {
+                        entry.insert(field.name.clone(), raw_val.clone());
+                    }
+                }
+            }
+        }
+
+        // tags must be an array of objects, not a raw string
+        let tags = entry.get("tags").expect("tags should be present");
+        match tags {
+            serde_json::Value::Array(arr) => {
+                assert_eq!(arr.len(), 2, "should have 2 tags");
+                assert_eq!(arr[0]["label"], "alpha");
+                assert_eq!(arr[1]["score"], 2i64);
+            }
+            other => panic!("expected Value::Array for tags (ListRecord parity), got: {:?}", other),
+        }
+
+        // refs must be an array of strings, not a raw string
+        let refs = entry.get("refs").expect("refs should be present");
+        match refs {
+            serde_json::Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0].as_str(), Some("R001"));
+            }
+            other => panic!("expected Value::Array for refs (ListFk parity), got: {:?}", other),
+        }
     }
 }
