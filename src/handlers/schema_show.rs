@@ -213,7 +213,7 @@ mod tests {
 
     const OBS_SCHEMA: &str = r#"
 name: observations
-id_format: "OBS{:03d}"
+id_format: "L{:03d}"
 lifecycle:
   states: [open, triaged, resolved]
   transitions:
@@ -247,7 +247,7 @@ fields:
         let obj = schema_to_json(&schema);
 
         assert_eq!(obj["name"], "observations");
-        assert_eq!(obj["id_format"], "OBS{:03d}");
+        assert_eq!(obj["id_format"], "L{:03d}");
         assert!(obj["fields"].is_array());
         assert!(obj["lifecycle"].is_object());
         assert_eq!(obj["lifecycle"]["initial_state"], "open");

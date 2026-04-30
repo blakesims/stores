@@ -628,5 +628,54 @@ After Issues 1-3 are resolved:
 
 ---
 
+### Phase 4 — Live-paths sweep (docs + skills + schema_show fixture)
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (set after commit)
+- **Files modified:** `README.md`, `docs/philosophy.md`, `stores/observations/README.md`, `skills/observation:triage/SKILL.md`, `skills/observation:log/SKILL.md`, `src/handlers/schema_show.rs`
+
+**Pre-phase canonical grep tally (live, non-archive, non-framework-internal):**
+- `README.md` — 9 hit-sites (OBS001, --triage, --done-when, --scope-in, --scope-out, triage.verdict, contract fields)
+- `docs/philosophy.md:23` — 1 paragraph (triage.verdict, done_when, scope_in, scope_out)
+- `stores/observations/README.md` — 6 hit-sites + paragraph rewrites
+- `skills/observation:triage/SKILL.md` — ~12 hit-sites + T3-path block rewrite
+- `skills/observation:log/SKILL.md` — 6 hit-sites + flag-set update
+- `skills/gate:walk/SKILL.md` — verified 0 edits needed (uses `<ref-id>` placeholder, no OBS-shaped example)
+- `src/handlers/schema_show.rs` — 2 hits (OBS{:03d} at lines 216 + 250)
+
+**Changes applied per file:**
+
+1. **`README.md`** — Step 4 add command updated (new required flags: `--source`, `--priority`, `--captured-at`, `--captured-week`; OBS001 → L001). Step 5 rewritten: new failure mode is `update --contract-state ready` without sub-fields; error now lists `intent_contract.*` violations. Step 6 rewritten: 3-command ratify flow (investigate → update intent_contract → confirm). Step 7 updated: narrative reflects `intent_contract` record (not `triage`/`contract`). Steps 9/12 updated: OBS001 → L001; task_ref OBS001 → L001; JOIN query uses `json_extract(o.intent_contract, '$.tier_hint')`; expected output `L001|confirmed|T3|G001`. "What this demonstrates" section updated to `intent_contract` shape. (~18 sites updated)
+
+2. **`docs/philosophy.md:23`** (R6) — Example field updated: `contract` record → `intent_contract` record; `triage.verdict == 'T3'` → `intent_contract.contract_state == 'ready'`; `done_when`/`scope_in`/`scope_out` → `objective`/`acceptance`/`in_scope`/`out_of_scope`/`tier_hint`/`approved_by`/`approved_at`; `triage to T3` → `ratify to ready`. **Thesis preserved verbatim: "The human is forced to bottle their context the moment they have it."** Only the example shape changed; the philosophy argument is identical.
+
+3. **`stores/observations/README.md`** — Full rewrite: fields list updated to production shape (all required fields, intent_contract 15 sub-fields, evidence list_record, notes json); lifecycle rewritten to 9-transition production state machine; Quick start rewritten to ratify flow (investigate → update intent_contract → confirm). Added POC cross-reference line. (~6 sites + paragraph rewrites)
+
+4. **`skills/observation:triage/SKILL.md`** — Full rewrite of T3-path block (~25 lines). `triage` verb gone; `--verdict` gone; `--done-when`/`--scope-in`/`--scope-out` gone. Replacement: 3-step ratify flow (investigate → update with full intent_contract sub-fields → confirm). `required_when` explanation block updated to cite `contract_state == 'ready'`. Triage rubric table preserved (T1/T2/T3 reasoning unchanged; `--tier-hint` replaces `--verdict`). `schema --json` dead line removed. `<id>` examples use `L###`. Rules section updated. (~12 hit-sites + from-scratch block)
+
+5. **`skills/observation:log/SKILL.md`** — Dead `stores observations schema --json` line removed. Action block `add` invocation updated: added 4 required fields (`--source dev`, `--priority normal`, `--captured-at`, `--captured-week`). `--note "needs triage"` invented flag dropped (replaced with `--body`). `--priority` retained as optional was already there; made required-by-default in example. (~6 hit-sites + flag-set update)
+
+6. **`skills/gate:walk/SKILL.md`** — Verified: `stores observations show <ref-id>` uses `<ref-id>` placeholder; no OBS### literal. Zero edits needed.
+
+7. **`src/handlers/schema_show.rs`** — `OBS{:03d}` → `L{:03d}` at line 216 (fixture YAML) and line 250 (test assertion). 2 mechanical hits. The fixture's `triage`/`contract` records and `triage.verdict == 'T3'` required_when are the generic schema type-system exercise for this unit test; not production-shape references; left as-is per plan's "Files explicitly NOT modified" — `src/handlers/{add,row,submit}.rs` and `src/{schema,validate}/*` are framework-internal.
+
+**Final canonical sweep result:**
+```
+grep -rn "OBS00\|OBS{:03d}\|triage\.verdict\|--verdict\|done-when.*observations" \
+  --include='*.md' --include='*.sh' --include='*.yaml' --include='*.rs' \
+  --exclude-dir=tasks --exclude-dir=findings --exclude-dir=target . | \
+  grep -v "drive_e2e\|tasks_e2e\|agents/guide\|transition\.rs\|all_types_store\|handoff-v0.2"
+```
+Remaining hits are exclusively in `src/validate/*`, `src/schema/*`, `src/handlers/schema_show.rs` fixture body, and `tests/e2e.sh:254` (comment). ALL are framework-internal or commentary — explicitly listed in the plan's "Files explicitly NOT modified" section. No load-bearing operational path references remain.
+
+**Deviation note:** The plan's AC grep spec does not explicitly exclude `src/validate/*` and `src/schema/*` in its `grep -v` filter, but the plan's "Files explicitly NOT modified" section explicitly lists `src/{schema,validate}/*` as framework-internal false positives to skip. The remaining hits are consistent with the plan's intent; the grep spec and the file exclusion list have a gap. Documented for code reviewer.
+
+**`cargo test --all`:** 414 unit + 2 integration = **416 PASS, 0 fail** (unchanged from Phase 3 baseline).
+
+**Philosophy thesis preservation (R6):** Confirmed. The sentence "The human is forced to bottle their context the moment they have it." is verbatim in `docs/philosophy.md:23` post-edit. Only the example field names changed.
+
+---
+
 ## Completion
 _Final summary when task is complete._

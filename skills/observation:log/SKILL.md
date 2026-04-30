@@ -18,7 +18,6 @@ Once per fresh session:
 
 ```bash
 stores observations --help          # verbs
-stores observations schema --json   # field shape, enums, required_when rules
 ```
 
 The schema tells you what fields `add` accepts. If it changes, your CLI calls
@@ -34,7 +33,7 @@ not data):
 | **T1** | ≤2 files, ≤50 LOC, no migrations/deps/config | Propose the fix inline. If user approves, edit + commit. **Do not file.** Commit message is the durable record. |
 | **T2** | ≤5 files, ≤200 LOC, single subsystem | File the entry; downstream `/observation:triage` will route to a mini-loop. |
 | **T3** | Migrations, cross-subsystem, capability change | File the entry; downstream `/observation:triage` will gather the contract. |
-| **Can't tell** | Not enough context to triage confidently | File with `--note "needs triage"` so triage classifies later. |
+| **Can't tell** | Not enough context to triage confidently | File with `--body "needs triage"` so triage classifies later. |
 
 Override: if the user says "just log it," skip the rubric and file.
 
@@ -44,7 +43,11 @@ Override: if the user says "just log it," skip the rubric and file.
 # T2/T3 capture (default path):
 stores observations add \
     --summary "<1-line description>" \
-    [--priority high|normal|low] \
+    --source dev \
+    --priority normal \
+    --captured-at <YYYY-MM-DD> \
+    --captured-week <wNN-dN> \
+    [--body "<extended notes>"] \
     [--contact-id <n>] \
     [--field-name <name>] \
     --invoker ai_with_human

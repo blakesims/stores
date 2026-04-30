@@ -119,39 +119,54 @@ stores install ./stores/gate
 
 Both `observations` and `gate` tables now live in `.stores/db.sqlite`.
 
-**Step 4** — Add an observation. Returns `OBS001`.
+**Step 4** — Add an observation. Returns `L001`.
 
 ```bash
-stores observations add --summary "thing broke"
+stores observations add --summary "thing broke" \
+    --source dev --priority normal \
+    --captured-at 2026-04-30 --captured-week w11-d4
 ```
 
-**Step 5** — Triage to T3 without the required contract fields. **Fails** — the `required_when: triage.verdict == 'T3'` rule fires on all three contract sub-fields.
+**Step 5** — Flip `intent_contract.contract_state` to `ready` without the required sub-fields. **Fails** — the `required_when: intent_contract.contract_state == 'ready'` rule fires on all gated sub-fields.
 
 ```bash
-stores observations triage OBS001 --verdict T3
+stores observations update L001 --contract-state ready --invoker human
 ```
 
-Expected error (all three violations in one pass):
+Expected error (all violations in one pass):
 ```
 Error: validation failed:
-- contract.done_when: required (because triage.verdict == 'T3')
-- contract.scope_in: required (because triage.verdict == 'T3')
-- contract.scope_out: required (because triage.verdict == 'T3')
+- intent_contract.objective: required (because intent_contract.contract_state == 'ready')
+- intent_contract.acceptance: required (because intent_contract.contract_state == 'ready')
+- intent_contract.in_scope: required (because intent_contract.contract_state == 'ready')
+- intent_contract.out_of_scope: required (because intent_contract.contract_state == 'ready')
+- intent_contract.tier_hint: required (because intent_contract.contract_state == 'ready')
+- intent_contract.approved_by: required (because intent_contract.contract_state == 'ready')
+- intent_contract.approved_at: required (because intent_contract.contract_state == 'ready')
 ```
 
-**Step 6** — Triage again with the full contract. Succeeds.
+**Step 6** — Walk through the ratify flow: investigate, fill the contract, confirm.
 
 ```bash
-stores observations triage OBS001 --verdict T3 \
-    --done-when "X works after fix" \
-    --scope-in "backend handler" \
-    --scope-out "frontend"
+stores observations investigate L001 --invoker human
+stores observations update L001 \
+    --contract-state ready \
+    --objective "Fix the 500 handler" \
+    --type work \
+    --in-scope "backend handler" \
+    --out-of-scope "frontend" \
+    --acceptance "checkout succeeds" \
+    --tier-hint T3 \
+    --approved-by blake \
+    --approved-at 2026-04-30 \
+    --invoker human
+stores observations confirm L001 --invoker human
 ```
 
-**Step 7** — Show OBS001. Entry includes nested `triage` and `contract` records.
+**Step 7** — Show L001. Entry includes the populated `intent_contract` record.
 
 ```bash
-stores observations show OBS001
+stores observations show L001
 ```
 
 Add `--json` for machine-readable output with fully nested objects (not escaped strings).
@@ -164,13 +179,13 @@ stores observations list
 
 Add `--json` for a JSON array.
 
-**Step 9** — Add a gate decision linked to OBS001. Returns `G001`. (`task_ref = OBS001` makes the cross-store JOIN in step 12 return a real match.)
+**Step 9** — Add a gate decision linked to L001. Returns `G001`. (`task_ref = L001` makes the cross-store JOIN in step 12 return a real match.)
 
 ```bash
 stores gate add --type decision \
     --one-liner "Soft or hard delete on cleanup?" \
     --options "soft|hard" \
-    --task-ref OBS001 \
+    --task-ref L001 \
     --filed-by quickstart \
     --source dev
 ```
@@ -212,15 +227,15 @@ The `--invoker human` override clears it:
 stores gate answer G002 --answer yes --invoker human
 ```
 
-**Step 12** — Cross-store SQL JOIN in the single DB. Returns a row with non-NULL `g.display_id` (`G001`) joined to observation `OBS001` via `task_ref`.
+**Step 12** — Cross-store SQL JOIN in the single DB. Returns a row with non-NULL `g.display_id` (`G001`) joined to observation `L001` via `task_ref`.
 
 ```bash
 sqlite3 .stores/db.sqlite \
-  "select o.display_id, o.status, json_extract(o.triage,'$.verdict'), g.display_id \
+  "select o.display_id, o.status, json_extract(o.intent_contract,'$.tier_hint'), g.display_id \
    from observations o left join gate g on g.task_ref = o.display_id"
 ```
 
-Expected output: `OBS001|triaged|T3|G001`
+Expected output: `L001|confirmed|T3|G001`
 
 **Step 13** — Invoker resolution is demonstrated throughout:
 - No `--invoker` + `$CLAUDECODE=1` → `ai_autonomous` (auto-detected)
@@ -232,7 +247,7 @@ Expected output: `OBS001|triaged|T3|G001`
 
 Two key enforcement moments:
 
-**Required-when contract (#5 / #6):** The `contract` Record fields (`done_when`, `scope_in`, `scope_out`) each carry `required_when: "triage.verdict == 'T3'"`. Triaging to T3 without them fails with all three violations aggregated in one error. All three must be supplied together. This models the "work item needs a clear definition of done before AI takes it on" pattern.
+**Required-when contract (#5 / #6):** The `intent_contract` record sub-fields (`objective`, `acceptance`, `in_scope`, `out_of_scope`, `tier_hint`, `approved_by`, `approved_at`) each carry `required_when: "intent_contract.contract_state == 'ready'"`. Flipping the contract to `ready` without them fails with all violations aggregated in one error. All must be supplied together. This models the "work item needs a clear definition of done before AI takes it on" pattern.
 
 **Per-field actor on `gate.answer` (#10 / #11):** The `answer` field in the `gate` schema carries `actor: human`. An AI invoker (auto-detected from `$CLAUDECODE`) attempting to write it is rejected with a message naming the field, the required actor, and the `$CLAUDECODE` detection source. The `--invoker human` flag overrides the auto-detection for cases where a human is running the CLI in an AI-flagged environment.
 

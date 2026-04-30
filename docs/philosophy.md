@@ -20,7 +20,7 @@ This is the β architecture: **DB-as-truth + framework-as-engine.** Workflow-sha
 
 ### 1. `required_when` — capture intent at the moment of context
 
-The `contract` record on `observations` has `required_when: "triage.verdict == 'T3'"` on `done_when`, `scope_in`, `scope_out`. When you triage to T3, you must supply all three together — the framework rejects the write otherwise, listing all violations in one error. The human is forced to bottle their context the moment they have it. Downstream, an AI drains a queue of T3 items without ever needing a context refresh, because the contract is already in the row.
+The `intent_contract` record on `observations` has `required_when: "intent_contract.contract_state == 'ready'"` on `objective`, `acceptance`, `in_scope`, `out_of_scope`, `tier_hint`, `approved_by`, and `approved_at`. When you ratify to `ready`, you must supply all of them together — the framework rejects the write otherwise, listing all violations in one error. The human is forced to bottle their context the moment they have it. Downstream, an AI drains a queue of T3 items without ever needing a context refresh, because the contract is already in the row.
 
 ### 2. Per-field `actor` — authority is a structural property of the field, not a convention
 

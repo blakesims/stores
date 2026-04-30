@@ -1,32 +1,87 @@
 # observations store
 
-Captures and triages observations during AI-assisted work sessions.
+Captures and triages observations during AI-assisted work sessions. Production shape mirrors 10.06 ledger rows.
 
-## Fields
+## Fields (selected)
 
+**Required at add time:**
 - `summary` (text, required) — one-line description
-- `body` (text, optional) — extended notes; use `--body-from-file` for multi-line
-- `triage.verdict` (enum: T1|T2|T3) — triage outcome
-- `triage.notes` (text, optional) — free-form triage notes
-- `contract.done_when` (text, required when verdict=T3) — completion criteria
-- `contract.scope_in` (text, required when verdict=T3) — in-scope work
-- `contract.scope_out` (text, required when verdict=T3) — out-of-scope work
-- `tags` (list<text>, optional) — pipe-separated: `"frontend|backend"`
+- `source` (enum: dashboard|qa|dev|sentry|intake|converge|wrap, required)
+- `priority` (enum: high|normal|low, required)
+- `captured_at` (text, required) — ISO date the observation was captured
+- `captured_week` (text, required) — e.g. `w11-d4` (operator-hygiene format, no regex enforced)
+
+**Optional top-level fields (selection):**
+- `body` (text) — extended notes; use `--body-from-file` for multi-line
+- `tags` (list<text>) — pipe-separated: `"frontend|backend"`
+- `task_id` (text) — soft-FK to a `tasks` display_id (e.g. `T170`)
+- `investigation_note`, `resolved_at`, `resolution` (text) — resolution tracking
+- `contact_id`, `field_name` — dashboard-sync dedup keys
+
+**`intent_contract` record (15 sub-fields, D9 production names):**
+
+Sub-fields required when `contract_state == 'ready'`:
+- `objective` (text) — one-line goal statement
+- `type` (enum: work|investigation)
+- `in_scope` (list<text>) — what changes
+- `out_of_scope` (list<text>) — what stays unchanged
+- `acceptance` (list<text>) — completion criteria
+- `tier_hint` (enum: T1|T2|T3)
+- `approved_by` (text, actor: human) — human who ratified the contract
+- `approved_at` (timestamp, actor: human)
+
+Always-optional sub-fields: `inputs`, `touches`, `affects_capability`, `known_solution`, `drafted_by`, `drafted_at`, `contract_state` (enum: draft|ready).
+
+**`evidence` record:** `external_refs` (list_record with `system`, `kind`, `id` sub-fields).
+
+**`notes` (json):** structured JSON blob for operator notes.
 
 ## Lifecycle
 
-`open` → `triaged` (verb: `triage`, actor: ai_with_human)
-`triaged` → `resolved` (verb: `resolve`, actor: ai_autonomous)
-`triaged` → `wont_fix` (verb: `wont_fix`, actor: ai_with_human)
+```
+open → investigating  (verb: investigate, actor: ai_with_human)
+open → wont_fix       (verb: wont_fix,    actor: ai_with_human)
+
+investigating → confirmed   (verb: confirm,       actor: ai_with_human,
+                             guard: intent_contract.contract_state == 'ready')
+investigating → needs_info  (verb: request_info,  actor: ai_autonomous)
+
+confirmed → needs_info   (verb: park,         actor: ai_autonomous)
+confirmed → in_progress  (verb: claim,        actor: ai_autonomous)
+confirmed → wont_fix     (verb: wont_fix,     actor: ai_with_human)
+
+needs_info → confirmed   (verb: provide_info, actor: human)
+
+in_progress → resolved   (verb: resolve,      actor: ai_autonomous)
+```
 
 ## Quick start
 
 ```bash
 stores install ./stores/observations
-stores observations add --summary "thing broke"           # returns L001
-stores observations triage L001 --verdict T3 \
-    --done-when "X works" --scope-in "backend" --scope-out "frontend"
+
+# Add a fully-shaped observation
+stores observations add \
+    --summary "Dashboard: 500 on checkout" \
+    --source dashboard --priority high \
+    --captured-at 2026-04-30 --captured-week w11-d4
+
+# Ratify flow: investigate → fill intent contract → confirm
+stores observations investigate L001 --invoker human
+stores observations update L001 \
+    --contract-state ready \
+    --objective "Fix the 500 handler" \
+    --type work \
+    --in-scope "backend handler" \
+    --out-of-scope "frontend" \
+    --acceptance "checkout succeeds" \
+    --tier-hint T3 \
+    --approved-by blake --approved-at 2026-04-30 \
+    --invoker human
+stores observations confirm L001 --invoker human
+
 stores observations show L001
 stores observations list
-CLAUDECODE=1 stores observations resolve L001
 ```
+
+Historical POC: `stores/observations_1006/` — frozen fixture, not maintained.
