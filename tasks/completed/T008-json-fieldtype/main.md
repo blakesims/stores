@@ -586,7 +586,7 @@ Verdict: **justified, not a scope creep**.
 
 - **Completed:** 2026-04-30
 - **Code commits:** `22eeb72` (P1 parser/DDL), `5450e13` (P2 write path), `e50f2a1` (P3 validator), `f42caf6` (P4 read path + list.rs parity gap closure), `25c3bb8` (P5 schema re-add + artefacts)
-- **CodeRabbit Stage 6:** pending (running at the time of completion summary)
+- **CodeRabbit Stage 6:** ran twice on `--base 5f79cd8` (the T008 setup commit), both clean (`No findings ✔`). Initial run flagged a minor doc nit on T007's completion summary (off-by-one date + missing base-SHA context); fixed inline at `3cfc00c` and re-ran clean.
 - **Test count delta:** 396 → 414 (+18). All green.
 - **e2e:** drive_e2e + gate_e2e green throughout; pre-existing e2e Step 6 + tasks_e2e Step 16 unchanged.
 
