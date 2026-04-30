@@ -760,7 +760,7 @@ Remaining hits are exclusively in `src/validate/*`, `src/schema/*`, `src/handler
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
-- **Commit SHA:** (set after commit)
+- **Commit SHA:** 683dd9c
 - **Files modified:** `stores/observations_1006/schema.yaml`
 
 **Summary:**
