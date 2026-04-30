@@ -730,4 +730,55 @@ This is integration smoke — artefact-only, zero code changes. Per spec, findin
 ---
 
 ## Completion
+
+- **Completed:** 2026-04-30
+- **Code commits:** `7dc5f48` (P1 schema), `3c37ea4` (P2 rename sweep), `754e46c` (P3 gate_e2e + dispatch.rs guard), `51e59ef` (P4 smoke artefacts)
+- **CodeRabbit Stage 6:** ran twice on `--base 49de491`, both clean (`No findings ✔`)
+- **Test count:** 398/0 throughout. New `tests/gate_e2e.sh` per-commit canary covers all six production-shape clauses.
+- **e2e:** `drive_e2e.sh` green throughout; `gate_e2e.sh` (new) PASS 6/6; pre-existing `e2e.sh` Step 6 + `tasks_e2e.sh` Step 16 unchanged.
+
+### Executive summary
+
+10.06 has been hand-rolling its own gate primitive in `issues/gate.json` for months. The bundled `stores/gate/` schema was a v0.1 minimal placeholder. T007 was the first real migration: extend the bundled gate to hold a 10.06 production gate row end-to-end, with 10.06's actual behaviors (priority_rank, defer_until, source, business_reason / technical_detail / command / implications, the `deferred` lifecycle state, repeatable options) enforced by the schema rather than by `./dev gate`'s bash conventions. Path A (in-place extension) was locked in plan-review cycle 2; the bundled v0.1 demo (`tests/e2e.sh`) became the canary regression net. All six DONE_WHEN clauses captured live as artefacts in `/tmp/t007-gate-port/`.
+
+### Deeper dive
+
+Phase 1 schema work: rename `question → one_liner`; add 9 new fields (`priority_rank`, `priority_rank_at`, `defer_until`, `filed_by` per D1, `source` enum, `business_reason`, `technical_detail`, `command`, `implications`); add the `deferred` state plus `defer` / `resume` transitions including a `pending → pending` self-loop for resume idempotency; plus `cancel` from `deferred → cancelled`. Three deviations recorded:
+
+- **D1 — `created_by` → `filed_by`**: framework DDL codegen reserves `created_by` as an audit column. Forced rename; applies to any future 10.06 port using `created_by` semantics.
+- **D2 — `src/handlers/guide.rs::insert_gate` fixture**: shape correction; zero behaviour change.
+- **D3 — `src/cli/dispatch.rs:114` workflow guard**: one-line guard `if schema.workflow.is_some()` so `gate resume` (no workflow) routes to the generic transition handler instead of `submit::run_resume` (workflow-only). `tasks` resume (workflow-bearing) still hits `submit::run_resume` correctly.
+
+Phase 2 was a 4-site rename sweep across `tests/e2e.sh`, `skills/observation:triage/SKILL.md`, top-level `README.md`, and `stores/gate/README.md` — 8 `--question` replacements plus the gate README's Fields and Lifecycle prose.
+
+Phase 3 wrote `tests/gate_e2e.sh` covering all six DONE_WHEN clauses with state assertions. The script unsets `CLAUDECODE` so actor checks see a `human` invoker by default.
+
+Phase 4 captured artefacts at `/tmp/t007-gate-port/`. **D4 noted**: defer / resume require explicit `--invoker ai_with_human` when the operator's shell has `CLAUDECODE=1` (transitions' actor is `ai_with_human`, doesn't accept `ai_autonomous`). gate_e2e.sh handles via `unset CLAUDECODE`. Documented as porting note for future cutover.
+
+### Technical things to consider
+
+- **D1 is a porting pattern.** Future 10.06 stores using `created_by` (e.g. observations port at T009) will hit it. Either rename to `filed_by` consistently or fix framework-side.
+- **D3 generalizes.** Any verb in BOTH workflow dispatch AND lifecycle transitions needs the guard pattern. Currently only `resume` matches; if more converge, factor out.
+- **D4 UX.** AI agent sessions need to know to pass `--invoker ai_with_human` for defer/resume. Document in `stores/gate/README.md` as follow-up, or relax actor.
+- **`required_when: "status == 'deferred'"` does NOT fire** for `defer_until` (R1). Validator runs against pre-merge entry. Honest limitation; framework-side fix out of scope.
+
+### To understand
+
+```bash
+# A fully-shaped gate round-trips:
+cat /tmp/t007-gate-port/clause-1-full-add.json | jq '.'
+# Defer + resume idempotency:
+cat /tmp/t007-gate-port/clause-3-resume.txt
+# Actor rejection:
+cat /tmp/t007-gate-port/clause-4-ai-rejected.txt
+# Run the canary anytime:
+bash tests/gate_e2e.sh
+```
+
+### Lessons learned
+
+- **Dispatch routing collisions surface late.** `resume` existed in `submit.rs` for the workflow `tasks` store; T007 introduced it on non-workflow `gate`. Phase 3's smoke caught it. Lesson: any new verb on a non-workflow store should be checked against the workflow-handler dispatch list.
+- **Reserved audit columns are friction at port time.** D1 will recur on future ports.
+- **Canonical-grep methodology works.** Plan-review cycle 1 caught two missed rename sites that the planner under-counted; cycle 2 added them.
+- **e2e.sh as canary works.** Path A's main risk was breaking the bundled v0.1 demo. Phase 2 mechanical rename + careful patch kept it green throughout.
 _Final summary when task is complete._
