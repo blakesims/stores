@@ -1,9 +1,9 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (Phase 1 code review — PASS; routing to executor for Phase 2)
+- **Last Updated:** 2026-04-30 (Phase 2 code review — PASS; routing to executor for Phase 3)
 - **Blocked Reason:** —
 
 ## Task
@@ -486,6 +486,48 @@ After Issues 1-3 are resolved:
 **Decision:** PASS. The D9 production names are exactly right (verified against `intent-contract.md` reference doc directly). Lifecycle is complete with correct actors and guards. List-typed sub-field semantics preserved. e2e.sh fails cleanly at the right step in the right shape. No `src/` touched. No regressions in other e2e suites (the tasks_e2e.sh failure is pre-existing). This is a clean schema-only foundation for Phase 2.
 
 **Routing:** CODE_REVIEW → EXECUTING_PHASE_2.
+
+---
+
+### Phase 2 — `tests/e2e.sh` migration to 10.06 production shape
+- **Reviewer:** code-reviewer agent
+- **Date:** 2026-04-30
+- **Commit reviewed:** `4cfd3ad` ("feat(T009-P2): tests/e2e.sh migration to 10.06 production shape")
+- **Gate:** **PASS**
+
+**Verification against ACs (Phase 2):**
+
+| AC | Status | Notes |
+|----|--------|-------|
+| `bash tests/e2e.sh` exits 0 (NEW — pre-Phase-2 it failed at Step 4) | ✓ | Re-run during review: EXIT=0; all 13 steps PASS |
+| Step 5 demonstrates `required_when` enforcement under new shape | ✓ | Lines 90-110: error cites `intent_contract.objective`, `.acceptance`, `.in_scope`, `.out_of_scope`, `.tier_hint`, and `intent_contract.contract_state == 'ready'` (the gate predicate itself). Substantively richer than v0.1's 3-field check |
+| Step 6 demonstrates triage flow `open → confirmed` with full intent_contract | ✓ | Lines 119-134: 3 commands — `investigate L001` (open→investigating), `update L001 --contract-state ready ...` (8 sub-fields including `--approved-by blake --approved-at 2026-04-30 --invoker human`), `confirm L001` (investigating→confirmed) |
+| Step 7 shows L001 with new `intent_contract` populated via `show --json` | ✓ | Lines 144-159: Python assertions check `intent_contract` is dict, `contract_state == 'ready'`, `tier_hint == 'T3'`, `objective` matches, and `acceptance`/`in_scope`/`out_of_scope` are all `list` (R5 list-semantics check baked in) |
+| Step 12 JOIN updated to `json_extract(o.intent_contract, '$.tier_hint')` | ✓ | Line 258 confirmed; runtime output `L001\|confirmed\|T3\|G001` matches expected shape exactly |
+| Canonical grep returns 0 non-commentary hits | ✓ | `grep -nE "OBS\|--triage \|--contract \|triage\.\|done_when\|scope_in\|scope_out\|verdict" tests/e2e.sh` returns 1 hit on line 254: `# Uses intent_contract.tier_hint (new shape) instead of triage.verdict (v0.1)` — verified to be a comment line, not a live command |
+
+**Tests re-run during review:**
+- `bash tests/e2e.sh` — EXIT=0; all 13 steps PASS; JOIN output `L001|confirmed|T3|G001` confirmed
+- `bash tests/gate_e2e.sh` — PASS (6/6 DONE_WHEN clauses)
+- `bash tests/drive_e2e.sh` — PASS (AC7.1 + AC7.1b)
+- `bash tests/tasks_e2e.sh` — fails at Step 16 (`ac5_11b atomicity test failed`). **Pre-existing**; verified by re-running against `4cfd3ad~1` (Phase 1 baseline) — same failure. Not a Phase 2 regression
+- `cargo test --all` — 414 unit + 2 integration = 416 PASS, 0 fail
+
+**Out-of-scope discipline:**
+- `git show 4cfd3ad --stat` confirms ONLY 2 files touched: `tests/e2e.sh` (+104/-64) and `tasks/active/T009-port-10-06-observations/main.md` (+25). **Zero `src/` Rust files modified, zero `stores/*/schema.yaml` modified, zero other `tests/*.sh` modified** — plan required this
+- CLAUDECODE actor demo step (Step 11) preserved — diff shows only the gate display_id label changed `G002` → `G003` (because Step 9b inserted a new G002 in earlier T007 P2 work; the Step 11 actor-mismatch logic is byte-identical in spirit)
+
+**LOC delta judgment (168 vs 70-90 plan estimate):**
+- Header rewrite (+15): the README-correspondence comment block (lines 4-31) lists every command with new flags/IDs — defensible, this IS the auditable contract the script verifies
+- Step 6 expansion 1→3 commands (+8): mirrors production triage flow (`investigate` → `update --contract-state ready` → `confirm`); the new shape inherently requires 3 verbs where the old v0.1 needed only `triage`. Justified
+- Step 7 Python assertions doubled: validates every D9 sub-field (`contract_state`, `tier_hint`, `objective`, `acceptance` is list, `in_scope` is list, `out_of_scope` is list). Stronger assertions than the old `triage.verdict + contract.done_when` 2-field check. Justified
+- Net: each delta is purposeful. R2 trip-wire (120 LOC) was crossed but the work is one coherent logical unit — rename and reshape are interleaved at every step (Step 5 logic changes AND Step 5 IDs change AND Step 5 flag names change), so a clean split into "mechanical-rename" vs "step-rewrite" wasn't available. **Process learning, not a finding**
+
+**Findings:** None substantive.
+
+**Decision:** PASS. The script now exits 0 (it didn't pre-Phase-2 — clean post-Phase-1 acceptance), all 13 steps demonstrate equivalent or stronger enforcement under the new `intent_contract` shape, the canonical grep is comment-only, and out-of-scope discipline is intact. The LOC overshoot is justified by genuinely-needed coverage expansion (Step 6 verb-flow, Step 7 list-semantics assertions). No `src/` regressions; the only failing sibling test (`tasks_e2e.sh`) is pre-existing.
+
+**Routing:** CODE_REVIEW → EXECUTING_PHASE_3.
 
 ---
 
