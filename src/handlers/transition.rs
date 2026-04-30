@@ -62,7 +62,16 @@ pub(crate) fn run_in_tx(
                     .map(|s| s.trim_end_matches('\n').to_string());
             }
         }
-        matches.get_one::<String>(cli_name).cloned()
+        // For List(_) fields the arg uses ArgAction::Append; join multiple values with "|"
+        // so the existing coerce_value pipe-split produces the correct array.
+        // Single values and pipe-separated strings pass through unchanged (backwards compat).
+        match matches.try_get_many::<String>(cli_name) {
+            Ok(Some(vals)) => {
+                let joined: Vec<&str> = vals.map(|s| s.as_str()).collect();
+                if joined.is_empty() { None } else { Some(joined.join("|")) }
+            }
+            _ => None,
+        }
     })?;
 
     // Deep-merge diff into existing; Record-typed fields get sub-field-level merge

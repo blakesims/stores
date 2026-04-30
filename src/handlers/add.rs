@@ -31,7 +31,17 @@ pub fn run(
                 return std::fs::read_to_string(path).ok().map(|s| s.trim_end_matches('\n').to_string());
             }
         }
-        matches.get_one::<String>(cli_name).cloned()
+        // For List(_) fields the arg uses ArgAction::Append; join multiple values with "|"
+        // so the existing coerce_value pipe-split produces the correct array.
+        // Single values and pipe-separated strings pass through unchanged (backwards compat).
+        // For scalar fields, get_many returns a single-element iterator; join is identity.
+        match matches.try_get_many::<String>(cli_name) {
+            Ok(Some(vals)) => {
+                let joined: Vec<&str> = vals.map(|s| s.as_str()).collect();
+                if joined.is_empty() { None } else { Some(joined.join("|")) }
+            }
+            _ => None,
+        }
     })?;
 
     // Run validator
@@ -534,5 +544,118 @@ fields:
             Some("reviewed"),
             "transition must update status in the hyphenated store"
         );
+    }
+
+    // ---- T006 Phase 4: repeatable list flags (ArgAction::Append) ----
+    //
+    // Schema with a top-level List(Text) field (`in_scope`) used for all three AC tests.
+
+    const LIST_FLAG_SCHEMA: &str = r#"
+name: scopestore
+id_format: "S{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+  - name: in_scope
+    type:
+      list: text
+"#;
+
+    fn list_flag_schema_and_conn() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(LIST_FLAG_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    /// Build an `add` command where List(_) fields use ArgAction::Append,
+    /// mirroring what `cli/dynamic.rs` does at runtime.
+    fn build_add_cmd_with_append(schema: &Schema) -> clap::Command {
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd = clap::Command::new("add");
+        for leaf in &leaves {
+            let mut arg = clap::Arg::new(leaf.cli_name.clone())
+                .long(leaf.cli_name.clone())
+                .required(false);
+            if matches!(leaf.field.ty, crate::schema::FieldType::List(_)) {
+                arg = arg.action(clap::ArgAction::Append);
+            }
+            cmd = cmd.arg(arg);
+        }
+        cmd
+    }
+
+    fn get_in_scope(conn: &Connection, display_id: &str) -> Vec<String> {
+        let raw: String = conn
+            .query_row(
+                "SELECT in_scope FROM scopestore WHERE display_id = ?1",
+                [display_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        val.as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// AC Phase 4 — pipe-free repeatable form: `--in-scope a --in-scope b` → `["a", "b"]`.
+    /// Regression-trap: this form previously errored with "the argument '--in-scope' cannot
+    /// be used multiple times". After ArgAction::Append it must succeed and produce two elements.
+    #[test]
+    fn list_field_repeatable_form() {
+        let (schema, conn) = list_flag_schema_and_conn();
+        let cmd = build_add_cmd_with_append(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--title", "repeatable test",
+            "--in-scope", "a",
+            "--in-scope", "b",
+        ]);
+        run(&schema, &conn, &matches, Actor::Human).expect("repeatable form must succeed");
+        let items = get_in_scope(&conn, "S001");
+        assert_eq!(items, vec!["a", "b"], "repeatable form: expected [\"a\", \"b\"], got {:?}", items);
+    }
+
+    /// AC Phase 4 — backwards-compat pipe form: `--in-scope "a|b"` → `["a", "b"]`.
+    /// Verifies existing pipe-separated form continues to work after the ArgAction::Append change.
+    #[test]
+    fn list_field_pipe_form() {
+        let (schema, conn) = list_flag_schema_and_conn();
+        let cmd = build_add_cmd_with_append(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--title", "pipe test",
+            "--in-scope", "a|b",
+        ]);
+        run(&schema, &conn, &matches, Actor::Human).expect("pipe form must succeed");
+        let items = get_in_scope(&conn, "S001");
+        assert_eq!(items, vec!["a", "b"], "pipe form: expected [\"a\", \"b\"], got {:?}", items);
+    }
+
+    /// AC Phase 4 — mixed form: `--in-scope "a|b" --in-scope "c"` → `["a", "b", "c"]`.
+    /// The join-with-"|" strategy in the get_arg closure collapses "a|b" + "c" to "a|b|c"
+    /// before coerce_value splits on "|", yielding three elements.
+    /// NOTE: this also documents the known limitation — a literal "|" within a value is
+    /// indistinguishable from a separator (see Decision Matrix).
+    #[test]
+    fn list_field_mixed_form() {
+        let (schema, conn) = list_flag_schema_and_conn();
+        let cmd = build_add_cmd_with_append(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--title", "mixed test",
+            "--in-scope", "a|b",
+            "--in-scope", "c",
+        ]);
+        run(&schema, &conn, &matches, Actor::Human).expect("mixed form must succeed");
+        let items = get_in_scope(&conn, "S001");
+        assert_eq!(items, vec!["a", "b", "c"], "mixed form: expected [\"a\", \"b\", \"c\"], got {:?}", items);
     }
 }

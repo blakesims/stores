@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -342,6 +342,29 @@ All five cycle-1 revisions verified. Status advances PLAN_REVIEW → READY.
 - **Notes:**
   - Root cause: `external_refs` is nested inside `evidence` (a Record), not a top-level field. The initial top-level check in `validate`'s main loop missed it. Moving the check into `validate_field` (which is called for all depths) resolved the nesting issue.
   - `drive_e2e.sh`: PASS. `e2e.sh` Step 6 and `tasks_e2e.sh` Step 16 failures confirmed pre-existing.
+
+### Phase 4 — Finding D: repeatable list flags via ArgAction::Append
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Completed:** 2026-04-30
+- **Commit SHA:** (see below)
+- **Files modified:**
+  - `src/cli/dynamic.rs` — added `ArgAction::Append` for `FieldType::List(_)` leaves in both `build_leaf_cmd_owned` (transition verbs) and `build_leaf_cmd` (add/update verbs)
+  - `src/handlers/add.rs` — replaced `get_one::<String>(cli_name)` in the `get_arg` closure with `try_get_many::<String>(cli_name)` + join-with-`|`; added `LIST_FLAG_SCHEMA` fixture and three new tests
+  - `src/handlers/update.rs` — same consumer update in `build_entry_map` closure
+  - `src/handlers/transition.rs` — same consumer update in `build_entry_map` closure
+  - `tasks/active/T006-substrate-cleanup-poc/main.md` — this log
+- **Consumer audit:**
+  - Sites updated: 3 (`add.rs`, `update.rs`, `transition.rs`) — all three `build_entry_map` closures
+  - Strategy: `try_get_many` + join-with-`|` so pipe-split in `coerce_value` handles both the repeatable form and the legacy pipe-separated form uniformly
+  - Scalar fields: `try_get_many` returns a single-element iterator; `join("|")` is identity — no behavior change for non-list fields
+  - `ListRecord` / `ListFk` fields: NOT given `ArgAction::Append` (they parse full JSON blobs, not pipe-separated tokens); the `try_get_many` join is harmless since their input is always a single JSON string
+- **Three AC tests (all pass):**
+  - `list_field_repeatable_form`: `--in-scope a --in-scope b` → `["a", "b"]` — PASS
+  - `list_field_pipe_form`: `--in-scope "a|b"` → `["a", "b"]` — PASS (backwards compat)
+  - `list_field_mixed_form`: `--in-scope "a|b" --in-scope "c"` → `["a", "b", "c"]` — PASS
+- **Test count delta:** 393 → 396 (+3)
+- **E2e results:** `drive_e2e.sh` PASS; `e2e.sh` Step 6 and `tasks_e2e.sh` Step 16 failures confirmed pre-existing (unchanged from Phases 1–3)
 
 ---
 

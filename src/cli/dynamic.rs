@@ -632,18 +632,23 @@ fn build_leaf_cmd_owned(
             leaf.field.ty,
             FieldType::Text | FieldType::Timestamp | FieldType::DisplayId
         );
+        let is_list = matches!(leaf.field.ty, FieldType::List(_));
 
-        cmd = cmd.arg(
-            Arg::new(leaf.cli_name.clone())
-                .long(leaf.cli_name.clone())
-                .help(
-                    leaf.field
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| leaf.cli_name.clone()),
-                )
-                .required(false),
-        );
+        let mut arg = Arg::new(leaf.cli_name.clone())
+            .long(leaf.cli_name.clone())
+            .help(
+                leaf.field
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| leaf.cli_name.clone()),
+            )
+            .required(false);
+
+        if is_list {
+            arg = arg.action(ArgAction::Append);
+        }
+
+        cmd = cmd.arg(arg);
 
         if is_text_like {
             let from_file_name = format!("{}-from-file", leaf.cli_name);
@@ -702,19 +707,24 @@ fn build_leaf_cmd(
             leaf.field.ty,
             FieldType::Text | FieldType::Timestamp | FieldType::DisplayId
         );
+        let is_list = matches!(leaf.field.ty, FieldType::List(_));
 
         // Main arg — clone the String into a Box<str> to satisfy Into<Id>
-        cmd = cmd.arg(
-            Arg::new(leaf.cli_name.clone())
-                .long(leaf.cli_name.clone())
-                .help(
-                    leaf.field
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| leaf.cli_name.clone()),
-                )
-                .required(false),
-        );
+        let mut arg = Arg::new(leaf.cli_name.clone())
+            .long(leaf.cli_name.clone())
+            .help(
+                leaf.field
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| leaf.cli_name.clone()),
+            )
+            .required(false);
+
+        if is_list {
+            arg = arg.action(ArgAction::Append);
+        }
+
+        cmd = cmd.arg(arg);
 
         // --<name>-from-file companion for Text-like fields
         if is_text_like {
