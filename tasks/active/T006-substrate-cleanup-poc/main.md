@@ -1,12 +1,12 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** COMPLETE
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
 - **Plan-review cycle:** 2 of 3 (cycle 1 NEEDS_WORK → cycle 2 READY)
-- **Phase 5 review cycle:** 1 of 3 (cycle 1 REVISE-minor — Finding A artefact missing verbatim error)
+- **Phase 5 review cycle:** 2 of 3 (cycle 1 REVISE-minor → cycle 2 PASS)
 
 ## Task
 
@@ -672,6 +672,25 @@ Exit non-zero ✓; field name (`evidence.external_refs`) named ✓; "JSON array"
 - The Phase 5 plan named six artefacts (`poc-rerun.sh`, `poc-rerun.log`, `show-l001.json`, `ratify-rejected.txt`, `hyphen-install.txt`, `repeatable-flag.txt`) under `tasks/planning/T006-substrate-cleanup-poc/artefacts/`. The executor instead landed five `finding-{a,b,c,d,e}*` files under `/tmp/t006-p5-smoke/` (ephemeral) and recorded their substance in the execution log. This is consistent with the "Smoke dir is ephemeral; nothing in repo" line at main.md:390 and matches the spirit of the Phase 5 plan. Non-blocking.
 
 **Routing:** Phase 5 REVISE (minor) → Status `CODE_REVIEW` → `EXECUTING_PHASE_5` for a single fix to capture stderr into `finding-a-ratify-rejected.txt`. Re-review will be a quick spot-check of the one artefact plus a `git show` to confirm zero `.rs` drift.
+
+#### Cycle 2 review (PASS)
+- **Reviewer:** code-reviewer
+- **Reviewed commit:** `d9bfa13`
+- **Verdict:** PASS
+
+**Verification (targeted re-review of the cycle-1 finding only):**
+
+1. **Finding A artefact recapture — PASS.** Read `/tmp/t006-p5-smoke/finding-a-ratify-rejected.txt` directly. Now contains TWO lines (122 bytes total): the verbatim `Error: no transition from 'open' via 'ratify' (gate None) had its guard satisfied and no unguarded fallback exists` followed by `exit=1`. Both required elements present. mtime `2026-04-30 23:51:28` matches the cycle-2 capture window. The cycle-1 reviewer rubric is now satisfied: a future operator reading just this artefact can distinguish "ratify rejected because Phase 1's guard fence fired" from any other non-zero exit.
+
+2. **Commit hygiene — PASS.** `git show --stat d9bfa13` lists exactly one file: `tasks/active/T006-substrate-cleanup-poc/main.md` (1 insertion, 1 deletion — the Status field flip). Zero `.rs` drift; `Cargo.toml` untouched; no schema fixture committed; no other task files touched. Matches the cycle-1 inline-fix contract.
+
+3. **No regressions — PASS.** Re-ran `cargo test --all`: `396 passed; 0 failed; 0 ignored` (lib) + `2 passed` (schemas_validate_fixtures). Re-ran `tests/drive_e2e.sh`: both AC7.1 and AC7.1b PASS. Identical numbers to cycle-1 review.
+
+4. **Findings B/C/D/E artefacts unchanged — PASS.** Spot-checked `finding-b-show-json.json` (still valid JSON; `evidence.external_refs` still a JSON array with `system/kind/id` object), `finding-c-hyphen-install.txt` (still `Installed store 'obs-test-hyphen'... exit=0`), and `finding-d-repeatable.txt` (still three-way array equivalence). All four other findings still hold. mtimes unchanged from cycle-1 capture (23:45-23:46).
+
+**Findings:** zero. The cycle-1 minor regression is resolved with the smallest possible patch surface.
+
+**Routing:** Phase 5 PASS (cycle 2) → Status `CODE_REVIEW` → `COMPLETE`. Final phase, all DONE_WHEN clauses satisfied.
 
 ---
 
