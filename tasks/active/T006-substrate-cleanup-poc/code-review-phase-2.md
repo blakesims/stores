@@ -161,3 +161,62 @@ Both `e2e.sh` and `tasks_e2e.sh` failures reproduce on master immediately before
 2. (Optional, recommended in same revision) Minor 1 — fold the wording enrichment so both required and optional cases emit `"invalid JSON for <field>"`-style messages.
 
 Estimated LOC: ~15-25 across `row.rs::coerce_value` + 1 validator wiring + 2 tests. Same files Phase 2 already touches.
+
+---
+
+## REVISE cycle 1 review (2026-04-30)
+
+- **Reviewer:** code-reviewer
+- **Commit reviewed:** `5256bfa`
+- **Gate:** **PASS**
+- **Counts:** 0 critical / 0 major / 0 minor
+
+### Cycle-1 critical — CLOSED
+
+Live repro on a fresh tempdir with the canonical optional-field schema:
+```
+$ stores observations_1006 add --summary "rev test" --source dev --priority normal \
+    --captured-at 2026-04-30 --external-refs '{not json'
+Error: validation failed:
+- evidence.external_refs: value must be a JSON array, got string '{not json'
+exit=1
+```
+Non-zero exit ✓; `external_refs` named ✓; "JSON array"/"got string" hints present ✓.
+
+### Implementation correctness
+
+| Check | Verdict |
+|-------|---------|
+| Sentinel `Value::String(raw)` chosen over `Value::Null` (matches fix-option (a)) | PASS |
+| `List(_)` pipe-split arm untouched (separation of List vs ListRecord) | PASS |
+| Type-shape check moved into `validate_field` (depth-aware via `required::lookup`) | PASS |
+| Fires for top-level (`linked_observations`) AND nested (`evidence.external_refs`) | PASS — both verified live |
+| No double-firing (single error per bad-JSON field) | PASS — short-circuit `return` at line 189 prevents downstream noise |
+| New test `list_record_bad_json_optional_field_still_errors` (optional fixture, asserts field-name + array-hint) | PASS |
+| Renamed `_returns_null` → `_returns_sentinel_string` is a real semantic change (asserts `Value::String(raw)` not `Value::Null`) | PASS — all 3 spot-checked |
+| Existing `list_record_bad_json_returns_validator_error` (required-field) now also asserts `msg.contains("array")` | PASS — pins wording for future regressions |
+| Happy-path round-trip `[{"system":"docker",...}]` → `show --json` emits `array` | PASS |
+
+### Out-of-scope
+
+`git show 5256bfa --stat`: `src/handlers/add.rs`, `src/handlers/row.rs`, `src/validate/error.rs`, `src/validate/mod.rs`, `tasks/active/T006-substrate-cleanup-poc/main.md`, `tasks/global-task-manager.md`. NO `lifecycle.rs` / `drive.rs` / `status.rs` / `next_action.rs` / `submit.rs` / `transition.rs` / `update.rs` touches. T005 + Phase 1 fences hold.
+
+`update.rs` and `transition.rs` write paths still serialize `ListRecord|ListFk` correctly from the original Phase 2 commit; the sentinel `Value::String` is short-circuited at validate time so write paths never see it.
+
+### Tests
+
+- `cargo test --all`: **388 passed** (387 → 388, net +1 from new optional-field test).
+- `tests/drive_e2e.sh`: PASS.
+- `tests/e2e.sh` Step 6 (CLAUDECODE inheritance) and `tests/tasks_e2e.sh` Step 16 (SIGPIPE on `cargo test ... | grep -q` under `pipefail`) — verified pre-existing on master pre-T006 in cycle-1; no NEW failures introduced.
+
+### Binary rebuild
+
+Installed `stores` binary timestamp at review start was 23:02 (predating commit `5256bfa` at 23:13). Rebuilt via `cargo install --path . --features runner-claude-code` before running live repros (new binary 23:15). All live results above use the rebuilt binary.
+
+### Minor 1 from cycle-1 — IMPLICITLY CLOSED
+
+Required-field path now ALSO surfaces "value must be a JSON array, got string ..." (the type-shape check fires before required-rule, short-circuiting it). Both required and optional cases use the unified enriched message. The required-field test asserts `msg.contains("array")`, pinning the wording.
+
+### Routing
+
+**Gate:** PASS. Status: `CODE_REVIEW` → `EXECUTING_PHASE_3`.

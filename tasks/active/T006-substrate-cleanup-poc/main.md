@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -445,6 +445,46 @@ $ stores observations_1006 show L001 --json | jq '.evidence.external_refs | type
 **Pre-existing failure verification:** Confirmed e2e.sh Step 6 (CLAUDECODE inheritance) and tasks_e2e.sh Step 16 (SIGPIPE on `cargo test ... | grep -q` under `set -o pipefail`) reproduce on master pre-T006 (`33fac5a`). Not Phase-2 regressions; flagged for separate cleanup but out of scope here.
 
 **Routing:** Phase 2 REVISE → Status `CODE_REVIEW` → `EXECUTING_PHASE_2`. Revision scope: address Critical 1 (silent-corruption on optional list_record/list_fk fields) — recommend fix-option (a). Add `list_record_bad_json_on_optional_field_surfaces_error` test pinning the new contract. Optionally fold Minor 1 wording enrichment in the same revision.
+
+---
+
+### Phase 2 — REVISE cycle 1 review
+- **Reviewer:** code-reviewer
+- **Date:** 2026-04-30
+- **Commit reviewed:** `5256bfa`
+- **Gate:** PASS
+- **Counts:** 0 critical / 0 major / 0 minor
+
+**Cycle-1 critical (silent corruption on optional list_record/list_fk) — CLOSED.**
+
+Live repro against the canonical optional-field schema (`stores/observations_1006`) on a fresh tempdir:
+```
+$ stores observations_1006 add --summary "rev test" --source dev --priority normal \
+    --captured-at 2026-04-30 --external-refs '{not json'
+Error: validation failed:
+- evidence.external_refs: value must be a JSON array, got string '{not json'
+exit=1
+```
+Exit non-zero ✓; field name (`evidence.external_refs`) named ✓; "JSON array"/"got string" hints present ✓. Cycle-1 critical closed.
+
+**Implementation review:**
+
+1. **Sentinel choice (`row.rs::coerce_value`).** `_ => Value::Null` → `_ => Value::String(raw.to_string())` for ListRecord/ListFk only. `Value::Null` is a legal value for nullable fields (so the required-rule can't catch it on optional fields); `Value::String` is never a valid shape for a list_record/list_fk column, so the type-shape check fires unconditionally. Sound choice; matches recommended fix-option (a).
+2. **`List(_)` arm untouched.** Pipe-split List logic at `row.rs:98-105` is unchanged. Sentinel logic only applies to `ListRecord | ListFk`. List vs ListRecord behaviour separation holds.
+3. **Validator depth correctness.** Check moved into `validate_field` (lines 172-191), which is called for top-level fields AND recurses through Record/ListRecord nesting. Verified by live repro on both depths: nested (`evidence.external_refs` on observations_1006) and top-level (`linked_observations` on tasks). `required::lookup` is the depth-aware helper (descends into `Value::Object`).
+4. **No double-firing.** Top-level run on bad `linked_observations` JSON produces exactly ONE `linked_observations` error, not two. The pre-fix top-level guard the executor mentioned isn't present — the check is only in `validate_field`. Confirmed by reading `validate/mod.rs:86-150` (main loop is purely structural recursion; no parallel ListRecord type-shape check). Short-circuit `return` at line 189 prevents required/enum/pattern/actor checks from also firing on the sentinel string.
+5. **Test coverage hardening (cycle-1 minor).**
+   - `list_record_bad_json_optional_field_still_errors` (new, `add.rs:367-394`): fixture has no `required: true` on `external_refs` (default false); asserts error contains field name AND array hint. Pins the optional-field floor — the exact case cycle-1's `_returns_validator_error` test missed.
+   - `list_record_bad_json_returns_validator_error` (existing, required-field): now also asserts `msg.contains("array")`. Future regressions on the format wording trip this test.
+   - Renames `_returns_null` → `_returns_sentinel_string` (3 tests in `row.rs`): semantic flip, not just label. Old assertion `assert_eq!(result, Value::Null, ...)` → `assert_eq!(result, Value::String(raw.to_string()), ...)`. Spot-checked all three: real semantic change.
+6. **Happy path unaffected.** Round-trip valid `[{"system":"docker","kind":"container","id":"foo"}]` → `show --json | jq '.evidence.external_refs | type'` → `array`. No regression.
+7. **Out-of-scope check.** `git show 5256bfa --stat` lists: `add.rs`, `row.rs`, `validate/error.rs`, `validate/mod.rs`, `main.md`, `global-task-manager.md`. NO touches to `lifecycle.rs`, `drive.rs`, `status.rs`, `next_action.rs`, `submit.rs`, `transition.rs`, `update.rs`. T005 + Phase 1 fences hold. (`update.rs` and `transition.rs` write paths still cover `ListRecord`/`ListFk` from the original Phase 2 commit; the sentinel `Value::String` is short-circuited at validate time, so write paths never see it.)
+8. **Test counts and e2e.** `cargo test --all`: **388 passed** (was 387 pre-revise; +1 = `list_record_bad_json_optional_field_still_errors`). `drive_e2e.sh`: PASS. `e2e.sh` Step 6 (CLAUDECODE inheritance) and `tasks_e2e.sh` Step 16 (SIGPIPE on `cargo test ... | grep -q` under `pipefail`) failures verified pre-existing on master pre-T006; not REVISE-1 regressions. Confirmed Step 16 source still uses the SIGPIPE-prone pattern at `tests/tasks_e2e.sh:50-57`.
+9. **Binary freshness.** Installed `stores` binary at `/home/blake/.cargo/bin/stores` was last installed at 23:02 (predating commit `5256bfa` at 23:13). Rebuilt via `cargo install --path . --features runner-claude-code` before running live repros; new binary timestamped 23:15. All live results above use the rebuilt binary.
+
+**Minor 1 from cycle-1 (required-path wording polish) — IMPLICITLY CLOSED.** Required-field path now also surfaces "value must be a JSON array, got string ..." (since the type-shape check fires before the required-rule does, short-circuiting it). Both required and optional cases use the unified enriched message. The `list_record_bad_json_returns_validator_error` test now also asserts `msg.contains("array")`, pinning the new wording.
+
+**Routing:** Phase 2 PASS → Status `CODE_REVIEW` → `EXECUTING_PHASE_3` for Finding C (DDL identifier escaping for hyphenated store names).
 
 ---
 
