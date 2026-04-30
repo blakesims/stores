@@ -1,7 +1,7 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** EXECUTING_PHASE_6
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30 (Phase 5 code review PASS — advancing to Phase 6 operator integration smoke)
 - **Blocked Reason:** —
@@ -842,6 +842,47 @@ Remaining hits are exclusively in `src/validate/*`, `src/schema/*`, `src/handler
 ```
 
 **Deviations from plan:** None. The README one-liner was already present (Phase 4 added it); skipped as specified.
+
+---
+
+### Phase 6 — Operator integration smoke: eight clauses against /tmp/t009-obs-port
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (set after commit)
+- **Tempdir:** `/tmp/t009-obs-port`
+
+**Summary:**
+- Binary rebuilt and reinstalled: `stores 0.4.1` confirmed via `stores --version`.
+- Fresh `/tmp/t009-obs-port` tempdir: `git init -q` + `stores setup` (auto-installed observations, gate, tasks stores + skills + agents).
+- All 8 DONE_WHEN artefacts captured as durable file paths.
+
+**Artefact paths and per-clause observations:**
+
+| # | Artefact path | Clause | Observation |
+|---|---|---|---|
+| 1 | `/tmp/t009-obs-port/artefact-1-full-add.json` | Full add (dashboard T3 → L001, all 4 new required fields + full intent_contract draft) | display_id=L001, source=dashboard, priority=high, status=open; intent_contract: contract_state=draft, drafted_by=claude-code, tier_hint=T3, objective/in_scope/out_of_scope/acceptance all populated; evidence.external_refs=[{system:docker,kind:container,id:backend}]; notes={siblings:[L210],...} |
+| 2 | `/tmp/t009-obs-port/artefact-2-triage-flow.txt` | Triage flow open→investigating→confirmed | Three transitions succeeded. Final state: `{status: confirmed, contract_state: ready}`. Guard enforced: confirm required contract_state==ready (update step set it). |
+| 3 | `/tmp/t009-obs-port/artefact-3-required-when.txt` | required_when on contract sub-fields | exit=1; error: `validation failed` listing 6 missing sub-fields all citing `because intent_contract.contract_state == 'ready'`: acceptance, approved_at, approved_by, in_scope, objective, out_of_scope. |
+| 4 | `/tmp/t009-obs-port/artefact-4-actor-human.txt` | actor:human on approved_by/approved_at (AI rejected) | exit=1; error: `field 'intent_contract.approved_at' requires actor 'human'; invoker is 'ai_autonomous'` + same for `approved_by`. |
+| 5 | `/tmp/t009-obs-port/artefact-5-evidence.json` | evidence.external_refs round-trips as JSON array | Structured object: `{env, external_refs:[{id,kind,system}], observed_at}`. external_refs is a parsed array, not a blob. |
+| 6 | `/tmp/t009-obs-port/artefact-6-notes.json` | notes round-trips as JSON object | `{discovery_path, reproed_by, siblings:[L210]}` — structured subkeys, not a quoted string. |
+| 7 | `/tmp/t009-obs-port/artefact-7-needs-info.txt` | needs_info parking + provide_info resume | park(ai_autonomous): confirmed→needs_info. AI provide_info(ai_autonomous) rejected: `transition 'provide_info' requires actor 'human'`. Human provide_info: needs_info→confirmed. |
+| 8 | `/tmp/t009-obs-port/artefact-8-cross-store.txt` | cross-store task_id soft-FK round-trip | tasks add → T001; observations update L001 --task-id T001; show L001 → task_id="T001". |
+
+**Deviations from plan spec (smoke script steps):**
+
+1. **park invoker:** The plan smoke script used `--invoker ai_with_human` for the park command. Schema requires `actor: ai_autonomous` on the `park` transition (confirmed by artefact-7 first-pass rejection). Fixed to `--invoker ai_autonomous`. This matches `tests/observations_e2e.sh` Step 7 which already uses `--invoker ai_autonomous` for park. Not a code defect; plan step had wrong invoker.
+2. **tasks add requires scope_in/scope_out:** The plan smoke script omitted `--scope-in` and `--scope-out` for the tasks add call. The tasks schema marks these as unconditionally required. Added both flags. Not a code defect; plan step was incomplete.
+3. **`show --json` key is `display_id` not `id`:** Artefact-1 sanity check uses `display_id` (actual schema key name). Plan comment said `jq returns one_liner-equivalent (summary)` — equivalent info captured via python3. Not a code defect.
+
+**`cargo test --all`:** 414 unit + 2 integration = **416 PASS, 0 fail** (unchanged from Phase 5 baseline).
+
+**E2e suites:**
+- `bash tests/e2e.sh` — EXIT=0; 13/13 PASS
+- `bash tests/observations_e2e.sh` — EXIT=0; 8/8 DONE_WHEN clauses PASS
+- `bash tests/gate_e2e.sh` — EXIT=0; 6/6 PASS
+- `tasks_e2e.sh` Step 16 pre-existing SIGPIPE/pipefail flake — unchanged, not a regression
 
 ---
 
