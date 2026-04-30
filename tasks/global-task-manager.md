@@ -6,7 +6,7 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T009 | Port the 10.06 `observations` store — second real migration | High | Phase 2 | EXECUTING_PHASE_2 | [main.md](./active/T009-port-10-06-observations/main.md) |
+| T009 | Port the 10.06 `observations` store — second real migration | High | Phase 4 | EXECUTING_PHASE_4 | [main.md](./active/T009-port-10-06-observations/main.md) |
 
 Next available task id: T010
 

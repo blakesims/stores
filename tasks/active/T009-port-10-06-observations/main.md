@@ -1,9 +1,9 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (Phase 2 code review — PASS; routing to executor for Phase 3)
+- **Last Updated:** 2026-04-30 (Phase 3 code review — PASS; routing to executor for Phase 4)
 - **Blocked Reason:** —
 
 ## Task
@@ -531,7 +531,69 @@ After Issues 1-3 are resolved:
 
 ---
 
-### Phase 3 — New `tests/observations_e2e.sh`
+### Phase 3 — New `tests/observations_e2e.sh` (Code Review)
+- **Reviewer:** code-reviewer agent
+- **Date:** 2026-04-30
+- **Commit reviewed:** `6067e9a` ("feat(T009-P3): add tests/observations_e2e.sh covering the eight DONE_WHEN clauses")
+- **Gate:** **PASS**
+
+**Verification against DONE_WHEN (8 clauses):**
+
+| # | Clause | State assertion | Status |
+|---|--------|-----------------|--------|
+| 1 | Full add (dashboard T3 → L001) | `display_id == 'L001'`, `status == 'open'`, `intent_contract.contract_state == 'draft'`, `tier_hint == 'T3'`, `objective` non-null, `in_scope`/`out_of_scope`/`acceptance` are lists (R5 list-semantics) | ✓ |
+| 2 | Triage flow open→investigating→confirmed | `status == 'investigating'` after investigate; `contract_state == 'ready'` after update; `status == 'confirmed'` AND `contract_state == 'ready'` after confirm | ✓ |
+| 3 | required_when rejection | exit ≠ 0; error contains `intent_contract.contract_state == 'ready'`, `intent_contract.objective`, `intent_contract.acceptance` | ✓ |
+| 4 | actor:human rejection on approved_by | exit ≠ 0; error contains `actor`, `human`, `approved_by` | ✓ |
+| 5 | evidence.external_refs JSON array round-trip | `jq '.evidence.external_refs[0].system' == "docker"` | ✓ |
+| 6 | notes JSON object round-trip | `jq -c '.notes.siblings' == ["L210"]` | ✓ |
+| 7 | needs_info parking | `status == 'needs_info'` after park (ai_autonomous); AI provide_info exits ≠ 0 with actor/human in error; `status == 'confirmed'` after human provide_info | ✓ |
+| 8 | cross-store task_id soft-FK | `tasks add` returns T001; `jq '.task_id' == "T001"` after observation update | ✓ |
+
+**Tests re-run during review:**
+- `bash tests/observations_e2e.sh` — EXIT=0; all 8 step PASS markers printed; final summary block matches the expected per-clause shape
+- `cargo test --all` — 414 unit + 2 integration = **416 PASS, 0 fail**
+- `bash tests/e2e.sh` — EXIT=0 (13/13 PASS)
+- `bash tests/gate_e2e.sh` — PASS (6/6 clauses)
+- `bash tests/drive_e2e.sh` — PASS (AC7.1 + AC7.1b)
+- `bash tests/tasks_e2e.sh` — fails at Step 16 (`ac5_11b atomicity test failed`); **pre-existing**, predates Phase 3 (verified by inspecting `git log -- tests/tasks_e2e.sh` history). Not a Phase 3 regression
+
+**Convention conformance vs `tests/gate_e2e.sh`:**
+- ✓ `set -euo pipefail` (line 24)
+- ✓ `unset CLAUDECODE` near top so default invoker is human (line 28)
+- ✓ `mktemp -d /tmp/t009-obs-port-XXXXXX` + `trap cleanup EXIT` (lines 35-36)
+- ✓ Numbered "Step N/8 — desc" headers on each section
+- ✓ `chmod +x` (-rwxrwxr-x on the file)
+- ✓ `git init -q` (line 48) gated to `cd "$TMPDIR"` (line 43) — fresh tempdir; cannot pollute a real repo
+
+**D9 production names (no v0.1 leakage):**
+- ✓ Observations commands use `--objective`, `--in-scope`, `--out-of-scope`, `--acceptance`, `--tier-hint`
+- ✓ `grep -nE "done.when|scope.in|scope.out|verdict|--triage" tests/observations_e2e.sh` returns hits ONLY on lines 285-287 — these are `stores tasks add --done-when/--scope-in/--scope-out`, the **tasks** store schema (still on v0.1 names by design). Not an observations leak
+
+**CLAUDECODE management for negative tests:**
+- ✓ `CLAUDECODE=1` is used as a per-command prefix on lines 175 and 250 (Steps 4 and 7's AI-rejection negative tests). Per-command env scoping means it does NOT leak to subsequent commands. Verified by inspection — the only other CLAUDECODE references are the top-level `unset`, comments, and the summary echo
+
+**Cross-store Step 8 setup correctness:**
+- ✓ Script uses `stores tasks add ... --invoker ai_with_human` (matches the tasks schema's `add` actor list); returns T001
+- ✓ `stores tasks show T001 --json` confirms the row exists before linking; the soft-FK round-trip then asserts `.task_id == "T001"` on the observation. Pass-message explicitly notes "soft-FK value round-trip only; cross-store integrity is T010" — R4 risk averted
+
+**Out-of-scope discipline:**
+- `git show 6067e9a --stat` confirms ONLY 2 files touched: `tests/observations_e2e.sh` (+320, new) and `tasks/active/T009-port-10-06-observations/main.md` (+37/-1). **Zero `src/` Rust files modified, zero `stores/*/schema.yaml` modified, zero other `tests/*.sh` modified** — plan required this
+
+**Observations (not findings):**
+- The script's final summary line is `=== All 8 DONE_WHEN clauses verified ===` (not literally "All 8 steps passed"). Functionally equivalent to the executor's claim and to `gate_e2e.sh`'s `=== All 6 DONE_WHEN clauses verified ===` shape. On-spec
+- Step 1's `show --json` assertion spot-checks ~12 of the ~26 new top-level fields. The unchecked fields are covered by the schema's own validator (Phase 1 cargo tests) and by the e2e Step 7 assertions in `tests/e2e.sh` (Phase 2). Reasonable coverage trade-off — Phase 3 is a behavioral walkthrough, not an exhaustive field-presence check
+- Step 7's `park` uses `--invoker ai_autonomous` (correct: schema's `park` transition has `actor: ai_autonomous`); the executor's deviation note is on-spec, not a finding
+
+**Findings:** None substantive.
+
+**Decision:** PASS. All 8 DONE_WHEN clauses exercised with state assertions (not exit-code-only). Conventions match `gate_e2e.sh`. D9 production names used throughout for observations commands. CLAUDECODE leak-protected via per-command prefix. Cross-store Step 8 correctly scoped to soft-FK round-trip with explicit T010-out-of-scope language. No regressions: 416/0 cargo, e2e/gate/drive all PASS; tasks_e2e.sh Step 16 failure is pre-existing.
+
+**Routing:** CODE_REVIEW → EXECUTING_PHASE_4.
+
+---
+
+### Phase 3 — New `tests/observations_e2e.sh` (Execution Summary)
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
