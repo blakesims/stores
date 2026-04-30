@@ -535,7 +535,7 @@ After Issues 1-3 are resolved:
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
-- **Commit SHA:** (pending)
+- **Commit SHA:** 6067e9a
 - **Files added:** `tests/observations_e2e.sh`
 
 **Summary:**
