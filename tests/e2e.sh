@@ -4,22 +4,30 @@
 # README command correspondence (auditable list — same commands, same order):
 #   1.  stores init
 #   2.  stores install ./stores/observations
-#   3.  stores install ./stores/gate
-#   4.  stores observations add --summary "thing broke"                    → OBS001
-#   5.  stores observations triage OBS001 --verdict T3                       → fails (required_when)
-#   6.  stores observations triage OBS001 --verdict T3 --done-when "X works after fix" \
-#         --scope-in "backend handler" --scope-out "frontend"              → succeeds
-#   7.  stores observations show OBS001                                       → entry with triage + contract
-#   8.  stores observations list                                            → all entries
+#   3.  stores install ./stores/gate (multi-store coexistence)
+#   4.  stores observations add --summary "thing broke" --source dev --priority normal \
+#         --captured-at 2026-04-30 --captured-week w11-d4                 → L001
+#   5.  stores observations update L001 --contract-state ready             → fails (required_when)
+#         Error cites intent_contract.objective, .acceptance, .in_scope, .out_of_scope,
+#         .tier_hint, .type, .approved_by, .approved_at (all gated by contract_state == 'ready')
+#   6.  stores observations investigate L001 --invoker human               → open → investigating
+#       stores observations update L001 --contract-state ready             \
+#         --objective "..." --type work --in-scope "..." --out-of-scope "..."\
+#         --acceptance "..." --tier-hint T3                               \
+#         --approved-by blake --approved-at 2026-04-30 --invoker human    → succeeds
+#       stores observations confirm L001 --invoker human                  → investigating → confirmed
+#   7.  stores observations show L001                                      → entry with intent_contract
+#       stores observations show L001 --json                               → intent_contract.contract_state == 'ready'
+#   8.  stores observations list                                           → all entries
 #   9.  stores gate add --type decision --one-liner "Soft or hard delete on cleanup?" \
-#         --options "soft|hard" --task-ref OBS001                            → G001
-#   10. stores gate answer G001 --answer hard --invoker human              → succeeds
+#         --options "soft|hard" --task-ref L001                            → G001
+#   10. stores gate answer G001 --answer hard --invoker human             → succeeds
 #   11. CLAUDECODE=1 stores gate add --type decision \
-#         --one-liner "Actor check demo gate" --options "yes|no"            → G002 (step 11a: fresh pending gate)
-#       CLAUDECODE=1 stores gate answer G002 --answer hard                 → fails (actor-mismatch)
+#         --one-liner "Actor check demo gate" --options "yes|no"           → G003 (step 11a)
+#       CLAUDECODE=1 stores gate answer G003 --answer hard                → fails (actor-mismatch)
 #   12. sqlite3 .stores/db.sqlite "select o.display_id, o.status,
-#         json_extract(o.triage,'$.verdict'), g.display_id
-#         from observations o left join gate g on g.task_ref = o.display_id" → G001 non-NULL join match
+#         json_extract(o.intent_contract,'$.tier_hint'), g.display_id
+#         from observations o left join gate g on g.task_ref = o.display_id" → L001|confirmed|T3|G001
 #   13. (verified throughout: $CLAUDECODE → ai_autonomous; --invoker overrides; schema violations rejected)
 #
 # Usage: bash tests/e2e.sh
@@ -70,79 +78,110 @@ echo "$TABLES" | grep -q "gate" || fail "gate table not present"
 pass "gate store installed; both tables coexist"
 
 # ---------------------------------------------------------------------------
-# Step 4: observations add → OBS001
+# Step 4: observations add → L001 (with 4 new required fields)
 # ---------------------------------------------------------------------------
 echo "--- Step 4: stores observations add"
-OUT=$(stores observations add --summary "thing broke")
-[[ "$OUT" == "OBS001" ]] || fail "expected OBS001, got: $OUT"
-pass "add returned OBS001"
+OUT=$(stores observations add --summary "thing broke" \
+    --source dev --priority normal \
+    --captured-at 2026-04-30 --captured-week w11-d4)
+[[ "$OUT" == "L001" ]] || fail "expected L001, got: $OUT"
+pass "add returned L001"
 
 # ---------------------------------------------------------------------------
-# Step 5: triage without contract → fails citing required_when
+# Step 5: update --contract-state ready without sub-fields → fails (required_when)
+# Demonstrates the same enforcement as v0.1's triage T3 rejection:
+# a write that flips contract_state to ready while missing all required sub-fields
+# is rejected, with errors citing each intent_contract field gated by contract_state == 'ready'.
 # ---------------------------------------------------------------------------
-echo "--- Step 5: triage T3 without contract fields (should fail)"
-ERR_OUT=$(stores observations triage OBS001 --verdict T3 2>&1) && fail "expected non-zero exit" || true
-echo "$ERR_OUT" | grep -q "contract.done_when" || fail "expected contract.done_when in error; got: $ERR_OUT"
-echo "$ERR_OUT" | grep -q "contract.scope_in" || fail "expected contract.scope_in in error"
-echo "$ERR_OUT" | grep -q "contract.scope_out" || fail "expected contract.scope_out in error"
-pass "triage T3 without contract rejected with required_when errors"
+echo "--- Step 5: contract-state ready without sub-fields (should fail)"
+ERR_OUT=$(stores observations update L001 --contract-state ready --invoker human 2>&1) \
+    && fail "expected non-zero exit" || true
+echo "$ERR_OUT" | grep -q "intent_contract.objective" \
+    || fail "expected intent_contract.objective in error; got: $ERR_OUT"
+echo "$ERR_OUT" | grep -q "intent_contract.acceptance" \
+    || fail "expected intent_contract.acceptance in error; got: $ERR_OUT"
+echo "$ERR_OUT" | grep -q "intent_contract.in_scope" \
+    || fail "expected intent_contract.in_scope in error; got: $ERR_OUT"
+echo "$ERR_OUT" | grep -q "intent_contract.out_of_scope" \
+    || fail "expected intent_contract.out_of_scope in error; got: $ERR_OUT"
+echo "$ERR_OUT" | grep -q "intent_contract.tier_hint" \
+    || fail "expected intent_contract.tier_hint in error; got: $ERR_OUT"
+echo "$ERR_OUT" | grep -q "intent_contract.contract_state == 'ready'" \
+    || fail "expected contract_state == 'ready' enforcement cited; got: $ERR_OUT"
+pass "contract-state ready without sub-fields rejected with required_when errors"
 
 # ---------------------------------------------------------------------------
-# Step 6: triage with full contract → succeeds
+# Step 6: investigate → update contract to ready with all sub-fields → confirm
+# Demonstrates the full triage flow under the new intent_contract shape:
+#   open → investigating  (investigate verb, actor: ai_with_human)
+#   update intent_contract sub-fields + contract_state=ready (actor: human for approved_by/at)
+#   investigating → confirmed  (confirm verb, guard: contract_state == 'ready')
 # ---------------------------------------------------------------------------
-echo "--- Step 6: triage T3 with full contract (should succeed)"
-stores observations triage OBS001 --verdict T3 \
-    --done-when "X works after fix" \
-    --scope-in "backend handler" \
-    --scope-out "frontend"
-pass "triage with contract succeeded"
+echo "--- Step 6: investigate + fill contract + confirm (should succeed)"
+stores observations investigate L001 --invoker human
+stores observations update L001 \
+    --contract-state ready \
+    --objective "Fix the broken backend handler" \
+    --type work \
+    --in-scope "backend handler" \
+    --out-of-scope "frontend" \
+    --acceptance "handler returns 200 after fix" \
+    --tier-hint T3 \
+    --approved-by blake \
+    --approved-at 2026-04-30 \
+    --invoker human
+stores observations confirm L001 --invoker human
+pass "investigate + contract ready + confirm succeeded"
 
 # ---------------------------------------------------------------------------
-# Step 7: show OBS001 — entry with nested triage + contract
+# Step 7: show L001 — entry with nested intent_contract record
 # ---------------------------------------------------------------------------
-echo "--- Step 7: stores observations show OBS001"
-SHOW_OUT=$(stores observations show OBS001)
-echo "$SHOW_OUT" | grep -q "display_id: OBS001" || fail "show missing display_id"
-echo "$SHOW_OUT" | grep -q "verdict: T3" || fail "show missing triage.verdict"
-echo "$SHOW_OUT" | grep -q "done_when: X works after fix" || fail "show missing contract.done_when"
+echo "--- Step 7: stores observations show L001"
+SHOW_OUT=$(stores observations show L001)
+echo "$SHOW_OUT" | grep -q "display_id: L001" || fail "show missing display_id"
+echo "$SHOW_OUT" | grep -q "tier_hint: T3" || fail "show missing intent_contract.tier_hint"
+echo "$SHOW_OUT" | grep -q "contract_state: ready" || fail "show missing intent_contract.contract_state"
 
-# JSON: nested triage + contract keys present
-SHOW_JSON=$(stores observations show OBS001 --json)
+# JSON: nested intent_contract keys present with production shape
+SHOW_JSON=$(stores observations show L001 --json)
 echo "$SHOW_JSON" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
-assert d['display_id'] == 'OBS001', f'bad display_id: {d}'
-assert isinstance(d['triage'], dict), f'triage not nested dict: {d}'
-assert d['triage']['verdict'] == 'T3', f'bad verdict: {d}'
-assert isinstance(d['contract'], dict), f'contract not nested dict: {d}'
-assert d['contract']['done_when'] == 'X works after fix', f'bad done_when: {d}'
+assert d['display_id'] == 'L001', f'bad display_id: {d}'
+assert isinstance(d['intent_contract'], dict), f'intent_contract not nested dict: {d}'
+assert d['intent_contract']['contract_state'] == 'ready', f'bad contract_state: {d}'
+assert d['intent_contract']['tier_hint'] == 'T3', f'bad tier_hint: {d}'
+assert d['intent_contract']['objective'] == 'Fix the broken backend handler', f'bad objective: {d}'
+assert isinstance(d['intent_contract']['acceptance'], list), f'acceptance not list: {d}'
+assert isinstance(d['intent_contract']['in_scope'], list), f'in_scope not list: {d}'
+assert isinstance(d['intent_contract']['out_of_scope'], list), f'out_of_scope not list: {d}'
 " || fail "show --json failed structure check"
-pass "show returns entry with nested triage and contract"
+pass "show returns entry with nested intent_contract (contract_state=ready, tier_hint=T3)"
 
 # ---------------------------------------------------------------------------
 # Step 8: list → all entries
 # ---------------------------------------------------------------------------
 echo "--- Step 8: stores observations list"
 LIST_OUT=$(stores observations list)
-echo "$LIST_OUT" | grep -q "OBS001" || fail "list output missing OBS001"
+echo "$LIST_OUT" | grep -q "L001" || fail "list output missing L001"
 
 LIST_JSON=$(stores observations list --json)
 COUNT=$(echo "$LIST_JSON" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
 [[ "$COUNT" -ge 1 ]] || fail "list --json returned empty array"
-pass "list shows OBS001"
+pass "list shows L001"
 
 # ---------------------------------------------------------------------------
-# Step 9: gate add → G001 (task-ref = OBS001 for JOIN)
+# Step 9: gate add → G001 (task-ref = L001 for JOIN)
 # ---------------------------------------------------------------------------
 echo "--- Step 9: stores gate add → G001"
 GATE_OUT=$(stores gate add --type decision \
     --one-liner "Soft or hard delete on cleanup?" \
     --options "soft|hard" \
-    --task-ref OBS001 \
+    --task-ref L001 \
     --filed-by e2e-test \
     --source dev)
 [[ "$GATE_OUT" == "G001" ]] || fail "expected G001, got: $GATE_OUT"
-pass "gate add returned G001 with task-ref OBS001"
+pass "gate add returned G001 with task-ref L001"
 
 # ---------------------------------------------------------------------------
 # Step 9b: gate add from human (no CLAUDECODE) — actor-gate-fix verification
@@ -153,7 +192,7 @@ echo "--- Step 9b: gate add as human invoker (no CLAUDECODE, no --invoker flag)"
 GATE_HUMAN_OUT=$(stores gate add --type decision \
     --one-liner "Human-filed gate test" \
     --options "yes|no" \
-    --task-ref OBS001 \
+    --task-ref L001 \
     --filed-by e2e-test \
     --source dev)
 [[ "$GATE_HUMAN_OUT" == "G002" ]] || fail "expected G002 from human gate add, got: $GATE_HUMAN_OUT"
@@ -199,7 +238,7 @@ d = json.load(sys.stdin)
 assert d['display_id'] == 'G001', f'bad display_id: {d}'
 assert isinstance(d['options'], list), f'options not list: {d}'
 assert d['answer'] == 'hard', f'bad answer: {d}'
-assert d['task_ref'] == 'OBS001', f'bad task_ref: {d}'
+assert d['task_ref'] == 'L001', f'bad task_ref: {d}'
 " || fail "gate show --json failed structure check"
 
 GATE_LIST_JSON=$(stores gate list --json)
@@ -212,19 +251,20 @@ pass "gate show/list --json valid"
 
 # ---------------------------------------------------------------------------
 # Step 12: cross-store SQL JOIN — non-NULL gate match
+# Uses intent_contract.tier_hint (new shape) instead of triage.verdict (v0.1)
 # ---------------------------------------------------------------------------
 echo "--- Step 12: cross-store SQL JOIN"
 JOIN_OUT=$(sqlite3 .stores/db.sqlite \
-    "select o.display_id, o.status, json_extract(o.triage,'$.verdict'), g.display_id from observations o left join gate g on g.task_ref = o.display_id")
+    "select o.display_id, o.status, json_extract(o.intent_contract,'$.tier_hint'), g.display_id from observations o left join gate g on g.task_ref = o.display_id")
 
 echo "JOIN output: $JOIN_OUT"
 
-# Assert G001 (non-NULL gate display_id) appears in the output joined to OBS001
-echo "$JOIN_OUT" | grep -q "OBS001" || fail "OBS001 not in JOIN output"
+# Assert G001 (non-NULL gate display_id) appears in the output joined to L001
+echo "$JOIN_OUT" | grep -q "L001" || fail "L001 not in JOIN output"
 echo "$JOIN_OUT" | grep -q "G001" || fail "G001 not in JOIN output — join match is NULL"
-# Confirm the row structure: OBS001|...|T3|G001
-echo "$JOIN_OUT" | grep -q "T3" || fail "verdict T3 not in JOIN output"
-pass "JOIN returns OBS001|...|T3|G001 — real non-NULL gate match confirmed"
+# Confirm the row structure: L001|confirmed|T3|G001
+echo "$JOIN_OUT" | grep -q "T3" || fail "tier_hint T3 not in JOIN output"
+pass "JOIN returns L001|confirmed|T3|G001 — real non-NULL gate match confirmed"
 
 # ---------------------------------------------------------------------------
 # Step 13: Summary of enforcement verified throughout
@@ -234,13 +274,13 @@ echo "=== All 13 DONE_WHEN steps verified ==="
 echo "  #1  init: PASS"
 echo "  #2  install observations: PASS"
 echo "  #3  install gate (multi-store coexistence): PASS"
-echo "  #4  observations add → OBS001: PASS"
-echo "  #5  triage T3 without contract rejected: PASS"
-echo "  #6  triage T3 with contract succeeds: PASS"
-echo "  #7  show OBS001 nested triage+contract: PASS"
+echo "  #4  observations add → L001 (with required source/priority/captured-at/captured-week): PASS"
+echo "  #5  contract-state ready without sub-fields rejected (intent_contract.contract_state == 'ready'): PASS"
+echo "  #6  investigate + contract ready + confirm succeeds: PASS"
+echo "  #7  show L001 nested intent_contract (contract_state=ready, tier_hint=T3): PASS"
 echo "  #8  list all entries: PASS"
-echo "  #9  gate add → G001 with task-ref OBS001: PASS"
+echo "  #9  gate add → G001 with task-ref L001: PASS"
 echo "  #10 gate answer G001 --invoker human: PASS"
 echo "  #11 CLAUDECODE=1 gate answer without --invoker rejected: PASS"
-echo "  #12 cross-store SQL JOIN returns non-NULL G001 match: PASS"
+echo "  #12 cross-store SQL JOIN returns L001|confirmed|T3|G001 (intent_contract.tier_hint): PASS"
 echo "  #13 invoker detection + --invoker override + schema enforcement: PASS (verified throughout)"

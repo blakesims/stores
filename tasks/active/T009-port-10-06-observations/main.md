@@ -1,7 +1,7 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30 (Phase 1 code review — PASS; routing to executor for Phase 2)
 - **Blocked Reason:** —
@@ -407,6 +407,29 @@ After Issues 1-3 are resolved:
 - **`stores install ./stores/observations`**: DDL installs cleanly; 40 columns verified via `PRAGMA table_info(observations)`.
 - **e2e.sh expected-failure mode**: Step 4 `stores observations add` fails with `Error: validation failed: - captured_at: required - captured_week: required - priority: required - source: required`. NOT a parse error or panic. Expected per plan.
 - **Deviations from plan**: None. The plan noted `approval_invoker` (16th sub-field in the production doc audit-trail section) as an acceptable scope-narrowing; not added. `inputs` sub-field is `list: text` as specified. Schema grew to ~210 lines (plan estimated 150-200 — slightly over due to full YAML verbosity with descriptions).
+
+### Phase 2 — `tests/e2e.sh` partial rewrite
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (see below)
+- **Files modified:** `tests/e2e.sh`
+
+**Summary:**
+- Header comment block (lines 4-23) fully rewritten: new commands reflect `L001`, `--source dev --priority normal --captured-at ... --captured-week ...`, `intent_contract` shape, `confirm` verb.
+- Step 4: `--summary "thing broke"` → `--summary "thing broke" --source dev --priority normal --captured-at 2026-04-30 --captured-week w11-d4`; expected ID `OBS001` → `L001`.
+- Step 5: Rewritten — `stores observations update L001 --contract-state ready --invoker human` triggers required_when failures; grep assertions now check `intent_contract.objective`, `intent_contract.acceptance`, `intent_contract.in_scope`, `intent_contract.out_of_scope`, `intent_contract.tier_hint`, `intent_contract.contract_state == 'ready'`.
+- Step 6: Rewritten — `investigate L001 --invoker human` + `update L001 --contract-state ready --objective ... --type work --in-scope ... --out-of-scope ... --acceptance ... --tier-hint T3 --approved-by blake --approved-at 2026-04-30 --invoker human` + `confirm L001 --invoker human` (full 3-command triage flow: open→investigating→confirmed).
+- Step 7: Rewritten — `show L001` checks `display_id: L001`, `tier_hint: T3`, `contract_state: ready`; `show --json` Python assertion checks `d['intent_contract']['contract_state'] == 'ready'`, `d['intent_contract']['tier_hint'] == 'T3'`, `d['intent_contract']['objective']`, and that `acceptance`/`in_scope`/`out_of_scope` are lists.
+- Steps 8-11: Mechanical rename `OBS001` → `L001`, `task_ref OBS001` → `task_ref L001`.
+- Gate JSON assertion: `d['task_ref'] == 'L001'` (was `'OBS001'`).
+- Step 12: JOIN query updated — `json_extract(o.intent_contract,'$.tier_hint')` replaces `json_extract(o.triage,'$.verdict')`; grep assertions check `L001` and `T3`; expected output is `L001|confirmed|T3|G001`.
+- Step 13 summary block: all references updated to L001 and new shape.
+- **LOC delta**: 104 added / 64 deleted across 168 changed lines; file grew from 246 → 286 LOC. Exceeds plan's 70-90 estimate (R2 trip-wire was 120 LOC). Cause: header rewrite added ~15 LOC; step 6 expanded from 4 to 12 LOC (3 commands instead of 1); step 7 Python assertions doubled. No split into 2 commits needed — changes are one coherent logical unit.
+- **`bash tests/e2e.sh` result**: EXIT 0 — all 13 steps PASS.
+- **Canonical grep**: `grep -nE "OBS|--triage |--contract |triage\.|done_when|scope_in|scope_out|verdict" tests/e2e.sh` returns exactly 1 hit: line 254 commentary `# Uses intent_contract.tier_hint (new shape) instead of triage.verdict (v0.1)` — acceptable commentary per plan.
+- **`cargo test --all`**: 414 unit + 2 integration = 416 total, all PASS, 0 fail.
+- **Deviations from plan**: None substantive. LOC delta (168 touched vs 70-90 estimate) is documented above. The `--summary` flag appears in the `add` command (line 84) and header (line 8) — these are not old-shape references; `--summary` is a universal retained field.
 
 ---
 
