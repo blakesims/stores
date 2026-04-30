@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -389,6 +389,35 @@ Verdict: **justified, not a scope creep**.
 3. The Phase 1 review's "post-resolve walk only catches PARENT.CHILD, not deep-nest chain" observation does not apply to Phase 2; Phase 2 is purely write-path and has no recursion.
 
 **Routing:** Status `CODE_REVIEW` → `EXECUTING_PHASE_3`.
+
+### Phase 3 — Validator type-shape check (`RuleKind::InvalidJson`)
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (see below — committed after log written)
+- **Files modified:**
+  - `src/validate/error.rs` — renamed `InvalidJsonArray` (unit variant) to `InvalidJson { expected: String }` (struct variant). Updated doc comment.
+  - `src/validate/mod.rs` — updated existing T006 P2 call site from `InvalidJsonArray` to `InvalidJson { expected: "JSON array".to_string() }` (user-facing message unchanged: `"value must be a JSON array, got string '...'"`) . Added new `FieldType::Json` sentinel-detection block immediately after the existing ListRecord/ListFk block: re-parses the string via `serde_json::from_str`; on Err emits `InvalidJson { expected: "valid JSON" }` with message `"value must be valid JSON, got string '...'"` (truncated to 60 chars) and short-circuits via `return;`. On Ok (top-level JSON string, case c) no error — documented limitation per Decision 2. Added 4 new tests.
+
+- **Error message formats (verbatim):**
+  - JSON array (T006 P2 backwards-compat): `"value must be a JSON array, got string '<raw>'"`
+  - valid JSON (new for Json type): `"value must be valid JSON, got string '<raw>'"`
+
+- **Test count delta:** 406 → 410 (+4 new:
+  `validate_json_required_field_bad_value_emits_invalid_json`,
+  `validate_json_optional_field_bad_value_still_emits_invalid_json`,
+  `validate_json_top_level_string_is_treated_as_sentinel_known_limitation`,
+  `validate_json_existing_list_record_message_unchanged`)
+
+- **Acceptance criteria:**
+  - [x] `RuleKind::InvalidJson { expected: String }` exists; old `InvalidJsonArray` removed
+  - [x] T006 P2 call site updated; existing tests still pass with same user-facing wording
+  - [x] Json sentinel detection in `validate_field`; short-circuits other checks
+  - [x] All Phase 3 tests pass; `cargo test --all` = 410 passed, 0 failed
+
+- **Deviation from plan:**
+  - The plan described the `validate_json_top_level_string_is_valid` test as asserting NO error (Decision 2 limitation: top-level JSON string is valid). However, per Decision 2's re-parse logic: `coerce_value` for `'"hello"'` returns `Value::String("hello")` (inner content, no quotes). The validator re-parses `"hello"` (no quotes) via `serde_json::from_str` → Err (not valid JSON without quotes). This DOES trigger the sentinel. This is the documented false-flag: the test is renamed `validate_json_top_level_string_is_treated_as_sentinel_known_limitation` and asserts the false-flag fires (pinning the known behaviour rather than asserting "no error"). The plan's Decision 2 text explicitly states "regression test asserting the limitation"; the test correctly pins the limitation. No behavioral change from plan's intent.
 
 ---
 

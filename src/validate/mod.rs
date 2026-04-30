@@ -178,7 +178,7 @@ fn validate_field(
         if let Some(serde_json::Value::String(raw)) = required::lookup(entry, &field_path) {
             errors.push(ValidationError {
                 field_path: field_path.clone(),
-                rule: error::RuleKind::InvalidJsonArray,
+                rule: error::RuleKind::InvalidJson { expected: "JSON array".to_string() },
                 message: format!(
                     "value must be a JSON array, got string '{}'",
                     if raw.len() > 60 { &raw[..60] } else { raw.as_str() }
@@ -187,6 +187,30 @@ fn validate_field(
             // Short-circuit: don't run required/enum/pattern/actor checks on a sentinel string —
             // the type-shape error is the relevant signal; other checks would produce noise.
             return;
+        }
+    }
+
+    // T008 P3: type-shape check for Json fields.
+    // coerce_value returns Value::String(raw) sentinel on parse failure (Phase 2).
+    // Re-parse to distinguish (b) true sentinel (parse error) from (c) top-level JSON string
+    // (valid JSON whose top-level is a string, e.g. --notes '"hello"').
+    // Case (c) is treated as valid per Decision 2's documented limitation.
+    if matches!(&field.ty, FieldType::Json) {
+        if let Some(serde_json::Value::String(raw)) = required::lookup(entry, &field_path) {
+            if serde_json::from_str::<serde_json::Value>(raw).is_err() {
+                // Sentinel detected: bad JSON was written via coerce_value.
+                errors.push(ValidationError {
+                    field_path: field_path.clone(),
+                    rule: error::RuleKind::InvalidJson { expected: "valid JSON".to_string() },
+                    message: format!(
+                        "value must be valid JSON, got string '{}'",
+                        if raw.len() > 60 { &raw[..60] } else { raw.as_str() }
+                    ),
+                });
+                // Short-circuit: InvalidJson is the only relevant diagnostic for a sentinel.
+                return;
+            }
+            // else: top-level JSON string (case c) — treated as valid; no error.
         }
     }
 
@@ -632,5 +656,186 @@ fields:
         ]);
         validate(&s, &entry, Op::Add, Actor::Human)
             .expect("empty list_record should pass even with required sub-fields");
+    }
+
+    // ---- Phase 3 (T008): Json sentinel detection ----
+
+    const JSON_SCHEMA_REQUIRED: &str = r#"
+name: notes_store
+id_format: "N{:03d}"
+default_actor: ~
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: notes
+    type: json
+    required: true
+"#;
+
+    const JSON_SCHEMA_OPTIONAL: &str = r#"
+name: notes_store
+id_format: "N{:03d}"
+default_actor: ~
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: notes
+    type: json
+    required: false
+"#;
+
+    /// Required Json field with bad JSON (sentinel) → exactly one `InvalidJson` error on `notes`.
+    /// Short-circuit: `Required` must NOT also fire (Decision 5).
+    #[test]
+    fn validate_json_required_field_bad_value_emits_invalid_json() {
+        let s = Schema::from_yaml(JSON_SCHEMA_REQUIRED).unwrap();
+        // Simulate sentinel written by coerce_value on bad JSON.
+        let entry = entry_from(&[
+            ("title", str_val("hello")),
+            ("notes", str_val("{not json")),
+        ]);
+        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+
+        let notes_errs: Vec<&ValidationError> = errs
+            .iter()
+            .filter(|e| e.field_path == vec!["notes".to_string()])
+            .collect();
+
+        // Exactly one error for `notes` (short-circuit: no Required also firing).
+        assert_eq!(
+            notes_errs.len(), 1,
+            "expected exactly 1 error for notes; got: {:?}",
+            notes_errs.iter().map(|e| &e.rule).collect::<Vec<_>>()
+        );
+
+        // Rule is InvalidJson { expected: "valid JSON" }.
+        assert!(
+            matches!(&notes_errs[0].rule, error::RuleKind::InvalidJson { expected } if expected == "valid JSON"),
+            "expected InvalidJson{{valid JSON}}; got: {:?}", notes_errs[0].rule
+        );
+
+        // Message contains field-relevant phrase.
+        assert!(
+            notes_errs[0].message.contains("valid JSON"),
+            "message should contain 'valid JSON'; got: {}", notes_errs[0].message
+        );
+    }
+
+    /// Optional Json field with bad JSON (sentinel) → `InvalidJson` fires even though
+    /// the field is not required.  Regression-trap: optional sentinel must NOT silently pass.
+    #[test]
+    fn validate_json_optional_field_bad_value_still_emits_invalid_json() {
+        let s = Schema::from_yaml(JSON_SCHEMA_OPTIONAL).unwrap();
+        let entry = entry_from(&[
+            ("title", str_val("hello")),
+            ("notes", str_val("{bad json here")),
+        ]);
+        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+
+        let notes_errs: Vec<&ValidationError> = errs
+            .iter()
+            .filter(|e| e.field_path == vec!["notes".to_string()])
+            .collect();
+
+        assert_eq!(
+            notes_errs.len(), 1,
+            "optional field: expected exactly 1 InvalidJson error; got: {:?}", notes_errs
+        );
+        assert!(
+            matches!(&notes_errs[0].rule, error::RuleKind::InvalidJson { expected } if expected == "valid JSON"),
+            "optional field: expected InvalidJson{{valid JSON}}; got: {:?}", notes_errs[0].rule
+        );
+        assert!(
+            notes_errs[0].message.contains("valid JSON"),
+            "message should contain 'valid JSON'; got: {}", notes_errs[0].message
+        );
+    }
+
+    /// Top-level JSON string `'"hello"'` — coerce_value returns `Value::String("hello")`.
+    /// Re-parse of `"hello"` (without quotes) fails → this IS flagged as sentinel.
+    /// Decision 2 documented limitation: top-level JSON strings false-flag.
+    /// This test pins the *known* behaviour (limitation is accepted).
+    #[test]
+    fn validate_json_top_level_string_is_treated_as_sentinel_known_limitation() {
+        let s = Schema::from_yaml(JSON_SCHEMA_OPTIONAL).unwrap();
+        // coerce_value parses '"hello"' → Value::String("hello").
+        // The validator sees Value::String("hello"), re-parses "hello" (no quotes) → Err → sentinel.
+        // Decision 2: this false-flags; documented limitation, accepted for v0.5.
+        let entry = entry_from(&[
+            ("title", str_val("hello")),
+            ("notes", str_val("hello")), // inner content after coerce_value strips quotes
+        ]);
+        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let notes_errs: Vec<&ValidationError> = errs
+            .iter()
+            .filter(|e| e.field_path == vec!["notes".to_string()])
+            .collect();
+        // Confirm the false-flag behaviour is pinned (InvalidJson fires for top-level string).
+        assert_eq!(
+            notes_errs.len(), 1,
+            "known limitation: top-level JSON string triggers sentinel; got: {:?}", notes_errs
+        );
+        assert!(
+            matches!(&notes_errs[0].rule, error::RuleKind::InvalidJson { .. }),
+            "known limitation: InvalidJson expected; got: {:?}", notes_errs[0].rule
+        );
+    }
+
+    /// Backwards-compat: the T006 P2 list_record/list_fk InvalidJsonArray path now emits
+    /// `InvalidJson { expected: "JSON array" }` and the user-facing message is unchanged.
+    #[test]
+    fn validate_json_existing_list_record_message_unchanged() {
+        const LR_SCHEMA: &str = r#"
+name: items
+id_format: "X{:03d}"
+default_actor: ~
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: entries
+    type: list_record
+    fields:
+      - name: note
+        type: text
+        required: true
+"#;
+        let s = Schema::from_yaml(LR_SCHEMA).unwrap();
+        // Sentinel: bad JSON string stored by coerce_value for a list_record field.
+        let entry = entry_from(&[
+            ("title", str_val("hello")),
+            ("entries", str_val("{not an array")),
+        ]);
+        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+
+        let entries_errs: Vec<&ValidationError> = errs
+            .iter()
+            .filter(|e| e.field_path == vec!["entries".to_string()])
+            .collect();
+
+        assert_eq!(entries_errs.len(), 1, "expected 1 error for entries; got: {:?}", entries_errs);
+
+        // Rule shape: InvalidJson { expected: "JSON array" } (renamed from InvalidJsonArray).
+        assert!(
+            matches!(&entries_errs[0].rule, error::RuleKind::InvalidJson { expected } if expected == "JSON array"),
+            "expected InvalidJson{{JSON array}}; got: {:?}", entries_errs[0].rule
+        );
+
+        // User-facing message must read "value must be a JSON array, got string '...'" (T006 P2 compat).
+        assert!(
+            entries_errs[0].message.starts_with("value must be a JSON array, got string '"),
+            "message backwards-compat check failed; got: {}", entries_errs[0].message
+        );
     }
 }
