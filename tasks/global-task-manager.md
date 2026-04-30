@@ -6,7 +6,7 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T005 | Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility | High | Phase 1 | READY | [main.md](./active/T005-drive-substrate-fixes/main.md) |
+| T005 | Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility | High | Phase 4 | COMPLETE | [main.md](./active/T005-drive-substrate-fixes/main.md) |
 
 Next available task id: T006
 

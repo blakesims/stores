@@ -1,7 +1,7 @@
 # T005: Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** COMPLETE
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -329,6 +329,44 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
 - **Minor 3 (deferred — no automated regression-trap for visibility):** No new test asserts that drive's stderr is line-buffered or that flush calls are present. The plan explicitly defers visibility verification to Phase 4 smoke (manual `2>&1 | tail -100` check), and unit-testing flush behaviour requires subprocess capture. Acceptable; a future task could add a shell test that backgrounds drive, polls stderr via `tail -f`, and asserts each progress line appears within N ms of the spawn returning. Not blocking.
 - **Locked-decision compliance — verified.** Decision Matrix row 5 ("Bug 3 fix shape") locked option (a): explicit `stderr().flush()` after each progress `eprintln!`. Diff is exactly that — no macro, no `unsafe`, no `libc::setvbuf`, no `BufWriter`, no global initializer. Executor stayed inside the locked option.
 - **Verdict:** PASS. All ACs met (modulo Phase-4-deferred manual visibility check); idiom uniform across 9 sites; locked Decision Matrix option (a) faithfully implemented; no scope creep; tests green; e2e green. Advance to Phase 4 (smoke + DONE_WHEN sign-off).
+
+### Phase 4 Code Review — End-to-end haiku smoke
+
+- **Reviewer:** code-reviewer (Opus 4.7, 1M)
+- **Commit reviewed:** `b315332` ("feat(T005-P4): smoke validation passes — drive --testing runs to complete on hello-world")
+- **Diff scope:** artefact-only — `tasks/active/T005-drive-substrate-fixes/main.md` (+31/-1). Zero `.rs` / `Cargo.toml` changes. Per Decision Matrix row 6 this is the expected shape for Phase 4.
+
+**Artefact verification (`/tmp/t005-smoke/`):**
+
+- `drive-smoke.log` — 15 lines, every spawn has a matched `spawning ... runner` → `... returned (exit=0, Xs)` → `... → submitted (gate=...; source=sdk)` triple. Final line: `[T001] status=complete; drive finished`. No 5-minute gaps; spawn returns are timestamped consistent with the executor's per-spawn report (planner 23.6s, plan_reviewer 22.4s, executor 31.9s, code_reviewer 38.7s).
+- `smoke-status.json` — `"blocked": false`, `"status": "complete"`, `"current_phase": 1`, `"current_cycle": 1`, `"next_agent": null`. **Phase 1 reporter ✓.**
+- `smoke-next-action.json` — `T001 status=complete phase=1/1 cycle=1 next=- blocked=false`. **Phase 1 reporters agree ✓.**
+- `smoke-db.txt` — `T001|complete|1|` (id, status, phase, blocked_reason). DB row shows `status=complete`, blocked_reason empty. ✓
+- `.stores/runs/*.jsonl` — 4 transcripts (one per spawn: planner / plan_reviewer / executor / code_reviewer). Each terminates with `"type":"result","subtype":"success"`. ✓
+- `scripts/hello.sh` — exists, executable, content `#!/bin/bash\necho hi`. DONE_WHEN literal hello-world clause satisfied. ✓
+
+**Wall-clock cross-check:** earliest jsonl mtime 21:56:34 → drive-smoke.log mtime 21:58:07 = 93s of in-loop spawn time, matching the executor's 116s wall claim once startup/teardown overhead is included. No silent hangs.
+
+**Phase 1 unit-test re-run** (`cargo test --bin stores blocked`): 12/12 pass, including `blocked_helper_null_reason`, `blocked_helper_empty_reason`, `blocked_helper_real_reason`, `blocked_helper_status_blocked_all_reasons`, and `next_action_blocked_reason_shapes` — covers the `blocked_reason ∈ {NULL, "", "real reason"}` matrix from DONE_WHEN.
+
+**Phase 2 unit-test re-run** (`cargo test --bin stores drive::tests`): 20/20 pass, including `drive_loop_unroutable_role_exits_nonzero` and `drive_loop_role_mismatch_message_format` — these are the captive demonstration of the "if any spawn returns an unrecognised envelope role, drive exits non-zero within seconds with an error message naming `(expected_role, received_role, session_id)`" DONE_WHEN clause that haiku did not exercise live.
+
+**DONE_WHEN clause-by-clause:**
+
+1. "2-phase hello-world smoke runs `stores tasks drive --auto --claude-code` to `complete` without operator intervention" — satisfied in spirit; haiku emitted a 1-phase plan, drive ran to `complete` exit 0 unattended. Per the orchestrator's review brief, phase count is the model's call, not a smoke regression.
+2. "If any spawn returns an unrecognised envelope role, drive exits non-zero within seconds with `(expected_role, received_role, session_id)`" — satisfied via the two Phase 2 unit tests above. Haiku didn't trigger this path live; the Decision Matrix accepted unit-test demonstration as the artefact.
+3. "`stores tasks status` and `stores tasks next-action` agree on `blocked` for every row in tests covering `blocked_reason ∈ {NULL, "", "real reason"}`" — satisfied via the 12 Phase 1 unit tests + the live smoke artefacts where both reporters return `blocked=false` on the completed row.
+
+**Findings:**
+
+- _(none, critical)_
+- _(none, major)_
+- **Minor 1 — observation, not a finding:** the cosmetic "multiple task directories found for T001" warning is correctly out of scope per the orchestrator brief (artefact of planner-agent stub creation, not a drive bug).
+- **Minor 2 — observation:** the executor's main.md notes "5 spawns" in the body but only 4 JSONL transcripts exist on disk and only 4 spawn/return tuples appear in the log. The actual count is 4 (planner, plan_reviewer, executor, code_reviewer); the "5" in the prose probably counts the implicit "completed-status check" the loop performs after a code-reviewer PASS. Cosmetic discrepancy in the executor narrative; the artefact-derived count is correct and the loop behaviour is correct. Not blocking.
+
+**Locked-decision compliance:** Decision Matrix row 6 ((a) — capture `drive-smoke.log` and DB dump as artefacts in the executor log) faithfully honoured: log + DB dump + both reporter JSON dumps + per-spawn JSONL transcripts all present and referenced from the executor's Phase 4 entry.
+
+**Verdict:** **PASS.** All three DONE_WHEN clauses satisfied (one live, two via unit-test artefact per locked Decision Matrix); both reporters agree on `blocked=false`; drive completed exit 0 with no hang; wall clock matches reported. No code regressions (artefact-only commit). All 32 task-relevant tests green. Advance Status `CODE_REVIEW` → `COMPLETE`.
 
 ### Phase 4 — End-to-end haiku smoke re-validation
 
