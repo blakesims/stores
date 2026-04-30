@@ -1,9 +1,9 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** EXECUTING_PHASE_5
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (Phase 4 code review — REVISE-minor; routing back to executor for one-flag fix)
+- **Last Updated:** 2026-04-30 (Phase 4 code review cycle 2 — PASS; routing forward to Phase 5)
 - **Blocked Reason:** —
 
 ## Task
@@ -687,6 +687,23 @@ This is exactly the R1 risk class flagged in the plan ("a careless executor coul
 **Decision:** REVISE-minor. Phase 4 substantially complete: philosophy thesis preserved, canonical sweep clean, all 6 marquee files updated coherently, no regressions, no `src/` logic touched, schema_show.rs fixture-only. One operator-facing skill bug in the load-bearing T3-path block — the marquee skill rewrite of Phase 4 — needs a one-flag fix.
 
 **Routing:** CODE_REVIEW → EXECUTING_PHASE_4 (fix `skills/observation:triage/SKILL.md:78` only; everything else passed).
+
+#### Cycle 2 review (PASS)
+
+**Date:** 2026-04-30
+**Commit reviewed:** bfde807 (`fix(T009-P4): triage skill update step needs --invoker human (REVISE 1)`)
+**Scope:** Single-line fix at `skills/observation:triage/SKILL.md:78`.
+
+**Verification:**
+
+1. **Line 78 fix in place.** Read directly: `--invoker human    # approved_by/approved_at carry actor: human; AI invokers are rejected`. Inline comment present, explains the why, matches the schema.
+2. **Schema cross-check.** `stores/observations/schema.yaml` confirms `approved_by` (line 317) and `approved_at` (line 323) carry `actor: human`; `investigate` transition (line 16) and `confirm` transition (line 28) carry `actor: ai_with_human`. Therefore line 65 (`investigate ... --invoker ai_with_human`) and line 81 (`confirm ... --invoker ai_with_human`) are CORRECT and were correctly left untouched. Line 99 is in the `gate add` block (different store, `actor: ai_with_human` per gate schema) — also correctly left alone. Frontmatter `default_invoker: ai_with_human` (line 5) is the skill-level default; per-step overrides handle the actor-mismatch on the update step.
+3. **Tests.** `cargo test --all` → 414 unit + 2 integration = **416 PASS, 0 fail** (matches expected baseline). `tests/observations_e2e.sh` → all 8 marquee assertions PASS. `tests/e2e.sh` → PASS through #13. `tests/gate_e2e.sh` → PASS. `tests/tasks_e2e.sh` Step 16 fails on a SIGPIPE/pipefail flake in the script (`cargo test ... | grep -q ...` — grep closes pipe early, pipefail fires); confirmed pre-existing by running against the pre-cycle-2 SKILL.md content (same failure). The underlying `ac5_11b` test passes when invoked directly. Unrelated to this cycle's change (which only touched a markdown file). No regression introduced.
+4. **Diff scope discipline.** `git show bfde807 --stat` confirms 1 file changed, 1 insertion, 1 deletion. No unrelated drift.
+
+**Decision:** PASS. The single REVISE-minor finding from cycle 1 is resolved exactly as scoped; no scope creep; no regressions. Phase 4 is complete.
+
+**Routing:** CODE_REVIEW → EXECUTING_PHASE_5.
 
 ---
 
