@@ -302,12 +302,11 @@ fields:
     }
 
     /// AC P2-2 (list_record_bad_json_returns_validator_error): passing bad JSON for a
-    /// required list_record field fails validation with an error that mentions the field name.
+    /// required list_record field fails validation with an error that mentions the field name
+    /// AND a JSON/array hint.
     ///
-    /// Decision Matrix: fail-silent coerce (Value::Null) + validator surfaces field name.
-    /// The schema has external_refs without required:true on the field itself but
-    /// sub-fields are required — however for the validator error we need the field to be
-    /// required. Use a schema where external_refs has required: true to guarantee the error.
+    /// T006 REVISE 1: coerce_value now returns Value::String(raw) on parse failure so the
+    /// type-shape validator fires for both required and optional fields.
     #[test]
     fn list_record_bad_json_returns_validator_error() {
         const REQUIRED_LR_SCHEMA: &str = r#"
@@ -338,10 +337,62 @@ fields:
 
         let err = run(&schema, &conn, &matches, Actor::Human).unwrap_err();
         let msg = err.to_string();
-        // Must mention the field name
+        // Must mention the field name AND include a JSON/array hint (REVISE 1 wording check)
         assert!(
             msg.contains("external_refs"),
             "error must mention field name 'external_refs'; got: {msg}"
+        );
+        assert!(
+            msg.contains("JSON array") || msg.contains("json array") || msg.contains("array"),
+            "error must hint at JSON array requirement; got: {msg}"
+        );
+    }
+
+    /// AC P2-2 (REVISE 1): list_record_bad_json_optional_field_still_errors — passing bad
+    /// JSON for an OPTIONAL list_record field MUST also produce a validation error.
+    ///
+    /// This is the critical case the original implementation missed: Value::Null is a valid
+    /// nullable value so the required-rule never fires for optional fields. Value::String(raw)
+    /// sentinel routes through the type-shape check which fires unconditionally.
+    #[test]
+    fn list_record_bad_json_optional_field_still_errors() {
+        // Schema with external_refs OPTIONAL (no required: true at field level)
+        const OPTIONAL_LR_SCHEMA: &str = r#"
+name: lropt
+id_format: "P{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+  - name: external_refs
+    type: list_record
+    fields:
+      - name: system
+        type: text
+        required: true
+"#;
+        let schema = Schema::from_yaml(OPTIONAL_LR_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema)).unwrap();
+
+        let cmd = build_test_add_cmd(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--external-refs", "{not json",
+        ]);
+
+        let err = run(&schema, &conn, &matches, Actor::Human).unwrap_err();
+        let msg = err.to_string();
+        // Must mention the field name AND include a JSON/array hint
+        assert!(
+            msg.contains("external_refs"),
+            "error must mention field name 'external_refs' even for optional field; got: {msg}"
+        );
+        assert!(
+            msg.contains("JSON array") || msg.contains("json array") || msg.contains("array"),
+            "error must hint at JSON array requirement; got: {msg}"
         );
     }
 }

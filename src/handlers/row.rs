@@ -104,12 +104,15 @@ pub fn coerce_value(ty: &FieldType, raw: &str) -> Value {
             Value::Array(parts)
         }
         // ListRecord and ListFk: the raw CLI string is expected to be a JSON array.
-        // Parse it; on failure (bad JSON or non-array shape) return Null so the
-        // validator surfaces the field name via "required" or "invalid" error.
+        // On success return the parsed array.  On parse failure OR non-array shape,
+        // return Value::String(raw) as a sentinel so the validator's type-shape check
+        // fires for both required AND optional fields (Value::Null is a valid nullable
+        // value; Value::String is never valid for a list_record/list_fk column, so the
+        // type-mismatch error fires unconditionally).
         FieldType::ListRecord(_) | FieldType::ListFk { .. } => {
             match serde_json::from_str::<Value>(raw) {
                 Ok(Value::Array(arr)) => Value::Array(arr),
-                _ => Value::Null,
+                _ => Value::String(raw.to_string()),
             }
         }
         _ => Value::String(raw.to_string()),
@@ -310,19 +313,31 @@ mod tests {
     }
 
     #[test]
-    fn coerce_value_list_record_bad_json_returns_null() {
+    fn coerce_value_list_record_bad_json_returns_sentinel_string() {
+        // T006 REVISE 1: bad JSON returns Value::String(raw) (sentinel) not Value::Null.
+        // Value::Null is a valid nullable value and would silently pass validation for
+        // optional fields; Value::String triggers the type-shape validator unconditionally.
         let ty = FieldType::ListRecord(vec![]);
         let raw = "{not json";
         let result = coerce_value(&ty, raw);
-        assert_eq!(result, Value::Null, "bad JSON must return Null (fail-silent)");
+        assert_eq!(
+            result,
+            Value::String(raw.to_string()),
+            "bad JSON must return sentinel String (T006 REVISE 1)"
+        );
     }
 
     #[test]
-    fn coerce_value_list_record_non_array_json_returns_null() {
+    fn coerce_value_list_record_non_array_json_returns_sentinel_string() {
+        // T006 REVISE 1: non-array JSON also returns sentinel String, not Null.
         let ty = FieldType::ListRecord(vec![]);
         let raw = r#"{"system":"docker"}"#; // object, not array
         let result = coerce_value(&ty, raw);
-        assert_eq!(result, Value::Null, "non-array JSON must return Null");
+        assert_eq!(
+            result,
+            Value::String(raw.to_string()),
+            "non-array JSON must return sentinel String (T006 REVISE 1)"
+        );
     }
 
     #[test]
@@ -341,12 +356,13 @@ mod tests {
     }
 
     #[test]
-    fn coerce_value_list_fk_bad_json_returns_null() {
+    fn coerce_value_list_fk_bad_json_returns_sentinel_string() {
+        // T006 REVISE 1: bad JSON returns Value::String(raw) sentinel, not Value::Null.
         use crate::schema::FieldType;
         let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
         let raw = "{not json";
         let result = coerce_value(&ty, raw);
-        assert_eq!(result, Value::Null);
+        assert_eq!(result, Value::String(raw.to_string()));
     }
 
     // Schema with depth-3 nesting: plan.phases[N].name and cycles[N].executor.summary

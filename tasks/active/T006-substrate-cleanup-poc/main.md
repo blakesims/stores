@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -320,6 +320,28 @@ All five cycle-1 revisions verified. Status advances PLAN_REVIEW → READY.
   - `row.rs::read_row`: already correct — all four types handled in the JSON deserialization branch (pre-existing, introduced in an earlier task)
 - **Validator error message:** `pretty_print` formats as `- <field_name>: required`; for `external_refs` with bad JSON → `Null`, the error is `- external_refs: required`. Field name IS in the output. Confirmed by `list_record_bad_json_returns_validator_error` test asserting `msg.contains("external_refs")`.
 - **Tests:** 387 passed, 0 failed (`cargo test --all`). `drive_e2e.sh` PASS. `e2e.sh` Step 6 and `tasks_e2e.sh` Step 16 failures are pre-existing (CLAUDECODE env var / SIGPIPE pipefail), confirmed in Phase 1 Code Review.
+
+### Phase 2 — REVISE cycle 1
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Completed:** 2026-04-30
+- **Commit SHA:** (see below)
+- **Files modified:**
+  - `src/handlers/row.rs` — changed parse-failure branch in `ListRecord|ListFk` arm from `Value::Null` to `Value::String(raw.to_string())` sentinel; updated 3 existing unit tests to assert `Value::String` instead of `Value::Null`
+  - `src/validate/error.rs` — added `RuleKind::InvalidJsonArray` variant
+  - `src/validate/mod.rs` — added type-shape check in `validate_field`: uses `required::lookup(entry, field_path)` to detect sentinel string at any depth (top-level OR nested inside a Record), emits field-named "value must be a JSON array, got string '...'" error and short-circuits; applies to both required and optional fields
+  - `src/handlers/add.rs` — added `list_record_bad_json_optional_field_still_errors` test (optional field, asserts error contains field name + array hint); updated existing `list_record_bad_json_returns_validator_error` test to also assert array hint in wording
+  - `tasks/active/T006-substrate-cleanup-poc/main.md` — this log
+- **New test:** `list_record_bad_json_optional_field_still_errors`
+- **Verbatim error from live repro:**
+  ```
+  Error: validation failed:
+  - evidence.external_refs: value must be a JSON array, got string '{not json'
+  ```
+- **Test count delta:** 387 → 388 (net +1; 3 renamed tests, 1 new test, 2 removed old names)
+- **Notes:**
+  - Root cause: `external_refs` is nested inside `evidence` (a Record), not a top-level field. The initial top-level check in `validate`'s main loop missed it. Moving the check into `validate_field` (which is called for all depths) resolved the nesting issue.
+  - `drive_e2e.sh`: PASS. `e2e.sh` Step 6 and `tasks_e2e.sh` Step 16 failures confirmed pre-existing.
 
 ---
 

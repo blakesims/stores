@@ -169,6 +169,27 @@ fn validate_field(
     let mut field_path = parent_path.to_vec();
     field_path.push(field.name.clone());
 
+    // T006 REVISE 1: type-shape check for ListRecord and ListFk fields at any depth.
+    // coerce_value returns Value::String(raw) on bad JSON / non-array input as a sentinel.
+    // Value::Null is a valid nullable value (doesn't trigger required for optional fields);
+    // Value::String is never valid for list_record/list_fk columns, so this check fires
+    // unconditionally regardless of whether the field is required or optional.
+    if matches!(&field.ty, FieldType::ListRecord(_) | FieldType::ListFk { .. }) {
+        if let Some(serde_json::Value::String(raw)) = required::lookup(entry, &field_path) {
+            errors.push(ValidationError {
+                field_path: field_path.clone(),
+                rule: error::RuleKind::InvalidJsonArray,
+                message: format!(
+                    "value must be a JSON array, got string '{}'",
+                    if raw.len() > 60 { &raw[..60] } else { raw.as_str() }
+                ),
+            });
+            // Short-circuit: don't run required/enum/pattern/actor checks on a sentinel string —
+            // the type-shape error is the relevant signal; other checks would produce noise.
+            return;
+        }
+    }
+
     // required / required_when
     required::check_required(field, &field_path, entry, errors);
 

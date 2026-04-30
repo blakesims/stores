@@ -6,6 +6,9 @@ pub enum RuleKind {
     Enum,
     Pattern { pattern: String },
     Actor,
+    /// The field requires a JSON array (list_record / list_fk) but received an
+    /// unparseable or non-array value.  The message carries the raw input for context.
+    InvalidJsonArray,
 }
 
 /// A single validation violation.
