@@ -548,8 +548,34 @@ pub(crate) fn drive_loop(
 /// Returns `(AgentEnvelope, source_tag)` where `source_tag` is one of
 /// `"sdk"`, `"sap"`, or `"legacy"`.
 fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(AgentEnvelope, &'static str)> {
+    // Helper: peek the "role" string field from a JSON Value without consuming it.
+    fn peek_role(v: &serde_json::Value) -> Option<&str> {
+        v.get("role").and_then(|r| r.as_str())
+    }
+
+    // Helper: return Err if the peeked role is present and does not match expected.
+    // A missing/null role is allowed through (Layer 2 injects it below).
+    fn check_role_mismatch(
+        peeked: Option<&str>,
+        expected: &str,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(received) = peeked {
+            if received != expected {
+                let sid = session_id.unwrap_or("<unknown>");
+                bail!(
+                    "envelope role mismatch: expected {expected}, received {received}, session_id {sid}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    let session_id = out.session_id.as_deref();
+
     // ── Layer 1: SDK-validated structured output ─────────────────────────────
     if let Some(value) = &out.structured_output {
+        check_role_mismatch(peek_role(value), agent_role_normalized, session_id)?;
         let envelope = serde_json::from_value::<AgentEnvelope>(value.clone()).map_err(|e| {
             anyhow::anyhow!("structured_output deserialise failed: {e}\nvalue: {value}")
         })?;
@@ -562,11 +588,16 @@ fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(Ag
     // metadata); we extract any well-formed JSON object from the prose and
     // inject the role ourselves. AgentEnvelope's `serde(tag = "role")`
     // deserialiser is the authoritative shape gate.
+    //
+    // ORDERING: peek role BEFORE or_insert_with; otherwise a present-but-wrong
+    // role would be overwritten by the inject and the check would trivially pass.
     if let Some(fm) = &out.final_message {
         if !fm.trim().is_empty() {
             if let Some(mut candidate) =
                 crate::runner::sap::extract_envelope_from_text(fm, None)
             {
+                // Peek BEFORE inject.
+                check_role_mismatch(peek_role(&candidate), agent_role_normalized, session_id)?;
                 if let serde_json::Value::Object(ref mut map) = &mut candidate {
                     map.entry("role".to_string()).or_insert_with(|| {
                         serde_json::Value::String(agent_role_normalized.to_string())
@@ -584,6 +615,10 @@ fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(Ag
     // ── Layer 3: Legacy — final_message direct parse then last-line stdout ───
     if let Some(fm) = &out.final_message {
         if !fm.trim().is_empty() {
+            // Peek role before attempting AgentEnvelope deserialise.
+            if let Ok(raw_val) = serde_json::from_str::<serde_json::Value>(fm) {
+                check_role_mismatch(peek_role(&raw_val), agent_role_normalized, session_id)?;
+            }
             if let Ok(envelope) = serde_json::from_str::<AgentEnvelope>(fm) {
                 return Ok((envelope, "legacy"));
             }
@@ -604,6 +639,10 @@ fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(Ag
              expected a JSON envelope on the last line"
         ),
         Some(line) => {
+            // Peek role before attempting AgentEnvelope deserialise.
+            if let Ok(raw_val) = serde_json::from_str::<serde_json::Value>(line) {
+                check_role_mismatch(peek_role(&raw_val), agent_role_normalized, session_id)?;
+            }
             let envelope = serde_json::from_str::<AgentEnvelope>(line).map_err(|e| {
                 anyhow::anyhow!(
                     "all 3 parse layers failed (layers attempted: sdk, sap, legacy); \
@@ -1374,5 +1413,76 @@ mod tests {
         };
         let (_, source) = parse_envelope(&out, "executor").expect("legacy last-line scan must succeed");
         assert_eq!(source, "legacy");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 2 — Bug 2: drive exits non-zero when runner returns wrong role
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn drive_loop_unroutable_role_exits_nonzero() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        // Insert a task already at executing — drive expects an executor envelope.
+        insert_task(
+            &conn, &schema, "T001", "executing",
+            "2026-01-01T00:00:00Z", 1, 1, None, None,
+        );
+
+        // Runner returns a guide envelope (wrong role) with exit_code 0.
+        let misrouted = RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: Some("{\"role\":\"guide\",\"action\":\"noop\"}".to_string()),
+            structured_output: None,
+            session_id: Some("smoke-session-uuid".to_string()),
+            structured_output_source: None,
+        };
+        let runner = MockRunner::new(vec![misrouted]);
+
+        // drive_loop must return Err, not hang or return Ok.
+        drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect_err("guide envelope while executing must cause Err");
+    }
+
+    #[test]
+    fn drive_loop_role_mismatch_message_format() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn, &schema, "T001", "executing",
+            "2026-01-01T00:00:00Z", 1, 1, None, None,
+        );
+
+        let misrouted = RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: Some("{\"role\":\"guide\",\"action\":\"noop\"}".to_string()),
+            structured_output: None,
+            session_id: Some("smoke-session-uuid".to_string()),
+            structured_output_source: None,
+        };
+        let runner = MockRunner::new(vec![misrouted]);
+
+        let err = drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect_err("guide envelope while executing must cause Err");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("executor"),
+            "error must name expected role 'executor': {msg}"
+        );
+        assert!(
+            msg.contains("guide"),
+            "error must name received role 'guide': {msg}"
+        );
+        assert!(
+            msg.contains("smoke-session-uuid"),
+            "error must include session_id: {msg}"
+        );
     }
 }

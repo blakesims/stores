@@ -1,7 +1,7 @@
 # T005: Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -242,6 +242,21 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
 - **Minor 1 (deferred):** No test directly asserts `format_task_line(...)`'s `blocked=` substring agrees with `compute(...).blocked` for the same row. Structural agreement is guaranteed by the shared helper, but a defensive co-located assertion would harden against future divergence (e.g. if either reporter ever inlines the predicate again). Recommend adding when next touching either file; not blocking.
 - **Minor 2 (deferred):** `_blocked_reason: Option<&str>` is intentionally unused; the underscore prefix and doc-comment together make this clear, and call sites pass meaningful expressions (`task.blocked_reason.as_deref()`, `blocked_reason.as_str()`) which document intent at the use site. Acceptable; flagged only because future readers may wonder why the parameter exists. Decision Matrix and doc-comment already justify it.
 - **Verdict:** PASS. All ACs met; the tests directly catch the original bug; no scope creep; doc-comment is faithful; full suite green. Advance to Phase 2.
+
+### Phase 2 — Drive surfaces unroutable-role envelope as `(expected, received, session_id)` error
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Completed:** 2026-04-30
+- **Commit:** TBD (filled after commit)
+- **Files modified:**
+  - `src/handlers/drive.rs` — extended `parse_envelope` body with two nested helper closures (`peek_role`, `check_role_mismatch`) and added role-peek calls before deserialise in each of the three layers (Layer 1 SDK, Layer 2 SAP, Layer 3 Legacy final_message + last-line stdout). Layer 2 peek runs BEFORE `or_insert_with` injection (M2/R1 ordering). Signature unchanged (single `agent_role_normalized` parameter serves as both SAP inject-role and expected-role, per M1 collapse recommendation). Added two new tests: `drive_loop_unroutable_role_exits_nonzero` and `drive_loop_role_mismatch_message_format`.
+- **Notes:**
+  - M1 (redundant parameter): collapsed to a single parameter — `agent_role_normalized` is used as both the SAP inject-role and the expected-role for the mismatch check. No call-site edits needed (all 10 test call sites already pass the correct role string).
+  - M2/R1 (Layer 2 ordering): peek runs on the raw extracted candidate before `or_insert_with`, documented in a code comment.
+  - Layer 3 Legacy: added `serde_json::from_str::<serde_json::Value>` pre-parse to get a `Value` for peeking before the `AgentEnvelope` deserialise attempt (both final_message path and last-line stdout path).
+  - `cargo test --all`: 377 tests pass (375 + 2 new), 0 failures.
+  - `tests/drive_e2e.sh`: both AC7.1 and AC7.1b pass.
 
 ---
 
