@@ -248,7 +248,7 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Completed:** 2026-04-30
-- **Commit:** TBD (filled after commit)
+- **Commit:** `2acc3b9`
 - **Files modified:**
   - `src/handlers/drive.rs` — extended `parse_envelope` body with two nested helper closures (`peek_role`, `check_role_mismatch`) and added role-peek calls before deserialise in each of the three layers (Layer 1 SDK, Layer 2 SAP, Layer 3 Legacy final_message + last-line stdout). Layer 2 peek runs BEFORE `or_insert_with` injection (M2/R1 ordering). Signature unchanged (single `agent_role_normalized` parameter serves as both SAP inject-role and expected-role, per M1 collapse recommendation). Added two new tests: `drive_loop_unroutable_role_exits_nonzero` and `drive_loop_role_mismatch_message_format`.
 - **Notes:**
