@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_2
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -362,6 +362,67 @@ Both confirmed pre-existing; not Phase 1 regressions.
 **Routing:** Phase 1 PASS → Status advances `CODE_REVIEW` → `EXECUTING_PHASE_2` for Finding B (`list_record` write path).
 
 ---
+
+### Phase 2 — Finding B: `list_record` / `list_fk` write path
+- **Reviewer:** code-reviewer
+- **Date:** 2026-04-30
+- **Commit reviewed:** `e079400` (+ exec-log update `70a401d`)
+- **Gate:** REVISE (substantial)
+- **Counts:** 1 critical / 0 major / 1 minor
+
+**Verification (against Phase 2 ACs):**
+- AC1 (list_record CLI round-trip): **PASS for required fields.** Verified end-to-end via `show --json L001 | jq '.evidence.external_refs | type'` → `array`. The user-facing round-trip emits a structured JSON array, not an escaped-string blob. Out-of-the-box `read_row` was already correctly deserialising these column types (the diff confirms only the WRITE path was buggy); the read path was an existing correctness, not a Phase-2 addition.
+- AC2 (list_fk CLI round-trip): **PASS.** Live test against `tasks` schema with `--linked-observations '["L001","L002"]'` → `show --json` emits `["L001","L002"]` as type `array`. The new additive CLI write surface for list_fk fields works as designed.
+- AC3 (bad-JSON UX `list_record_bad_json_returns_validator_error`): **PARTIAL — see Critical 1.** Required-field path works (unit test passes; required validator surfaces field name in path prefix). Optional-field path silently corrupts.
+- AC4 (cargo test --all + the three e2e scripts green): **cargo: PASS** (387 passed). **e2e.sh / drive_e2e.sh / tasks_e2e.sh:** drive_e2e.sh PASS; e2e.sh and tasks_e2e.sh failures verified pre-existing on `cd5df8b` (master pre-T006) — same env/SIGPIPE issues as Phase 1 noted, not Phase-2 regressions.
+
+**Round-trip via `show --json`:** `array` (success). The DONE_WHEN moment for Finding B (evidence.external_refs renders as JSON array) is observable end-to-end on a fresh tempdir. POC trace:
+```
+$ stores observations_1006 add --summary "rt test" --source dev --priority normal \
+    --captured-at 2026-04-30 \
+    --external-refs '[{"system":"docker","kind":"container","id":"foo"}]'
+L001
+$ stores observations_1006 show L001 --json | jq '.evidence.external_refs | type'
+"array"
+```
+
+**Out-of-scope check:** Files touched are exactly the 5 planned (`row.rs`, `add.rs`, `update.rs`, `transition.rs`, `Cargo.lock`, `main.md` — all within Phase 2 scope). NO touches to `lifecycle.rs` (Phase 1) or `select_transition`. NO touches to `drive.rs`/`next_action.rs`/`submit.rs`. T005 fences hold.
+
+**Critical findings (gate-blocking):**
+
+1. **Silent corruption on bad JSON to OPTIONAL list_record/list_fk fields.** The Decision-Matrix-blessed "fail-silent → validator surfaces field name" contract relies on the validator's `required` rule to translate `Value::Null` into a user-facing error. For an OPTIONAL list_record/list_fk field (e.g. `evidence.external_refs` in `observations_1006/schema.yaml` — no `required: true` at the field level), there is no `required` rule to fire. Bad JSON input is silently converted to `Value::Null` and accepted with no diagnostic. Reproduction:
+   ```
+   $ stores observations_1006 add --summary "bad json test" --source dev --priority normal \
+       --captured-at 2026-04-30 --external-refs '{not json'
+   L002
+   (no error)
+   $ stores observations_1006 show L002 --json | jq '.evidence'
+   { "external_refs": null }
+   ```
+   The operator's input was discarded with zero feedback. This is exactly the "operator-debuggability floor" the AC text was written to prevent: AC L113 says the error must "indicate the value was rejected" — the optional case produces no error at all. The unit test `list_record_bad_json_returns_validator_error` only proves the required-field case; the realistic POC schema has the field optional.
+
+   **Why this matters now, not later:** Phase 5's artefact capture (steps 8 + 11) writes `evidence.external_refs` and asserts the round-trip. If a future operator typos the JSON, the artefact will silently capture a Null without flagging the typo — the POC ratification narrative loses the "substrate enforces shape" thesis. This is also the exact UX regression cycle-2 revision 4 was added to prevent.
+
+   **Fix options (planner's call but all are small):**
+   - (a) Detect bad-JSON in `coerce_value` and stash a sentinel (e.g. `Value::String(raw)`) instead of `Value::Null`; validator surfaces "invalid JSON for `<field>`: <parse-error>" when it sees String-where-Array-expected. ~15 LOC.
+   - (b) Coerce at the handler boundary (add.rs/update.rs) and bail with a clean error before validation. Slightly larger blast radius.
+   - (c) Document the optional-field silent-corruption as accepted, downgrade AC L113 wording to "required-field only," and require operators of optional list_record fields to use the programmatic write path. Cheapest but bypasses the original UX intent.
+
+   Recommended: (a). Add a unit test `list_record_bad_json_on_optional_field_surfaces_error` that asserts the error path also fires when the field is optional. This closes the operator-UX gap and matches the Decision Matrix row 4 enrichment language ("invalid JSON for external_refs").
+
+**Minor findings (not blocking once Critical 1 is addressed):**
+
+1. **`required` validator wording.** The bad-JSON unit test asserts the error contains `external_refs`; the actual emitted message is `"validation failed:\n- external_refs: required"`. This is a path-prefix from `pretty_print`, not a field-aware "JSON parse failure" message. AC text accepts either ("missing required field 'external_refs'" OR "invalid JSON for external_refs"); the current behaviour falls into the cheaper option. If the planner picks fix-option (a) for Critical 1, fold the wording-enrichment in at the same time so both required and optional paths use the same enriched message. ~5 LOC.
+
+**What works (preserved correctness):**
+- `List(_)` (pipe-split) coerce arm is untouched — no accidental behaviour change to existing pipe-separated list:text fields.
+- `read_row` pre-existed correct for all four JSON types (Record/List/ListRecord/ListFk); the executor noted this; no read-path follow-up needed.
+- Cargo.lock change (v0.4.1 bump propagation) committed cleanly in the same commit. No unstaged drift.
+- All 387 cargo tests pass; drive_e2e.sh canary green.
+
+**Pre-existing failure verification:** Confirmed e2e.sh Step 6 (CLAUDECODE inheritance) and tasks_e2e.sh Step 16 (SIGPIPE on `cargo test ... | grep -q` under `set -o pipefail`) reproduce on master pre-T006 (`33fac5a`). Not Phase-2 regressions; flagged for separate cleanup but out of scope here.
+
+**Routing:** Phase 2 REVISE → Status `CODE_REVIEW` → `EXECUTING_PHASE_2`. Revision scope: address Critical 1 (silent-corruption on optional list_record/list_fk fields) — recommend fix-option (a). Add `list_record_bad_json_on_optional_field_surfaces_error` test pinning the new contract. Optionally fold Minor 1 wording enrichment in the same revision.
 
 ---
 
