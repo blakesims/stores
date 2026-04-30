@@ -1,7 +1,7 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30 (Phase 2 code review — PASS; routing to executor for Phase 3)
 - **Blocked Reason:** —
@@ -528,6 +528,41 @@ After Issues 1-3 are resolved:
 **Decision:** PASS. The script now exits 0 (it didn't pre-Phase-2 — clean post-Phase-1 acceptance), all 13 steps demonstrate equivalent or stronger enforcement under the new `intent_contract` shape, the canonical grep is comment-only, and out-of-scope discipline is intact. The LOC overshoot is justified by genuinely-needed coverage expansion (Step 6 verb-flow, Step 7 list-semantics assertions). No `src/` regressions; the only failing sibling test (`tasks_e2e.sh`) is pre-existing.
 
 **Routing:** CODE_REVIEW → EXECUTING_PHASE_3.
+
+---
+
+### Phase 3 — New `tests/observations_e2e.sh`
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (pending)
+- **Files added:** `tests/observations_e2e.sh`
+
+**Summary:**
+- Created `tests/observations_e2e.sh` — 8-clause scripted walkthrough mirroring `tests/gate_e2e.sh` shape.
+- `set -euo pipefail`; `unset CLAUDECODE` at top; `TMPDIR=$(mktemp -d /tmp/t009-obs-port-XXXXXX)`; trap cleanup on EXIT.
+- `git init -q` + `stores setup` (auto-installs observations, gate, tasks — no explicit `stores install` needed).
+- All 8 DONE_WHEN clauses exercised with STATE assertions (not exit-code-only).
+- Step 3 uses a fresh L002 (no contract sub-fields) to trigger required_when failure cleanly.
+- Steps 4, 7 use `CLAUDECODE=1 --invoker ai_autonomous` for AI-invoker negative test only; all other commands run with `unset CLAUDECODE` (human invoker).
+- Step 7 `park` uses `--invoker ai_autonomous` (schema requires `actor: ai_autonomous`).
+- Step 8 Clause 8 scope boundary is explicit in script comment header AND in the pass message: soft-FK round-trip only; T010 owns cross-store referential integrity.
+- `bash tests/observations_e2e.sh` exit code: **0** (all 8 steps PASS).
+- `cargo test --all`: 414 unit + 2 integration = **416 PASS, 0 fail**.
+- No regressions: `e2e.sh` PASS, `gate_e2e.sh` PASS, `drive_e2e.sh` PASS; `tasks_e2e.sh` Step 16 pre-existing failure unchanged.
+- Script is `chmod +x`; executable.
+
+**Step outcomes:**
+1. Full add (dashboard T3, all required fields, full intent contract → L001): **PASS**
+2. Triage flow (open→investigating→confirmed; guard: contract_state==ready): **PASS**
+3. required_when (flip contract_state ready without sub-fields → rejected, error cites sub-fields): **PASS**
+4. actor:human (CLAUDECODE=1 ai_autonomous on approved_by → rejected): **PASS**
+5. evidence.external_refs JSON array round-trip (list_record, T006 P2): **PASS**
+6. notes JSON object round-trip (T008 substrate): **PASS**
+7. needs_info parking (confirmed→needs_info→confirmed; AI provide_info rejected): **PASS**
+8. cross-store task_id soft-FK (value round-trip; T010 guards out of scope): **PASS**
+
+**Deviations from plan:** None. The plan noted `stores setup` auto-installs all three bundled stores (verified in `src/cli/dynamic.rs:13`). No explicit `stores install` calls needed. The `git init -q` prerequisite is required for the `tasks` store (matches `tasks_e2e.sh` precedent).
 
 ---
 
