@@ -285,7 +285,7 @@ Status: PLAN_REVIEW → READY.
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
-- **Commit SHA:** (pending)
+- **Commit SHA:** 5450e13
 - **Files modified:**
   - `src/handlers/row.rs` — added `FieldType::Json` arm to `coerce_value`; parses via `serde_json::from_str::<Value>(raw)`, returns parsed `Value` on success, `Value::String(raw)` sentinel on failure. Added 4 unit tests: `coerce_value_json_parses_object`, `coerce_value_json_parses_array`, `coerce_value_json_parses_scalar`, `coerce_value_json_bad_returns_sentinel_string`.
   - `src/handlers/add.rs` — added `FieldType::Json` to the `Record | List | ListRecord | ListFk` storage match arm at line 95. Added 2 integration tests: `json_field_write_then_read_round_trips_as_object` (verifies stored TEXT is valid JSON matching input), `json_field_absent_stores_null_literal` (Decision 4: absent field stores `"null"`).
