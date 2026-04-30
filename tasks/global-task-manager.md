@@ -6,7 +6,6 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T008 | Add `FieldType::Json` for free-shape opaque payloads | High | Phase 5 | EXECUTING_PHASE_5 | [main.md](./active/T008-json-fieldtype/main.md) |
 
 Next available task id: T009
 
@@ -16,6 +15,7 @@ Next available task id: T009
 
 | ID | Task Name | Completed | Link |
 |:---|:----------|:----------|:-----|
+| T008 | Add `FieldType::Json` for free-shape opaque payloads | 2026-04-30 | [main.md](./completed/T008-json-fieldtype/main.md) |
 | T007 | Port the 10.06 `gate` store — first real migration | 2026-04-30 | [main.md](./completed/T007-port-10-06-gate/main.md) |
 | T006 | Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags) | 2026-04-30 | [main.md](./completed/T006-substrate-cleanup-poc/main.md) |
 | T005 | Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility | 2026-04-30 | [main.md](./completed/T005-drive-substrate-fixes/main.md) |
