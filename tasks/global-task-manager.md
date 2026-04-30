@@ -6,7 +6,6 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T005 | Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility | High | Phase 4 | COMPLETE | [main.md](./active/T005-drive-substrate-fixes/main.md) |
 
 Next available task id: T006
 
@@ -16,6 +15,7 @@ Next available task id: T006
 
 | ID | Task Name | Completed | Link |
 |:---|:----------|:----------|:-----|
+| T005 | Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility | 2026-04-30 | [main.md](./completed/T005-drive-substrate-fixes/main.md) |
 | T004 | Schema-validated agent envelope via `--json-schema` | 2026-04-28 | [main.md](./completed/T004-schema-validated-envelope/main.md) |
 | T003 | Framework-bundled workflow agents + runtime-agnostic orchestrator | 2026-04-28 | [main.md](./completed/T003-bundled-agents-and-drive/main.md) |
 | T002 | Tasks store on β architecture (workflow engine) | 2026-04-26 | [main.md](./completed/T002-tasks-store-v02/main.md) |
