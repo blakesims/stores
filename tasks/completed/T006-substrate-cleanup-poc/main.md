@@ -695,4 +695,49 @@ Exit non-zero ✓; field name (`evidence.external_refs`) named ✓; "JSON array"
 ---
 
 ## Completion
-_Final summary when task is complete._
+
+- **Completed:** 2026-04-30
+- **Code commits:** `7d99727` (P1), `e079400` + `5256bfa` (P2 + REVISE-1), `0d992d3` (P3), `00bb065` (P4); `a3dd1c6` + `d9bfa13` (P5 artefacts)
+- **CodeRabbit Stage 6:** ran twice on `--base 33fac5a`, both clean (`No findings ✔`)
+- **Test count delta:** 376 → 396 (+20). All green.
+- **e2e:** `tests/drive_e2e.sh` green throughout. Pre-existing failures (e2e Step 6, tasks_e2e Step 16) unchanged (CLAUDECODE / SIGPIPE — both predate T006).
+
+### Executive summary
+
+The L275 POC against `stores/observations_1006/` had surfaced four substrate gaps in `stores` v0.4: (A) plain-transition `guard:` clauses parsed but never evaluated at runtime, (B) `list_record` and `list_fk` values stored as opaque strings, (C) hyphenated store names broke DDL with bare-identifier syntax errors, (D) `list: text` flags couldn't repeat at the CLI. T006 closed all four as a coherent batch over four code phases plus an integration smoke. The L275 POC now runs to completion with all four enforcement moments firing.
+
+### Deeper dive
+
+The marquee fix was Phase 1: `select_transition` extracted from `submit.rs::find_transition` into a shared helper at `src/schema/lifecycle.rs`. Both `submit.rs` and `transition.rs::run_in_tx` now delegate. The `validate_transition_ambiguity` validator was also relaxed — it had been rejecting any two `(from, verb, requires_gate=None)` pairs, including the legitimate guard-partitioned case. Now it only rejects truly ambiguous unguarded pairs.
+
+Phase 2 had a critical close-call. Cycle-1 implementation returned `Value::Null` on bad JSON, relying on the validator's `required` check to surface the error. But for *optional* fields like `evidence.external_refs`, `Null` is a valid value — bad JSON would silently corrupt the row with zero diagnostic. REVISE-1 changed the sentinel to `Value::String(raw)` and added a new `RuleKind::InvalidJsonArray` validator, with the type-shape check moved into `validate_field` so it fires at all nesting depths.
+
+Phase 3 took 17 SQL identifier interpolation sites through a `quote_ident()` helper. The plan-review's canonical sweep caught five sites the planner had missed; cycle-2 plan review added them. Phase 4 added `clap::ArgAction::Append` for `List(_)` fields. Phase 5 was operator-driven artefact capture — the L275 trace replayed end-to-end, captured five findings as files in `/tmp/t006-p5-smoke/`.
+
+### Technical things to consider
+
+- `Value::String(raw)` sentinel pattern for parse failures in `coerce_value` is now the canonical way to route a bad input through the validator. Future field types should follow the same shape.
+- `select_transition` is generic and reusable. `submit.rs::find_transition` is now a 6-line delegator.
+- 17 SQL interpolation sites are centralized through `quote_ident`. New handlers MUST use the helper. Consider a clippy lint to prevent regression.
+- Repeatable list flags work for `List(_)` only, not `ListRecord`/`ListFk`. JSON is the single-arg convention for those types.
+- Validator type-shape check now fires at all record nesting depths.
+
+### To understand
+
+```bash
+# Verify ratify is now guard-aware:
+cat /tmp/t006-p5-smoke/finding-a-ratify-rejected.txt
+# evidence.external_refs round-trips as a structured array:
+cat /tmp/t006-p5-smoke/finding-b-show-json.json | jq '.evidence.external_refs'
+# Hyphenated store install:
+cat /tmp/t006-p5-smoke/finding-c-hyphen-install.txt
+# Repeat list flags or use pipe form:
+cat /tmp/t006-p5-smoke/finding-d-repeatable.txt
+```
+
+### Lessons learned
+
+- `Option::is_some()` over a string-shaped column is a footgun (T005's `blocked_reason` and T006's optional list_record bad-JSON both bit on this).
+- Plan-review caught real architectural drift twice — full algorithm extraction, and the 6 → 17 SQL audit. Canonical-sweep methodology is worth keeping.
+- Validators that operate at one nesting depth are silently wrong for fields at another depth. `validate_field` is the right level.
+- Live integration phase IS the proof. T006 P5's artefacts are the bridge between "the framework should work" and "the framework does work for the actual use case."
