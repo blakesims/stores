@@ -1,9 +1,9 @@
 # T007: Port the 10.06 `gate` store — first real migration
 
 ## Meta
-- **Status:** PLAN_REVIEW
+- **Status:** READY
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (revision cycle 1 of 3)
+- **Last Updated:** 2026-04-30 (plan-review cycle 2 of 3 — APPROVED)
 - **Blocked Reason:** —
 
 ## Task
@@ -276,6 +276,42 @@ Phase 5 says: "Skip if planner/reviewer agree the README is regenerable... and n
 ### Routing
 
 NEEDS_WORK → planner. The two issues above are surgical: extend Phase 2's file-list AC to cover the `skills/` and top-level `README.md` rename sites, and mark `stores/gate/README.md` rename as mandatory (either folded into Phase 2 or as a non-optional Phase 5). After revision, expected next status is PLAN_REVIEW for a fast re-check.
+
+### Cycle 2 review
+
+- **Gate:** READY
+- **Reviewer:** plan-reviewer agent (2026-04-30, cycle 2 of 3)
+- **Open Questions Finalized:** None.
+
+#### Verdict
+
+Both cycle-1 substantive issues are closed; cosmetic items addressed. PASS. Routing → READY → executor.
+
+#### Verification of cycle-1 fixes
+
+1. **Rename sweep completeness (Issue 1, cycle 1)** — Closed. Phase 2 file-list now enumerates all 4 live operator-facing/runnable sites: `tests/e2e.sh`, `skills/observation:triage/SKILL.md` (lines 76-83), top-level `README.md` (lines 170-186), `stores/gate/README.md` (Quick Start + Fields/Lifecycle prose). Independent grep across `*.md`/`*.sh`/`*.yaml`/`*.rs` confirms these 4 are the complete tracked-runnable surface; remaining hits are in `findings/cli-smoke-2026-04-26.md` (frozen 2026-04-26 audit doc) and `tasks/completed/T001-...` (frozen completed task) — correctly excluded by the planner's stated scope ("tracked files that call `stores gate add --question`" in operator-facing dirs). The Phase 2 grep AC explicitly enumerates the in-scope directories.
+
+2. **README polish folded into Phase 2 (Issue 2, cycle 1)** — Closed. Former optional Phase 5 dropped entirely; `stores/gate/README.md` rename is now a hard AC of Phase 2 (lines 157-158: Quick Start runnable verbatim + Fields/Lifecycle prose match schema). Plan is 4 contiguous phases; all six DONE_WHEN clauses still map (clauses 1-3 to Phase 1 schema + Phase 3 e2e, clauses 4-6 to Phase 3 verification, all six as literal Phase 4 ACs at lines 187-192). No clause dropped.
+
+3. **Cosmetic M1 (line-audit)** — Closed. Phase 2 line 145 now correctly says "2 README-correspondence comment lines at 14, 18 (line 17 is a `CLAUDECODE` comment, no `--question`)". Verified against `tests/e2e.sh` grep hits at lines 14 and 18 only.
+
+4. **Cosmetic M2 (R5 wording)** — Closed. R5 (line 217) now references `(from, verb)` partitioning per `src/schema/lifecycle.rs:93-119` (verified: `let key = (t.from.clone(), t.verb.clone())` at lifecycle.rs:99; filter is `requires_gate.is_none() && guard.is_none()` at lifecycle.rs:98). The forward-caveat for future executors ("if anyone later adds a SECOND fully-unguarded transition with `from=pending, verb=resume`...") is correct and load-bearing.
+
+5. **Locked items preserved verbatim** — Confirmed. Path A (DM row 1), `defer_until: text` (DM row 3), resume self-loop (DM row 5), R1 validate-pre-merge (Risks row 1) all unchanged from cycle 1.
+
+6. **Decision Matrix row count** — 9 rows (unchanged from cycle 1; planner reported "no new rows added" — accurate).
+
+#### Surviving nit (non-blocking)
+
+**N1 (cosmetic) — Phase 2 has 5 ACs, exceeding the ≤4 per-phase guideline.** Folding Issue-1's grep AC and Issue-2's two README ACs into Phase 2 brought the count to 5. Trivially collapsible to ≤4 with sub-bullets:
+- Combine ACs 1+2 ("all three e2e suites pass / un-regressed: `e2e.sh` 13/13, `drive_e2e.sh`, `tasks_e2e.sh`")
+- Combine ACs 4+5 ("`stores/gate/README.md` correctness: Quick Start runs verbatim AND Fields/Lifecycle prose matches schema (10 fields, 4 states, defer/resume documented)")
+
+Resulting 4-AC Phase 2 is structurally identical and reviewer-friendly. **Not blocking** — executor can collapse during execution; the review brief explicitly permits sub-bullets and flagged this contingency.
+
+#### Routing
+
+READY → orchestrator → executor. Move folder `tasks/planning/T007-port-10-06-gate/` → `tasks/active/T007-port-10-06-gate/`; update GTM row to point to active path and Status `READY`. Suggest executor collapse Phase 2 ACs to ≤4 via sub-bullets (N1) before starting Phase 1, but this is optional polish and does not require a re-review.
 
 ---
 
