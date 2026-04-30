@@ -1,5 +1,8 @@
 use crate::schema::actor::Actor;
 use crate::schema::expr::{Expr, parse_guard};
+use crate::validate::EntryMap;
+use crate::validate::expr_eval::eval;
+use anyhow::bail;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -82,23 +85,26 @@ impl Lifecycle {
     }
 
     /// Validate transition ambiguity: for each `(from, verb)` pair, at most one
-    /// transition may have `requires_gate: None`.  Returns an error naming the
-    /// ambiguous pair if two unguarded transitions share the same `(from, verb)`.
+    /// transition may be fully unambiguous (no `requires_gate` AND no `guard`).
+    /// Guard-partitioned pairs (all transitions in the pair carry a `guard:`) are
+    /// allowed — `select_transition` resolves them at runtime by evaluating guards.
+    /// Returns an error naming the ambiguous pair if two fully-unguarded transitions
+    /// share the same `(from, verb)`.
     pub fn validate_transition_ambiguity(&self) -> anyhow::Result<()> {
-        // Map (from, verb) → count of transitions with requires_gate == None
-        let mut unguarded_count: HashMap<(String, String), Vec<&str>> = HashMap::new();
+        // Map (from, verb) → count of transitions with requires_gate == None AND guard == None
+        let mut fully_unguarded: HashMap<(String, String), Vec<&str>> = HashMap::new();
 
         for t in &self.transitions {
-            if t.requires_gate.is_none() {
+            if t.requires_gate.is_none() && t.guard.is_none() {
                 let key = (t.from.clone(), t.verb.clone());
-                unguarded_count
+                fully_unguarded
                     .entry(key)
                     .or_default()
                     .push(&t.to);
             }
         }
 
-        for ((from, verb), targets) in &unguarded_count {
+        for ((from, verb), targets) in &fully_unguarded {
             if targets.len() > 1 {
                 anyhow::bail!(
                     "ambiguous transition selection: ({from}, verb={verb}) has {} transitions \
@@ -111,6 +117,79 @@ impl Lifecycle {
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime transition selection (shared between submit.rs and transition.rs)
+// ---------------------------------------------------------------------------
+
+/// Select the best matching transition from `transitions` for a given
+/// (`from_state`, `verb`, `gate`) triple, evaluated against `entry`.
+///
+/// Algorithm (mirrors `submit::find_transition` / task 5.5 / 5.5b):
+/// 1. Filter candidates by `(from, verb, requires_gate)`.
+/// 2. Among candidates, prefer the one whose `guard` evaluates true.
+///    If two guards both evaluate true, that is a schema-design error → bail.
+/// 3. If no guarded-true candidate exists, fall back to the unguarded candidate
+///    (the catch-all for guard-fail cases, e.g. REVISE → blocked).
+/// 4. If neither is found, bail with a "guard not satisfied" message.
+pub fn select_transition<'a>(
+    transitions: &'a [Transition],
+    from_state: &str,
+    verb: &str,
+    gate: Option<&str>,
+    entry: &EntryMap,
+) -> anyhow::Result<&'a Transition> {
+    let candidates: Vec<_> = transitions
+        .iter()
+        .filter(|t| {
+            t.from == from_state
+                && t.verb == verb
+                && t.requires_gate.as_deref() == gate
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        match gate {
+            Some(g) => bail!(
+                "no transition from '{}' via verb '{}' with gate '{}' found in schema",
+                from_state, verb, g
+            ),
+            None => bail!(
+                "no transition from '{}' via verb '{}' found in schema",
+                from_state, verb
+            ),
+        }
+    }
+
+    // Prefer guarded transitions whose guard evaluates true.
+    let mut guarded_true: Vec<_> = candidates
+        .iter()
+        .filter(|t| t.guard.is_some() && eval(t.guard.as_ref().unwrap(), entry))
+        .copied()
+        .collect();
+
+    if guarded_true.len() > 1 {
+        bail!(
+            "ambiguous: multiple transitions from '{}' via '{}' (gate {:?}) have guards that evaluate true — schema guards must partition entry space",
+            from_state, verb, gate
+        );
+    }
+
+    if let Some(t) = guarded_true.pop() {
+        return Ok(t);
+    }
+
+    // No guarded-true match: use the unguarded fallback (catch-all).
+    let unguarded: Vec<_> = candidates.iter().filter(|t| t.guard.is_none()).copied().collect();
+    if let Some(t) = unguarded.first() {
+        return Ok(t);
+    }
+
+    bail!(
+        "no transition from '{}' via '{}' (gate {:?}) had its guard satisfied and no unguarded fallback exists",
+        from_state, verb, gate
+    )
 }
 
 #[cfg(test)]

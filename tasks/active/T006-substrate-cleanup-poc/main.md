@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** READY
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -284,7 +284,23 @@ All five cycle-1 revisions verified. Status advances PLAN_REVIEW → READY.
 ---
 
 ## Execution Log
-_Executor agent fills this section per phase._
+
+### Phase 1 — Finding A: plain-transition guard evaluation
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Completed:** 2026-04-30
+- **Commit SHA:** (see below)
+- **Files modified:**
+  - `src/schema/lifecycle.rs` — added `select_transition` helper (pub fn); updated `validate_transition_ambiguity` to allow guard-partitioned same-verb pairs
+  - `src/handlers/submit.rs` — collapsed `find_transition` to a thin delegator to `select_transition`
+  - `src/handlers/transition.rs` — rewired `run_in_tx`: reordered to build merged entry before transition selection, replaced bare `.find(|t| t.verb == verb)` with `select_transition`; added 6 regression-trap tests
+  - `tasks/active/T006-substrate-cleanup-poc/main.md` — this log
+- **Notes:**
+  - `select_transition` lives in `src/schema/lifecycle.rs` next to `validate_transition_ambiguity` (install-time partner), as per the plan's Decision Matrix.
+  - `validate_transition_ambiguity` was updated to distinguish "fully unguarded" (both `requires_gate=None` AND `guard=None`) from "guard-partitioned" pairs. The regression-trap test schema has two same-verb transitions both with `guard:` but no `requires_gate`; the original validator would have rejected the schema at load time. This update is a necessary companion to the runtime fix — without it, guard-partitioned schemas cannot be installed.
+  - The `state_machine_rejects_wrong_from_state` test assertion was updated: the old message "cannot {verb}: row is in state ..." is replaced by `select_transition`'s "no transition from '{from}' via verb '{verb}' found in schema". Semantics preserved, wording changed by the reorder.
+  - `tasks_e2e.sh` Step 16 fails with a SIGPIPE/pipefail issue on `cargo test ... | grep -q` — confirmed pre-existing at HEAD before Phase 1 (stash verified). Not introduced by this phase.
+  - `cargo test --all`: 380 passed, 0 failed.
 
 ---
 

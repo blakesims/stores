@@ -228,11 +228,9 @@ pub(crate) fn write_status_and_fields(
 
 /// Find a transition matching (from_state, verb, gate) whose guard evaluates true.
 ///
-/// Algorithm per 5.5 / 5.5b:
-/// 1. Filter to candidates with matching (from, verb, requires_gate).
-/// 2. Among those, prefer the one whose guard evaluates true against `entry`.
-/// 3. If no guarded transition matches, fall back to the unguarded one (if any).
-///    The unguarded fallback is the catch-all for guard-fail cases (e.g. REVISE → blocked).
+/// Thin delegator to `crate::schema::lifecycle::select_transition`, which holds
+/// the canonical algorithm.  Kept here so the four call sites in this file
+/// (submit_plan, submit_plan_review, submit_execute, submit_review) remain byte-identical.
 pub(crate) fn find_transition<'a>(
     schema: &'a Schema,
     from_state: &str,
@@ -240,57 +238,12 @@ pub(crate) fn find_transition<'a>(
     gate: Option<&str>,
     entry: &EntryMap,
 ) -> Result<&'a crate::schema::lifecycle::Transition> {
-    let candidates: Vec<_> = schema
-        .lifecycle
-        .transitions
-        .iter()
-        .filter(|t| {
-            t.from == from_state
-                && t.verb == verb
-                && t.requires_gate.as_deref() == gate
-        })
-        .collect();
-
-    if candidates.is_empty() {
-        match gate {
-            Some(g) => bail!(
-                "no transition from '{}' via verb '{}' with gate '{}' found in schema",
-                from_state, verb, g
-            ),
-            None => bail!(
-                "no transition from '{}' via verb '{}' found in schema",
-                from_state, verb
-            ),
-        }
-    }
-
-    // Prefer guarded transitions whose guard evaluates true.
-    let mut guarded_true: Vec<_> = candidates
-        .iter()
-        .filter(|t| t.guard.is_some() && eval(t.guard.as_ref().unwrap(), entry))
-        .copied()
-        .collect();
-
-    if guarded_true.len() > 1 {
-        bail!(
-            "ambiguous: multiple transitions from '{}' via '{}' (gate {:?}) have guards that evaluate true — schema guards must partition entry space",
-            from_state, verb, gate
-        );
-    }
-
-    if let Some(t) = guarded_true.pop() {
-        return Ok(t);
-    }
-
-    // No guarded-true match: use the unguarded fallback (catch-all).
-    let unguarded: Vec<_> = candidates.iter().filter(|t| t.guard.is_none()).copied().collect();
-    if let Some(t) = unguarded.first() {
-        return Ok(t);
-    }
-
-    bail!(
-        "no transition from '{}' via '{}' (gate {:?}) had its guard satisfied and no unguarded fallback exists",
-        from_state, verb, gate
+    crate::schema::lifecycle::select_transition(
+        &schema.lifecycle.transitions,
+        from_state,
+        verb,
+        gate,
+        entry,
     )
 }
 

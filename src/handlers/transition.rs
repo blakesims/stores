@@ -3,7 +3,7 @@ use clap::ArgMatches;
 use rusqlite::{Connection, Transaction};
 use serde_json::Value;
 
-use crate::schema::{actor::Actor, FieldType, Schema};
+use crate::schema::{actor::Actor, lifecycle::select_transition, FieldType, Schema};
 use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601, read_row};
@@ -32,14 +32,6 @@ pub(crate) fn run_in_tx(
     invoker: Actor,
     verb: &str,
 ) -> Result<()> {
-    // Resolve the transition definition from schema
-    let transition = schema
-        .lifecycle
-        .transitions
-        .iter()
-        .find(|t| t.verb == verb)
-        .ok_or_else(|| anyhow::anyhow!("no transition with verb '{}' in schema", verb))?;
-
     let display_id = matches
         .get_one::<String>("display_id")
         .map(|s| s.as_str())
@@ -48,18 +40,10 @@ pub(crate) fn run_in_tx(
     // Read existing row (inside tx)
     let (row_id, existing) = read_row(schema, tx, display_id)?;
 
-    // State-machine legality check
     let current_status = existing
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if current_status != transition.from {
-        anyhow::bail!(
-            "cannot {verb}: row is in state '{}', expected '{}'",
-            current_status,
-            transition.from
-        );
-    }
 
     // Build diff entry from CLI args
     let diff = build_entry_map(schema, |cli_name| {
@@ -101,6 +85,17 @@ pub(crate) fn run_in_tx(
         }
         merged.insert(k.clone(), v.clone());
     }
+
+    // Resolve the transition using the full selection algorithm (guard-aware).
+    // Must run AFTER building merged so guards are evaluated against the post-diff entry.
+    // Plain transitions never carry a requires_gate, so gate=None is correct.
+    let transition = select_transition(
+        &schema.lifecycle.transitions,
+        current_status,
+        verb,
+        None,
+        &merged,
+    )?;
 
     // Run validator against merged entry; actor checks scoped to diff only.
     validate::validate(schema, &merged, Op::Transition(verb.to_string(), diff.clone()), invoker).map_err(
@@ -352,19 +347,18 @@ fields:
         ]);
         run(&schema, &conn, &matches, Actor::Human, "triage").unwrap();
 
-        // Second triage is rejected
+        // Second triage is rejected (state-machine legality now enforced by select_transition)
         let cmd2 = build_cmd(&schema, "triage");
         let matches2 = cmd2.get_matches_from(["triage", "L001", "--verdict", "T1"]);
         let err = run(&schema, &conn, &matches2, Actor::Human, "triage").unwrap_err();
+        let msg = err.to_string();
         assert!(
-            err.to_string().contains("cannot triage"),
-            "expected state-machine error: {}",
-            err
+            msg.contains("triage"),
+            "expected state-machine error mentioning verb; got: {msg}"
         );
         assert!(
-            err.to_string().contains("triaged"),
-            "error should mention current state: {}",
-            err
+            msg.contains("triaged") || msg.contains("no transition"),
+            "error should indicate state mismatch: {msg}"
         );
     }
 
@@ -476,5 +470,203 @@ fields:
             .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(status, "open", "rollback must restore original status");
+    }
+
+    // ---- Phase 1 (T006) regression-trap: guard evaluation in plain transitions ----
+
+    /// Schema with two same-verb transitions partitioned by guard.
+    /// Pre-fix: the bare `.find(|t| t.verb == verb)` always picked the first (T2) regardless.
+    /// Post-fix: `select_transition` evaluates guards and picks the correct one.
+    const GUARDED_PARTITIONED_SCHEMA: &str = r#"
+name: observations
+id_format: "L{:03d}"
+default_actor: ai_autonomous
+lifecycle:
+  states: [confirmed, in_progress_t2, in_progress_t3]
+  transitions:
+    - from: confirmed
+      to: in_progress_t2
+      verb: ratify
+      guard: "tier_hint == 'T2'"
+      actor: ai_autonomous
+    - from: confirmed
+      to: in_progress_t3
+      verb: ratify
+      guard: "tier_hint == 'T3'"
+      actor: ai_autonomous
+fields:
+  - name: summary
+    type: text
+    required: true
+  - name: tier_hint
+    type: text
+    required: false
+"#;
+
+    fn setup_guarded() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(GUARDED_PARTITIONED_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    /// Insert a row directly at 'confirmed' with a given tier_hint.
+    fn insert_confirmed_row(_schema: &Schema, conn: &Connection, tier: &str) {
+        conn.execute(
+            "INSERT INTO observations (display_id, status, summary, tier_hint) VALUES (?1, 'confirmed', 'test', ?2)",
+            rusqlite::params![format!("L{:03}", 1), tier],
+        ).unwrap();
+    }
+
+    #[test]
+    fn guard_partitioned_picks_t3_transition_for_t3_row() {
+        let (schema, conn) = setup_guarded();
+        insert_confirmed_row(&schema, &conn, "T3");
+
+        let cmd = build_cmd(&schema, "ratify");
+        let matches = cmd.get_matches_from(["ratify", "L001"]);
+        run(&schema, &conn, &matches, Actor::AiAutonomous, "ratify").unwrap();
+
+        let status: String = conn
+            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "in_progress_t3", "T3 row must land in in_progress_t3, not in_progress_t2");
+    }
+
+    #[test]
+    fn guard_partitioned_picks_t2_transition_for_t2_row() {
+        let (schema, conn) = setup_guarded();
+        insert_confirmed_row(&schema, &conn, "T2");
+
+        let cmd = build_cmd(&schema, "ratify");
+        let matches = cmd.get_matches_from(["ratify", "L001"]);
+        run(&schema, &conn, &matches, Actor::AiAutonomous, "ratify").unwrap();
+
+        let status: String = conn
+            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "in_progress_t2", "T2 row must land in in_progress_t2, not in_progress_t3");
+    }
+
+    #[test]
+    fn guard_partitioned_rejects_when_no_guard_matches() {
+        let (schema, conn) = setup_guarded();
+        // Insert with tier_hint T1 — neither T2 nor T3 guard fires, no unguarded fallback
+        insert_confirmed_row(&schema, &conn, "T1");
+
+        let cmd = build_cmd(&schema, "ratify");
+        let matches = cmd.get_matches_from(["ratify", "L001"]);
+        let err = run(&schema, &conn, &matches, Actor::AiAutonomous, "ratify").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("guard not satisfied") || msg.contains("no unguarded fallback"),
+            "expected guard-not-satisfied error; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn plain_transition_guard_false_rejected() {
+        // Single-transition schema with a guard that is false for the row.
+        let schema_yaml = r#"
+name: observations
+id_format: "L{:03d}"
+default_actor: ai_autonomous
+lifecycle:
+  states: [confirmed, ready]
+  transitions:
+    - from: confirmed
+      to: ready
+      verb: ratify
+      guard: "tier_hint == 'ready'"
+      actor: ai_autonomous
+fields:
+  - name: summary
+    type: text
+    required: true
+  - name: tier_hint
+    type: text
+    required: false
+"#;
+        let schema = Schema::from_yaml(schema_yaml).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema)).unwrap();
+
+        conn.execute(
+            "INSERT INTO observations (display_id, status, summary, tier_hint) VALUES ('L001', 'confirmed', 'test', 'not_ready')",
+            [],
+        ).unwrap();
+
+        let cmd = build_cmd(&schema, "ratify");
+        let matches = cmd.get_matches_from(["ratify", "L001"]);
+        let err = run(&schema, &conn, &matches, Actor::AiAutonomous, "ratify").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("guard not satisfied") || msg.contains("no unguarded fallback"),
+            "expected guard rejection; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn plain_transition_guard_true_succeeds() {
+        let schema_yaml = r#"
+name: observations
+id_format: "L{:03d}"
+default_actor: ai_autonomous
+lifecycle:
+  states: [confirmed, ready]
+  transitions:
+    - from: confirmed
+      to: ready
+      verb: ratify
+      guard: "tier_hint == 'ready'"
+      actor: ai_autonomous
+fields:
+  - name: summary
+    type: text
+    required: true
+  - name: tier_hint
+    type: text
+    required: false
+"#;
+        let schema = Schema::from_yaml(schema_yaml).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema)).unwrap();
+
+        conn.execute(
+            "INSERT INTO observations (display_id, status, summary, tier_hint) VALUES ('L001', 'confirmed', 'test', 'ready')",
+            [],
+        ).unwrap();
+
+        let cmd = build_cmd(&schema, "ratify");
+        let matches = cmd.get_matches_from(["ratify", "L001"]);
+        run(&schema, &conn, &matches, Actor::AiAutonomous, "ratify").unwrap();
+
+        let status: String = conn
+            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "ready");
+    }
+
+    #[test]
+    fn validate_transition_ambiguity_still_rejects_unguarded_same_verb_pairs() {
+        // Confirm install-time validator is unaffected by our extraction
+        use crate::schema::lifecycle::Lifecycle;
+        let yaml = r#"
+states: [confirmed, a, b]
+transitions:
+  - from: confirmed
+    to: a
+    verb: ratify
+  - from: confirmed
+    to: b
+    verb: ratify
+"#;
+        let lc: Lifecycle = serde_yaml::from_str(yaml).unwrap();
+        let err = lc.validate_transition_ambiguity().unwrap_err();
+        assert!(
+            err.to_string().contains("ambiguous transition selection"),
+            "install-time validator must still fire: {err}"
+        );
     }
 }
