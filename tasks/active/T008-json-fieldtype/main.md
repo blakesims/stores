@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -418,6 +418,44 @@ Verdict: **justified, not a scope creep**.
 
 - **Deviation from plan:**
   - The plan described the `validate_json_top_level_string_is_valid` test as asserting NO error (Decision 2 limitation: top-level JSON string is valid). However, per Decision 2's re-parse logic: `coerce_value` for `'"hello"'` returns `Value::String("hello")` (inner content, no quotes). The validator re-parses `"hello"` (no quotes) via `serde_json::from_str` → Err (not valid JSON without quotes). This DOES trigger the sentinel. This is the documented false-flag: the test is renamed `validate_json_top_level_string_is_treated_as_sentinel_known_limitation` and asserts the false-flag fires (pinning the known behaviour rather than asserting "no error"). The plan's Decision 2 text explicitly states "regression test asserting the limitation"; the test correctly pins the limitation. No behavioral change from plan's intent.
+
+---
+
+### Phase 3 — Validator type-shape check (`RuleKind::InvalidJson`)
+
+- **Verdict:** PASS
+- **Reviewer date:** 2026-04-30
+- **Commit reviewed:** e50f2a1
+- **Test count:** 410/0 (baseline 406 → +4 new). `cargo test --all` confirmed locally; final result lines: `410 passed; 0 failed` (lib) and `2 passed; 0 failed` (`schemas_validate_fixtures`).
+
+**AC verification**
+
+| AC | Verdict | Evidence |
+|---|---|---|
+| `RuleKind::InvalidJson { expected: String }` exists; old `InvalidJsonArray` removed | PASS | `src/validate/error.rs:9-12`. Repo-wide grep shows zero `InvalidJsonArray` references; both call-sites at `validate/mod.rs:181` (`expected: "JSON array"`) and `:204` (`expected: "valid JSON"`) carry the discriminator on the rule struct. |
+| T006 P2 call site updated; existing tests pass with same user-facing wording | PASS | `validate/mod.rs:183` still emits `"value must be a JSON array, got string '<raw>'"` verbatim. `list_record_bad_json_returns_validator_error` and `list_record_bad_json_optional_field_still_errors` (both in `add.rs`) green; both assert `msg.contains("JSON array")`. The new `validate_json_existing_list_record_message_unchanged` further pins the message prefix `"value must be a JSON array, got string '"` (starts_with assertion). |
+| Json sentinel detection in `validate_field`; short-circuits other checks | PASS | `validate/mod.rs:198-215` — `matches!(&field.ty, FieldType::Json)` → re-parses raw via `serde_json::from_str`; on `Err` pushes InvalidJson and `return;` (line 211); on `Ok` no-ops. The `return;` short-circuit prevents `check_required` / `check_enum` / `check_pattern` / actor checks from firing. Test `validate_json_required_field_bad_value_emits_invalid_json` asserts `notes_errs.len() == 1` for a `required: true` Json field with bad JSON — exactly the short-circuit behaviour. |
+| 4 new tests pass; `cargo test --all` ≥ 410 | PASS | All four new tests green: `validate_json_required_field_bad_value_emits_invalid_json`, `validate_json_optional_field_bad_value_still_emits_invalid_json`, `validate_json_top_level_string_is_treated_as_sentinel_known_limitation`, `validate_json_existing_list_record_message_unchanged`. Total 410/0. |
+
+**Specific concerns addressed**
+
+1. **T006 P2 backwards compat (NON-NEGOTIABLE).** Verified by direct read of `validate/mod.rs:183`: format string is `"value must be a JSON array, got string '{}'"` — character-for-character identical to pre-Phase-3 code. Both `list_record_bad_json_returns_validator_error` (required) and `list_record_bad_json_optional_field_still_errors` (optional) green; their assertions `msg.contains("external_refs")` and `msg.contains("JSON array")` succeed unchanged. Wording shift: zero. PASS.
+2. **Json error message wording.** `validate/mod.rs:206` emits `"value must be valid JSON, got string '<raw>'"` with `<raw>` truncated to 60 chars at `:207`. Field name appears via `pretty_print`'s `format!("- {}: {}", e.field_dot(), e.message)` (`error.rs:36`); for `notes`, the rendered line is `- notes: value must be valid JSON, got string 'hello'`. Wording matches plan AC ("value must be valid JSON" — exact). Truncation matches existing convention (same `if raw.len() > 60 { &raw[..60] } else { raw.as_str() }` formula as the ListRecord/ListFk arm).
+3. **`<raw>` is sentinel content, not full CLI input.** `coerce_value` for Json (Phase 2, `row.rs:124-127`) returns `Value::String(raw_input)` where `raw_input` is the raw `&str` passed to `coerce_value`. The validator reads `Value::String(raw)` directly — same string. For the documented limitation case (`'"hello"'`), `coerce_value` parses successfully to `Value::String("hello")` (inner content), and the validator sees `"hello"` (no quotes). Message reads `got string 'hello'`. This is the intended behaviour per Decision 2.
+4. **Sentinel short-circuit verified.** Test `validate_json_required_field_bad_value_emits_invalid_json` schema declares `notes: json, required: true`. The entry has a sentinel value; the test asserts `notes_errs.len() == 1` and the rule is `InvalidJson`. If the short-circuit weren't present, `check_required` would also fire (since `Value::String` is non-null but not the field's expected shape — required check passes for non-null but a parallel error path would occur). The single-error assertion pins this. PASS.
+5. **Optional vs required Json regression-trap.** `validate_json_optional_field_bad_value_still_emits_invalid_json` exists and passes. Schema declares `notes: json, required: false`. Sentinel value present. Test asserts exactly 1 InvalidJson error fires — same regression trap that the T006 P2 REVISE 1 cycle locked in for ListRecord. The Json arm uses identical `Value::String(raw)` sentinel detection (lines 199-200), so the optional/required parity is structurally guaranteed.
+6. **Deviation judgment (test rename).** Plan named the test `validate_json_top_level_string_is_valid` and described it as asserting NO error. The executor renamed it to `validate_json_top_level_string_is_treated_as_sentinel_known_limitation` and asserts the false-flag DOES fire (single InvalidJson error). This matches Decision 2's stated semantics: re-parse cannot disambiguate top-level JSON-string from sentinel without parser-level wrapping (rejected option c). The rename pins the LIMITATION rather than asserting unreachable correctness — strictly more accurate. The test serves as a regression-trap: if a future change inadvertently fixes the false-flag (e.g. by switching to wrap-on-success), this test will fail and force an explicit Decision 2 reconsideration. PASS the deviation.
+7. **Out-of-scope check.** `git show e50f2a1 --stat` lists exactly: `src/validate/error.rs`, `src/validate/mod.rs`, `tasks/active/T008-json-fieldtype/main.md`. NO touches to `row.rs` (Phase 2), `add.rs` / `update.rs` / `transition.rs` (Phase 2), `show.rs` / `list.rs` (Phase 4), `observations_1006/schema.yaml` (Phase 5), `cli/dynamic.rs`, or `codegen/ddl.rs`. Tightly scoped.
+8. **No T005/T006/T007 logic touched** beyond the InvalidJsonArray → InvalidJson{expected} migration. The T006 P2 call-site at `validate/mod.rs:181` reuses the existing format string verbatim; the existing T006 short-circuit pattern (`return;` at `:189`) is preserved. T005 (drive, parse_envelope, status, lifecycle, submit, dispatch) and T007 (gate schema) territory untouched.
+9. **Pre-existing failures unchanged.** `cargo test --all` is 410/0 — no new failures. The documented `tests/e2e.sh` Step 6 (CLAUDECODE auto-detect) and `tests/tasks_e2e.sh` Step 16 (SIGPIPE) external-shell test failures are unrelated to validate/* and remain unchanged in shape.
+
+**Findings (non-blocking observations)**
+
+1. The Json sentinel-detection block (`mod.rs:198-215`) is structurally near-identical to the ListRecord/ListFk block (`:177-191`) — only the type-arm in `matches!` and the format strings differ. Future cleanup could extract a small helper `check_invalid_json_sentinel(field, &field_path, entry, errors, expected: &str, msg: &str, reparse: bool)` to dedupe, but the duplication is shallow (2 blocks, ~13 lines each) and the reparse-or-not distinction makes a generic helper marginally awkward. Cosmetic; not gate-failing.
+2. The "documented limitation" test is currently the only test asserting a NON-error path through the `FieldType::Json` arm — but it asserts an error (the false-flag). There's no test that exercises a successful Json sentinel re-parse landing on `Ok(_)` (the no-op `else` branch at line 213). Such a test would require wiring `coerce_value` output (`Value::Object` etc.) directly into the EntryMap and asserting no notes_err — somewhat redundant since the existing `add` integration test (`json_field_write_then_read_round_trips_as_object`) already proves the happy path doesn't error. Note for future reference; not gate-failing.
+3. Non-trivial-finding budget: I aimed for ≥3 substantive findings on a non-trivial change. The change IS non-trivial in concept (rename + new sentinel detection block + 4 tests + documented-limitation pin), but the execution is mechanically clean: every decision was pre-locked in the Decision Matrix, the executor mirrored the T006 P2 pattern 1:1, all four AC tests pass, and the only deviation is a test rename that strictly improves accuracy. The findings above are minor cosmetic notes rather than substantive defects. Lower count is justified by the tightness of the planning + the precedent of T006 P2 (which was already through 1 REVISE cycle, so this Phase 3 inherits a battle-tested pattern).
+
+**Routing:** Status `CODE_REVIEW` → `EXECUTING_PHASE_4`.
 
 ---
 
