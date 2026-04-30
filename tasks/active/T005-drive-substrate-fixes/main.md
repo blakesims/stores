@@ -1,7 +1,7 @@
 # T005: Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_2
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -219,7 +219,29 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
 ---
 
 ## Code Review Log
-_Code-reviewer agent fills this section per phase._
+
+### Phase 1 — Shared `is_blocked()` helper; reporters agree on `blocked`
+
+- **Gate:** PASS
+- **Reviewed commit:** `6aa6e12`
+- **Reviewer:** code-reviewer (Opus 4.7 1M)
+- **Date:** 2026-04-30
+- **Counts:** 0 critical, 0 major, 2 minor
+- **Tests run:**
+  - `cargo test handlers::status` → 16 passed (including all 4 new helper tests).
+  - `cargo test handlers::next_action` → 5 passed (including `next_action_blocked_reason_shapes`).
+  - `cargo test --all` → 373 unit + 2 integration = 375 passed, 0 failed.
+- **AC verification:**
+  - [x] Status handler: 4 new helper tests present and passing (`blocked_helper_null_reason`, `blocked_helper_empty_reason`, `blocked_helper_real_reason`, `blocked_helper_status_blocked_all_reasons`).
+  - [x] next-action handler: `next_action_blocked_reason_shapes` exercises both `status` shapes × all three `blocked_reason` shapes.
+  - [x] `cargo test --all` 375/375 passing.
+- **Bug-1 regression-trap proof:** `blocked_helper_empty_reason` is decisive. With `status="executing"` and `blocked_reason=Some("")`, the *old* `status.rs:160` predicate (`blocked_reason.is_some() || status=="blocked"`) returns `true || false = true` → would have produced `blocked=true`. The new test asserts `blocked=false` and passes only because `is_blocked` is status-only. The old code is unambiguously caught.
+- **Cross-reporter agreement:** structurally guaranteed because both reporters call the same `is_blocked` helper. There is no co-located test that calls both reporters and asserts equality, but the ACs do not require one. Noted as Minor 1.
+- **Out-of-scope check:** `git show 6aa6e12 --stat` reports exactly the 3 expected files (`src/handlers/{mod.rs, next_action.rs, status.rs}`); no drive.rs, no parse_envelope, no stderr changes leaked in.
+- **Doc comment quality:** `is_blocked`'s doc comment names Bug 1, references the old buggy predicate verbatim, and states the canonical interpretation (status-only; reason is a description, not the gate). Faithful to the Decision Matrix.
+- **Minor 1 (deferred):** No test directly asserts `format_task_line(...)`'s `blocked=` substring agrees with `compute(...).blocked` for the same row. Structural agreement is guaranteed by the shared helper, but a defensive co-located assertion would harden against future divergence (e.g. if either reporter ever inlines the predicate again). Recommend adding when next touching either file; not blocking.
+- **Minor 2 (deferred):** `_blocked_reason: Option<&str>` is intentionally unused; the underscore prefix and doc-comment together make this clear, and call sites pass meaningful expressions (`task.blocked_reason.as_deref()`, `blocked_reason.as_str()`) which document intent at the use site. Acceptable; flagged only because future readers may wonder why the parameter exists. Decision Matrix and doc-comment already justify it.
+- **Verdict:** PASS. All ACs met; the tests directly catch the original bug; no scope creep; doc-comment is faithful; full suite green. Advance to Phase 2.
 
 ---
 
