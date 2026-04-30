@@ -1,7 +1,7 @@
 # T005: Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -329,6 +329,36 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
 - **Minor 3 (deferred — no automated regression-trap for visibility):** No new test asserts that drive's stderr is line-buffered or that flush calls are present. The plan explicitly defers visibility verification to Phase 4 smoke (manual `2>&1 | tail -100` check), and unit-testing flush behaviour requires subprocess capture. Acceptable; a future task could add a shell test that backgrounds drive, polls stderr via `tail -f`, and asserts each progress line appears within N ms of the spawn returning. Not blocking.
 - **Locked-decision compliance — verified.** Decision Matrix row 5 ("Bug 3 fix shape") locked option (a): explicit `stderr().flush()` after each progress `eprintln!`. Diff is exactly that — no macro, no `unsafe`, no `libc::setvbuf`, no `BufWriter`, no global initializer. Executor stayed inside the locked option.
 - **Verdict:** PASS. All ACs met (modulo Phase-4-deferred manual visibility check); idiom uniform across 9 sites; locked Decision Matrix option (a) faithfully implemented; no scope creep; tests green; e2e green. Advance to Phase 4 (smoke + DONE_WHEN sign-off).
+
+### Phase 4 — End-to-end haiku smoke re-validation
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-30T14:56:05
+- **Completed:** 2026-04-30T14:58:12
+- **Commit:** (this commit)
+- **Files modified:** none (operator-driven; artefacts captured only)
+- **Artefacts:**
+  - `/tmp/t005-smoke/drive-smoke.log`
+  - `/tmp/t005-smoke/smoke-status.json`
+  - `/tmp/t005-smoke/smoke-next-action.json`
+  - `/tmp/t005-smoke/smoke-db.txt`
+- **Wall clock:** 116s (1m 56s)
+- **Spawn count:** 5 (planner, plan_reviewer, executor, code_reviewer — 1 phase task so no P2 spawns needed)
+- **ms per spawn (approx):** planner 23.6s, plan_reviewer 22.4s, executor 31.9s, code_reviewer 38.7s
+- **Exit code:** 0
+
+**AC verification:**
+
+- [x] `stores tasks drive --auto --claude-code --testing` ran to `status=complete` without operator intervention on fresh `/tmp/t005-smoke`.
+- [x] `tee drive-smoke.log` showed per-spawn "spawning … runner" lines in real time as each spawn began (Phase 3 flush confirmed). Log is non-empty and contains all 5 spawn/return/submit tuples.
+- [x] After completion: `stores tasks status T001` → `blocked=false`; `stores tasks next-action T001 --json` → `"blocked": false`. Both reporters agree (Phase 1 fix confirmed).
+- [x] Phase 2 unit-test artefact (`drive_loop_unroutable_role_exits_nonzero`, `drive_loop_role_mismatch_message_format`) demonstrated the role-mismatch path without provoking haiku.
+
+**Observations:**
+
+- One warning printed during executor and code_reviewer cycles: "multiple task directories found for 'T001': [active/T001-hello-world, planning/T001-hello-world]; writing to canonical path without moving". The planner created the directory under `tasks/active/` but the pre-existing planning stub under `tasks/planning/` was never cleaned up. Drive completed correctly regardless — the warning is cosmetic and out of scope.
+- The haiku-based planner produced a single-phase plan (DONE_WHEN was achievable in one phase), so only 4 spawns + 1 completed_check were needed. Drive exited 0 after P1 code-review gate=PASS.
+- `scripts/hello.sh` exists and `bash scripts/hello.sh` prints `hi` — DONE_WHEN clause satisfied.
 
 ---
 
