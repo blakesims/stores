@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_2
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -305,7 +305,44 @@ All five cycle-1 revisions verified. Status advances PLAN_REVIEW → READY.
 ---
 
 ## Code Review Log
-_Code-reviewer agent fills this section per phase._
+
+### Phase 1 — Finding A: plain-transition guard evaluation
+- **Reviewer:** code-reviewer
+- **Date:** 2026-04-30
+- **Commit reviewed:** `7d99727`
+- **Gate:** PASS
+- **Counts:** 0 critical / 0 major / 2 minor
+
+**Verification (against Phase 1 ACs):**
+- AC1 (guard-eval unit + ambiguity-validator preserved): **PASS** — `plain_transition_guard_false_rejected` and `plain_transition_guard_true_succeeds` cover both directions; install-time validator preserved (test `validate_transition_ambiguity_still_rejects_unguarded_same_verb_pairs`).
+- AC2 (regression-trap for full selection algorithm): **PASS** — `GUARDED_PARTITIONED_SCHEMA` defines two `(from=confirmed, verb=ratify)` transitions partitioned by `guard: tier_hint == 'T2'/'T3'`. Test `guard_partitioned_picks_t3_transition_for_t3_row` would fail under the pre-fix `.find(|t| t.verb == verb)` (which would always pick T2 first). Confirmed the bug-trap is real.
+- AC3 (submit.rs callers byte-identical): **PASS** — `find_transition` signature unchanged; collapsed to a 6-line delegator. Workflow tests still pass.
+- AC4 (cargo test --all + tests/e2e.sh green): **cargo: PASS** (380 passed, 0 failed). **e2e.sh + tasks_e2e.sh pre-existing failures verified pre-existing on `cd5df8b` (master~1)** — not introduced by Phase 1. drive_e2e.sh: **PASS**.
+
+**Headline algorithm extraction:** `select_transition` in `src/schema/lifecycle.rs:136-193` is the FULL algorithm, byte-for-byte equivalent to the pre-T006 `submit.rs::find_transition` (filter by from+verb+gate; prefer guarded-true; ambiguity check; unguarded fallback; bail). Not a thinned-out version.
+
+**Validator-relaxation analysis:**
+- Two `(requires_gate=None, guard=None)` pairs → STILL rejected (test covers).
+- Two `(requires_gate=None, guard=Some(_))` pairs → accepted (transitively tested via `Schema::from_yaml(GUARDED_PARTITIONED_SCHEMA)`).
+- One unguarded + one guarded → accepted (only unguarded counts toward `fully_unguarded`).
+- Logic correct; deviation is sound.
+
+**Reordering correctness:** `run_in_tx` builds merged BEFORE selecting — required because guards eval against post-diff entry. Old "row is in state X, expected Y" message replaced by `select_transition`'s "no transition from '{from}' via verb '{verb}' found in schema". Test `state_machine_rejects_wrong_from_state` updated to accept either message. Semantics preserved; wording slightly less informative for wrong-state case but still navigable.
+
+**Out-of-scope check:** Files touched are exactly the 4 planned (`lifecycle.rs`, `submit.rs`, `transition.rs`, `main.md`). NO touches to drive.rs / next_action.rs / parse_envelope / mod.rs / status.rs. T005 fences hold.
+
+**Pre-existing failure verification:** Stashed Cargo.lock, checked out `cd5df8b` (cycle-2-ready, immediately pre-Phase-1), rebuilt binary, re-ran:
+- `tests/e2e.sh` Step 6 (actor mismatch on triage) → SAME failure pre-existed (CLAUDECODE not unset in script).
+- `tests/tasks_e2e.sh` Step 16 (SIGPIPE on `cargo test ... | grep -q` under `set -o pipefail`) → SAME failure pre-existed.
+Both confirmed pre-existing; not Phase 1 regressions.
+
+**Minor findings (not blocking):**
+1. **No direct positive-case test for the new validator branch.** The "guard-partitioned pairs are now accepted" path is only exercised transitively via `Schema::from_yaml(GUARDED_PARTITIONED_SCHEMA)` in the regression-trap tests. A dedicated `validate_transition_ambiguity_accepts_guard_partitioned_pairs` assert in lifecycle.rs would be 5 LOC and pin the new behaviour explicitly. Not blocking — the transitive coverage is sufficient (parse-time would fail if the validator rejected).
+2. **Wrong-state error wording regression.** Pre-fix: `"cannot {verb}: row is in state '{X}', expected '{Y}'"` — names BOTH actual and expected state. Post-fix: `"no transition from '{X}' via verb '{verb}' found in schema"` — names actual only, leaves operator to grep schema for expected. Acceptable trade documented in execution log; if Phase 5 artefact capture (`ratify-rejected.txt`) wants the expected-state hint, consider enriching the bail message in `select_transition`'s empty-candidates branch.
+
+**Routing:** Phase 1 PASS → Status advances `CODE_REVIEW` → `EXECUTING_PHASE_2` for Finding B (`list_record` write path).
+
+---
 
 ---
 
