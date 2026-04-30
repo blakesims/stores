@@ -1,7 +1,7 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30 (Phase 3 code review — PASS; routing to executor for Phase 4)
 - **Blocked Reason:** —
@@ -632,7 +632,7 @@ After Issues 1-3 are resolved:
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
-- **Commit SHA:** (set after commit)
+- **Commit SHA:** b1bb6d5
 - **Files modified:** `README.md`, `docs/philosophy.md`, `stores/observations/README.md`, `skills/observation:triage/SKILL.md`, `skills/observation:log/SKILL.md`, `src/handlers/schema_show.rs`
 
 **Pre-phase canonical grep tally (live, non-archive, non-framework-internal):**
