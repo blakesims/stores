@@ -1,0 +1,53 @@
+{
+  "captured_at": "2026-04-30",
+  "contact_id": null,
+  "created_at": "2026-04-30T18:08:11Z",
+  "created_by": "ai_autonomous",
+  "display_id": "L001",
+  "evidence": {
+    "env": "local-feat-worktree",
+    "external_refs": [
+      {
+        "id": "backend",
+        "kind": "container",
+        "system": "docker"
+      }
+    ],
+    "observed_at": "2026-04-30T16:30:00Z"
+  },
+  "field_name": null,
+  "intent_contract": {
+    "acceptance": [
+      "wrap completes"
+    ],
+    "contract_state": "draft",
+    "drafted_at": "2026-04-30T16:35:00Z",
+    "drafted_by": "claude-code",
+    "in_scope": [
+      "main.py"
+    ],
+    "objective": "Make legacy feat worktrees recoverable",
+    "out_of_scope": [
+      "new --feat-local verb"
+    ],
+    "tier_hint": "T2",
+    "type": "work"
+  },
+  "investigation_note": null,
+  "notes": {
+    "discovery_path": "T271 wrap Phase 2.5",
+    "reproed_by": "agent",
+    "siblings": [
+      "L210"
+    ]
+  },
+  "priority": "normal",
+  "resolution": null,
+  "resolved_at": null,
+  "source": "dev",
+  "status": "open",
+  "summary": "L275-shaped: legacy feat-worktree wrap kill loop",
+  "task_id": null,
+  "updated_at": "2026-04-30T18:08:11Z",
+  "updated_by": "ai_autonomous"
+}

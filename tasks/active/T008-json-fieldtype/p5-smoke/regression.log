@@ -1,0 +1,45 @@
+=== cargo test --all ===
+test result: ok. 414 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+=== tests/drive_e2e.sh ===
+[T001] phase 1 cycle 1: code_reviewer → submitted (gate=Some(PASS); source=sap)
+[T001] phase 2 cycle 1: code_reviewer → submitted (gate=Some(PASS); source=sap)
+  ✓ AC7.1: status=complete, current_phase=2, both phases have 1 cycle each with PASS gate
+[T001] phase 1 cycle 1: code_reviewer → submitted (gate=Some(PASS); source=sap)
+[T001] phase 2 cycle 2: code_reviewer → submitted (gate=Some(PASS); source=sap)
+  ✓ AC7.1b: status=complete, current_phase=2, phase-2 has 2 cycles (REVISE then PASS)
+=== All drive e2e scenarios passed ===
+  AC7.1  happy path (N=2 phases, zero REVISE): PASS
+  AC7.1b revise-once (one REVISE on phase 2):  PASS
+
+=== tests/gate_e2e.sh ===
+  PASS: add returned G001
+  PASS: all 9 new fields present and correct in show --json
+  PASS: status=deferred and defer_until=2026-05-11
+  PASS: status=pending after deferred → pending resume
+  PASS: self-loop resume succeeded; status still pending
+  PASS: CLAUDECODE=1 answer rejected (exit=1); error mentions actor and human
+  PASS: status=answered and answer=yes
+  PASS: G002 repeatable --options produced ["yes", "no"]
+  PASS: G003 pipe-form --options produced ["yes", "no"]
+  PASS: jq comparison: G002.options == G003.options (["yes","no"])
+=== All 6 DONE_WHEN clauses verified ===
+  #1 full add (9 new fields + G001): PASS
+  #2 defer G001 (deferred + defer_until=2026-05-11): PASS
+  #3 resume (deferred→pending + self-loop idempotency): PASS
+  #4 AI invoker rejected on answer: PASS
+  #5 human invoker answer (answered): PASS
+  #6 repeatable options both forms produce ["yes","no"]: PASS
+
+=== tests/e2e.sh (Step 6 pre-existing CLAUDECODE failure) ===
+  PASS: init created .stores/db.sqlite and .stores/manifest.yaml
+  PASS: observations store installed
+  PASS: gate store installed; both tables coexist
+  PASS: add returned OBS001
+  PASS: triage T3 without contract rejected with required_when errors
+--- Step 6: triage T3 with full contract (should succeed)
+
+=== tests/tasks_e2e.sh (Step 16 pre-existing SIGPIPE failure) ===
+--- Step 16: cargo test (atomicity unit tests for AC5.11/AC5.13/AC5.14)
+  FAIL: ac5_11b atomicity test failed

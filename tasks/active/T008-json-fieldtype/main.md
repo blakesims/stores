@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** EXECUTING_PHASE_5
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -508,6 +508,43 @@ Verdict: **justified, not a scope creep**.
 - **Test count delta:** 410 → 414 (+4 new: `read_row_json_field_returns_structured_object`, `read_row_json_field_null_cell_returns_null`, `list_json_field_decodes_to_structured_value`, `list_list_record_field_decodes_to_structured_value`). `cargo test --all` = 414 passed; 0 failed.
 
 - **Deviation from plan:** None. `show.rs` required no modification (plan AC #3 acknowledged this case: "if `show.rs` delegates to `read_row` for the deserialisation, then no further change needed"). Tests are inline in `row.rs` and `list.rs` test modules per plan.
+
+---
+
+### Phase 5 — Integration: re-add `notes` to `observations_1006` + smoke trace
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Finished:** 2026-04-30
+- **Commit SHA:** (see below)
+- **Files modified:**
+  - `stores/observations_1006/schema.yaml` — re-added `notes` field at the top level (after all inline flat fields, before the `evidence` record block), with `type: json`, `required: false`, description matching plan.
+  - `tasks/active/T008-json-fieldtype/p5-smoke/` — six artefact files committed.
+
+- **Pre-conditions verified:** Binary rebuilt from current master as `stores 0.4.1` before running smoke.
+
+- **Schema change:** `notes` inserted between the flat fields block and the `evidence` record. Comment explains the free-shape intent.
+
+- **Smoke artefacts captured at `/tmp/t008-notes-smoke/` (also committed at `tasks/active/T008-json-fieldtype/p5-smoke/`):**
+
+  | Artefact | Path | Clause | Observation |
+  |---|---|---|---|
+  | 1 | `artefact-1-full-with-notes.json` | L001 full `show --json` with notes | Valid JSON; `notes` is a structured object with `siblings`/`reproed_by`/`discovery_path` keys |
+  | 2 | `artefact-2-structured-roundtrip.txt` | jq subkey probes | `.notes` emits structured object; `.notes.siblings` → `["L210"]`; `.notes.discovery_path` → `"T271 wrap Phase 2.5"` |
+  | 3 | `artefact-3-bad-json.txt` | bad-JSON error | exit=1; verbatim: `- notes: value must be valid JSON, got string '{not json'`; contains both `notes` and `valid JSON` |
+  | 4 | `artefact-4-list-json.json` | `list --json` structured | Valid JSON array; row 0 `notes` is a `dict` (not a string blob) |
+  | 5 | `artefact-5-from-file.txt` | from-file large payload | Contains `200` (value of `.notes.investigation.logs[0].tail`); round-trip confirmed |
+  | 6 | `regression.log` | all e2e suites | `cargo test --all` = 414/0; drive_e2e PASS; gate_e2e PASS; e2e.sh Step 6 pre-existing CLAUDECODE failure (unchanged); tasks_e2e Step 16 pre-existing SIGPIPE failure (unchanged) |
+
+- **Acceptance criteria:**
+  - [x] `observations_1006/schema.yaml` parses cleanly; `schemas_validate_fixtures` = 2/0
+  - [x] All five smoke artefacts captured; each pins its DONE_WHEN clause exactly
+  - [x] Artefact 3 verbatim: `- notes: value must be valid JSON, got string '{not json'` — contains `notes` + "valid JSON"
+  - [x] No e2e regressions; pre-existing Step 6 / Step 16 failures unchanged in shape
+
+- **Deviation from plan:**
+  - The spec's artefact-5 step referenced `show L003 --json` (assuming bad-JSON add in artefact-3 would write L002). The bad-JSON add correctly exited 1 and wrote no row, so the from-file add became L002, not L003. `show L002 --json` used instead. No behavioral impact; the artefact itself returns `200` as required.
+  - No `.rs` files modified. Artefact from-file add used `--notes-from-file` (Phase 2 CLI flag from `is_text_like` predicate); companion flag worked as expected.
 
 ---
 

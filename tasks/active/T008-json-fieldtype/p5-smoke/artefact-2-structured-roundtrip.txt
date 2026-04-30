@@ -1,0 +1,18 @@
+Original: --notes '{"siblings":["L210"],"reproed_by":"agent","discovery_path":"T271 wrap Phase 2.5"}'
+
+show --json output for .notes:
+{
+  "discovery_path": "T271 wrap Phase 2.5",
+  "reproed_by": "agent",
+  "siblings": [
+    "L210"
+  ]
+}
+
+Sibling array as a structured value:
+[
+  "L210"
+]
+
+Specific subkey access:
+"T271 wrap Phase 2.5"

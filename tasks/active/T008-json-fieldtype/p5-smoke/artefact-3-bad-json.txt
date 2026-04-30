@@ -1,0 +1,3 @@
+Error: validation failed:
+- notes: value must be valid JSON, got string '{not json'
+exit=1

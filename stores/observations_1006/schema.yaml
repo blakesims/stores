@@ -90,6 +90,14 @@ fields:
       - {name: affects_capability, type: text}
       - {name: known_solution, type: text}
 
+  # Free-shape catch-all for per-observation metadata (siblings, discovery_path,
+  # related_observations, tried_repros, user_quotes, etc.).  Type: json means
+  # the framework stores and round-trips any valid JSON object/array/scalar.
+  - name: notes
+    type: json
+    required: false
+    description: "Free-shape catch-all (siblings, discovery_path, etc.)"
+
   # Evidence record with list_record of external refs (the schema you ratified
   # in w11-d4-16). Demonstrates record-containing-list_record-of-records.
   - name: evidence
