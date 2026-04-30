@@ -137,6 +137,7 @@ Expected error (all violations in one pass):
 ```
 Error: validation failed:
 - intent_contract.objective: required (because intent_contract.contract_state == 'ready')
+- intent_contract.type: required (because intent_contract.contract_state == 'ready')
 - intent_contract.acceptance: required (because intent_contract.contract_state == 'ready')
 - intent_contract.in_scope: required (because intent_contract.contract_state == 'ready')
 - intent_contract.out_of_scope: required (because intent_contract.contract_state == 'ready')
@@ -247,7 +248,7 @@ Expected output: `L001|confirmed|T3|G001`
 
 Two key enforcement moments:
 
-**Required-when contract (#5 / #6):** The `intent_contract` record sub-fields (`objective`, `acceptance`, `in_scope`, `out_of_scope`, `tier_hint`, `approved_by`, `approved_at`) each carry `required_when: "intent_contract.contract_state == 'ready'"`. Flipping the contract to `ready` without them fails with all violations aggregated in one error. All must be supplied together. This models the "work item needs a clear definition of done before AI takes it on" pattern.
+**Required-when contract (#5 / #6):** The `intent_contract` record sub-fields (`objective`, `type`, `acceptance`, `in_scope`, `out_of_scope`, `tier_hint`, `approved_by`, `approved_at`) each carry `required_when: "intent_contract.contract_state == 'ready'"`. Flipping the contract to `ready` without them fails with all violations aggregated in one error. All must be supplied together. This models the "work item needs a clear definition of done before AI takes it on" pattern.
 
 **Per-field actor on `gate.answer` (#10 / #11):** The `answer` field in the `gate` schema carries `actor: human`. An AI invoker (auto-detected from `$CLAUDECODE`) attempting to write it is rejected with a message naming the field, the required actor, and the `$CLAUDECODE` detection source. The `--invoker human` flag overrides the auto-detection for cases where a human is running the CLI in an AI-flagged environment.
 
