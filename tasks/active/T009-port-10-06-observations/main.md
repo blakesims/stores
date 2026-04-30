@@ -1,9 +1,9 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_2
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (plan-reviewer cycle 2 — PASS; routing to executor)
+- **Last Updated:** 2026-04-30 (Phase 1 code review — PASS; routing to executor for Phase 2)
 - **Blocked Reason:** —
 
 ## Task
@@ -411,7 +411,58 @@ After Issues 1-3 are resolved:
 ---
 
 ## Code Review Log
-_Code-reviewer agent fills this section per phase._
+
+### Phase 1 — Schema extension
+- **Reviewer:** code-reviewer agent
+- **Date:** 2026-04-30
+- **Commit reviewed:** `367fca4` ("feat(T009-P1): extend observations schema to 10.06 production shape")
+- **Gate:** **PASS**
+
+**Verification against ACs (Phase 1):**
+
+| AC | Status | Notes |
+|----|--------|-------|
+| `id_format: L{:03d}` | ✓ | Line 2 of schema.yaml |
+| 7 lifecycle states `[open, investigating, confirmed, needs_info, in_progress, resolved, wont_fix]` | ✓ | Line 9; `triaged` removed; `initial_state: open` |
+| 9 transitions with correct actor/guard | ✓ | All 9 transitions present (plan AC1 listed 8, schema has 9 — extra is `confirmed → wont_fix` which IS in plan AC1; planner said "8" but enumerated 9; schema correct) |
+| `investigating → confirmed` guarded on `intent_contract.contract_state == 'ready'` | ✓ | Line 29 |
+| `provide_info` (needs_info → confirmed) `actor: human` | ✓ | Line 47 |
+| All ~26 new top-level fields with correct types | ✓ | 33 top-level fields total; SQLite install produces 40 columns (4 audit + 2 framework `id`/`display_id` + `status` + 33 user fields = 40); types match plan field-reference table |
+| `intent_contract` has all 15 D9-locked sub-fields with production names | ✓ | Verified against `~/repos/clients/10.06-wt/10.06-main/research/refs/intent-contract.md` directly. All present: `contract_state`, `drafted_by`, `drafted_at`, `objective`, `type`, `in_scope`, `out_of_scope`, `acceptance`, `tier_hint`, `inputs`, `touches`, `affects_capability`, `known_solution`, `approved_by`, `approved_at`. **Zero forbidden v0.1 names** (`done_when`/`scope_in`/`scope_out`/`verdict`) anywhere in schema (grep confirmed empty) |
+| `in_scope`, `out_of_scope`, `acceptance` typed as `list: text` (not single string) | ✓ | R5 risk averted; production list semantics preserved |
+| `objective` is plain `text` (single line) | ✓ | Line 257 |
+| `tier_hint` enum `[T1, T2, T3]` | ✓ | Line 287 |
+| `actor: human` on `approved_by` + `approved_at` | ✓ | Lines 317, 323 |
+| 8 `required_when` annotations on intent_contract sub-fields gated by `contract_state == 'ready'` | ✓ | Plan AC summary said "7 gated" but enumerated 8 in the explicit field list (6 plain + 2 actor:human). Schema matches the enumerated list, which matches the production reference doc (the doc lists `type: always` as required). 6 plain (`objective`, `type`, `in_scope`, `out_of_scope`, `acceptance`, `tier_hint`) + 2 actor:human (`approved_by`, `approved_at`) = 8 total. The plan's "7" was an internal summary-vs-enumeration count discrepancy; not a schema bug |
+| `evidence` record with `external_refs: list_record` | ✓ | T006 P2 substrate; sub-fields `system`/`kind`/`id` all required text |
+| `notes: type: json, required: false` | ✓ | T008 substrate; line 361 |
+| `locked_by`/`locked_at`/`lock_reason` with `actor: framework` | ✓ | Lines 214, 220, 226 (D5) |
+| D6 audit-column collision check | ✓ | Header comment lines 4-6; verified distinct from reserved set |
+| `cargo test --all` green | ✓ | 414 unit + 2 integration = 416 PASS, 0 fail |
+
+**Tests re-run during review:**
+- `cargo test --all` — 416/0 PASS (matches executor's claim)
+- `bash tests/e2e.sh` — fails at Step 4 with **clean validation error**: `validation failed: - captured_at: required - captured_week: required - priority: required - source: required`. NOT a parse error or panic. Failure is at the EXPECTED step (4 — first observation add) and is the EXPECTED shape (validator field-required cluster). Phase 2 will fix.
+- `bash tests/gate_e2e.sh` — PASS (6 DONE_WHEN clauses)
+- `bash tests/drive_e2e.sh` — PASS (AC7.1 + AC7.1b)
+- `bash tests/tasks_e2e.sh` — fails at Step 16 (`ac5_11b atomicity test failed`). **Pre-existing failure** — confirmed by re-running against the prior schema (HEAD~2); same failure. NOT a Phase 1 regression.
+
+**Out-of-scope discipline:**
+- `git show 367fca4 --stat` confirms ONLY 2 files touched: `stores/observations/schema.yaml` (+304/-40) and `tasks/active/T009-port-10-06-observations/main.md` (+24). **Zero `src/` Rust files modified** — plan required this.
+- `approval_invoker` (16th production sub-field) NOT added. This is the explicit cycle-2 plan-review scope narrowing — production framework substrate already records invoker; the plan reviewer's note ("acceptable scope-narrowing") authorizes this. NOT a finding.
+
+**Observations (not findings):**
+- `body` field retained (line 74) — plan AC explicitly lists it as "retained from v0.1 + present in production"; production reference doc does not name `body` directly but the field is harmless and the plan called for retention. On-spec.
+- `tags: list: text` retained (line 230) — plan AC lists as retained; production has it. On-spec.
+- Schema landed at 364 lines vs plan's 150-200 estimate. R3 anticipated "may grow beyond 150 lines"; this is at the upper end but fully described per-field with descriptions, which is the right trade-off for a production-shape store.
+- Plan AC1 enumerated 8 transitions but the schema has 9 (the listed 8 plus `confirmed → wont_fix`). Re-reading plan AC1 carefully: it lists `confirmed → wont_fix` as the 9th bullet. The "8 transitions" header was a count error; the enumeration is correct and the schema matches. Not a bug.
+- D9 `type` sub-field: schema correctly types it `enum [work, investigation]` and gates with required_when. Production doc confirms `type: always` required and `work | investigation` enum. Match.
+
+**Findings:** None substantive. The two minor count discrepancies in the plan ("7 gated" vs 8; "8 transitions" vs 9) are plan-summary-vs-enumeration mismatches; the schema implements the enumerated lists, which match the production reference. The schema is the spec; the plan summaries are scaffolding.
+
+**Decision:** PASS. The D9 production names are exactly right (verified against `intent-contract.md` reference doc directly). Lifecycle is complete with correct actors and guards. List-typed sub-field semantics preserved. e2e.sh fails cleanly at the right step in the right shape. No `src/` touched. No regressions in other e2e suites (the tasks_e2e.sh failure is pre-existing). This is a clean schema-only foundation for Phase 2.
+
+**Routing:** CODE_REVIEW → EXECUTING_PHASE_2.
 
 ---
 
