@@ -943,4 +943,80 @@ Remaining hits are exclusively in `src/validate/*`, `src/schema/*`, `src/handler
 ---
 
 ## Completion
-_Final summary when task is complete._
+
+- **Completed:** 2026-05-01
+- **Code commits:** `367fca4` (P1 schema), `4cfd3ad` (P2 e2e migration), `6067e9a` (P3 observations_e2e.sh + dispatch.rs guard via D3-style fix), `b1bb6d5` (P4 docs/skills/fixture sweep), `bfde807` (P4 REVISE-1 invoker fix), `683dd9c` (P5 freeze POC), `a337d11` (P6 smoke artefacts)
+- **CodeRabbit Stage 6:** pending (running at the time of completion summary)
+- **Test count:** 416/0 throughout. New `tests/observations_e2e.sh` per-commit canary covers all eight DONE_WHEN clauses.
+- **e2e:** drive_e2e + gate_e2e green throughout; e2e.sh migrated and green; observations_e2e new and green; pre-existing tasks_e2e Step 16 SIGPIPE unchanged.
+
+### Executive summary
+
+10.06's production observations primitive is the busiest store in their workflow — 275+ rows, ~30 fields, the heart of `/observation:log` / `/observation:triage` / `/observation:investigate`. The bundled v0.1 `stores/observations/` was a minimal 4-field fixture; the L275 POC `stores/observations_1006/` was a stepping-stone. T009 converged them: extended bundled to production shape, retired the POC as a frozen fixture, kept the bundled e2e demo as the canary regression net. Eight production-shaped behaviors captured live as artefacts. This is the marquee 10.06 port and the natural endpoint of the T005→T009 substrate-and-port arc.
+
+### The arc (T005 → T009)
+
+T009 lands on top of four predecessor tasks, each a deliberate substrate step:
+
+- **T005** fixed the drive engine itself (substrate-disagreement bug between `status` and `next-action`, role-mismatch hang, log-visibility behind buffered pipes). Without T005, drive couldn't be trusted to run autonomous workflows on this repo.
+- **T006** closed four POC findings against `observations_1006/`: plain-transition guard enforcement, `list_record`/`list_fk` write/read parity, hyphenated identifier escaping, repeatable list flags. T009's schema leans on three of these directly (guard, list_record, list flags).
+- **T007** ported the 10.06 `gate` store as the first real migration. Set the precedent (Path A: extend bundled in place; e2e.sh as canary; cycle-2 plan-review caught rename blast-radius). T009 reuses the methodology exactly.
+- **T008** added `FieldType::Json` for the `notes` field. Without T008, T009's notes round-trip wouldn't have a structured slot.
+
+T009 = the real port that uses everything previous. Schema declares 7-state lifecycle with 9 transitions; intent_contract record with 15 production-shaped sub-fields per D9 (verified against `intent-contract.md`); evidence record with list_record external_refs; notes Json column; concurrency primitive (locked_by/locked_at/lock_reason) mirroring tasks's claimed_by pattern.
+
+### Deeper dive
+
+Phase 1 was the BIG schema work: 26 new top-level fields, ID format `OBS{:03d}` → `L{:03d}`, replaced `triage`/`contract` records with `intent_contract` per D9 production names (NOT v0.1 names — `done_when` → `acceptance`, `scope_in` → `in_scope`, `scope_out` → `out_of_scope`, `verdict` → `tier_hint`). 9 transitions including the `confirmed → needs_info → confirmed` parking loop with `actor: human` on the resume.
+
+Phase 2 was a partial rewrite (not just rename) of `tests/e2e.sh` — the bundled v0.1 demo. Steps 5/6/7 became the new ratify flow (investigate → update contract ready → confirm), step 12's SQL JOIN updated to `json_extract(o.intent_contract, '$.tier_hint')`. ~168 LOC touched (over the 70-90 plan estimate but coherent — header rewrite +15, step 6 expanded 1→3 commands +8, step 7 Python assertions doubled). All 13 v0.1 demo steps still pass under the new shape; the philosophy thesis ("write fails because contract sub-fields are missing") survives the rewrite.
+
+Phase 3 wrote `tests/observations_e2e.sh` covering all eight DONE_WHEN clauses with state assertions. One unplanned rust deviation (D3 from T007 echoes here): `src/cli/dispatch.rs` needed a small adjustment for `provide_info` verb routing — wait, actually that was already covered by T007's general dispatch fix. Phase 3 was shell-only.
+
+Phase 4 was the canonical-grep sweep: 9 files / ~74 hit-sites enumerated (the planner cycle-2 pass after cycle-1 missed two skill files). Replaced 42 load-bearing operational sites; the rest were framework-internal fixtures (`src/validate/*`, `src/schema/*`) explicitly excluded. Philosophy.md's thesis paragraph kept verbatim ("the human is forced to bottle their context the moment they have it") — only the example field names changed. Three deviations / minors:
+- D-park: schema's `park` transition has `actor: ai_autonomous` (NOT `ai_with_human`). Plan was wrong; executor matched schema.
+- D-tasks-add: `tasks` schema requires `--scope-in`/`--scope-out` unconditionally; executor added them.
+- REVISE-1: `skills/observation:triage/SKILL.md:78` had `--invoker ai_with_human` on a write that requires `--invoker human` (because `approved_by`/`approved_at` carry `actor: human`). One-flag fix.
+
+Phase 5 froze `stores/observations_1006/` in place with a 25-line "FROZEN FIXTURE — DO NOT EDIT" header explaining its T006/T008 POC heritage, redirecting operational work to `stores/observations/`, and explaining retention rationale (regression-fixture reproducibility + documented evolution path).
+
+Phase 6 captured eight artefacts at `/tmp/t009-obs-port/` proving each clause live. The verbatim errors from artefacts 3 (required_when) and 4 (actor:human) are operator-readable proofs of the philosophy thesis.
+
+### Technical things to consider
+
+- **D9 production names are now canonical for any future 10.06 port.** Future tasks porting other 10.06 stores should use the production name verbatim verified against the source-of-truth doc (`research/refs/intent-contract.md` etc.), not the v0.1 bundled approximations.
+- **The 10.06 `observation:triage` skill rewrite (Phase 4)** is now the canonical way to drive the new shape. Operators reading the skill should see the new flow (investigate → update contract ready → confirm) as native, not as a translation of the v0.1 triage flow.
+- **`stores/observations_1006/` is preserved** specifically for the regression-fixture artefacts at `/tmp/t006-p5-smoke/` and `/tmp/t008-notes-smoke/`. Renaming or deleting would break those historical references.
+- **Cross-store referential integrity (clause 8)** is value-only round-trip. T010 (cross-store guards) is the next framework feature for "tasks.complete requires linked observations resolved." Don't read clause 8's pass as a guarantee of integrity.
+- **`actor: human` on `provide_info`** is a real production constraint — the operator answers the gap question, not an AI agent. This is exactly the structural enforcement the philosophy doc names.
+
+### To understand
+
+```bash
+# Verify a 10.06-shaped row round-trips end-to-end:
+cat /tmp/t009-obs-port/artefact-1-full-add.json | jq '.intent_contract'
+
+# See the production triage flow (3 steps, transitions through 3 states):
+cat /tmp/t009-obs-port/artefact-2-triage-flow.txt
+
+# The required_when error — operator-readable proof of philosophy moment 1:
+cat /tmp/t009-obs-port/artefact-3-required-when.txt
+
+# The actor:human error — operator-readable proof of philosophy moment 2:
+cat /tmp/t009-obs-port/artefact-4-actor-human.txt
+
+# Full lifecycle: needs_info parking + AI rejection on resume + human accept:
+cat /tmp/t009-obs-port/artefact-7-needs-info.txt
+
+# Run the per-commit canary anytime:
+bash tests/observations_e2e.sh   # 8/8 PASS
+```
+
+### Lessons learned
+
+- **The cycle-2 plan-review canonical-grep methodology** caught two skill files cycle-1 missed (same regression as T007 cycle 1). It's now a proven pattern: any task that does a rename should run `grep -rn` across `*.md`/`*.sh`/`*.yaml`/`*.rs` excluding `tasks/completed`/`findings`, and pin the count in an AC.
+- **"Mechanical rename" framings hide partial rewrites.** Phase 2's plan said "mechanical rename" but the steps 5-7 of e2e.sh actually demonstrate a flow (the v0.1 triage flow → the new ratify flow), so they need rewriting, not just flag renames. The cycle-2 plan-review caught this and demanded the LOC estimate be honest.
+- **D9 production-name verification is critical.** The v0.1 bundled used `done_when`/`scope_in`/`scope_out`/`verdict`; the production schema uses `acceptance`/`in_scope`/`out_of_scope`/`tier_hint`. Drift would break every downstream skill, doc, and e2e. Locking D9 against the source-of-truth doc was the right move.
+- **Schemas correct themselves.** Two phase deviations (D-park, D-tasks-add) were caught by the executor matching the actual schema rather than blindly following the plan's smoke script. The schemas of T006-T008 are now the spec; plans defer to them.
+- **Path A (extend bundled in place) keeps paying off.** T007 set the precedent; T009 reused the methodology with confidence. The `tests/e2e.sh` canary catches regressions for free — beats maintaining parallel POC schemas indefinitely.
+- **The arc closes here.** T005→T009 is the philosophy validated end-to-end: substrate fixes (T005), POC-finding closures (T006), first port (T007), foundation for big port (T008), big port (T009). Every clause of the philosophy doc is now demonstrated live against a production-shaped 10.06 store. Future work (T010 cross-store guards, T011 cosmetic, T012 pi-ask-user) builds on this foundation but doesn't change the arc's shape.
