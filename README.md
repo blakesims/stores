@@ -168,9 +168,11 @@ Add `--json` for a JSON array.
 
 ```bash
 stores gate add --type decision \
-    --question "Soft or hard delete on cleanup?" \
+    --one-liner "Soft or hard delete on cleanup?" \
     --options "soft|hard" \
-    --task-ref OBS001
+    --task-ref OBS001 \
+    --filed-by quickstart \
+    --source dev
 ```
 
 **Step 10** — Answer the gate as a human. The `answer` field carries `actor: human`; `--invoker human` satisfies the constraint.
@@ -183,8 +185,10 @@ stores gate answer G001 --answer hard --invoker human
 
 ```bash
 CLAUDECODE=1 stores gate add --type decision \
-    --question "Actor check demo gate" \
-    --options "yes|no"
+    --one-liner "Actor check demo gate" \
+    --options "yes|no" \
+    --filed-by quickstart \
+    --source dev
 ```
 
 This returns `G002`. Now attempt to answer without `--invoker`:

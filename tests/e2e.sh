@@ -11,11 +11,11 @@
 #         --scope-in "backend handler" --scope-out "frontend"              → succeeds
 #   7.  stores observations show OBS001                                       → entry with triage + contract
 #   8.  stores observations list                                            → all entries
-#   9.  stores gate add --type decision --question "Soft or hard delete on cleanup?" \
+#   9.  stores gate add --type decision --one-liner "Soft or hard delete on cleanup?" \
 #         --options "soft|hard" --task-ref OBS001                            → G001
 #   10. stores gate answer G001 --answer hard --invoker human              → succeeds
 #   11. CLAUDECODE=1 stores gate add --type decision \
-#         --question "Actor check demo gate" --options "yes|no"            → G002 (step 11a: fresh pending gate)
+#         --one-liner "Actor check demo gate" --options "yes|no"            → G002 (step 11a: fresh pending gate)
 #       CLAUDECODE=1 stores gate answer G002 --answer hard                 → fails (actor-mismatch)
 #   12. sqlite3 .stores/db.sqlite "select o.display_id, o.status,
 #         json_extract(o.triage,'$.verdict'), g.display_id
@@ -136,9 +136,11 @@ pass "list shows OBS001"
 # ---------------------------------------------------------------------------
 echo "--- Step 9: stores gate add → G001"
 GATE_OUT=$(stores gate add --type decision \
-    --question "Soft or hard delete on cleanup?" \
+    --one-liner "Soft or hard delete on cleanup?" \
     --options "soft|hard" \
-    --task-ref OBS001)
+    --task-ref OBS001 \
+    --filed-by e2e-test \
+    --source dev)
 [[ "$GATE_OUT" == "G001" ]] || fail "expected G001, got: $GATE_OUT"
 pass "gate add returned G001 with task-ref OBS001"
 
@@ -149,9 +151,11 @@ pass "gate add returned G001 with task-ref OBS001"
 # ---------------------------------------------------------------------------
 echo "--- Step 9b: gate add as human invoker (no CLAUDECODE, no --invoker flag)"
 GATE_HUMAN_OUT=$(stores gate add --type decision \
-    --question "Human-filed gate test" \
+    --one-liner "Human-filed gate test" \
     --options "yes|no" \
-    --task-ref OBS001)
+    --task-ref OBS001 \
+    --filed-by e2e-test \
+    --source dev)
 [[ "$GATE_HUMAN_OUT" == "G002" ]] || fail "expected G002 from human gate add, got: $GATE_HUMAN_OUT"
 pass "human invoker gate add succeeded (no actor-mismatch error)"
 
@@ -168,8 +172,10 @@ pass "gate answer G001 succeeded with --invoker human"
 # ---------------------------------------------------------------------------
 echo "--- Step 11: actor-mismatch rejection (CLAUDECODE=1, no --invoker)"
 GATE3_OUT=$(CLAUDECODE=1 stores gate add --type decision \
-    --question "Actor check demo gate" \
-    --options "yes|no")
+    --one-liner "Actor check demo gate" \
+    --options "yes|no" \
+    --filed-by e2e-test \
+    --source dev)
 [[ "$GATE3_OUT" == "G003" ]] || fail "expected G003, got: $GATE3_OUT"
 
 ACTOR_ERR=$(CLAUDECODE=1 stores gate answer G003 --answer hard 2>&1) && fail "expected non-zero exit for actor mismatch" || true

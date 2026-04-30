@@ -76,9 +76,11 @@ File a gate decision and BLOCK rather than guessing:
 ```bash
 stores gate add \
     --type decision \
-    --question "<the question>" \
+    --one-liner "<the question>" \
     --options "<a|b|c>" \
     --task-ref <observation-display-id> \
+    --filed-by observation:triage \
+    --source converge \
     --invoker ai_with_human
 ```
 
