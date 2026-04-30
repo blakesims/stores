@@ -391,7 +391,7 @@ After Issues 1-3 are resolved:
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
-- **Commit SHA:** (filled after commit)
+- **Commit SHA:** 367fca4
 - **Files modified:** `stores/observations/schema.yaml`
 
 **Summary:**
