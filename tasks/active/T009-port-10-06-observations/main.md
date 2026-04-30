@@ -1,9 +1,9 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (Phase 3 code review — PASS; routing to executor for Phase 4)
+- **Last Updated:** 2026-04-30 (Phase 4 code review — REVISE-minor; routing back to executor for one-flag fix)
 - **Blocked Reason:** —
 
 ## Task
@@ -628,7 +628,69 @@ After Issues 1-3 are resolved:
 
 ---
 
-### Phase 4 — Live-paths sweep (docs + skills + schema_show fixture)
+### Phase 4 Code Review — Live-paths sweep
+- **Reviewer:** code-reviewer agent
+- **Date:** 2026-04-30
+- **Commit reviewed:** `b1bb6d5` ("feat(T009-P4): rename sweep across docs + skills + schema_show fixture")
+- **Gate:** **REVISE-minor**
+
+**Verification against ACs (Phase 4):**
+
+| AC | Status | Notes |
+|----|--------|-------|
+| Pre-phase canonical grep recorded; reconciled against load-bearing/skip lists | ✓ | Documented in commit message + execution log |
+| Post-update grep returns zero non-historical, non-false-positive load-bearing hits | ✓ | All remaining hits in `src/validate/*`, `src/schema/*`, `src/handlers/schema_show.rs` fixture body, `tests/e2e.sh:254` comment — all framework-internal or commentary, listed in plan's "Files explicitly NOT modified" section. Executor's documented deviation (plan's grep filter spec didn't list these explicitly, but plan body did) is on-spec; not a finding |
+| `cargo test --all` green | ✓ | 416/0 PASS re-run during review (414 unit + 2 integration) |
+| Skills are executable instructions (copy-paste works) | **✗** | See Finding 1. `observation:triage/SKILL.md` line 78 has `--invoker ai_with_human` for the `update` command that writes `--approved-by` and `--approved-at` (both `actor: human`). Schema rejects this — copy-paste fails with `actor 'human'; invoker is 'ai_with_human'` on `approved_by` and `approved_at` |
+
+**Tests re-run during review:**
+- `cargo test --all` — 416/0 PASS
+- `bash tests/e2e.sh` — EXIT=0; 13/13 PASS
+- `bash tests/observations_e2e.sh` — EXIT=0; 8/8 DONE_WHEN clauses verified
+- `bash tests/gate_e2e.sh` — PASS (6/6 clauses)
+- `bash tests/drive_e2e.sh` — PASS (AC7.1 + AC7.1b)
+
+**Philosophy thesis preservation (R6):**
+- ✓ Verified `docs/philosophy.md:23` directly. Thesis sentence "The human is forced to bottle their context the moment they have it." is verbatim. Example field names migrated correctly: `triage.verdict == 'T3'` → `intent_contract.contract_state == 'ready'`; `done_when`/`scope_in`/`scope_out` → `objective`/`acceptance`/`in_scope`/`out_of_scope`/`tier_hint`/`approved_by`/`approved_at`. The "Downstream, an AI drains a queue of T3 items..." paragraph remains coherent because `tier_hint=T3` is a real production value. R6 risk averted.
+
+**Out-of-scope discipline:**
+- `git show b1bb6d5 --stat` confirms only 7 files touched: 6 markdown files + `src/handlers/schema_show.rs` (fixture only, +/-2 lines mechanical) + `tasks/active/T009-port-10-06-observations/main.md`. **schema_show.rs diff is fixture-only** (the const `OBS_SCHEMA` literal `id_format` field and a single `assert_eq!` line). No handler logic touched.
+- Zero changes to `stores/*/schema.yaml`, zero changes to `tests/*.sh`, zero `src/` Rust logic changes.
+
+**Finding 1 (REVISE-minor): Skill copy-paste fails on actor:human enforcement.**
+
+`skills/observation:triage/SKILL.md` lines 67-78 documents the update step as:
+
+```bash
+stores observations update <id> \
+    --contract-state ready \
+    --objective "..." \
+    [...] \
+    --approved-by <human-name> \
+    --approved-at <YYYY-MM-DD> \
+    --invoker ai_with_human    # ← BUG
+```
+
+But Phase 1 schema lines 317 and 323 set `actor: human` on `approved_by` and `approved_at`. Per `src/validate/actor.rs:84`, `Actor::Human` requires `invoker == Actor::Human`; `ai_with_human` is NOT sufficient. Reproduced live in a fresh tempdir: error is
+
+```
+- intent_contract.approved_at: field 'intent_contract.approved_at' requires actor 'human'; invoker is 'ai_with_human'
+- intent_contract.approved_by: field 'intent_contract.approved_by' requires actor 'human'; invoker is 'ai_with_human'
+```
+
+Plan ambiguity contributed: cycle-2 plan body line 209 says `"--invoker ai_with_human" advice survives` — but the plan was written before Phase 1 confirmed `actor: human` on `approved_by`/`approved_at`. The reference docs got it right: both `README.md:152-162` and `stores/observations/README.md:71-80` use `--invoker human` for the same update command. Only the skill carries the regression.
+
+**Fix:** Change `--invoker ai_with_human` → `--invoker human` on line 78 of `skills/observation:triage/SKILL.md`. The investigate step (line 65) and confirm step (line 81) can stay `ai_with_human` (those transitions are `actor: ai_with_human`). Single-flag swap; ~1 LOC. Verifiable by repeating the tempdir copy-paste check and watching it succeed.
+
+This is exactly the R1 risk class flagged in the plan ("a careless executor could leave the old `--verdict T3` example in") — not the same example, but the same failure mode: skill ships a command that doesn't run as written. Phase 6's "skills hand-cross-check" AC would catch this; better to fix here than push it to Phase 6.
+
+**Decision:** REVISE-minor. Phase 4 substantially complete: philosophy thesis preserved, canonical sweep clean, all 6 marquee files updated coherently, no regressions, no `src/` logic touched, schema_show.rs fixture-only. One operator-facing skill bug in the load-bearing T3-path block — the marquee skill rewrite of Phase 4 — needs a one-flag fix.
+
+**Routing:** CODE_REVIEW → EXECUTING_PHASE_4 (fix `skills/observation:triage/SKILL.md:78` only; everything else passed).
+
+---
+
+### Phase 4 — Live-paths sweep (docs + skills + schema_show fixture) [Execution Summary, original]
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
