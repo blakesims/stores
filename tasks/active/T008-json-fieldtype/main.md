@@ -261,7 +261,7 @@ Status: PLAN_REVIEW → READY.
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
-- **Commit SHA:** (see below)
+- **Commit SHA:** 22eeb72
 - **Files modified:**
   - `src/schema/mod.rs` — added `Json` variant to `FieldType` enum; added `"json"` arm in `resolve_field_type` Scalar branch; updated unknown-type error string to include `json`; added nested-Json rejection in `raw_to_field` (post-resolve walk of sub-fields); added 4 unit tests.
   - `src/codegen/ddl.rs` — added `FieldType::Json` to both the `scalar_col_def` None arm and the `json_defs` TEXT arm in `ddl_for`; updated `ddl_json_columns_are_text` test; updated `ddl_snapshot` expected string.
