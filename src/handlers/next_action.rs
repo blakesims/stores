@@ -94,7 +94,7 @@ pub(crate) fn compute(
     let claimed_at = entry.get("claimed_at").cloned().unwrap_or(Value::Null);
     let blocked_reason = entry.get("blocked_reason").cloned().unwrap_or(Value::Null);
 
-    let is_blocked = status == "blocked";
+    let is_blocked = crate::handlers::is_blocked(&status, blocked_reason.as_str());
     let next_agent = if is_blocked {
         None
     } else {
@@ -342,6 +342,73 @@ workflow:
         let v = serde_json::to_value(&out).unwrap();
         assert_eq!(v["blocked"], json!(true));
         assert_eq!(v["next_agent"], Value::Null);
+    }
+
+    // Bug 1 / T005-P1: blocked_reason shapes — status drives the predicate
+    //
+    // Parametric over blocked_reason ∈ {NULL, "", "real reason"} × status ∈
+    // {"blocked", "executing"}.  The predicate must track status, never reason.
+    //
+    // Note: wf_schema() does not declare blocked_reason as a schema field, so we
+    // add the column via ALTER TABLE after DDL setup, then UPDATE after insert
+    // (same pattern as drive.rs:1118-1121).
+    #[test]
+    fn next_action_blocked_reason_shapes() {
+        let schema = wf_schema();
+        let (_dir, conn) = open_db_with_schema(&schema);
+
+        // Add blocked_reason column (not in wf_schema() fields, so DDL omits it).
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN blocked_reason TEXT",
+            schema.name
+        ))
+        .unwrap();
+
+        // Insert rows for each combination.
+        // reason shapes: NULL, "", "real reason"
+        let reason_shapes: &[(&str, Option<&str>)] = &[
+            ("null",   None),
+            ("empty",  Some("")),
+            ("real",   Some("real reason")),
+        ];
+
+        for (label, reason) in reason_shapes {
+            // --- status = "executing" → blocked must be false ---
+            let exec_id = format!("WF_{label}_exec");
+            insert_wf_row(&conn, &schema, &exec_id, "executing", 1, 1);
+            if let Some(r) = reason {
+                conn.execute(
+                    &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", schema.name),
+                    rusqlite::params![r, exec_id],
+                )
+                .unwrap();
+            }
+
+            let out = compute(&schema, &conn, &exec_id).unwrap();
+            assert!(
+                !out.blocked,
+                "status=executing, reason={label} → blocked must be false; got blocked={}",
+                out.blocked
+            );
+
+            // --- status = "blocked" → blocked must be true ---
+            let blk_id = format!("WF_{label}_blk");
+            insert_wf_row(&conn, &schema, &blk_id, "blocked", 1, 1);
+            if let Some(r) = reason {
+                conn.execute(
+                    &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", schema.name),
+                    rusqlite::params![r, blk_id],
+                )
+                .unwrap();
+            }
+
+            let out = compute(&schema, &conn, &blk_id).unwrap();
+            assert!(
+                out.blocked,
+                "status=blocked, reason={label} → blocked must be true; got blocked={}",
+                out.blocked
+            );
+        }
     }
 
     // AC4.7: non-workflow schema → compute returns error naming the store

@@ -157,7 +157,7 @@ pub fn format_task_line(task: &TaskState) -> String {
         None => "-".to_string(),
     };
     let next = next_from_status(&task.status);
-    let blocked = task.blocked_reason.is_some() || task.status == "blocked";
+    let blocked = crate::handlers::is_blocked(&task.status, task.blocked_reason.as_deref());
     format!(
         "{id} status={status} phase={phase} cycle={cycle} next={next} blocked={blocked}",
         id = task.display_id,
@@ -480,6 +480,68 @@ mod tests {
 
         assert!(frame.contains("status=blocked"), "frame should contain status=blocked: {frame}");
         assert!(frame.contains("blocked=true"), "frame should contain blocked=true: {frame}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug 1 / T005-P1: is_blocked() helper — status drives the predicate
+    // -----------------------------------------------------------------------
+
+    /// status="executing", blocked_reason=None → blocked=false
+    #[test]
+    fn blocked_helper_null_reason() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T010", "executing", Some(1), Some(1), None, Some(2));
+        let task = fetch_task(&conn, "T010").unwrap();
+        let line = format_task_line(&task);
+        assert!(
+            line.contains("blocked=false"),
+            "null reason + status=executing → blocked=false: {line}"
+        );
+    }
+
+    /// status="executing", blocked_reason=Some("") → blocked=false
+    #[test]
+    fn blocked_helper_empty_reason() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T011", "executing", Some(1), Some(1), Some(""), Some(2));
+        let task = fetch_task(&conn, "T011").unwrap();
+        let line = format_task_line(&task);
+        assert!(
+            line.contains("blocked=false"),
+            "empty-string reason + status=executing → blocked=false: {line}"
+        );
+    }
+
+    /// status="executing", blocked_reason=Some("real reason") → blocked=false
+    /// (status-only predicate: reason is a description, not the gate)
+    #[test]
+    fn blocked_helper_real_reason() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T012", "executing", Some(1), Some(1), Some("real reason"), Some(2));
+        let task = fetch_task(&conn, "T012").unwrap();
+        let line = format_task_line(&task);
+        assert!(
+            line.contains("blocked=false"),
+            "real reason + status=executing → blocked=false (status drives): {line}"
+        );
+    }
+
+    /// status="blocked" × all three reason shapes → blocked=true for all three
+    #[test]
+    fn blocked_helper_status_blocked_all_reasons() {
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T013", "blocked", None, None, None, None);
+        insert_task(&conn, "T014", "blocked", None, None, Some(""), None);
+        insert_task(&conn, "T015", "blocked", None, None, Some("real reason"), None);
+
+        for id in &["T013", "T014", "T015"] {
+            let task = fetch_task(&conn, id).unwrap();
+            let line = format_task_line(&task);
+            assert!(
+                line.contains("blocked=true"),
+                "status=blocked → blocked=true regardless of reason (id={id}): {line}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
