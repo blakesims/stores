@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -485,6 +485,34 @@ Exit non-zero ✓; field name (`evidence.external_refs`) named ✓; "JSON array"
 **Minor 1 from cycle-1 (required-path wording polish) — IMPLICITLY CLOSED.** Required-field path now also surfaces "value must be a JSON array, got string ..." (since the type-shape check fires before the required-rule does, short-circuiting it). Both required and optional cases use the unified enriched message. The `list_record_bad_json_returns_validator_error` test now also asserts `msg.contains("array")`, pinning the new wording.
 
 **Routing:** Phase 2 PASS → Status `CODE_REVIEW` → `EXECUTING_PHASE_3` for Finding C (DDL identifier escaping for hyphenated store names).
+
+---
+
+### Phase 3 — Finding C: DDL identifier escaping for hyphenated store names
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Completed:** 2026-04-30
+- **Commit SHA:** (see below — set after commit)
+- **Files modified:**
+  - `src/codegen/ddl.rs` — added `pub(crate) fn quote_ident(name: &str) -> String` helper; applied at CREATE TABLE site (site 1); updated `ddl_snapshot` test (now expects `"kitchen_sink"` quoted); added 4 new tests: `quote_ident_plain`, `quote_ident_hyphenated`, `quote_ident_escapes_internal_double_quote`, `ddl_hyphenated_name_accepted_by_sqlite`
+  - `src/handlers/add.rs` — imported `quote_ident`; applied at INSERT (site 2) and UPDATE display_id (site 3); added `HYPHEN_SCHEMA` const + `hyphen_schema_and_conn`/`build_add_cmd_for`/`build_verb_cmd_for` helpers + `hyphenated_store_name_crud_round_trip` trap-test
+  - `src/handlers/row.rs` — imported `quote_ident`; applied at SELECT FROM read_row (site 4)
+  - `src/handlers/list.rs` — imported `quote_ident`; applied at SELECT FROM (site 5)
+  - `src/handlers/transition.rs` — imported `quote_ident`; applied at UPDATE in `execute_transition_write` (site 6)
+  - `src/handlers/update.rs` — imported `quote_ident`; applied at UPDATE (site 7)
+  - `src/handlers/submit.rs` — imported `quote_ident`; quoted inside `acquire_lock` (sites 8-9: UPDATE + SELECT), `release_lock` (site 10: UPDATE), `write_status_and_fields` (site 11: UPDATE)
+  - `src/handlers/drive.rs` — imported `quote_ident`; applied at auto-pick SELECT (site 12), INSERT test scaffold (site 13), UPDATE blocked_reason test fixture (site 14)
+  - `src/handlers/next_action.rs` — imported `quote_ident` (inside test module only); applied at INSERT test scaffold (site 15), two UPDATE blocked_reason test fixtures (sites 16-17; `replace_all` caught both identical strings)
+  - `tests/fixtures/obs-test-1006/schema.yaml` — new minimal fixture schema with `name: obs-test-1006`
+  - `tasks/active/T006-substrate-cleanup-poc/main.md` — this log
+- **Interpolation sites updated:** 17 of 17 (matches plan audit; grep confirms same 17 before fix)
+- **Hyphenated CRUD test outcome:** `hyphenated_store_name_crud_round_trip` PASSES — add, read_row, list, update, transition all succeed against `obs-test-1006`; no SQL syntax errors; status transitions from `open` → `reviewed`
+- **Test count delta:** 388 → 395 (binary suite) + 2 (integration suite) = 395+2 total. New tests: `quote_ident_plain`, `quote_ident_hyphenated`, `quote_ident_escapes_internal_double_quote`, `ddl_hyphenated_name_accepted_by_sqlite`, `hyphenated_store_name_crud_round_trip` (5 new); `ddl_snapshot` updated (counted as existing)
+- **`ddl_snapshot` update:** quoted identifier is semantically identical to bare identifier in SQLite; snapshot now expects `CREATE TABLE IF NOT EXISTS "kitchen_sink" (...)`. All other snapshot assertions (column names, types, CHECK constraints) unchanged.
+- **e2e regressions:** none introduced. `drive_e2e.sh` PASS. `e2e.sh` Step 6 (CLAUDECODE inheritance) and `tasks_e2e.sh` Step 16 (SIGPIPE/pipefail) confirmed pre-existing per stash comparison.
+- **Notes:**
+  - `submit.rs` acquire/release/write functions receive `table: &str` (raw name); quoting done inside each function via `let qtable = quote_ident(table)` — cleaner than quoting at each call site.
+  - `next_action.rs` import is test-only; moved to `mod tests` block to suppress `unused_import` warning (the three uses are all inside `#[cfg(test)]`).
 
 ---
 

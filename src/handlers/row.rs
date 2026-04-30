@@ -5,6 +5,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde_json::Value;
 
+use crate::codegen::ddl::quote_ident;
 use crate::schema::{FieldType, Schema};
 use crate::validate::EntryMap;
 
@@ -199,7 +200,7 @@ pub fn read_row(
     let col_list = cols.join(", ");
     let sql = format!(
         "SELECT {col_list} FROM {table} WHERE display_id = ?1",
-        table = schema.name
+        table = quote_ident(&schema.name)
     );
 
     let row_data: Result<(i64, BTreeMap<String, Value>), _> = conn.query_row(

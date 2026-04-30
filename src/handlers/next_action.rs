@@ -181,6 +181,7 @@ fn json_value_to_text(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::ddl::quote_ident;
     use crate::db;
     use crate::schema::Schema;
     use serde_json::json;
@@ -288,7 +289,7 @@ workflow:
         let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            schema.name,
+            quote_ident(&schema.name),
             cols.join(", "),
             placeholders.join(", ")
         );
@@ -378,7 +379,7 @@ workflow:
             insert_wf_row(&conn, &schema, &exec_id, "executing", 1, 1);
             if let Some(r) = reason {
                 conn.execute(
-                    &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", schema.name),
+                    &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", quote_ident(&schema.name)),
                     rusqlite::params![r, exec_id],
                 )
                 .unwrap();
@@ -396,7 +397,7 @@ workflow:
             insert_wf_row(&conn, &schema, &blk_id, "blocked", 1, 1);
             if let Some(r) = reason {
                 conn.execute(
-                    &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", schema.name),
+                    &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", quote_ident(&schema.name)),
                     rusqlite::params![r, blk_id],
                 )
                 .unwrap();

@@ -4,6 +4,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use crate::codegen::ddl::quote_ident;
 use crate::schema::{actor::Actor, FieldType, Schema};
 use crate::output;
 
@@ -110,7 +111,7 @@ pub fn run(
 
     let sql = format!(
         "SELECT {col_list} FROM {}{}{}{} ",
-        schema.name, where_str, order_str, limit_str
+        quote_ident(&schema.name), where_str, order_str, limit_str
     );
 
     // ---------- execute ----------

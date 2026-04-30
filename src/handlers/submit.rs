@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+use crate::codegen::ddl::quote_ident;
 use crate::schema::{actor::Actor, Schema};
 use crate::validate::{self, EntryMap, Op};
 use crate::validate::expr_eval::eval;
@@ -76,9 +77,10 @@ fn acquire_lock(
 ) -> Result<()> {
     let now = now_iso8601();
     let five_min_ago = iso_subtract_seconds(300);
+    let qtable = quote_ident(table);
 
     let sql = format!(
-        "UPDATE {table} SET claimed_by = ?1, claimed_at = ?2 \
+        "UPDATE {qtable} SET claimed_by = ?1, claimed_at = ?2 \
          WHERE display_id = ?3 AND (claimed_by IS NULL OR claimed_at < ?4)"
     );
 
@@ -91,7 +93,7 @@ fn acquire_lock(
 
     if rows_changed == 0 {
         let lock_info: Result<(Option<String>, Option<String>), _> = tx.query_row(
-            &format!("SELECT claimed_by, claimed_at FROM {table} WHERE display_id = ?1"),
+            &format!("SELECT claimed_by, claimed_at FROM {qtable} WHERE display_id = ?1"),
             rusqlite::params![display_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         );
@@ -108,8 +110,9 @@ fn acquire_lock(
 
 /// Release the row lock (final action inside tx, per 5.3 step 10).
 fn release_lock(tx: &Transaction, table: &str, display_id: &str) -> Result<()> {
+    let qtable = quote_ident(table);
     let sql = format!(
-        "UPDATE {table} SET claimed_by = NULL, claimed_at = NULL WHERE display_id = ?1"
+        "UPDATE {qtable} SET claimed_by = NULL, claimed_at = NULL WHERE display_id = ?1"
     );
     tx.execute(&sql, rusqlite::params![display_id])
         .context("release lock")?;
@@ -214,7 +217,8 @@ pub(crate) fn write_status_and_fields(
     sql_values.push(rusqlite::types::Value::Integer(row_id));
 
     let set_clause = set_parts.join(", ");
-    let sql = format!("UPDATE {table} SET {set_clause} WHERE id = ?{where_idx}");
+    let qtable = quote_ident(table);
+    let sql = format!("UPDATE {qtable} SET {set_clause} WHERE id = ?{where_idx}");
 
     tx.execute(&sql, rusqlite::params_from_iter(sql_values.iter()))
         .context("write_status_and_fields")?;

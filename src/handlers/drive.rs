@@ -43,6 +43,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::cli::agents::{BUNDLED_AGENT_SCHEMAS, BUNDLED_AGENTS};
+use crate::codegen::ddl::quote_ident;
 use crate::cli::dynamic::BUNDLED_STORE_TEMPLATES;
 use crate::db;
 use crate::handlers::next_action::compute as compute_next_action;
@@ -241,7 +242,7 @@ pub(crate) fn resolve_task_id(
 
     // AC3.2: auto-selection query — non-terminal + not live-claimed, created_at ASC.
     let lock_expiry = iso_subtract_secs(LOCK_WINDOW_SECS);
-    let table = &schema.name;
+    let table = quote_ident(&schema.name);
     let sql = format!(
         "SELECT display_id FROM {table} \
          WHERE status NOT IN ('complete', 'blocked') \
@@ -880,7 +881,7 @@ mod tests {
                  created_by, updated_by, title, slug, current_phase, current_cycle, \
                  plan, contract, cycles, plan_review_log, claimed_by, claimed_at) \
                  VALUES (?1,?2,?3,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                name = schema.name
+                name = quote_ident(&schema.name)
             ),
             rusqlite::params![
                 display_id,
@@ -1171,7 +1172,7 @@ mod tests {
         );
         // Write a blocked_reason
         conn.execute(
-            &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", schema.name),
+            &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", quote_ident(&schema.name)),
             rusqlite::params!["test block reason", "T001"],
         ).unwrap();
 

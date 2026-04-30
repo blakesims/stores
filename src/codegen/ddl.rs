@@ -1,5 +1,12 @@
 use crate::schema::{FieldType, Schema};
 
+/// Quote a SQL identifier using double-quote delimiters (SQL standard).
+/// Any internal `"` characters are escaped by doubling them.
+/// This makes table names like `observations-1006` safe to use in DDL/DML.
+pub(crate) fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// Reserved columns prepended to every generated table.
 /// Order is fixed for determinism.
 const RESERVED_COLUMNS: &[&str] = &[
@@ -57,7 +64,7 @@ fn scalar_col_def(field_name: &str, ty: &FieldType) -> Option<String> {
 /// in schema order, then JSON columns for List/Record fields in schema order.
 /// This produces deterministic SQL for the same input.
 pub fn ddl_for(schema: &Schema) -> String {
-    let table = &schema.name;
+    let table = quote_ident(&schema.name);
 
     // Collect scalar column defs (Text, Integer, Bool, Timestamp, DisplayId, Enum)
     let mut scalar_defs: Vec<String> = Vec::new();
@@ -165,7 +172,7 @@ mod tests {
         let schema = Schema::from_yaml(ALL_TYPES_FIXTURE).unwrap();
         let ddl = ddl_for(&schema);
         let expected = concat!(
-            "CREATE TABLE IF NOT EXISTS kitchen_sink (\n",
+            "CREATE TABLE IF NOT EXISTS \"kitchen_sink\" (\n",
             "    id INTEGER PRIMARY KEY AUTOINCREMENT,\n",
             "    display_id TEXT UNIQUE NOT NULL,\n",
             "    status TEXT NOT NULL,\n",
@@ -232,5 +239,49 @@ fields:
         // Specifically check that claimed_by is TEXT (not modified by actor attribute)
         assert!(ddl_fw.contains("claimed_by TEXT"), "claimed_by must be TEXT: {ddl_fw}");
         assert!(ddl_fw.contains("current_phase INTEGER"), "current_phase must be INTEGER: {ddl_fw}");
+    }
+
+    // ---- quote_ident tests (Phase 3 / Finding C) ----
+
+    #[test]
+    fn quote_ident_plain() {
+        assert_eq!(quote_ident("observations"), "\"observations\"");
+    }
+
+    #[test]
+    fn quote_ident_hyphenated() {
+        assert_eq!(quote_ident("observations-1006"), "\"observations-1006\"");
+    }
+
+    #[test]
+    fn quote_ident_escapes_internal_double_quote() {
+        assert_eq!(quote_ident("foo\"bar"), "\"foo\"\"bar\"");
+    }
+
+    /// AC Phase 3: DDL for a hyphenated store name produces a quoted identifier
+    /// and is accepted by SQLite.
+    #[test]
+    fn ddl_hyphenated_name_accepted_by_sqlite() {
+        let yaml = r#"
+name: obs-test-1006
+id_format: "O{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: summary
+    type: text
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let ddl = ddl_for(&schema);
+        assert!(
+            ddl.contains("CREATE TABLE IF NOT EXISTS \"obs-test-1006\""),
+            "expected quoted hyphenated identifier in DDL; got:\n{ddl}"
+        );
+
+        // Verify SQLite accepts the DDL.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(&ddl)
+            .expect("SQLite must accept DDL with quoted hyphenated table name");
     }
 }

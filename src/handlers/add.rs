@@ -3,6 +3,7 @@ use clap::ArgMatches;
 use rusqlite::Connection;
 use serde_json::Value;
 
+use crate::codegen::ddl::quote_ident;
 use crate::id_format;
 use crate::schema::{actor::Actor, FieldType, Schema};
 use crate::validate::{self, Op};
@@ -127,7 +128,7 @@ pub fn run(
 
     let col_list = col_names.join(", ");
     let ph_list = placeholders.join(", ");
-    let sql = format!("INSERT INTO {} ({col_list}) VALUES ({ph_list})", schema.name);
+    let sql = format!("INSERT INTO {} ({col_list}) VALUES ({ph_list})", quote_ident(&schema.name));
 
     // Execute inside a transaction; render display_id from last_insert_rowid
     let tx = conn.unchecked_transaction()?;
@@ -138,7 +139,7 @@ pub fn run(
     let rowid = tx.last_insert_rowid();
     let display_id = id_format::render(&schema.id_format, rowid);
     tx.execute(
-        &format!("UPDATE {} SET display_id = ?1 WHERE id = ?2", schema.name),
+        &format!("UPDATE {} SET display_id = ?1 WHERE id = ?2", quote_ident(&schema.name)),
         rusqlite::params![display_id, rowid],
     )?;
     tx.commit()?;
@@ -393,6 +394,145 @@ fields:
         assert!(
             msg.contains("JSON array") || msg.contains("json array") || msg.contains("array"),
             "error must hint at JSON array requirement; got: {msg}"
+        );
+    }
+
+    // ---- T006 Phase 3: hyphenated store name CRUD round-trip ----
+    //
+    // AC Phase 3 trap-test: install a schema with name `obs-test-1006` and exercise
+    // add / read_row (show) / list / update / transition.  If any of the 17 SQL
+    // interpolation sites was NOT quoted, this test fails on the verb that hits it.
+
+    const HYPHEN_SCHEMA: &str = r#"
+name: obs-test-1006
+id_format: "O{:03d}"
+lifecycle:
+  states: [open, reviewed]
+  initial_state: open
+  transitions:
+    - from: open
+      to: reviewed
+      verb: review
+      actor: human
+fields:
+  - name: summary
+    type: text
+    required: true
+  - name: priority
+    type: enum
+    enum_values: [low, medium, high]
+  - name: tags
+    type:
+      list: text
+"#;
+
+    fn hyphen_schema_and_conn() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(HYPHEN_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    fn build_add_cmd_for(schema: &Schema) -> clap::Command {
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd = clap::Command::new("add");
+        for leaf in &leaves {
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name.clone())
+                    .required(false),
+            );
+        }
+        cmd
+    }
+
+    fn build_verb_cmd_for(schema: &Schema, verb: &'static str) -> clap::Command {
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd = clap::Command::new(verb).arg(
+            clap::Arg::new("display_id").required(true).index(1),
+        );
+        for leaf in &leaves {
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name.clone())
+                    .required(false),
+            );
+        }
+        cmd
+    }
+
+    /// Phase 3 AC trap-test: all CRUD verbs succeed against a store with a hyphenated name.
+    /// Exercises sites: add (INSERT + UPDATE display_id), read_row (SELECT), list (SELECT),
+    /// update (UPDATE), transition (UPDATE).
+    #[test]
+    fn hyphenated_store_name_crud_round_trip() {
+        let (schema, conn) = hyphen_schema_and_conn();
+
+        // 1. add — tests INSERT INTO and UPDATE display_id sites
+        let add_cmd = build_add_cmd_for(&schema);
+        let add_matches = add_cmd.get_matches_from([
+            "add",
+            "--summary", "hyphen store test",
+            "--priority", "high",
+            "--tags", "a|b",
+        ]);
+        run(&schema, &conn, &add_matches, Actor::Human)
+            .expect("add must succeed against hyphenated store name");
+
+        // 2. show (read_row) — tests SELECT FROM site
+        let (_, entry) = crate::handlers::row::read_row(&schema, &conn, "O001")
+            .expect("read_row must succeed against hyphenated store name");
+        assert_eq!(
+            entry.get("summary").and_then(|v| v.as_str()),
+            Some("hyphen store test"),
+            "summary must round-trip"
+        );
+
+        // 3. list — tests SELECT FROM list site
+        let list_cmd = {
+            let mut cmd = clap::Command::new("list");
+            cmd = cmd.arg(clap::Arg::new("status").long("status").required(false));
+            cmd = cmd.arg(clap::Arg::new("limit").long("limit").required(false));
+            cmd = cmd.arg(clap::Arg::new("sort").long("sort").required(false));
+            cmd = cmd.arg(clap::Arg::new("reverse").long("reverse").required(false).action(clap::ArgAction::SetTrue));
+            cmd = cmd.arg(clap::Arg::new("json").long("json").required(false).action(clap::ArgAction::SetTrue));
+            cmd = cmd.arg(clap::Arg::new("since").long("since").required(false));
+            cmd
+        };
+        let list_matches = list_cmd.get_matches_from(["list"]);
+        crate::handlers::list::run(&schema, &conn, &list_matches, Actor::Human)
+            .expect("list must succeed against hyphenated store name");
+
+        // 4. update — tests UPDATE site
+        let update_cmd = build_verb_cmd_for(&schema, "update");
+        let update_matches = update_cmd.get_matches_from([
+            "update", "O001",
+            "--summary", "updated summary",
+        ]);
+        crate::handlers::update::run(&schema, &conn, &update_matches, Actor::Human)
+            .expect("update must succeed against hyphenated store name");
+
+        // Verify update applied
+        let (_, entry2) = crate::handlers::row::read_row(&schema, &conn, "O001").unwrap();
+        assert_eq!(
+            entry2.get("summary").and_then(|v| v.as_str()),
+            Some("updated summary"),
+            "update must persist to the hyphenated store"
+        );
+
+        // 5. transition — tests UPDATE inside execute_transition_write
+        let trans_cmd = build_verb_cmd_for(&schema, "review");
+        let trans_matches = trans_cmd.get_matches_from(["review", "O001"]);
+        crate::handlers::transition::run(&schema, &conn, &trans_matches, Actor::Human, "review")
+            .expect("transition must succeed against hyphenated store name");
+
+        let (_, entry3) = crate::handlers::row::read_row(&schema, &conn, "O001").unwrap();
+        assert_eq!(
+            entry3.get("status").and_then(|v| v.as_str()),
+            Some("reviewed"),
+            "transition must update status in the hyphenated store"
         );
     }
 }

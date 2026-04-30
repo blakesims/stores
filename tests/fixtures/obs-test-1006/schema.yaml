@@ -1,0 +1,20 @@
+name: obs-test-1006
+id_format: "O{:03d}"
+lifecycle:
+  states: [open, reviewed]
+  initial_state: open
+  transitions:
+    - from: open
+      to: reviewed
+      verb: review
+      actor: human
+fields:
+  - name: summary
+    type: text
+    required: true
+  - name: priority
+    type: enum
+    enum_values: [low, medium, high]
+  - name: tags
+    type:
+      list: text

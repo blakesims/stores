@@ -3,6 +3,7 @@ use clap::ArgMatches;
 use rusqlite::Connection;
 use serde_json::Value;
 
+use crate::codegen::ddl::quote_ident;
 use crate::schema::{actor::Actor, FieldType, Schema};
 use crate::validate::{self, Op};
 
@@ -132,7 +133,7 @@ pub fn run(
     let set_clause = set_parts.join(", ");
     let sql = format!(
         "UPDATE {} SET {set_clause} WHERE id = ?{where_param_idx}",
-        schema.name
+        quote_ident(&schema.name)
     );
 
     conn.execute(&sql, rusqlite::params_from_iter(sql_values.iter()))
