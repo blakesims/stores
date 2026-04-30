@@ -462,7 +462,7 @@ Verdict: **justified, not a scope creep**.
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
-- **Commit SHA:** (see below — committed after this log entry)
+- **Commit SHA:** f42caf6
 - **Files modified:**
   - `src/handlers/row.rs` — added `FieldType::Json` to the JSON-deserialise match in `read_row` (lines 256-260); added 2 Phase 4 unit tests: `read_row_json_field_returns_structured_object` (asserts `Value::Object` with nested `k`/`arr` keys), `read_row_json_field_null_cell_returns_null` (asserts `"null"` literal reads back as `Value::Null`).
   - `src/handlers/list.rs` — extended the decode match from `Record | List` to `Record | List | ListRecord | ListFk | Json` (closes pre-existing parity gap); added 2 Phase 4 tests: `list_json_field_decodes_to_structured_value` (Json field → `Value::Object`), `list_list_record_field_decodes_to_structured_value` (ListRecord/ListFk → structured array; parity gap verified closed).
