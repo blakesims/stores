@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_5
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -365,6 +365,29 @@ All five cycle-1 revisions verified. Status advances PLAN_REVIEW → READY.
   - `list_field_mixed_form`: `--in-scope "a|b" --in-scope "c"` → `["a", "b", "c"]` — PASS
 - **Test count delta:** 393 → 396 (+3)
 - **E2e results:** `drive_e2e.sh` PASS; `e2e.sh` Step 6 and `tasks_e2e.sh` Step 16 failures confirmed pre-existing (unchanged from Phases 1–3)
+
+### Phase 5 — Integration smoke: all four enforcement moments
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Completed:** 2026-04-30
+- **Commit SHA:** (see below)
+- **Binary version:** `stores 0.4.1` (rebuilt from `cargo install --path . --features runner-claude-code`)
+- **Smoke dir:** `/tmp/t006-p5-smoke/`
+- **Artefacts:**
+  - `/tmp/t006-p5-smoke/finding-a-ratify-rejected.txt` — Finding A (guard fires on draft contract)
+  - `/tmp/t006-p5-smoke/finding-b-show-json.json` — Finding B (external_refs round-trip)
+  - `/tmp/t006-p5-smoke/finding-c-hyphen-install.txt` — Finding C (hyphenated store install)
+  - `/tmp/t006-p5-smoke/finding-d-repeatable.txt` — Finding D (repeatable list flags)
+  - `/tmp/t006-p5-smoke/finding-e-ratify-success.txt` — Happy-path transition trace
+  - `/tmp/t006-p5-smoke/finding-e-final-state.json` — Final state: `"status": "resolved"`
+- **Per-finding observations:**
+  - **A (guard on draft):** `ratify L001` with `contract_state=draft` → exit=1, error: `no transition from 'open' via 'ratify' (gate None) had its guard satisfied and no unguarded fallback exists`. Diagnostic, non-silent.
+  - **B (external_refs):** `show L001 --json | jq '.evidence.external_refs[0].system'` → `"docker"` (string from structured array, NOT an embedded JSON blob).
+  - **C (hyphen name):** `stores install ./obs-test-hyphen` → `Installed store 'obs-test-hyphen' (table: obs-test-hyphen)`, exit=0. `add` succeeds (X001).
+  - **D (repeatable flags):** repeatable form `["main.py","scripts/"]` = pipe form `["main.py","scripts/"]`; mixed form `["main.py","dev","scripts/"]`.
+  - **E (happy path):** after `update L001 --contract-state ready`, `ratify` succeeds (`open → confirmed`); `start_t2` → `in_progress`; `resolve` → `resolved`. Final `"status": "resolved"` confirmed in `finding-e-final-state.json`.
+- **Test results:** `cargo test --all` 396 passed, 0 failed. `drive_e2e.sh` PASS. `e2e.sh` Step 6 and `tasks_e2e.sh` Step 16 confirmed pre-existing (no new failures).
+- **Zero code changes:** Phase 5 is artefact-only. No `.rs` or `Cargo.toml` changes. Fixture `obs-test-hyphen/schema.yaml` is ephemeral in `/tmp/t006-p5-smoke/`, not committed.
 
 ---
 
