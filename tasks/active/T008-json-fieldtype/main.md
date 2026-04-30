@@ -1,7 +1,7 @@
 # T008: Add `FieldType::Json` for free-shape opaque payloads
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -347,6 +347,48 @@ Verdict: **justified, not a scope creep**.
 3. Executor's "deviation" callout in the Execution Log (schema_show.rs one-liner; post-resolve walk vs. in-`resolve_field_type`) is honest and scoped; no hidden changes.
 
 **Routing:** Status `CODE_REVIEW` → `EXECUTING_PHASE_2`.
+
+### Phase 2 — Write path: `coerce_value` + storage match arms + CLI from-file
+
+- **Verdict:** PASS
+- **Reviewer date:** 2026-04-30
+- **Commit reviewed:** 5450e13
+- **Test count:** 406/0 (baseline 400 → +6 new). `cargo test --all` confirmed locally; final test result line: `406 passed; 0 failed`.
+
+**AC verification**
+
+| AC | Verdict | Evidence |
+|---|---|---|
+| `coerce_value(&Json, '{"k":"v","arr":[1,2]}')` returns `Value::Object` | PASS | `row.rs:311-321` (`coerce_value_json_parses_object`); also array (`coerce_value_json_parses_array` at `:324`) and scalar (`:340`) covered |
+| `coerce_value(&Json, "{not json")` returns `Value::String("{not json")` sentinel | PASS | `row.rs:351-361` — `assert_eq!(result, Value::String(raw.to_string()), ...)`. Exact-match assertion on the sentinel String, not "is some kind of String" |
+| End-to-end `add` with JSON object stores TEXT containing the JSON string | PASS | `add.rs:json_field_write_then_read_round_trips_as_object` queries SQLite directly (`SELECT notes FROM jstore`) and re-parses the stored TEXT — does NOT go through `read_row`. Asserts `parsed["k"] == "v"` and `parsed["arr"] == json!([1,2])` |
+| Json fields get `--<name>-from-file` flag | PASS | `cli/dynamic.rs:633` (transition-verb builder) AND `:708` (`build_leaf_cmd`) BOTH extended to include `FieldType::Json` in `is_text_like`. Decision 4 null-default verified by `json_field_absent_stores_null_literal` (asserts stored value == `"null"`) |
+
+**Specific concerns addressed**
+
+1. **Sentinel detection coverage.** The 4 unit tests in `row.rs` cover object, array, scalar (number 42), and bad-JSON sentinel. The bad-JSON test at `:351-361` asserts `Value::String("{not json".to_string())` via `assert_eq!` — exact-match, not a loose string check. This is the critical regression-trap for Phase 3's validator and it pins the sentinel exactly.
+2. **Storage match consistency.** Verified across all three write-path sites:
+   - `add.rs:95`: `Record(_) | List(_) | ListRecord(_) | ListFk { .. } | Json`
+   - `update.rs:107`: `List(_) | ListRecord(_) | ListFk { .. } | Json` (Record handled separately at `:99` for deep-merge — correct per plan)
+   - `transition.rs:164`: `List(_) | ListRecord(_) | ListFk { .. } | Json` (Record at `:158`)
+   No drift; Json is appended to the same shape that T006 P2 established.
+3. **`is_text_like` both call sites.** Both predicates updated:
+   - `cli/dynamic.rs:633` (transition-verb builder)
+   - `cli/dynamic.rs:708` (`build_leaf_cmd`)
+   Confirmed via `grep -n "FieldType::Json" src/cli/dynamic.rs`. From-file flag is registered for Json fields in BOTH paths.
+4. **No accidental Json-in-`List(_)` addition.** `coerce_value` has its own `FieldType::Json` arm at `row.rs:124-127`, separate from the `List(_)` arm at `:99-106` (which does pipe-split) and from the `ListRecord | ListFk` arm at `:113-118` (which expects array shape). Json is its own arm with `Ok(v) => v` (any shape) — no fallthrough.
+5. **Storage-layer round-trip claim verified.** `json_field_write_then_read_round_trips_as_object` does exactly what the executor described: insert via `Op::Add`, query SQLite directly with `conn.query_row("SELECT notes FROM jstore WHERE display_id = 'J001'", ...)`, then `serde_json::from_str(&stored_notes)` and assert nested keys round-trip. The test does NOT call `read_row`, correctly avoiding Phase 4 scope.
+6. **`read_row` not changed.** Verified at `row.rs:256-259`: the JSON-deserialise match still reads `Record(_) | List(_) | ListRecord(_) | ListFk { .. }` — NO Json. Phase 4 scope preserved as the executor flagged.
+7. **Out-of-scope check.** `git show 5450e13 --stat` lists exactly: `src/cli/dynamic.rs`, `src/handlers/add.rs`, `src/handlers/row.rs`, `src/handlers/transition.rs`, `src/handlers/update.rs`, `tasks/active/T008-json-fieldtype/main.md`. NO touches to `validate/*` (Phase 3), `show.rs` / `list.rs` (Phase 4), `observations_1006/schema.yaml` (Phase 5), or any T005/T006/T007 territory. `list.rs:146` still matches only `Record | List` (unchanged) — Phase 4 will close that parity gap.
+8. **Pre-existing failures unchanged.** `cargo test --all` returns 406/0 cleanly. The documented CLAUDECODE auto-detect failure in `tests/e2e.sh` Step 6 and SIGPIPE pattern in `tests/tasks_e2e.sh` Step 16 are external-shell test issues, not Rust unit/integration tests; no new Rust failures introduced.
+
+**Findings (non-blocking observations)**
+
+1. The integration test name `json_field_write_then_read_round_trips_as_object` is slightly misleading — it does NOT actually exercise a "read" path (which would imply `read_row`). It only verifies the write half of the round-trip via direct SQLite query. The test itself is correct and the body's NOTE comment explicitly documents this. Renaming to `..._stored_text_parses_as_object` would be more accurate but is cosmetic and the executor's existing comment makes the intent clear. Not blocking.
+2. Decision 2's documented limitation (top-level JSON string `'"hello"'` false-flags) is not yet exercised by any test in Phase 2. Per the plan, that regression test was suggested for Phase 3 (validator-layer); the limitation is preserved as documented behaviour by the current `Ok(v) => v` arm at `row.rs:124-127`. Not blocking — Phase 3's responsibility.
+3. The Phase 1 review's "post-resolve walk only catches PARENT.CHILD, not deep-nest chain" observation does not apply to Phase 2; Phase 2 is purely write-path and has no recursion.
+
+**Routing:** Status `CODE_REVIEW` → `EXECUTING_PHASE_3`.
 
 ---
 
