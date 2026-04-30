@@ -1,0 +1,105 @@
+name: observations_1006
+id_format: "L{:03d}"
+scope: worktree
+
+# Lifecycle: a slimmed-down version of the 10.06 observation lifecycle.
+# Skipping `investigating` and `needs_info` for the POC — they're orthogonal
+# to the four enforcement moments we want to demonstrate.
+lifecycle:
+  states: [open, confirmed, in_progress, resolved, wont_fix]
+  initial_state: open
+  transitions:
+    # open → confirmed: ratification.
+    # Guard: contract must be 'ready' before this transition can fire.
+    # Required_when on approved_by/approved_at + actor:human on those sub-fields
+    # means: the row literally cannot reach 'ready' without a human invoker
+    # writing the approval fields.
+    - from: open
+      to: confirmed
+      verb: ratify
+      actor: ai_autonomous
+      guard: "intent_contract.contract_state == 'ready'"
+
+    # T1 inline: open straight to resolved (no confirmed step).
+    - from: open
+      to: resolved
+      verb: resolve_t1
+      actor: ai_with_human
+
+    # T2: confirmed → in_progress (orchestrator about to spawn executor+reviewer).
+    - from: confirmed
+      to: in_progress
+      verb: start_t2
+      actor: ai_autonomous
+      guard: "intent_contract.tier_hint == 'T2'"
+
+    # T3: confirmed → in_progress (escalation to worktree + planner loop).
+    - from: confirmed
+      to: in_progress
+      verb: start_t3
+      actor: ai_autonomous
+      guard: "intent_contract.tier_hint == 'T3'"
+
+    # in_progress → resolved (after subagents APPROVE and orchestrator commits).
+    - from: in_progress
+      to: resolved
+      verb: resolve
+      actor: ai_autonomous
+
+    # Bailout: confirmed → wont_fix.
+    - from: confirmed
+      to: wont_fix
+      verb: wont_fix
+      actor: ai_with_human
+
+fields:
+  - {name: summary, type: text, required: true}
+  - {name: source, type: enum, enum_values: [dashboard, qa, dev, sentry, intake, converge, wrap], required: true}
+  - {name: priority, type: enum, enum_values: [high, normal, low], required: true}
+  - {name: captured_at, type: text, required: true}
+  - {name: contact_id, type: integer}
+  - {name: field_name, type: text}
+  - {name: investigation_note, type: text}
+  - {name: resolution, type: text}
+  - {name: resolved_at, type: text}
+  - {name: task_id, type: text}
+
+  # The intent_contract record — sub-fields gated by contract_state.
+  # This is the marquee required_when test.
+  - name: intent_contract
+    type: record
+    fields:
+      - {name: contract_state, type: enum, enum_values: [draft, ready]}
+      - {name: type, type: enum, enum_values: [work, investigation]}
+      - {name: drafted_by, type: text}
+      - {name: drafted_at, type: timestamp}
+
+      # required_when contract_state == 'ready'
+      - {name: objective, type: text, required_when: "intent_contract.contract_state == 'ready'"}
+      - {name: in_scope, type: {list: text}, required_when: "intent_contract.contract_state == 'ready'"}
+      - {name: out_of_scope, type: {list: text}, required_when: "intent_contract.contract_state == 'ready'"}
+      - {name: acceptance, type: {list: text}, required_when: "intent_contract.contract_state == 'ready'"}
+      - {name: tier_hint, type: enum, enum_values: [T1, T2, T3], required_when: "intent_contract.contract_state == 'ready'"}
+
+      # actor:human + required_when — only humans can ratify.
+      - {name: approved_by, type: text, actor: human, required_when: "intent_contract.contract_state == 'ready'"}
+      - {name: approved_at, type: timestamp, actor: human, required_when: "intent_contract.contract_state == 'ready'"}
+
+      # Optional contract metadata.
+      - {name: touches, type: {list: text}}
+      - {name: affects_capability, type: text}
+      - {name: known_solution, type: text}
+
+  # Evidence record with list_record of external refs (the schema you ratified
+  # in w11-d4-16). Demonstrates record-containing-list_record-of-records.
+  - name: evidence
+    type: record
+    fields:
+      - {name: observed_at, type: timestamp}
+      - {name: env, type: text}
+      - name: external_refs
+        type: list_record
+        fields:
+          - {name: system, type: text, required: true}
+          - {name: kind, type: text, required: true}
+          - {name: id, type: text, required: true}
