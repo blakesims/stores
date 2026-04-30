@@ -6,7 +6,7 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T007 | Port the 10.06 `gate` store — first real migration | High | Plan approved | READY | [main.md](./planning/T007-port-10-06-gate/main.md) |
+| T007 | Port the 10.06 `gate` store — first real migration | High | Phase 1 | EXECUTING_PHASE_1 | [main.md](./active/T007-port-10-06-gate/main.md) |
 
 Next available task id: T008
 
