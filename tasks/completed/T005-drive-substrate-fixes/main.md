@@ -401,4 +401,64 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
 ---
 
 ## Completion
-_Final summary when task is complete._
+
+- **Completed:** 2026-04-30
+- **Commits (code):** `6aa6e12` (P1), `2acc3b9` (P2), `c425e32` (P3); P4 was artefact-only
+- **CodeRabbit Stage 6:** ran twice on `--base 9b0dc66`, both clean (`No findings ✔`)
+- **Test count delta:** +6 tests (4 helper tests in `status.rs`, 1 parametric in `next_action.rs`, 2 drive_loop integration tests in `drive.rs`); 0 → 0 failures across `cargo test --all` (375 → 377 passing) and `tests/drive_e2e.sh` green throughout
+
+### Executive summary
+
+Three substrate bugs in `stores tasks drive` were surfaced when the smoke test on `/tmp/t003-smoke` hung at 8m+ idle. Forensic audit identified: (1) `status.rs` and `next_action.rs` disagreed on `blocked` because the former did `Option::is_some()` over an empty-string `blocked_reason`; (2) when an agent emitted an envelope role drive didn't expect (e.g. `guide` while `executing`), the un-routable case was not surfaced clearly; (3) drive's per-spawn `eprintln!` progress was buffered behind `tail -N` wrappers, making operator-side progress invisible. All three are fixed: a shared `is_blocked()` helper at `src/handlers/mod.rs` is now the single source of truth for the predicate; `parse_envelope` peeks the candidate's `role` before deserialise and bails with `"envelope role mismatch: expected {x}, received {y}, session_id {z}"` on disagreement; and explicit `stderr().flush()` calls follow each progress announcement in `drive_loop`. Live haiku smoke at `/tmp/t005-smoke` ran to `status=complete` in 116s with all artefacts captured.
+
+### Deeper dive
+
+The most consequential finding was Bug 1 — not because it was hard to fix (one-line predicate) but because it was the **philosophy thesis violated inside the framework's own code**. The project's `docs/philosophy.md` argues that two readers of the same DB row computing different truths is the failure mode `stores` exists to prevent. T005's first commit replaced ad-hoc inline predicates with a shared helper that both reporters route through, so cross-reporter agreement is now structurally guaranteed (not test-guaranteed). Bug 2's fix ran into a subtle ordering question — the SAP layer auto-injects a missing `role` field with the expected role, so the role-peek had to happen on the raw extracted candidate *before* injection, otherwise role-less envelopes would always trivially pass the mismatch check. The executor caught this in implementation; the plan-reviewer flagged it as a risk; the Phase 2 code review verified the ordering at drive.rs:600. Bug 3 was the smallest semantic change but the highest operational impact: until it landed, post-mortem recovery of a hung drive run depended on whether the wrap-shell had buffered or not, and SIGTERM caught both drive and tail before tail could flush — leaving us with a 0-byte log file when we tried to audit the original t003-smoke hang. Adding flushes after the 9 progress eprintlns in `drive_loop` means the next time something goes wrong, operators see it live.
+
+### Technical things to consider
+
+- **`is_blocked` parameter is intentionally unused.** The signature is `(status: &str, _blocked_reason: Option<&str>) -> bool` to make the canonical interpretation explicit at every call site — "a row is blocked iff its workflow status is `blocked`; reason is a description, not the predicate." Future readers can see the second arg is deliberately ignored.
+- **Single-parameter collapse on `parse_envelope`.** The plan proposed adding `expected_role: &str`; the executor used `agent_role_normalized` for both SAP role injection and the new mismatch check. Safe because both values are derived from `na.next_agent` at the call site (drive.rs:355→366→477). If those ever diverge — e.g. drive starts spawning a role different from what the next-action returned — this collapse will need revisiting.
+- **No automated regression-trap for stderr visibility.** Phase 3's flush calls cannot easily be unit-tested without subprocess capture; verification is via Phase 4 smoke (manual `tee drive-smoke.log` confirmation). A future shell test could background drive against a mock runner and assert progress lines appear within N ms; not done in T005.
+- **Cosmetic warnings still in the smoke output.** "multiple task directories found for 'T001'" appeared during the executor and code_reviewer cycles because the planner created `tasks/active/T001-...` without cleaning up the `tasks/planning/T001-...` stub. Drive completed correctly regardless. Out of scope for T005; flagged for a small cleanup task.
+- **Layer 2 `or_insert_with` ordering is forward-defensive.** `Map::entry(...).or_insert_with(...)` only inserts when the key is absent, so the present-but-wrong case (`role:"guide"`) wouldn't have been corrupted by injection regardless of ordering. The peek-before-inject ordering protects against a future refactor where the inject becomes unconditional. Code comment at drive.rs:591–593 documents this.
+
+### To understand
+
+Concrete actions to feel the result:
+
+1. **Verify `blocked` agreement after a drive run:**
+   ```bash
+   stores tasks drive --auto --claude-code --testing 2>&1 | tee /tmp/drive-test.log
+   stores tasks status T001 --json | jq .blocked       # → false
+   stores tasks next-action T001 --json | jq .blocked  # → false (agreement)
+   ```
+
+2. **See live drive progress through a buffered wrapper:**
+   ```bash
+   stores tasks drive --auto --claude-code --testing 2>&1 | tail -100 &
+   # 'spawning planner via claude-code runner...' appears within 1s, not at process exit
+   ```
+
+3. **Confirm the role-mismatch error format:**
+   ```bash
+   cargo test --bin stores -- handlers::drive::tests::drive_loop_role_mismatch_message_format
+   # Asserts: error contains 'executor', 'guide', and the session id substring
+   ```
+
+4. **Reproduce the original t003-smoke scenario on the patched binary:**
+   ```bash
+   rm -rf /tmp/t006-smoke && mkdir -p /tmp/t006-smoke && cd /tmp/t006-smoke
+   stores setup
+   stores tasks add --invoker human --title "smoke" --slug "smoke" \
+     --done-when "echo hi" --scope-in "scripts/" --scope-out "src/"
+   stores tasks drive --auto --claude-code --testing
+   # Should run to completion without hanging.
+   ```
+
+### Lessons learned
+
+- The shared-helper pattern for cross-reporter predicates is cheap insurance against future divergence. Apply it whenever two pieces of code answer the same question about the same row.
+- `Option::is_some()` is a footgun on string-shaped fields where empty-string is semantically equivalent to absence. Either use `.is_some_and(|s| !s.is_empty())` or migrate the writer to insert NULL.
+- For long-running CLIs, line-buffer stderr or flush explicitly. The cost of buffering is invisible until you need to debug a hang, at which point you have nothing.
+- The plan-review stage caught two real risks (Layer 2 ordering, signature redundancy) that the planner missed. Both became execution-time fixes, not blocking. Keep using the legacy task-workflow plugin as the substrate for the next few tasks until `stores tasks drive` accumulates more dogfood mileage.
