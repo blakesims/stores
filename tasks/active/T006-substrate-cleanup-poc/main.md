@@ -1,11 +1,12 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_5
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
 - **Plan-review cycle:** 2 of 3 (cycle 1 NEEDS_WORK → cycle 2 READY)
+- **Phase 5 review cycle:** 1 of 3 (cycle 1 REVISE-minor — Finding A artefact missing verbatim error)
 
 ## Task
 
@@ -636,6 +637,41 @@ Exit non-zero ✓; field name (`evidence.external_refs`) named ✓; "JSON array"
 2. **`try_get_many::<String>` returns `Err(_)` only if the registered value type doesn't match `String`.** Since every leaf arg uses `String` and the closure's `_ => None` arm swallows the error, a future schema change that registers a non-String list field would silently null out the value rather than surfacing a programming error. Not exploitable today (all leaf args are String), but a `debug_assert!(matches!(result, Ok(_)))` would catch it in test builds. Theoretical; deferred.
 
 **Routing:** Phase 4 PASS → Status `CODE_REVIEW` → `EXECUTING_PHASE_5` for the L275 POC re-run integration phase.
+
+---
+
+### Phase 5 — Integration smoke: all four enforcement moments
+- **Reviewer:** code-reviewer
+- **Reviewed commit:** `a3dd1c6`
+- **Verdict:** REVISE (minor)
+
+**Verification (against Phase 5 ACs and per-finding rubric):**
+
+1. **Out-of-scope check — PASS.** `git show a3dd1c6 --stat` lists exactly two files: `tasks/active/T006-substrate-cleanup-poc/main.md` and `tasks/global-task-manager.md`. Zero `.rs` changes; `Cargo.toml` untouched; no schema fixture committed. Phase 5 honoured the artefact-only contract.
+
+2. **Test counts — PASS.** Re-ran `cargo test --all` myself: `396 passed; 0 failed; 0 ignored` (lib) + `2 passed` (schemas_validate_fixtures). Matches executor's claim exactly.
+
+3. **`drive_e2e.sh` (T005 canary) — PASS.** Re-ran: both AC7.1 (happy path, N=2 phases) and AC7.1b (revise-once on phase 2) PASS. T005 fence holds; no regression.
+
+4. **Pre-existing failures un-regressed — PASS.** Re-ran `tests/e2e.sh`: Step 6 fails on the same `ai_autonomous` invoker autodetection from `$CLAUDECODE` (verbatim match to Phase 3/4 capture). Re-ran `tests/tasks_e2e.sh`: Step 16 same `ac5_11b atomicity test failed` grep-pattern issue. Wording identical to earlier reviews; no new failures introduced.
+
+5. **Finding B (`finding-b-show-json.json`) — PASS.** Read the file directly: valid JSON; `evidence.external_refs` is a JSON array (not a quoted string blob); element 0 has `system: "docker"`, `kind: "container"`, `id: "backend"` as object keys. Exactly the structure the Phase 2 fence is supposed to enforce. `intent_contract.contract_state` is `"draft"` here (this is the pre-update snapshot), confirming the artefact was captured at the right moment to also illustrate Finding A's guard fence.
+
+6. **Finding C (`finding-c-hyphen-install.txt`) — PASS.** Three lines: `Installed store 'obs-test-hyphen' (table: obs-test-hyphen)`, `exit=0`, then `X001` from the subsequent `add`. Both install and add succeed against a hyphenated store name. Phase 3's `quote_ident` sweep is verified end-to-end.
+
+7. **Finding D (`finding-d-repeatable.txt`) — PASS.** Three captured arrays: `["main.py","scripts/"]` for repeatable form, identical `["main.py","scripts/"]` for pipe form, and `["main.py","dev","scripts/"]` for mixed form. All three exit codes captured (`L00{2,3,4} add exit=0`). Phase 4's Append wiring confirmed equivalent across the three call shapes.
+
+8. **Finding E happy-path replay — PASS.** `finding-e-ratify-success.txt` captures the full transition trace: `update` exit=0 → `ratify` (`open → confirmed`) → `start_t2` (`confirmed → in_progress`) → `resolve` (`in_progress → resolved`). `finding-e-final-state.json` shows `"status": "resolved"` and `intent_contract.contract_state": "ready"` with `approved_by`/`approved_at` populated. Lifecycle completes cleanly, end-to-end.
+
+9. **Finding A (`finding-a-ratify-rejected.txt`) — REGRESSION (minor).** **The artefact contains only `exit=1\n` (7 bytes total).** The verbatim error message that the executor reported in the Phase 5 execution log (`"no transition from 'open' via 'ratify' (gate None) had its guard satisfied and no unguarded fallback exists"`) is NOT captured in the file. The reviewer rubric is unambiguous on this point: "must contain the verbatim error message AND `exit=1`". The artefact pins only the exit code; the diagnostic text — the whole substantive evidence that Phase 1's guard fence fires *and is non-silent* — is missing from the on-disk artefact. Without the message in the file, a future operator reading just `finding-a-ratify-rejected.txt` cannot distinguish "ratify rejected because guard fired" from "ratify rejected for any other reason that exits non-zero". This is the single most load-bearing artefact of the whole Phase 5 deliverable (Finding A is the headline thesis: rules in the schema fire at runtime), and it's the one with the gap.
+
+   **Why this is REVISE-minor and not -substantial:** the underlying behaviour is correct — the executor saw the exact error message live, pasted it verbatim into the per-finding observations at line 384, and the message is structurally what Phase 1 was supposed to produce. The fix is a one-line shell-script change: redirect the `ratify` command's stderr (or combined `2>&1`) into the artefact alongside the exit code, then re-run the smoke. ≤30 LOC of shell wrapping. No production code change needed; no other artefact needs touching.
+
+**Findings:** one material (Finding A artefact incomplete; see item 9). One minor observation (non-blocking):
+
+- The Phase 5 plan named six artefacts (`poc-rerun.sh`, `poc-rerun.log`, `show-l001.json`, `ratify-rejected.txt`, `hyphen-install.txt`, `repeatable-flag.txt`) under `tasks/planning/T006-substrate-cleanup-poc/artefacts/`. The executor instead landed five `finding-{a,b,c,d,e}*` files under `/tmp/t006-p5-smoke/` (ephemeral) and recorded their substance in the execution log. This is consistent with the "Smoke dir is ephemeral; nothing in repo" line at main.md:390 and matches the spirit of the Phase 5 plan. Non-blocking.
+
+**Routing:** Phase 5 REVISE (minor) → Status `CODE_REVIEW` → `EXECUTING_PHASE_5` for a single fix to capture stderr into `finding-a-ratify-rejected.txt`. Re-review will be a quick spot-check of the one artefact plus a `git show` to confirm zero `.rs` drift.
 
 ---
 
