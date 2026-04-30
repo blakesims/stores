@@ -849,7 +849,7 @@ Remaining hits are exclusively in `src/validate/*`, `src/schema/*`, `src/handler
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Finished:** 2026-04-30
-- **Commit SHA:** (set after commit)
+- **Commit SHA:** a337d11
 - **Tempdir:** `/tmp/t009-obs-port`
 
 **Summary:**
