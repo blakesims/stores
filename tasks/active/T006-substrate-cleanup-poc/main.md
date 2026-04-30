@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_5
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -570,6 +570,49 @@ Exit non-zero ✓; field name (`evidence.external_refs`) named ✓; "JSON array"
 2. Executor's commit-message test-count delta ("388 → 395 binary") is off-by-two against my measurement (393 default / 411 with `runner-claude-code`); the test counts are correct, only the prose is slightly stale.
 
 **Routing:** Phase 3 PASS → Status `CODE_REVIEW` → `EXECUTING_PHASE_4` for Finding D (repeatable list flags).
+
+---
+
+### Phase 4 — Finding D: repeatable list flags via ArgAction::Append
+- **Reviewer:** code-reviewer
+- **Reviewed commit:** `00bb065`
+- **Verdict:** PASS
+
+**Verification (against AC checklist from Phase 4 plan + Specific Review Concerns):**
+
+1. **`cli/dynamic.rs` — Append confined to `FieldType::List(_)`.** Verified by reading both leaf-cmd builders (lines 635 and 717): `let is_list = matches!(leaf.field.ty, FieldType::List(_));` then `if is_list { arg = arg.action(ArgAction::Append); }`. ListRecord, ListFk, Text, Timestamp, DisplayId, Bool, Integer, Record — all unaffected. Live confirmation: `--external-refs '[…]' --external-refs '[…]'` correctly errors with `"the argument '--external-refs' cannot be used multiple times"` (Phase 2 JSON-blob semantic preserved).
+
+2. **Three consumer sites updated.** `add.rs:38`, `update.rs:43`, `transition.rs:68` — all three `build_entry_map` closures replaced `get_one::<String>` with a `match matches.try_get_many::<String>(cli_name) { Ok(Some(vals)) => … join("|"), _ => None }`. Defensive: no `unwrap()`, the `_` arm catches both `Ok(None)` and `Err(_)` and returns `None` — no panic possible.
+
+3. **Three new unit tests pass** (`list_field_repeatable_form`, `list_field_pipe_form`, `list_field_mixed_form`) — each builds a clap command mirroring `cli/dynamic.rs`'s real wiring (`build_add_cmd_with_append` re-creates `ArgAction::Append` for `List(_)` only) and asserts the stored `in_scope` JSON array. Test count: **393 → 396** (+3) as claimed.
+
+4. **`cargo test --all` green.** Re-ran: `396 passed; 0 failed; 0 ignored` (lib) + `2 passed` (schemas_validate_fixtures). No regressions.
+
+5. **Live integration (the marquee AC) — all three forms PASS.** Installed `stores 0.4.1` from this branch into a fresh tempdir, ran `stores install observations_1006`, and exercised all three forms against the L275 POC schema:
+   - **Repeatable form** `--in-scope "main.py" --in-scope "scripts/"` → `show L001 --json | jq '.intent_contract.in_scope'` returned `["main.py", "scripts/"]`. PASS.
+   - **Pipe form** `--in-scope "a|b|c"` → `["a", "b", "c"]`. PASS (backwards compat preserved).
+   - **Mixed form** `--in-scope "a|b" --in-scope "c"` → `["a", "b", "c"]`. PASS.
+   Scalar field spot-check: `summary`, `source`, `priority` round-tripped as strings (not arrays) — single-element join is identity, as advertised.
+
+6. **L275 four enforcement moments.** Re-ran from the live tempdir:
+   - (1) `ratify L001` with `contract_state=draft` → `Error: no transition from 'open' via 'ratify' (gate None) had its guard satisfied` (Phase 1 fence holds).
+   - (2) `external_refs` round-trips as `[{ "kind":"url", "value":"…" }]` JSON array (Phase 2 fence holds — verified on L004).
+   - (3) `stores install` of a hyphenated-name fixture (`name: hyphen-store`) succeeded cleanly with `Installed store 'hyphen-store' (table: hyphen-store)` (Phase 3 fence holds).
+   - (4) Repeatable `--in-scope` accepted equivalently to pipe form (Phase 4's deliverable). All four moments fire.
+
+7. **Out-of-scope check.** `git show 00bb065 --stat` shows only `src/cli/dynamic.rs`, `src/handlers/{add,update,transition}.rs`, `tasks/.../main.md`. No edits to `lifecycle.rs`, `validate/`, `row.rs`, `codegen/ddl.rs`, `submit.rs`, `drive.rs`, `next_action.rs`. Clean.
+
+8. **T005 fence + earlier-phase fences hold.** Read transition.rs:55–75 and add.rs:25–45: Phase 4's edits are ONLY in the `get_arg` closures. The `select_transition` machinery (T005) and storage match arms (Phase 2) are untouched. No drift.
+
+9. **e2e regression sweep.** `tests/drive_e2e.sh` PASS (T005 smoke un-regressed). `tests/e2e.sh` Step 6 fails on `ai_autonomous` autodetection from `CLAUDE_CODE_*` env vars — pre-existing environmental issue, unchanged from Phases 1–3 (re-ran in clean env via `env -i`: PASS, exit 0). `tests/tasks_e2e.sh` Step 16 grep-pattern false-negative on `ac5_11b` — pre-existing harness quirk; underlying test passes when run directly (`cargo test ac5_11b` → `1 passed; 0 failed`). Both pre-existing failures explicitly noted in Phase 3's review log; nothing new introduced.
+
+**Findings:** none material. Two minor observations (non-blocking):
+
+1. **`get_arg` closure is now duplicated three times verbatim across `add.rs`/`update.rs`/`transition.rs`.** The Phase 4 plan briefly considered hoisting it to `row.rs::build_entry_map` as the central choke point. The "duplicate the closure" approach was chosen for blast-radius minimization; this is fine for now but the duplication will mildly raise the maintenance cost of any future change to list-arg handling. Could be consolidated in a future hardening pass — non-blocking.
+
+2. **`try_get_many::<String>` returns `Err(_)` only if the registered value type doesn't match `String`.** Since every leaf arg uses `String` and the closure's `_ => None` arm swallows the error, a future schema change that registers a non-String list field would silently null out the value rather than surfacing a programming error. Not exploitable today (all leaf args are String), but a `debug_assert!(matches!(result, Ok(_)))` would catch it in test builds. Theoretical; deferred.
+
+**Routing:** Phase 4 PASS → Status `CODE_REVIEW` → `EXECUTING_PHASE_5` for the L275 POC re-run integration phase.
 
 ---
 
