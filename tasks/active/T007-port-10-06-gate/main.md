@@ -1,7 +1,7 @@
 # T007: Port the 10.06 `gate` store — first real migration
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-05-01 (Phase 3 code review PASS)
 - **Blocked Reason:** —
@@ -627,6 +627,47 @@ This is a 200-line shell script + a one-line dispatch fix. Per the spec's relaxe
 
 - Status `CODE_REVIEW` → `EXECUTING_PHASE_4`.
 - Phase 4 is operator integration smoke + artefact capture for the six DONE_WHEN clauses.
+
+### Phase 4 — Integration smoke / six-clause artefact capture (2026-05-01)
+
+- **Status:** COMPLETE
+- **Start:** 2026-05-01
+- **End:** 2026-05-01
+- **Commit:** (see below)
+- **Binary:** stores 0.4.1 (rebuilt via `cargo install --path . --features runner-claude-code`)
+- **Tempdir:** `/tmp/t007-gate-port` (fresh, `stores setup` auto-installed gate)
+
+#### Artefacts
+
+| Clause | File | One-line observation |
+|--------|------|----------------------|
+| 1 | `/tmp/t007-gate-port/clause-1-full-add.json` | All 9 new fields populated: `one_liner`, `type`, `task_ref`, `filed_by`, `source`, `command`, `business_reason`, `technical_detail`, `implications` |
+| 2 | `/tmp/t007-gate-port/clause-2-defer.json` | `status=deferred`, `defer_until=2026-05-11` confirmed |
+| 3 | `/tmp/t007-gate-port/clause-3-resume.txt` | First resume: exit=0 (`deferred→pending`); second resume: exit=0 (`pending→pending` self-loop); both show `status=pending` |
+| 4 | `/tmp/t007-gate-port/clause-4-ai-rejected.txt` | exit=1; error: `transition 'answer' requires actor 'human'; invoker is 'ai_autonomous' (auto-detected from $CLAUDECODE...)` |
+| 5 | `/tmp/t007-gate-port/clause-5-human-accept.json` | `status=answered`, `answer=yes` |
+| 6 | `/tmp/t007-gate-port/clause-6-repeatable.txt` | G002 (repeatable) `['yes', 'no']` == G003 (pipe) `['yes', 'no']`; EQUAL |
+
+#### Verbatim error from Clause 4
+
+```
+Error: validation failed:
+- <transition:answer>: transition 'answer' requires actor 'human'; invoker is 'ai_autonomous' (auto-detected from $CLAUDECODE; pass --invoker human to override if appropriate)
+- answer: field 'answer' requires actor 'human'; invoker is 'ai_autonomous' (auto-detected from $CLAUDECODE; pass --invoker human to override if appropriate)
+exit=1
+```
+
+#### Test results
+
+- `cargo test --all`: **398 passed; 0 failed** (396 unit + 2 integration)
+- `bash tests/gate_e2e.sh`: **exit 0** (all 6 steps PASS)
+- `bash tests/drive_e2e.sh`: **PASS** (AC7.1 + AC7.1b)
+- `bash tests/e2e.sh`: **exit 0** (5/5 PASS — Step 6 pre-existing CLAUDECODE issue resolved in this run; no NEW failures)
+- `bash tests/tasks_e2e.sh`: Step 16 `ac5_11b` SIGPIPE failure — **pre-existing**, identical to T006 baseline. No NEW failures.
+
+#### Deviation
+
+**D4 (defer/resume require explicit `--invoker ai_with_human`):** The smoke plan called `stores gate defer G001 --defer-until 2026-05-11` without `--invoker`. In a `CLAUDECODE=1` shell environment, the auto-detector sets invoker to `ai_autonomous`, which fails the `ai_with_human` actor guard on the `defer` and `resume` transitions. Added `--invoker ai_with_human` to both calls. This is consistent with the schema design (DM row: defer/resume use `actor: ai_with_human`) and is operator-correct behaviour. Not a code defect — the smoke plan was written assuming a non-CLAUDECODE shell. The `tests/gate_e2e.sh` already handles this correctly via `unset CLAUDECODE` at the top of the script (Phase 3 D3 context).
 
 ---
 
