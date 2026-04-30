@@ -492,7 +492,7 @@ Exit non-zero ✓; field name (`evidence.external_refs`) named ✓; "JSON array"
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Completed:** 2026-04-30
-- **Commit SHA:** (see below — set after commit)
+- **Commit SHA:** 0d992d3
 - **Files modified:**
   - `src/codegen/ddl.rs` — added `pub(crate) fn quote_ident(name: &str) -> String` helper; applied at CREATE TABLE site (site 1); updated `ddl_snapshot` test (now expects `"kitchen_sink"` quoted); added 4 new tests: `quote_ident_plain`, `quote_ident_hyphenated`, `quote_ident_escapes_internal_double_quote`, `ddl_hyphenated_name_accepted_by_sqlite`
   - `src/handlers/add.rs` — imported `quote_ident`; applied at INSERT (site 2) and UPDATE display_id (site 3); added `HYPHEN_SCHEMA` const + `hyphen_schema_and_conn`/`build_add_cmd_for`/`build_verb_cmd_for` helpers + `hyphenated_store_name_crud_round_trip` trap-test
