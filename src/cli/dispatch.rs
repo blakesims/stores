@@ -111,7 +111,7 @@ pub fn dispatch(
                         invoker,
                     )?;
                 }
-                Some(("resume", sub)) => {
+                Some(("resume", sub)) if schema.workflow.is_some() => {
                     let display_id = sub.get_one::<String>("display_id")
                         .map(|s| s.as_str())
                         .unwrap_or("");

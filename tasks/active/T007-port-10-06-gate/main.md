@@ -1,7 +1,7 @@
 # T007: Port the 10.06 `gate` store — first real migration
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30 (Phase 2 code review PASS)
 - **Blocked Reason:** —
@@ -527,6 +527,53 @@ This is a 5-file mechanical rename + doc-rewrite sweep. Per spec, low-risk doc-o
 
 - Status `CODE_REVIEW` → `EXECUTING_PHASE_3`.
 - Phase 3 should add `tests/gate_e2e.sh` covering the 6 DONE_WHEN clauses end-to-end against `/tmp/t007-gate-port`.
+
+---
+
+### Phase 3 — New `tests/gate_e2e.sh` (2026-04-30)
+
+- **Status:** COMPLETE
+- **Start:** 2026-04-30
+- **End:** 2026-04-30
+- **Commit:** (see below)
+- **Files added:**
+  - `tests/gate_e2e.sh` — scripted 6-clause gate trace (executable, set -euo pipefail, mktemp tempdir, cleanup trap)
+- **Files modified (unplanned — see Deviations):**
+  - `src/cli/dispatch.rs` — dispatch bug fix for `resume` verb routing
+
+#### Changes in `tests/gate_e2e.sh`
+
+- `set -euo pipefail`; `unset CLAUDECODE`; `mktemp -d /tmp/t007-gate-port-XXXXXX`; `trap ... EXIT`
+- Uses `stores setup` (which auto-installs all bundled stores including `gate` via `BUNDLED_STORE_NAMES`) — no explicit `stores install` needed
+- All 6 DONE_WHEN clauses in order, each with a Step N/6 header and PASS messages
+- Exit 0 confirmed on two consecutive clean runs
+
+#### Step outcomes (clean run)
+
+| Step | Clause | Outcome |
+|------|--------|---------|
+| 1/6 | Full add → G001; all 9 new fields verified via show --json | PASS |
+| 2/6 | defer G001 --defer-until 2026-05-11; status=deferred, defer_until=2026-05-11 | PASS |
+| 3/6 | resume (deferred→pending); second resume (self-loop pending→pending idempotent) | PASS |
+| 4/6 | CLAUDECODE=1 answer G001 (no --invoker) → exit=1; error contains "actor" and "human" | PASS |
+| 5/6 | answer G001 --invoker human → status=answered, answer=yes | PASS |
+| 6/6 | --options "yes" --options "no" == --options "yes|no" == ["yes","no"]; jq comparison equal | PASS |
+
+#### Deviations from plan
+
+**D3 (dispatch.rs fix — `resume` verb routing for non-workflow stores):**
+Phase 3 is spec'd as "shell only; no Rust code changes." During integration testing, `stores gate resume` exited with `Error: store 'gate' has no workflow declaration; resume is not available` despite `resume` being a valid lifecycle transition in `stores/gate/schema.yaml`. Root cause: `src/cli/dispatch.rs:114` has a hardcoded `Some(("resume", sub))` match arm that unconditionally routes to `handlers::submit::run_resume` (which requires `schema.workflow.is_some()`). The `resume` verb was only excluded from WORKFLOW_VERBS registration in dynamic.rs for schemas without a workflow (line 254), but the dispatch match arm is pre-ordered above the generic `Some((verb, sub))` lifecycle-transition arm, so it always intercepts `resume` first.
+
+Fix: added `if schema.workflow.is_some()` guard to the `Some(("resume", sub))` match arm. A store with no workflow (like `gate`) now falls through to the generic lifecycle-transition handler at line 186-192. The existing `tasks` store (which has a workflow) is unaffected — the guard remains true for it.
+
+This is a Phase 1 schema-integration gap: the transition was added to schema.yaml correctly, but the dispatch layer was not updated to handle lifecycle `resume` on non-workflow stores. The fix is 1 character change (`Some(("resume", sub)) =>` → `Some(("resume", sub)) if schema.workflow.is_some() =>`). `cargo test --all` still 398/0 after the change. `tests/drive_e2e.sh` unaffected (PASS).
+
+#### Test results
+
+- `cargo test --all`: **398 passed; 0 failed**
+- `bash tests/gate_e2e.sh`: **exit 0** (all 6 clauses PASS)
+- `bash tests/drive_e2e.sh`: **PASS** (AC7.1 + AC7.1b)
+- `tests/tasks_e2e.sh` and `tests/e2e.sh`: pre-existing failures unchanged
 
 ---
 
