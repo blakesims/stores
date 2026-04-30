@@ -39,6 +39,7 @@ use anyhow::{bail, Result};
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::cli::agents::{BUNDLED_AGENT_SCHEMAS, BUNDLED_AGENTS};
@@ -336,6 +337,7 @@ pub(crate) fn drive_loop(
         // Terminal: complete
         if na.status == "complete" {
             eprintln!("[{display_id}] status=complete; drive finished");
+            let _ = std::io::stderr().flush();
             return Ok(());
         }
 
@@ -349,6 +351,7 @@ pub(crate) fn drive_loop(
             eprintln!(
                 "[{display_id}] blocked: {reason}; run `stores gate {display_id} guide` for help"
             );
+            let _ = std::io::stderr().flush();
             return Ok(());
         }
 
@@ -431,6 +434,7 @@ pub(crate) fn drive_loop(
             "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: spawning {agent_role} via {} runner... (may take 30-90s)",
             runner.name()
         );
+        let _ = std::io::stderr().flush();
         let spawn_start = std::time::Instant::now();
         let run_out = runner.spawn(&agent_name_normalized, system_prompt, &brief_markdown, schema_text)?;
         let spawn_elapsed = spawn_start.elapsed();
@@ -439,6 +443,7 @@ pub(crate) fn drive_loop(
             run_out.exit_code,
             spawn_elapsed.as_secs_f64()
         );
+        let _ = std::io::stderr().flush();
 
         // AC2.7: surface schema validation retry exhaustion before the exit-code
         // check so the user always sees it, even on non-zero exit.
@@ -452,6 +457,7 @@ pub(crate) fn drive_loop(
                 "[{display_id}] schema validation retries exhausted; \
                  transcript: {transcript_hint}"
             );
+            let _ = std::io::stderr().flush();
         }
 
         // AC3.6: non-zero exit → surface stdout + stderr, no submit.
@@ -461,6 +467,7 @@ pub(crate) fn drive_loop(
                 "[{display_id}] runner exited with code {}; aborting without submitting",
                 run_out.exit_code
             );
+            let _ = std::io::stderr().flush();
             if !run_out.stdout.is_empty() {
                 eprintln!("runner stdout:\n{}", run_out.stdout);
             }
@@ -476,6 +483,7 @@ pub(crate) fn drive_loop(
         // ── Step 2e: parse envelope + dispatch submit ─────────────────────
         let (envelope, source_tag) = parse_envelope(&run_out, &agent_name_normalized).map_err(|e| {
             eprintln!("[{display_id}] envelope parse failed: {e}");
+            let _ = std::io::stderr().flush();
             if !run_out.stdout.is_empty() {
                 eprintln!("runner stdout:\n{}", run_out.stdout);
             }
@@ -516,6 +524,7 @@ pub(crate) fn drive_loop(
         eprintln!(
             "[{display_id}] phase {current_phase} cycle {current_cycle}: {agent_role} → submitted (gate={gate_display}; source={source_tag})"
         );
+        let _ = std::io::stderr().flush();
 
         // ── Step 2g: iter counter / max-iters (AC3.5) ────────────────────
         iter += 1;
@@ -527,6 +536,7 @@ pub(crate) fn drive_loop(
                  current state: status={} phase={} cycle={}",
                 na2.status, na2.current_phase, na2.current_cycle
             );
+            let _ = std::io::stderr().flush();
             bail!("max iterations exceeded ({max_iters}) for task {display_id}");
         }
     }

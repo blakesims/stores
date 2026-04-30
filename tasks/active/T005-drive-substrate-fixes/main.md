@@ -1,7 +1,7 @@
 # T005: Drive substrate fixes — `blocked` divergence + envelope-mismatch handling + log visibility
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -286,6 +286,21 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
 - **Minor 2 (Layer 2 ordering is moot for present-but-wrong, deferred):** `Map::entry(...).or_insert_with(...)` only inserts when the key is absent, so a present-but-wrong `role:"guide"` would NOT be overwritten regardless of peek-before-vs-after-inject. The ordering comment at drive.rs:591–593 protects against a future refactor where the inject becomes unconditional. Code is still correct; the comment is forward-defensive rather than load-bearing today. No action.
 - **Minor 3 (no test for absent-role pass-through, deferred):** Per R1 in plan-review, an envelope with `role` absent should pass through Layer 2 (the `or_insert_with` injects the expected role). No test currently exercises this path explicitly — the existing fixtures and the new mismatch tests all have `role` present. Hardening test recommended for a future task. Not blocking.
 - **Verdict:** PASS. All ACs met; Layer 2 ordering correct (and documented); error format meets the DONE_WHEN clause verbatim; M1 single-parameter collapse traced and safe; no scope creep; full suite + e2e shell test green. Advance to Phase 3.
+
+### Phase 3 — Drive progress visible through pipe wrappers (explicit stderr flush)
+
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Completed:** 2026-04-30
+- **Commit:** TBD (set after commit)
+- **Files modified:**
+  - `src/handlers/drive.rs` — added `use std::io::Write;` import. Appended `let _ = std::io::stderr().flush();` after each of the 9 progress `eprintln!` sites in `drive_loop`: (1) `status=complete; drive finished`, (2) `blocked: {reason}`, (3) pre-spawn `spawning {agent_role} via ... runner`, (4) post-spawn `{agent_role} returned (exit=...)`, (5) `schema validation retries exhausted`, (6) `runner exited with code`, (7) `envelope parse failed` (inside `map_err` closure), (8) `submitted (gate=...)`, (9) `max iterations exceeded`.
+- **Notes:**
+  - 9 flush sites added (plan cited 6 at lines 430/437/460/478/516/525; the actual code after Phase 2 edits has 9 distinct progress announcements when counting the `schema validation retries exhausted`, `runner exited with code`, `max iterations exceeded`, and `envelope parse failed` sites separately — all named in the plan's search anchors list).
+  - No new tests added (flush behavior cannot be reliably asserted in unit tests without subprocess stderr capture; the plan explicitly deferred manual verification to Phase 4).
+  - `cargo test --all`: 377 tests pass (375 unit + 2 integration), 0 failures.
+  - `tests/drive_e2e.sh`: both AC7.1 and AC7.1b PASS.
+  - tail-N visibility: deferred to Phase 4 smoke (operator visual confirmation). The `let _ = std::io::stderr().flush()` calls are in place.
 
 ---
 
