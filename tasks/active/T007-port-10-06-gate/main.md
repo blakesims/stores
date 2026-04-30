@@ -1,9 +1,9 @@
 # T007: Port the 10.06 `gate` store — first real migration
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (Phase 2 COMPLETE)
+- **Last Updated:** 2026-04-30 (Phase 2 code review PASS)
 - **Blocked Reason:** —
 
 ## Task
@@ -459,6 +459,74 @@ grep -rn "stores gate add.*--question|gate add.*--question|--question" \
 #### Deviations
 
 None. All 4 sites patched as specified. D1 (`filed_by`) and D2 (guide.rs) from Phase 1 honoured throughout.
+
+---
+
+### Phase 2 — Code Review (2026-04-30)
+
+- **Verdict:** PASS
+- **Reviewer:** code-reviewer agent
+- **Commit reviewed:** `3c37ea4` ("feat(T007-P2): rename --question → --one-liner across e2e + skills + READMEs")
+
+#### Verification against ACs
+
+- **AC: Repo-wide grep returns zero `--question` hits in operational paths.** PASS. Ran the spec-required grep:
+  ```
+  grep -rn "stores gate add.*--question\|gate add.*--question\|--question" \
+    /home/blake/repos/experiments/stores \
+    --include='*.md' --include='*.sh' --include='*.yaml' --include='*.rs' \
+    --exclude-dir=tasks/completed --exclude-dir=findings
+  ```
+  Zero hits in `tests/`, `skills/`, top-level `README.md`, `stores/gate/README.md`, or any `src/` Rust file. Remaining hits are exclusively in `tasks/active/T007-port-10-06-gate/main.md` (plan + Plan Review + Execution Log historical prose — explicitly fine per the spec) and `tasks/completed/T001-...` (frozen archive — explicitly excluded). Sweep is complete.
+- **AC: All 4 tracked sites updated.** PASS. `git show 3c37ea4 --stat` confirms exactly the expected file list: `tests/e2e.sh` (+22 lines), `skills/observation:triage/SKILL.md` (+4), `README.md` (+12), `stores/gate/README.md` (+43), `tasks/active/T007-port-10-06-gate/main.md` (+51 — DONE_WHEN clause 1 fix + execution log). NO `src/` Rust files, NO other test files, NO other store schemas — clean out-of-scope check.
+- **AC: `stores/gate/README.md` reflects new schema.** PASS. Re-read in full:
+  - Fields list (lines 7-21) covers all 15 fields including the 9 new ones (`priority_rank`, `priority_rank_at`, `defer_until`, `filed_by`, `source`, `business_reason`, `technical_detail`, `command`, `implications`); `filed_by` is explicitly named with the `created_by` collision rationale documented inline.
+  - Lifecycle section (lines 23-38) lists all 4 states (`pending`/`answered`/`deferred`/`cancelled`); transition table includes `defer`, `resume`, the `pending → pending` self-loop, and `deferred → cancelled`; defer-pre-merge limitation honestly disclosed (R1).
+  - Quick Start (lines 42-63) uses `--one-liner` + `--filed-by` + `--source` verbatim. No `--question` or `--created-by` references.
+- **AC: DONE_WHEN clause 1 fix.** PASS. main.md line 47 now reads `--filed-by morning-check` (was `--created-by morning-check`); D1 from Phase 1 honoured.
+
+#### Independent verification
+
+1. **Final sweep** — ran the spec grep myself; zero operational hits (details above).
+2. **`tests/e2e.sh`** — fails at Step 6 (pre-existing CLAUDECODE/`triage` actor auto-detection issue documented in T006 and called out in Phase 1 review). Step 6 fails BEFORE the renamed `--one-liner` lines (Steps 9, 11), so I verified the renamed flags work directly against a fresh tempdir at `/tmp/t007-p2-test`:
+   ```
+   stores gate add --type decision --one-liner "Soft or hard delete?" \
+       --options "soft|hard" --task-ref L001 \
+       --filed-by e2e-test --source dev
+   # → G001
+   stores gate answer G001 --answer hard --invoker human
+   # → Transitioned G001: pending → answered
+   stores gate show G001
+   # → status=answered, filed_by=e2e-test, source=dev, one_liner="Soft or hard delete?"
+   ```
+   All 3 renamed flags accepted; row reads back correctly. No NEW step regressions in e2e.sh.
+3. **`tests/drive_e2e.sh`** — PASS (AC7.1 + AC7.1b both green).
+4. **`tests/tasks_e2e.sh`** — fails at Step 16 (pre-existing SIGPIPE atomicity test, documented as T006-baseline). Not introduced by Phase 2.
+5. **`cargo test --all`** — **398 passed; 0 failed**. Un-regressed from Phase 1.
+6. **`tests/gate_e2e.sh`** — confirmed absent (`ls` returns "No such file or directory"). Phase 3 deliverable; not yet expected.
+
+#### Examples internal consistency
+
+- `skills/observation:triage/SKILL.md:76-85` — gate-add code block uses `--filed-by observation:triage --source converge --invoker ai_with_human`. Sensible placeholders for a triage skill; copy-pasteable.
+- `README.md:170-192` — Quickstart Step 9 + Step 11 both use `--filed-by quickstart --source dev`. Internally consistent across both invocations.
+- `stores/gate/README.md:42-63` — Quick Start uses `--filed-by quickstart --source dev` + `--one-liner` throughout. Verified spot-readable as a fresh-install walkthrough; full execution is Phase 4's job.
+
+#### Out-of-scope check
+
+`git show 3c37ea4 --stat` shows ONLY the 4 sites + main.md. No `src/`, no other tests, no other store schemas. Clean.
+
+#### Findings
+
+This is a 5-file mechanical rename + doc-rewrite sweep. Per spec, low-risk doc-only work — finding-count expectation is relaxed. After thorough review, I have no findings worth a REVISE.
+
+1. **(Informational, non-blocking) Step 6 of `tests/e2e.sh` is still failing pre-existing.** Phase 4's "all e2e suites green" AC will need this resolved or formally re-scoped (already documented as a known carry-forward). Not a Phase 2 issue.
+2. **(Informational, non-blocking) `tests/tasks_e2e.sh` Step 16 SIGPIPE failure.** Same — pre-existing, documented in T006, not introduced by T007. Phase 4 needs to disposition it.
+3. **(Informational, non-blocking) `--filed-by` placeholders in skill/README docs are concrete strings (`observation:triage`, `quickstart`, `e2e-test`) rather than `<filed-by>` angle-bracket placeholders.** This is a deliberate choice — operators can copy-paste verbatim and they all work; the strings are also semantically meaningful (skill slug / context name). No action needed.
+
+#### Routing
+
+- Status `CODE_REVIEW` → `EXECUTING_PHASE_3`.
+- Phase 3 should add `tests/gate_e2e.sh` covering the 6 DONE_WHEN clauses end-to-end against `/tmp/t007-gate-port`.
 
 ---
 
