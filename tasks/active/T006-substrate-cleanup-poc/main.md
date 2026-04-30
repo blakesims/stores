@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -513,6 +513,40 @@ Exit non-zero ✓; field name (`evidence.external_refs`) named ✓; "JSON array"
 - **Notes:**
   - `submit.rs` acquire/release/write functions receive `table: &str` (raw name); quoting done inside each function via `let qtable = quote_ident(table)` — cleaner than quoting at each call site.
   - `next_action.rs` import is test-only; moved to `mod tests` block to suppress `unused_import` warning (the three uses are all inside `#[cfg(test)]`).
+
+---
+
+### Phase 3 — Code Review (cycle 1)
+- **Verdict:** PASS
+- **Reviewed commit:** `0d992d3` (+ doc-only follow-up `16ff8e5`)
+- **Reviewer cycle:** 1 of 3
+
+**Acceptance criteria — verified:**
+- [x] `quote_ident` helper exists with correct signature (`pub(crate) fn quote_ident(name: &str) -> String`); plain / hyphenated / internal-quote-escape unit tests all PASS (`quote_ident_plain`, `quote_ident_hyphenated`, `quote_ident_escapes_internal_double_quote`). SQL-standard escape: internal `"` → `""`. Verified: `quote_ident("foo\"bar")` → `"foo""bar"`.
+- [x] All 17 audit sites updated. Reviewer re-ran the canonical sweep (`grep -rn -E 'INTO\s+\{|FROM\s+\{|UPDATE\s+\{|CREATE TABLE\s+\{|DELETE\s+FROM\s+\{' src/`): 16 raw hits, all routed through either `quote_ident(&schema.name)` inline or a pre-quoted local (`{table}` / `{qtable}` / `{name}`); the 17th site is `ddl.rs:102` (`CREATE TABLE IF NOT EXISTS {table}` with `let table = quote_ident(&schema.name)` set above). Two hardcoded literal table refs (`guide.rs:456` `FROM tasks`, `submit.rs:1349/1356` `FROM wf_tasks`) are bare-identifier safe and out of scope. Spot-checked every site individually: clean.
+- [x] `hyphenated_store_name_crud_round_trip` exists in `add.rs::tests` and exercises add → read_row → list → update → transition against `obs-test-1006`. Test PASSES; status round-trips `open` → `reviewed`.
+- [x] `cargo test --all` PASSES: 393 binary + 2 integration (default features); 411 binary + 2 integration with `--features runner-claude-code`. New tests: 5 (4 in ddl.rs, 1 in add.rs). Note: executor's "388 → 395" delta is mildly inaccurate (default-features count is 393); functionally irrelevant.
+- [x] e2e regression check: `drive_e2e.sh` PASS. `e2e.sh` Step 6 (CLAUDECODE inheritance) and `tasks_e2e.sh` Step 16 (`grep -q | fail` SIGPIPE under `set -o pipefail`) failures are pre-existing — confirmed by `git stash && bash tests/tasks_e2e.sh` reproducing identical failure on prior tree.
+
+**Live integration test (Specific concern #1):** PASS.
+- Built `stores 0.4.1 --features runner-claude-code`, fresh tempdir `/tmp/t006-p3-live`, `stores setup` succeeded.
+- Copied `stores/observations_1006` → `/tmp/observations-1006`, renamed `name: observations_1006` → `name: observations-1006`.
+- `stores install /tmp/observations-1006` → `Installed store 'observations-1006' (table: observations-1006)` (no `near "-": syntax error`).
+- `stores observations-1006 add ...` → `L001`. `show L001 --json` round-trips full row. `list` works. `update L001 --summary "live test updated"` → `Updated L001`; subsequent `show` confirms persistence. End-to-end CRUD against a real hyphenated schema name is green.
+
+**Specific concerns #2-7:**
+- **#2 (`quote_ident` correctness):** SQL-standard double-quote escape verified by unit test. Empty-string edge case (`quote_ident("")` → `""`) not tested, but schema parsing rejects empty names at YAML load — not reachable in practice. Not a blocker.
+- **#3 (audit completeness):** sweep matches the plan's 17-site audit. No extras to investigate.
+- **#4 (no regression on bundled schemas):** quoting an underscore identifier is semantically identical in SQLite (`"observations"` ≡ `observations`); existing 388 tests pass; `ddl_snapshot` updated once with a clear commit-message rationale and remains the only behavioural snapshot delta.
+- **#5 (Cargo.lock):** clean; only working-tree mod is `tasks/global-task-manager.md` (orchestrator territory).
+- **#6 (out-of-scope check):** `git show 0d992d3 --stat` lists exactly the 11 expected files. NO touches to `lifecycle.rs` (Phase 1) or `validate/` (Phase 2). Fence holds.
+- **#7 (T005 fences):** drive.rs/next_action.rs hunks are mechanical `&schema.name` → `quote_ident(&schema.name)` substitutions ONLY. Zero touches to `parse_envelope`, `is_blocked`, progress flushing, or any drive/next_action logic. Verified by reading each hunk.
+
+**Findings:** none material. Two minor observations (non-blocking, not REVISE-worthy):
+1. `quote_ident("")` is unhandled (returns `""`, which SQLite will reject); schema-parse already rejects empty names so this is theoretical-only. Could add a `debug_assert!(!name.is_empty())` for belt-and-braces in a future hardening pass.
+2. Executor's commit-message test-count delta ("388 → 395 binary") is off-by-two against my measurement (393 default / 411 with `runner-claude-code`); the test counts are correct, only the prose is slightly stale.
+
+**Routing:** Phase 3 PASS → Status `CODE_REVIEW` → `EXECUTING_PHASE_4` for Finding D (repeatable list flags).
 
 ---
 
