@@ -1,7 +1,7 @@
 # T007: Port the 10.06 `gate` store — first real migration
 
 ## Meta
-- **Status:** READY
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30 (plan-review cycle 2 of 3 — APPROVED)
 - **Blocked Reason:** —
@@ -316,7 +316,47 @@ READY → orchestrator → executor. Move folder `tasks/planning/T007-port-10-06
 ---
 
 ## Execution Log
-_Executor agent fills this section per phase._
+
+### Phase 1 — Schema extension (2026-04-30)
+
+- **Status:** COMPLETE
+- **Start:** 2026-04-30
+- **End:** 2026-04-30
+- **Commit:** (see below)
+- **Files modified:**
+  - `stores/gate/schema.yaml` — primary deliverable
+  - `src/handlers/guide.rs` — test fixture update (see deviation note)
+
+#### Changes in `stores/gate/schema.yaml`
+
+- Renamed `question` → `one_liner` (required text, unchanged semantics)
+- Added lifecycle state `deferred` (between `answered` and `cancelled`)
+- Added transitions:
+  - `pending → deferred` verb `defer` actor `ai_with_human`
+  - `deferred → pending` verb `resume` actor `ai_with_human`
+  - `pending → pending` verb `resume` actor `ai_with_human` (self-loop for idempotency)
+  - `deferred → cancelled` verb `cancel` actor `ai_autonomous` (per DM row "cancel-from-deferred")
+- Added 9 new fields:
+  - `priority_rank: integer` (optional)
+  - `priority_rank_at: timestamp` (optional)
+  - `defer_until: text` (optional; ISO-date string; R1 limitation applies)
+  - `filed_by: text` (required — **see deviation below**)
+  - `source: enum [dashboard, qa, dev, converge, wrap, intake]` (required)
+  - `business_reason: text` (optional)
+  - `technical_detail: text` (optional)
+  - `command: text` (optional)
+  - `implications: text` (optional)
+
+#### Deviations from plan
+
+**D1 (field rename: `created_by` → `filed_by`):** The plan specified a required `created_by` field. The framework DDL codegen (`src/codegen/ddl.rs`) already reserves `created_by` as an audit column (prepended to every table). Adding a schema field with the same name produced a SQLite `duplicate column name: created_by` error. Since modifying DDL codegen is out of scope and the semantic intent (filing skill / agent provenance) is distinct from the framework's invoker audit, the field was renamed `filed_by`. This name is unambiguous and avoids any reserved-column collision. Phase 2 and Phase 3 will use `--filed-by` instead of `--created-by`. The DONE_WHEN clause 1 spec text ("--created-by morning-check") should be read as "--filed-by morning-check" after this rename.
+
+**D2 (guide.rs test fixture update):** `src/handlers/guide.rs`'s `insert_gate` helper hardcoded the old `question` column and omitted the new required fields. The guide tests load `stores/gate/schema.yaml` live and generate DDL from it; the INSERT then failed against the new schema. Updated the helper to use `one_liner`, added `filed_by = 'test-fixture'` and `source = 'dev'` to satisfy the new required columns. This is a test-fixture correction, not a behavioral change. The plan scoped Phase 1 as "schema-only" and said "do not touch tests/e2e.sh" (the bash e2e) — the Rust unit test fixture is a necessary companion update, not a Phase 2 item.
+
+#### Test results
+
+- `cargo test --all`: **398 passed; 0 failed** (396 unit + 2 integration fixtures)
+- No pre-existing failures introduced or suppressed.
 
 ---
 

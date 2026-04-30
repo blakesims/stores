@@ -580,9 +580,11 @@ mod tests {
     ) {
         let task_ref_val = task_ref.unwrap_or("");
         conn.execute(
-            "INSERT INTO gate (display_id, status, type, question, task_ref, \
+            "INSERT INTO gate (display_id, status, type, one_liner, task_ref, \
+             filed_by, source, \
              created_at, updated_at, created_by, updated_by) \
              VALUES (?1, ?2, 'decision', ?3, ?4, \
+             'test-fixture', 'dev', \
              '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'human', 'human')",
             rusqlite::params![display_id, status, question, task_ref_val],
         )

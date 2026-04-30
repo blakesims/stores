@@ -2,7 +2,7 @@ name: gate
 id_format: "G{:03d}"
 # No store-level default_actor — fields are unguarded by default; only `answer` requires `human`.
 lifecycle:
-  states: [pending, answered, cancelled]
+  states: [pending, answered, deferred, cancelled]
   transitions:
     - from: pending
       to: answered
@@ -12,6 +12,22 @@ lifecycle:
       to: cancelled
       verb: cancel
       actor: ai_autonomous
+    - from: deferred
+      to: cancelled
+      verb: cancel
+      actor: ai_autonomous
+    - from: pending
+      to: deferred
+      verb: defer
+      actor: ai_with_human
+    - from: deferred
+      to: pending
+      verb: resume
+      actor: ai_with_human
+    - from: pending
+      to: pending
+      verb: resume
+      actor: ai_with_human
 
 fields:
   - name: type
@@ -20,10 +36,10 @@ fields:
     required: true
     description: "Gate type: decision (human chooses) or script (automated)"
 
-  - name: question
+  - name: one_liner
     type: text
     required: true
-    description: "The question posed at this gate"
+    description: "The question or action posed at this gate"
 
   - name: options
     type:
@@ -47,3 +63,49 @@ fields:
     enum_values: [high, normal, low]
     required: false
     description: "Filing priority — used by /task:open's Blake-only-step pattern (D1/Q1)"
+
+  - name: priority_rank
+    type: integer
+    required: false
+    description: "Numeric rank 1-5 set by /focus; lower is more urgent"
+
+  - name: priority_rank_at
+    type: timestamp
+    required: false
+    description: "Timestamp when priority_rank was last written"
+
+  - name: defer_until
+    type: text
+    required: false
+    description: "ISO date string (YYYY-MM-DD) — gate re-surfaces on or after this date. Operator-hygiene: not schema-enforced when transitioning to deferred (validate runs pre-merge; see R1 in task plan)"
+
+  - name: filed_by
+    type: text
+    required: true
+    description: "Skill slug or agent name that filed this gate (e.g. morning-check, task:wrap). Named 'filed_by' (not 'created_by') to avoid collision with the framework-reserved 'created_by' audit column."
+
+  - name: source
+    type: enum
+    enum_values: [dashboard, qa, dev, converge, wrap, intake]
+    required: true
+    description: "Origin context where this gate was raised"
+
+  - name: business_reason
+    type: text
+    required: false
+    description: "Proto-contract: why this gate matters from a business perspective"
+
+  - name: technical_detail
+    type: text
+    required: false
+    description: "Proto-contract: technical context for the gate"
+
+  - name: command
+    type: text
+    required: false
+    description: "For type=script: the shell command to run"
+
+  - name: implications
+    type: text
+    required: false
+    description: "Proto-contract: downstream consequences of the gate decision"
