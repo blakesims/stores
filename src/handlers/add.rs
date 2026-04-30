@@ -81,7 +81,7 @@ pub fn run(
         param_idx += 1;
 
         match &field.ty {
-            FieldType::Record(_) | FieldType::List(_) => {
+            FieldType::Record(_) | FieldType::List(_) | FieldType::ListRecord(_) | FieldType::ListFk { .. } => {
                 // Serialize to JSON string
                 let json_str = match val {
                     Some(v) => serde_json::to_string(v)
@@ -164,6 +164,31 @@ fields:
     type: text
 "#;
 
+    // T006 Phase 2 — schema with a list_record field for round-trip tests
+    const LIST_RECORD_SCHEMA: &str = r#"
+name: lrstore
+id_format: "R{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: external_refs
+    type: list_record
+    fields:
+      - name: system
+        type: text
+        required: true
+      - name: kind
+        type: text
+        required: true
+      - name: id
+        type: text
+        required: true
+"#;
+
     fn build_test_add_cmd(schema: &Schema) -> clap::Command {
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
         let mut cmd = clap::Command::new("add");
@@ -233,5 +258,90 @@ fields:
             .query_row("SELECT display_id FROM tstore WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(display_id, "T001");
+    }
+
+    // ---- T006 Phase 2: list_record CLI round-trip ----
+
+    fn list_record_schema_and_conn() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(LIST_RECORD_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    /// AC P2-1: add with a valid list_record JSON arg round-trips via read_row as
+    /// Value::Array (not a string blob).
+    #[test]
+    fn list_record_cli_round_trips_as_array() {
+        let (schema, conn) = list_record_schema_and_conn();
+        let cmd = build_test_add_cmd(&schema);
+        let raw_refs = r#"[{"system":"docker","kind":"container","id":"foo"}]"#;
+        let matches = cmd.get_matches_from([
+            "add",
+            "--title", "test row",
+            "--external-refs", raw_refs,
+        ]);
+
+        run(&schema, &conn, &matches, Actor::Human).unwrap();
+
+        let (_, entry) = crate::handlers::row::read_row(&schema, &conn, "R001").unwrap();
+        let refs_val = entry.get("external_refs").expect("external_refs must be present");
+        match refs_val {
+            serde_json::Value::Array(arr) => {
+                assert_eq!(arr.len(), 1, "expected 1 element");
+                assert_eq!(arr[0]["system"], "docker");
+                assert_eq!(arr[0]["kind"], "container");
+                assert_eq!(arr[0]["id"], "foo");
+            }
+            other => panic!(
+                "external_refs must round-trip as Value::Array, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// AC P2-2 (list_record_bad_json_returns_validator_error): passing bad JSON for a
+    /// required list_record field fails validation with an error that mentions the field name.
+    ///
+    /// Decision Matrix: fail-silent coerce (Value::Null) + validator surfaces field name.
+    /// The schema has external_refs without required:true on the field itself but
+    /// sub-fields are required — however for the validator error we need the field to be
+    /// required. Use a schema where external_refs has required: true to guarantee the error.
+    #[test]
+    fn list_record_bad_json_returns_validator_error() {
+        const REQUIRED_LR_SCHEMA: &str = r#"
+name: lrreq
+id_format: "Q{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: title
+    type: text
+  - name: external_refs
+    type: list_record
+    required: true
+    fields:
+      - name: system
+        type: text
+"#;
+        let schema = Schema::from_yaml(REQUIRED_LR_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema)).unwrap();
+
+        let cmd = build_test_add_cmd(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--external-refs", "{not json",
+        ]);
+
+        let err = run(&schema, &conn, &matches, Actor::Human).unwrap_err();
+        let msg = err.to_string();
+        // Must mention the field name
+        assert!(
+            msg.contains("external_refs"),
+            "error must mention field name 'external_refs'; got: {msg}"
+        );
     }
 }

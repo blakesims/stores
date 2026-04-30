@@ -94,7 +94,7 @@ pub fn run(
                         .unwrap_or_else(|_| "null".to_string());
                     sql_values.push(rusqlite::types::Value::Text(json_str));
                 }
-                FieldType::List(_) => {
+                FieldType::List(_) | FieldType::ListRecord(_) | FieldType::ListFk { .. } => {
                     let json_str = serde_json::to_string(new_val)
                         .unwrap_or_else(|_| "null".to_string());
                     sql_values.push(rusqlite::types::Value::Text(json_str));

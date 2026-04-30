@@ -103,6 +103,15 @@ pub fn coerce_value(ty: &FieldType, raw: &str) -> Value {
                 .collect();
             Value::Array(parts)
         }
+        // ListRecord and ListFk: the raw CLI string is expected to be a JSON array.
+        // Parse it; on failure (bad JSON or non-array shape) return Null so the
+        // validator surfaces the field name via "required" or "invalid" error.
+        FieldType::ListRecord(_) | FieldType::ListFk { .. } => {
+            match serde_json::from_str::<Value>(raw) {
+                Ok(Value::Array(arr)) => Value::Array(arr),
+                _ => Value::Null,
+            }
+        }
         _ => Value::String(raw.to_string()),
     }
 }
@@ -271,7 +280,7 @@ fn sqlite_to_json(v: rusqlite::types::Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Tests (Task 1.9 — AC1.9: depth-3 round-trip)
+// Tests (Task 1.9 — AC1.9: depth-3 round-trip) + T006 Phase 2 ACs
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -281,6 +290,64 @@ mod tests {
     use crate::schema::Schema;
     use serde_json::json;
     use tempfile::tempdir;
+
+    // ---- T006 Phase 2: coerce_value for ListRecord / ListFk ----
+
+    #[test]
+    fn coerce_value_list_record_valid_json_returns_array() {
+        let ty = FieldType::ListRecord(vec![]); // sub-fields not needed for coerce test
+        let raw = r#"[{"system":"docker","kind":"container","id":"foo"}]"#;
+        let result = coerce_value(&ty, raw);
+        match result {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 1);
+                assert_eq!(arr[0]["system"], "docker");
+                assert_eq!(arr[0]["kind"], "container");
+                assert_eq!(arr[0]["id"], "foo");
+            }
+            other => panic!("expected Value::Array, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn coerce_value_list_record_bad_json_returns_null() {
+        let ty = FieldType::ListRecord(vec![]);
+        let raw = "{not json";
+        let result = coerce_value(&ty, raw);
+        assert_eq!(result, Value::Null, "bad JSON must return Null (fail-silent)");
+    }
+
+    #[test]
+    fn coerce_value_list_record_non_array_json_returns_null() {
+        let ty = FieldType::ListRecord(vec![]);
+        let raw = r#"{"system":"docker"}"#; // object, not array
+        let result = coerce_value(&ty, raw);
+        assert_eq!(result, Value::Null, "non-array JSON must return Null");
+    }
+
+    #[test]
+    fn coerce_value_list_fk_valid_json_returns_array() {
+        use crate::schema::FieldType;
+        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
+        let raw = r#"["L001","L002"]"#;
+        let result = coerce_value(&ty, raw);
+        match result {
+            Value::Array(arr) => {
+                let ids: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
+                assert_eq!(ids, vec!["L001", "L002"]);
+            }
+            other => panic!("expected Value::Array, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn coerce_value_list_fk_bad_json_returns_null() {
+        use crate::schema::FieldType;
+        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
+        let raw = "{not json";
+        let result = coerce_value(&ty, raw);
+        assert_eq!(result, Value::Null);
+    }
 
     // Schema with depth-3 nesting: plan.phases[N].name and cycles[N].executor.summary
     const DEPTH3_SCHEMA: &str = r#"

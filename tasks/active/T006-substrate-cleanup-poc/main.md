@@ -1,7 +1,7 @@
 # T006: Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2
+- **Status:** CODE_REVIEW
 - **Created:** 2026-04-30
 - **Last Updated:** 2026-04-30
 - **Blocked Reason:** —
@@ -301,6 +301,25 @@ All five cycle-1 revisions verified. Status advances PLAN_REVIEW → READY.
   - The `state_machine_rejects_wrong_from_state` test assertion was updated: the old message "cannot {verb}: row is in state ..." is replaced by `select_transition`'s "no transition from '{from}' via verb '{verb}' found in schema". Semantics preserved, wording changed by the reorder.
   - `tasks_e2e.sh` Step 16 fails with a SIGPIPE/pipefail issue on `cargo test ... | grep -q` — confirmed pre-existing at HEAD before Phase 1 (stash verified). Not introduced by this phase.
   - `cargo test --all`: 380 passed, 0 failed.
+
+### Phase 2 — Finding B: list_record / list_fk write path
+- **Status:** COMPLETE
+- **Started:** 2026-04-30
+- **Completed:** 2026-04-30
+- **Commit SHA:** (see below)
+- **Files modified:**
+  - `src/handlers/row.rs` — added `ListRecord` and `ListFk` arms to `coerce_value`; added 5 unit tests for coerce round-trip and bad-JSON fail-silent behaviour
+  - `src/handlers/add.rs` — extended match arm from `Record|List` to also cover `ListRecord|ListFk`; added `LIST_RECORD_SCHEMA` fixture, `list_record_schema_and_conn` helper, `list_record_cli_round_trips_as_array` and `list_record_bad_json_returns_validator_error` tests
+  - `src/handlers/update.rs` — extended `List` arm to `List|ListRecord|ListFk`
+  - `src/handlers/transition.rs::execute_transition_write` — extended `List` arm to `List|ListRecord|ListFk`
+  - `tasks/active/T006-substrate-cleanup-poc/main.md` — this log
+- **Audit results:**
+  - `add.rs`: needed the fix — match arm was `Record|List` only, `ListRecord`/`ListFk` fell through to the `_` text arm, storing raw string
+  - `update.rs`: needed the fix — same pattern, `FieldType::List(_)` only
+  - `transition.rs::execute_transition_write`: needed the fix — `FieldType::List(_)` only
+  - `row.rs::read_row`: already correct — all four types handled in the JSON deserialization branch (pre-existing, introduced in an earlier task)
+- **Validator error message:** `pretty_print` formats as `- <field_name>: required`; for `external_refs` with bad JSON → `Null`, the error is `- external_refs: required`. Field name IS in the output. Confirmed by `list_record_bad_json_returns_validator_error` test asserting `msg.contains("external_refs")`.
+- **Tests:** 387 passed, 0 failed (`cargo test --all`). `drive_e2e.sh` PASS. `e2e.sh` Step 6 and `tasks_e2e.sh` Step 16 failures are pre-existing (CLAUDECODE env var / SIGPIPE pipefail), confirmed in Phase 1 Code Review.
 
 ---
 
