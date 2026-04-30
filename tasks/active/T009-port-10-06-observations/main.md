@@ -1,9 +1,9 @@
 # T009: Port the 10.06 `observations` store — second real migration
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_6
 - **Created:** 2026-04-30
-- **Last Updated:** 2026-04-30 (Phase 5 COMPLETE — frozen-fixture header added to observations_1006/schema.yaml)
+- **Last Updated:** 2026-04-30 (Phase 5 code review PASS — advancing to Phase 6 operator integration smoke)
 - **Blocked Reason:** —
 
 ## Task
@@ -704,6 +704,48 @@ This is exactly the R1 risk class flagged in the plan ("a careless executor coul
 **Decision:** PASS. The single REVISE-minor finding from cycle 1 is resolved exactly as scoped; no scope creep; no regressions. Phase 4 is complete.
 
 **Routing:** CODE_REVIEW → EXECUTING_PHASE_5.
+
+---
+
+### Phase 5 Code Review — Freeze observations_1006 with header annotation
+- **Reviewer:** code-reviewer agent
+- **Date:** 2026-04-30
+- **Commit reviewed:** `683dd9c` ("feat(T009-P5): freeze observations_1006 POC with header annotation")
+- **Gate:** **PASS**
+
+**Verification against ACs (Phase 5):**
+
+| AC | Status | Notes |
+|----|--------|-------|
+| Top-of-file comment in `stores/observations_1006/schema.yaml` clearly identifies it as frozen | ✓ | Read lines 1-25 directly. Has loud "FROZEN FIXTURE — DO NOT EDIT" banner across the box header + restated as "Do NOT edit operationally" near the bottom. Names POC heritage (T006, T008 with the substrate features each validated). Redirects to `stores/observations/schema.yaml` for production work. Explains retention rationale (regression-fixture reproducibility + documented evolution). Tells operators to copy to a new name (not reuse `_1006` suffix) for future POCs. All five operator-readability requirements satisfied. |
+| `stores install ./stores/observations_1006` still parses | ✓ | Re-ran live in a fresh tempdir (`mktemp -d`, `git init -q`, `stores init`, `stores install /home/blake/repos/experiments/stores/stores/observations_1006`): `Installed store 'observations_1006' (table: observations_1006)`. YAML parser tolerates the 25-line `#`-comment block above `name:`. |
+| No code references rely on the POC; `tests/e2e.sh` and `tests/observations_e2e.sh` use `stores/observations/` | ✓ | Already verified during Phase 4 review (pre-existing condition). Phase 5 added zero new dependencies. |
+
+**Out-of-scope discipline:**
+- `git show 683dd9c --stat` confirms exactly 2 files touched: `stores/observations_1006/schema.yaml` (+25 lines, header only) and `tasks/active/T009-port-10-06-observations/main.md` (+51/-2, execution log). Schema fields below the header are untouched (diff is purely an additive 25-line prepend). Zero scope creep.
+- A follow-up commit `be2e0f5` records the SHA in the execution log — a clerical-only update, fine.
+
+**Tests re-run during review:**
+- `cargo test --all` → 414 unit + 2 integration = **416 PASS, 0 fail** (matches Phase 4 baseline).
+- `stores install` smoke against fresh tempdir — PASS as documented above.
+
+**Header content audit (operator-readability, line-by-line):**
+- Lines 1-3: triple-banner box header with "FROZEN FIXTURE — DO NOT EDIT" — loud, unmissable.
+- Lines 4-6: identifies T006/T008 substrate-validation heritage.
+- Lines 8-11: redirects to `stores/observations/schema.yaml` with concrete reasons (7-state lifecycle, ~30 fields, intent_contract per D9).
+- Lines 13-19: dual retention rationale (regression fixture + documented evolution).
+- Lines 21-24: explicit "Do NOT edit operationally" + copy-to-new-name guidance.
+- Line 25: closing banner.
+
+This exceeds the plan's "4-6 line comment header" target (25 lines) but in a healthy direction — the extra context names the specific tempdir artefact paths (`/tmp/t006-p5-smoke/`, `/tmp/t008-notes-smoke/`) that anchor the retention rationale, which is exactly the D1 reasoning that Phase 5 exists to inscribe in-tree. Not a finding; arguably better than the spec.
+
+**Findings:**
+
+This is the smallest possible phase — a 25-line comment-block prepend with an additive-only diff, a parser-tolerated change, no logic touched, no test impact. I looked specifically for: (a) header content gaps (does it say all five things ACs imply?), (b) parser breakage (does the YAML still load?), (c) scope creep (did the executor touch anything else in the schema or elsewhere?), (d) cross-file consistency (is the README cross-reference Phase 4 added still in place?). None surfaced. The header is operator-clear, the parser is tolerant, the scope is clean, and the README one-liner at `stores/observations/README.md` is intact from Phase 4. Three-finding-floor explicitly suspended for this phase per cynicism budget — there is genuinely nothing wrong with a 25-line comment block that does exactly what its job description says.
+
+**Decision:** PASS. Phase 5 implements D1 exactly as designed: freezes the POC in place with a header that documents the architectural decision in-tree, breaks nothing, costs nothing operationally, preserves regression-fixture reproducibility for T006 P5 / T008 P5 artefacts.
+
+**Routing:** CODE_REVIEW → EXECUTING_PHASE_6.
 
 ---
 
