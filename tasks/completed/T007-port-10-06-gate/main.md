@@ -731,9 +731,9 @@ This is integration smoke — artefact-only, zero code changes. Per spec, findin
 
 ## Completion
 
-- **Completed:** 2026-04-30
+- **Completed:** 2026-05-01 (Phase 4 finished 2026-05-01 per execution log)
 - **Code commits:** `7dc5f48` (P1 schema), `3c37ea4` (P2 rename sweep), `754e46c` (P3 gate_e2e + dispatch.rs guard), `51e59ef` (P4 smoke artefacts)
-- **CodeRabbit Stage 6:** ran twice on `--base 49de491`, both clean (`No findings ✔`)
+- **CodeRabbit Stage 6:** ran twice on `--base 49de491` (the T007 setup commit; `49de491` = `chore(T007): create task — port 10.06 gate store`), both clean (`No findings ✔`)
 - **Test count:** 398/0 throughout. New `tests/gate_e2e.sh` per-commit canary covers all six production-shape clauses.
 - **e2e:** `drive_e2e.sh` green throughout; `gate_e2e.sh` (new) PASS 6/6; pre-existing `e2e.sh` Step 6 + `tasks_e2e.sh` Step 16 unchanged.
 
