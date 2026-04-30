@@ -6,7 +6,6 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T009 | Port the 10.06 `observations` store — second real migration | High | Phase 4 | EXECUTING_PHASE_4 | [main.md](./active/T009-port-10-06-observations/main.md) |
 
 Next available task id: T010
 
@@ -16,6 +15,7 @@ Next available task id: T010
 
 | ID | Task Name | Completed | Link |
 |:---|:----------|:----------|:-----|
+| T009 | Port the 10.06 `observations` store — second real migration | 2026-05-01 | [main.md](./completed/T009-port-10-06-observations/main.md) |
 | T008 | Add `FieldType::Json` for free-shape opaque payloads | 2026-04-30 | [main.md](./completed/T008-json-fieldtype/main.md) |
 | T007 | Port the 10.06 `gate` store — first real migration | 2026-04-30 | [main.md](./completed/T007-port-10-06-gate/main.md) |
 | T006 | Substrate cleanup — POC findings (transition guards, list_record, name escaping, list flags) | 2026-04-30 | [main.md](./completed/T006-substrate-cleanup-poc/main.md) |
