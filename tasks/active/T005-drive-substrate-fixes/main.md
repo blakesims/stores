@@ -292,7 +292,7 @@ The plan is tightly scoped to the three forensic bugs, each phase is independent
 - **Status:** COMPLETE
 - **Started:** 2026-04-30
 - **Completed:** 2026-04-30
-- **Commit:** TBD (set after commit)
+- **Commit:** `c425e32`
 - **Files modified:**
   - `src/handlers/drive.rs` — added `use std::io::Write;` import. Appended `let _ = std::io::stderr().flush();` after each of the 9 progress `eprintln!` sites in `drive_loop`: (1) `status=complete; drive finished`, (2) `blocked: {reason}`, (3) pre-spawn `spawning {agent_role} via ... runner`, (4) post-spawn `{agent_role} returned (exit=...)`, (5) `schema validation retries exhausted`, (6) `runner exited with code`, (7) `envelope parse failed` (inside `map_err` closure), (8) `submitted (gate=...)`, (9) `max iterations exceeded`.
 - **Notes:**
