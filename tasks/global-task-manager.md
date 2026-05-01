@@ -6,7 +6,7 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T010 | Wrap workflow + GO/NO_GO (last 10%) | High | 1/7 | EXECUTING_PHASE_1 | [main.md](./active/T010-wrap-workflow/main.md) |
+| T010 | Wrap workflow + GO/NO_GO (last 10%) | High | 3/7 | EXECUTING_PHASE_3 | [main.md](./active/T010-wrap-workflow/main.md) |
 
 Next available task id: T011
 

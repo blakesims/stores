@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_3
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (code-reviewer: Phase 1 cycle 2 PASS — eager-wrap dispatch verified)
+- **Last Updated:** 2026-05-01 (code-reviewer: Phase 2 PASS — wrap envelope schema verified)
 - **Blocked Reason:** —
 
 ## Task
@@ -527,7 +527,9 @@ _Code-reviewer agent fills this section per phase._
 
 > Details: `code-review-phase-1.md` (Cycle 2 review section).
 
-### Phase 2: Wrap envelope schema
+### Phase 2: Wrap envelope schema (Executor's execution log)
+> Note: this entry was placed under the Code Review Log heading by the executor; properly belongs under `## Execution Log`. Left in place to avoid churn — flagged in Code Review Phase 2 review (Finding 4) for housekeeping in a later phase.
+
 - **Status:** COMPLETE
 - **Started:** 2026-05-01
 - **Completed:** 2026-05-01
@@ -548,6 +550,24 @@ _Code-reviewer agent fills this section per phase._
   - Phase 1 stub's `AgentEnvelope::Wrap` was missing `reasoning: Option<String>`. Added with `#[serde(default)]` to keep the Phase 1 inline stub fixture (`wrap_fixture_json()`) valid (it omits the field, default gives None).
   - `parse_envelope_from_wrap_fixture` uses `structured_output` (Layer 1) rather than `make_run_output` to avoid multi-line JSON last-line-scan failure; the pretty-printed fixture's last line is `}` which fails the legacy layer's single-line parse.
   - No deviation from plan scope. Phase 4 files (`agents/wrap.md`, `stores/tasks/templates/wrap-brief.md.tpl`) untouched.
+
+### Phase 2 — Code review (2026-05-01)
+- **Gate:** PASS
+- **Reviewed commits:** `da8d38c` (schema + fixture + tests), `73901a2` (execution log)
+- **Revision count:** 0/3 (Phase 2 closes on first pass)
+- **ACs verified:** 2.1 (bundled_schemas_count), 2.2 (positive + negative fixture validation), 2.3 (parse_envelope_from_wrap_fixture), 2.4 (role_mismatch_wrap_envelope_while_executing), 2.5 (`additionalProperties: false` literal). All pass.
+- **Tests + build:** 455 unit + 2 integration = 457 total, all green. `cargo build --features runner-claude-code` clean (1 pre-existing dead_code warning on `AgentEnvelope::Wrap` fields — Phase 3 will clear when `compute_submit_wrap` reads them).
+- **Style consistency:** wrap.schema.json mirrors planner.schema.json (Draft 2020-12, $id, reasoning slot first, `additionalProperties: false`, descriptions on every field, no `gate` field — confirms decision matrix row (h)).
+- **Stub markers:** correctly retained on `agents/wrap.md` and `stores/tasks/templates/wrap-brief.md.tpl` (Phase 4's job).
+- **Out-of-scope hygiene:** files changed in `da8d38c` are exactly the 4 Phase 2 files; no Phase 3/4/5 contamination.
+- **Findings (informational, non-blocking):**
+  1. **MINOR** — `parse_envelope_from_wrap_fixture` uses `structured_output` injection instead of `make_run_output` like its peers, because the wrap fixture is the only multi-line/pretty-printed fixture and `make_run_output`'s last-line-scan reduces it to `}`. Verified the executor's claim end-to-end. The wrap envelope's Layer 2 (SAP) and Layer 3 (legacy) parse paths are now untested at the per-role-fixture level. Acceptable since real claude-code runs go through Layer 1 (sdk), but the asymmetry is worth flagging. Two follow-up options (see code-review-phase-2.md): (a) compact the fixture to one line and switch the test to `make_run_output`, or (b) enhance `make_run_output` to set `final_message` to full stdout. Neither blocks Phase 2.
+  2. **TRIVIAL** — pre-existing dead_code warning on `AgentEnvelope::Wrap` fields grew by one (`reasoning`). Phase 3 (`compute_submit_wrap`) clears it.
+  3. **TRIVIAL** — main.md test-count drift between debug and release builds noted in Phase 1 cycle-2 review still applies; Phase 6 reconciles.
+  4. **TRIVIAL (housekeeping)** — Executor placed the Phase 2 execution log entry under `## Code Review Log` rather than `## Execution Log`. Marked above; reorganise in a future docs-cleanup pass.
+- **Status update:** EXECUTING_PHASE_3 (orchestrator advances; Phase 3 — `compute_submit_wrap` + drive auto-fire `request_review` on PASS-on-last-phase via state-local flag — is unblocked).
+
+> Details: `code-review-phase-2.md`.
 
 ---
 
