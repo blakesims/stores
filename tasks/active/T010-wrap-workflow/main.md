@@ -1,7 +1,7 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_6
+- **Status:** CODE_REVIEW
 - **Created:** 2026-05-01
 - **Last Updated:** 2026-05-01 (code-reviewer: Phase 5 PASS — guide wrap-mode + /task:wrap skill verified)
 - **Blocked Reason:** —
@@ -720,6 +720,31 @@ _Code-reviewer agent fills this section per phase._
 - **Status update:** EXECUTING_PHASE_6 (orchestrator advances; Phase 6 — tests + e2e fixture — is unblocked).
 
 > Details: `code-review-phase-5.md`.
+
+### Phase 6: Tests + e2e fixture
+
+- **Status:** COMPLETE
+- **Started:** 2026-05-01
+- **Completed:** 2026-05-01
+- **Commit:** `5f66722`
+- **Files Modified:**
+  - `src/handlers/transition.rs` — 7 new unit tests in `tests` module: `ac6_accept_happy_path_in_review_human_lands_accepted`, `ac6_accept_wrong_state_executing_rejected`, `ac6_accept_ai_autonomous_invoker_rejected`, `ac6_reject_happy_path_in_review_human_lands_rejected`, `ac6_reject_ai_autonomous_invoker_rejected`, `ac6_amend_happy_path_rejected_lands_planning`, `ac6_amend_from_wrong_state_accepted_rejected`. New `WRAP_SCHEMA` inline const + `setup_wrap`, `insert_wrap_row`, `build_wrap_cmd`, `read_status_wrap` helpers.
+  - `tests/drive_e2e.sh` — Header comment updated to list AC7.5/AC7.6; cargo-install dependency documented. AC7.5 stanza: drive → in_review, `stores tasks accept T001`, asserts accepted + wrap_log preserved. AC7.6 stanza: CLAUDECODE=1 accept and reject both fail with actor-mismatch error; unset CLAUDECODE allows reject; final status=rejected.
+- **Test count:** 479 unit + 2 integration = **481 total** (+7 new transition tests). All pass.
+- **AC verification:**
+  - AC6.1: All 7 new unit tests pass (22 total in handlers::transition::tests). ✓
+  - AC6.2: `bash tests/drive_e2e.sh` exits 0 with all 4 ACs (AC7.1, AC7.1b, AC7.5, AC7.6). ✓
+  - AC6.3: Test naming convention `ac6_*_short_name` matches existing `ac5_5_*` pattern. ✓
+  - AC6.4: Coverage spans transition guards (accept/reject/amend happy+wrong-state), actor enforcement at unit level (AiAutonomous rejected for human-gated transitions), and CLI-subprocess actor enforcement (AC7.6). ✓
+  - AC6.5: `schemas_validate_fixtures.rs` wrap fixture validation (2 tests pass). ✓
+  - AC6.6: Migrated tests pass (all 479 unit pass). ✓
+  - AC6.7: AC7.6 subprocess test passes — CLAUDECODE=1 rejects accept+reject; unset allows reject; status=rejected. ✓
+- **Notes:**
+  - `reject` is a plain transition; there is no `--reason` enforcement at handler or CLI level — `reject_reason` in `wrap_log` is written by the wrap agent at submit-wrap time, not by the reject transition. The "reject requires --reason" bullet in the Phase 6 instructions was inapplicable to the existing implementation; `reject` works without any --reason arg (verified).
+  - `amend` is also a plain transition — `current_phase`/`current_cycle` reset is handled by the submit handlers (not the transition handler), so the test simply verifies `rejected → planning` landing.
+  - Actor enforcement error format: `"transition 'accept' requires actor 'human'; invoker is 'ai_autonomous' (auto-detected from $CLAUDECODE); to proceed: pass --invoker human"`.
+  - AC7.6 subprocess test uses subshell with `CLAUDECODE=1 stores tasks accept T001 2>&1) && fail ... || true` to capture non-zero exit without `set -e` aborting the outer script.
+  - `bash tests/tasks_e2e.sh` continues to exit 0.
 
 ---
 
