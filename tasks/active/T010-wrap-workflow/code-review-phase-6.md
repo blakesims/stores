@@ -121,3 +121,81 @@ No production code drift. No accidental changes to `submit.rs` / `dispatch.rs` /
 ## Verdict
 
 **REVISE (cycle 1/3).** Two critical, plan-explicit DONE_WHEN/Decision-Matrix items are unimplemented in production code, and Phase 6's tests silently codify the broken behavior as the spec. The executor's defense of these gaps does not survive verification of `compute_submit_wrap`, the wrap envelope schema, or `compute_on_entry_framework_fields`. Phase 6's testing job was to surface these — Phase 6 surfaced them in execution-log notes but argued them away rather than failing the gate. The orchestrator brief's guidance is explicit on this case: REVISE, with the executor either fixing the small code gaps or escalating.
+
+---
+
+# Cycle 1 review — 2026-05-01
+
+- **Reviewer:** code-reviewer agent (cycle 1)
+- **Reviewed commit:** `2aa992a` (fix: F1 + F2)
+- **Verdict:** **PASS**
+- **Files changed (per `git show 2aa992a --stat`):**
+  - `src/cli/dynamic.rs` — +11/-1 (`--reason` arg augmentation for `reject` verb)
+  - `src/cli/dispatch.rs` — +9/-1 (route `reject` verb to `run_reject`)
+  - `src/handlers/transition.rs` — +175/-9 (new `run_reject`; `verb == "amend"` injection in `run_in_tx`; updated/new `ac6_*` tests; helpers)
+  - `tests/drive_e2e.sh` — +20/-3 (AC7.6 `--reason` update + `reject_reason` assertion)
+  - `tasks/active/T010-wrap-workflow/main.md` — execution log
+  - **Out-of-scope check** — clean: no drift into `agents/`, `skills/`, `render/`, schema YAML, or other handlers.
+
+## Verification of cycle-0 findings
+
+### F1 — `reject --reason` (fixed)
+
+| Check | Result |
+|---|---|
+| `--reason` arg added to `reject` subcommand in `dynamic.rs` post-`build_transition_cmd` (manual augmentation b/c wrap_log is `list_record`) | ✓ verified, `required(true)` |
+| `dispatch.rs` routes `verb == "reject"` to `run_reject` with parsed reason | ✓ catch-all branch, runtime `bail!` fallback |
+| `run_reject` reads pre-transition wrap_log inside the same tx as the transition + post-write | ✓ single `conn.unchecked_transaction()` covers all three operations; `tx.commit()` only fires after the wrap_log UPDATE |
+| Atomicity — partial failure leaves state untouched | ✓ verified by reading lines 40–84 of `transition.rs`: tx open → read → mutate-in-memory → `run_in_tx(&tx, ...)` → manual UPDATE → commit. Any failure rolls back the entire chain. |
+| Empty-`wrap_log` edge case stubs entry with `{reject_reason, at}` | ✓ verified at lines 63–69; covered by `ac6_reject_empty_wrap_log_stubs_entry_with_reason` |
+| Latest-entry mutation preserves other wrap fields (option b) | ✓ in-place `obj.insert("reject_reason", ...)` does not overwrite `executive_summary` / `deviations` / etc.; `ac6_reject_writes_reason_to_wrap_log` test seeds `executive_summary:"Done"` and asserts the reason write |
+| Clap rejects missing `--reason` | ✓ smoke-tested: `stores tasks reject T001` → `error: the following required arguments were not provided: --reason <reason>` |
+| Production e2e `AC7.6` reject case persists `wrap_log[-1].reject_reason == "test rejection"` | ✓ `bash tests/drive_e2e.sh` reports PASS |
+
+### F2 — `amend` resets `current_phase` / `current_cycle` (fixed)
+
+| Check | Result |
+|---|---|
+| `verb == "amend"` injection lands in `run_in_tx` after `select_transition`, before `execute_transition_write` | ✓ verified at lines 173–180 of `transition.rs` |
+| Both `diff` and `merged` updated (so SET clause builder writes both fields) | ✓ |
+| `execute_transition_write` builds SET clause from `diff`; integer-typed fields take Integer-cast path (lines 250–256) | ✓ |
+| Verb-only routing safe — schema declares `amend` only on `rejected → planning` (single declaration) | ✓ verified `stores/tasks/schema.yaml:121`; no other transition uses `amend` |
+| Reset lands in same tx as transition (no `planning, current_phase=N` window) | ✓ single `tx.commit()` after `execute_transition_write` |
+| Production-schema smoke test: seed `rejected, current_phase=2, current_cycle=3`; run `stores tasks amend T001 --invoker ai_with_human` → `planning, 0, 0` | ✓ verified manually against `stores/tasks/schema.yaml` (which has `actor: framework, auto_increment: true` on these fields — the unit-test `WRAP_SCHEMA` does NOT) |
+| Manual `--current-phase 99` CLI override on amend still rejected by validator (framework-actor protection retained) | ✓ smoke-tested: `Error: validation failed: current_phase requires actor 'framework'` |
+| Test `ac6_amend_resets_phase_and_cycle` seeds 2/3, asserts 0/0 post-amend | ✓ |
+
+## Tests + build
+
+- `cargo build --features runner-claude-code` — clean, no warnings (forced rebuild via `touch transition.rs`).
+- `cargo test --features runner-claude-code` — **481 unit + 2 integration** pass. Reconciles vs cycle-0's 479+2: cycle-1 renamed `ac6_reject_happy_path_*` → `ac6_reject_writes_reason_to_wrap_log` (net 0) and added `ac6_reject_empty_wrap_log_stubs_entry_with_reason` + `ac6_amend_resets_phase_and_cycle` (+2). Total ac6_ tests in handlers::transition::tests: 9 (+ 1 unrelated `ac6_exact_fixture` in `schema::flatten` → 10 ac6_ matches across suite). Execution log's "10 ac6_* tests" claim is correct under that interpretation.
+- `bash tests/drive_e2e.sh` — 4/4 ACs PASS (AC7.1, AC7.1b, AC7.5, AC7.6 all green; AC7.6 explicitly verifies reject_reason persistence).
+- `bash tests/tasks_e2e.sh` — 16/16 steps PASS.
+
+## Honest-reversal check
+
+Per orchestrator brief, executor was instructed to "honestly reverse your prior 'no implementation gap' claim." Verified at `main.md:789`:
+
+> "The prior execution log notes for Phase 6 incorrectly claimed 'no implementation gap' for F1 and F2. Both claims were wrong. The code reviewer's verification was correct: F1's reasoning failed on temporal grounds (wrap agent runs before human decides), and F2's claim was disproved by a grep of `compute_on_entry_framework_fields`. The prior tests codified broken behavior as the spec. This revision fixes both gaps."
+
+Honest reversal landed.
+
+## Findings (cycle 1 — informational, non-blocking)
+
+1. **MINOR (footgun, low likelihood) — `run_reject`'s post-transition manual UPDATE silently overrides `run_in_tx`'s wrap_log diff write.** If a user invokes `stores tasks reject T001 --reason "x" --wrap-log "[]"`, the inner `run_in_tx` writes `wrap_log = []` via diff (since `--wrap-log` is auto-flattened to a CLI arg), then `run_reject`'s explicit UPDATE clobbers that with the pre-transition reading + reject_reason. The user's `--wrap-log` flag is silently ignored. Practically irrelevant — nobody would rationally combine these flags — but worth a defensive guard or doc note in a future hardening pass. Not a blocker.
+
+2. **MINOR (architectural) — verb-string keyed field injection in `run_in_tx` (`if verb == "amend"`) is a one-off special case.** Future verbs needing similar field-reset semantics would extend the same `if verb == "..."` ladder. The orchestrator flagged this as a future-refactor candidate (e.g. a `verb_reset_fields` lookup or schema-declared `on_transition.reset_fields: [...]`). **Not a Phase 6 blocker** — a generalisation costs more than it earns at v0.5 with a single use case. Re-evaluate when a second verb wants the same shape.
+
+3. **MINOR (test coverage gap) — unit-test `WRAP_SCHEMA` declares `current_phase`/`current_cycle` without the `actor: framework, auto_increment: true` constraints that the production `stores/tasks/schema.yaml` carries.** This means the unit test does not exercise the validator interaction with these constraints. The reviewer manually smoke-tested the production-schema path and confirmed amend works as intended (lines 173–180's injection happens AFTER validation, so the framework-actor field check on `diff` never sees the injected values; the bypass is intentional and correct — the framework engine itself is allowed to set framework-actor fields). However, no automated test pins this behavior. **Recommend (future hardening, not a Phase 6 blocker):** add an `AC7.7` to `drive_e2e.sh` that drives a task to in_review, rejects with reason, then amends with `--invoker ai_with_human` and asserts `status=planning, current_phase=0, current_cycle=0` against the production schema.
+
+4. **TRIVIAL — AC7.6 missing-reason bonus case not added.** Orchestrator listed it as "Optional but recommended." Reviewer manually verified clap enforcement works (`stores tasks reject T001` → "the following required arguments were not provided: --reason"). Not a blocker; nice-to-have for future hardening.
+
+5. **TRIVIAL — Reviewer note on validator/injection ordering.** F2 works precisely because `run_in_tx` injects fields AFTER `validate::validate(...)` (line 169) but BEFORE `execute_transition_write` (line 183). This is the right behavior for the use case (framework-engine-side resets shouldn't be subject to actor-field validation that's meant to gate manual CLI overrides), but the ordering is implicit. Worth a code-comment in a future polish pass: "`amend` field injection happens post-validation by design — the framework is itself permitted to set framework-actor fields; manual CLI overrides on the same fields ARE still gated by validation since they enter `diff` via `build_entry_map` BEFORE this injection." The reviewer manually verified this protection still works (`stores tasks amend T001 --current-phase 99 --invoker ai_with_human` → validation error).
+
+## Decision
+
+Both cycle-0 critical findings (F1, F2) are correctly fixed with minimal, well-targeted changes. Atomicity verified. Production-schema behavior smoke-tested. Out-of-scope discipline maintained. Tests strengthened (no longer encode broken behavior as spec). Honest reversal of the prior "no implementation gap" claim is in the execution log. All test suites green.
+
+The five cycle-1 findings above are informational future-work breadcrumbs, not gates. None of them undermine the core claims; the most substantive (item 3 — production-schema e2e for amend) is a hardening recommendation, not a regression.
+
+**PASS.** Phase 6's code-review responsibility is satisfied. With Phase 6 being the last code phase (Phase 7 is worklog/GTM housekeeping per plan), advance to **EXECUTING_PHASE_7**.

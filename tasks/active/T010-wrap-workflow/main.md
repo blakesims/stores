@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_7
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (code-reviewer: Phase 6 REVISE 1/3 — `reject --reason` and `amend` phase/cycle reset are unimplemented; executor's "no gap" claim was wrong)
+- **Last Updated:** 2026-05-01 (code-reviewer: Phase 6 cycle-1 PASS — F1 `reject --reason` and F2 `amend` phase/cycle reset both correctly fixed; advance to Phase 7 worklog/GTM)
 - **Blocked Reason:** —
 
 ## Task
@@ -822,6 +822,31 @@ _Code-reviewer agent fills this section per phase._
 - `src/handlers/transition.rs` — `run_reject` function; `amend` reset in `run_in_tx`; updated/new unit tests
 - `tests/drive_e2e.sh` — AC7.6 `--reason` update + `reject_reason` assertion
 - `tasks/active/T010-wrap-workflow/main.md` — this entry
+
+### Phase 6 — Code review cycle 1 (2026-05-01)
+
+- **Gate:** **PASS**
+- **Reviewed commit:** `2aa992a`
+- **Revision count:** 1/3 (used)
+- **Files changed (per `git show 2aa992a --stat`):** `src/cli/dynamic.rs` (+11/-1), `src/cli/dispatch.rs` (+9/-1), `src/handlers/transition.rs` (+175/-9), `tests/drive_e2e.sh` (+20/-3), `main.md`. **Out-of-scope check ✓** — no drift into `agents/`, `skills/`, `render/`, schema YAML, or other handlers.
+- **Verification of cycle-0 findings:**
+  - **F1 `reject --reason` ✓** — `--reason` arg added with `required(true)` in `dynamic.rs` (manual augmentation since `wrap_log` is `list_record`); `dispatch.rs` routes `verb == "reject"` to `run_reject`. `run_reject` opens one tx, reads pre-transition wrap_log, mutates `wrap_log[-1].reject_reason` in-memory (option b — preserves all other synthesis fields), fires `run_in_tx` for the status change, then writes the updated wrap_log JSON, then commits. **Atomicity verified by reading lines 40–84:** any failure mid-sequence rolls back the entire chain. Empty-wrap_log edge case stubs `{reject_reason, at}`. Smoke-tested: `stores tasks reject T001` (no flag) → clap "required arg not provided" error. Production e2e AC7.6 confirms `wrap_log[-1].reject_reason == "test rejection"` persisted.
+  - **F2 `amend` resets phase/cycle ✓** — `verb == "amend"` injection lands in `run_in_tx` after `select_transition` resolves, before `execute_transition_write`. Both `diff` and `merged` get `current_phase=0`, `current_cycle=0`. `execute_transition_write` builds SET clause from `diff`, integer-typed fields take Integer-cast path. Verb-only routing safe — schema declares `amend` only on `rejected → planning` (single declaration, verified at `stores/tasks/schema.yaml:121`). Smoke-tested against PRODUCTION schema (which has `actor: framework, auto_increment: true` constraints — unit test's `WRAP_SCHEMA` does not): seeded `rejected, current_phase=2, current_cycle=3`; `stores tasks amend T001 --invoker ai_with_human` → `planning, 0, 0`. Reset lands in same tx as transition (no `planning, current_phase=N>0` window). Manual `--current-phase 99` CLI override on amend STILL rejected by validator — framework-actor protection retained because injection happens post-validation, manual diff entries pre-validation.
+- **Tests + build:**
+  - `cargo build --features runner-claude-code` clean, no warnings.
+  - `cargo test --features runner-claude-code` — 481 unit + 2 integration pass. Reconciles vs cycle-0's 479+2: cycle-1 renamed `ac6_reject_happy_path_*` → `ac6_reject_writes_reason_to_wrap_log` (net 0) and added 2 (`ac6_reject_empty_wrap_log_stubs_entry_with_reason`, `ac6_amend_resets_phase_and_cycle`). 9 ac6_ tests in `handlers::transition::tests` + 1 unrelated `ac6_exact_fixture` = 10 ac6_ matches across suite.
+  - `bash tests/drive_e2e.sh` — 4/4 ACs PASS.
+  - `bash tests/tasks_e2e.sh` — 16/16 PASS.
+- **Honest-reversal check ✓** — `main.md:789` explicitly reverses the prior "no implementation gap" claim per orchestrator instruction.
+- **Findings (all informational, non-blocking):**
+  1. **MINOR (footgun, low likelihood)** — In `run_reject`, if a user passes both `--reason` and `--wrap-log "..."`, the inner `run_in_tx`'s diff-driven wrap_log write is silently overwritten by `run_reject`'s post-transition manual UPDATE. Practically irrelevant; defensive guard or doc note in a future hardening pass.
+  2. **MINOR (architectural)** — verb-string keyed field injection (`if verb == "amend"`) is a one-off special case. Future verbs needing similar field-reset semantics would extend the same `if verb == "..."` ladder. Future-refactor candidate (e.g. schema-declared `on_transition.reset_fields: [...]` or a `verb_reset_fields` lookup); not warranted at v0.5 with a single use case.
+  3. **MINOR (test coverage gap)** — unit-test `WRAP_SCHEMA` declares `current_phase`/`current_cycle` without `actor: framework, auto_increment: true` constraints that production carries. Reviewer manually smoke-tested the production-schema amend path; recommend adding an AC7.7 e2e (drive → in_review → reject → amend, assert `planning, 0, 0`) for automated coverage in a future hardening pass. Not a Phase 6 blocker.
+  4. **TRIVIAL** — AC7.6 missing-reason bonus case (orchestrator-flagged "Optional but recommended") not added. Reviewer manually verified clap enforcement works.
+  5. **TRIVIAL** — Worth a code-comment in a future polish pass that F2's injection-after-validation ordering is intentional: framework engine is permitted to set framework-actor fields; manual CLI overrides on the same fields ARE still gated because they enter `diff` via `build_entry_map` BEFORE this injection.
+- **Status update:** **EXECUTING_PHASE_7** (orchestrator advances to last phase — worklog + GTM update — since Phase 6 was the last code phase).
+
+> Details: `code-review-phase-6.md` (cycle 1 review section).
 
 ---
 
