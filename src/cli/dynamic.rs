@@ -43,6 +43,8 @@ pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[
             include_str!("../../stores/tasks/templates/executor-brief.md.tpl")),
         ("templates/code-reviewer-brief.md.tpl",
             include_str!("../../stores/tasks/templates/code-reviewer-brief.md.tpl")),
+        ("templates/wrap-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/wrap-brief.md.tpl")),
         ("templates/main.md.tpl",
             include_str!("../../stores/tasks/templates/main.md.tpl")),
     ]),

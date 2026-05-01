@@ -950,7 +950,18 @@ pub(crate) fn compute_submit_review(
         &invoker.to_string(), &fw_fields, &text_fields,
     )?;
 
-    // No follow-on needed for submit-review (see 5.5b note in task spec)
+    // Fire on-entry follow-ons for the new state (e.g. complete → in_review via on_state.complete).
+    // For PASS-last-phase, new_status == "complete" and the schema's on_state.complete fires
+    // request_review (framework actor), advancing the row to in_review in the same tx.
+    fire_on_entry_follow_ons(&tx, schema, display_id, row_id, &new_status)?;
+
+    // Re-read status after follow-ons (may have advanced from complete → in_review)
+    let (_, post_follow_on_entry) = read_row(schema, &tx, display_id)?;
+    let final_status = post_follow_on_entry
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&new_status)
+        .to_string();
 
     release_lock(&tx, &schema.name, display_id)?;
     tx.commit().context("submit-review: commit")?;
@@ -961,9 +972,9 @@ pub(crate) fn compute_submit_review(
 
     Ok(SubmitOutput {
         display_id: display_id.to_string(),
-        new_status: new_status.clone(),
+        new_status: final_status.clone(),
         summary: format!(
-            "Submitted review for {display_id} --gate {gate}; status now: {new_status}"
+            "Submitted review for {display_id} --gate {gate}; status now: {final_status}"
         ),
         cycles_idx: Some(cycle_idx),
         gate: Some(gate.to_string()),
@@ -1122,7 +1133,7 @@ name: wf_tasks
 id_format: "WF{:03d}"
 
 lifecycle:
-  states: [planning, plan_review, ready, executing, code_review, blocked, complete]
+  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected]
   transitions:
     - from: planning
       to: plan_review
@@ -1188,6 +1199,22 @@ lifecycle:
     - from: blocked
       to: ready
       verb: resume
+      actor: ai_with_human
+    - from: complete
+      to: in_review
+      verb: request_review
+      actor: framework
+    - from: in_review
+      to: accepted
+      verb: accept
+      actor: human
+    - from: in_review
+      to: rejected
+      verb: reject
+      actor: human
+    - from: rejected
+      to: planning
+      verb: amend
       actor: ai_with_human
 
 fields:
@@ -1257,6 +1284,24 @@ fields:
         type: text
       - name: summary
         type: text
+  - name: wrap_log
+    type: list_record
+    fields:
+      - name: executive_summary
+        type: text
+      - name: deviations
+        type:
+          list: text
+      - name: residual_risks
+        type:
+          list: text
+      - name: recommended_sanity_checks
+        type:
+          list: text
+      - name: reject_reason
+        type: text
+      - name: at
+        type: timestamp
 
 workflow:
   agent_roles:
@@ -1268,11 +1313,14 @@ workflow:
       description: "Reviews the execution"
     plan_reviewer:
       description: "Reviews the plan"
+    wrap:
+      description: "Synthesises completed task into a reviewer brief"
   briefing_templates:
     planner: templates/planner-brief.md.tpl
     executor: templates/executor-brief.md.tpl
     code_reviewer: templates/executor-brief.md.tpl
     plan_reviewer: templates/planner-brief.md.tpl
+    wrap: templates/wrap-brief.md.tpl
   on_state:
     planning:
       - dispatch_agent: planner
@@ -1284,11 +1332,16 @@ workflow:
       - dispatch_agent: code_reviewer
     plan_review:
       - dispatch_agent: plan_reviewer
+    complete:
+      - transition_to: in_review
+    in_review:
+      - dispatch_agent: wrap
   submit_targets:
     submit-plan: plan
     submit-execute: cycles
     submit-review: cycles
     submit-plan-review: plan_review_log
+    submit-wrap: wrap_log
   max_revise_cycles: 3
 "#;
 
@@ -1472,7 +1525,8 @@ workflow:
     }
 
     // ---------------------------------------------------------------------------
-    // AC5.3: submit-review --gate PASS (last phase) → complete
+    // AC5.3: submit-review --gate PASS (last phase) → complete → in_review
+    //        (complete is transient; on-entry follow-on advances to in_review in same tx)
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -1492,8 +1546,9 @@ workflow:
             Actor::AiAutonomous,
         ).unwrap();
 
-        assert_eq!(out.new_status, "complete");
-        assert_eq!(read_status(&conn), "complete");
+        // on_state.complete fires request_review (framework) → in_review in same tx
+        assert_eq!(out.new_status, "in_review");
+        assert_eq!(read_status(&conn), "in_review");
         // current_phase must NOT be bumped past last
         assert_eq!(read_i64(&conn, "current_phase"), 1);
     }

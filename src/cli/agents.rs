@@ -31,6 +31,7 @@ pub static BUNDLED_AGENTS: &[(&str, &str)] = &[
         include_str!("../../agents/code-reviewer.md"),
     ),
     ("guide", include_str!("../../agents/guide.md")),
+    ("wrap", include_str!("../../agents/wrap.md")),
 ];
 
 /// Bundled JSON Schemas for agent envelopes — embedded at compile time.
@@ -63,6 +64,10 @@ pub static BUNDLED_AGENT_SCHEMAS: &[(&str, &str)] = &[
     (
         "guide",
         include_str!("../../agents/schemas/guide.schema.json"),
+    ),
+    (
+        "wrap",
+        include_str!("../../agents/schemas/wrap.schema.json"),
     ),
 ];
 
@@ -334,7 +339,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // AC1.8: BUNDLED_AGENTS must contain exactly 5 entries
+    // AC1.8: BUNDLED_AGENTS must contain exactly 6 entries (includes wrap; T010 Phase 1)
     // -----------------------------------------------------------------------
     #[test]
     fn all_agents_bundled() {
@@ -344,12 +349,13 @@ mod tests {
         assert!(names.contains(&"executor"));
         assert!(names.contains(&"code-reviewer"));
         assert!(names.contains(&"guide"));
-        assert_eq!(names.len(), 5, "BUNDLED_AGENTS must contain exactly 5 entries");
+        assert!(names.contains(&"wrap"));
+        assert_eq!(names.len(), 6, "BUNDLED_AGENTS must contain exactly 6 entries");
     }
 
     // -----------------------------------------------------------------------
-    // AC1.4: BUNDLED_AGENT_SCHEMAS has 5 entries; role-name set matches
-    // BUNDLED_AGENTS.
+    // AC1.4: BUNDLED_AGENT_SCHEMAS has 6 entries; role-name set matches
+    // BUNDLED_AGENTS. (wrap schema added in T010 Phase 1 stub; formalized Phase 2)
     // -----------------------------------------------------------------------
     #[test]
     fn bundled_schemas_count_matches_agents() {
@@ -360,8 +366,8 @@ mod tests {
 
         assert_eq!(
             BUNDLED_AGENT_SCHEMAS.len(),
-            5,
-            "BUNDLED_AGENT_SCHEMAS must contain exactly 5 entries"
+            6,
+            "BUNDLED_AGENT_SCHEMAS must contain exactly 6 entries"
         );
         assert_eq!(
             agent_names, schema_names,

@@ -105,6 +105,18 @@ enum AgentEnvelope {
         details: Option<String>,
         counts: Option<ReviewCounts>,
     },
+    /// `wrap` output — synthesis brief for GO/NO_GO review.
+    /// Formally wired to `compute_submit_wrap` in Phase 3; Phase 1 stub exits drive loop.
+    #[serde(rename = "wrap")]
+    Wrap {
+        executive_summary: String,
+        #[serde(default)]
+        deviations: Vec<String>,
+        #[serde(default)]
+        residual_risks: Vec<String>,
+        #[serde(default)]
+        recommended_sanity_checks: Vec<String>,
+    },
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -499,7 +511,22 @@ pub(crate) fn drive_loop(
             anyhow::anyhow!("envelope parse error: {e}")
         })?;
 
+        // Track whether this iteration dispatched the wrap agent (used for exit below).
+        let dispatched_wrap = matches!(envelope, AgentEnvelope::Wrap { .. });
         let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;
+
+        // ── Wrap exit: brief written, awaiting human GO/NO_GO ────────────
+        // When the wrap agent submits, drive has done its job — exit 0 so the
+        // human can invoke `accept` or `reject`. (Phase 4 adds state-local flag;
+        // for now a per-iteration boolean suffices since Phase 1 has no loops
+        // that could re-enter in_review within a single drive run.)
+        if dispatched_wrap {
+            eprintln!(
+                "[{display_id}] in_review; brief written; awaiting `stores tasks accept | reject`"
+            );
+            let _ = std::io::stderr().flush();
+            return Ok(());
+        }
 
         // ── Step 2f: render ───────────────────────────────────────────────
         // Render is best-effort; failure is logged but does not abort the loop.
@@ -781,6 +808,29 @@ fn dispatch_submit(
                 Actor::AiAutonomous,
             )
         }
+
+        AgentEnvelope::Wrap { .. } => {
+            // Phase 1 stub: wrap envelope received while row is in_review.
+            // compute_submit_wrap (Phase 3) will persist wrap_log and confirm the
+            // row stays in in_review. For now, return a sentinel SubmitOutput so
+            // drive_loop can detect the wrap dispatch and exit with the human-review
+            // hint. The row status is already in_review (set by submit-review follow-on).
+            if current_status != "in_review" {
+                bail!(
+                    "wrap envelope received but status is '{}', expected 'in_review'",
+                    current_status
+                );
+            }
+            Ok(crate::handlers::submit::SubmitOutput {
+                display_id: display_id.to_string(),
+                new_status: "in_review".to_string(),
+                summary: format!("[{display_id}] wrap brief written; awaiting human review"),
+                cycles_idx: None,
+                gate: None,
+                plan_review_gate: None,
+                blocked_reason: None,
+            })
+        }
     }
 }
 
@@ -937,9 +987,16 @@ mod tests {
         include_str!("../../tests/fixtures/agent_outputs/code-reviewer.json")
     }
 
+    /// Stub wrap envelope for Phase 1 testing.
+    /// The wrap agent schema is formally defined in Phase 2; this fixture is
+    /// sufficient for drive_loop to parse and exit with the in_review hint.
+    fn wrap_fixture_json() -> &'static str {
+        r#"{"role":"wrap","executive_summary":"stub","deviations":[],"residual_risks":[],"recommended_sanity_checks":[]}"#
+    }
+
     // ---------------------------------------------------------------------------
     // AC3.7: happy-path through 1 full phase (planning → plan_review →
-    // executing → code_review → complete)
+    // executing → code_review → complete → in_review via wrap dispatch)
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -953,19 +1010,23 @@ mod tests {
             "2026-01-01T00:00:00Z", 0, 0, None, None,
         );
 
-        // Queue: planner → plan_reviewer → executor → code_reviewer
+        // Queue: planner → plan_reviewer → executor → code_reviewer → wrap
+        // After code_reviewer PASS-last-phase, on_state.complete fires request_review
+        // (same tx → in_review). Drive then dispatches wrap agent; after wrap
+        // submits, drive exits with "awaiting human review" hint.
         let planner_out = make_run_output(planner_fixture_json(), 0);
         let plan_reviewer_out = make_run_output(plan_reviewer_fixture_json(), 0);
         let executor_out = make_run_output(executor_fixture_json(), 0);
         let code_reviewer_out = make_run_output(code_reviewer_fixture_json(), 0);
+        let wrap_out = make_run_output(wrap_fixture_json(), 0);
 
-        let runner = MockRunner::new(vec![planner_out, plan_reviewer_out, executor_out, code_reviewer_out]);
+        let runner = MockRunner::new(vec![planner_out, plan_reviewer_out, executor_out, code_reviewer_out, wrap_out]);
 
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
 
-        // Verify final status
+        // Verify final status: in_review (drive exits after wrap dispatch, row awaits human)
         let na = compute_next_action(&schema, &conn, "T001").unwrap();
-        assert_eq!(na.status, "complete", "task should be complete after drive");
+        assert_eq!(na.status, "in_review", "task should be in_review after drive (awaiting human GO/NO_GO)");
     }
 
     // ---------------------------------------------------------------------------

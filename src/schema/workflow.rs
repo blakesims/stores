@@ -298,6 +298,7 @@ const SUBMIT_VERBS: &[&str] = &[
     "submit-execute",
     "submit-review",
     "submit-plan-review",
+    "submit-wrap",
 ];
 
 impl Workflow {

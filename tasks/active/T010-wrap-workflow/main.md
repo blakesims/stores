@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** PLAN_REVIEW
+- **Status:** CODE_REVIEW
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (planner: revisions for plan-review round 2)
+- **Last Updated:** 2026-05-01 (executor: Phase 1 complete)
 - **Blocked Reason:** —
 
 ## Task
@@ -341,10 +341,27 @@ Close the **last 10%** of the task lifecycle by extending `tasks/schema.yaml` wi
 
 ## Plan Review
 
+### Round 2 — Plan-reviewer verification (2026-05-01)
+
+- **Gate:** **READY**
+- **Reviewed:** 2026-05-01
+- **Verification summary:** All seven round-1 corrections landed cleanly without regressions.
+  1. **AC4.3 state-local flag** — heuristic explicitly rejected; `dispatched_wrap_this_run: bool` named; AC4.3a covers re-entry after reject→amend→re-complete; Phase 4 Dependencies names the prereq; Decision Matrix row (k) with philosophy-invariant rationale.
+  2. **`git_diff_summary` out of render** — `src/render/context.rs` untouched; drive computes the diff and passes it via context overlay; render stays pure `(schema, entry) → Value`; Decision Matrix row (j) documents the since-ref fallback chain.
+  3. **Test fixture migration enumeration** — AC1.7 names `submit.rs::ac5_3_submit_review_pass_last_phase_completes` (lines 1479–1496), `drive.rs:~968`, `drive.rs:~1152`; AC1.9 requires the grep sweep; Phase 6 migrates both. Independent verification: planner's line numbers are accurate (round-1 reviewer's 1638/1656 callout was a miscount; the actual function is at 1479–1496).
+  4. **`amend` verb naming** — promoted to first-class Decision Matrix row (i) with semantic rationale (`resume` preserves `current_phase`, `amend` resets to phase 0).
+  5. **Skill path** — verified at planning time via `ls skills/gate:walk/`; convention is `skills/<verb>:<noun>/SKILL.md` with the colon as part of the directory name; new `skills/task:wrap/SKILL.md` matches.
+  6. **CLI-level actor enforcement** — AC6.7 + `tests/drive_e2e.sh::AC7.6` documented as subprocess-shape, real CLI binary, `CLAUDECODE=1` set vs unset, symmetric pair for `accept` and `reject --reason`.
+  7. **Phase 4 prereq on Hot-spot A fix** — Phase 4 Dependencies line names the state-local-flag mechanism explicitly with infinite-redispatch failure-mode rationale.
+- **Architecture preservation:** Decisions (a)–(h) unchanged. New rows (i), (j), (k) are spec-tightening only. Render stays pure. No backwards-compat hacks. Schema-first phase ordering preserved.
+- **Verdict:** Plan can move to active execution. No further round trip needed.
+
+> Full detail: `plan-review.md` (Round 2 — Verification section).
+
 ### Round 2 — Planner revision (2026-05-01)
 
 - **Gate (planner self-attest):** READY-FOR-REVIEW (round 2)
-- **Status:** awaiting plan-reviewer round-2 verdict.
+- **Status:** verified READY by plan-reviewer (see above).
 - **Round-1 outcome:** NEEDS_WORK with seven specific corrections (full review at `plan-review.md`).
 - **Revisions applied (mapping each correction to where it landed):**
   1. **AC4.3 dispatch idempotency** — heuristic replaced with state-local flag inside `drive_loop`. New AC4.3 + AC4.3a (re-entry safety after amend) added. Phase 4 "Decisions made" rewritten. Decision Matrix row (k) added with full rationale (philosophy invariant, why option (i) breaks under reject→amend→re-complete, why state-local flag is correct).
@@ -404,13 +421,28 @@ Three concrete implementation corrections must land before execution begins. Non
 ## Execution Log
 _Executor agent fills this section per phase._
 
-### Phase 1: [Title]
-- **Status:** PENDING | IN_PROGRESS | COMPLETE | BLOCKED
-- **Started:** —
-- **Completed:** —
-- **Commits:** —
-- **Files Modified:** —
-- **Notes:** —
+### Phase 1: Lifecycle schema extension
+- **Status:** COMPLETE
+- **Started:** 2026-05-01
+- **Completed:** 2026-05-01
+- **Commits:** (see commit SHA after commit)
+- **Files Modified:**
+  - `stores/tasks/schema.yaml` — 10 states, 4 new transitions, wrap_log field, on_state.complete/in_review, submit-wrap, wrap agent_role, briefing_templates.wrap
+  - `src/handlers/submit.rs` — WF_SCHEMA_YAML fixture mirrored; fire_on_entry_follow_ons added to compute_submit_review; ac5_3 assertion migrated to in_review
+  - `src/handlers/drive.rs` — AgentEnvelope::Wrap added; dispatch_submit stub arm; in_review wrap-exit path; happy_path test migrated (5 mock outputs); wrap_fixture_json helper
+  - `src/schema/workflow.rs` — submit-wrap added to SUBMIT_VERBS
+  - `src/cli/agents.rs` — wrap added to BUNDLED_AGENTS + BUNDLED_AGENT_SCHEMAS; counts updated 5→6
+  - `src/cli/dynamic.rs` — wrap-brief.md.tpl added to BUNDLED_STORE_TEMPLATES
+  - `agents/wrap.md` — stub agent system prompt (Phase 4 will finalize)
+  - `agents/schemas/wrap.schema.json` — stub schema (Phase 2 will formalize)
+  - `stores/tasks/templates/wrap-brief.md.tpl` — stub template (Phase 4 will finalize)
+- **Notes:**
+  - The plan expected `actor: framework` for `complete → in_review`; confirmed by inspecting `ready → executing` in schema — also `actor: framework`. Consistent.
+  - `compute_submit_review` previously had "No follow-on needed" comment; Phase 1 adds `fire_on_entry_follow_ons` call so PASS-last-phase chains to in_review in same tx. This was necessary to satisfy AC1.7.
+  - The schema validation requires every `agent_roles` entry to have a `briefing_templates` entry (existing rule). Phase 1 creates stub files for `wrap` to pass this gate rather than deferring to Phase 4.
+  - `AgentEnvelope::Wrap` variant added in Phase 1 (scoped to Phase 2 in plan) because `drive_loop` would panic when dispatching `in_review → wrap` without a parseable envelope type. Plan's Phase 1 test migration requires drive to complete the happy path.
+  - `BUNDLED_AGENTS` count updated 5→6 (plan specifies this in Phase 4, but required in Phase 1 to avoid "no bundled agent" error in drive test).
+  - All 430 tests pass. `cargo build --features runner-claude-code` succeeds. AC1.9 sweep clean.
 
 ---
 

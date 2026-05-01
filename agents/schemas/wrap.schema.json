@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Wrap agent output envelope",
+  "description": "Synthesis brief produced by the wrap agent at task completion. Persisted to wrap_log[].",
+  "type": "object",
+  "required": ["role", "executive_summary"],
+  "additionalProperties": false,
+  "properties": {
+    "role": {
+      "type": "string",
+      "const": "wrap"
+    },
+    "executive_summary": {
+      "type": "string",
+      "description": "≤150-word summary: what was promised, what was delivered, key gaps."
+    },
+    "deviations": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Plan divergences that occurred during execution.",
+      "default": []
+    },
+    "residual_risks": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Risks that remain after task completion.",
+      "default": []
+    },
+    "recommended_sanity_checks": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Specific checks the reviewer should perform before GO/NO_GO.",
+      "default": []
+    }
+  }
+}

@@ -67,9 +67,18 @@ fields:
   - {name: claimed_by, type: text, actor: framework}
   - {name: claimed_at, type: timestamp, actor: framework}
   - {name: blocked_reason, type: text}
+  - name: wrap_log
+    type: list_record
+    fields:
+      - {name: executive_summary, type: text}
+      - {name: deviations, type: {list: text}}
+      - {name: residual_risks, type: {list: text}}
+      - {name: recommended_sanity_checks, type: {list: text}}
+      - {name: reject_reason, type: text}
+      - {name: at, type: timestamp}
 
 lifecycle:
-  states: [planning, plan_review, ready, executing, code_review, blocked, complete]
+  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected]
   initial_state: planning
   transitions:
     # planning → plan_review (submit-plan)
@@ -103,6 +112,14 @@ lifecycle:
     # blocked → ready (resume)
     - {from: blocked, to: ready, verb: resume, actor: ai_with_human}
 
+    # complete → in_review (framework on-entry follow-on)
+    - {from: complete, to: in_review, verb: request_review, actor: framework}
+    # in_review → accepted / rejected (human gated)
+    - {from: in_review, to: accepted, verb: accept, actor: human}
+    - {from: in_review, to: rejected, verb: reject, actor: human}
+    # rejected → planning (amend: re-open contract authoring)
+    - {from: rejected, to: planning, verb: amend, actor: ai_with_human}
+
 workflow:
   max_revise_cycles: 3
   agent_roles:
@@ -114,11 +131,14 @@ workflow:
       description: "Executes one phase"
     code_reviewer:
       description: "Reviews phase output, PASS/REVISE/FAIL gate"
+    wrap:
+      description: "Synthesises completed task into a reviewer brief"
   briefing_templates:
     planner: "templates/planner-brief.md.tpl"
     plan_reviewer: "templates/plan-reviewer-brief.md.tpl"
     executor: "templates/executor-brief.md.tpl"
     code_reviewer: "templates/code-reviewer-brief.md.tpl"
+    wrap: "templates/wrap-brief.md.tpl"
   render_template: "templates/main.md.tpl"
   render_target_path: "tasks/{{status_dir}}/{{display_id}}-{{slug}}/main.md"
   submit_targets:
@@ -126,6 +146,7 @@ workflow:
     submit-plan-review: plan_review_log
     submit-execute: cycles
     submit-review: cycles
+    submit-wrap: wrap_log
   on_state:
     planning:
       - dispatch_agent: planner
@@ -138,4 +159,7 @@ workflow:
     code_review:
       - dispatch_agent: code_reviewer
     blocked: []
-    complete: []
+    complete:
+      - transition_to: in_review
+    in_review:
+      - dispatch_agent: wrap

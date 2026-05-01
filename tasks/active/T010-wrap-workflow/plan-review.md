@@ -164,3 +164,52 @@ None. Decisions (a)–(h) are all argued and ratified by the plan. The seven ite
 ## 7. Gate: **NEEDS_WORK**
 
 Re-run planner with the seven corrections above. Expect a single round trip — none of the issues require rethinking the architecture, just tightening the implementation specification.
+
+---
+
+# Round 2 — Verification (2026-05-01)
+
+**Reviewer:** plan-reviewer (round 2)
+**Reviewed against:** revised `main.md` at commit `22d0180`, plus independent re-read of `src/handlers/{submit,drive}.rs`, `skills/gate:walk/`, `skills/observation:log/`, `agents/schemas/`.
+**Gate:** **READY**
+
+## Verification matrix (seven corrections)
+
+| # | Correction | Round-1 ask | Round-2 location | Verdict |
+|---|---|---|---|---|
+| 1 | AC4.3 state-local flag | Drop the `wrap_log[].at` heuristic; commit to a state-local bool inside `drive_loop`; cover re-entry after reject→amend→re-complete | AC4.3 + AC4.3a (lines 223–224); Phase 4 "Decisions made" rewritten (line 232); Decision Matrix row (k) (line 338); Phase 4 Dependencies prereq (line 236) | LANDED |
+| 2 | `git_diff_summary` out of `src/render/context.rs` | Shell-out lives in `drive.rs`; `render_template` accepts a context overlay; since-ref formula documented | Phase 4 file list explicitly says "no change to `src/render/context.rs`" (line 217); drive computes diff, passes overlay; AC4.5 + AC4.6 (lines 226–227); Decision Matrix row (j) with full fallback chain (line 337) | LANDED |
+| 3 | Test fixture migration enumeration | Name specific test functions / line numbers; require a `grep` sweep; Phase 6 covers migrated assertions | AC1.7 enumerates `submit.rs::ac5_3_submit_review_pass_last_phase_completes` (1479–1496), `drive.rs:~968`, `drive.rs:~1152`; AC1.9 requires the grep sweep; Phase 6 file list migrates both explicitly (lines 281–283); AC6.6 covers it | LANDED |
+| 4 | Decision Matrix row for `amend` verb naming | First-class row with `amend` distinct from `resume` rationale | Decision Matrix row (i) (line 336) — semantic rationale: `resume` preserves `current_phase`, `amend` resets to phase 0; row (g) cross-references (i) | LANDED |
+| 5 | Skill path verified against actual repo | `ls` an existing skill, commit to the convention | Phase 5 file list (line 246) explicitly notes verification — convention is `skills/<verb>:<noun>/SKILL.md` with the colon as part of the directory name; `skills/task:wrap/SKILL.md` matches | LANDED |
+| 6 | Phase 6 CLI-level actor enforcement | Subprocess-shape test with `CLAUDECODE=1` set vs unset; symmetric `accept`/`reject` pair; real CLI binary | AC6.7 (line 299); `tests/drive_e2e.sh::AC7.6` (lines 285–288) — two-step assertion against real CLI binary, symmetric pair for `reject --reason` | LANDED |
+| 7 | Phase 4 Dependencies prereq on Hot-spot A fix | Make explicit, not buried in narrative | Phase 4 Dependencies line 236 names the state-local-flag mechanism explicitly with the infinite-redispatch failure-mode rationale | LANDED |
+
+## Independent line-number verification
+
+I re-read `src/handlers/submit.rs` and `src/handlers/drive.rs` to validate the planner's enumerated targets:
+
+- `submit.rs::ac5_3_submit_review_pass_last_phase_completes` — declared at line 1479; assertions on `out.new_status == "complete"` and `read_status(...) == "complete"` at lines 1495–1496. Planner's "lines ~1479–1496" is the correct function range.
+- `drive.rs:968` — `assert_eq!(na.status, "complete", "task should be complete after drive")`. Confirmed.
+- `drive.rs:1152` — `&conn, &schema, "T001", "complete",` (a setup line, not an assertion). Confirmed; the planner correctly notes this remains valid (`complete` stays a real lifecycle state).
+- `drive.rs:339` — `if na.status == "complete"` (control-flow check inside drive_loop). Confirmed; planner correctly notes this is a mid-loop branch on a still-reachable state and does not need migration.
+
+The round-1 review's "lines 1638, 1656" callout was a miscount on my part. The planner's actual line numbers (1479–1496) are accurate; the test in question is named and bounded correctly.
+
+## Spot-checks
+
+- **DONE_WHEN coverage** — all six bullets remain mapped to their phases with files and ACs. No drift from round 1.
+- **Architecture preservation** — Decisions (a)–(h) unchanged. Three new rows (i), (j), (k) are spec-tightening, not architecture changes.
+- **No new render-time I/O** — verified. Render stays pure `(schema, entry) → Value`; the only change is a context-overlay parameter, fed by drive.
+- **No backwards-compat hacks** — no "if old field X" branches anywhere.
+- **Phase ordering / dependencies** — schema-first preserved. Phase 4's prereq on the state-local flag mechanism is named explicitly (not cosmetic).
+- **Plan Review log integrity** — round-1 entry preserved at the bottom; round-2 entry appended at the top of `## Plan Review` in main.md with the seven corrections mapped to their landing sites.
+
+## Final assessment
+
+The plan was already substantively sound after round 1; the seven corrections were spec-tightening only. All seven landed cleanly without introducing new gaps. The state-local-flag treatment is particularly well-argued (Decision Matrix row (k) walks through why the heuristic fails under reject→amend→re-complete and why the flag does not violate the philosophy invariant). The since-ref fallback chain in row (j) is concrete and executor-actionable.
+
+## Gate: **READY**
+
+Plan can move to active execution. No further round-trip required.
+
