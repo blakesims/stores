@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_1
+- **Status:** CODE_REVIEW
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (code-reviewer: Phase 1 REVISE — back to executor; cycle 1/3)
+- **Last Updated:** 2026-05-01 (executor: Phase 1 revision cycle 1 complete — aceb643)
 - **Blocked Reason:** —
 
 ## Task
@@ -443,6 +443,29 @@ _Executor agent fills this section per phase._
   - `AgentEnvelope::Wrap` variant added in Phase 1 (scoped to Phase 2 in plan) because `drive_loop` would panic when dispatching `in_review → wrap` without a parseable envelope type. Plan's Phase 1 test migration requires drive to complete the happy path.
   - `BUNDLED_AGENTS` count updated 5→6 (plan specifies this in Phase 4, but required in Phase 1 to avoid "no bundled agent" error in drive test).
   - All 430 tests pass. `cargo build --features runner-claude-code` succeeds. AC1.9 sweep clean.
+  - NOTE: test count "430" was stale — actual was 448 (446 unit + 2 integration) pre-revision. See revision cycle 1 below.
+
+#### Revision cycle 1 — 2026-05-01 (executor)
+- **Commit:** `aceb643`
+- **Files Modified:**
+  - `src/handlers/drive.rs` — Remove `complete`-as-terminal exit (now errors with "schema bug"); add `in_review`/`accepted`/`rejected` explicit exits; remove `dispatched_wrap` per-iteration boolean (superseded by `in_review` guard at loop top, which handles both same-run and cross-run re-entry). Migrate `terminal_complete_exits_without_spawning` → `terminal_complete_errors_with_schema_bug_message`. Add `terminal_in_review_exits_without_spawning` and `drive_in_review_with_existing_wrap_log_does_not_redispatch`.
+  - `src/handlers/status.rs` — `is_terminal`: `accepted|rejected` only (complete removed). Add `is_awaiting_human`: `blocked|in_review|accepted|rejected`. `next_from_status`: add `in_review→wrap`, `accepted→-`, `rejected→planner`. `fetch_all_tasks`: exclude `accepted|rejected` (not `complete`/`blocked`). `status follow` loop: use `is_awaiting_human` instead of `is_terminal`. Migrate terminal-state follow tests to use `accepted`/`in_review`.
+  - `src/render/path.rs` — `status_to_dir`: `complete→active` (transient), `in_review→active`, `rejected→paused`, `accepted→completed`. Update `status_dir_complete` test; add `status_dir_in_review`, `status_dir_accepted`, `status_dir_rejected`, `resolve_render_path_accepted_status`.
+  - `src/handlers/render.rs` — `run_render_moves_directory_on_status_change`: use `accepted` (not `complete`) for the active→completed move test.
+  - `stores/tasks/templates/main.md.tpl` — Completion section: `accepted` triggers "Accepted" block; new `rejected` and `in_review` branches added.
+  - `tests/drive_e2e.sh` — AC7.1 and AC7.1b: assert `status=in_review` (not `complete`). Pass messages updated.
+  - `tests/tasks_e2e.sh` — Steps 13, 14, 15: assert `in_review`; render path updated to `tasks/active/` (in_review maps to active/). Fix pre-existing `pipefail`/SIGPIPE bug in Step 16 (`cargo test ... | grep -q` → capture to variable).
+  - `tests/fixtures/drive_e2e/happy_2phase.jsonl` — Add wrap envelope as 7th item.
+  - `tests/fixtures/drive_e2e/revise_once.jsonl` — Add wrap envelope as 9th item.
+  - `agents/wrap.md` — Add Phase 1 stub comment.
+  - `agents/schemas/wrap.schema.json` — Add `$comment` Phase 2 stub marker.
+  - `stores/tasks/templates/wrap-brief.md.tpl` — Add Phase 4 stub comment.
+- **Test count:** 453 unit + 2 integration = **455 total**. All pass.
+- **Notes:**
+  - Cross-run `in_review` re-entry decision: drive refuses to re-dispatch wrap when the row is already `in_review` (the `in_review` guard at loop top exits 0 unconditionally). No heuristic (wrap_log timestamp comparison) needed — the `in_review` status IS the signal. If human wants a re-wrap, use `reject --reason "re-wrap needed" → amend → re-complete`.
+  - `dispatched_wrap` per-iteration boolean removed: the `in_review` status check at loop top provides the same protection for same-run AND cross-run re-entry, making the boolean redundant. Phase 4's AC4.3 work is now fully subsumed by this revision.
+  - Pre-existing `pipefail`/SIGPIPE bug in `tasks_e2e.sh` Step 16 fixed (capture cargo test output to variable before piping to grep). This was broken before Phase 1 — verified via `git stash`.
+  - AC1.9 `complete` sweep extended to `src/handlers/status.rs`, `src/render/path.rs`, `stores/tasks/templates/`, `tests/` per reviewer's request. All remaining hits are legitimate (schema-edge references, transient-state routing, the new error guard).
 
 ---
 
