@@ -111,6 +111,41 @@ pub fn dispatch(
                         invoker,
                     )?;
                 }
+                Some(("submit-wrap", sub)) => {
+                    let display_id = sub.get_one::<String>("display_id")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let executive_summary = read_file_content(sub, "summary-from-file")
+                        .unwrap_or_default();
+                    let deviations = read_lines_from_file(sub, "deviations-from-file")
+                        .unwrap_or_default();
+                    let residual_risks = read_lines_from_file(sub, "residual-risks-from-file")
+                        .unwrap_or_default();
+                    let sanity_checks = read_lines_from_file(sub, "sanity-checks-from-file")
+                        .unwrap_or_default();
+                    let reasoning = read_file_content(sub, "reasoning-from-file");
+
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("executive_summary".to_string(),
+                        serde_json::Value::String(executive_summary));
+                    obj.insert("deviations".to_string(),
+                        serde_json::Value::Array(deviations.into_iter()
+                            .map(serde_json::Value::String).collect()));
+                    obj.insert("residual_risks".to_string(),
+                        serde_json::Value::Array(residual_risks.into_iter()
+                            .map(serde_json::Value::String).collect()));
+                    obj.insert("recommended_sanity_checks".to_string(),
+                        serde_json::Value::Array(sanity_checks.into_iter()
+                            .map(serde_json::Value::String).collect()));
+                    if let Some(r) = reasoning {
+                        obj.insert("reasoning".to_string(), serde_json::Value::String(r));
+                    }
+                    let wrap_entry = serde_json::Value::Object(obj);
+
+                    handlers::submit::run_submit_wrap(
+                        schema, &conn, display_id, wrap_entry, invoker,
+                    )?;
+                }
                 Some(("resume", sub)) if schema.workflow.is_some() => {
                     let display_id = sub.get_one::<String>("display_id")
                         .map(|s| s.as_str())

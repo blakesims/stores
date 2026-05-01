@@ -204,7 +204,7 @@ fn build_store_command(schema: &Schema) -> Command {
     // as lifecycle transition subcommands even if the schema declares them as transition verbs.
     const WORKFLOW_VERBS: &[&str] = &[
         "next-action", "brief", "render", "drive", "status", "guide",
-        "submit-plan", "submit-plan-review", "submit-execute", "submit-review", "resume",
+        "submit-plan", "submit-plan-review", "submit-execute", "submit-review", "submit-wrap", "resume",
     ];
 
     let mut store_cmd = Command::new(schema.name.clone())
@@ -227,6 +227,7 @@ fn build_store_command(schema: &Schema) -> Command {
             .subcommand(build_submit_plan_review_cmd())
             .subcommand(build_submit_execute_cmd())
             .subcommand(build_submit_review_cmd())
+            .subcommand(build_submit_wrap_cmd())
             .subcommand(build_resume_cmd())
             .subcommand(build_guide_cmd());
     }
@@ -436,6 +437,43 @@ fn build_submit_review_cmd() -> Command {
             Arg::new("details-from-file")
                 .long("details-from-file")
                 .help("Load detailed findings from file")
+                .required(false),
+        )
+}
+
+/// Build the `submit-wrap` command.
+fn build_submit_wrap_cmd() -> Command {
+    Command::new("submit-wrap")
+        .about("Submit the wrap agent's synthesis brief (in_review; append-only write to wrap_log[])")
+        .arg(Arg::new("display_id").help("Display ID").required(true))
+        .arg(
+            Arg::new("summary-from-file")
+                .long("summary-from-file")
+                .help("Load executive_summary from file (use '-' for stdin)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("deviations-from-file")
+                .long("deviations-from-file")
+                .help("Load deviations from file (one per line)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("residual-risks-from-file")
+                .long("residual-risks-from-file")
+                .help("Load residual_risks from file (one per line)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("sanity-checks-from-file")
+                .long("sanity-checks-from-file")
+                .help("Load recommended_sanity_checks from file (one per line)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("reasoning-from-file")
+                .long("reasoning-from-file")
+                .help("Load optional reasoning from file")
                 .required(false),
         )
 }

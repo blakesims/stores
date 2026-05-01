@@ -849,27 +849,46 @@ fn dispatch_submit(
             )
         }
 
-        AgentEnvelope::Wrap { .. } => {
-            // Phase 1 stub: wrap envelope received while row is in_review.
-            // compute_submit_wrap (Phase 3) will persist wrap_log and confirm the
-            // row stays in in_review. For now, return a sentinel SubmitOutput so
-            // drive_loop can detect the wrap dispatch and exit with the human-review
-            // hint. The row status is already in_review (set by submit-review follow-on).
+        AgentEnvelope::Wrap {
+            executive_summary,
+            deviations,
+            residual_risks,
+            recommended_sanity_checks,
+            reasoning,
+        } => {
+            // Phase 3: call compute_submit_wrap to persist the wrap_log entry.
+            // The row is already at in_review (set by compute_submit_review's on-entry
+            // follow-on). compute_submit_wrap is a pure list_record append — no transition
+            // is fired; status remains in_review after the call.
             if current_status != "in_review" {
                 bail!(
                     "wrap envelope received but status is '{}', expected 'in_review'",
                     current_status
                 );
             }
-            Ok(crate::handlers::submit::SubmitOutput {
-                display_id: display_id.to_string(),
-                new_status: "in_review".to_string(),
-                summary: format!("[{display_id}] wrap brief written; awaiting human review"),
-                cycles_idx: None,
-                gate: None,
-                plan_review_gate: None,
-                blocked_reason: None,
-            })
+
+            let mut obj = serde_json::Map::new();
+            obj.insert("executive_summary".to_string(),
+                serde_json::Value::String(executive_summary));
+            obj.insert("deviations".to_string(),
+                serde_json::Value::Array(deviations.into_iter()
+                    .map(serde_json::Value::String).collect()));
+            obj.insert("residual_risks".to_string(),
+                serde_json::Value::Array(residual_risks.into_iter()
+                    .map(serde_json::Value::String).collect()));
+            obj.insert("recommended_sanity_checks".to_string(),
+                serde_json::Value::Array(recommended_sanity_checks.into_iter()
+                    .map(serde_json::Value::String).collect()));
+            if let Some(r) = reasoning {
+                obj.insert("reasoning".to_string(), serde_json::Value::String(r));
+            }
+            let wrap_entry = serde_json::Value::Object(obj);
+
+            crate::handlers::submit::compute_submit_wrap(
+                schema, conn, display_id,
+                wrap_entry,
+                crate::schema::actor::Actor::AiAutonomous,
+            )
         }
     }
 }

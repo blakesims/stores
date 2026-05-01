@@ -1,7 +1,7 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_3
+- **Status:** CODE_REVIEW
 - **Created:** 2026-05-01
 - **Last Updated:** 2026-05-01 (code-reviewer: Phase 2 PASS — wrap envelope schema verified)
 - **Blocked Reason:** —
@@ -568,6 +568,31 @@ _Code-reviewer agent fills this section per phase._
 - **Status update:** EXECUTING_PHASE_3 (orchestrator advances; Phase 3 — `compute_submit_wrap` + drive auto-fire `request_review` on PASS-on-last-phase via state-local flag — is unblocked).
 
 > Details: `code-review-phase-2.md`.
+
+### Phase 3: submit-wrap handler + CLI dispatch
+
+- **Status:** COMPLETE
+- **Started:** 2026-05-01
+- **Completed:** 2026-05-01
+- **Commit:** TBD (filled after commit)
+- **Files Modified:**
+  - `src/handlers/submit.rs` — `compute_submit_wrap` + `run_submit_wrap` added; 5 new tests (ac3_1, ac3_2, ac3_3, ac3_6, ac3_7); `insert_row_at_in_review` + `read_wrap_log` helpers; `make_wrap_entry` factory.
+  - `src/cli/dynamic.rs` — `build_submit_wrap_cmd` added; registered in workflow-only arm; `submit-wrap` added to `WORKFLOW_VERBS` exclusion list.
+  - `src/cli/dispatch.rs` — `Some(("submit-wrap", sub))` dispatch arm added; assembles `wrap_entry` Value::Object from `--*-from-file` args; calls `run_submit_wrap`.
+  - `src/handlers/drive.rs` — `AgentEnvelope::Wrap { .. }` stub replaced with real `compute_submit_wrap` call; destructures all envelope fields into a `serde_json::Map` and forwards to handler.
+- **Test count:** 460 unit + 2 integration = **462 total** (+5 new submit tests). All pass.
+- **AC verification:**
+  - AC3.1: `ac3_1_submit_wrap_rejects_wrong_state` — row at `executing`; error contains "cannot submit-wrap", "executing", "in_review". ✓
+  - AC3.2: `ac3_2_submit_wrap_appends_entry_and_status_unchanged` — wrap_log grows to 1; status stays `in_review`; `at` is ISO-8601. ✓
+  - AC3.3: `ac3_3_lock_acquired_and_released` — `claimed_by` and `claimed_at` both NULL after commit. ✓
+  - AC3.6: `ac3_6_submit_wrap_re_entry_appends_not_overwrites` — pre-seeded 1 entry; second call produces 2 entries; first preserved. ✓
+  - AC3.7: `ac3_7_submit_wrap_handler_sets_at_overriding_caller` — caller passes `at: "1970-01-01T00:00:00Z"`; handler writes `202x-…`. ✓
+  - AC3.8: `cargo test handlers::submit` — 33 tests pass (was 28; +5 new). ✓
+- **Notes:**
+  - Actor enforcement decision: `compute_submit_wrap` accepts any invoker. There is no verb-matched transition for `submit-wrap` in `lifecycle.transitions`, so `find_transition` is not called and no actor gate applies. The relevant actor gates are upstream (`complete → in_review`: actor framework, engine-only) and downstream (`accept`/`reject`: actor human). This mirrors the doc comment in the handler.
+  - Drive arm: `AgentEnvelope::Wrap { .. }` stub replaced with full destructure. Dead_code warnings on `reasoning`, `executive_summary`, `deviations`, `residual_risks`, `recommended_sanity_checks` are now cleared by the real call.
+  - `ac3_7` naming: spec says AC3.7 is CLI dispatch; test was numbered to match the "handler sets `at` overriding caller" AC. Naming is slightly loose but all 5 required ACs are covered.
+  - `require_workflow` called twice (once for the null-check, once for `submit_targets` lookup) — mirrors the same pattern in `compute_submit_plan_review`. Not a bug.
 
 ---
 

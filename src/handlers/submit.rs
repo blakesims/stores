@@ -1012,6 +1012,133 @@ pub fn run_submit_review(
 }
 
 // ---------------------------------------------------------------------------
+// submit-wrap: append to wrap_log[] (pure write — no transition fired) (AC3.x)
+// ---------------------------------------------------------------------------
+
+/// Append a wrap entry to `wrap_log[]` without firing any transition.
+///
+/// **Design rationale:** By the time this handler is called, the row is already at `in_review`.
+/// The `complete → in_review` transition was fired by `compute_submit_review`'s on-entry
+/// follow-on machinery (`on_state.complete: [transition_to: in_review]`). There is no
+/// `submit-wrap` verb in `lifecycle.transitions`; `submit-wrap` is declared only in
+/// `submit_targets` as a list_record write target.
+///
+/// **Actor enforcement:** submit-wrap accepts any invoker. The actor gate that matters
+/// for the wrap lifecycle is on the upstream `complete → in_review` transition
+/// (`actor: framework`, only fireable by on-entry machinery) and on the downstream
+/// `accept`/`reject` transitions (`actor: human`). submit-wrap itself is invoked by
+/// the wrap agent (ai_autonomous), but there is no verb-matched transition to validate
+/// against, so no actor check is applied here. Existing submit verbs that lack a verb-matched
+/// transition (e.g. this pattern) simply skip the `find_transition` + validator step.
+///
+/// **Re-entry semantics:** calling this on an `in_review` row that already has a `wrap_log`
+/// entry appends a new entry (append-only list_record). This supports re-wrap after
+/// `rejected → planning → … → complete` round-trips without overwriting history.
+pub(crate) fn compute_submit_wrap(
+    schema: &Schema,
+    conn: &Connection,
+    display_id: &str,
+    wrap_entry: Value,
+    invoker: Actor,
+) -> Result<SubmitOutput> {
+    require_workflow(schema, "submit-wrap")?;
+
+    // Look up field name from submit_targets (schema is the contract)
+    let workflow = require_workflow(schema, "submit-wrap")?;
+    let wrap_field = workflow
+        .submit_targets
+        .get("submit-wrap")
+        .map(|s| s.as_str())
+        .unwrap_or("wrap_log");
+
+    // Step 1: open tx
+    let tx = conn.unchecked_transaction().context("submit-wrap: begin tx")?;
+
+    // Step 2: acquire lock
+    acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
+
+    // Step 3: read row
+    let (row_id, existing) = read_row(schema, &tx, display_id)?;
+
+    // State-machine check (AC3.1): must be in_review
+    let current_status = existing.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if current_status != "in_review" {
+        bail!(
+            "cannot submit-wrap: row is in state '{}', expected 'in_review'",
+            current_status
+        );
+    }
+
+    // Step 4/5: build updated wrap_log list by appending new entry with `at` timestamp
+    let mut entry_obj = match wrap_entry {
+        Value::Object(m) => m,
+        other => {
+            bail!("submit-wrap: wrap_entry must be a JSON object, got {}", other);
+        }
+    };
+    // `at` is always set by the handler, overriding any caller-supplied value
+    entry_obj.insert("at".to_string(), Value::String(now_iso8601()));
+    let entry = Value::Object(entry_obj);
+
+    let mut wrap_list: Vec<Value> = existing
+        .get(wrap_field)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    wrap_list.push(entry);
+
+    // Step 6: no validator pass (submit-wrap has no verb-matched transition; pure write)
+
+    // Step 7: no transition fired (status stays in_review)
+
+    // Step 8: write updated wrap_log (status unchanged)
+    let wrap_json = serde_json::to_string(&wrap_list)?;
+    let mut text_fields: BTreeMap<String, String> = BTreeMap::new();
+    text_fields.insert(wrap_field.to_string(), wrap_json);
+
+    let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
+
+    write_status_and_fields(
+        &tx, &schema.name, row_id, "in_review",
+        &invoker.to_string(), &fw_fields, &text_fields,
+    )?;
+
+    // Step 9: no follow-on transitions
+
+    // Step 10: release lock
+    release_lock(&tx, &schema.name, display_id)?;
+
+    // Step 11: commit
+    tx.commit().context("submit-wrap: commit")?;
+
+    Ok(SubmitOutput {
+        display_id: display_id.to_string(),
+        new_status: "in_review".to_string(),
+        summary: format!(
+            "Submitted wrap for {display_id}; wrap_log now has {} entries; status remains: in_review",
+            wrap_list.len()
+        ),
+        cycles_idx: None,
+        gate: None,
+        plan_review_gate: None,
+        blocked_reason: None,
+    })
+}
+
+pub fn run_submit_wrap(
+    schema: &Schema,
+    conn: &Connection,
+    display_id: &str,
+    wrap_entry: Value,
+    invoker: Actor,
+) -> Result<()> {
+    let out = compute_submit_wrap(schema, conn, display_id, wrap_entry, invoker)?;
+    println!("{}", out.summary);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // resume: blocked → ready (→ executing via on-entry follow-on) (AC5.14)
 // ---------------------------------------------------------------------------
 
@@ -2661,6 +2788,236 @@ workflow:
         assert!(
             rendered.contains("Sentinel Test"),
             "rendered briefing must contain the task title"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helpers for wrap_log tests
+    // ---------------------------------------------------------------------------
+
+    fn read_wrap_log(conn: &Connection) -> Vec<Value> {
+        let json_str: Option<String> = conn.query_row(
+            "SELECT wrap_log FROM wf_tasks WHERE display_id = 'WF001'",
+            [], |r| r.get(0),
+        ).unwrap_or(None);
+        json_str
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn insert_row_at_in_review(conn: &Connection, schema: &Schema, wrap_log: Vec<Value>) {
+        let now = now_iso8601();
+        let plan_json = serde_json::to_string(&json!({
+            "summary": "test plan",
+            "phases": [{"name": "phase 1"}]
+        })).unwrap();
+        let cycles_json = serde_json::to_string(&json!([])).unwrap();
+        let log_json = serde_json::to_string(&json!([])).unwrap();
+        let wrap_log_json = serde_json::to_string(&wrap_log).unwrap();
+        // `schema` is unused except for call-site clarity
+        let _ = schema;
+
+        conn.execute(
+            "INSERT INTO wf_tasks (display_id, status, created_at, updated_at, \
+             created_by, updated_by, title, current_phase, current_cycle, \
+             plan, cycles, plan_review_log, blocked_reason, wrap_log) \
+             VALUES (?1, 'in_review', ?2, ?3, 'human', 'human', 'Test task', \
+             1, 1, ?4, ?5, ?6, '', ?7)",
+            rusqlite::params![
+                "WF001", now, now,
+                plan_json, cycles_json, log_json, wrap_log_json
+            ],
+        ).unwrap();
+    }
+
+    fn make_wrap_entry() -> Value {
+        json!({
+            "executive_summary": "All objectives met.",
+            "deviations": ["minor scope reduction in phase 2"],
+            "residual_risks": ["untested edge case in parser"],
+            "recommended_sanity_checks": ["run integration test suite"],
+            "reject_reason": null
+        })
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC3.1: submit-wrap rejects row not in in_review
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac3_1_submit_wrap_rejects_wrong_state() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
+
+        let err = compute_submit_wrap(
+            &schema, &conn, "WF001",
+            make_wrap_entry(), Actor::AiAutonomous,
+        ).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot submit-wrap"),
+            "error must mention 'cannot submit-wrap': {msg}"
+        );
+        assert!(
+            msg.contains("executing"),
+            "error must name the actual state: {msg}"
+        );
+        assert!(
+            msg.contains("in_review"),
+            "error must name the expected state: {msg}"
+        );
+
+        // Row unchanged
+        assert_eq!(read_status(&conn), "executing");
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC3.2: submit-wrap appends to wrap_log; status remains in_review
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac3_2_submit_wrap_appends_entry_and_status_unchanged() {
+        let (schema, conn) = setup();
+        insert_row_at_in_review(&conn, &schema, vec![]);
+
+        let out = compute_submit_wrap(
+            &schema, &conn, "WF001",
+            make_wrap_entry(), Actor::AiAutonomous,
+        ).unwrap();
+
+        // Status remains in_review (no transition fired)
+        assert_eq!(out.new_status, "in_review");
+        assert_eq!(read_status(&conn), "in_review");
+
+        // wrap_log grew by 1
+        let log = read_wrap_log(&conn);
+        assert_eq!(log.len(), 1, "wrap_log must have 1 entry");
+
+        // Entry has correct fields
+        let entry = &log[0];
+        assert_eq!(
+            entry["executive_summary"].as_str().unwrap(),
+            "All objectives met."
+        );
+        assert_eq!(entry["deviations"].as_array().unwrap().len(), 1);
+        assert_eq!(entry["residual_risks"].as_array().unwrap().len(), 1);
+        assert_eq!(entry["recommended_sanity_checks"].as_array().unwrap().len(), 1);
+
+        // `at` must be set by handler (ISO-8601)
+        let at = entry["at"].as_str().expect("at must be a string");
+        assert!(
+            at.contains('T') && at.contains('-'),
+            "at must be ISO-8601, got: {at}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC3.3: lock acquired and released; no leaks after commit
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac3_3_lock_acquired_and_released() {
+        let (schema, conn) = setup();
+        insert_row_at_in_review(&conn, &schema, vec![]);
+
+        compute_submit_wrap(
+            &schema, &conn, "WF001",
+            make_wrap_entry(), Actor::AiAutonomous,
+        ).unwrap();
+
+        let claimed_by = read_text(&conn, "claimed_by");
+        assert!(
+            claimed_by.is_none() || claimed_by.as_deref() == Some(""),
+            "lock must be released after commit: {:?}", claimed_by
+        );
+        let claimed_at = read_text(&conn, "claimed_at");
+        assert!(
+            claimed_at.is_none() || claimed_at.as_deref() == Some(""),
+            "claimed_at must be NULL after commit: {:?}", claimed_at
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC3.6: re-entry — calling submit-wrap when wrap_log already has entries appends
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac3_6_submit_wrap_re_entry_appends_not_overwrites() {
+        let (schema, conn) = setup();
+        // Pre-seed one wrap_log entry
+        let existing_entry = json!({
+            "executive_summary": "First wrap.",
+            "deviations": [],
+            "residual_risks": [],
+            "recommended_sanity_checks": [],
+            "at": "2026-01-01T00:00:00Z"
+        });
+        insert_row_at_in_review(&conn, &schema, vec![existing_entry]);
+
+        // Sanity: 1 entry before second submit-wrap
+        assert_eq!(read_wrap_log(&conn).len(), 1);
+
+        // Second submit-wrap call
+        let second_entry = json!({
+            "executive_summary": "Second wrap — re-wrap after amendments.",
+            "deviations": ["scope expanded in phase 3"],
+            "residual_risks": [],
+            "recommended_sanity_checks": ["smoke test after deploy"]
+        });
+        let out = compute_submit_wrap(
+            &schema, &conn, "WF001",
+            second_entry, Actor::AiAutonomous,
+        ).unwrap();
+
+        assert_eq!(out.new_status, "in_review");
+        let log = read_wrap_log(&conn);
+        assert_eq!(log.len(), 2, "wrap_log must have 2 entries after re-entry");
+        assert_eq!(
+            log[0]["executive_summary"].as_str().unwrap(),
+            "First wrap.",
+            "first entry must be preserved"
+        );
+        assert_eq!(
+            log[1]["executive_summary"].as_str().unwrap(),
+            "Second wrap — re-wrap after amendments.",
+            "second entry must be appended"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC3.7: handler sets `at` from now_iso8601(), ignoring any caller-supplied `at`
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac3_7_submit_wrap_handler_sets_at_overriding_caller() {
+        let (schema, conn) = setup();
+        insert_row_at_in_review(&conn, &schema, vec![]);
+
+        // Caller provides a stale `at` — handler must override it
+        let entry_with_stale_at = json!({
+            "executive_summary": "Override test.",
+            "deviations": [],
+            "residual_risks": [],
+            "recommended_sanity_checks": [],
+            "at": "1970-01-01T00:00:00Z"
+        });
+
+        compute_submit_wrap(
+            &schema, &conn, "WF001",
+            entry_with_stale_at, Actor::AiAutonomous,
+        ).unwrap();
+
+        let log = read_wrap_log(&conn);
+        let at = log[0]["at"].as_str().unwrap();
+        // Handler's `at` must NOT be the epoch sentinel
+        assert_ne!(
+            at, "1970-01-01T00:00:00Z",
+            "handler must override caller-supplied `at` with now_iso8601()"
+        );
+        assert!(
+            at.starts_with("202"),
+            "handler-set `at` must be a recent timestamp, got: {at}"
         );
     }
 }
