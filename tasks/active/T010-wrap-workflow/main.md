@@ -1,7 +1,7 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2
+- **Status:** CODE_REVIEW
 - **Created:** 2026-05-01
 - **Last Updated:** 2026-05-01 (code-reviewer: Phase 1 cycle 2 PASS — eager-wrap dispatch verified)
 - **Blocked Reason:** —
@@ -526,6 +526,28 @@ _Code-reviewer agent fills this section per phase._
 - **Status update:** EXECUTING_PHASE_2 (orchestrator advances; Phase 2 — wrap envelope schema — is unblocked)
 
 > Details: `code-review-phase-1.md` (Cycle 2 review section).
+
+### Phase 2: Wrap envelope schema
+- **Status:** COMPLETE
+- **Started:** 2026-05-01
+- **Completed:** 2026-05-01
+- **Commit:** `da8d38c`
+- **Files Modified:**
+  - `agents/schemas/wrap.schema.json` — Production schema: `$comment` stub replaced with `$id`; `reasoning` slot added (first property, field-ordering recovery pattern); `role` const typed without redundant `type: string`; `default: []` dropped (not needed with `additionalProperties: false`); style matches `planner.schema.json`.
+  - `tests/fixtures/agent_outputs/wrap.json` — Representative wrap envelope with all fields populated (reasoning, executive_summary, 2 deviations, 1 residual_risk, 4 recommended_sanity_checks).
+  - `src/handlers/drive.rs` — `AgentEnvelope::Wrap` gains `reasoning: Option<String>` with `#[serde(default)]`; `wrap_full_fixture_json()` helper added (Phase 2 full fixture via `include_str!`); `parse_envelope_from_wrap_fixture` unit test (AC2.3, uses structured_output layer to handle pretty-printed JSON); `role_mismatch_wrap_envelope_while_executing` unit test (AC2.4).
+  - `tests/schemas_validate_fixtures.rs` — `RoleCase { role: "wrap", stray_key: "unexpected_wrap_field" }` added to `role_cases()`.
+- **Test count:** 455 unit + 2 integration = **457 total** (+2 new tests). All pass.
+- **AC verification:**
+  - AC2.1: `bundled_schemas_count_matches_agents` passes with `len() == 6`. ✓
+  - AC2.2: `all_fixtures_validate_against_schemas` and `fixtures_with_stray_field_rejected_by_schema` both pass covering wrap. ✓
+  - AC2.3: `parse_envelope_from_wrap_fixture` parses full fixture; asserts reasoning present, all array fields non-empty, sdk layer used. ✓
+  - AC2.4: `role_mismatch_wrap_envelope_while_executing` — wrap envelope while executing; error names "executor", "wrap", and session_id. ✓
+  - AC2.5: `additionalProperties: false` literal present in `wrap.schema.json`. ✓
+- **Notes:**
+  - Phase 1 stub's `AgentEnvelope::Wrap` was missing `reasoning: Option<String>`. Added with `#[serde(default)]` to keep the Phase 1 inline stub fixture (`wrap_fixture_json()`) valid (it omits the field, default gives None).
+  - `parse_envelope_from_wrap_fixture` uses `structured_output` (Layer 1) rather than `make_run_output` to avoid multi-line JSON last-line-scan failure; the pretty-printed fixture's last line is `}` which fails the legacy layer's single-line parse.
+  - No deviation from plan scope. Phase 4 files (`agents/wrap.md`, `stores/tasks/templates/wrap-brief.md.tpl`) untouched.
 
 ---
 
