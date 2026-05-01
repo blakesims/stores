@@ -46,5 +46,11 @@
     "stderr": "",
     "exit_code": 0,
     "final_message": "{\"role\": \"code-reviewer\", \"gate\": \"PASS\", \"summary\": \"Phase 2 revised implementation is correct. All ACs satisfied.\", \"counts\": {\"critical\": 0, \"major\": 0, \"minor\": 0}}"
+  },
+  {
+    "stdout": "{\"role\":\"wrap\",\"executive_summary\":\"stub\",\"deviations\":[],\"residual_risks\":[],\"recommended_sanity_checks\":[]}",
+    "stderr": "",
+    "exit_code": 0,
+    "final_message": "{\"role\":\"wrap\",\"executive_summary\":\"stub\",\"deviations\":[],\"residual_risks\":[],\"recommended_sanity_checks\":[]}"
   }
 ]

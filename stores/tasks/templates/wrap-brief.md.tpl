@@ -1,3 +1,5 @@
+{{!-- STUB — Phase 4 owns the full brief template. This file exists for Phase 1 happy-path test
+     (drive's briefing_templates lookup needs a 'wrap' entry). DO NOT use as production template. --}}
 # Wrap Brief — {{display_id}}: {{title}}
 
 > **Mode:** wrap — synthesise the completed task for human GO/NO_GO review.

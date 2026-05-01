@@ -371,10 +371,12 @@ mod tests {
     // AC6.3: directory is moved when status changes from active to completed.
     #[test]
     fn run_render_moves_directory_on_status_change() {
-        let (tmp, conn, schema) = setup_fixture_env("complete", "dir-move-task", "WF001");
+        // Use `accepted` (the new terminal state that maps to completed/).
+        // `complete` is now transient and maps to active/.
+        let (tmp, conn, schema) = setup_fixture_env("accepted", "dir-move-task", "WF001");
         let tmp_path = tmp.path().to_path_buf();
 
-        // Create the directory in the "active" location as it would be before completion.
+        // Create the directory in the "active" location as it would be before acceptance.
         let old_dir = tmp_path.join("tasks/active/WF001-dir-move-task");
         std::fs::create_dir_all(&old_dir).unwrap();
         std::fs::write(old_dir.join("notes.md"), "some notes").unwrap();

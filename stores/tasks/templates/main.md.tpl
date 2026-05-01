@@ -113,7 +113,10 @@ _No plan reviews yet._
 ---
 
 ## Completion
-{{#if (eq status "complete")}}- **Completed:** {{updated_at}}
+{{#if (eq status "accepted")}}- **Accepted:** {{updated_at}}
 - **Branch:** {{#if branch}}{{branch}}{{else}}—{{/if}}
+{{else}}{{#if (eq status "rejected")}}- **Rejected:** {{updated_at}}
+- **Branch:** {{#if branch}}{{branch}}{{else}}—{{/if}}
+{{else}}{{#if (eq status "in_review")}}- **In Review:** {{updated_at}} — awaiting human GO/NO_GO
 {{else}}_Not yet complete._
-{{/if}}
+{{/if}}{{/if}}{{/if}}

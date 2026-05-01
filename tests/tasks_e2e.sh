@@ -46,15 +46,16 @@ echo ""
 # Step 16 (pre-check): Rust atomicity/AC5.11 tests
 # ---------------------------------------------------------------------------
 echo "--- Step 16: cargo test (atomicity unit tests for AC5.11/AC5.13/AC5.14)"
+# Capture to variable to avoid SIGPIPE from grep -q exiting early under set -o pipefail.
 # Run ac5_11b tests
-cargo test --manifest-path "$STORES_ROOT/Cargo.toml" ac5_11b 2>&1 | \
-    grep -q "test result: ok" || fail "ac5_11b atomicity test failed"
+AC5_11B_OUT=$(cargo test --manifest-path "$STORES_ROOT/Cargo.toml" ac5_11b 2>&1)
+echo "$AC5_11B_OUT" | grep -q "test result: ok" || fail "ac5_11b atomicity test failed"
 # Run ac5_13 tests
-cargo test --manifest-path "$STORES_ROOT/Cargo.toml" ac5_13 2>&1 | \
-    grep -q "test result: ok" || fail "ac5_13 lock-held test failed"
+AC5_13_OUT=$(cargo test --manifest-path "$STORES_ROOT/Cargo.toml" ac5_13 2>&1)
+echo "$AC5_13_OUT" | grep -q "test result: ok" || fail "ac5_13 lock-held test failed"
 # Run ac5_14 tests
-cargo test --manifest-path "$STORES_ROOT/Cargo.toml" ac5_14 2>&1 | \
-    grep -q "test result: ok" || fail "ac5_14 blocked-recovery test failed"
+AC5_14_OUT=$(cargo test --manifest-path "$STORES_ROOT/Cargo.toml" ac5_14 2>&1)
+echo "$AC5_14_OUT" | grep -q "test result: ok" || fail "ac5_14 blocked-recovery test failed"
 pass "atomicity tests (AC5.11/AC5.13/AC5.14) pass"
 
 # ---------------------------------------------------------------------------
@@ -287,20 +288,20 @@ stores tasks submit-review T001 \
     --summary "all phases complete" \
     --invoker ai_autonomous
 STATUS=$(stores tasks show T001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
-[[ "$STATUS" == "complete" ]] || fail "PASS phase 2: expected complete; got: $STATUS"
-pass "PASS phase 2 (PASS-last): status=complete"
+[[ "$STATUS" == "in_review" ]] || fail "PASS phase 2: expected in_review; got: $STATUS"
+pass "PASS phase 2 (PASS-last): status=in_review (awaiting human accept/reject)"
 
 # ---------------------------------------------------------------------------
 # Step 14: render idempotency
 # ---------------------------------------------------------------------------
 echo "--- Step 14: render idempotency"
 stores tasks render T001
-[[ -f "tasks/completed/T001-smoke-test/main.md" ]] || fail "render: main.md not created at tasks/completed/T001-smoke-test/main.md"
-pass "render: main.md exists at tasks/completed/T001-smoke-test/"
+[[ -f "tasks/active/T001-smoke-test/main.md" ]] || fail "render: main.md not created at tasks/active/T001-smoke-test/main.md"
+pass "render: main.md exists at tasks/active/T001-smoke-test/ (in_review maps to active/)"
 
-sha1sum tasks/completed/T001-smoke-test/main.md > /tmp/render1.sha
+sha1sum tasks/active/T001-smoke-test/main.md > /tmp/render1.sha
 stores tasks render T001
-sha1sum tasks/completed/T001-smoke-test/main.md > /tmp/render2.sha
+sha1sum tasks/active/T001-smoke-test/main.md > /tmp/render2.sha
 diff /tmp/render1.sha /tmp/render2.sha || fail "render: two renders not byte-identical"
 pass "render: two consecutive renders are byte-identical (AC9.5)"
 
@@ -310,9 +311,9 @@ pass "render: two consecutive renders are byte-identical (AC9.5)"
 echo "--- Step 15: SQLite final state"
 FINAL=$(sqlite3 .stores/db.sqlite "select status, current_phase from tasks where display_id = 'T001'")
 echo "Final state: $FINAL"
-echo "$FINAL" | grep -q "complete" || fail "final status not complete"
+echo "$FINAL" | grep -q "in_review" || fail "final status not in_review"
 echo "$FINAL" | grep -q "2" || fail "final current_phase not 2"
-pass "SQLite: final state is status=complete, current_phase=2"
+pass "SQLite: final state is status=in_review, current_phase=2"
 
 # ---------------------------------------------------------------------------
 # AC9.6: Verify no forbidden verbs used in this script

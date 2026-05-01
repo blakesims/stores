@@ -347,9 +347,46 @@ pub(crate) fn drive_loop(
         // ── Step 2a: compute next-action ──────────────────────────────────
         let na = compute_next_action(schema, conn, display_id)?;
 
-        // Terminal: complete
+        // Transient guard: `complete` should never be observable between loop
+        // iterations — the on_state.complete follow-on fires inside the same
+        // submit tx and advances the row to `in_review`. If we see it here,
+        // the follow-on didn't fire (schema bug or manual DB surgery). Exit
+        // non-zero with a clear diagnostic.
         if na.status == "complete" {
-            eprintln!("[{display_id}] status=complete; drive finished");
+            eprintln!(
+                "[{display_id}] ERROR: task at status 'complete' but \
+                 `complete → in_review` follow-on did not fire — schema bug"
+            );
+            let _ = std::io::stderr().flush();
+            anyhow::bail!(
+                "task {display_id} stuck at 'complete'; expected follow-on to advance to 'in_review'"
+            );
+        }
+
+        // Waiting-for-human: `in_review` — wrap was already dispatched (either
+        // this run or a prior one). Drive's job is done; the human must accept
+        // or reject.
+        if na.status == "in_review" {
+            eprintln!(
+                "[{display_id}] in_review; brief written; awaiting `stores tasks accept | reject`"
+            );
+            let _ = std::io::stderr().flush();
+            return Ok(());
+        }
+
+        // Terminal: accepted — human accepted; nothing more to dispatch.
+        if na.status == "accepted" {
+            eprintln!("[{display_id}] accepted; task is complete");
+            let _ = std::io::stderr().flush();
+            return Ok(());
+        }
+
+        // Terminal: rejected — human rejected; nothing more to dispatch.
+        // (Use `stores tasks amend` to re-open the contract.)
+        if na.status == "rejected" {
+            eprintln!(
+                "[{display_id}] rejected; run `stores tasks {display_id} amend` to re-open"
+            );
             let _ = std::io::stderr().flush();
             return Ok(());
         }
@@ -511,22 +548,7 @@ pub(crate) fn drive_loop(
             anyhow::anyhow!("envelope parse error: {e}")
         })?;
 
-        // Track whether this iteration dispatched the wrap agent (used for exit below).
-        let dispatched_wrap = matches!(envelope, AgentEnvelope::Wrap { .. });
         let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;
-
-        // ── Wrap exit: brief written, awaiting human GO/NO_GO ────────────
-        // When the wrap agent submits, drive has done its job — exit 0 so the
-        // human can invoke `accept` or `reject`. (Phase 4 adds state-local flag;
-        // for now a per-iteration boolean suffices since Phase 1 has no loops
-        // that could re-enter in_review within a single drive run.)
-        if dispatched_wrap {
-            eprintln!(
-                "[{display_id}] in_review; brief written; awaiting `stores tasks accept | reject`"
-            );
-            let _ = std::io::stderr().flush();
-            return Ok(());
-        }
 
         // ── Step 2f: render ───────────────────────────────────────────────
         // Render is best-effort; failure is logged but does not abort the loop.
@@ -1205,7 +1227,11 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn terminal_complete_exits_without_spawning() {
+    fn terminal_complete_errors_with_schema_bug_message() {
+        // Under the new schema, `complete` is transient — the on_state follow-on
+        // advances it to `in_review` inside the submit tx. A row stuck at `complete`
+        // between drive iterations means the follow-on did NOT fire (schema bug /
+        // manual DB surgery). Drive must exit non-zero with a clear diagnostic.
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
 
@@ -1214,12 +1240,68 @@ mod tests {
             "2026-01-01T00:00:00Z", 1, 1, None, None,
         );
 
-        // Empty runner — if spawned, it would error.
         let runner = MockRunner::new(vec![]);
 
-        // Should return Ok(()) immediately without touching the runner.
+        // Should return Err (non-zero), NOT Ok(()), because `complete` is not terminal.
+        let result = drive_loop(&schema, &conn, "T001", &runner, 50);
+        assert!(result.is_err(), "drive_loop must error when row is at 'complete' (schema bug state)");
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("complete") && msg.contains("follow-on"),
+            "error message must mention 'complete' and 'follow-on'; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn terminal_in_review_exits_without_spawning() {
+        // Cross-run re-entry: a human re-runs `stores tasks drive T001` against a
+        // row that is already at `in_review` (wrap was dispatched in a prior session).
+        // Drive must exit 0 immediately with the in_review hint — no re-dispatch.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn, &schema, "T001", "in_review",
+            "2026-01-01T00:00:00Z", 1, 1, None, None,
+        );
+
+        // Empty runner — if spawned, it would error (no queued responses).
+        let runner = MockRunner::new(vec![]);
+
+        // Should return Ok(()) immediately — drive refuses to re-dispatch wrap.
         drive_loop(&schema, &conn, "T001", &runner, 50)
-            .expect("complete status should exit immediately");
+            .expect("in_review status should exit Ok(()) without dispatching");
+    }
+
+    #[test]
+    fn drive_in_review_with_existing_wrap_log_does_not_redispatch() {
+        // Symmetric with terminal_in_review_exits_without_spawning. Exercises the
+        // cross-run case where wrap_log[] is non-empty (populated by a prior wrap
+        // dispatch). Drive must still exit 0 without touching the runner.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn, &schema, "T001", "in_review",
+            "2026-01-01T00:00:00Z", 1, 1, None, None,
+        );
+        // Simulate non-empty wrap_log (as if Phase 3's compute_submit_wrap ran).
+        conn.execute(
+            &format!(
+                "UPDATE {} SET wrap_log = ?1 WHERE display_id = ?2",
+                quote_ident(&schema.name)
+            ),
+            rusqlite::params![
+                r#"[{"executive_summary":"prior wrap","deviations":[],"residual_risks":[],"recommended_sanity_checks":[],"at":"2026-01-01T00:00:00Z"}]"#,
+                "T001"
+            ],
+        ).unwrap();
+
+        let runner = MockRunner::new(vec![]);
+
+        // Must exit 0 — the in_review guard fires at top of loop regardless of wrap_log content.
+        drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect("in_review with non-empty wrap_log should exit Ok(()) without re-dispatching");
     }
 
     #[test]

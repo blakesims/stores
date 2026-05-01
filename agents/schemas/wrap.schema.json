@@ -1,4 +1,5 @@
 {
+  "$comment": "STUB — Phase 2 owns the strict envelope schema. This file exists for Phase 1 happy-path test (drive's parse_envelope needs a wrap variant). Phase 2 will add the 'reasoning' slot, tighten additionalProperties:false, and add required fields per the full spec.",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Wrap agent output envelope",
   "description": "Synthesis brief produced by the wrap agent at task completion. Persisted to wrap_log[].",

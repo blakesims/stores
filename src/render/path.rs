@@ -21,17 +21,23 @@ use crate::render::render_template;
 /// Map a lifecycle status to the on-disk subdirectory name under `tasks/`.
 ///
 /// Mapping:
-///   planning | plan_review → "planning"
-///   ready | executing | code_review → "active"
-///   blocked → "paused"
-///   complete → "completed"
-///   anything else → "active" (safe fallback)
+///   planning | plan_review                         → "planning"
+///   ready | executing | code_review                → "active"
+///   complete | in_review                           → "active"  (transient / awaiting human)
+///   blocked | rejected                             → "paused"  (human action required)
+///   accepted                                       → "completed" (terminal, human signed off)
+///   anything else                                  → "active" (safe fallback)
+///
+/// Note: `complete` is transient — a row never rests there in normal flow. If observed,
+/// map to `active/` (still mid-flow). `in_review` rows are awaiting a human decision
+/// but the task is not done; `active/` keeps them visible alongside executing tasks.
+/// `rejected` is similar to `blocked` — awaiting human-driven `amend`; maps to `paused/`.
 pub fn status_to_dir(status: &str) -> &'static str {
     match status {
         "planning" | "plan_review" => "planning",
-        "ready" | "executing" | "code_review" => "active",
-        "blocked" => "paused",
-        "complete" => "completed",
+        "ready" | "executing" | "code_review" | "complete" | "in_review" => "active",
+        "blocked" | "rejected" => "paused",
+        "accepted" => "completed",
         _ => "active",
     }
 }
@@ -203,7 +209,26 @@ mod tests {
 
     #[test]
     fn status_dir_complete() {
-        assert_eq!(status_to_dir("complete"), "completed");
+        // `complete` is transient (on_state follow-on fires immediately); maps to active/.
+        assert_eq!(status_to_dir("complete"), "active");
+    }
+
+    #[test]
+    fn status_dir_in_review() {
+        // in_review: awaiting human GO/NO_GO; still in active/ (task not yet done).
+        assert_eq!(status_to_dir("in_review"), "active");
+    }
+
+    #[test]
+    fn status_dir_accepted() {
+        // accepted: human signed off; task done → completed/.
+        assert_eq!(status_to_dir("accepted"), "completed");
+    }
+
+    #[test]
+    fn status_dir_rejected() {
+        // rejected: human said no; awaiting amend → paused/.
+        assert_eq!(status_to_dir("rejected"), "paused");
     }
 
     #[test]
@@ -230,11 +255,29 @@ mod tests {
 
     #[test]
     fn resolve_render_path_complete_status() {
+        // complete is now transient (maps to active/).
         let tpl = "tasks/{{status_dir}}/{{display_id}}-{{slug}}/main.md";
         let ctx = json!({
             "display_id": "T003",
             "slug": "my-task",
             "status": "complete"
+        });
+        let root = Path::new("/repo");
+        let p = resolve_render_path(tpl, &ctx, root).unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("/repo/tasks/active/T003-my-task/main.md")
+        );
+    }
+
+    #[test]
+    fn resolve_render_path_accepted_status() {
+        // accepted: terminal, human signed off → completed/.
+        let tpl = "tasks/{{status_dir}}/{{display_id}}-{{slug}}/main.md";
+        let ctx = json!({
+            "display_id": "T003",
+            "slug": "my-task",
+            "status": "accepted"
         });
         let root = Path::new("/repo");
         let p = resolve_render_path(tpl, &ctx, root).unwrap();

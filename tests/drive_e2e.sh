@@ -73,9 +73,9 @@ trap 'rm -rf "$TMP_HAPPY" "$TMP_REVISE"' EXIT
     # Assert final state via show --json
     ROW=$(stores tasks show T001 --json)
 
-    # status = complete
+    # status = in_review (drive exits after wrap dispatch; human must accept/reject)
     STATUS=$(echo "$ROW" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'])")
-    [[ "$STATUS" == "complete" ]] || fail "AC7.1: expected status=complete; got: $STATUS"
+    [[ "$STATUS" == "in_review" ]] || fail "AC7.1: expected status=in_review; got: $STATUS"
 
     # current_phase = 2
     PHASE=$(echo "$ROW" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['current_phase'])")
@@ -106,7 +106,7 @@ print('assertions ok')
 " || fail "AC7.1: cycles assertion failed"
 
 )
-pass "AC7.1: status=complete, current_phase=2, both phases have 1 cycle each with PASS gate"
+pass "AC7.1: status=in_review, current_phase=2, both phases have 1 cycle each with PASS gate"
 
 # ---------------------------------------------------------------------------
 # AC7.1b: revise-once — N=2 phases, one REVISE cycle on phase 2
@@ -142,9 +142,9 @@ TMP_REVISE=$(mktemp -d)
     # Assert final state via show --json
     ROW=$(stores tasks show T001 --json)
 
-    # status = complete
+    # status = in_review (drive exits after wrap dispatch; human must accept/reject)
     STATUS=$(echo "$ROW" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'])")
-    [[ "$STATUS" == "complete" ]] || fail "AC7.1b: expected status=complete; got: $STATUS"
+    [[ "$STATUS" == "in_review" ]] || fail "AC7.1b: expected status=in_review; got: $STATUS"
 
     # current_phase = 2
     PHASE=$(echo "$ROW" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['current_phase'])")
@@ -185,7 +185,7 @@ print('assertions ok')
 " || fail "AC7.1b: cycles assertion failed"
 
 )
-pass "AC7.1b: status=complete, current_phase=2, phase-2 has 2 cycles (REVISE then PASS)"
+pass "AC7.1b: status=in_review, current_phase=2, phase-2 has 2 cycles (REVISE then PASS)"
 
 echo ""
 echo "=== All drive e2e scenarios passed ==="

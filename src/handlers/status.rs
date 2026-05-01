@@ -118,15 +118,34 @@ fn next_from_status(status: &str) -> &'static str {
         "plan_review" => "plan-reviewer",
         "ready" | "executing" => "executor",
         "code_review" => "code-reviewer",
-        "complete" => "-",
+        "complete" => "wrap",
+        "in_review" => "wrap",
+        "accepted" => "-",
+        "rejected" => "planner",
         "blocked" => "-",
         _ => "?",
     }
 }
 
-/// Is this status a terminal state?
+/// Is this status a truly-terminal state (no further progress without human action)?
+///
+/// `accepted` and `rejected` are terminal — `accepted` is the positive end-state;
+/// `rejected` requires the human to decide what to do next (amend contract or close).
+/// `in_review` and `blocked` are NOT terminal but ARE "awaiting human" — `status follow`
+/// can safely stop on them via `is_awaiting_human`. `complete` is transient (the
+/// `complete → in_review` follow-on fires in the same tx; it should never be observable
+/// as a resting state).
 fn is_terminal(status: &str) -> bool {
-    status == "complete" || status == "blocked"
+    // accepted: human signed off — nothing more to do.
+    // rejected: human said no — requires amend, which is a human decision.
+    status == "accepted" || status == "rejected"
+}
+
+/// Is this status one where drive (or `status follow`) should pause for human input?
+/// Superset of `is_terminal`; includes states that are awaiting a human action but
+/// could theoretically continue automatically (e.g. after `stores tasks accept`).
+fn is_awaiting_human(status: &str) -> bool {
+    status == "blocked" || status == "in_review" || is_terminal(status)
 }
 
 // ---------------------------------------------------------------------------
@@ -231,11 +250,16 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
 }
 
 /// Fetch all non-terminal task rows ordered by created_at.
+///
+/// Excludes truly-terminal states (`accepted`, `rejected`) from the active view.
+/// `complete` is transient and appears here if a row is somehow stuck mid-follow-on.
+/// `blocked` and `in_review` ARE included — they are awaiting human input but are
+/// still "active" from a monitoring standpoint.
 pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
     let mut stmt = conn.prepare(
         "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan \
          FROM tasks \
-         WHERE status NOT IN ('complete', 'blocked') \
+         WHERE status NOT IN ('accepted', 'rejected') \
          ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -332,7 +356,7 @@ fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
                     println!("{}", compute_status_frame(&task));
                     prev_keys.insert(id.clone(), key.clone());
                 }
-                if is_terminal(&task.status) {
+                if is_awaiting_human(&task.status) {
                     return Ok(());
                 }
             }
@@ -570,8 +594,9 @@ mod tests {
     #[test]
     fn multi_frame_excludes_terminal_tasks() {
         let (_dir, conn) = open_test_conn();
-        insert_task(&conn, "T001", "complete", None, None, None, None);
-        insert_task(&conn, "T002", "blocked", None, None, Some("reason"), None);
+        // accepted and rejected are terminal; complete is transient (active); blocked is active.
+        insert_task(&conn, "T001", "accepted", None, None, None, None);
+        insert_task(&conn, "T002", "rejected", None, None, None, None);
         insert_task(&conn, "T003", "executing", Some(1), Some(1), None, Some(2));
 
         let tasks = fetch_all_tasks(&conn).unwrap();
@@ -681,9 +706,11 @@ mod tests {
     }
 
     #[test]
-    fn bounded_follow_loop_exits_on_complete() {
+    fn bounded_follow_loop_exits_on_accepted() {
+        // `accepted` is now the terminal state that causes single-task follow to exit.
+        // `complete` is transient and is_awaiting_human returns false for it (it's mid-flow).
         let (_dir, conn) = open_test_conn();
-        insert_task(&conn, "T001", "complete", None, None, None, None);
+        insert_task(&conn, "T001", "accepted", None, None, None, None);
         let db_path_val = _dir.path().join("test.db");
 
         let args = StatusArgs {
@@ -694,15 +721,34 @@ mod tests {
         };
         let result = run_follow_loop(&db_path_val, args);
         // Should exit 0 immediately (terminal state on first iter)
-        assert!(result.is_ok(), "follow loop should exit 0 on complete task: {result:?}");
+        assert!(result.is_ok(), "follow loop should exit 0 on accepted task: {result:?}");
+    }
+
+    #[test]
+    fn bounded_follow_loop_exits_on_in_review() {
+        // `in_review` triggers is_awaiting_human — the single-task follow loop should
+        // exit 0 at this state (human needs to act; further polling is pointless).
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T001", "in_review", None, None, None, None);
+        let db_path_val = _dir.path().join("test.db");
+
+        let args = StatusArgs {
+            display_id: Some("T001".to_string()),
+            follow: true,
+            interval_ms: 0,
+            max_iters: 100,
+        };
+        let result = run_follow_loop(&db_path_val, args);
+        assert!(result.is_ok(), "follow loop should exit 0 on in_review task: {result:?}");
     }
 
     #[test]
     fn bounded_follow_loop_multi_task_exits_when_all_terminal() {
         let (_dir, conn) = open_test_conn();
-        // All tasks are terminal — multi-task loop should exit immediately
-        insert_task(&conn, "T001", "complete", None, None, None, None);
-        insert_task(&conn, "T002", "blocked", None, None, Some("reason"), None);
+        // All tasks are terminal — multi-task loop should exit immediately.
+        // `accepted` and `rejected` are the terminal states; `blocked` is still active.
+        insert_task(&conn, "T001", "accepted", None, None, None, None);
+        insert_task(&conn, "T002", "rejected", None, None, None, None);
         let db_path_val = _dir.path().join("test.db");
 
         let args = StatusArgs {

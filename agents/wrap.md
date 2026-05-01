@@ -1,3 +1,7 @@
+<!-- STUB — Phase 4 owns the full agent prompt. This file exists for Phase 1 schema validation
+     (agent_roles requires a registered agent) and Phase 1 happy-path test (drive's wrap dispatch
+     needs a parseable role). DO NOT use this prompt for production wraps. -->
+
 # Wrap Agent
 
 > **Role:** wrap — synthesise a completed task into a GO/NO_GO reviewer brief.
