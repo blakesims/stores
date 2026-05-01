@@ -32,7 +32,7 @@ pub fn check_actor(
     };
 
     if !actor_allowed(invoker, required_actor) {
-        let invoker_detail = invoker_detail_str(invoker);
+        let remedy = invoker_remedy(invoker, required_actor);
         errors.push(ValidationError {
             field_path: field_path.to_vec(),
             rule: RuleKind::Actor,
@@ -41,7 +41,7 @@ pub fn check_actor(
                 field_path.join("."),
                 required_actor,
                 invoker,
-                invoker_detail,
+                remedy,
             ),
         });
     }
@@ -55,7 +55,7 @@ pub fn check_transition_actor(
     errors: &mut Vec<ValidationError>,
 ) {
     if !actor_allowed(invoker, transition_actor) {
-        let invoker_detail = invoker_detail_str(invoker);
+        let remedy = invoker_remedy(invoker, transition_actor);
         errors.push(ValidationError {
             field_path: vec![format!("<transition:{}>", verb)],
             rule: RuleKind::Actor,
@@ -64,7 +64,7 @@ pub fn check_transition_actor(
                 verb,
                 transition_actor,
                 invoker,
-                invoker_detail,
+                remedy,
             ),
         });
     }
@@ -90,15 +90,33 @@ fn actor_allowed(invoker: Actor, required: Actor) -> bool {
     }
 }
 
-/// Build the suffix for the error message that explains how the invoker was detected.
-fn invoker_detail_str(invoker: Actor) -> String {
-    match invoker {
-        Actor::AiAutonomous => {
-            " (auto-detected from $CLAUDECODE; pass --invoker human to override if appropriate)"
-                .to_string()
-        }
-        _ => String::new(),
+/// Build the suffix for an actor-mismatch error: detection note + concrete remedy.
+///
+/// The remedy is keyed off `required` (not the invoker) so the operator is told
+/// the actor that will actually satisfy the constraint — closes L267-walk feedback
+/// item 2, where the previous always-suggest-`--invoker human` wording was wrong
+/// for fields/transitions that require `ai_autonomous` or `ai_with_human`.
+fn invoker_remedy(invoker: Actor, required: Actor) -> String {
+    if required == Actor::Framework {
+        return " (this field is reserved for the framework engine and not writable from the CLI)"
+            .to_string();
     }
+
+    let auto_note = match invoker {
+        Actor::AiAutonomous => " (auto-detected from $CLAUDECODE)",
+        _ => "",
+    };
+
+    // The actor flag the operator must declare to satisfy `required`.
+    // For `ai_with_human`, a `human` invoker is also accepted — name both.
+    let flag_clause = match required {
+        Actor::Human => "pass --invoker human".to_string(),
+        Actor::AiAutonomous => "pass --invoker ai_autonomous".to_string(),
+        Actor::AiWithHuman => "pass --invoker ai_with_human (or --invoker human)".to_string(),
+        Actor::Framework => unreachable!(), // handled above
+    };
+
+    format!("{}; to proceed: {}", auto_note, flag_clause)
 }
 
 #[cfg(test)]
@@ -243,6 +261,44 @@ mod tests {
         assert!(msg.contains("transition 'answer'"), "msg: {msg}");
         assert!(msg.contains("requires actor 'human'"), "msg: {msg}");
         assert!(msg.contains("$CLAUDECODE"), "msg: {msg}");
+    }
+
+    // ---- L267-walk feedback item 2: remedy names the required actor, not always 'human' ----
+
+    #[test]
+    fn transition_remedy_for_ai_autonomous_required_does_not_suggest_human() {
+        // The agent's exact scenario: skill default of --invoker ai_with_human hits
+        // claim/resolve which the schema gates to ai_autonomous. Pre-fix the message
+        // said "pass --invoker human" — wrong; human doesn't satisfy ai_autonomous.
+        let mut errors = vec![];
+        check_transition_actor("claim", Actor::AiAutonomous, Actor::AiWithHuman, &mut errors);
+        assert_eq!(errors.len(), 1);
+        let msg = &errors[0].message;
+        assert!(msg.contains("requires actor 'ai_autonomous'"), "msg: {msg}");
+        assert!(msg.contains("pass --invoker ai_autonomous"), "msg: {msg}");
+        assert!(!msg.contains("pass --invoker human"), "msg must NOT suggest human: {msg}");
+    }
+
+    #[test]
+    fn field_remedy_for_ai_with_human_required_offers_both_invokers() {
+        let field = text_field_with_actor("notes", Some(Actor::AiWithHuman));
+        let entry = entry_with("notes", "text");
+        let mut errors = vec![];
+        check_actor(&field, &["notes".to_string()], &entry, Actor::AiAutonomous, None, &mut errors);
+        assert_eq!(errors.len(), 1);
+        let msg = &errors[0].message;
+        assert!(msg.contains("--invoker ai_with_human"), "msg: {msg}");
+        assert!(msg.contains("--invoker human"), "msg should also mention human as alternative: {msg}");
+    }
+
+    #[test]
+    fn transition_remedy_for_framework_required_calls_out_engine_only() {
+        let mut errors = vec![];
+        check_transition_actor("internal", Actor::Framework, Actor::Human, &mut errors);
+        assert_eq!(errors.len(), 1);
+        let msg = &errors[0].message;
+        assert!(msg.contains("framework engine"), "msg: {msg}");
+        assert!(!msg.contains("--invoker"), "framework remedy must not suggest --invoker: {msg}");
     }
 
     #[test]
