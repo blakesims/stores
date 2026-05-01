@@ -38,16 +38,26 @@ use crate::runner::{mock::MockRunner, Runner, RunnerOutput};
 use crate::schema::Schema;
 
 // ---------------------------------------------------------------------------
-// Authorized verb list (embedded in the gate-full brief, AC6.1)
+// Authorized verb lists
 // ---------------------------------------------------------------------------
 
-/// The 5 verbs the guide agent is authorized to call, shown in its brief.
+/// The 5 verbs the guide agent is authorized to call in gate mode.
 pub(crate) const AUTHORIZED_VERBS: &[&str] = &[
     "stores gate show",
     "stores gate answer",
     "stores tasks show",
     "stores tasks list",
     "stores tasks next-action",
+];
+
+/// The 6 verbs authorized in wrap mode (AC5.3).
+pub(crate) const WRAP_MODE_VERBS: &[&str] = &[
+    "stores tasks show",
+    "stores tasks list",
+    "stores tasks next-action",
+    "stores tasks accept",
+    "stores tasks reject",
+    "stores gate add",
 ];
 
 // ---------------------------------------------------------------------------
@@ -282,8 +292,9 @@ pub(crate) fn run_gate_guide_with_runner(
 
 /// Core logic for `stores tasks <id> guide`. Separated for unit tests.
 ///
-/// v0.3 stub-quality form: dumps context bundle, no specialized tooling.
-/// Full form expected in v0.4.
+/// Status-keyed mode dispatch (AC5.1):
+/// - `in_review` → `build_wrap_mode_brief`
+/// - all other statuses → `build_tasks_brief` (existing v0.3 stub)
 pub(crate) fn run_tasks_guide_with_runner(
     tasks_schema: &Schema,
     conn: &Connection,
@@ -293,18 +304,12 @@ pub(crate) fn run_tasks_guide_with_runner(
     // Load task row.
     let (_, task_entry) = read_row(tasks_schema, conn, display_id)?;
 
-    // Compute next-action output.
-    let na = compute_next_action(tasks_schema, conn, display_id)?;
-    let next_action_text = serde_json::to_string_pretty(&na).unwrap_or_default();
-
-    // Extract last review cycle.
-    let task_val = Value::Object(
-        task_entry
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
-    );
-    let last_review = extract_last_n_cycles(&task_val, 1);
+    // Determine current status for mode dispatch (AC5.1).
+    let status = task_entry
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // Build the guide system prompt.
     let system_prompt = BUNDLED_AGENTS
@@ -313,8 +318,30 @@ pub(crate) fn run_tasks_guide_with_runner(
         .map(|(_, c)| *c)
         .ok_or_else(|| anyhow::anyhow!("no bundled 'guide' agent found"))?;
 
-    // Build the context bundle.
-    let brief = build_tasks_brief(display_id, &task_entry, &next_action_text, &last_review);
+    // AC5.1: branch on status.
+    let brief = if status == "in_review" {
+        // Wrap mode — build synthesis brief.
+        let task_val = Value::Object(
+            task_entry
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        );
+        let wrap_log_latest = extract_latest_wrap_log_entry(&task_val);
+        build_wrap_mode_brief(display_id, &task_entry, wrap_log_latest.as_ref())
+    } else {
+        // Task mode (v0.3 stub) for all other statuses.
+        let na = compute_next_action(tasks_schema, conn, display_id)?;
+        let next_action_text = serde_json::to_string_pretty(&na).unwrap_or_default();
+        let task_val = Value::Object(
+            task_entry
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        );
+        let last_review = extract_last_n_cycles(&task_val, 1);
+        build_tasks_brief(display_id, &task_entry, &next_action_text, &last_review)
+    };
 
     // Spawn runner.
     let run_out = runner.spawn("guide", system_prompt, &brief, None)?;
@@ -439,9 +466,146 @@ pub(crate) fn build_tasks_brief(
     )
 }
 
+/// Build the wrap-mode context bundle (AC5.2, AC5.3).
+///
+/// Rendered when the task row is in status `in_review`. Includes:
+/// - Latest `wrap_log` entry (executive_summary, deviations, residual_risks,
+///   recommended_sanity_checks) — from the row, no extra DB reads.
+/// - Contract block (promise).
+/// - Cycles table (reality).
+/// - Authorized verbs: exactly the 6 in `WRAP_MODE_VERBS`.
+pub(crate) fn build_wrap_mode_brief(
+    task_id: &str,
+    task_entry: &crate::validate::EntryMap,
+    wrap_log_latest: Option<&Value>,
+) -> String {
+    // --- Contract section ---
+    let contract_section = {
+        let contract = task_entry.get("contract");
+        match contract {
+            Some(v) => {
+                let contract_json = serde_json::to_string_pretty(v).unwrap_or_default();
+                format!("## Promise (Contract)\n\n```json\n{contract_json}\n```\n")
+            }
+            None => "## Promise (Contract)\n\n_No contract recorded._\n".to_string(),
+        }
+    };
+
+    // --- Cycles section ---
+    let cycles_section = {
+        let task_val = Value::Object(
+            task_entry
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        );
+        let cycles_text = extract_cycles_table(&task_val);
+        if cycles_text.is_empty() {
+            "## Reality (Execution Cycles)\n\n_No execution cycles recorded._\n".to_string()
+        } else {
+            format!("## Reality (Execution Cycles)\n\n{cycles_text}\n")
+        }
+    };
+
+    // --- Wrap log section ---
+    let wrap_log_section = match wrap_log_latest {
+        Some(entry) => {
+            let exec_summary = entry
+                .get("executive_summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("_Not recorded._");
+            let deviations = format_string_list(entry.get("deviations"));
+            let residual_risks = format_string_list(entry.get("residual_risks"));
+            let sanity_checks = format_string_list(entry.get("recommended_sanity_checks"));
+            format!(
+                "## Synthesis (Wrap Agent Brief)\n\n\
+                 ### Executive Summary\n\n\
+                 {exec_summary}\n\n\
+                 ### Deviations\n\n\
+                 {deviations}\n\n\
+                 ### Residual Risks\n\n\
+                 {residual_risks}\n\n\
+                 ### Recommended Sanity Checks\n\n\
+                 {sanity_checks}\n"
+            )
+        }
+        None => {
+            "## Synthesis (Wrap Agent Brief)\n\n\
+             _No wrap_log entry found. The wrap agent has not yet run or the entry was not persisted._\n"
+                .to_string()
+        }
+    };
+
+    // --- Authorized verbs ---
+    let verbs_list = WRAP_MODE_VERBS
+        .iter()
+        .map(|v| format!("- `{v}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "# Guide Context Bundle — Wrap Mode\n\n\
+         **Mode:** wrap\n\
+         **Task ID:** {task_id}\n\n\
+         {contract_section}\n\
+         {cycles_section}\n\
+         {wrap_log_section}\n\
+         ## Authorized CLI Verbs (Wrap Mode)\n\n\
+         The `accept` and `reject` transitions are `actor: human` in the schema — \
+         when invoked under `$CLAUDECODE` the framework refuses; the human is the one who runs these.\n\
+         Your role is to read the brief, surface key findings, and propose the decision — \
+         but the human executes it. This is a schema-enforced restriction, not a prompt-enforced one.\n\n\
+         You are authorized to call exactly these verbs:\n\n\
+         {verbs_list}\n\n\
+         All other CLI verbs are FORBIDDEN in wrap mode.\n"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Context extraction helpers
 // ---------------------------------------------------------------------------
+
+/// Extract the latest wrap_log entry from a task value (most recent by position).
+fn extract_latest_wrap_log_entry(task_val: &Value) -> Option<Value> {
+    match task_val.get("wrap_log") {
+        Some(Value::Array(arr)) if !arr.is_empty() => arr.last().cloned(),
+        _ => None,
+    }
+}
+
+/// Render cycles[] as a plain-text table for the wrap-mode brief.
+fn extract_cycles_table(task_val: &Value) -> String {
+    let cycles = match task_val.get("cycles") {
+        Some(Value::Array(arr)) if !arr.is_empty() => arr,
+        _ => return String::new(),
+    };
+    let mut rows: Vec<String> = vec![
+        "| Phase | Cycle | Executor Summary | Review Gate | Review Summary |".to_string(),
+        "|-------|-------|-----------------|-------------|----------------|".to_string(),
+    ];
+    for c in cycles {
+        let phase = c.get("phase").and_then(|v| v.as_i64()).map(|n| n.to_string()).unwrap_or_else(|| "—".to_string());
+        let cycle = c.get("cycle").and_then(|v| v.as_i64()).map(|n| n.to_string()).unwrap_or_else(|| "—".to_string());
+        let exec_summary = c.get("executor").and_then(|e| e.get("summary")).and_then(|v| v.as_str()).unwrap_or("—");
+        let review_gate = c.get("review").and_then(|r| r.get("gate")).and_then(|v| v.as_str()).unwrap_or("—");
+        let review_summary = c.get("review").and_then(|r| r.get("summary")).and_then(|v| v.as_str()).unwrap_or("—");
+        rows.push(format!("| {phase} | {cycle} | {exec_summary} | {review_gate} | {review_summary} |"));
+    }
+    rows.join("\n")
+}
+
+/// Format a JSON array of strings as a Markdown bullet list.
+fn format_string_list(val: Option<&Value>) -> String {
+    match val {
+        Some(Value::Array(arr)) if !arr.is_empty() => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| format!("- {s}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => "_None._".to_string(),
+    }
+}
 
 /// Load a task row from the DB by display_id using a raw SQL query.
 /// Returns None if the tasks table doesn't exist or the row isn't found.
@@ -1035,5 +1199,204 @@ mod tests {
 
         let result = run_tasks_guide_with_runner(&tasks_s, &conn, "T002", &runner);
         assert!(result.is_err(), "should return Err on runner non-zero exit");
+    }
+
+    // -----------------------------------------------------------------------
+    // AC5.5: wrap-mode brief dispatch — in_review status triggers build_wrap_mode_brief
+    // -----------------------------------------------------------------------
+
+    fn insert_task_row_in_review(conn: &Connection, display_id: &str) {
+        let plan_json = serde_json::to_string(&json!({
+            "objective": "Test wrap",
+            "phases": [{"name": "Phase 1", "objective": "Execute", "tasks": [],
+                        "acceptance_criteria": [], "files": [], "dependencies": []}]
+        }))
+        .unwrap();
+        let contract_json = serde_json::to_string(&json!({
+            "done_when": "All phases complete and accepted",
+            "scope_in": "Wrap workflow implementation",
+            "scope_out": "Ship workflow"
+        }))
+        .unwrap();
+        let cycles_json = serde_json::to_string(&json!([{
+            "phase": 1, "cycle": 1,
+            "executor": {"summary": "Implemented wrap handler"},
+            "review": {"gate": "PASS", "summary": "All ACs satisfied"}
+        }]))
+        .unwrap();
+        let wrap_log_json = serde_json::to_string(&json!([{
+            "executive_summary": "Phase 5 complete: guide.rs now dispatches wrap-mode for in_review rows. build_wrap_mode_brief renders contract, cycles, and wrap_log. No deviations.",
+            "deviations": [],
+            "residual_risks": ["AC6 tests not yet written"],
+            "recommended_sanity_checks": ["cargo test handlers::guide", "cargo build --features runner-claude-code"],
+            "reject_reason": null,
+            "at": "2026-05-01T12:00:00Z"
+        }]))
+        .unwrap();
+        let plan_review_json = serde_json::to_string(&json!([])).unwrap();
+
+        conn.execute(
+            "INSERT INTO tasks \
+             (display_id, status, title, slug, current_phase, current_cycle, \
+              plan, contract, cycles, plan_review_log, wrap_log, \
+              created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'in_review', 'Wrap Test Task', 'wrap-test', 1, 1, \
+             ?2, ?3, ?4, ?5, ?6, \
+             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'human', 'human')",
+            rusqlite::params![
+                display_id,
+                plan_json,
+                contract_json,
+                cycles_json,
+                plan_review_json,
+                wrap_log_json
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ac5_5_in_review_status_triggers_wrap_mode_brief() {
+        let tasks_s = tasks_schema_loaded();
+        let (_dir, conn) = open_db_with_schema(&tasks_s);
+
+        insert_task_row_in_review(&conn, "T010");
+
+        let noop_envelope = r#"{"role":"guide","action":"noop","summary":"Wrap brief delivered"}"#;
+        let runner_out = make_run_output(noop_envelope, 0);
+        let runner = MockRunner::new(vec![runner_out]);
+
+        // Should succeed (runner exits 0).
+        let result = run_tasks_guide_with_runner(&tasks_s, &conn, "T010", &runner);
+        assert!(result.is_ok(), "in_review guide should exit Ok: {:?}", result.err());
+    }
+
+    #[test]
+    fn ac5_5_wrap_mode_brief_contains_executive_summary() {
+        let task_entry: crate::validate::EntryMap = {
+            let contract = json!({
+                "done_when": "Wrap workflow complete",
+                "scope_in": "Guide wrap-mode",
+                "scope_out": "Ship workflow"
+            });
+            let cycles = json!([{
+                "phase": 1, "cycle": 1,
+                "executor": {"summary": "Implemented wrap-mode brief"},
+                "review": {"gate": "PASS", "summary": "All ACs met"}
+            }]);
+            let wrap_log = json!([{
+                "executive_summary": "UNIQUE_EXEC_SUMMARY_TOKEN: guide.rs dispatches wrap-mode for in_review rows",
+                "deviations": ["Over-delivered: added helper tests"],
+                "residual_risks": ["AC6 e2e not yet run"],
+                "recommended_sanity_checks": ["cargo test handlers::guide"],
+                "reject_reason": null,
+                "at": "2026-05-01T12:00:00Z"
+            }]);
+            let mut map = std::collections::BTreeMap::new();
+            map.insert("status".to_string(), json!("in_review"));
+            map.insert("contract".to_string(), contract);
+            map.insert("cycles".to_string(), cycles);
+            map.insert("wrap_log".to_string(), wrap_log);
+            map
+        };
+
+        let task_val = Value::Object(
+            task_entry
+                .iter()
+                .map(|(k, v): (&String, &Value)| (k.clone(), v.clone()))
+                .collect(),
+        );
+        let wrap_log_latest = extract_latest_wrap_log_entry(&task_val);
+
+        let brief = build_wrap_mode_brief("T010", &task_entry, wrap_log_latest.as_ref());
+
+        // Mode header.
+        assert!(brief.contains("Wrap Mode"), "brief must indicate Wrap Mode");
+        assert!(brief.contains("T010"), "brief must contain task ID");
+
+        // AC5.2: executive_summary present.
+        assert!(
+            brief.contains("UNIQUE_EXEC_SUMMARY_TOKEN"),
+            "brief must include executive_summary from wrap_log"
+        );
+
+        // AC5.2: contract block present.
+        assert!(
+            brief.contains("Wrap workflow complete"),
+            "brief must include contract done_when"
+        );
+
+        // AC5.2: cycles table present.
+        assert!(
+            brief.contains("Implemented wrap-mode brief"),
+            "brief must include executor summary from cycles"
+        );
+
+        // AC5.3: all 6 authorized verbs present.
+        for verb in WRAP_MODE_VERBS {
+            assert!(
+                brief.contains(verb),
+                "brief must contain wrap-mode authorized verb '{verb}'"
+            );
+        }
+
+        // AC5.3: accept and reject verbs present.
+        assert!(brief.contains("stores tasks accept"), "brief must contain accept verb");
+        assert!(brief.contains("stores tasks reject"), "brief must contain reject verb");
+
+        // Schema-enforced restriction note.
+        assert!(
+            brief.contains("schema-enforced"),
+            "brief must explain schema-enforced restriction on accept/reject"
+        );
+
+        // FORBIDDEN clause.
+        assert!(
+            brief.contains("FORBIDDEN"),
+            "brief must contain FORBIDDEN clause"
+        );
+    }
+
+    #[test]
+    fn ac5_5_wrap_mode_brief_without_wrap_log() {
+        let task_entry: crate::validate::EntryMap = {
+            let mut map = std::collections::BTreeMap::new();
+            map.insert("status".to_string(), json!("in_review"));
+            map.insert("contract".to_string(), json!({"done_when": "X", "scope_in": "Y", "scope_out": "Z"}));
+            map.insert("cycles".to_string(), json!([]));
+            map
+        };
+
+        let brief = build_wrap_mode_brief("T999", &task_entry, None);
+
+        assert!(brief.contains("T999"), "task ID in brief");
+        assert!(brief.contains("Wrap Mode"), "mode label present");
+        // Should gracefully note missing wrap_log.
+        assert!(
+            brief.contains("wrap agent has not yet run") || brief.contains("No wrap_log"),
+            "brief must gracefully handle absent wrap_log"
+        );
+        // Verbs still present.
+        for verb in WRAP_MODE_VERBS {
+            assert!(brief.contains(verb), "verb '{verb}' must appear even without wrap_log");
+        }
+    }
+
+    #[test]
+    fn ac5_5_non_in_review_status_gets_tasks_brief() {
+        // Verify that statuses other than in_review still get the task-mode brief
+        // by checking the brief header text.
+        let task_entry: crate::validate::EntryMap = {
+            let mut map = std::collections::BTreeMap::new();
+            map.insert("status".to_string(), json!("executing"));
+            map.insert("contract".to_string(), json!({"done_when": "X", "scope_in": "Y", "scope_out": "Z"}));
+            map.insert("cycles".to_string(), json!([]));
+            map
+        };
+
+        // build_tasks_brief is called for executing status.
+        let brief = build_tasks_brief("T888", &task_entry, "{}", "");
+        assert!(brief.contains("Task Mode"), "executing status must get Task Mode brief");
+        assert!(!brief.contains("Wrap Mode"), "executing status must NOT get Wrap Mode brief");
     }
 }
