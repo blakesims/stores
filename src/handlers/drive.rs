@@ -9,7 +9,7 @@
 /// When `--auto` is given (no explicit id), the task is selected from the DB as:
 /// ```sql
 /// SELECT * FROM tasks
-/// WHERE status NOT IN ('complete', 'blocked')
+/// WHERE status NOT IN ('complete', 'blocked', 'accepted', 'rejected')
 ///   AND (claimed_by IS NULL OR claimed_at < <now - LOCK_WINDOW_SECS>)
 /// ORDER BY created_at ASC
 /// LIMIT 1
@@ -259,7 +259,7 @@ pub(crate) fn resolve_task_id(
     let table = quote_ident(&schema.name);
     let sql = format!(
         "SELECT display_id FROM {table} \
-         WHERE status NOT IN ('complete', 'blocked') \
+         WHERE status NOT IN ('complete', 'blocked', 'accepted', 'rejected') \
            AND (claimed_by IS NULL OR claimed_at < ?1) \
          ORDER BY created_at ASC \
          LIMIT 1"
@@ -353,7 +353,7 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
 /// AC4.6: On any failure (no git binary, not a repo, no master branch, detached
 /// HEAD), the function returns `"<git diff unavailable>"` rather than erroring.
 pub(crate) fn compute_git_diff_summary(
-    _branch: Option<&str>,
+    branch: Option<&str>,
     first_executor_commit: Option<&str>,
 ) -> String {
     use std::process::Command;
@@ -369,8 +369,11 @@ pub(crate) fn compute_git_diff_summary(
         }
     };
 
-    // Step 1: try git merge-base HEAD master.
-    let since_ref = run_git(&["merge-base", "HEAD", "master"]).or_else(|| {
+    // Step 1: try git merge-base HEAD <branch>.
+    // branch comes from the row's `branch` field (set when drive dispatches the wrap agent).
+    // Falls back to "master" if the row has no branch field set.
+    let branch_to_use = branch.unwrap_or("master");
+    let since_ref = run_git(&["merge-base", "HEAD", branch_to_use]).or_else(|| {
         // Step 2: fallback to first executor commit.
         first_executor_commit
             .filter(|s| !s.is_empty())
@@ -974,6 +977,10 @@ fn dispatch_submit(
                 );
             }
 
+            // `reasoning` is the agent's internal thought and is NOT persisted to wrap_log.
+            // The schema defines only: executive_summary, deviations, residual_risks,
+            // recommended_sanity_checks, reject_reason, at.
+            let _ = reasoning; // consumed here; intentionally discarded
             let mut obj = serde_json::Map::new();
             obj.insert("executive_summary".to_string(),
                 serde_json::Value::String(executive_summary));
@@ -986,9 +993,6 @@ fn dispatch_submit(
             obj.insert("recommended_sanity_checks".to_string(),
                 serde_json::Value::Array(recommended_sanity_checks.into_iter()
                     .map(serde_json::Value::String).collect()));
-            if let Some(r) = reasoning {
-                obj.insert("reasoning".to_string(), serde_json::Value::String(r));
-            }
             let wrap_entry = serde_json::Value::Object(obj);
 
             crate::handlers::submit::compute_submit_wrap(

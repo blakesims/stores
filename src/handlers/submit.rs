@@ -1076,6 +1076,20 @@ pub(crate) fn compute_submit_wrap(
             bail!("submit-wrap: wrap_entry must be a JSON object, got {}", other);
         }
     };
+    // Step 6: defense-in-depth shape check — executive_summary must be present and non-empty.
+    // The full schema-validator Op is a hardening follow-up (no Op::SubmitWrap exists yet);
+    // this guard catches the most critical missing field without structural rework.
+    {
+        let summary_ok = entry_obj
+            .get("executive_summary")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !summary_ok {
+            bail!("submit-wrap: executive_summary is required and must be a non-empty string");
+        }
+    }
+
     // `at` is always set by the handler, overriding any caller-supplied value
     entry_obj.insert("at".to_string(), Value::String(now_iso8601()));
     let entry = Value::Object(entry_obj);
@@ -1087,8 +1101,6 @@ pub(crate) fn compute_submit_wrap(
         .unwrap_or_default();
 
     wrap_list.push(entry);
-
-    // Step 6: no validator pass (submit-wrap has no verb-matched transition; pure write)
 
     // Step 7: no transition fired (status stays in_review)
 

@@ -123,7 +123,9 @@ pub fn dispatch(
                         .unwrap_or_default();
                     let sanity_checks = read_lines_from_file(sub, "sanity-checks-from-file")
                         .unwrap_or_default();
-                    let reasoning = read_file_content(sub, "reasoning-from-file");
+                    // `reasoning-from-file` is accepted at the CLI but not persisted;
+                    // it is consumed here for completeness and discarded (not in schema).
+                    let _reasoning = read_file_content(sub, "reasoning-from-file");
 
                     let mut obj = serde_json::Map::new();
                     obj.insert("executive_summary".to_string(),
@@ -137,9 +139,6 @@ pub fn dispatch(
                     obj.insert("recommended_sanity_checks".to_string(),
                         serde_json::Value::Array(sanity_checks.into_iter()
                             .map(serde_json::Value::String).collect()));
-                    if let Some(r) = reasoning {
-                        obj.insert("reasoning".to_string(), serde_json::Value::String(r));
-                    }
                     let wrap_entry = serde_json::Value::Object(obj);
 
                     handlers::submit::run_submit_wrap(

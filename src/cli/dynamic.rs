@@ -460,7 +460,7 @@ fn build_submit_wrap_cmd() -> Command {
             Arg::new("summary-from-file")
                 .long("summary-from-file")
                 .help("Load executive_summary from file (use '-' for stdin)")
-                .required(false),
+                .required(true),
         )
         .arg(
             Arg::new("deviations-from-file")

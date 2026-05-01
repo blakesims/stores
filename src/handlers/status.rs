@@ -121,7 +121,7 @@ fn next_from_status(status: &str) -> &'static str {
         "complete" => "wrap",
         "in_review" => "wrap",
         "accepted" => "-",
-        "rejected" => "planner",
+        "rejected" => "-",
         "blocked" => "-",
         _ => "?",
     }
