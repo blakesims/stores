@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_5
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (executor: Phase 4 COMPLETE — wrap agent prompt + brief template + git_diff_summary overlay)
+- **Last Updated:** 2026-05-01 (code-reviewer: Phase 4 PASS — wrap agent + brief template + overlay verified)
 - **Blocked Reason:** —
 
 ## Task
@@ -652,6 +652,24 @@ _Code-reviewer agent fills this section per phase._
   - `compute_git_diff_summary` is `pub(crate)` so the tests in `drive::tests` can call it directly for AC4.6 unit coverage.
   - Phase 3 Finding 1 (stale comment in `in_review_re_entry_after_amend_dispatches_fresh_wrap`) addressed by adding the strengthened test variants with the correct comment.
   - Both `bash tests/drive_e2e.sh` and `bash tests/tasks_e2e.sh` exit 0.
+
+### Phase 4 — Code review (2026-05-01)
+- **Gate:** PASS
+- **Reviewed commits:** `13662ca` (impl), `1480fab` (execution log)
+- **Revision count:** 0/3 (Phase 4 closes on first pass)
+- **ACs verified:** 4.1–4.8 all pass (4.1/4.2/4.3/4.3a pulled forward in Phase 1; 4.4/4.5/4.6/4.7/4.8 covered by 8 new tests in this commit). All 470 unit+integration tests green; build clean; both shell e2e (`drive_e2e.sh`, `tasks_e2e.sh`) exit 0.
+- **Render purity confirmed:** `git diff master..HEAD -- src/render/context.rs` is empty. Decision Matrix row (j) honoured — `compute_git_diff_summary` lives in `drive.rs::355` (`pub(crate)`); the overlay is wired via `render_template_with_overlay` only.
+- **Decision (j) compliance:** since-ref formula `git merge-base HEAD master` → `cycles[0].executor.commit` → literal `<git diff unavailable>` placeholder + stderr warning. Matches plan exactly.
+- **Findings (informational, non-blocking; all Phase 6 doc-cleanup):**
+  1. **TRIVIAL** — No comment near `wrap-brief.md.tpl:44`'s `{{{git_diff_summary}}}` documenting why triple-brace is required (HTML-escape avoidance for `<git diff unavailable>` and the fenced diff). Test catches the regression but a maintainer comment would prevent future "fixes."
+  2. **MINOR** — `git_diff_summary_unavailable_when_no_git_and_no_commit` test name implies it exercises the unavailable path, but in this repo `git merge-base HEAD master` succeeds, so the test only confirms non-empty + no-panic. Body comment correctly notes the limitation. Could be strengthened with a `set_current_dir` to a non-git temp dir.
+  3. **TRIVIAL** — Pre-existing stale comment at `drive.rs:1463-1464` ("Phase 1 stub; Phase 3 will write this via compute_submit_wrap") still present. Phase 3 reviewer flagged in Finding 2; executor's main.md note that this is "addressed" is misleading — the original test still has the stale text; only the new sibling test got the corrected comment.
+  4. **TRIVIAL** — Pre-existing stale doc comment at `cli/agents.rs:6` says "BUNDLED_AGENTS (5 entries)" but it has been 6 since Phase 1.
+  5. **TRIVIAL** — Commit message and main.md claim "11 new tests" / "3 existing tests strengthened"; actual counting is 8 new tests (1 helper + 7 drive + 1 render) and 3 NEW sibling tests with `_wrap_log_content` suffix (originals untouched). Net AC4.7 coverage is strictly more than recommended; counting nit only.
+  6. **TRIVIAL** — Original 3 wrap-dispatch drive tests (`happy_path_one_phase_mock`, `in_review_first_iteration_dispatches_wrap`, `in_review_re_entry_after_amend_dispatches_fresh_wrap`) remain queue-drain-only proxies — the executor added strengthened siblings instead of editing the originals. Acceptable.
+- **Status update:** EXECUTING_PHASE_5 (orchestrator advances; Phase 5 — guide wrap-mode + `/task:wrap` skill — is unblocked).
+
+> Details: `code-review-phase-4.md`.
 
 ---
 
