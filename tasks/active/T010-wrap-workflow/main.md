@@ -3,7 +3,7 @@
 ## Meta
 - **Status:** EXECUTING_PHASE_1
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (code-reviewer: Phase 1 cycle 1 review — REVISE 2/3, eager-wrap broken)
+- **Last Updated:** 2026-05-01 (executor: Phase 1 cycle 2 — eager-wrap dispatch restored via state-local flag)
 - **Blocked Reason:** —
 
 ## Task
@@ -466,6 +466,18 @@ _Executor agent fills this section per phase._
   - `dispatched_wrap` per-iteration boolean removed: the `in_review` status check at loop top provides the same protection for same-run AND cross-run re-entry, making the boolean redundant. Phase 4's AC4.3 work is now fully subsumed by this revision.
   - Pre-existing `pipefail`/SIGPIPE bug in `tasks_e2e.sh` Step 16 fixed (capture cargo test output to variable before piping to grep). This was broken before Phase 1 — verified via `git stash`.
   - AC1.9 `complete` sweep extended to `src/handlers/status.rs`, `src/render/path.rs`, `stores/tasks/templates/`, `tests/` per reviewer's request. All remaining hits are legitimate (schema-edge references, transient-state routing, the new error guard).
+
+#### Revision cycle 2 — 2026-05-01 (executor)
+- **Commit:** `8ba0077`
+- **Files Modified:**
+  - `src/handlers/drive.rs` — Restore `dispatched_wrap_this_run: bool` (initialized `false`) at top of `drive_loop`. Change loop-top `in_review` guard: `if na.status == "in_review" && dispatched_wrap_this_run { ... return Ok(()) }`. After `dispatch_submit` returns successfully when `na.status == "in_review"`, set `dispatched_wrap_this_run = true`. Rewrite two wrong-spec tests: `terminal_in_review_exits_without_spawning` → `in_review_first_iteration_dispatches_wrap` (asserts wrap is dispatched; runner drained); `drive_in_review_with_existing_wrap_log_does_not_redispatch` → `in_review_re_entry_after_amend_dispatches_fresh_wrap` (asserts fresh dispatch even with existing wrap_log; runner drained). Add eager-dispatch regression guard to `happy_path_one_phase_mock`: `assert_eq!(runner.remaining_count(), 0, ...)`.
+  - `src/runner/mock.rs` — Add `MockRunner::remaining_count() -> usize` helper for queue-drain assertions in tests.
+  - `tests/drive_e2e.sh` — Capture drive stderr in AC7.1 and AC7.1b; assert `grep "spawning wrap"` matches. If the status-only guard regression re-appears, the 7th fixture envelope is not consumed and "spawning wrap" never appears in stderr → test fails.
+- **Test count:** 455 unit + 2 integration = **457 total** (2 new tests). All pass.
+- **Notes:**
+  - Implements plan AC4.3a: a fresh drive invocation on a row at `in_review` (with OR without existing `wrap_log[]`) dispatches wrap. Only same-run re-entry (within a single drive process) is suppressed by the state-local flag. This is consistent with `wrap_log` as a `list_record` — history is preserved; each drive run can append.
+  - AC4.3 vs cycle-0 reviewer "refuse unconditionally on cross-run" conflict resolved per instructions: plan AC4.3a wins. Fresh drive run → dispatch (regardless of `wrap_log` non-emptiness). The state-local flag prevents intra-run re-dispatch only.
+  - `cargo install` required to update `~/.cargo/bin/stores` for e2e (subshell PATH inherits the installed binary, not `target/release/`). Pre-existing env constraint, not a new regression.
 
 ---
 
