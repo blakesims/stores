@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_5
+- **Status:** CODE_REVIEW
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (code-reviewer: Phase 4 PASS — wrap agent + brief template + overlay verified)
+- **Last Updated:** 2026-05-01 (executor: Phase 5 COMPLETE — guide wrap-mode + /task:wrap skill)
 - **Blocked Reason:** —
 
 ## Task
@@ -670,6 +670,29 @@ _Code-reviewer agent fills this section per phase._
 - **Status update:** EXECUTING_PHASE_5 (orchestrator advances; Phase 5 — guide wrap-mode + `/task:wrap` skill — is unblocked).
 
 > Details: `code-review-phase-4.md`.
+
+### Phase 5: Guide wrap-mode + `/task:wrap` skill
+
+- **Status:** COMPLETE
+- **Started:** 2026-05-01
+- **Completed:** 2026-05-01
+- **Commit:** `b0fcd7c`
+- **Files Modified:**
+  - `src/handlers/guide.rs` — `WRAP_MODE_VERBS` const (6 verbs); `run_tasks_guide_with_runner` branches on `task_entry.status == "in_review"` (AC5.1); `build_wrap_mode_brief` renders contract, cycles table, and latest wrap_log entry with schema-enforced restriction note and WRAP_MODE_VERBS list (AC5.2/5.3); helpers `extract_latest_wrap_log_entry`, `extract_cycles_table`, `format_string_list`; 4 new AC5.5 unit tests.
+  - `agents/guide.md` — Three-mode structure: gate / task / wrap. Workflow position updated with wrap branch. How to Read Your Brief adds wrap-mode brief shape. Wrap Mode Protocol section added (when mode runs, step-by-step, authorized verbs, schema-enforced restriction). Authorized CLI Verbs section updated: read-only section applies to all modes, wrap-mode human-only section added, FORBIDDEN list updated with explicit `stores tasks accept`/`stores tasks reject` prohibition for AI context. Frontmatter tools list adds `accept`, `reject`, `gate add`.
+  - `skills/task:wrap/SKILL.md` — New slim skill (AC5.6).
+- **Test count:** 472 unit + 2 integration = **474 total** (+4 new guide tests). All pass.
+- **AC verification:**
+  - AC5.1: `run_tasks_guide_with_runner` dispatches on status. `in_review` row → `build_wrap_mode_brief` (verified by `ac5_5_in_review_status_triggers_wrap_mode_brief`). Non-`in_review` → `build_tasks_brief` (verified by `ac5_5_non_in_review_status_gets_tasks_brief`). ✓
+  - AC5.2: `ac5_5_wrap_mode_brief_contains_executive_summary` asserts: executive_summary text, contract `done_when`, cycles executor summary — all from the row, no extra DB reads. ✓
+  - AC5.3: Same test asserts all 6 verbs from `WRAP_MODE_VERBS`: `stores tasks show`, `stores tasks list`, `stores tasks next-action`, `stores tasks accept`, `stores tasks reject`, `stores gate add`. ✓
+  - AC5.4: `agents/guide.md` describes three modes; Wrap Mode Protocol section explains schema-enforced restriction ("schema-enforced restriction, not a prompt-enforced one"). Mode dispatch is at the framework layer (brief header, not agent logic). ✓
+  - AC5.5: 4 new tests: `ac5_5_in_review_status_triggers_wrap_mode_brief`, `ac5_5_wrap_mode_brief_contains_executive_summary`, `ac5_5_wrap_mode_brief_without_wrap_log`, `ac5_5_non_in_review_status_gets_tasks_brief`. ✓
+  - AC5.6: `skills/task:wrap/SKILL.md` exists with YAML frontmatter `name: task:wrap`. Matches `skills/task:next/SKILL.md` convention. ✓
+- **Notes:**
+  - `compute_git_diff_summary` visibility from guide.rs: `pub(crate)` in `drive.rs` works fine — `guide.rs` is in the same crate. However, Phase 5 does NOT call `compute_git_diff_summary` in guide.rs. The wrap-mode brief in Phase 5 is a human-readable summary (not a rendered template); it includes the wrap_log entry's executive_summary (already written by the wrap agent) and the cycles table from the row. The git diff rendering is in the wrap agent's brief (Phase 4, via `wrap-brief.md.tpl` and `render_template_with_overlay`), not in the guide agent's brief. No need to call `compute_git_diff_summary` here — no promotion required.
+  - Decision (f) compliance: `agents/guide.md` does NOT contain row-status inspection logic. The brief header `**Mode:** wrap` tells the agent which protocol to follow.
+  - Brief structure for wrap-mode: separate from the Phase 4 wrap-brief.md.tpl (that template is for the wrap AGENT's input; this guide brief is for the guide agent helping the HUMAN review the result). Single source of truth holds — the wrap agent's synthesis is already in `wrap_log[]`; the guide brief surfaces it.
 
 ---
 
