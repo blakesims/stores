@@ -70,3 +70,7 @@ Each section is owned by a specific agent:
 3. Human updates Status to appropriate previous state
 4. Human tells orchestrator: "Continue TXXX"
 5. Orchestrator resumes from the new status
+
+### Task Completion Notes
+
+When a task reaches `COMPLETE`, run `docs/worklog/new-note.sh <task-slug>` to create a worklog note capturing what shipped (decisions made, surprises, follow-ups). Link the resulting note from the task's `main.md` `## Completion` section. The worklog feeds `/doc:sweep` for the daily summary — see `.notes-config.yml`.

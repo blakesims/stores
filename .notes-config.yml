@@ -1,0 +1,30 @@
+# Documentation system config — created by /doc:init
+# Global skills (/doc:new-note, /doc:sweep) read this file to adapt per-project.
+version: 1
+
+# Where transient worklog notes live. The new-note.sh script lives here too.
+worklog_dir: docs/worklog
+
+# Where curated reference docs live (ADRs, PRDs, API refs, domain maps).
+# Refs are updated manually — no script-managed naming.
+refs_dir: docs
+
+# How worklog notes are bucketed on disk:
+#   flat    — all notes in one directory, date-prefixed filenames
+#   daily   — one subdirectory per day (YYYY-MM-DD/)
+#   weekly  — one subdirectory per ISO week (YYYY-Www/)
+granularity: daily
+
+# What summaries the /doc:sweep skill produces:
+#   none            — no automated summaries
+#   daily           — daily summary only
+#   weekly          — weekly summary only (sweep runs on Fri or Sun)
+#   daily+weekly    — daily + weekly (weekly rolls up the dailies)
+summary_cadence: daily
+
+# Integrations discovered/wired during /doc:init.
+# Informational — the actual wiring lives in the referenced files.
+integrations:
+  - name: tasks
+    hook: on-completion
+    note: "tasks/CLAUDE.md instructs task-workflow agents to create a worklog note on task completion and link it from the task's main.md"
