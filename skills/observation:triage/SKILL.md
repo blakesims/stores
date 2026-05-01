@@ -48,6 +48,23 @@ status before writing.)
 | **ALREADY_RESOLVED** | No longer occurring | Update `resolution`, resolve. Stop. |
 | **CONTINUE** | Can't classify in ~10 tool calls | Spawn an investigator subagent; re-triage with their findings. |
 
+## Actor cheat sheet (read this once)
+
+The lifecycle has mixed actors. Match `--invoker` to what the schema requires;
+**do not paste `--invoker ai_with_human` everywhere**. In a `CLAUDECODE=1`
+shell the auto-detect yields `ai_autonomous`, which already satisfies any
+`actor: ai_autonomous` verb — so for those, **omit `--invoker` entirely**.
+
+| Verb | Required actor | What to pass |
+|------|----------------|--------------|
+| `investigate`, `confirm`, `wont_fix` | `ai_with_human` | `--invoker ai_with_human` |
+| `claim`, `resolve`, `park`, `request_info` | `ai_autonomous` | omit `--invoker` (auto-detect wins in CLAUDECODE shells) |
+| `provide_info` | `human` | `--invoker human` (the operator answers the gap question) |
+| `update --contract-state ready` (sets `approved_by`/`approved_at`) | `human` (per-field) | `--invoker human` |
+
+If you guess wrong, the error message will name the required actor and the
+exact remedy — read it.
+
 ## T3 path — ratify the intent contract
 
 Read the observation summary back to the user. Ask:
@@ -83,6 +100,25 @@ stores observations confirm <id> --invoker ai_with_human
 
 If the CLI rejects at Step 2 with a `required_when` error, you missed a field —
 read the error, add the missing flag, retry. Never bypass.
+
+## Close path — claim → work → resolve
+
+After the contract is ratified and the work is done, transition the row to
+`resolved`. Both verbs are gated `actor: ai_autonomous`, so omit `--invoker`:
+
+```bash
+# Step 1: confirmed → in_progress
+stores observations claim <id>
+
+# Step 2: in_progress → resolved (after the work + commit)
+stores observations resolve <id> \
+    --resolution "<one-line outcome>" \
+    --resolved-at $(date -I)
+```
+
+If you accidentally pass `--invoker ai_with_human` here, the schema rejects
+with a clear remedy — that's the substrate doing its job. Don't paste-paste
+the invoker flag from the ratify step; check the cheat sheet above.
 
 ## Mid-flow: hit a question you can't resolve?
 

@@ -20,6 +20,15 @@ detects `$CLAUDECODE` and would otherwise infer `ai_autonomous`, which the
 schema rejects. Pass `--invoker human` explicitly on every `answer` call.
 Without it, the answer write fails with a clear actor-mismatch error.
 
+Other gate verbs have different actor requirements — match the flag to the
+verb, don't blanket `--invoker human`:
+
+| Verb | Required actor | What to pass |
+|------|----------------|--------------|
+| `answer` | `human` | `--invoker human` |
+| `defer`, `resume` | `ai_with_human` | `--invoker human` (accepted) or `--invoker ai_with_human` |
+| `cancel` | `ai_autonomous` | omit `--invoker` (auto-detect wins in CLAUDECODE shells) |
+
 ## Discover
 
 ```bash
@@ -46,11 +55,11 @@ For each pending item:
 # Decision Blake answered:
 stores gate answer <gate-id> --answer "<choice>" --invoker human
 
-# Decision Blake wants to defer:
-stores gate defer <gate-id> --until "<date>" --reason "<why>" --invoker human
+# Decision Blake wants to defer (resurfaces when defer_until arrives):
+stores gate defer <gate-id> --defer-until <YYYY-MM-DD>
 
-# Decision Blake wants to cancel:
-stores gate cancel <gate-id> --reason "<why>" --invoker human
+# Decision Blake wants to cancel (no further action; record-keeping):
+stores gate cancel <gate-id>
 ```
 
 5. Move to the next pending item.

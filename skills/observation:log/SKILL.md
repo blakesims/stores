@@ -45,12 +45,11 @@ stores observations add \
     --summary "<1-line description>" \
     --source dev \
     --priority normal \
-    --captured-at <YYYY-MM-DD> \
-    --captured-week <wNN-dN> \
+    --captured-at "$(date -I)" \
+    --captured-week "$(date +w%V-d%u)" \
     [--body "<extended notes>"] \
     [--contact-id <n>] \
-    [--field-name <name>] \
-    --invoker ai_with_human
+    [--field-name <name>]
 
 # Long descriptions: pipe via stdin
 stores observations add --summary - <<< "$(cat <<'TXT'
@@ -58,6 +57,12 @@ multi-line summary here
 TXT
 )"
 ```
+
+`--summary`, `--source`, `--priority`, `--captured-at`, `--captured-week` are
+all required by the schema, but the latter two are mechanical — the
+`$(date ...)` defaults above fill them without operator input. No
+`--invoker` flag is needed on `add`: none of the fields written here carry
+an `actor:` constraint, so the auto-detect default is fine.
 
 The CLI returns the new display_id (e.g. `L042`). Confirm to the user in one
 line: `Logged L042 (priority): summary`. Done.

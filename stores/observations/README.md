@@ -84,4 +84,31 @@ stores observations show L001
 stores observations list
 ```
 
+## Migrating from `./dev observation` (10.06)
+
+If you're porting muscle memory from 10.06's bash CLI, the verb shape is the
+same but most flag names align with the production schema rather than the
+v0.1 short-form. Common mappings:
+
+| `./dev observation …` | `stores observations …` | Notes |
+|---|---|---|
+| `log --foo bar` | `add --foo bar` | Verb rename: `log` → `add`. |
+| `log --done-when "X"` | `update <id> --acceptance "X"` | Renamed to D9 production name. Belongs on the contract, not the initial add. |
+| `log --scope-in "X"` | `update <id> --in-scope "X"` | D9 rename. |
+| `log --scope-out "X"` | `update <id> --out-of-scope "X"` | D9 rename. |
+| `log --verdict T3` | `update <id> --tier-hint T3` | D9 rename. |
+| `update --evidence '{...}'` | `update <id> --observed-at … --env … --external-refs '{system,kind,id}'` | `evidence` was flattened: each sub-field is its own flag. `external_refs` is a `list_record` and accepts repeated `--external-refs '{...}'` flags or a single `'[{...},{...}]'` JSON array. |
+| `update --notes '{...}'` | `update <id> --notes '{...}'` | Same — opaque JSON blob via `FieldType::Json`. |
+| `update --investigation-note "..."` | `update <id> --investigation-note "..."` | Same. |
+| `update --schedule today` | `update <id> --scheduled-for "$(date -I)"` | No `today/tomorrow/clear` shortcut yet — pass an ISO date. |
+| `list --closed-today` | `list --status resolved --json \| jq '...'` | No shortcut flag yet; filter via JSON output. |
+| `add --linked-observations '["L001"]'` | `add --linked-observations L001 --linked-observations L002` | Repeatable flags now work; bare single value auto-promotes to a 1-element array. (Both forms accepted.) |
+
+Actor flags are uniformly `--invoker human|ai_autonomous|ai_with_human`. In a
+`CLAUDECODE=1` shell the auto-detect yields `ai_autonomous`, which already
+satisfies any `actor: ai_autonomous` verb (`claim`, `resolve`, `park`,
+`request_info`) — so for those, **omit `--invoker`**. Pass it explicitly only
+when you need to override the auto-detect (e.g. `--invoker human` for
+`provide_info` or for fields like `approved_by`/`approved_at`).
+
 Historical POC: `stores/observations_1006/` — frozen fixture, not maintained.
