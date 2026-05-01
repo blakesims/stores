@@ -150,16 +150,66 @@ pub fn select_transition<'a>(
         .collect();
 
     if candidates.is_empty() {
-        match gate {
-            Some(g) => bail!(
+        // The verb may be valid but unreachable from the current state.  Scan
+        // the full transition table for the verb (ignoring `from`/`gate`) and
+        // surface the reachable from-states so the operator sees the next legal
+        // hop rather than a bare "not found in schema".
+        let reachable_froms: Vec<&str> = transitions
+            .iter()
+            .filter(|t| t.verb == verb)
+            .map(|t| t.from.as_str())
+            .collect();
+        let mut dedup: Vec<&str> = Vec::new();
+        for f in &reachable_froms {
+            if !dedup.contains(f) {
+                dedup.push(*f);
+            }
+        }
+
+        let prefix = match gate {
+            Some(g) => format!(
                 "no transition from '{}' via verb '{}' with gate '{}' found in schema",
                 from_state, verb, g
             ),
-            None => bail!(
+            None => format!(
                 "no transition from '{}' via verb '{}' found in schema",
                 from_state, verb
             ),
+        };
+
+        if dedup.is_empty() {
+            bail!("{}; verb '{}' is not declared anywhere in this schema", prefix, verb);
         }
+
+        // Find a hop FROM current state TO one of the reachable_froms (one-step lookahead).
+        // If exactly one, name it as the suggested next step.
+        let next_hops: Vec<&Transition> = transitions
+            .iter()
+            .filter(|t| t.from == from_state && dedup.contains(&t.to.as_str()))
+            .collect();
+        let hop_hint = match next_hops.as_slice() {
+            [] => String::new(),
+            [t] => format!(
+                "; current state '{}' transitions there via verb '{}'",
+                from_state, t.verb
+            ),
+            many => {
+                let verbs: Vec<&str> = many.iter().map(|t| t.verb.as_str()).collect();
+                format!(
+                    "; current state '{}' can reach those states via {{{}}}",
+                    from_state,
+                    verbs.join(", ")
+                )
+            }
+        };
+
+        bail!(
+            "{}; verb '{}' is reachable from {{{}}}{}",
+            prefix,
+            verb,
+            dedup.join(", "),
+            hop_hint
+        );
     }
 
     // Prefer guarded transitions whose guard evaluates true.
@@ -348,6 +398,56 @@ transitions:
     guard: "a && b"
 "#);
         assert!(result.is_err(), "invalid guard expression should fail deserialization");
+    }
+
+    // ---- "no transition found" wording: surface next-hop hint ----
+    // Closes L267-walk feedback item 3: instead of "no transition from 'confirmed'
+    // via verb 'resolve' found in schema", the message names where 'resolve' IS
+    // reachable and the verb that gets you there from the current state.
+
+    fn obs_lifecycle_with_claim_resolve() -> Lifecycle {
+        serde_yaml::from_str(r#"
+states: [open, confirmed, in_progress, resolved]
+transitions:
+  - from: open
+    to: confirmed
+    verb: confirm
+  - from: confirmed
+    to: in_progress
+    verb: claim
+    actor: ai_autonomous
+  - from: in_progress
+    to: resolved
+    verb: resolve
+    actor: ai_autonomous
+"#).unwrap()
+    }
+
+    #[test]
+    fn select_transition_unreachable_verb_names_reachable_froms() {
+        let lc = obs_lifecycle_with_claim_resolve();
+        let entry = std::collections::BTreeMap::new();
+        let err = select_transition(&lc.transitions, "confirmed", "resolve", None, &entry).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("verb 'resolve' is reachable from {in_progress}"), "msg: {msg}");
+    }
+
+    #[test]
+    fn select_transition_unreachable_verb_names_next_hop_when_unique() {
+        let lc = obs_lifecycle_with_claim_resolve();
+        let entry = std::collections::BTreeMap::new();
+        let err = select_transition(&lc.transitions, "confirmed", "resolve", None, &entry).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("transitions there via verb 'claim'"), "msg: {msg}");
+    }
+
+    #[test]
+    fn select_transition_undeclared_verb_says_so() {
+        let lc = obs_lifecycle_with_claim_resolve();
+        let entry = std::collections::BTreeMap::new();
+        let err = select_transition(&lc.transitions, "open", "teleport", None, &entry).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("verb 'teleport' is not declared anywhere in this schema"), "msg: {msg}");
     }
 
     #[test]
