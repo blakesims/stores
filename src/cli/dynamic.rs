@@ -261,7 +261,17 @@ fn build_store_command(schema: &Schema) -> Command {
         if !registered_verbs.insert(verb.clone()) {
             continue;
         }
-        let transition_cmd = build_transition_cmd(verb, &leaves);
+        let mut transition_cmd = build_transition_cmd(verb, &leaves);
+        // `reject` requires a human-supplied reason written to wrap_log[-1].reject_reason.
+        // walk_field skips ListRecord fields, so we add --reason manually here.
+        if verb == "reject" {
+            transition_cmd = transition_cmd.arg(
+                Arg::new("reason")
+                    .long("reason")
+                    .help("Rejection reason (written to wrap_log[-1].reject_reason)")
+                    .required(true),
+            );
+        }
         store_cmd = store_cmd.subcommand(transition_cmd);
     }
 

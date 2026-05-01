@@ -1,7 +1,7 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_6
+- **Status:** CODE_REVIEW
 - **Created:** 2026-05-01
 - **Last Updated:** 2026-05-01 (code-reviewer: Phase 6 REVISE 1/3 — `reject --reason` and `amend` phase/cycle reset are unimplemented; executor's "no gap" claim was wrong)
 - **Blocked Reason:** —
@@ -783,6 +783,45 @@ _Code-reviewer agent fills this section per phase._
 - **Status update:** **EXECUTING_PHASE_6** (orchestrator returns to executor with revision scope per `code-review-phase-6.md`; revision count 1/3).
 
 > Details: `code-review-phase-6.md`.
+
+### Phase 6 — Revision cycle 1 (2026-05-01)
+
+**Honest record:** The prior execution log notes for Phase 6 incorrectly claimed "no implementation gap" for F1 and F2. Both claims were wrong. The code reviewer's verification was correct: F1's reasoning failed on temporal grounds (wrap agent runs before human decides), and F2's claim was disproved by a grep of `compute_on_entry_framework_fields`. The prior tests codified broken behavior as the spec. This revision fixes both gaps.
+
+**F1 — `reject --reason` writes to `wrap_log[-1].reject_reason`:**
+- `src/cli/dynamic.rs`: after auto-generating the `reject` transition subcommand from `build_transition_cmd`, augment it with `--reason` (required). `walk_field` cannot auto-generate this because `wrap_log` is `list_record` (not `record`), so the arg is added manually in the `if verb == "reject"` branch.
+- `src/handlers/transition.rs`: new `run_reject(schema, conn, matches, invoker, reason)` function. Opens a transaction, reads `wrap_log` (pre-transition), mutates `wrap_log[-1].reject_reason` (option b — extends latest entry, preserving all other fields), fires `run_in_tx` for the status transition (`in_review → rejected`), then writes the updated `wrap_log` JSON in the same transaction. If `wrap_log` is empty (wrap agent hasn't run), appends a stub entry with `reject_reason` + `at`.
+- `src/cli/dispatch.rs`: the `(verb, sub)` catch-all arm now branches on `verb == "reject"` to call `run_reject` instead of `run`. Clap enforces `required(true)` at parse time; dispatch provides a runtime fallback bail.
+- Option choice: (b) — mutate latest entry. The plan's Phase 1 schema notes verbatim said "writes to `blocked_reason`-style sub-field on the latest `wrap_log` entry". The wrap synthesis fields (executive_summary, deviations, etc.) remain intact. History is preserved because we're adding a field, not overwriting existing fields.
+
+**F2 — `amend` resets `current_phase`/`current_cycle` to 0:**
+- `src/handlers/transition.rs::run_in_tx`: after `select_transition` resolves but before `execute_transition_write`, detects `verb == "amend"` and injects `current_phase = 0` and `current_cycle = 0` into both `diff` and `merged`. `diff` binding changed to `let mut diff = ...`. This is the simplest concrete fix: no new plumbing required, `execute_transition_write` already iterates `diff` to build SET clauses, so adding `current_phase`/`current_cycle` to `diff` causes them to be written in the same SQL UPDATE.
+- Implementation note: the reset targets the `amend` verb specifically. If another `rejected → planning`-like transition were added later, it would not automatically get this reset. This is correct behavior per Decision (i): only `amend` semantically means "contract was wrong, start over."
+
+**Tests updated:**
+- `WRAP_SCHEMA` extended with `current_phase: integer` and `current_cycle: integer` fields.
+- New helper `insert_wrap_row_with_phase` for seeding phase/cycle.
+- New helpers `read_wrap_log` and `read_phase_cycle`.
+- New `build_reject_cmd` helper that adds `--reason required` (mirrors `dynamic.rs` augmentation).
+- `ac6_reject_happy_path_in_review_human_lands_rejected` removed and replaced by:
+  - `ac6_reject_writes_reason_to_wrap_log` — happy path: in_review row with one wrap_log entry. `reject --reason "scope was wrong"`. Asserts `status=rejected` AND `wrap_log[-1].reject_reason == "scope was wrong"`.
+  - `ac6_reject_empty_wrap_log_stubs_entry_with_reason` — empty wrap_log case: stub entry appended with reason.
+  - `ac6_reject_ai_autonomous_invoker_rejected` — updated to call `run_reject` (was calling bare `run`).
+- New `ac6_amend_resets_phase_and_cycle` — seeds `current_phase=2, current_cycle=3` at `rejected`, applies `amend`, asserts `planning` + `current_phase=0` + `current_cycle=0`.
+- `tests/drive_e2e.sh::AC7.6`: CLAUDECODE=1 reject call updated to include `--reason "test rejection"` (required to get past clap parse to the actor check). Human-invoker reject updated to `reject T001 --reason "test rejection"`. Added assertion: `wrap_log[-1].reject_reason == "test rejection"` via Python json extraction.
+
+**Test results:**
+- `cargo test --features runner-claude-code`: 481 passed (10 `ac6_*` tests — up from 7; 3 new ones: `ac6_reject_writes_reason_to_wrap_log`, `ac6_reject_empty_wrap_log_stubs_entry_with_reason`, `ac6_amend_resets_phase_and_cycle`).
+- `bash tests/drive_e2e.sh`: all 4 ACs pass.
+- `bash tests/tasks_e2e.sh`: all 16 steps pass.
+- `cargo install --path .`: clean.
+
+**Files changed:**
+- `src/cli/dynamic.rs` — `--reason` arg augmentation for `reject` verb
+- `src/cli/dispatch.rs` — `reject` arm calls `run_reject`
+- `src/handlers/transition.rs` — `run_reject` function; `amend` reset in `run_in_tx`; updated/new unit tests
+- `tests/drive_e2e.sh` — AC7.6 `--reason` update + `reject_reason` assertion
+- `tasks/active/T010-wrap-workflow/main.md` — this entry
 
 ---
 

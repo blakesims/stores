@@ -23,6 +23,67 @@ pub fn run(
     Ok(())
 }
 
+/// Entry point for `reject` — performs the status transition AND writes reject_reason
+/// to wrap_log[-1].reject_reason, atomically in one transaction.
+pub fn run_reject(
+    schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    invoker: Actor,
+    reason: &str,
+) -> Result<()> {
+    let display_id = matches
+        .get_one::<String>("display_id")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    let tx = conn.unchecked_transaction().context("reject: begin tx")?;
+
+    // Read wrap_log BEFORE the transition (status is still in_review here).
+    let (row_id, existing) = read_row(schema, &tx, display_id)?;
+
+    let wrap_field = schema
+        .workflow
+        .as_ref()
+        .and_then(|w| w.submit_targets.get("submit-wrap"))
+        .map(|s| s.as_str())
+        .unwrap_or("wrap_log");
+
+    let mut wrap_list: Vec<Value> = existing
+        .get(wrap_field)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Mutate wrap_log[-1].reject_reason (option b: update latest entry in-place).
+    if let Some(last) = wrap_list.last_mut() {
+        if let Value::Object(ref mut obj) = last {
+            obj.insert("reject_reason".to_string(), Value::String(reason.to_string()));
+        }
+    } else {
+        // wrap agent hasn't run yet — append a stub entry so the reason is never lost.
+        let mut stub = serde_json::Map::new();
+        stub.insert("reject_reason".to_string(), Value::String(reason.to_string()));
+        stub.insert("at".to_string(), Value::String(now_iso8601()));
+        wrap_list.push(Value::Object(stub));
+    }
+
+    // Fire the reject transition (status: in_review → rejected).
+    run_in_tx(&tx, schema, matches, invoker, "reject")?;
+
+    // Write updated wrap_log.
+    let wrap_json = serde_json::to_string(&wrap_list)?;
+    let qtable = quote_ident(&schema.name);
+    tx.execute(
+        &format!("UPDATE {qtable} SET {wrap_field} = ?1 WHERE id = ?2"),
+        rusqlite::params![wrap_json, row_id],
+    )
+    .context("reject: write wrap_log reject_reason")?;
+
+    tx.commit().context("reject: commit tx")?;
+    Ok(())
+}
+
 /// Transaction-agnostic core.  All DB access uses `tx` (which is `Deref<Target=Connection>`).
 /// Called by `run` (single-call CLI path) and by submit handlers that pass their own `tx`
 /// for atomic multi-step operations (Phase 5 / task 5.7).
@@ -47,7 +108,7 @@ pub(crate) fn run_in_tx(
         .unwrap_or("");
 
     // Build diff entry from CLI args
-    let diff = build_entry_map(schema, |cli_name| {
+    let mut diff = build_entry_map(schema, |cli_name| {
         let from_file_key = format!("{cli_name}-from-file");
         if matches.try_contains_id(&from_file_key).unwrap_or(false) {
             if let Some(path) = matches.get_one::<String>(&from_file_key) {
@@ -108,6 +169,15 @@ pub(crate) fn run_in_tx(
     validate::validate(schema, &merged, Op::Transition(verb.to_string(), diff.clone()), invoker).map_err(
         |errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)),
     )?;
+
+    // F2: `amend` (rejected → planning) resets current_phase/current_cycle to 0.
+    // Decision Matrix row (i): "resets the row to phase 0".
+    if verb == "amend" {
+        merged.insert("current_phase".to_string(), Value::Number(0.into()));
+        merged.insert("current_cycle".to_string(), Value::Number(0.into()));
+        diff.insert("current_phase".to_string(), Value::Number(0.into()));
+        diff.insert("current_cycle".to_string(), Value::Number(0.into()));
+    }
 
     // Write: UPDATE merged fields + status = transition.to + updated_*
     execute_transition_write(tx, schema, row_id, &transition.to, &diff, &merged, invoker)?;
@@ -702,6 +772,12 @@ fields:
   - name: title
     type: text
     required: true
+  - name: current_phase
+    type: integer
+    required: false
+  - name: current_cycle
+    type: integer
+    required: false
   - name: wrap_log
     type: list_record
     fields:
@@ -728,6 +804,13 @@ fields:
         ).unwrap();
     }
 
+    fn insert_wrap_row_with_phase(conn: &Connection, status: &str, wrap_log_json: &str, current_phase: i64, current_cycle: i64) {
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, wrap_log, current_phase, current_cycle) VALUES (?1, ?2, 'Test', ?3, ?4, ?5)",
+            rusqlite::params!["T001", status, wrap_log_json, current_phase, current_cycle],
+        ).unwrap();
+    }
+
     fn build_wrap_cmd(schema: &Schema, verb: &'static str) -> clap::Command {
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
         let mut cmd = clap::Command::new(verb).arg(
@@ -747,6 +830,21 @@ fields:
         conn.query_row(
             "SELECT status FROM tasks WHERE display_id = 'T001'",
             [], |r| r.get(0),
+        ).unwrap()
+    }
+
+    fn read_wrap_log(conn: &Connection) -> Vec<serde_json::Value> {
+        let raw: Option<String> = conn.query_row(
+            "SELECT wrap_log FROM tasks WHERE display_id = 'T001'",
+            [], |r| r.get(0),
+        ).unwrap();
+        raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    }
+
+    fn read_phase_cycle(conn: &Connection) -> (i64, i64) {
+        conn.query_row(
+            "SELECT current_phase, current_cycle FROM tasks WHERE display_id = 'T001'",
+            [], |r| Ok((r.get(0).unwrap_or(0), r.get(1).unwrap_or(0))),
         ).unwrap()
     }
 
@@ -811,29 +909,58 @@ fields:
 
     // --- reject ---
 
+    fn build_reject_cmd(schema: &Schema) -> clap::Command {
+        // build_wrap_cmd plus the required --reason arg (mirrors dynamic.rs augmentation).
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd = clap::Command::new("reject").arg(
+            clap::Arg::new("display_id").required(true).index(1),
+        );
+        for leaf in &leaves {
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name.clone())
+                    .required(false),
+            );
+        }
+        cmd = cmd.arg(
+            clap::Arg::new("reason")
+                .long("reason")
+                .required(true),
+        );
+        cmd
+    }
+
+    /// F1 happy path: reject with --reason writes status=rejected AND reject_reason to wrap_log[-1].
     #[test]
-    fn ac6_reject_happy_path_in_review_human_lands_rejected() {
+    fn ac6_reject_writes_reason_to_wrap_log() {
         let (schema, conn) = setup_wrap();
         insert_wrap_row(
             &conn, "in_review",
             r#"[{"executive_summary":"Done","reject_reason":null,"at":"2026-01-01T00:00:00Z"}]"#,
         );
 
-        let cmd = build_wrap_cmd(&schema, "reject");
-        let matches = cmd.get_matches_from(["reject", "T001"]);
-        run(&schema, &conn, &matches, Actor::Human, "reject").unwrap();
+        let cmd = build_reject_cmd(&schema);
+        let matches = cmd.get_matches_from(["reject", "T001", "--reason", "scope was wrong"]);
+        let reason = matches.get_one::<String>("reason").unwrap().clone();
+        run_reject(&schema, &conn, &matches, Actor::Human, &reason).unwrap();
 
         assert_eq!(read_status_wrap(&conn), "rejected");
+        let wrap_log = read_wrap_log(&conn);
+        let last = wrap_log.last().expect("wrap_log must not be empty");
+        let got = last.get("reject_reason").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(got, "scope was wrong", "reject_reason must equal supplied --reason");
     }
 
+    /// F1 actor check: AiAutonomous invoker must be rejected at the transition layer.
     #[test]
     fn ac6_reject_ai_autonomous_invoker_rejected() {
         let (schema, conn) = setup_wrap();
         insert_wrap_row(&conn, "in_review", "[]");
 
-        let cmd = build_wrap_cmd(&schema, "reject");
-        let matches = cmd.get_matches_from(["reject", "T001"]);
-        let err = run(&schema, &conn, &matches, Actor::AiAutonomous, "reject").unwrap_err();
+        let cmd = build_reject_cmd(&schema);
+        let matches = cmd.get_matches_from(["reject", "T001", "--reason", "x"]);
+        let reason = matches.get_one::<String>("reason").unwrap().clone();
+        let err = run_reject(&schema, &conn, &matches, Actor::AiAutonomous, &reason).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("transition 'reject'"),
@@ -845,6 +972,25 @@ fields:
         );
         // Row unchanged
         assert_eq!(read_status_wrap(&conn), "in_review");
+    }
+
+    /// F1: reject on empty wrap_log still persists reason (stub entry appended).
+    #[test]
+    fn ac6_reject_empty_wrap_log_stubs_entry_with_reason() {
+        let (schema, conn) = setup_wrap();
+        insert_wrap_row(&conn, "in_review", "[]");
+
+        let cmd = build_reject_cmd(&schema);
+        let matches = cmd.get_matches_from(["reject", "T001", "--reason", "no wrap agent run"]);
+        let reason = matches.get_one::<String>("reason").unwrap().clone();
+        run_reject(&schema, &conn, &matches, Actor::Human, &reason).unwrap();
+
+        assert_eq!(read_status_wrap(&conn), "rejected");
+        let wrap_log = read_wrap_log(&conn);
+        assert!(!wrap_log.is_empty(), "wrap_log must have a stub entry");
+        let last = wrap_log.last().unwrap();
+        let got = last.get("reject_reason").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(got, "no wrap agent run");
     }
 
     // --- amend ---
@@ -860,6 +1006,28 @@ fields:
 
         assert_eq!(read_status_wrap(&conn), "planning",
             "amend must land at planning (Decision Matrix row i)");
+    }
+
+    /// F2: amend resets current_phase and current_cycle to 0 (Decision Matrix row i).
+    #[test]
+    fn ac6_amend_resets_phase_and_cycle() {
+        let (schema, conn) = setup_wrap();
+        insert_wrap_row_with_phase(&conn, "rejected", "[]", 2, 3);
+
+        // Verify seed values
+        let (phase_before, cycle_before) = read_phase_cycle(&conn);
+        assert_eq!(phase_before, 2);
+        assert_eq!(cycle_before, 3);
+
+        let cmd = build_wrap_cmd(&schema, "amend");
+        let matches = cmd.get_matches_from(["amend", "T001"]);
+        run(&schema, &conn, &matches, Actor::Human, "amend").unwrap();
+
+        assert_eq!(read_status_wrap(&conn), "planning",
+            "amend must land at planning");
+        let (phase_after, cycle_after) = read_phase_cycle(&conn);
+        assert_eq!(phase_after, 0, "amend must reset current_phase to 0");
+        assert_eq!(cycle_after, 0, "amend must reset current_cycle to 0");
     }
 
     #[test]

@@ -297,26 +297,37 @@ TMP_REJECT=$(mktemp -d)
     MID_STATUS=$(stores tasks show T001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
     [[ "$MID_STATUS" == "in_review" ]] || fail "AC7.6: status changed after failed accept; got: $MID_STATUS"
 
-    # With CLAUDECODE=1 → reject must also fail
-    REJECT_ERR=$(CLAUDECODE=1 stores tasks reject T001 2>&1) && fail "AC7.6: reject with CLAUDECODE=1 should have exited non-zero" || true
+    # With CLAUDECODE=1 → reject must also fail (--reason required to get past clap parse)
+    REJECT_ERR=$(CLAUDECODE=1 stores tasks reject T001 --reason "test rejection" 2>&1) && fail "AC7.6: reject with CLAUDECODE=1 should have exited non-zero" || true
     echo "$REJECT_ERR" | grep -q "transition 'reject'" || \
         fail "AC7.6: reject error should mention transition 'reject'; got: $REJECT_ERR"
     echo "$REJECT_ERR" | grep -q "requires actor 'human'" || \
         fail "AC7.6: reject error should mention requires actor 'human'; got: $REJECT_ERR"
 
-    # Without CLAUDECODE → reject must succeed (human invoker)
+    # Without CLAUDECODE → reject must succeed (human invoker) and persist reject_reason
     unset CLAUDECODE 2>/dev/null || true
-    stores tasks reject T001
+    stores tasks reject T001 --reason "test rejection"
 
     # Assert final status rejected
     FINAL_STATUS=$(stores tasks show T001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
     [[ "$FINAL_STATUS" == "rejected" ]] || fail "AC7.6: expected status=rejected after human reject; got: $FINAL_STATUS"
+
+    # Assert reject_reason was written to wrap_log[-1]
+    REJECT_REASON=$(stores tasks show T001 --json | python3 -c "
+import sys, json
+row = json.load(sys.stdin)
+wl = row.get('wrap_log') or []
+if isinstance(wl, str): wl = json.loads(wl)
+last = wl[-1] if wl else {}
+print(last.get('reject_reason', ''))
+")
+    [[ "$REJECT_REASON" == "test rejection" ]] || fail "AC7.6: expected reject_reason='test rejection' in wrap_log[-1]; got: '$REJECT_REASON'"
 )
-pass "AC7.6: CLAUDECODE=1 rejects accept+reject; unset CLAUDECODE allows reject; status=rejected"
+pass "AC7.6: CLAUDECODE=1 rejects accept+reject; unset CLAUDECODE allows reject with --reason; status=rejected, reject_reason persisted"
 
 echo ""
 echo "=== All drive e2e scenarios passed ==="
 echo "  AC7.1  happy path (N=2 phases, zero REVISE): PASS"
 echo "  AC7.1b revise-once (one REVISE on phase 2):  PASS"
 echo "  AC7.5  wrap-then-accept end-to-end:           PASS"
-echo "  AC7.6  CLI actor enforcement (CLAUDECODE):    PASS"
+echo "  AC7.6  CLI actor enforcement (CLAUDECODE):    PASS (reject --reason persisted)"

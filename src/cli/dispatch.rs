@@ -221,7 +221,15 @@ pub fn dispatch(
                 Some((verb, sub)) => {
                     // Check if this is a declared lifecycle transition verb
                     if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {
-                        handlers::transition::run(schema, &conn, sub, invoker, verb)?;
+                        if verb == "reject" {
+                            // reject requires --reason (clap enforces required=true at parse time).
+                            let reason = sub
+                                .get_one::<String>("reason")
+                                .ok_or_else(|| anyhow::anyhow!("reject requires --reason"))?;
+                            handlers::transition::run_reject(schema, &conn, sub, invoker, reason)?;
+                        } else {
+                            handlers::transition::run(schema, &conn, sub, invoker, verb)?;
+                        }
                     } else {
                         bail!("unknown verb '{}' for store '{}'", verb, store.name);
                     }
