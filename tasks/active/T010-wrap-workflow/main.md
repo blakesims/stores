@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_1
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (executor: Phase 1 complete)
+- **Last Updated:** 2026-05-01 (code-reviewer: Phase 1 REVISE — back to executor; cycle 1/3)
 - **Blocked Reason:** —
 
 ## Task
@@ -450,11 +450,20 @@ _Executor agent fills this section per phase._
 _Code-reviewer agent fills this section per phase._
 
 ### Phase 1
-- **Gate:** PASS | REVISE | FAIL
-- **Issues Found:** —
-- **Revision Count:** 0/3
+- **Gate:** REVISE (substantial)
+- **Reviewed:** 2026-05-01
+- **Revision Count:** 1/3
+- **Issues Found:**
+  1. **CRITICAL** — `tests/drive_e2e.sh::AC7.1` fails outright after Phase 1: asserts `status=complete`, but new schema produces `status=in_review` post-follow-on; mock-runner queue exhausted on wrap dispatch. Symmetric break in `tests/tasks_e2e.sh` Steps 13 and 15. AC1.7/AC1.9 grep sweep was scoped to Rust source and missed shell e2e tests.
+  2. **MAJOR** — `src/handlers/drive.rs:351` hard-codes `na.status == "complete"` as terminal exit; contradicts new schema where `complete` is transient. Existing `terminal_complete_exits_without_spawning` test now encodes wrong behavior.
+  3. **MAJOR** — Schema-additivity downstream consumers not audited: `src/handlers/status.rs::is_terminal` and `next_from_status` ignore `in_review`/`accepted`/`rejected`; `src/render/path.rs::status_to_dir` falls through to "active" for `accepted` (should be "completed"); `stores/tasks/templates/main.md.tpl` keys Completion section on `status == "complete"` which never fires under new schema.
+  4. **MINOR** — Scope creep beyond plan's "Files to modify" (7 extra files); each defensible per execution log notes, but stub files (`agents/wrap.md`, `agents/schemas/wrap.schema.json`, `stores/tasks/templates/wrap-brief.md.tpl`) should be marked in-file as Phase 1 stubs.
+  5. **TRIVIAL** — Test count claim "430" is stale; actual is 448 (446 unit + 2 integration), same as pre-Phase-1 baseline. Phase 1 added zero new tests (consistent with plan; just update the number).
+  6. **MINOR** — `dispatched_wrap` boolean in drive.rs is the AC4.3 state-local flag pulled into Phase 1 (necessary for happy-path test). Phase 4 estimate shrinks; flag in execution log.
 
-> Details: code-review-phase-1.md
+- **Status update:** EXECUTING_PHASE_1 (return to executor with revision scope in `code-review-phase-1.md`)
+
+> Details: `code-review-phase-1.md`
 
 ---
 
