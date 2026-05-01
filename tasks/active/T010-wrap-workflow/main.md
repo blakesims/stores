@@ -574,7 +574,7 @@ _Code-reviewer agent fills this section per phase._
 - **Status:** COMPLETE
 - **Started:** 2026-05-01
 - **Completed:** 2026-05-01
-- **Commit:** TBD (filled after commit)
+- **Commit:** `c36e3ac`
 - **Files Modified:**
   - `src/handlers/submit.rs` — `compute_submit_wrap` + `run_submit_wrap` added; 5 new tests (ac3_1, ac3_2, ac3_3, ac3_6, ac3_7); `insert_row_at_in_review` + `read_wrap_log` helpers; `make_wrap_entry` factory.
   - `src/cli/dynamic.rs` — `build_submit_wrap_cmd` added; registered in workflow-only arm; `submit-wrap` added to `WORKFLOW_VERBS` exclusion list.
