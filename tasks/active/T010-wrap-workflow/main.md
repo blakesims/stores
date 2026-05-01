@@ -425,7 +425,7 @@ _Executor agent fills this section per phase._
 - **Status:** COMPLETE
 - **Started:** 2026-05-01
 - **Completed:** 2026-05-01
-- **Commits:** (see commit SHA after commit)
+- **Commits:** `9aaef2d`
 - **Files Modified:**
   - `stores/tasks/schema.yaml` — 10 states, 4 new transitions, wrap_log field, on_state.complete/in_review, submit-wrap, wrap agent_role, briefing_templates.wrap
   - `src/handlers/submit.rs` — WF_SCHEMA_YAML fixture mirrored; fire_on_entry_follow_ons added to compute_submit_review; ac5_3 assertion migrated to in_review
