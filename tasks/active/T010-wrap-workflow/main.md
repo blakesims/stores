@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_4
+- **Status:** CODE_REVIEW
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (code-reviewer: Phase 3 PASS — submit-wrap handler + CLI dispatch verified)
+- **Last Updated:** 2026-05-01 (executor: Phase 4 COMPLETE — wrap agent prompt + brief template + git_diff_summary overlay)
 - **Blocked Reason:** —
 
 ## Task
@@ -623,6 +623,35 @@ _Code-reviewer agent fills this section per phase._
 - **Status update:** EXECUTING_PHASE_4 (orchestrator advances; Phase 4 — wrap agent prompt + briefing template + render-context purity — is unblocked).
 
 > Details: `code-review-phase-3.md`.
+
+### Phase 4: Wrap agent prompt + briefing template + drive integration
+
+- **Status:** COMPLETE
+- **Started:** 2026-05-01
+- **Completed:** 2026-05-01
+- **Commit:** `13662ca`
+- **Files Modified:**
+  - `agents/wrap.md` — Phase 1 stub replaced with production prompt (persona, stages 0-6, output protocol, failure modes, good/bad summary examples, authorized/forbidden verbs, checklist). Stub marker removed.
+  - `stores/tasks/templates/wrap-brief.md.tpl` — Phase 1 stub replaced with production template (Header, Promise, Reality table, Diff section with triple-brace `{{{git_diff_summary}}}`, Your Job). Stub marker removed.
+  - `src/render/engine.rs` — `render_template_with_overlay()` added; `render_template` refactored to delegate to it; `render_template_with_overlay_merges_correctly` test added (AC4.5).
+  - `src/render/mod.rs` — `render_template_with_overlay` exported.
+  - `src/handlers/drive.rs` — `compute_git_diff_summary()` helper added (git merge-base HEAD master → first_executor_commit fallback → `<git diff unavailable>`, AC4.5/AC4.6); overlay wired into wrap brief path; 3 existing tests strengthened (wrap_log content assertions, AC4.7); 6 new tests added (AC4.4, AC4.5, AC4.6 x2, AC4.7 x2).
+- **AC verification:**
+  - AC4.1: (already true) `next-action` on `in_review` returns `next_agent: "wrap"`. ✓
+  - AC4.2: (already true) Drive successfully spawns wrap agent via mock runner. ✓
+  - AC4.3 / AC4.3a: (already true) State-local flag + re-entry safety. ✓
+  - AC4.4: `wrap_brief_template_renders_with_fixture_row` — renders without error, asserts Promise/Reality/Diff/Your Job sections present. ✓
+  - AC4.5: `wrap_brief_includes_git_diff_summary` + `render_template_with_overlay_merges_correctly` — overlay reaches rendered output; drive computes diff in drive.rs only; `context.rs` untouched. ✓
+  - AC4.6: `git_diff_summary_unavailable_when_no_git_and_no_commit` + `git_diff_summary_with_first_executor_commit_fallback` — graceful degradation; never panics. ✓
+  - AC4.7: `happy_path_one_phase_mock_wrap_log_content`, `in_review_first_iteration_dispatches_wrap_log_content`, `in_review_re_entry_after_amend_wrap_log_content` — assert wrap_log[] length, executive_summary == "stub", at is non-empty. ✓
+  - AC4.8: (already true) BUNDLED_AGENTS count == 6. ✓
+- **Test count:** 468 unit + 2 integration = **470 total** (+11 new tests). All pass.
+- **Notes:**
+  - `{{{git_diff_summary}}}` triple-brace required in template (Handlebars HTML-escapes `<>` with double-brace; the `<git diff unavailable>` placeholder was rendering as `&lt;git diff unavailable&gt;`). Discovered via test failure; trivial fix.
+  - `render_template_with_overlay` overlay merge: shallow-merges into a clone of the top-level context object. Non-object ctx (extremely unlikely for briefing templates) falls back to empty map before merge.
+  - `compute_git_diff_summary` is `pub(crate)` so the tests in `drive::tests` can call it directly for AC4.6 unit coverage.
+  - Phase 3 Finding 1 (stale comment in `in_review_re_entry_after_amend_dispatches_fresh_wrap`) addressed by adding the strengthened test variants with the correct comment.
+  - Both `bash tests/drive_e2e.sh` and `bash tests/tasks_e2e.sh` exit 0.
 
 ---
 
