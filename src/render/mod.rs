@@ -6,3 +6,4 @@ pub mod path;
 
 pub use context::build_context;
 pub use engine::render_template;
+pub use engine::render_template_with_overlay;

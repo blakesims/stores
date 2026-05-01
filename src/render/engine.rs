@@ -147,6 +147,43 @@ fn helper_default(
 /// `OnceLock<Handlebars<'static>>` or a `RenderEngine` struct that wraps a
 /// reusable registry (helpers hold no per-render state).
 pub fn render_template(text: &str, ctx: &Value) -> Result<String> {
+    render_template_with_overlay(text, ctx, &std::collections::HashMap::new())
+}
+
+/// Render `text` as a Handlebars template against `ctx`, with an additional
+/// `overlay` map merged on top of `ctx` before template evaluation.
+///
+/// The overlay is a caller-supplied `HashMap<String, Value>` that is shallow-
+/// merged into the top-level context object.  Keys in the overlay take
+/// precedence over identically-named keys already present in `ctx`.
+///
+/// Non-wrap callers pass an empty overlay via `render_template` and observe no
+/// behavioural change.  The wrap brief path in `drive.rs` passes
+/// `git_diff_summary` so render stays pure `(schema, entry) → Value` — the
+/// diff computation never enters `src/render/context.rs`.
+///
+/// # AC4.5 — render stays pure
+/// `src/render/context.rs::build_context` is NOT modified.  The overlay is a
+/// separate parameter that is merged at template-evaluation time only.
+pub fn render_template_with_overlay(
+    text: &str,
+    ctx: &Value,
+    overlay: &std::collections::HashMap<String, Value>,
+) -> Result<String> {
+    // Merge overlay into a shallow clone of ctx.
+    let merged: Value = if overlay.is_empty() {
+        ctx.clone()
+    } else {
+        let mut map = match ctx {
+            Value::Object(m) => m.clone(),
+            _ => serde_json::Map::new(),
+        };
+        for (k, v) in overlay {
+            map.insert(k.clone(), v.clone());
+        }
+        Value::Object(map)
+    };
+
     let mut hbs = Handlebars::new();
     // Strict mode OFF — missing keys → empty string, never an error.
     hbs.set_strict_mode(false);
@@ -158,7 +195,7 @@ pub fn render_template(text: &str, ctx: &Value) -> Result<String> {
     hbs.register_helper("default", Box::new(helper_default));
 
     let rendered = hbs
-        .render_template(text, ctx)
+        .render_template(text, &merged)
         .map_err(|e| anyhow::anyhow!("template render error: {}", e))?;
     Ok(rendered)
 }
@@ -332,6 +369,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "no");
+    }
+
+    // AC4.5: render_template_with_overlay_merges_correctly — overlay keys appear
+    // in rendered output; context-only keys still work; overlay wins on conflict.
+    #[test]
+    fn render_template_with_overlay_merges_correctly() {
+        // 1. Overlay key reaches template.
+        let tpl = "diff: {{git_diff_summary}}";
+        let ctx = json!({});
+        let mut overlay = std::collections::HashMap::new();
+        overlay.insert("git_diff_summary".to_string(), json!("abc123..HEAD: 3 files changed"));
+        let out = super::render_template_with_overlay(tpl, &ctx, &overlay).unwrap();
+        assert_eq!(out, "diff: abc123..HEAD: 3 files changed");
+
+        // 2. Context-only keys still work when overlay is non-empty.
+        let tpl2 = "title: {{title}} diff: {{git_diff_summary}}";
+        let ctx2 = json!({"title": "My Task"});
+        let out2 = super::render_template_with_overlay(tpl2, &ctx2, &overlay).unwrap();
+        assert_eq!(out2, "title: My Task diff: abc123..HEAD: 3 files changed");
+
+        // 3. Overlay wins over context on key conflict.
+        let ctx3 = json!({"git_diff_summary": "old value"});
+        let out3 = super::render_template_with_overlay(tpl, &ctx3, &overlay).unwrap();
+        assert_eq!(out3, "diff: abc123..HEAD: 3 files changed");
+
+        // 4. Empty overlay → same as render_template.
+        let empty: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+        let ctx4 = json!({"val": "hello"});
+        let tpl4 = "val: {{val}}";
+        let out4 = super::render_template_with_overlay(tpl4, &ctx4, &empty).unwrap();
+        assert_eq!(out4, "val: hello");
     }
 
     // Regression: lt missing first arg → false, no error (plan task 3.4 contract).
