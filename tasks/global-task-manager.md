@@ -6,7 +6,6 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T010 | Wrap workflow + GO/NO_GO (last 10%) | High | 7/7 | EXECUTING_PHASE_7 | [main.md](./active/T010-wrap-workflow/main.md) |
 
 Next available task id: T011
 
@@ -16,6 +15,7 @@ Next available task id: T011
 
 | ID | Task Name | Completed | Link |
 |:---|:----------|:----------|:-----|
+| T010 | Wrap workflow + GO/NO_GO (last 10%) | 2026-05-01 | [main.md](./completed/T010-wrap-workflow/main.md) |
 | T009 | Port the 10.06 `observations` store — second real migration | 2026-05-01 | [main.md](./completed/T009-port-10-06-observations/main.md) |
 | T008 | Add `FieldType::Json` for free-shape opaque payloads | 2026-04-30 | [main.md](./completed/T008-json-fieldtype/main.md) |
 | T007 | Port the 10.06 `gate` store — first real migration | 2026-04-30 | [main.md](./completed/T007-port-10-06-gate/main.md) |
