@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_2
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (executor: Phase 1 cycle 2 — eager-wrap dispatch restored via state-local flag)
+- **Last Updated:** 2026-05-01 (code-reviewer: Phase 1 cycle 2 PASS — eager-wrap dispatch verified)
 - **Blocked Reason:** —
 
 ## Task
@@ -506,7 +506,26 @@ _Code-reviewer agent fills this section per phase._
 
 - **Status update:** EXECUTING_PHASE_1 (return to executor with revision scope in `code-review-phase-1.md`)
 
-> Details: `code-review-phase-1.md`
+#### Cycle 2 review — 2026-05-01
+- **Gate:** PASS
+- **Reviewed commits:** `8ba0077` (fix), `bd41587` (execution log), `46b9c8c` (status)
+- **Revision count:** 2/3 (Phase 1 closes)
+- **Verification:**
+  1. **Eager-wrap fires.** `cargo test handlers::drive::tests::happy_path_one_phase_mock -- --nocapture` shows `spawning wrap` then `wrap returned` then next iteration's `in_review; brief written` exit. All 5 queued mock outputs consumed; `runner.remaining_count() == 0` asserted. Cycle-1 silent-skip regression dead.
+  2. **First-time eager dispatch correct.** `in_review_first_iteration_dispatches_wrap` (drive.rs:1283) — row at `in_review` with empty wrap_log, one wrap response queued, runner drained after `drive_loop`. AC4.3a load-bearing path tested positively.
+  3. **Cross-run re-entry dispatches fresh wrap.** `in_review_re_entry_after_amend_dispatches_fresh_wrap` (drive.rs:1318) — row at `in_review` with non-empty wrap_log entry, one wrap response queued, runner drained. AC4.3a re-entry-after-amend rule encoded.
+  4. **Same-run re-dispatch correctly suppressed; flag set-point right.** Trace: line 348 `let mut dispatched_wrap_this_run = false;` → line 377 loop-top guard requires both `in_review` AND flag → line 559 `dispatch_submit(...)?` (errors propagate, dispatch cannot be skipped) → lines 565–567 `if na.status == "in_review" { dispatched_wrap_this_run = true; }`. Flag flips AFTER dispatch returns OK. Next iteration's guard exits clean.
+  5. **`MockRunner::remaining_count()`** at `src/runner/mock.rs:53-55` — pure read accessor, immutable borrow, no mutation, mirrors existing pattern.
+  6. **Shell e2e** `tests/drive_e2e.sh` AC7.1 and AC7.1b both pass and now grep `spawning wrap` from stderr; the assertion would fail if the silent-skip regression reappeared. `tests/tasks_e2e.sh` 16 steps all pass.
+  7. **No cycle-1 regressions.** `git diff aceb643..HEAD -- src/handlers/status.rs src/render/path.rs stores/tasks/templates/main.md.tpl` is empty. Stub markers, downstream consumers (Issue 3), shell-e2e fixtures (Issue 1) unchanged.
+  8. **Phase 1 ACs (1.1–1.9) all satisfied.** AC1.2 schema lifecycle tests 13/13. AC1.8 `cargo build --features runner-claude-code` clean. AC1.9 `complete` sweep — remaining hits all legitimate (transient-state routing, schema-bug guard test, `next_from_status` mapping).
+- **Minor (non-blocking):**
+  - Execution log test count "457" doesn't match `cargo test --release` reading of 437 (435 unit + 2 integration). Pre-existing drift; reconcile in Phase 6.
+  - `~/.cargo/bin/stores` vs `target/release/stores` — shell e2e resolves via PATH; `cargo install --path .` required to update the installed binary. Pre-existing env constraint; recommend documenting in Phase 6/7.
+
+- **Status update:** EXECUTING_PHASE_2 (orchestrator advances; Phase 2 — wrap envelope schema — is unblocked)
+
+> Details: `code-review-phase-1.md` (Cycle 2 review section).
 
 ---
 

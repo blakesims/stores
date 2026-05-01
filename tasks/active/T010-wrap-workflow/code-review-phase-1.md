@@ -338,3 +338,73 @@ But the plan's flow IS reject → amend → re-complete → back-to-in_review-wi
 ### Verdict
 
 **Gate: REVISE (cycle 2/3).** The downstream-consumer audit (Issue 3) is excellent. The terminal-exit branches (Issue 2 partial fix) are correct in shape. The shell-e2e migration (Issue 1) is correct. The stub markers (Issue 4) are clean. But the eager-wrap path — the central animating purpose of T010 — is broken by the loop-top guard. The fix is small (~15 LOC: restore the per-iteration boolean, update the two tests, add a positive dispatch-was-called assertion). The cycle-1 revision should not have removed `dispatched_wrap`; restoring it brings the implementation back in line with the plan's binding decisions.
+
+---
+
+## Cycle 2 review — 2026-05-01
+
+**Reviewed commits:** `8ba0077` (the fix), `bd41587` (execution log), `46b9c8c` (status).
+**Gate:** **PASS**
+**Revision count:** 2/3 (this cycle closes Phase 1).
+
+### Summary
+
+Cycle-2 fix is small, well-targeted, and correct. The state-local flag (`dispatched_wrap_this_run: bool`) is restored exactly where Decision Matrix (k) and AC4.3 specify. The loop-top guard is now `if na.status == "in_review" && dispatched_wrap_this_run`, so first-time observation falls through to dispatch. The flag is set AFTER `dispatch_submit` returns successfully, never before — the dispatch itself cannot be skipped. Two migrated tests now positively assert the dispatch happened (queue-drain check via the new `MockRunner::remaining_count()` accessor). The shell e2e adds a `spawning wrap` stderr grep so the silent-skip regression cannot reappear.
+
+All 437 tests pass (435 unit + 2 integration) under `cargo test --release`. Both shell e2e scenarios pass (`tests/drive_e2e.sh`, `tests/tasks_e2e.sh`). `cargo build --features runner-claude-code` clean. AC1.9 sweep clean. None of cycle-1's correct fixes (Issues 1, 3, 4, 5) were touched — `git diff aceb643..HEAD -- src/handlers/status.rs src/render/path.rs stores/tasks/templates/main.md.tpl` is empty.
+
+### Verification of cycle-2 fix points
+
+1. **Eager-wrap fires.** Running `cargo test handlers::drive::tests::happy_path_one_phase_mock -- --nocapture` shows `phase 1 cycle 1: spawning wrap via mock runner` followed by `wrap returned (exit=0, …)` and `wrap → submitted (gate=None)`, then on the next iteration `in_review; brief written; awaiting stores tasks accept | reject`. All five queued mock outputs consumed; `remaining_count() == 0` asserted in the test (drive.rs:1071-1077). The cycle-1 silent-skip regression is dead.
+
+2. **First-time eager dispatch is correct.** `in_review_first_iteration_dispatches_wrap` (drive.rs:1283) inserts a row at `in_review` with empty `wrap_log[]`, queues exactly one wrap response, calls `drive_loop`, and asserts `runner.remaining_count() == 0`. This is the load-bearing AC4.3a test. Test passes.
+
+3. **Cross-run re-entry dispatches fresh wrap (plan AC4.3a).** `in_review_re_entry_after_amend_dispatches_fresh_wrap` (drive.rs:1318) inserts a row at `in_review` with a non-empty pre-existing `wrap_log[]` entry simulating a prior wrap run, queues one wrap response, calls `drive_loop`, asserts the runner is drained. Encodes AC4.3a's "fresh drive run → dispatch regardless of wrap_log non-emptiness" rule. Test passes. Note: the test asserts `runner.remaining_count() == 0` rather than `wrap_log[]` length increasing by 1, because Phase 1's `dispatch_submit` wrap arm is a stub (Phase 3 owns `compute_submit_wrap`). Queue-drain is the appropriate proxy for "dispatch fired" until Phase 3 lands. Acceptable per execution log notes.
+
+4. **Same-run re-dispatch is suppressed correctly; flag set-point is right.** Trace of `drive.rs::drive_loop`:
+   - Line 348: `let mut dispatched_wrap_this_run = false;`
+   - Line 377: loop-top guard `if na.status == "in_review" && dispatched_wrap_this_run { return Ok(()); }` — first iter, flag is false → fall through.
+   - Lines 416–504: spawn the wrap agent (announces `spawning wrap`).
+   - Line 559: `let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;` — wrap envelope routed to the stub arm at drive.rs:850, returns `SubmitOutput { new_status: "in_review" }`. The `?` propagates errors, so the flag set below cannot run if dispatch fails.
+   - Lines 565–567: `if na.status == "in_review" { dispatched_wrap_this_run = true; }` — flips AFTER successful dispatch_submit.
+   - Next iteration: `na.status == "in_review"` (wrap stub doesn't transition status), flag now true → guard at line 377 fires → `Ok(())`. 
+
+   Order is correct: dispatch happens → submit returns → flag flips → next iteration's guard exits. Flag cannot be set before dispatch and cannot skip the dispatch.
+
+5. **Plan AC4.3 / AC4.3a satisfied.** AC4.3 specifies `dispatched_wrap_this_run: bool` semantically; the implementation uses that exact identifier. AC4.3a specifies fresh drive runs against `in_review` rows must dispatch wrap; the implementation does this and is positively tested by both migrated tests above.
+
+6. **No regressions.** Cycle-1's correct fixes preserved. Specifically:
+   - `tests/drive_e2e.sh` AC7.1 and AC7.1b both pass and now additionally fail loudly if `spawning wrap` is missing from stderr.
+   - `tests/tasks_e2e.sh` all 16 steps pass; render path mapping (`in_review → tasks/active/`) intact.
+   - `is_terminal`/`is_awaiting_human`/`status_to_dir` untouched (verified via `git diff aceb643..HEAD`).
+   - Stub markers (`agents/wrap.md`, `agents/schemas/wrap.schema.json`, `wrap-brief.md.tpl`) unchanged.
+
+7. **Phase 1 ACs.**
+   - AC1.1: schema loads — yes (passes via the schema lifecycle tests at AC1.2).
+   - AC1.2: `cargo test schema::lifecycle` passes (13/13).
+   - AC1.3: 10 lifecycle states present.
+   - AC1.4: `wrap_log` list_record with the right sub-fields.
+   - AC1.5: `on_state.complete: [transition_to: in_review]`, `on_state.in_review: [dispatch_agent: wrap]`.
+   - AC1.6: `submit_targets.submit-wrap == wrap_log`.
+   - AC1.7: PASS-last assertion in submit.rs migrated to `in_review`; drive.rs happy-path migrated to consume 5 outputs and assert `in_review`; setup line at drive.rs:~1266 is the schema-bug guard test (legitimate use of `complete` literal).
+   - AC1.8: `cargo build --features runner-claude-code` clean.
+   - AC1.9: sweep clean — remaining `complete` literals are all legitimate (transient-state routing, schema-bug guard, `next_from_status` mapping, comments).
+
+### `MockRunner::remaining_count()` review
+
+Pure read accessor: `self.queue.borrow().len()` — uses `borrow()` (immutable), no mutation. Mirrors the existing pattern (the `spawn` method uses `borrow_mut()` for popping). Clean. (`src/runner/mock.rs:53-55`.)
+
+### Minor observations (not blocking)
+
+- **Test count drift.** Execution log claims "457 total" (2 new tests over cycle-1's "455"). Actual count under `cargo test --release` is 437 (435 unit + 2 integration). The drift looks pre-existing; neither cycle-1 nor cycle-2 introduced it; not Phase 1's concern. Phase 6 should reconcile when the test naming sweep runs.
+
+- **`~/.cargo/bin/stores` vs `target/release/stores`.** The shell e2e tests resolve `stores` via PATH, which on this dev box points at `~/.cargo/bin/stores`. Means a `cargo install --path .` is required to update the installed binary before running the e2e tests; a stale install will silently test old behavior. Pre-existing constraint (not a cycle-2 regression), but worth documenting in `tests/drive_e2e.sh` header or a CI note. **Recommendation: flag for documentation in Phase 6 or Phase 7; not a Phase 1 blocker.**
+
+- **The Phase 1 `dispatch_submit` wrap arm now goes live.** Cycle-1 review (Finding "Minor — drive's stub `dispatch_submit` arm is dead code") noted the wrap arm at drive.rs:850 was unreachable under the cycle-1 loop-top guard. Cycle-2 makes it reachable; the stub returns `SubmitOutput { new_status: "in_review" }` and drive correctly handles it. Phase 3 will replace the stub with `compute_submit_wrap`. No issue here.
+
+### Verdict
+
+**Gate: PASS.** The fix was exactly what the cycle-1 review demanded, and it's been verified by the two new positive-assertion tests, the queue-drain regression guard on the happy-path test, and the `spawning wrap` shell e2e grep. The eager-wrap path now matches plan Decision (b) and AC4.3a. No regressions to cycle-1's correct fixes. Phase 1 is closed; Phase 2 (wrap envelope schema) is unblocked.
+
+**Status update:** EXECUTING_PHASE_2 (orchestrator advances to Phase 2 — wrap envelope schema).
+
