@@ -51,6 +51,7 @@ fn role_cases() -> &'static [RoleCase] {
         RoleCase { role: "executor", stray_key: "unexpected_executor_field" },
         RoleCase { role: "code-reviewer", stray_key: "unexpected_cr_field" },
         RoleCase { role: "guide", stray_key: "unexpected_guide_field" },
+        RoleCase { role: "wrap", stray_key: "unexpected_wrap_field" },
     ]
 }
 

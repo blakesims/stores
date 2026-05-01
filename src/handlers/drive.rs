@@ -109,6 +109,8 @@ enum AgentEnvelope {
     /// Formally wired to `compute_submit_wrap` in Phase 3; Phase 1 stub exits drive loop.
     #[serde(rename = "wrap")]
     Wrap {
+        #[serde(default)]
+        reasoning: Option<String>,
         executive_summary: String,
         #[serde(default)]
         deviations: Vec<String>,
@@ -1032,6 +1034,11 @@ mod tests {
         r#"{"role":"wrap","executive_summary":"stub","deviations":[],"residual_risks":[],"recommended_sanity_checks":[]}"#
     }
 
+    /// Full wrap fixture (Phase 2) — representative envelope with all fields populated.
+    fn wrap_full_fixture_json() -> &'static str {
+        include_str!("../../tests/fixtures/agent_outputs/wrap.json")
+    }
+
     // ---------------------------------------------------------------------------
     // AC3.7: happy-path through 1 full phase (planning → plan_review →
     // executing → code_review → complete → in_review via wrap dispatch)
@@ -1503,6 +1510,96 @@ mod tests {
         let out = make_run_output(code_reviewer_fixture_json(), 0);
         let (env, _) = parse_envelope(&out, "code-reviewer").expect("code-reviewer fixture should parse");
         assert!(matches!(env, AgentEnvelope::CodeReviewer { .. }));
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC2.3: parse_envelope_from_wrap_fixture — Phase 2
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn parse_envelope_from_wrap_fixture() {
+        // Use structured_output (Layer 1) to avoid multi-line JSON stdout parsing
+        // issues in make_run_output's last-line scan. The fixture is pretty-printed;
+        // parse it as a serde_json::Value and inject via structured_output.
+        let fixture_val: serde_json::Value = serde_json::from_str(wrap_full_fixture_json())
+            .expect("wrap fixture must be valid JSON");
+        let out = RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: None,
+            structured_output: Some(fixture_val),
+            session_id: None,
+            structured_output_source: None,
+        };
+        let (env, source) = parse_envelope(&out, "wrap").expect("wrap fixture should parse");
+        assert_eq!(source, "sdk", "fixture via structured_output must use sdk layer");
+        match env {
+            AgentEnvelope::Wrap {
+                reasoning,
+                executive_summary,
+                deviations,
+                residual_risks,
+                recommended_sanity_checks,
+            } => {
+                assert!(reasoning.is_some(), "reasoning should be present in fixture");
+                assert!(!executive_summary.is_empty(), "executive_summary must be non-empty");
+                assert!(!deviations.is_empty(), "deviations must be non-empty in fixture");
+                assert!(!residual_risks.is_empty(), "residual_risks must be non-empty in fixture");
+                assert!(
+                    !recommended_sanity_checks.is_empty(),
+                    "recommended_sanity_checks must be non-empty in fixture"
+                );
+            }
+            other => panic!("expected AgentEnvelope::Wrap, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC2.4: role-mismatch detection covers wrap — Phase 2
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn role_mismatch_wrap_envelope_while_executing() {
+        // drive dispatches executor while executing; runner returns wrap envelope.
+        // parse_envelope must return Err with "envelope role mismatch" naming both roles.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn, &schema, "T001", "executing",
+            "2026-01-01T00:00:00Z", 1, 1, None, None,
+        );
+
+        let misrouted = RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: Some(
+                r#"{"role":"wrap","executive_summary":"wrong agent sent this"}"#.to_string()
+            ),
+            structured_output: None,
+            session_id: Some("wrap-mismatch-session".to_string()),
+            structured_output_source: None,
+        };
+        let runner = MockRunner::new(vec![misrouted]);
+
+        let err = drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect_err("wrap envelope while executing must cause Err");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("executor"),
+            "error must name expected role 'executor': {msg}"
+        );
+        assert!(
+            msg.contains("wrap"),
+            "error must name received role 'wrap': {msg}"
+        );
+        assert!(
+            msg.contains("wrap-mismatch-session"),
+            "error must include session_id: {msg}"
+        );
     }
 
     // ---------------------------------------------------------------------------

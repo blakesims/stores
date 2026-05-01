@@ -1,0 +1,18 @@
+{
+  "role": "wrap",
+  "reasoning": "Reviewing the contract against delivered phases. All acceptance criteria were met. One minor deviation in Phase 2 (schema field ordering changed for clarity). No blocking residual risks.",
+  "executive_summary": "T010 Phase 2 delivered the wrap envelope schema as a Draft 2020-12 JSON Schema with additionalProperties:false, registered in BUNDLED_AGENT_SCHEMAS, and wired the AgentEnvelope::Wrap variant in drive.rs. Fixture, schema-validation tests, and parse-from-fixture unit tests added. All 5 acceptance criteria pass.",
+  "deviations": [
+    "Schema field ordering: reasoning slot moved to first position to match planner.schema.json convention (style-only, no semantic change).",
+    "Phase 1 stub removed $comment marker — replaced with production $id field per Draft 2020-12 conventions."
+  ],
+  "residual_risks": [
+    "compute_submit_wrap (Phase 3) does not yet persist wrap_log[] — wrap envelope is received by drive but not written to DB until Phase 3 lands."
+  ],
+  "recommended_sanity_checks": [
+    "Run cargo test --features runner-claude-code and confirm test count increased by at least 2.",
+    "Verify wrap.schema.json validates wrap.json fixture via jsonschema crate (schemas_validate_fixtures test).",
+    "Confirm parse_envelope_from_wrap_fixture parses all optional fields including reasoning.",
+    "Confirm role-mismatch test fires 'envelope role mismatch' with expected/received roles named."
+  ]
+}

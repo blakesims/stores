@@ -1,15 +1,19 @@
 {
-  "$comment": "STUB — Phase 2 owns the strict envelope schema. This file exists for Phase 1 happy-path test (drive's parse_envelope needs a wrap variant). Phase 2 will add the 'reasoning' slot, tighten additionalProperties:false, and add required fields per the full spec.",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Wrap agent output envelope",
+  "$id": "https://stores.local/schemas/wrap",
+  "title": "WrapEnvelope",
   "description": "Synthesis brief produced by the wrap agent at task completion. Persisted to wrap_log[].",
   "type": "object",
   "required": ["role", "executive_summary"],
   "additionalProperties": false,
   "properties": {
-    "role": {
+    "reasoning": {
       "type": "string",
-      "const": "wrap"
+      "description": "Free-text reasoning and synthesis notes before structured output (field-ordering recovery pattern)."
+    },
+    "role": {
+      "const": "wrap",
+      "description": "Identifies this envelope as the wrap agent output."
     },
     "executive_summary": {
       "type": "string",
@@ -18,20 +22,17 @@
     "deviations": {
       "type": "array",
       "items": {"type": "string"},
-      "description": "Plan divergences that occurred during execution.",
-      "default": []
+      "description": "Plan divergences that occurred during execution."
     },
     "residual_risks": {
       "type": "array",
       "items": {"type": "string"},
-      "description": "Risks that remain after task completion.",
-      "default": []
+      "description": "Risks that remain after task completion."
     },
     "recommended_sanity_checks": {
       "type": "array",
       "items": {"type": "string"},
-      "description": "Specific checks the reviewer should perform before GO/NO_GO.",
-      "default": []
+      "description": "Specific checks the reviewer should perform before GO/NO_GO."
     }
   }
 }
