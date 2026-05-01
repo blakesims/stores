@@ -848,6 +848,27 @@ _Code-reviewer agent fills this section per phase._
 
 > Details: `code-review-phase-6.md` (cycle 1 review section).
 
+### Stage 6 — CodeRabbit batch (2026-05-01)
+
+- **Status:** COMPLETE
+- **Commit:** `c4032d7`
+- **Files changed:** `src/cli/dynamic.rs`, `src/cli/dispatch.rs`, `src/handlers/drive.rs`, `src/handlers/status.rs`, `src/handlers/submit.rs`, `skills/task:wrap/SKILL.md`
+- **7 fixes applied:**
+  1. **Issue 1 (submit-wrap required)** — `--summary-from-file` set `required(true)` in `build_submit_wrap_cmd` (`dynamic.rs:463`).
+  2. **Issue 2 (rejected next-step)** — `next_from_status("rejected")` returns `"-"` instead of `"planner"` (`status.rs:124`).
+  3. **Issue 3 (reasoning strip)** — `AgentEnvelope::Wrap` in `drive.rs` no longer inserts `reasoning` into `wrap_entry`; also stripped from CLI `dispatch.rs` path. `reasoning` field consumed and discarded at both callsites.
+  4. **Issue 4 (wrap_entry shape check)** — Added ~10-LOC `executive_summary` presence + non-empty guard in `compute_submit_wrap` before push, runs before `push(entry)` to avoid borrow-after-move. Full `Op::SubmitWrap` validator left as follow-up (no existing Op variant; structural change exceeds 15-LOC budget).
+  5. **Issue 5 (git_diff_summary branch param)** — Renamed `_branch` → `branch`; `branch_to_use = branch.unwrap_or("master")`; merge-base now runs `git merge-base HEAD <branch_to_use>`. Doc-comment updated.
+  6. **Issue 6 (auto-select filter)** — SQL filter extended: `NOT IN ('complete', 'blocked', 'accepted', 'rejected')`. Header doc comment synced.
+  7. **Issue 7 (SKILL.md)** — One sentence added clarifying `accept`/`reject` are human-run via `actor: human` enforcement.
+- **Issue 8 (Completion section)** — DEFERRED per orchestrator decision; `## Completion` left as-is.
+- **Build/test:** `cargo build --features runner-claude-code` clean; `cargo test --features runner-claude-code` 481/481 pass; `bash tests/drive_e2e.sh` 4/4 PASS; `bash tests/tasks_e2e.sh` 16/16 PASS.
+- **CodeRabbit round-2 (`/tmp/cr-t010-round2.log`) — 4 findings, NOT fixed (one-round rule):**
+  1. `transition.rs:74-81` — `reject`'s post-transition wrap_log UPDATE uses pre-read snapshot; if `--wrap-log` also supplied, it would be silently overwritten. Carry-over from Phase 6 finding; flagged as follow-up.
+  2. `transition.rs:28-34` — `run_reject` accepts empty `--reason ""`. New finding; trivial guard; follow-up.
+  3. `agents/wrap.md:105-110` — Spot-check examples hardcode `master..HEAD`; diverges from brief's computed range. New finding; cosmetic; follow-up.
+  4. `tasks/active/T010-wrap-workflow/main.md:853-903` — Premature `## Completion`; carry-over from round-1; orchestrator-DEFERRED.
+
 ### Phase 7 — Worklog + GTM update (2026-05-01)
 
 - **Status:** COMPLETE
