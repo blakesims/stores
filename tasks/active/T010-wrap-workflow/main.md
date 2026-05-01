@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_4
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (code-reviewer: Phase 2 PASS — wrap envelope schema verified)
+- **Last Updated:** 2026-05-01 (code-reviewer: Phase 3 PASS — submit-wrap handler + CLI dispatch verified)
 - **Blocked Reason:** —
 
 ## Task
@@ -593,6 +593,36 @@ _Code-reviewer agent fills this section per phase._
   - Drive arm: `AgentEnvelope::Wrap { .. }` stub replaced with full destructure. Dead_code warnings on `reasoning`, `executive_summary`, `deviations`, `residual_risks`, `recommended_sanity_checks` are now cleared by the real call.
   - `ac3_7` naming: spec says AC3.7 is CLI dispatch; test was numbered to match the "handler sets `at` overriding caller" AC. Naming is slightly loose but all 5 required ACs are covered.
   - `require_workflow` called twice (once for the null-check, once for `submit_targets` lookup) — mirrors the same pattern in `compute_submit_plan_review`. Not a bug.
+
+### Phase 3 — Code review (2026-05-01)
+
+- **Verdict:** PASS (cycle 0 — no revisions required)
+- **Reviewed commit:** `c36e3ac` (+ docs `26de11f`)
+- **AC verification (against orchestrator-revised ACs):**
+  - **AC3.1** ✓ wrong-state rejection — unit test `ac3_1_submit_wrap_rejects_wrong_state` and end-to-end CLI smoke (`stores tasks submit-wrap T999` on an `executing` row) both produce `"cannot submit-wrap: row is in state 'executing', expected 'in_review'"`.
+  - **AC3.2** ✓ append + status unchanged + `at` set — unit test `ac3_2_submit_wrap_appends_entry_and_status_unchanged` and end-to-end CLI confirm wrap_log gains 1 entry, status stays `in_review`, `at` is ISO-8601.
+  - **AC3.3** ✓ lock release — `ac3_3_lock_acquired_and_released` confirms `claimed_by` and `claimed_at` both NULL after commit.
+  - **AC3.4** ✓ DROPPED per orchestrator brief (no transition fired by submit-wrap; correctly implemented).
+  - **AC3.5** ✓ actor enforcement — submit-wrap accepts any invoker, mirroring the existing pattern: `compute_submit_plan_review` enforces actor only via `validate::validate(... Op::SubmitPlanReview ..., invoker)` which looks up the verb-matched transition's `actor` field. Since `submit-wrap` has no verb-matched transition in `lifecycle.transitions` (verified against `stores/tasks/schema.yaml`), there is nothing to enforce against. The actor gates that bite are upstream (`request_review`, framework) and downstream (`accept`/`reject`, human).
+  - **AC3.6** ✓ re-entry appends — unit test `ac3_6_submit_wrap_re_entry_appends_not_overwrites` (pre-seed 1, append, expect 2) and end-to-end CLI confirm append-only semantics.
+  - **AC3.7** ✓ CLI dispatch shape — `build_submit_wrap_cmd` declares all 4 required-shape args (`--summary-from-file`, `--deviations-from-file`, `--residual-risks-from-file`, `--sanity-checks-from-file`) plus optional `--reasoning-from-file`; dispatch arm builds a `serde_json::Map` matching wrap_log entry shape; list args split via `read_lines_from_file` (newline-split, trim, empty filter). End-to-end CLI smoke confirms: `--deviations-from-file <file with two lines>` produces `["dev1","dev2"]` in the persisted entry. Note: not directly unit-tested at the dispatch layer, but matches the existing untested pattern of `submit-plan-review`/`submit-review`/`submit-execute` CLI arms.
+  - **AC3.8** ✓ 5 new tests (revised brief said ≥5; plan literal text said ≥6 before AC3.4 was dropped).
+- **Build / test gates:**
+  - `cargo build --features runner-claude-code`: clean (no warnings introduced; the 3 warnings in `add.rs`/`transition.rs`/`update.rs` predate this branch — `git diff master..HEAD` confirms zero changes to those files).
+  - `cargo test --features runner-claude-code`: 460 unit + 2 integration = 462 pass — matches executor's claim.
+  - `bash tests/drive_e2e.sh`: PASS (AC7.1 happy path + AC7.1b revise-once both green; final state = `in_review`; brief written; awaiting human).
+  - `bash tests/tasks_e2e.sh`: PASS (Step 13 final state = `in_review|2`, Step 15 SQLite confirms; the summary line "→ complete" is stale labelling that predates T010 — the actual asserts check `in_review`).
+  - `AgentEnvelope::Wrap` dead_code warnings on `reasoning`/`executive_summary`/`deviations`/`residual_risks`/`recommended_sanity_checks` are cleared by the real `compute_submit_wrap` call.
+- **Out-of-scope check:** `git show c36e3ac --stat` = exactly `submit.rs`, `dispatch.rs`, `dynamic.rs`, `drive.rs`, `main.md`. Nothing in `agents/wrap.md` (Phase 4), `agents/guide.md` (Phase 5), `skills/task:wrap/` (Phase 5), or `src/render/context.rs` (Phase 4 stays pure).
+- **Findings (informational, non-blocking):**
+  1. **MINOR (gap)** — `happy_path_one_phase_mock`, `in_review_first_iteration_dispatches_wrap`, `in_review_re_entry_after_amend_dispatches_fresh_wrap` (in `drive.rs::tests`) still rely on `runner.remaining_count() == 0` queue-drain proxies introduced in Phase 1 cycle-2 because `compute_submit_wrap` did not yet exist. Now that it does, these tests **could and should** also assert the post-condition that `wrap_log[]` has 1 entry whose `executive_summary == "stub"` (matching `wrap_fixture_json()`). The orchestrator's brief explicitly flagged this as an opportunity. The 3 ac3_* unit tests cover the handler in isolation and the queue-drain proves drive dispatched, so we have high confidence the wire works — but no single test asserts the end-to-end "fixture → drive parses → handler writes wrap_log content". Recommend adding the assertion in Phase 6 cleanup (or Phase 4 if convenient — Phase 4 will already be touching this area).
+  2. **TRIVIAL (stale comment)** — `in_review_re_entry_after_amend_dispatches_fresh_wrap` (drive.rs:1356-1357) still says "Phase 1 stub; Phase 3 will write this via compute_submit_wrap". Phase 3 has landed; comment is stale. Trivial; fold into Phase 6 doc-cleanup.
+  3. **TRIVIAL (CLI permissiveness asymmetry)** — All 4 wrap `--*-from-file` flags are `.required(false)`, so a CLI invocation with no flags produces `executive_summary == ""` and three empty arrays. The agent path (`AgentEnvelope::Wrap`) requires non-empty `executive_summary` via serde non-Option type. Asymmetric but matches existing prior art (`submit-execute`, `submit-review` CLI arms also tolerate missing `--summary`). Not blocking.
+  4. **TRIVIAL** — `compute_submit_wrap` calls `require_workflow` twice (lines 1044, 1047). First call's result is discarded. Mirrors `compute_submit_plan` (lines 399, 421). Pre-existing pattern, harmless. Could be tightened but not Phase 3's responsibility.
+  5. **TRIVIAL (test naming)** — `ac3_7_submit_wrap_handler_sets_at_overriding_caller` is named after AC3.7 but actually covers handler-level `at` override (an AC3.2 sub-concern). The CLI dispatch shape per AC3.7 is verified manually + by reading the code, not by a unit test. Matches the existing pattern — `submit-plan-review`/`submit-review` CLI arms also lack dedicated unit tests; coverage comes via `tasks_e2e.sh`.
+- **Status update:** EXECUTING_PHASE_4 (orchestrator advances; Phase 4 — wrap agent prompt + briefing template + render-context purity — is unblocked).
+
+> Details: `code-review-phase-3.md`.
 
 ---
 
