@@ -10,16 +10,19 @@ use crate::schema::{FieldType, Schema};
 use crate::validate::EntryMap;
 
 /// Build a nested EntryMap from flat CLI args.
-/// `get_arg` returns the raw string value for a given cli_name (e.g. "done-when"),
-/// or None if the arg was not provided.
 ///
-/// Depth support: paths of length 1 (top-level) or 2 (Record sub-field) are the
-/// only shapes produced by the flat CLI arg surface for v0.1/v0.2.  ListRecord
-/// and ListFk fields cannot be set via flat CLI args; they are written programmatically
-/// by the submit handlers (Phase 5) using JSON directly.
-pub fn build_entry_map<F>(schema: &Schema, get_arg: F) -> Result<EntryMap>
+/// `get_args` returns the raw string values for a given cli_name (e.g. "linked-observations"),
+/// or None if the arg was not provided.  Most fields receive a single value; list-typed
+/// fields receive one entry per repeated `--<flag>` occurrence.
+///
+/// For `ListFk`/`ListRecord` fields, `build_entry_map` accepts three input shapes:
+/// (1) a single JSON array (back-compat with the v0.1 single-arg convention);
+/// (2) a single bare value (auto-promoted to a 1-element array — `L001` → `["L001"]`
+///     for ListFk; a single JSON object → `[{...}]` for ListRecord);
+/// (3) repeated `--<flag>` occurrences (each becomes one element).
+pub fn build_entry_map<F>(schema: &Schema, get_args: F) -> Result<EntryMap>
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str) -> Option<Vec<String>>,
 {
     use crate::schema::flatten::leaf_args;
     let leaves = leaf_args(schema)?;
@@ -27,20 +30,73 @@ where
     let mut entry: EntryMap = BTreeMap::new();
 
     for leaf in &leaves {
-        let raw = get_arg(&leaf.cli_name);
+        let raws = match get_args(&leaf.cli_name) {
+            Some(v) if !v.is_empty() => v,
+            _ => continue,
+        };
 
-        if raw.is_none() {
-            continue;
-        }
-        let raw = raw.unwrap();
-
-        let value = coerce_value(&leaf.field.ty, &raw);
+        let value = assemble_field_value(&leaf.field.ty, &raws);
 
         // Insert value at the correct depth.
         insert_at_path(&mut entry, &leaf.path, value);
     }
 
     Ok(entry)
+}
+
+/// Combine one or more raw CLI inputs into the JSON value for a field.
+///
+/// Scalars and `Record`/`Json`/`List` fields delegate to `coerce_value` after
+/// joining (List uses pipe-join for back-compat).  `ListFk` and `ListRecord`
+/// support repeated `--<flag>` and bare-value auto-promote per the
+/// `build_entry_map` doc.
+fn assemble_field_value(ty: &FieldType, raws: &[String]) -> Value {
+    match ty {
+        FieldType::List(_) => {
+            // Pipe-join all inputs; coerce_value splits on '|' (preserves `--foo "X|Y"`
+            // and `--foo X --foo Y` equivalence).
+            let joined = raws.join("|");
+            coerce_value(ty, &joined)
+        }
+        FieldType::ListFk { .. } => {
+            if raws.len() == 1 {
+                let raw = &raws[0];
+                match serde_json::from_str::<Value>(raw) {
+                    Ok(Value::Array(arr)) => Value::Array(arr),
+                    // Bare display_id (or any non-JSON-array): auto-promote to single-element array.
+                    _ => Value::Array(vec![Value::String(raw.clone())]),
+                }
+            } else {
+                Value::Array(raws.iter().cloned().map(Value::String).collect())
+            }
+        }
+        FieldType::ListRecord(_) => {
+            if raws.len() == 1 {
+                let raw = &raws[0];
+                match serde_json::from_str::<Value>(raw) {
+                    Ok(Value::Array(arr)) => Value::Array(arr),
+                    // Single JSON object → wrap as 1-element array.
+                    Ok(v @ Value::Object(_)) => Value::Array(vec![v]),
+                    // Anything else (bad JSON, scalar, etc.): sentinel for the validator.
+                    _ => Value::String(raw.clone()),
+                }
+            } else {
+                // Multi-arg: each must parse as JSON. On any parse failure, sentinel the
+                // whole field (matches T006 REVISE-1 bad-JSON UX — surface via validator).
+                let mut parsed: Vec<Value> = Vec::with_capacity(raws.len());
+                for r in raws {
+                    match serde_json::from_str::<Value>(r) {
+                        Ok(v) => parsed.push(v),
+                        Err(_) => return Value::String(r.clone()),
+                    }
+                }
+                Value::Array(parsed)
+            }
+        }
+        // Scalars, Record, Json: take the first input and run through coerce_value.
+        // (Repeated flags on scalar fields are not blocked by clap but we use the first.)
+        _ => coerce_value(ty, &raws[0]),
+    }
 }
 
 /// Insert `value` into `entry` following `path` (any depth ≥ 1).
@@ -431,6 +487,108 @@ mod tests {
         let raw = "{not json";
         let result = coerce_value(&ty, raw);
         assert_eq!(result, Value::String(raw.to_string()));
+    }
+
+    // ---- assemble_field_value: repeated-flag and bare-string auto-promote ----
+    // Closes the L267-walk friction: --linked-observations L001 (bare) and
+    // --linked-observations L001 --linked-observations L002 (repeated) both work.
+
+    #[test]
+    fn assemble_list_fk_bare_string_auto_promotes_to_single_element_array() {
+        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
+        let v = assemble_field_value(&ty, &["L001".to_string()]);
+        assert_eq!(v, Value::Array(vec![Value::String("L001".to_string())]));
+    }
+
+    #[test]
+    fn assemble_list_fk_single_json_array_passes_through() {
+        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
+        let v = assemble_field_value(&ty, &[r#"["L001","L002"]"#.to_string()]);
+        match v {
+            Value::Array(arr) => {
+                let ids: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
+                assert_eq!(ids, vec!["L001", "L002"]);
+            }
+            other => panic!("expected Value::Array, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assemble_list_fk_repeated_flags_collect_to_array() {
+        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
+        let v = assemble_field_value(&ty, &["L001".to_string(), "L002".to_string(), "L003".to_string()]);
+        match v {
+            Value::Array(arr) => {
+                let ids: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
+                assert_eq!(ids, vec!["L001", "L002", "L003"]);
+            }
+            other => panic!("expected Value::Array, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assemble_list_record_single_json_object_wraps_in_array() {
+        let ty = FieldType::ListRecord(vec![]);
+        let raw = r#"{"system":"sentry","kind":"issue","id":"PROJ-1"}"#;
+        let v = assemble_field_value(&ty, &[raw.to_string()]);
+        match v {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 1);
+                assert_eq!(arr[0]["system"], "sentry");
+                assert_eq!(arr[0]["id"], "PROJ-1");
+            }
+            other => panic!("expected Value::Array, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assemble_list_record_single_json_array_passes_through() {
+        let ty = FieldType::ListRecord(vec![]);
+        let raw = r#"[{"system":"sentry","kind":"issue","id":"X"}]"#;
+        let v = assemble_field_value(&ty, &[raw.to_string()]);
+        match v {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 1);
+                assert_eq!(arr[0]["system"], "sentry");
+            }
+            other => panic!("expected Value::Array, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assemble_list_record_repeated_json_objects_collect_to_array() {
+        let ty = FieldType::ListRecord(vec![]);
+        let v = assemble_field_value(&ty, &[
+            r#"{"system":"sentry","kind":"issue","id":"X"}"#.to_string(),
+            r#"{"system":"github","kind":"commit","id":"abc"}"#.to_string(),
+        ]);
+        match v {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0]["system"], "sentry");
+                assert_eq!(arr[1]["system"], "github");
+            }
+            other => panic!("expected Value::Array, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assemble_list_record_bad_json_returns_sentinel_string() {
+        // Preserves the T006 REVISE-1 contract: bad JSON surfaces via the validator,
+        // not silently as Null.
+        let ty = FieldType::ListRecord(vec![]);
+        let v = assemble_field_value(&ty, &["{not json".to_string()]);
+        assert_eq!(v, Value::String("{not json".to_string()));
+    }
+
+    #[test]
+    fn assemble_list_pipe_join_back_compat() {
+        // List(_) keeps its existing pipe-split semantics: --foo "X|Y" and
+        // --foo X --foo Y produce the same array.
+        let ty = FieldType::List(Box::new(FieldType::Text));
+        let from_pipe = assemble_field_value(&ty, &["X|Y".to_string()]);
+        let from_repeat = assemble_field_value(&ty, &["X".to_string(), "Y".to_string()]);
+        assert_eq!(from_pipe, from_repeat);
     }
 
     // ---- T008 Phase 4: read_row round-trip for Json fields ----

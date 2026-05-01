@@ -632,7 +632,10 @@ fn build_leaf_cmd_owned(
             leaf.field.ty,
             FieldType::Text | FieldType::Timestamp | FieldType::DisplayId | FieldType::Json
         );
-        let is_list = matches!(leaf.field.ty, FieldType::List(_));
+        let is_list = matches!(
+            leaf.field.ty,
+            FieldType::List(_) | FieldType::ListFk { .. } | FieldType::ListRecord(_)
+        );
 
         let mut arg = Arg::new(leaf.cli_name.clone())
             .long(leaf.cli_name.clone())
@@ -707,7 +710,10 @@ fn build_leaf_cmd(
             leaf.field.ty,
             FieldType::Text | FieldType::Timestamp | FieldType::DisplayId | FieldType::Json
         );
-        let is_list = matches!(leaf.field.ty, FieldType::List(_));
+        let is_list = matches!(
+            leaf.field.ty,
+            FieldType::List(_) | FieldType::ListFk { .. } | FieldType::ListRecord(_)
+        );
 
         // Main arg — clone the String into a Box<str> to satisfy Into<Id>
         let mut arg = Arg::new(leaf.cli_name.clone())

@@ -18,7 +18,7 @@ pub fn run(
 ) -> Result<()> {
     // Build entry from CLI args
     let entry = build_entry_map(schema, |cli_name| {
-        // Check for --<name>-from-file first (only if clap registered it)
+        // --<name>-from-file takes precedence (single-element vec carrying the file body).
         let from_file_key = format!("{cli_name}-from-file");
         if matches.try_contains_id(&from_file_key).unwrap_or(false) {
             if let Some(path) = matches.get_one::<String>(&from_file_key) {
@@ -26,19 +26,17 @@ pub fn run(
                     use std::io::Read;
                     let mut s = String::new();
                     std::io::stdin().read_to_string(&mut s).ok();
-                    return Some(s.trim_end_matches('\n').to_string());
+                    return Some(vec![s.trim_end_matches('\n').to_string()]);
                 }
-                return std::fs::read_to_string(path).ok().map(|s| s.trim_end_matches('\n').to_string());
+                return std::fs::read_to_string(path)
+                    .ok()
+                    .map(|s| vec![s.trim_end_matches('\n').to_string()]);
             }
         }
-        // For List(_) fields the arg uses ArgAction::Append; join multiple values with "|"
-        // so the existing coerce_value pipe-split produces the correct array.
-        // Single values and pipe-separated strings pass through unchanged (backwards compat).
-        // For scalar fields, get_many returns a single-element iterator; join is identity.
         match matches.try_get_many::<String>(cli_name) {
             Ok(Some(vals)) => {
-                let joined: Vec<&str> = vals.map(|s| s.as_str()).collect();
-                if joined.is_empty() { None } else { Some(joined.join("|")) }
+                let collected: Vec<String> = vals.cloned().collect();
+                if collected.is_empty() { None } else { Some(collected) }
             }
             _ => None,
         }
