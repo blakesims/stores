@@ -221,3 +221,120 @@ None of these requires re-planning. They are all scope-tightening fixes consiste
 **Gate: REVISE (substantial)** — return to executor with the revision scope above. Counts as revision cycle 1/3.
 
 The schema layer is solid. The migration is genuinely subtle and the executor caught the actor mismatch correctly. The misses are all in "downstream of schema" territory that the plan acknowledged needed audit but didn't enumerate. Now we know what the audit surface is.
+
+---
+
+## Cycle 1 review — 2026-05-01 (commits `aceb643`, `0cdb329`)
+
+**Gate: REVISE (cycle 2/3) — eager-wrap auto-dispatch is broken.**
+
+### What landed correctly
+
+1. **Issue 1 (shell e2e fixtures + assertions) — FIXED.**
+   - `tests/fixtures/drive_e2e/happy_2phase.jsonl`: 7th wrap envelope appended.
+   - `tests/fixtures/drive_e2e/revise_once.jsonl`: 9th wrap envelope appended.
+   - `tests/drive_e2e.sh::AC7.1` and `AC7.1b`: assertions migrated to `status == "in_review"`.
+   - `tests/tasks_e2e.sh` Steps 13, 14, 15: assertions migrated; render path correctly maps `in_review → tasks/active/`.
+   - Both shell tests exit 0 against a fresh release build of HEAD.
+   - Pre-existing `pipefail`/SIGPIPE bug in `tasks_e2e.sh` Step 16 fixed (capture cargo test output to variable). Out of scope but surgical and defensible.
+
+2. **Issue 2 (drive.rs terminal-exit logic) — PARTIALLY FIXED.** The `complete`-as-error guard, explicit branches for `in_review`/`accepted`/`rejected`, the migrated `terminal_complete_errors_with_schema_bug_message` test, and the new `terminal_blocked_exits_zero` test are all correct in shape. **BUT** the loop-top `in_review` guard is too aggressive — see Critical Finding below.
+
+3. **Issue 3 (downstream consumers) — FIXED comprehensively.**
+   - `src/handlers/status.rs::is_terminal` returns true only for `accepted | rejected` (correct under v0.5).
+   - `is_awaiting_human` is a new predicate covering `blocked | in_review | accepted | rejected`. Used by `status follow` (line 359). Correctly stops the follow loop on the new pause-states.
+   - `next_from_status`: `in_review → wrap`, `accepted → -`, `rejected → planner`. (Note: `complete → wrap` was added too — that's debatable since `complete` should never be observable, but it's consistent with the schema's `on_state.complete → transition_to: in_review → dispatch_agent: wrap` chain. Fine.)
+   - `fetch_all_tasks` excludes `accepted | rejected` (terminal); `complete` and `blocked` and `in_review` remain visible. Correct.
+   - `src/render/path.rs::status_to_dir`: `complete | in_review → active`, `blocked | rejected → paused`, `accepted → completed`. Four new unit tests added. Correct.
+   - `src/handlers/render.rs::run_render_moves_directory_on_status_change`: migrated to use `accepted` for the active→completed move. Correct.
+   - `stores/tasks/templates/main.md.tpl`: Completion section keyed on `accepted` with new branches for `rejected` and `in_review`. Correct.
+
+4. **Issue 4 (stub markers) — FIXED.** `agents/wrap.md`, `agents/schemas/wrap.schema.json` (`$comment` field), and `stores/tasks/templates/wrap-brief.md.tpl` all carry clear "Phase N stub" markers at the top.
+
+5. **Issue 5 (test count) — IMPLICITLY FIXED.** Execution log now claims 455 (453 unit + 2 integration). Verified: `cargo test --features runner-claude-code` reports `453 passed; 0 failed` (unit) and `2 passed; 0 failed` (integration). Match.
+
+6. **Issue 6 (AC4.3 partial-pull-forward note) — REWRITTEN.** Execution log now claims AC4.3 is "fully subsumed" by the loop-top `in_review` guard. **This claim is wrong** — see Critical Finding 8.
+
+7. **Forbidden paths clean.** `agents/guide.md`, `skills/task:wrap/`, `compute_submit_wrap` (Phase 3), `src/render/context.rs` not touched.
+
+8. **Build clean.** `cargo build --release --features runner-claude-code` succeeds with one pre-existing `dead_code` warning on `AgentEnvelope::Wrap` fields (will go away in Phase 3 when `compute_submit_wrap` reads them).
+
+### CRITICAL Finding 8 — eager-wrap auto-dispatch is broken (REGRESSION introduced by revision)
+
+**Severity: Critical (architectural — contradicts plan Decision (b) and AC4.3a).**
+
+The executor removed `dispatched_wrap` and replaced it with a status-only loop-top guard:
+
+```rust
+// drive.rs:369–375
+if na.status == "in_review" {
+    eprintln!("[{display_id}] in_review; brief written; awaiting `stores tasks accept | reject`");
+    let _ = std::io::stderr().flush();
+    return Ok(());
+}
+```
+
+This guard fires BEFORE `compute_next_action`'s `next_agent` is even consulted. Trace:
+
+1. `code_reviewer` PASSes the last phase. `submit-review` writes `code_review → complete` and the same tx fires `on_state.complete: [transition_to: in_review]`. Final status is `in_review` post-tx.
+2. Drive's NEXT iteration calls `compute_next_action`. Returns `na.status == "in_review"`, `na.next_agent == Some("wrap")` (because `on_state.in_review: [dispatch_agent: wrap]`).
+3. The loop-top guard at line 369 fires unconditionally. Drive prints the message and returns `Ok(())`. **Wrap is NEVER dispatched.** No `wrap_log[]` entry is appended. The "brief written" stderr line is **a lie** — no brief was written.
+
+**Reproduction:**
+```bash
+cargo test --features runner-claude-code handlers::drive::tests::happy_path_one_phase_mock -- --nocapture
+```
+Stderr shows:
+```
+[T001] phase 1 cycle 1: code_reviewer → submitted (gate=Some(PASS); source=sap)
+[T001] in_review; brief written; awaiting `stores tasks accept | reject`
+```
+NO `phase X cycle Y: spawning wrap` line. The 5th queued mock output (`wrap_out`) is never consumed. The test still passes because its assertion is just `na.status == "in_review"` — which IS true (set by the same-tx follow-on, not by wrap).
+
+**Direct contradiction with the plan:**
+
+- **Decision (b) Eager:** "auto-fire on PASS-on-last-phase; the brief is waiting when the human shows up. Lazy would force the human to invoke a verb that immediately spawns an agent and waits 30–90s before showing the brief — friction at exactly the moment the human is most context-loaded." The current implementation IS the lazy variant — the brief is NOT waiting; the human will get the in_review message and then have to invoke `/task:wrap` (or whatever) to actually run wrap.
+- **AC4.3a Re-entry safety:** "If drive is invoked while the row is already at status `in_review` (e.g. user retypes `stores tasks drive T001` after a reject → amend → re-complete cycle that landed back in `in_review`), the **first** iteration's `next-action` returns `next_agent: wrap`. Drive dispatches wrap → submit-wrap appends a new (correct, current-cycle) `wrap_log` entry → the state-local flag flips → drive exits." The current implementation refuses to dispatch wrap on this exact path.
+
+**The executor's "in_review IS the signal" reasoning was wrong.** The executor wrote:
+
+> "Cross-run `in_review` re-entry decision: drive refuses to re-dispatch wrap when the row is already `in_review`... If human wants a re-wrap, use `reject --reason "re-wrap needed" → amend → re-complete`."
+
+But the plan's flow IS reject → amend → re-complete → back-to-in_review-with-empty-wrap_log-for-the-new-cycle, and the row sits at `in_review` (because `complete → in_review` follow-on fires inside the tx). The status alone cannot distinguish "first-time entry to in_review for this cycle" from "re-entry after wrap was already done." The plan's Decision Matrix row (k) explicitly enumerated the heuristic options and chose **state-local flag** — exactly to avoid status-only ambiguity. Removing the flag and using status-only is going BACKWARD to the rejected option.
+
+**The two new tests encode the wrong spec:**
+
+- `terminal_in_review_exits_without_spawning` (drive.rs:1255): inserts a row at `in_review` with empty wrap_log and asserts drive exits without dispatching. Per AC4.3a, this is the case where drive MUST dispatch (wrap_log is empty; wrap has not run for this cycle).
+- `drive_in_review_with_existing_wrap_log_does_not_redispatch` (drive.rs:1276): inserts a row at `in_review` with a non-empty wrap_log and asserts no re-dispatch. This case is fine in spirit (re-entry after wrap completed and drive was re-invoked) — but the test's structure (status-only check) means it passes for the wrong reason; it would pass under any guard, including ones that wrongly skip the empty-wrap_log case.
+
+**The drive_e2e.sh and tasks_e2e.sh assertions are similarly hollow.** Both assert `status == "in_review"` after drive but neither verifies the wrap envelope was consumed:
+- `drive_e2e.sh::AC7.1`: 7th fixture envelope (wrap) is unused under the current code; the test would pass if only the first 6 envelopes were queued. False confidence.
+- `tasks_e2e.sh` Step 13: drives via direct CLI (`submit-review --gate PASS`), not via the drive loop, so wrap dispatch is not exercised at all by this path.
+
+### Required revision (cycle 2 scope)
+
+1. **Restore wrap auto-dispatch on first-entry to `in_review`.** Either:
+   - **(a) Pure state-local flag (per plan AC4.3 / Decision Matrix (k)):** restore `dispatched_wrap` (or rename to `dispatched_wrap_this_run`) inside `drive_loop`. Loop-top check becomes `if na.status == "in_review" && dispatched_wrap_this_run { exit }`. The first-time observation falls through to `next_agent` resolution (returns `wrap`); dispatch fires; `dispatch_submit` returns `submit_out` with `from_role == "wrap"` (or `target_state == "in_review"`); flag flips; next iteration's loop-top check exits cleanly.
+   - **(b) Predicate on wrap_log emptiness (a defensible alternative not in the plan but cleaner against external-trigger restarts):** `if na.status == "in_review" && wrap_log_non_empty(row) { exit }`. The first-time observation has empty wrap_log → falls through → dispatches wrap → `compute_submit_wrap` appends → next iteration sees non-empty wrap_log → exits. This option doesn't need a state-local flag and survives drive-process restarts. It's NOT what the plan picked (the plan rejected timestamp-based heuristics, and an emptiness check could be argued as a heuristic), but emptiness ≠ timestamp comparison; it's a clean structural predicate. If the executor prefers (b), update the plan's Decision Matrix row (k) to reflect the choice, with rationale.
+
+   Either way, the path "PASS-on-last-phase → drive's next iteration dispatches wrap" must work. The executor's claim that AC4.3 is subsumed is false; AC4.3 is required.
+
+2. **Migrate or replace the two misleading tests:**
+   - `terminal_in_review_exits_without_spawning` (drive.rs:1255): the asserted behavior is wrong. Either rename and rewrite to assert "row at in_review with empty wrap_log → drive dispatches wrap" (the AC4.3a re-entry-after-amend test), OR delete it; the eager-dispatch test in `happy_path_one_phase_mock` would cover the path.
+   - `drive_in_review_with_existing_wrap_log_does_not_redispatch` (drive.rs:1276): keep the name and intent, but make the test exercise the actual code path it claims to test. Under option (a), there's no schema-level reason an `in_review` row with non-empty wrap_log shouldn't re-dispatch — only the state-local flag prevents it, and the flag is only set within a single drive run. So the cross-run case under option (a) WOULD re-dispatch. The plan's AC4.3a accepts this (a re-entry by drive after a reject→amend→re-complete cycle SHOULD produce a new wrap_log entry). If the executor wants the cross-run case to refuse (which is option (b)), they need to argue for it as a plan-deviation in the execution log.
+
+3. **Add a positive eager-dispatch assertion to the happy-path test.** Verify the runner consumed all 5 queued envelopes (e.g. `assert!(runner.is_drained())` or count remaining items in the mock queue). Or assert the row's `wrap_log` is non-empty after drive returns. This catches the silent-skip regression.
+
+4. **Add an `assert wrap_log non-empty` check to `drive_e2e.sh::AC7.1`.** The shell test should not pass if the 7th fixture envelope is unconsumed. Use `sqlite3 .stores/db.sqlite "SELECT json_array_length(wrap_log) FROM tasks WHERE display_id='T001'"` or grep the drive stderr for the `spawning wrap` line.
+
+### What's NOT a Phase 1 issue
+
+- The `compute_submit_wrap` handler (Phase 3) doesn't exist yet, so the wrap dispatch in Phase 1 takes the stub path in `dispatch_submit` (drive.rs:835) which doesn't actually persist `wrap_log`. That's fine for Phase 1 — the stub returns a sentinel `SubmitOutput`, drive can flip its state-local flag and exit. The executor was right to leave `compute_submit_wrap` for Phase 3. But the Phase 1 stub path must still be EXERCISED — currently it's not.
+
+### Minor — drive's stub `dispatch_submit` arm is dead code
+
+`dispatch_submit` (drive.rs:835) has a `wrap` arm that returns a sentinel `SubmitOutput { new_status: "in_review" }`. Under the current loop-top guard, this arm is never reached because drive exits before dispatching. Once the eager-dispatch path is restored, this arm becomes live. (Phase 3 will replace it with `compute_submit_wrap`.) Just flagging that the stub does work but currently sits unreachable.
+
+### Verdict
+
+**Gate: REVISE (cycle 2/3).** The downstream-consumer audit (Issue 3) is excellent. The terminal-exit branches (Issue 2 partial fix) are correct in shape. The shell-e2e migration (Issue 1) is correct. The stub markers (Issue 4) are clean. But the eager-wrap path — the central animating purpose of T010 — is broken by the loop-top guard. The fix is small (~15 LOC: restore the per-iteration boolean, update the two tests, add a positive dispatch-was-called assertion). The cycle-1 revision should not have removed `dispatched_wrap`; restoring it brings the implementation back in line with the plan's binding decisions.
