@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** CODE_REVIEW
+- **Status:** EXECUTING_PHASE_6
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (executor: Phase 5 COMPLETE — guide wrap-mode + /task:wrap skill)
+- **Last Updated:** 2026-05-01 (code-reviewer: Phase 5 PASS — guide wrap-mode + /task:wrap skill verified)
 - **Blocked Reason:** —
 
 ## Task
@@ -693,6 +693,33 @@ _Code-reviewer agent fills this section per phase._
   - `compute_git_diff_summary` visibility from guide.rs: `pub(crate)` in `drive.rs` works fine — `guide.rs` is in the same crate. However, Phase 5 does NOT call `compute_git_diff_summary` in guide.rs. The wrap-mode brief in Phase 5 is a human-readable summary (not a rendered template); it includes the wrap_log entry's executive_summary (already written by the wrap agent) and the cycles table from the row. The git diff rendering is in the wrap agent's brief (Phase 4, via `wrap-brief.md.tpl` and `render_template_with_overlay`), not in the guide agent's brief. No need to call `compute_git_diff_summary` here — no promotion required.
   - Decision (f) compliance: `agents/guide.md` does NOT contain row-status inspection logic. The brief header `**Mode:** wrap` tells the agent which protocol to follow.
   - Brief structure for wrap-mode: separate from the Phase 4 wrap-brief.md.tpl (that template is for the wrap AGENT's input; this guide brief is for the guide agent helping the HUMAN review the result). Single source of truth holds — the wrap agent's synthesis is already in `wrap_log[]`; the guide brief surfaces it.
+
+### Phase 5 — Code review (2026-05-01)
+- **Gate:** PASS
+- **Reviewed commits:** `b0fcd7c` (impl), `e50951d` (docs)
+- **Revision count:** 0/3 (Phase 5 closes on first pass)
+- **ACs verified:** AC5.1–AC5.6 all pass.
+  - AC5.1 — Single status check at `run_tasks_guide_with_runner` entry (guide.rs:308-322); `in_review` → `build_wrap_mode_brief`; else → `build_tasks_brief`. Existing gate-mode dispatch untouched.
+  - AC5.2 — `build_wrap_mode_brief` (guide.rs:477-562) renders contract block (JSON dump), cycles[] table (`extract_cycles_table`), and latest wrap_log entry (`extract_latest_wrap_log_entry` → `arr.last().cloned()` LIFO). Graceful fallback for empty/missing `wrap_log` verified by `ac5_5_wrap_mode_brief_without_wrap_log`.
+  - AC5.3 — `WRAP_MODE_VERBS` const (guide.rs:54-61) lists exactly the 6 required verbs; brief includes the FORBIDDEN clause.
+  - AC5.4 — `agents/guide.md` describes three modes; Wrap Mode Protocol explains "schema-enforced restriction, not a prompt-enforced one" (lines 211-214); explicit framework-layer claim "The brief header tells you which mode you are in. You do NOT inspect row state to determine your mode" (lines 69-71). Decision (f) compliance.
+  - AC5.5 — 4 new unit tests (`ac5_5_in_review_status_triggers_wrap_mode_brief`, `ac5_5_wrap_mode_brief_contains_executive_summary`, `ac5_5_wrap_mode_brief_without_wrap_log`, `ac5_5_non_in_review_status_gets_tasks_brief`).
+  - AC5.6 — `skills/task:wrap/SKILL.md` exists with `name: task:wrap` frontmatter; slim body (~3 lines prose); points at `stores tasks <id> guide --claude-code`.
+- **Build + tests:** `cargo build --features runner-claude-code` clean. `cargo test --features runner-claude-code` = 472 unit + 2 integration = **474 total** (was 470 at end of Phase 4; +4 matches the 4 new tests). `bash tests/drive_e2e.sh` exit 0; `bash tests/tasks_e2e.sh` exit 0.
+- **Out-of-scope check:** `git show b0fcd7c --name-only` = exactly `agents/guide.md`, `skills/task:wrap/SKILL.md`, `src/handlers/guide.rs`. Nothing in `tests/drive_e2e.sh` (Phase 6), `compute_submit_wrap` (Phase 3), `agents/wrap.md` (Phase 4), or `src/render/context.rs`.
+- **Specific concerns from review brief — verified:**
+  1. `compute_git_diff_summary` visibility — pub(crate); guide.rs correctly does NOT call it. The wrap-mode brief surfaces the wrap agent's already-persisted synthesis; no fresh diff needed at human-review time. Reviewer's reasoning correct.
+  2. `EntryMap = BTreeMap<String, Value>` — confirmed; all test fixtures use `BTreeMap` directly. No `HashMap` introduced.
+  3. Schema-enforced restriction story — `actor: human` on accept/reject is in `stores/tasks/schema.yaml:118-119`; enforced via `validate::actor::check_transition_actor`; CLI verbs `accept`/`reject`/`amend` exist as auto-generated subcommands. Existing unit tests (`transition_actor_*`) cover the actor enforcement; CLI-subprocess integration test is explicitly Phase 6's AC7.6 — not a Phase 5 blocker.
+  4. Two separate briefs (Phase 4 wrap-brief.md.tpl vs Phase 5 build_wrap_mode_brief) — justified separation: different audiences (wrap agent producing synthesis vs guide agent narrating finished synthesis), different content (envelope template vs authorized-verbs list). ~30 LOC overlap on Promise/Reality scaffold; sharing would require parametrizing handlebars or adding render dependency in guide.rs (purposely absent). Acceptable.
+- **Findings (informational, non-blocking):**
+  1. **MINOR** — `ac5_5_wrap_mode_brief_contains_executive_summary` asserts `executive_summary` token but does not directly assert that `deviations`, `residual_risks`, `recommended_sanity_checks` lists render. Code path is straightforward `format_string_list(entry.get("…"))` per field; could be tightened with sentinel tokens for each.
+  2. **MINOR** — `agents/guide.md` frontmatter (lines 19-20) grants `Bash(stores tasks accept:*)` and `Bash(stores tasks reject:*)` while the prompt body (lines 363-364) tells the AI it MUST NOT call them. Schema rejects AI-invoker writes regardless of tool grant — design works. Belt-and-suspenders is just suspenders (schema), not belt (tool grant). Future tightening could remove the grants for ergonomic consistency.
+  3. **TRIVIAL** — Cycles table format duplicated between `extract_cycles_table` (guide.rs:577-595) and `wrap-brief.md.tpl:34-36`. Same logical content, different presentation engines (Rust format!() vs handlebars). ~12 LOC. Future refactor opportunity; not in scope for Phase 5.
+  4. **TRIVIAL** — Phase 5 commit message says "All 472 unit tests pass"; main.md execution log says "472 unit + 2 integration = **474 total** (+4 new guide tests)." Main.md is accurate; commit message slightly under-states. Counting nit only.
+- **Status update:** EXECUTING_PHASE_6 (orchestrator advances; Phase 6 — tests + e2e fixture — is unblocked).
+
+> Details: `code-review-phase-5.md`.
 
 ---
 
