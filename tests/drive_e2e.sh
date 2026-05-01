@@ -2,12 +2,18 @@
 # tests/drive_e2e.sh — End-to-end smoke test for `stores tasks drive` with mock runner.
 #
 # Drives a fresh T001 task through the full lifecycle via `stores tasks drive --mock`:
-#   AC7.1:  N=2 phases, zero REVISE → status=complete, current_phase=2, 2 total cycles (1/phase)
-#   AC7.1b: N=2 phases, one REVISE on phase 2 → status=complete, phase-2 has 2 cycles
+#   AC7.1:  N=2 phases, zero REVISE → status=in_review, current_phase=2, 2 total cycles (1/phase)
+#   AC7.1b: N=2 phases, one REVISE on phase 2 → status=in_review, phase-2 has 2 cycles
+#   AC7.5:  wrap-then-accept — drive → in_review, then `stores tasks accept T001` → accepted
+#   AC7.6:  CLI actor enforcement — CLAUDECODE=1 rejects accept/reject; unset allows them
 #
 # Invoker notes:
 #   - CLAUDECODE is unset throughout to avoid session-inherited ai_autonomous.
 #   - drive uses ai_autonomous internally for all submit calls.
+#   - AC7.5/AC7.6 use the real CLI binary — actor enforcement must be tested at subprocess level.
+#
+# IMPORTANT: After changes that affect the CLI, rebuild the installed binary first:
+#   cargo install --path .
 #
 # Usage: bash tests/drive_e2e.sh
 # Requires: stores binary on PATH (cargo install --path . OR cargo build --release), sqlite3, jq
@@ -42,7 +48,7 @@ pass "fixtures present"
 echo "--- AC7.1: happy path (N=2 phases, zero REVISE)"
 
 TMP_HAPPY=$(mktemp -d)
-trap 'rm -rf "$TMP_HAPPY" "$TMP_REVISE"' EXIT
+trap 'rm -rf "$TMP_HAPPY" "${TMP_REVISE:-}" "${TMP_ACCEPT:-}" "${TMP_REJECT:-}"' EXIT
 
 (
     cd "$TMP_HAPPY"
@@ -197,7 +203,120 @@ print('assertions ok')
 )
 pass "AC7.1b: status=in_review, current_phase=2, phase-2 has 2 cycles (REVISE then PASS)"
 
+# ---------------------------------------------------------------------------
+# AC7.5: wrap-then-accept end-to-end
+# ---------------------------------------------------------------------------
+echo "--- AC7.5: wrap-then-accept end-to-end"
+
+TMP_ACCEPT=$(mktemp -d)
+
+(
+    cd "$TMP_ACCEPT"
+    git init -q
+    [[ -d .git ]] || fail "AC7.5: git init failed"
+
+    stores init
+    stores install "$STORES_ROOT/stores/observations"
+    stores install "$STORES_ROOT/stores/gate"
+    stores install "$STORES_ROOT/stores/tasks"
+
+    OUT=$(stores tasks add \
+        --title "Accept e2e test" \
+        --slug "accept-e2e" \
+        --capability "test" \
+        --done-when "task accepted by human" \
+        --scope-in "wrap accept path" \
+        --scope-out "real claude" \
+        --invoker ai_with_human)
+    [[ "$OUT" == "T001" ]] || fail "AC7.5: expected T001, got: $OUT"
+
+    # Drive to in_review
+    stores tasks drive T001 --mock "$FIXTURE_HAPPY" >/dev/null 2>&1 || true
+
+    # Verify in_review before accept
+    PRE_STATUS=$(stores tasks show T001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+    [[ "$PRE_STATUS" == "in_review" ]] || fail "AC7.5: expected in_review before accept; got: $PRE_STATUS"
+
+    # Verify wrap_log non-empty
+    WRAP_LEN=$(stores tasks show T001 --json | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('wrap_log', [])))")
+    [[ "$WRAP_LEN" -ge 1 ]] || fail "AC7.5: expected wrap_log non-empty before accept; got: $WRAP_LEN"
+
+    # Human invokes accept (CLAUDECODE is unset → human actor)
+    stores tasks accept T001
+
+    # Assert final status accepted
+    POST_STATUS=$(stores tasks show T001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+    [[ "$POST_STATUS" == "accepted" ]] || fail "AC7.5: expected status=accepted after accept; got: $POST_STATUS"
+
+    # Assert wrap_log preserved (accept does not modify wrap_log)
+    POST_WRAP_LEN=$(stores tasks show T001 --json | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('wrap_log', [])))")
+    [[ "$POST_WRAP_LEN" -eq "$WRAP_LEN" ]] || fail "AC7.5: wrap_log length changed on accept ($WRAP_LEN → $POST_WRAP_LEN); accept must not append to wrap_log"
+)
+pass "AC7.5: drive → in_review → accept → accepted; wrap_log preserved"
+
+# ---------------------------------------------------------------------------
+# AC7.6: CLI-level actor enforcement (CLAUDECODE env)
+# ---------------------------------------------------------------------------
+echo "--- AC7.6: CLI actor enforcement via CLAUDECODE env"
+
+TMP_REJECT=$(mktemp -d)
+
+(
+    cd "$TMP_REJECT"
+    git init -q
+    [[ -d .git ]] || fail "AC7.6: git init failed"
+
+    stores init
+    stores install "$STORES_ROOT/stores/observations"
+    stores install "$STORES_ROOT/stores/gate"
+    stores install "$STORES_ROOT/stores/tasks"
+
+    stores tasks add \
+        --title "Actor enforcement test" \
+        --slug "actor-enf" \
+        --capability "test" \
+        --done-when "actor enforcement verified" \
+        --scope-in "accept/reject actor gate" \
+        --scope-out "real claude" \
+        --invoker ai_with_human >/dev/null
+
+    # Drive T001 to in_review
+    stores tasks drive T001 --mock "$FIXTURE_HAPPY" >/dev/null 2>&1 || true
+
+    PRE_STATUS=$(stores tasks show T001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+    [[ "$PRE_STATUS" == "in_review" ]] || fail "AC7.6: expected in_review before actor test; got: $PRE_STATUS"
+
+    # With CLAUDECODE=1 → accept must fail (ai_autonomous not allowed for actor:human)
+    ACCEPT_ERR=$(CLAUDECODE=1 stores tasks accept T001 2>&1) && fail "AC7.6: accept with CLAUDECODE=1 should have exited non-zero" || true
+    echo "$ACCEPT_ERR" | grep -q "transition 'accept'" || \
+        fail "AC7.6: accept error should mention transition 'accept'; got: $ACCEPT_ERR"
+    echo "$ACCEPT_ERR" | grep -q "requires actor 'human'" || \
+        fail "AC7.6: accept error should mention requires actor 'human'; got: $ACCEPT_ERR"
+
+    # Status must still be in_review (accept was rejected)
+    MID_STATUS=$(stores tasks show T001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+    [[ "$MID_STATUS" == "in_review" ]] || fail "AC7.6: status changed after failed accept; got: $MID_STATUS"
+
+    # With CLAUDECODE=1 → reject must also fail
+    REJECT_ERR=$(CLAUDECODE=1 stores tasks reject T001 2>&1) && fail "AC7.6: reject with CLAUDECODE=1 should have exited non-zero" || true
+    echo "$REJECT_ERR" | grep -q "transition 'reject'" || \
+        fail "AC7.6: reject error should mention transition 'reject'; got: $REJECT_ERR"
+    echo "$REJECT_ERR" | grep -q "requires actor 'human'" || \
+        fail "AC7.6: reject error should mention requires actor 'human'; got: $REJECT_ERR"
+
+    # Without CLAUDECODE → reject must succeed (human invoker)
+    unset CLAUDECODE 2>/dev/null || true
+    stores tasks reject T001
+
+    # Assert final status rejected
+    FINAL_STATUS=$(stores tasks show T001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+    [[ "$FINAL_STATUS" == "rejected" ]] || fail "AC7.6: expected status=rejected after human reject; got: $FINAL_STATUS"
+)
+pass "AC7.6: CLAUDECODE=1 rejects accept+reject; unset CLAUDECODE allows reject; status=rejected"
+
 echo ""
 echo "=== All drive e2e scenarios passed ==="
 echo "  AC7.1  happy path (N=2 phases, zero REVISE): PASS"
 echo "  AC7.1b revise-once (one REVISE on phase 2):  PASS"
+echo "  AC7.5  wrap-then-accept end-to-end:           PASS"
+echo "  AC7.6  CLI actor enforcement (CLAUDECODE):    PASS"

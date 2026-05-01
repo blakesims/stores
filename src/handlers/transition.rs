@@ -676,4 +676,206 @@ transitions:
             "install-time validator must still fire: {err}"
         );
     }
+
+    // ---- Phase 6 (T010): accept / reject / amend transition tests ----
+
+    /// Minimal schema with in_review, accepted, rejected, and the three wrap transitions.
+    const WRAP_SCHEMA: &str = r#"
+name: tasks
+id_format: "T{:03d}"
+lifecycle:
+  states: [executing, in_review, accepted, rejected, planning]
+  transitions:
+    - from: in_review
+      to: accepted
+      verb: accept
+      actor: human
+    - from: in_review
+      to: rejected
+      verb: reject
+      actor: human
+    - from: rejected
+      to: planning
+      verb: amend
+      actor: ai_with_human
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: wrap_log
+    type: list_record
+    fields:
+      - name: executive_summary
+        type: text
+      - name: reject_reason
+        type: text
+      - name: at
+        type: timestamp
+"#;
+
+    fn setup_wrap() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(WRAP_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    fn insert_wrap_row(conn: &Connection, status: &str, wrap_log_json: &str) {
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, wrap_log) VALUES (?1, ?2, 'Test', ?3)",
+            rusqlite::params!["T001", status, wrap_log_json],
+        ).unwrap();
+    }
+
+    fn build_wrap_cmd(schema: &Schema, verb: &'static str) -> clap::Command {
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd = clap::Command::new(verb).arg(
+            clap::Arg::new("display_id").required(true).index(1),
+        );
+        for leaf in &leaves {
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name.clone())
+                    .required(false),
+            );
+        }
+        cmd
+    }
+
+    fn read_status_wrap(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT status FROM tasks WHERE display_id = 'T001'",
+            [], |r| r.get(0),
+        ).unwrap()
+    }
+
+    // --- accept ---
+
+    #[test]
+    fn ac6_accept_happy_path_in_review_human_lands_accepted() {
+        let (schema, conn) = setup_wrap();
+        insert_wrap_row(
+            &conn, "in_review",
+            r#"[{"executive_summary":"Done","reject_reason":null,"at":"2026-01-01T00:00:00Z"}]"#,
+        );
+
+        let cmd = build_wrap_cmd(&schema, "accept");
+        let matches = cmd.get_matches_from(["accept", "T001"]);
+        run(&schema, &conn, &matches, Actor::Human, "accept").unwrap();
+
+        assert_eq!(read_status_wrap(&conn), "accepted");
+    }
+
+    #[test]
+    fn ac6_accept_wrong_state_executing_rejected() {
+        let (schema, conn) = setup_wrap();
+        insert_wrap_row(&conn, "executing", "[]");
+
+        let cmd = build_wrap_cmd(&schema, "accept");
+        let matches = cmd.get_matches_from(["accept", "T001"]);
+        let err = run(&schema, &conn, &matches, Actor::Human, "accept").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("accept") || msg.contains("no transition") || msg.contains("executing"),
+            "expected state-machine error; got: {msg}"
+        );
+        // Row unchanged
+        assert_eq!(read_status_wrap(&conn), "executing");
+    }
+
+    #[test]
+    fn ac6_accept_ai_autonomous_invoker_rejected() {
+        let (schema, conn) = setup_wrap();
+        insert_wrap_row(&conn, "in_review", "[]");
+
+        let cmd = build_wrap_cmd(&schema, "accept");
+        let matches = cmd.get_matches_from(["accept", "T001"]);
+        let err = run(&schema, &conn, &matches, Actor::AiAutonomous, "accept").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("transition 'accept'"),
+            "expected actor mismatch on accept; got: {msg}"
+        );
+        assert!(
+            msg.contains("requires actor 'human'"),
+            "error must cite required actor; got: {msg}"
+        );
+        assert!(
+            msg.contains("ai_autonomous"),
+            "error must cite invoker; got: {msg}"
+        );
+        // Row unchanged
+        assert_eq!(read_status_wrap(&conn), "in_review");
+    }
+
+    // --- reject ---
+
+    #[test]
+    fn ac6_reject_happy_path_in_review_human_lands_rejected() {
+        let (schema, conn) = setup_wrap();
+        insert_wrap_row(
+            &conn, "in_review",
+            r#"[{"executive_summary":"Done","reject_reason":null,"at":"2026-01-01T00:00:00Z"}]"#,
+        );
+
+        let cmd = build_wrap_cmd(&schema, "reject");
+        let matches = cmd.get_matches_from(["reject", "T001"]);
+        run(&schema, &conn, &matches, Actor::Human, "reject").unwrap();
+
+        assert_eq!(read_status_wrap(&conn), "rejected");
+    }
+
+    #[test]
+    fn ac6_reject_ai_autonomous_invoker_rejected() {
+        let (schema, conn) = setup_wrap();
+        insert_wrap_row(&conn, "in_review", "[]");
+
+        let cmd = build_wrap_cmd(&schema, "reject");
+        let matches = cmd.get_matches_from(["reject", "T001"]);
+        let err = run(&schema, &conn, &matches, Actor::AiAutonomous, "reject").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("transition 'reject'"),
+            "expected actor mismatch on reject; got: {msg}"
+        );
+        assert!(
+            msg.contains("requires actor 'human'"),
+            "error must cite required actor; got: {msg}"
+        );
+        // Row unchanged
+        assert_eq!(read_status_wrap(&conn), "in_review");
+    }
+
+    // --- amend ---
+
+    #[test]
+    fn ac6_amend_happy_path_rejected_lands_planning() {
+        let (schema, conn) = setup_wrap();
+        insert_wrap_row(&conn, "rejected", "[]");
+
+        let cmd = build_wrap_cmd(&schema, "amend");
+        let matches = cmd.get_matches_from(["amend", "T001"]);
+        run(&schema, &conn, &matches, Actor::Human, "amend").unwrap();
+
+        assert_eq!(read_status_wrap(&conn), "planning",
+            "amend must land at planning (Decision Matrix row i)");
+    }
+
+    #[test]
+    fn ac6_amend_from_wrong_state_accepted_rejected() {
+        let (schema, conn) = setup_wrap();
+        insert_wrap_row(&conn, "accepted", "[]");
+
+        let cmd = build_wrap_cmd(&schema, "amend");
+        let matches = cmd.get_matches_from(["amend", "T001"]);
+        let err = run(&schema, &conn, &matches, Actor::Human, "amend").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("amend") || msg.contains("no transition") || msg.contains("accepted"),
+            "expected state-machine error for amend from accepted; got: {msg}"
+        );
+        // Row unchanged
+        assert_eq!(read_status_wrap(&conn), "accepted");
+    }
 }
