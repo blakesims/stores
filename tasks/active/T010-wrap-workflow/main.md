@@ -1,9 +1,9 @@
 # T010: Wrap Workflow + GO/NO_GO (last 10%)
 
 ## Meta
-- **Status:** EXECUTING_PHASE_7
+- **Status:** CODE_REVIEW
 - **Created:** 2026-05-01
-- **Last Updated:** 2026-05-01 (code-reviewer: Phase 6 cycle-1 PASS — F1 `reject --reason` and F2 `amend` phase/cycle reset both correctly fixed; advance to Phase 7 worklog/GTM)
+- **Last Updated:** 2026-05-01 (executor Phase 7: worklog note + main.md Completion section filled; AC7.1 + AC7.4 complete)
 - **Blocked Reason:** —
 
 ## Task
@@ -848,12 +848,56 @@ _Code-reviewer agent fills this section per phase._
 
 > Details: `code-review-phase-6.md` (cycle 1 review section).
 
+### Phase 7 — Worklog + GTM update (2026-05-01)
+
+- **Status:** COMPLETE
+- **Started:** 2026-05-01
+- **Completed:** 2026-05-01
+- **Files modified:**
+  - `docs/worklog/2026-05-01/04-t010-wrap-workflow.md` — new worklog note: Summary, Decisions ratified (11-row matrix), Surprises (6), Follow-ups (7).
+  - `tasks/active/T010-wrap-workflow/main.md` — `## Completion` section filled: date, 2-sentence summary, full commit list (27 commits), 5 lessons learned, worklog link.
+- **AC7.1 ✓** — Worklog note at `docs/worklog/2026-05-01/04-t010-wrap-workflow.md` with all 4 required sections.
+- **AC7.4 ✓** — `## Completion` section filled with Completed date, Summary, Commits, Lessons Learned, Worklog link.
+- **AC7.2 / AC7.3 (DEFERRED)** — GTM "Recently Completed" entry and folder move to `tasks/completed/` are orchestrator-owned; not performed here.
+
 ---
 
 ## Completion
-_Final summary when task is complete._
 
-- **Completed:** [DATE]
-- **Summary:** ...
-- **Commits:** ...
-- **Lessons Learned:** ...
+- **Completed:** 2026-05-01
+- **Summary:** T010 extended the task lifecycle so that `complete` is no longer terminal. A new `wrap` agent produces an executive brief on PASS-on-last-phase; the row auto-advances to `in_review` via a state-local eager-dispatch flag; the guide agent's new wrap-mode renders the brief and exposes actor-gated `accept`/`reject` transitions; and the `/task:wrap` skill drops the human reviewer into that mode. Reject writes a `--reason` to `wrap_log[-1].reject_reason`; `amend` resets `current_phase`/`current_cycle` to 0 for re-planning from scratch. End result: GO/NO_GO is a typed, actor-attributed first-class row event in the DB, not a chat vibe.
+- **Commits:**
+  - `9aaef2d` feat(T010 Phase 1): lifecycle extension — in_review/accepted/rejected + wrap_log
+  - `07709ae` review(T010 P1): REVISE — drive_e2e.sh red, downstream consumers unaudited
+  - `3e4b53c` chore(T010): record Phase 1 commit SHA in execution log
+  - `aceb643` fix(T010 Phase 1): revise — shell e2e + drive terminal-exit + downstream consumers
+  - `0cdb329` chore(T010): update execution log — Phase 1 revision cycle 1 complete
+  - `4fac048` review(T010 P1 cycle 1): REVISE 2/3 — eager-wrap auto-dispatch broken
+  - `8ba0077` fix(T010 Phase 1 cycle 2): restore eager-wrap dispatch via state-local flag
+  - `bd41587` chore(T010): update execution log — Phase 1 revision cycle 2 complete
+  - `46b9c8c` chore(T010): set status CODE_REVIEW — Phase 1 cycle 2 submitted
+  - `8e8e635` review(T010 P1 cycle 2): PASS — eager-wrap dispatch verified
+  - `da8d38c` feat(T010 Phase 2): wrap envelope schema + fixture + parse tests
+  - `73901a2` docs(T010 Phase 2): execution log + status CODE_REVIEW
+  - `4c72fae` review(T010 P2): PASS — wrap envelope schema verified
+  - `c36e3ac` feat(T010 Phase 3): submit-wrap handler + CLI dispatch
+  - `26de11f` docs(T010 Phase 3): fill execution log with commit SHA + CODE_REVIEW status
+  - `4d94988` review(T010 P3): PASS — submit-wrap handler + CLI dispatch verified
+  - `13662ca` feat(T010 Phase 4): wrap agent prompt + brief template + git_diff_summary overlay
+  - `1480fab` docs(T010): Phase 4 execution log + status → CODE_REVIEW
+  - `fdf3509` review(T010 P4): PASS — wrap agent + brief template + git_diff_summary overlay verified
+  - `b0fcd7c` feat(T010 Phase 5): guide wrap-mode + /task:wrap skill
+  - `e50951d` docs(T010): Phase 5 execution log + status CODE_REVIEW
+  - `bf4ce4f` review(T010 P5): PASS — guide wrap-mode + /task:wrap skill verified
+  - `5f66722` test(T010 Phase 6): transition + e2e accept/reject + CLI actor enforcement
+  - `fadcd71` docs(T010): Phase 6 execution log + status CODE_REVIEW
+  - `f8cce9d` review(T010 P6): REVISE 1/3 — `reject --reason` + `amend` phase reset unimplemented
+  - `2aa992a` fix(T010 Phase 6 cycle 1): implement reject --reason + amend phase/cycle reset
+  - `038e790` review(T010 P6 cycle-1): PASS — F1 reject --reason + F2 amend reset verified
+- **Lessons Learned:**
+  - Follow-on machinery has multiple code paths. `compute_submit_review` bypassed normal entry-follow-on firing; each distinct dispatch path must independently call `fire_on_entry_follow_ons` or the follow-on silently never fires.
+  - "Good simplification" proposals that touch dispatch timing must have their observable behaviour verified against the spec before approval. A loop-guard substitution that looks equivalent can silently change dispatch from eager to lazy.
+  - DONE_WHEN criteria must be checked against the spec, not just against the written code. Tests that "match the implementation" prove nothing if the implementation is incomplete. Code review must independently verify each DONE_WHEN item.
+  - Schema additivity plans should enumerate affected callsites explicitly (not just "audit consumers"). Vague audit flags leave the executor guessing; enumeration makes the review mechanical.
+  - Phase scope estimates should be revised when a prior phase's pull-forward subsumes later-phase work. Phantom ACs ("already done") create confusion in the execution log; better to mark them explicitly in the updated plan.
+- **Worklog:** `docs/worklog/2026-05-01/04-t010-wrap-workflow.md`
