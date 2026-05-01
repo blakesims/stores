@@ -47,6 +47,12 @@ impl MockRunner {
             queue: RefCell::new(q),
         }
     }
+
+    /// Return the number of responses remaining in the queue.
+    /// A value of 0 means all queued responses were consumed (the runner was fully drained).
+    pub fn remaining_count(&self) -> usize {
+        self.queue.borrow().len()
+    }
 }
 
 // SAFETY: MockRunner is used in single-threaded tests; RefCell is not Sync, but

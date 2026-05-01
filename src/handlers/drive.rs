@@ -342,6 +342,10 @@ pub(crate) fn drive_loop(
     max_iters: usize,
 ) -> Result<()> {
     let mut iter = 0usize;
+    // AC4.3 state-local flag: tracks whether wrap was dispatched in THIS drive
+    // run. Prevents same-run re-dispatch while allowing fresh dispatch on every
+    // new drive invocation (covers re-entry after reject → amend → re-complete).
+    let mut dispatched_wrap_this_run = false;
 
     loop {
         // ── Step 2a: compute next-action ──────────────────────────────────
@@ -363,10 +367,14 @@ pub(crate) fn drive_loop(
             );
         }
 
-        // Waiting-for-human: `in_review` — wrap was already dispatched (either
-        // this run or a prior one). Drive's job is done; the human must accept
-        // or reject.
-        if na.status == "in_review" {
+        // AC4.3: `in_review` exit guard — only short-circuit if wrap was already
+        // dispatched in THIS run. On first observation (dispatched_wrap_this_run ==
+        // false), fall through to dispatch wrap (eager auto-fire per Decision (b)
+        // and AC4.3a). On second observation (flag set), exit with the human-review
+        // hint. This allows fresh wrap dispatch on every new drive invocation
+        // (covers re-entry after reject → amend → re-complete), while preventing
+        // same-run re-dispatch.
+        if na.status == "in_review" && dispatched_wrap_this_run {
             eprintln!(
                 "[{display_id}] in_review; brief written; awaiting `stores tasks accept | reject`"
             );
@@ -549,6 +557,14 @@ pub(crate) fn drive_loop(
         })?;
 
         let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;
+
+        // AC4.3 flag: wrap dispatches when na.status == "in_review" (the row is in
+        // in_review, next_agent is wrap). Once dispatch_submit returns successfully
+        // (wrap envelope processed), set the flag so the next iteration's loop-top
+        // guard exits cleanly instead of re-dispatching.
+        if na.status == "in_review" {
+            dispatched_wrap_this_run = true;
+        }
 
         // ── Step 2f: render ───────────────────────────────────────────────
         // Render is best-effort; failure is logged but does not abort the loop.
@@ -1049,6 +1065,17 @@ mod tests {
         // Verify final status: in_review (drive exits after wrap dispatch, row awaits human)
         let na = compute_next_action(&schema, &conn, "T001").unwrap();
         assert_eq!(na.status, "in_review", "task should be in_review after drive (awaiting human GO/NO_GO)");
+
+        // AC4.3 eager-dispatch regression guard: all 5 queued mock responses must be
+        // consumed. If the wrap response (5th) was not consumed, the runner still has
+        // 1 item remaining — this catches the status-only guard regression where
+        // drive exits at in_review without dispatching wrap.
+        assert_eq!(
+            runner.remaining_count(), 0,
+            "all 5 mock responses (including wrap) must be consumed; {} remain — \
+             eager-wrap dispatch did not fire",
+            runner.remaining_count()
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1253,10 +1280,16 @@ mod tests {
     }
 
     #[test]
-    fn terminal_in_review_exits_without_spawning() {
-        // Cross-run re-entry: a human re-runs `stores tasks drive T001` against a
-        // row that is already at `in_review` (wrap was dispatched in a prior session).
-        // Drive must exit 0 immediately with the in_review hint — no re-dispatch.
+    fn in_review_first_iteration_dispatches_wrap() {
+        // AC4.3a: When drive is invoked and the row is already at `in_review`
+        // (e.g. fresh run after a reject → amend → re-complete cycle), the first
+        // iteration's next-action returns next_agent=wrap. Drive must dispatch wrap
+        // (eager auto-fire per Decision (b)), not exit immediately.
+        //
+        // The state-local flag `dispatched_wrap_this_run` is false at the start of
+        // every new drive run, so the loop-top guard falls through and wrap is
+        // dispatched. Only after wrap submits does the flag flip, causing the next
+        // iteration to exit with the "awaiting human" hint.
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
 
@@ -1265,19 +1298,28 @@ mod tests {
             "2026-01-01T00:00:00Z", 1, 1, None, None,
         );
 
-        // Empty runner — if spawned, it would error (no queued responses).
-        let runner = MockRunner::new(vec![]);
+        // One wrap response queued — must be consumed for the test to pass.
+        let wrap_out = make_run_output(wrap_fixture_json(), 0);
+        let runner = MockRunner::new(vec![wrap_out]);
 
-        // Should return Ok(()) immediately — drive refuses to re-dispatch wrap.
+        // Drive must succeed (not error) and consume the wrap response.
         drive_loop(&schema, &conn, "T001", &runner, 50)
-            .expect("in_review status should exit Ok(()) without dispatching");
+            .expect("in_review with dispatched_wrap_this_run=false must dispatch wrap and exit Ok(())");
+
+        // Assert the runner was fully drained — wrap response was consumed.
+        assert_eq!(
+            runner.remaining_count(), 0,
+            "wrap response must have been consumed (eager dispatch); {} responses remain",
+            runner.remaining_count()
+        );
     }
 
     #[test]
-    fn drive_in_review_with_existing_wrap_log_does_not_redispatch() {
-        // Symmetric with terminal_in_review_exits_without_spawning. Exercises the
-        // cross-run case where wrap_log[] is non-empty (populated by a prior wrap
-        // dispatch). Drive must still exit 0 without touching the runner.
+    fn in_review_re_entry_after_amend_dispatches_fresh_wrap() {
+        // AC4.3a: A fresh drive invocation on a row at `in_review` with an existing
+        // wrap_log[] entry (from a prior wrap run) must still dispatch wrap. The
+        // state-local flag only prevents same-run re-dispatch; cross-run re-entry
+        // always dispatches (wrap_log preserves history as a list_record).
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
 
@@ -1285,7 +1327,8 @@ mod tests {
             &conn, &schema, "T001", "in_review",
             "2026-01-01T00:00:00Z", 1, 1, None, None,
         );
-        // Simulate non-empty wrap_log (as if Phase 3's compute_submit_wrap ran).
+        // Simulate non-empty wrap_log from a prior wrap dispatch (Phase 1 stub; Phase 3
+        // will write this via compute_submit_wrap).
         conn.execute(
             &format!(
                 "UPDATE {} SET wrap_log = ?1 WHERE display_id = ?2",
@@ -1297,11 +1340,20 @@ mod tests {
             ],
         ).unwrap();
 
-        let runner = MockRunner::new(vec![]);
+        // One wrap response queued — must be consumed (fresh dispatch regardless of existing wrap_log).
+        let wrap_out = make_run_output(wrap_fixture_json(), 0);
+        let runner = MockRunner::new(vec![wrap_out]);
 
-        // Must exit 0 — the in_review guard fires at top of loop regardless of wrap_log content.
+        // Drive must succeed and dispatch wrap even though wrap_log is non-empty.
         drive_loop(&schema, &conn, "T001", &runner, 50)
-            .expect("in_review with non-empty wrap_log should exit Ok(()) without re-dispatching");
+            .expect("in_review with existing wrap_log must still dispatch wrap on re-entry");
+
+        // Assert the runner was fully drained — the fresh wrap response was consumed.
+        assert_eq!(
+            runner.remaining_count(), 0,
+            "wrap response must have been consumed on re-entry; {} responses remain",
+            runner.remaining_count()
+        );
     }
 
     #[test]

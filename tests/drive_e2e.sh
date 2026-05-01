@@ -66,9 +66,9 @@ trap 'rm -rf "$TMP_HAPPY" "$TMP_REVISE"' EXIT
         --invoker ai_with_human)
     [[ "$OUT" == "T001" ]] || fail "AC7.1: expected T001, got: $OUT"
 
-    # Drive with mock runner using happy_2phase fixture
-    stores tasks drive T001 --mock "$FIXTURE_HAPPY" 2>&1 | \
-        grep -v "^$" || true
+    # Drive with mock runner using happy_2phase fixture; capture stderr for wrap assertion
+    DRIVE_STDERR=$(stores tasks drive T001 --mock "$FIXTURE_HAPPY" 2>&1 || true)
+    echo "$DRIVE_STDERR" | grep -v "^$" || true
 
     # Assert final state via show --json
     ROW=$(stores tasks show T001 --json)
@@ -76,6 +76,12 @@ trap 'rm -rf "$TMP_HAPPY" "$TMP_REVISE"' EXIT
     # status = in_review (drive exits after wrap dispatch; human must accept/reject)
     STATUS=$(echo "$ROW" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'])")
     [[ "$STATUS" == "in_review" ]] || fail "AC7.1: expected status=in_review; got: $STATUS"
+
+    # AC4.3 eager-dispatch assertion: drive must have spawned the wrap agent.
+    # If the status-only guard regression is present, drive exits at in_review before
+    # dispatching wrap and "spawning wrap" never appears in stderr.
+    echo "$DRIVE_STDERR" | grep -q "spawning wrap" || \
+        fail "AC7.1: wrap agent was not dispatched (eager-wrap regression); stderr: $DRIVE_STDERR"
 
     # current_phase = 2
     PHASE=$(echo "$ROW" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['current_phase'])")
@@ -135,9 +141,9 @@ TMP_REVISE=$(mktemp -d)
         --invoker ai_with_human)
     [[ "$OUT" == "T001" ]] || fail "AC7.1b: expected T001, got: $OUT"
 
-    # Drive with mock runner using revise_once fixture
-    stores tasks drive T001 --mock "$FIXTURE_REVISE" 2>&1 | \
-        grep -v "^$" || true
+    # Drive with mock runner using revise_once fixture; capture stderr for wrap assertion
+    DRIVE_STDERR=$(stores tasks drive T001 --mock "$FIXTURE_REVISE" 2>&1 || true)
+    echo "$DRIVE_STDERR" | grep -v "^$" || true
 
     # Assert final state via show --json
     ROW=$(stores tasks show T001 --json)
@@ -145,6 +151,10 @@ TMP_REVISE=$(mktemp -d)
     # status = in_review (drive exits after wrap dispatch; human must accept/reject)
     STATUS=$(echo "$ROW" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'])")
     [[ "$STATUS" == "in_review" ]] || fail "AC7.1b: expected status=in_review; got: $STATUS"
+
+    # AC4.3 eager-dispatch assertion: wrap agent must have been spawned.
+    echo "$DRIVE_STDERR" | grep -q "spawning wrap" || \
+        fail "AC7.1b: wrap agent was not dispatched (eager-wrap regression); stderr: $DRIVE_STDERR"
 
     # current_phase = 2
     PHASE=$(echo "$ROW" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['current_phase'])")
