@@ -12,15 +12,49 @@
 - `stores tasks status <id>` and `stores tasks next-action <id>` — observe the workflow without driving it.
 - `stores tasks brief <id> <agent-role>` — preview the brief drive would dispatch (debugging without spawning).
 
-### `--invoker ai_with_human`
+### `--invoker` discipline (the strict rule)
 
-The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by default. Fields marked `actor: ai_with_human` (e.g. `title`, `slug`) reject autonomous writes. **Pass `--invoker ai_with_human` whenever you (Claude) are operating in a session with the user actively in the loop** — which is true any time you're conversing with them. This is the wrapper boundary in action: the wrapping agent uses the CLI like any other client and does not get a privileged channel. See `docs/philosophy.md` § *What's outside the substrate*.
+The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by default. Fields marked `actor: ai_with_human` reject autonomous writes; fields marked `actor: human` reject any AI write. This is the wrapper boundary T011 documented, schema-enforced.
+
+**Default is `ai_autonomous`. Never silently upgrade.** Most of the time (~80-90%) the AI operates this repo autonomously and the right invoker is `ai_autonomous`. Existing-of-a-session does NOT count as "human in loop." The session is just where the AI happens to be running; it is not consent to write rows the human hasn't seen.
+
+**Use `--invoker ai_with_human` only when the human just authorized this exact row in this turn.** Concretely: you've shown the user the row you're about to write, they typed assent (a "yes" / "go" / equivalent to that proposal), and you're writing it now. Not "the user is presumably available." Not "the user kicked off this work an hour ago." This turn, this row, just-said-yes.
+
+**The four user-authority moments (U1–U4) are the only places `ai_with_human` is appropriate:**
+
+- **U1 — Scope ratification.** `tasks add` (the row is born; the contract — `done_when` / `scope_in` / `scope_out` — is born with it). The human must have just approved the contract you're about to write.
+- **U2 — Promotion.** Observation → task. `tasks add ... --linked-observations <obs-id>`. The user has seen the observation and assented to it becoming a task.
+- **U3 — Acceptance.** `tasks accept` / `tasks reject`. These are pure `actor: human` — the AI cannot do them at all. The user types the verb.
+- **U4 — Resume / amend.** `tasks resume` (blocked → ready), `tasks amend` (rejected → planning). The human must have seen the blocker / rejection and authorized the unblock.
+
+**Everything else is `ai_autonomous`:** every `submit-*` during a drive cycle, every `observations add` for friction encountered mid-work, every `tasks render` / `tasks status` / `tasks next-action`, every read.
+
+**Halting is a feature.** When autonomous work hits a moment that needs U1–U4 grounding, **halt and propose**, then write `ai_with_human` after assent. Do not pre-seek consent for autonomous moments; do not skip consent for grounding moments. The schema's rejection of an undergrounded write is the fail-loud signal we want — getting rejected is not an error to recover from, it's the substrate doing its job.
+
+See `docs/philosophy.md` § *What's outside the substrate*.
 
 ### Bugs are observations, not blockers
 
-When the substrate hurts mid-task, **do not retreat to hand-editing markdown**. File the friction in the observations store via `stores observations add --invoker ai_with_human ...` (run `--help` for the exact field names your schema requires). The `tasks` schema has `linked_observations: list_fk, ref: observations` — link the observation to the task that surfaced it so the bug is discoverable next to the work that found it. The hurt IS the data we wanted; working around it silently throws that data away.
+When the substrate hurts mid-task, **do not retreat to hand-editing markdown**. File the friction in the observations store with `--invoker ai_autonomous` — filing friction is autonomous work, not a U-moment. The observation lands in the `open` state and shows up in the next `/pickup` queue.
 
-If the substrate is so broken you genuinely cannot proceed: file the observation, fall back to markdown for that one task, and open a fresh task to fix the substrate. Don't let the recursion stall you, but don't give up the dogfood without first paying the observation tax.
+```bash
+stores observations add --invoker ai_autonomous \
+  --summary "<one-line>" \
+  --source dev \
+  --priority high|normal|low \
+  --captured-at "$(date -Iseconds)" \
+  --captured-week "$(date +w%V)" \
+  --task-id "<surfacing-task-display-id>" \
+  --body "<longer description; --body-from-file for multi-line>"
+```
+
+Observations get `L{:03d}` IDs (`L001`, `L002`, …) — distinct from tasks' `T###`. The `task_id` field is a soft-FK (plain text, no referential guard) — set it to the display id of the task that surfaced the friction.
+
+**Observations carry their own triage tier** via their `intent_contract.tier_hint` (T1 / T2 / T3):
+- **T1 / T2** — handled inside the observation lifecycle (`investigate` → draft contract → `confirm` (U-moment) → `claim` → `resolve`). No separate task row.
+- **T3** — promoted to a full task: `stores tasks add --invoker ai_with_human --linked-observations L00X ...`. The observation gets `resolved` with `resolution` referencing the task once the task ships.
+
+If the substrate is so broken you cannot even file an observation: write a worklog note (`docs/worklog/<date>/NN-substrate-down-<slug>.md`) describing what broke and what you hand-edited, then open a fresh task (or observation, when substrate recovers) to address it. The worklog note IS the audit trail for the substrate-down period — git-tracked, timestamped, discoverable.
 
 ### The great divide on IDs
 
