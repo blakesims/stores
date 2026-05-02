@@ -1,7 +1,7 @@
 # T011: Document the wrapper boundary in philosophy.md
 
 ## Meta
-- **Status:** EXECUTING_PHASE_1
+- **Status:** COMPLETE
 - **Created:** 2026-05-02
 - **Last Updated:** 2026-05-02
 - **Blocked Reason:** —
@@ -106,13 +106,13 @@ _Plan-reviewer agent fills this section._
 ## Execution Log
 _Executor agent fills this section per phase._
 
-### Phase 1: [Title]
-- **Status:** PENDING | IN_PROGRESS | COMPLETE | BLOCKED
-- **Started:** —
-- **Completed:** —
-- **Commits:** —
-- **Files Modified:** —
-- **Notes:** —
+### Phase 1: Insert "What's outside the substrate" section
+- **Status:** COMPLETE
+- **Started:** 2026-05-02
+- **Completed:** 2026-05-02
+- **Commits:** — (per instructions: orchestrator commits after code review)
+- **Files Modified:** `docs/philosophy.md`
+- **Notes:** Inserted 3-paragraph section between `## What falls out` and `## The deeper bet`. No surrounding-section edits needed — the seam reads cleanly without a transition sentence (carry-forward note 2: defaulted to zero). C3 got its own paragraph to ensure "pause drive" and the full atomicity/second-write-path reasoning are not buried. The `## The deeper bet` heading was accidentally consumed by the first Edit call and immediately restored in a follow-up edit; final file is correct.
 
 ---
 
@@ -120,9 +120,9 @@ _Executor agent fills this section per phase._
 _Code-reviewer agent fills this section per phase._
 
 ### Phase 1
-- **Gate:** PASS | REVISE | FAIL
-- **Issues Found:** —
-- **Revision Count:** 0/3
+- **Gate:** PASS
+- **Issues Found:** None blocking. Three small observations recorded in the detail file (inline-code styling of "pause `drive`"; deliberate 3-paragraph layout giving C3 its own paragraph for emphasis; zero transition sentences at the section seams — all within plan). All ten acceptance criteria pass on first cycle, including the `## The deeper bet` heading-restoration check the executor flagged in their handoff.
+- **Revision Count:** 1/3
 
 > Details: code-review-phase-1.md
 

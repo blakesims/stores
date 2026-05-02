@@ -37,6 +37,14 @@ States and transitions are first-class in the schema. A transition declares its 
 - **Workflows compose.** Any new workflow-shaped problem (notes, runs, gates, reviews) is a YAML file away. You inherit `next-action`, `brief`, `submit-*`, `render`, `drive` for free.
 - **Audit trail is mechanical.** The DB is the log. `main.md` is just a view. There is no "did the agent actually do X" — there's a row, with a timestamp, with the actor, with the diff.
 
+## What's outside the substrate
+
+Worktree provisioning, project setup scripts, and observing wrappers — a Claude Code instance watching a long-running session, an outer orchestrator that spawned the whole thing — live outside the substrate. `stores` does not own these. They wrap `stores`; `stores` does not wrap them. This is not a gap to fill later; it is the correct boundary. The substrate's job is to enforce workflow structure. Everything above that layer is the caller's problem.
+
+That boundary has one implication worth making explicit: the substrate has exactly one write path — the CLI — and **any wrapper shares the same authority surface as every other CLI client**. An autonomous outer agent is not `actor: ai_autonomous` at the schema level; it has no privileged row-write path; it cannot reach into the DB directly. If it wants to act on what it observes, it issues CLI commands, the same commands a human operator would type. The wrapper is just another client. The schema still enforces field-level actor constraints, required-when predicates, and lifecycle guards regardless of who is on the other end of the CLI invocation.
+
+The trap to resist is giving that outer layer a back-channel: "let the wrapping orchestrator pause `drive`, or inject a state transition, or signal the substrate through some side path." The temptation is real — it feels like coordination. What it actually does is push orchestration up a level, outside the schema's reach; break the substrate's atomicity, since a pause is now an unverified second write path the DB does not know about; and introduce a class of failures the framework cannot detect or log. The answer is not a richer inter-layer protocol. The answer is that the outer layer drives everything through the CLI, same as anyone else, and the substrate's guarantees hold unconditionally.
+
 ## The deeper bet
 
 Most agent frameworks treat the LLM as the cognitive center and the surrounding system as scaffolding. `stores` inverts that: **the schema is the cognitive center, and the LLM is a constrained worker that fills in slots the schema demands.** The framework doesn't ask "what does the agent want to do?" — it asks "what does the next row require, who is allowed to write it, and what predicate must hold?" The agent's job is to produce a value that satisfies the schema. The schema's job is to make sure no work happens without intent, and no intent goes uncaptured.
