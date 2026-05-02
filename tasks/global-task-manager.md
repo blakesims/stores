@@ -6,8 +6,9 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
+| T012 | workspace_path field + tasks next-id verb | High | — | PLANNING | [main.md](./planning/T012-workspace-path-and-next-id/main.md) |
 
-Next available task id: T012
+Next available task id: T013
 
 ---
 
