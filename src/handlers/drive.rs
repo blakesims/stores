@@ -600,12 +600,21 @@ pub(crate) fn drive_loop(
             .get("workspace_path")
             .and_then(|v| v.as_str());
 
-        // Validate: if set but path does not exist, error before spawn (no silent fallback).
+        // Validate: if set but path does not exist OR is not a directory, error before spawn
+        // (no silent fallback). exists()-only would let a regular file slip through and defer
+        // failure to spawn-time when current_dir() rejects it as a non-directory infra error.
         if let Some(p) = workspace_path {
-            if !std::path::Path::new(p).exists() {
+            let path = std::path::Path::new(p);
+            if !path.exists() {
                 anyhow::bail!(
                     "[{display_id}] workspace_path '{p}' does not exist; \
                      set a valid path or remove the field"
+                );
+            }
+            if !path.is_dir() {
+                anyhow::bail!(
+                    "[{display_id}] workspace_path '{p}' is not a directory; \
+                     set a valid directory path or remove the field"
                 );
             }
         }
@@ -2227,10 +2236,12 @@ mod tests {
         );
     }
 
-    /// AC1.6: row with workspace_path set to an existing tempdir — runner records
-    /// the canonicalized path for every spawn.
+    /// AC1.6: row with workspace_path set to an existing tempdir — drive passes the
+    /// row's raw string through to the runner on every spawn. (Canonicalization happens
+    /// inside ClaudeCodeRunner; MockRunner records the raw value. The runner-level
+    /// tests `workspace_path_canonicalised_when_some` verify the canonicalize step.)
     #[test]
-    fn workspace_path_set_and_exists_canonicalizes() {
+    fn workspace_path_set_propagates_to_runner() {
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
         let workspace_dir = tempdir().expect("tempdir for workspace");
@@ -2265,18 +2276,17 @@ mod tests {
             !paths.is_empty(),
             "workspace_paths_seen must be non-empty after drive"
         );
-        // Every recorded path must equal the canonical workspace path string.
+        // Every recorded path must equal the row's raw workspace_path string.
+        // (MockRunner records what drive passed; canonicalization is the runner's
+        // job, exercised by claude_code.rs::tests::workspace_path_canonicalised_when_some.)
         for p in &paths {
             assert_eq!(
                 p.as_deref(),
                 Some(workspace_path.as_str()),
-                "all workspace_paths_seen must equal workspace_path, got: {p:?}"
+                "all workspace_paths_seen must equal the row's workspace_path, got: {p:?}"
             );
         }
-        // Note: MockRunner records the raw string from the row; ClaudeCodeRunner would
-        // canonicalize it. The drive-level test verifies the correct value was passed;
-        // the runner-level tests (workspace_path_canonicalised_when_some) verify canonicalization.
-        let _ = canonical_str; // referenced in the note above
+        let _ = canonical_str; // computed for the cross-reference in the comment above
     }
 
     /// AC1.6: row with workspace_path set to a non-existent directory — drive returns Err
@@ -2316,6 +2326,49 @@ mod tests {
         );
 
         // Runner queue undrained — no spawn occurred.
+        assert_eq!(
+            runner.remaining_count(), 1,
+            "runner queue must be undrained (no spawn should have occurred)"
+        );
+    }
+
+    /// AC1.6 (defensive): row with workspace_path set to a regular file rather than a
+    /// directory — drive returns Err before spawn (would otherwise defer to current_dir's
+    /// non-directory infra error). Companion to workspace_path_set_but_missing_errors_at_spawn.
+    #[test]
+    fn workspace_path_set_to_file_errors_at_spawn() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        let workspace_dir = tempdir().expect("tempdir for file fixture");
+        let file_path = workspace_dir.path().join("not-a-directory");
+        std::fs::write(&file_path, b"i am a file").expect("write file fixture");
+        let file_str = file_path.to_str().unwrap().to_string();
+
+        insert_task(
+            &conn, &schema, "T001", "planning",
+            "2026-01-01T00:00:00Z", 0, 0, None, None,
+        );
+        conn.execute(
+            &format!(
+                "UPDATE {} SET workspace_path = ?1 WHERE display_id = ?2",
+                crate::codegen::ddl::quote_ident(&schema.name)
+            ),
+            rusqlite::params![file_str, "T001"],
+        ).unwrap();
+
+        let runner = MockRunner::new(vec![make_run_output(planner_fixture_json(), 0)]);
+
+        let err = drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect_err("drive_loop must return Err when workspace_path is a file");
+
+        let msg = err.to_string();
+        assert!(msg.contains("T001"), "error must contain display_id, got: {msg}");
+        assert!(msg.contains(&file_str), "error must contain the offending path, got: {msg}");
+        assert!(
+            msg.contains("not a directory"),
+            "error must say 'not a directory' to distinguish from missing-path case, got: {msg}"
+        );
+
         assert_eq!(
             runner.remaining_count(), 1,
             "runner queue must be undrained (no spawn should have occurred)"
