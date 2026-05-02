@@ -6,7 +6,7 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T012 | workspace_path field + tasks next-id verb | High | 1/2 | EXECUTING_PHASE_1 | [main.md](./active/T012-workspace-path-and-next-id/main.md) |
+| T012 | workspace_path field + tasks next-id verb | High | 2/2 | EXECUTING_PHASE_2 | [main.md](./active/T012-workspace-path-and-next-id/main.md) |
 
 Next available task id: T013
 

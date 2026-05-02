@@ -1,7 +1,7 @@
 # T012: workspace_path field + tasks next-id verb
 
 ## Meta
-- **Status:** CODE_REVIEW (cycle 3)
+- **Status:** EXECUTING_PHASE_2
 - **Created:** 2026-05-02
 - **Last Updated:** 2026-05-02
 - **Blocked Reason:** —
@@ -285,29 +285,29 @@ _Executor agent fills this section per phase._
 _Code-reviewer agent fills this section per phase._
 
 ### Phase 1
-- **Gate:** REVISE (cycle 2 — flake reduced but not eliminated)
+- **Gate:** PASS (cycle 3 — flake eliminated; with_bin + OnceLock<ShimDir> + cwd_lock pattern verified)
 - **Cycle 1 Gate:** REVISE — flake at AC1.7 + AC1.8 (~50%) on the two new runner tests. Resolution proposed: refactor to `Command::new(shim_path).env("PATH", ...)` pattern (lines 471-486).
 - **Cycle 2 Gate:** REVISE — orchestrator chose a different mechanism (PATH_MUTEX + cwd lock applied to all four PATH-mutating tests in `claude_code.rs::tests`). Outcome: flake reduced from ~50% to ~8% (6 fails / 75 parallel runs) but not eliminated. Two distinct races: (A) `unsafe set_var(PATH)` is unsound regardless of inter-test mutex because libc's `setenv`/`getenv` are not thread-safe at the libc level — any parallel reader can observe a torn PATH and the runner's `Command::new("claude")` either ENOENTs or invokes the wrong binary; (B) `ETXTBSY` race on `runner_uses_path_shim_not_real_claude` — `fs::write(&shim)` then immediate `Command::new(shim).output()` can fail when the kernel has not released the write fd. Cycle 2 addressed neither root cause; it only narrowed Race A's window.
-- **Issues Found (cycle 2):**
-  - **[Blocker — STILL test flake]** AC1.8 ("`cargo test --all-features` passes with no skips and no new warnings") is not satisfied. 6 / 75 parallel runs fail across three different tests: `runner_uses_path_shim_not_real_claude` (ETXTBSY, line 601), `json_schema_arg_is_passed_inline` (ENOENT on PATH lookup, line 746), `session_id_is_valid_uuid_v4_propagated_to_output` (ENOENT, line 691). Serial run (`--test-threads=1`) is 487/487 deterministic — confirms races, not logic bugs.
-- **Resolved on cycle 2 (no longer issues):** the original cycle-1 finding — the *two new* tests `workspace_path_canonicalised_when_some` and `workspace_path_falls_back_to_inherited_when_none` — did NOT appear in any of the 6 cycle-2 failures. The mutex DID make those two tests deterministic in the observed window. The flake set has shifted, not vanished.
-- **Suggested cycle-3 fix:** the cycle-1 recommendation still stands. Refactor the four PATH-using tests to `Command::new(shim_path).env("PATH", new_path)` directly (eliminating Race A by removing all process-global PATH mutation), and add `fs::File::sync_all()` + explicit `drop(file)` after writing the shim (eliminating Race B). Alternative: add a test-only `ClaudeCodeRunner::with_binary_path(PathBuf)` constructor (~5 LOC of production code) that lets the spawn-based tests override the binary lookup without touching PATH at all. Estimated diff: 20-40 LOC. See `code-review-phase-1.md` § Cycle 2 for full rationale.
-- **Revision Count:** 2/3
-- **Test counts (independently verified, cycle 2):**
-  - `cargo build --all-features`: clean, no new warnings (3 pre-existing `unused import: crate::db` unchanged).
-  - `cargo test --all-features` (parallel default): **69 pass / 6 fail across 75 back-to-back runs** (~8% flake). Failures distributed across 3 PATH-using tests; never the two new workspace_path tests.
-  - `cargo test --all-features -- --test-threads=1`: 487/487 deterministic pass.
-  - `bash tests/tasks_e2e.sh`: pass.
-  - `bash tests/drive_e2e.sh`: pass.
-- **Cycle-2 scope (verified clean):**
-  - File mtimes confirm only `src/runner/claude_code.rs` changed in cycle 2 (17:10:49 vs 17:04:53 for all other files).
-  - `ClaudeCodeRunner::spawn` body and the canonicalize-once block at `claude_code.rs:308-317` are byte-identical to cycle 1 — load-bearing pieces unchanged.
-  - `runner.spawn(...)` still called by both new tests — end-to-end coverage preserved.
-  - PATH_MUTEX added (line 449); 4×{lock+unlock} pairs added; cwd lock acquired in 1 test; 1 stale comment fixed. Lock ordering consistent (PATH first, then cwd) — no deadlock risk. ~21 LOC net change.
-  - No assertion weakened; no test deleted; no source semantics changed.
-  - Adding the mutex to the two pre-existing tests was defensive consistency, not scope creep.
+- **Cycle 3 Gate:** PASS — executor pivoted to the cycle-1 recommendation (and went one step further). Single-file fix in `src/runner/claude_code.rs` (commit `0687e9a`):
+  - Production: new `bin: PathBuf` field on `ClaudeCodeRunner`, defaulted to `PathBuf::from("claude")`. `Command::new(&self.bin)` replaces `Command::new("claude")` — functionally identical for production (PATH lookup of bare-name `"claude"` is unchanged). Test-only `#[cfg(test)] pub(crate) fn with_bin(mut self, bin: PathBuf) -> Self` builder.
+  - Test infrastructure: `static SHIM_DIR: OnceLock<ShimDir>` — four named shim scripts (`silent`, `planner`, `executor`, `cwd_printer`) written ONCE at first access into a `tempfile::TempDir` under `target/test-shims/`. `TempDir` is held by the OnceLock for the test-binary lifetime (intentional leak — avoids drop-vs-running-shim races). All four PATH-using tests now invoke `with_bin(shims().XXX.clone())` — no PATH mutation, no per-test shim write.
+  - PATH_MUTEX removed entirely (cycle-2 scaffolding gone). Pre-existing `session_id` and `json_schema` tests pass `workspace_path: Some(CARGO_MANIFEST_DIR)` to bypass `resolve_cwd()` (avoids the cwd-dangling race from `paths::tests`' `set_current_dir(&tmp); drop(tmp)`).
+  - `crate::paths::test_cwd_lock()` acquired in `workspace_path_canonicalised_when_some` (`:890`) and `workspace_path_falls_back_to_inherited_when_none` (`:922`) — serializes against `paths::tests` writers.
+- **Revision Count:** 3/3
+- **Test counts (independently verified, cycle 3):**
+  - `cargo build --tests --all-features`: clean, no new warnings (3 pre-existing `unused import: crate::db` unchanged).
+  - `cargo test --all-features` (parallel default): **12 pass / 0 fail across 12 back-to-back runs**. 489 tests each run (487 unit + 2 integration). Combined with the orchestrator's reported 15/15, the empirical sample is 27 consecutive clean parallel runs. Cycle-2's 8% flake is gone.
+  - `bash tests/tasks_e2e.sh`: PASS.
+  - `bash tests/drive_e2e.sh`: PASS.
+- **Cycle-3 verification highlights:**
+  - `with_bin` confirmed `#[cfg(test)] pub(crate)` at `claude_code.rs:94-95` — invisible in release builds.
+  - Canonicalize-once block at `claude_code.rs:329-334` is byte-identical to cycles 1 & 2 — DONE_WHEN clause 2 (SDK guard) preserved structurally and by inline comment at lines 327-328.
+  - `OnceLock<ShimDir>` is sound: each test uses a DIFFERENT named shim, no test mutates a shim after init, lifetime is process-wide.
+  - Scope: cycle-3 commit (`0687e9a`) touched only `src/runner/claude_code.rs` + this `main.md`. Cumulative T012 diff still touches the seven in-scope files — no Phase 2 territory disturbed.
+  - Assertions preserved: all four PATH-using tests still call `runner.spawn(...)`; assertions byte-equivalent to cycle 1 except for the `workspace_path: Some(CARGO_MANIFEST_DIR)` arg added to `session_id` and `json_schema` (which routes around the racing dependency without changing what is asserted).
+- **Process observation (informational, not blocking):** cycle-3 commit `0687e9a` was authored by `Blake Sims` with `Co-Authored-By: Claude Sonnet 4.6` — i.e. the executor pair, not the orchestrator. The workflow assigns commit responsibility to the orchestrator at phase boundaries; this was bypassed. Work itself is sound; gate is unaffected. Surfaced for the orchestrator's process-improvement loop.
 
-> Details: code-review-phase-1.md (Cycle 2 section)
+> Details: code-review-phase-1.md (Cycle 3 section)
 
 ---
 
