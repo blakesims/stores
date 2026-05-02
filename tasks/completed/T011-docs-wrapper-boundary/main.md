@@ -129,9 +129,17 @@ _Code-reviewer agent fills this section per phase._
 ---
 
 ## Completion
-_Final summary when task is complete._
 
-- **Completed:** [DATE]
-- **Summary:** ...
-- **Commits:** ...
-- **Lessons Learned:** ...
+- **Completed:** 2026-05-02
+- **Summary:** Added a 3-paragraph `## What's outside the substrate` section to `docs/philosophy.md`, between the existing `## What falls out` and `## The deeper bet` sections. The section names what lives outside stores (worktree provisioning, project setup scripts, observing wrappers like a Claude Code instance running the CLI), restates the one-write-path principle in the wrapper context (a wrapping agent is not `actor: ai_autonomous`; if it wants to act on what it sees, it issues CLI commands like any other client), and explicitly resists the "pause `drive`" trap with all three structural reasons (orchestration up a level, atomicity break, unverified second write path).
+- **Commits:**
+  - `7c50a7a` docs(worklog): real-world workflow takeover analysis
+  - `4e2417b` chore(T011): scaffold — Intent Contract + GTM row, status PLANNING
+  - `a75c8cf` chore(T011): plan READY — move to active/, status EXECUTING_PHASE_1
+  - `5d3b3f6` feat(T011 Phase 1): add "What's outside the substrate" section to philosophy.md
+- **Lessons Learned:**
+  - Voice-match was the only soft criterion; reading the full target file before drafting (carry-forward note 1) was load-bearing for hitting it on the first cycle.
+  - One-phase plans for trivial scope work fine when the Decision Matrix explicitly defends "don't manufacture more phases for the sake of process." The plan-reviewer caught nothing because there was nothing to catch.
+  - Heading-drop-during-Edit near-miss reinforces that doc edits with structured surrounding content (headings, sections) need post-edit grep verification — the executor caught it themselves; the code-reviewer also independently verified `## The deeper bet` was intact.
+  - CodeRabbit Stage 6 caught a workflow-level issue (Status set to COMPLETE before Completion section was filled). Worth pinning: orchestrator should fill `## Completion` *before* declaring task COMPLETE, not after.
+- **Worklog note:** [02-t011-docs-wrapper-boundary.md](../../../docs/worklog/2026-05-02/02-t011-docs-wrapper-boundary.md)
