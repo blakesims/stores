@@ -271,7 +271,7 @@ pub(crate) fn run_gate_guide_with_runner(
     );
 
     // Spawn runner.
-    let run_out = runner.spawn("guide", system_prompt, &brief, None)?;
+    let run_out = runner.spawn("guide", system_prompt, &brief, None, None)?;
 
     if run_out.exit_code != 0 {
         eprintln!("[guide] runner exited with code {}", run_out.exit_code);
@@ -344,7 +344,7 @@ pub(crate) fn run_tasks_guide_with_runner(
     };
 
     // Spawn runner.
-    let run_out = runner.spawn("guide", system_prompt, &brief, None)?;
+    let run_out = runner.spawn("guide", system_prompt, &brief, None, None)?;
 
     if run_out.exit_code != 0 {
         eprintln!("[guide] runner exited with code {}", run_out.exit_code);

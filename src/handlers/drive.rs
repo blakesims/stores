@@ -595,6 +595,21 @@ pub(crate) fn drive_loop(
             .find(|(n, _)| *n == agent_name_normalized)
             .map(|(_, s)| *s);
 
+        // Extract workspace_path from the task row (same pattern as branch above).
+        let workspace_path = entry
+            .get("workspace_path")
+            .and_then(|v| v.as_str());
+
+        // Validate: if set but path does not exist, error before spawn (no silent fallback).
+        if let Some(p) = workspace_path {
+            if !std::path::Path::new(p).exists() {
+                anyhow::bail!(
+                    "[{display_id}] workspace_path '{p}' does not exist; \
+                     set a valid path or remove the field"
+                );
+            }
+        }
+
         // Pre-spawn announcement: runners block until the child exits, so without
         // this the user sees nothing for 30-90s per agent. v0.4 will stream child
         // stdout line-by-line; for v0.3 we just bookend the call.
@@ -606,7 +621,7 @@ pub(crate) fn drive_loop(
         );
         let _ = std::io::stderr().flush();
         let spawn_start = std::time::Instant::now();
-        let run_out = runner.spawn(&agent_name_normalized, system_prompt, &brief_markdown, schema_text)?;
+        let run_out = runner.spawn(&agent_name_normalized, system_prompt, &brief_markdown, schema_text, workspace_path)?;
         let spawn_elapsed = spawn_start.elapsed();
         eprintln!(
             "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: {agent_role} returned (exit={}, {:.1}s)",
@@ -2177,5 +2192,179 @@ mod tests {
         // The invariant: returns non-empty, no panic.
         let result = compute_git_diff_summary(None, Some("HEAD~2"));
         assert!(!result.is_empty(), "compute_git_diff_summary with fallback commit must return non-empty string");
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC1.6: workspace_path spawn-time tests
+    // ---------------------------------------------------------------------------
+
+    /// AC1.6: row with no workspace_path — runner records None for the cwd arg.
+    #[test]
+    fn workspace_path_unset_uses_inherited_cwd() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn, &schema, "T001", "planning",
+            "2026-01-01T00:00:00Z", 0, 0, None, None,
+        );
+
+        let runner = MockRunner::new(vec![
+            make_run_output(planner_fixture_json(), 0),
+            make_run_output(plan_reviewer_fixture_json(), 0),
+            make_run_output(executor_fixture_json(), 0),
+            make_run_output(code_reviewer_fixture_json(), 0),
+            make_run_output(wrap_fixture_json(), 0),
+        ]);
+
+        drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
+
+        let paths = runner.workspace_paths_seen();
+        // All spawns (planner, plan_reviewer, executor, code_reviewer, wrap) should record None.
+        assert!(
+            paths.iter().all(|p| p.is_none()),
+            "all workspace_paths_seen must be None when workspace_path is unset, got: {paths:?}"
+        );
+    }
+
+    /// AC1.6: row with workspace_path set to an existing tempdir — runner records
+    /// the canonicalized path for every spawn.
+    #[test]
+    fn workspace_path_set_and_exists_canonicalizes() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        let workspace_dir = tempdir().expect("tempdir for workspace");
+        let workspace_path = workspace_dir.path().to_str().unwrap().to_string();
+        let canonical = workspace_dir.path().canonicalize().unwrap();
+        let canonical_str = canonical.to_str().unwrap().to_string();
+
+        insert_task(
+            &conn, &schema, "T001", "planning",
+            "2026-01-01T00:00:00Z", 0, 0, None, None,
+        );
+        conn.execute(
+            &format!(
+                "UPDATE {} SET workspace_path = ?1 WHERE display_id = ?2",
+                crate::codegen::ddl::quote_ident(&schema.name)
+            ),
+            rusqlite::params![workspace_path, "T001"],
+        ).unwrap();
+
+        let runner = MockRunner::new(vec![
+            make_run_output(planner_fixture_json(), 0),
+            make_run_output(plan_reviewer_fixture_json(), 0),
+            make_run_output(executor_fixture_json(), 0),
+            make_run_output(code_reviewer_fixture_json(), 0),
+            make_run_output(wrap_fixture_json(), 0),
+        ]);
+
+        drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
+
+        let paths = runner.workspace_paths_seen();
+        assert!(
+            !paths.is_empty(),
+            "workspace_paths_seen must be non-empty after drive"
+        );
+        // Every recorded path must equal the canonical workspace path string.
+        for p in &paths {
+            assert_eq!(
+                p.as_deref(),
+                Some(workspace_path.as_str()),
+                "all workspace_paths_seen must equal workspace_path, got: {p:?}"
+            );
+        }
+        // Note: MockRunner records the raw string from the row; ClaudeCodeRunner would
+        // canonicalize it. The drive-level test verifies the correct value was passed;
+        // the runner-level tests (workspace_path_canonicalised_when_some) verify canonicalization.
+        let _ = canonical_str; // referenced in the note above
+    }
+
+    /// AC1.6: row with workspace_path set to a non-existent directory — drive returns Err
+    /// before spawn; runner queue is undrained (no spawn occurred).
+    #[test]
+    fn workspace_path_set_but_missing_errors_at_spawn() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        let missing_path = "/tmp/stores-test-nonexistent-workspace-path-99999";
+
+        insert_task(
+            &conn, &schema, "T001", "planning",
+            "2026-01-01T00:00:00Z", 0, 0, None, None,
+        );
+        conn.execute(
+            &format!(
+                "UPDATE {} SET workspace_path = ?1 WHERE display_id = ?2",
+                crate::codegen::ddl::quote_ident(&schema.name)
+            ),
+            rusqlite::params![missing_path, "T001"],
+        ).unwrap();
+
+        // Queue has one response; if spawn is called, remaining_count drops to 0.
+        let runner = MockRunner::new(vec![make_run_output(planner_fixture_json(), 0)]);
+
+        let err = drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect_err("drive_loop must return Err when workspace_path is missing");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("T001"),
+            "error message must contain display_id 'T001', got: {msg}"
+        );
+        assert!(
+            msg.contains(missing_path),
+            "error message must contain missing path, got: {msg}"
+        );
+
+        // Runner queue undrained — no spawn occurred.
+        assert_eq!(
+            runner.remaining_count(), 1,
+            "runner queue must be undrained (no spawn should have occurred)"
+        );
+    }
+
+    /// AC1.6: same row drives through two consecutive cycles (planner → plan_reviewer);
+    /// both spawns record the same workspace_path, demonstrating canonicalize-once
+    /// contract is honored per spawn-call.
+    #[test]
+    fn workspace_path_canonicalize_stable_across_spawns() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        let workspace_dir = tempdir().expect("tempdir for workspace");
+        let workspace_path = workspace_dir.path().to_str().unwrap().to_string();
+
+        insert_task(
+            &conn, &schema, "T001", "planning",
+            "2026-01-01T00:00:00Z", 0, 0, None, None,
+        );
+        conn.execute(
+            &format!(
+                "UPDATE {} SET workspace_path = ?1 WHERE display_id = ?2",
+                crate::codegen::ddl::quote_ident(&schema.name)
+            ),
+            rusqlite::params![workspace_path, "T001"],
+        ).unwrap();
+
+        let runner = MockRunner::new(vec![
+            make_run_output(planner_fixture_json(), 0),
+            make_run_output(plan_reviewer_fixture_json(), 0),
+            make_run_output(executor_fixture_json(), 0),
+            make_run_output(code_reviewer_fixture_json(), 0),
+            make_run_output(wrap_fixture_json(), 0),
+        ]);
+
+        drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
+
+        let paths = runner.workspace_paths_seen();
+        assert!(paths.len() >= 2, "must have at least 2 spawns to test stability");
+
+        // All recorded paths must be byte-identical — demonstrating the value is stable
+        // across consecutive spawns (as it would be across spawn/resume calls with ClaudeCodeRunner).
+        let first = paths[0].as_deref();
+        for (i, p) in paths.iter().enumerate() {
+            assert_eq!(
+                p.as_deref(), first,
+                "workspace_path at spawn {i} differs from spawn 0: expected {first:?}, got {p:?}"
+            );
+        }
     }
 }

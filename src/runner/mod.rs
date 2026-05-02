@@ -105,13 +105,17 @@ pub trait Runner: Send {
     /// - `system_prompt`: the full system prompt to pass to the agent.
     /// - `brief`: the per-task briefing text (passed to the agent as the user
     ///   turn or via stdin depending on the runner).
-    ///
-    /// # Parameters
     /// - `schema`: optional JSON-schema text to pass via `--json-schema`. When
     ///   `Some`, the runner requests schema-validated structured output and
     ///   populates `RunnerOutput.structured_output` from the result event.
     ///   When `None`, the runner falls through to the legacy line-scan path
     ///   and `structured_output` is `None`.
+    /// - `workspace_path`: optional path to use as the working directory for
+    ///   the spawned agent. If `Some`, the runner MUST canonicalize and lock
+    ///   this path at spawn entry. The Anthropic SDK silently mints a fresh
+    ///   session if cwd differs between spawn and resume calls (see
+    ///   `claude_code.rs:305-306`). If `None`, the runner uses the inherited
+    ///   cwd (current behavior).
     ///
     /// # Errors
     /// Returns `Err` only for infrastructure failures (process failed to launch,
@@ -123,6 +127,7 @@ pub trait Runner: Send {
         system_prompt: &str,
         brief: &str,
         schema: Option<&str>,
+        workspace_path: Option<&str>,
     ) -> Result<RunnerOutput>;
 }
 

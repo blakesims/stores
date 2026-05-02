@@ -6,6 +6,7 @@ fields:
   - {name: title, type: text, required: true, actor: ai_with_human}
   - {name: slug, type: text, required: true, pattern: "^[a-z0-9-]+$", actor: ai_with_human}
   - {name: branch, type: text, required: false}
+  - {name: workspace_path, type: text, required: false}
   - {name: capability, type: text}
   - {name: sub_item, type: text}
   - {name: infra, type: text}

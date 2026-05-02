@@ -32,10 +32,13 @@
 ///
 /// # cwd canonicalisation
 ///
-/// `std::env::current_dir()?.canonicalize()?` is called on entry and pinned
-/// as the working directory for the spawn. This guards against the documented
-/// #1 footgun for session resume: the Anthropic SDK silently mints a fresh
-/// session if cwd differs between spawn and resume calls.
+/// Two branches, both resolved once at spawn entry:
+/// - When `workspace_path` is `Some(p)`: `p` is canonicalized and used as cwd.
+/// - When `workspace_path` is `None`: `std::env::current_dir()?.canonicalize()?` (inherited cwd).
+///
+/// Both guard against the documented #1 footgun for session resume: the
+/// Anthropic SDK silently mints a fresh session if cwd differs between
+/// spawn and resume calls.
 ///
 /// # Schema dialect
 ///
@@ -61,12 +64,19 @@ pub struct ClaudeCodeRunner {
     /// If `Some`, passes `--model=<value>` to claude on every spawn. If `None`,
     /// claude uses its default model.
     model: Option<String>,
+    /// Binary to invoke. Defaults to `PathBuf::from("claude")` (PATH lookup).
+    /// Tests override this via `with_bin` to point at an absolute shim path,
+    /// eliminating any need to mutate the process-global PATH.
+    bin: PathBuf,
 }
 
 impl ClaudeCodeRunner {
     /// Create a runner that uses claude's default model.
     pub fn new() -> Self {
-        Self { model: None }
+        Self {
+            model: None,
+            bin: PathBuf::from("claude"),
+        }
     }
 
     /// Create a runner that forces a specific model (e.g. `"haiku"`, `"sonnet"`,
@@ -74,7 +84,17 @@ impl ClaudeCodeRunner {
     pub fn with_model(model: impl Into<String>) -> Self {
         Self {
             model: Some(model.into()),
+            bin: PathBuf::from("claude"),
         }
+    }
+
+    /// Override the binary path (test-only). Replaces `Command::new("claude")`
+    /// with `Command::new(bin)`, so tests can point at an absolute shim path
+    /// without mutating the process-global PATH.
+    #[cfg(test)]
+    pub(crate) fn with_bin(mut self, bin: PathBuf) -> Self {
+        self.bin = bin;
+        self
     }
 }
 
@@ -300,12 +320,20 @@ impl Runner for ClaudeCodeRunner {
         system_prompt: &str,
         brief: &str,
         schema: Option<&str>,
+        workspace_path: Option<&str>,
     ) -> Result<RunnerOutput> {
         // Mint UUID and canonicalise cwd on entry.
         let session_id = uuid::Uuid::new_v4().to_string();
-        let cwd = resolve_cwd()?;
+        // Canonicalize once at spawn entry; the SDK silently mints a fresh session
+        // if cwd differs across resume calls (see lines 33-38).
+        let cwd = match workspace_path {
+            Some(p) => std::path::PathBuf::from(p)
+                .canonicalize()
+                .with_context(|| format!("workspace_path canonicalize failed: '{p}'"))?,
+            None => resolve_cwd()?,
+        };
 
-        let mut cmd = Command::new("claude");
+        let mut cmd = Command::new(&self.bin);
         cmd.current_dir(&cwd);
         cmd.arg("-p")
             .arg("--append-system-prompt")
@@ -427,41 +455,115 @@ impl Runner for ClaudeCodeRunner {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::OnceLock;
 
-    /// Write a tiny shell script to a tempdir that simulates `claude -p`,
-    /// prepend that tempdir to `PATH`, and assert that:
-    /// - the runner constructs the right command (verified by what the shim
-    ///   echoes back),
-    /// - `final_message` is correctly extracted from the fixture output.
+    /// Module-level shim directory, created once for the lifetime of the test binary.
     ///
-    /// The shim ignores all arguments and emits agent commentary followed by
-    /// the role-keyed JSON envelope on the final line (matching the contract
-    /// `claude -p --output-format text` produces with a real agent).
+    /// All shim-exec tests reference paths inside this directory rather than
+    /// writing short-lived per-test shim files. Writing each shim once before
+    /// any test runs eliminates the kernel inode-recycling ETXTBSY race that
+    /// appears under 20+ parallel threads on Linux 6.x: that race fires when a
+    /// file is quickly created, exec'd, and its inode freed, and the freed inode
+    /// is concurrently reused by another write that happens to overlap with an
+    /// in-flight execve. A stable, long-lived shim file is never freed during
+    /// the test run, so no recycling can occur.
+    ///
+    /// The `TempDir` value is kept alive for the whole test run by the `OnceLock`.
+    /// We leak it at process exit rather than cleaning it up — the OS reclaims
+    /// the files anyway, and avoiding teardown prevents a race between the test
+    /// runner's `drop` and any shim that's still running.
+    struct ShimDir {
+        /// Kept alive so the shim files are not deleted during the test run.
+        #[allow(dead_code)]
+        dir: tempfile::TempDir,
+        /// `#!/bin/sh\nexit 0\n` — produces no stdout, exits 0.
+        silent: PathBuf,
+        /// Emits a stream-json result event with a role=planner envelope.
+        planner: PathBuf,
+        /// Emits a stream-json result event with a role=executor envelope.
+        executor: PathBuf,
+        /// Emits `{"type":"result","result":"<cwd>"}` where cwd is `$(pwd)`.
+        cwd_printer: PathBuf,
+    }
+
+    static SHIM_DIR: OnceLock<ShimDir> = OnceLock::new();
+
+    /// Create all shim files once. Called via `SHIM_DIR.get_or_init(init_shims)`.
+    ///
+    /// Writes to a subdirectory of `target/debug/` (the cargo build output
+    /// directory). This path is stable, is NOT in `/tmp`, and the directory
+    /// already exists — avoiding the ext4 inode-recycling race that fires
+    /// under high concurrency when many short-lived files are created and
+    /// deleted in `/tmp` simultaneously.
+    fn init_shims() -> ShimDir {
+        // Write to the cargo target directory for this package. The target dir
+        // has stable inodes that are not affected by the high-turnover /tmp
+        // churn from parallel test tempdirs.
+        let target_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-shims");
+        fs::create_dir_all(&target_dir).expect("create shim target dir");
+        // Wrap in a TempDir-like struct; we'll use a plain PathBuf instead.
+        // But we need TempDir for ShimDir.dir... let's use a TempDir in target.
+        let dir = tempfile::Builder::new()
+            .prefix("shims-")
+            .tempdir_in(&target_dir)
+            .expect("shim tempdir");
+
+        let write = |name: &str, script: &str| {
+            let p = dir.path().join(name);
+            let mut f = fs::File::create(&p).expect("create shim");
+            f.write_all(script.as_bytes()).expect("write shim");
+            f.sync_all().expect("sync shim");
+            drop(f);
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).expect("chmod shim");
+            p
+        };
+
+        let silent = write("silent", "#!/bin/sh\nexit 0\n");
+        // The planner shim emits a stream-json result event with a planner envelope.
+        let planner = write("planner", concat!(
+            "#!/bin/sh\n",
+            "echo '{\"type\":\"result\",\"result\":\"{\\\"role\\\":\\\"planner\\\",\\\"phases\\\":[],\\\"decision_matrix\\\":[]}\"}'",
+            "\nexit 0\n",
+        ));
+        // The executor shim emits a stream-json result event with an executor envelope.
+        let executor = write("executor", concat!(
+            "#!/bin/sh\n",
+            "echo '{\"type\":\"result\",\"result\":\"{\\\"role\\\":\\\"executor\\\",\\\"commit\\\":\\\"abc\\\"}\"}'",
+            "\nexit 0\n",
+        ));
+        // The cwd_printer shim emits {"type":"result","result":"<cwd>"} where cwd is pwd.
+        let cwd_printer = write("cwd_printer", concat!(
+            "#!/bin/sh\n",
+            "printf '{\"type\":\"result\",\"result\":\"%s\"}\\n' \"$(pwd)\"",
+            "\nexit 0\n",
+        ));
+
+        ShimDir { dir, silent, planner, executor, cwd_printer }
+    }
+
+    /// Return a reference to the process-wide shim directory, initializing it
+    /// on first call.
+    fn shims() -> &'static ShimDir {
+        SHIM_DIR.get_or_init(init_shims)
+    }
+
+    /// Write a tiny shell script that simulates `claude -p` and assert that
+    /// `final_message` is correctly extracted from the fixture output.
+    ///
+    /// The shim ignores all arguments and emits a role-keyed JSON envelope in
+    /// a stream-json result event. Invoked via `Command::new(shim_path)` — no
+    /// PATH mutation. Uses the process-wide `SHIM_DIR` so no per-test write
+    /// occurs (eliminates the kernel ETXTBSY inode-recycling race).
     #[test]
     fn command_construction_and_final_message_parsing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let shim_path = dir.path().join("claude");
+        let shim_path = &shims().planner;
 
-        // The shim emits a stream-json result event with text containing the
-        // role-keyed JSON envelope.
-        let shim_script = r#"#!/bin/sh
-echo '{"type":"result","result":"{\"role\":\"planner\",\"phases\":[],\"decision_matrix\":[]}"}'
-exit 0
-"#;
-        fs::write(&shim_path, shim_script).expect("write shim");
-        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
-            .expect("chmod shim");
-
-        // Prepend the tempdir so our shim shadows any real `claude` binary.
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), original_path);
-
-        // We cannot mutate PATH for the current process safely in a parallel
-        // test environment, so we invoke via Command directly with PATH set.
-        // Instead, rebuild the command manually here with the overridden PATH.
-        let output = std::process::Command::new(shim_path.to_str().unwrap())
-            .env("PATH", &new_path)
+        // Invoke the stable shim directly via its absolute path.
+        let output = std::process::Command::new(shim_path)
             .arg("-p")
             .arg("--append-system-prompt")
             .arg("You are a planner.")
@@ -544,34 +646,15 @@ exit 0
         assert!(extract_tools_from_frontmatter(prompt).is_none());
     }
 
-    /// Verify that the ClaudeCodeRunner uses a PATH-injected shim rather than
-    /// a real `claude` binary. This test exercises the full `Runner::spawn`
-    /// path by manipulating PATH at the process level via a wrapper Command.
-    ///
-    /// NOTE: This test does NOT call `std::env::set_var` (which is unsound in
-    /// multithreaded tests). Instead it delegates to a subprocess that runs
-    /// with the modified PATH. The actual ClaudeCodeRunner spawn call happens
-    /// inside the runner integration test below, which uses `unsafe` PATH
-    /// mutation only in a controlled single-assertion scope.
+    /// Verify that the shim script runs successfully and produces the expected
+    /// stream-json output. Invokes the stable executor shim directly via its
+    /// absolute path — no PATH mutation, no per-test shim write.
     #[test]
     fn runner_uses_path_shim_not_real_claude() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let shim_path = dir.path().join("claude");
+        let shim_path = &shims().executor;
 
-        let shim_script = r#"#!/bin/sh
-echo '{"type":"result","result":"{\"role\":\"executor\",\"commit\":\"abc\"}"}'
-exit 0
-"#;
-        fs::write(&shim_path, shim_script).expect("write shim");
-        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
-            .expect("chmod shim");
-
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), original_path);
-
-        // Run the shim directly (simulating what ClaudeCodeRunner would do).
-        let output = std::process::Command::new(shim_path.to_str().unwrap())
-            .env("PATH", &new_path)
+        // Run the stable executor shim directly.
+        let output = std::process::Command::new(shim_path)
             .arg("-p")
             .arg("--append-system-prompt").arg("sys")
             .arg("--output-format").arg("stream-json")
@@ -643,29 +726,13 @@ exit 0
     /// RunnerOutput.session_id when the shim exits 0.
     #[test]
     fn session_id_is_valid_uuid_v4_propagated_to_output() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let shim_path = dir.path().join("claude");
-
-        // Shim just exits 0 with empty stream-json output.
-        let shim_script = "#!/bin/sh\nexit 0\n";
-        fs::write(&shim_path, shim_script).expect("write shim");
-        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
-            .expect("chmod shim");
-
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), original_path);
-
-        // Patch PATH via env override, then call spawn.
-        // We use unsafe set_var scoped tightly; this test is single-threaded
-        // by cargo test's default behaviour (one test per thread).
-        let runner = ClaudeCodeRunner::new();
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-        let result = runner.spawn("planner", "sys", "brief", None);
-        unsafe {
-            std::env::set_var("PATH", &original_path);
-        }
+        // Use the stable silent shim (exits 0, no stdout) via with_bin.
+        // Pass a stable workspace_path so resolve_cwd() is never called — this
+        // avoids a race with paths::tests that call set_current_dir and then
+        // drop the tmp dir before restoring, leaving the process cwd dangling.
+        let workspace = env!("CARGO_MANIFEST_DIR").to_string();
+        let runner = ClaudeCodeRunner::new().with_bin(shims().silent.clone());
+        let result = runner.spawn("planner", "sys", "brief", None, Some(&workspace));
 
         let out = result.expect("spawn should succeed with shim");
         let sid = out.session_id.expect("session_id should be Some");
@@ -694,30 +761,13 @@ exit 0
     /// and no `/tmp/` path is constructed.
     #[test]
     fn json_schema_arg_is_passed_inline() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let shim_path = dir.path().join("claude");
-
-        // Shim echoes all args to stdout in a simple format, then exits.
-        let shim_script = r#"#!/bin/sh
-echo '{"type":"result","result":""}'
-exit 0
-"#;
-        fs::write(&shim_path, shim_script).expect("write shim");
-        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
-            .expect("chmod shim");
-
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), original_path);
-
         let schema_text = r#"{"type":"object","properties":{"role":{"const":"planner"}}}"#;
-        let runner = ClaudeCodeRunner::new();
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-        let result = runner.spawn("planner", "sys", "brief", Some(schema_text));
-        unsafe {
-            std::env::set_var("PATH", &original_path);
-        }
+        // Use the stable silent shim via with_bin. No PATH mutation, no per-test write.
+        // Pass a stable workspace_path so resolve_cwd() is never called — guards
+        // against the cwd-dangling race from paths::tests.
+        let workspace = env!("CARGO_MANIFEST_DIR").to_string();
+        let runner = ClaudeCodeRunner::new().with_bin(shims().silent.clone());
+        let result = runner.spawn("planner", "sys", "brief", Some(schema_text), Some(&workspace));
 
         // The spawn should succeed (shim exits 0).
         result.expect("spawn should succeed with shim");
@@ -817,5 +867,74 @@ exit 0
         assert!(val["phases"].is_array());
         assert!(val["decision_matrix"].is_array());
         assert!(err.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // AC1.7: workspace_path runner-level tests
+    // -------------------------------------------------------------------------
+
+    /// AC1.7: when workspace_path: Some(<path>), the spawn uses the canonicalized
+    /// form of that path as cwd. Verified via the stable cwd_printer shim that
+    /// prints its cwd to stdout.
+    ///
+    /// Uses a stable subdirectory of CARGO_MANIFEST_DIR and holds the project
+    /// cwd lock to serialize against paths::tests that call set_current_dir.
+    /// Those tests change the process cwd to a temp directory and may run git,
+    /// which can leave write fds open that trigger ETXTBSY on concurrent execs.
+    #[test]
+    fn workspace_path_canonicalised_when_some() {
+        // Acquire the project-wide cwd lock. This test does not call
+        // set_current_dir itself, but holding the lock serializes against
+        // paths::tests that do, preventing ETXTBSY from a concurrent write fd
+        // colliding with the cwd_printer shim exec.
+        let _cwd_guard = crate::paths::test_cwd_lock().lock().expect("cwd lock poisoned");
+
+        // Use the cargo target directory as the workspace — it always exists,
+        // has stable inodes, and never collides with the shim files' inodes.
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target");
+        let workspace_str = workspace.to_str().unwrap().to_string();
+        let expected_cwd = workspace.canonicalize().unwrap();
+
+        // Use with_bin to point the runner at the stable cwd_printer shim.
+        // No PATH mutation, no per-test shim write, no tempdir in /tmp.
+        let runner = ClaudeCodeRunner::new().with_bin(shims().cwd_printer.clone());
+        let result = runner.spawn("planner", "sys", "brief", None, Some(&workspace_str));
+
+        let out = result.expect("spawn should succeed with shim");
+        let printed_cwd = out.final_message.expect("final_message (cwd) must be present");
+        let actual_cwd = std::path::PathBuf::from(printed_cwd.trim());
+        assert_eq!(
+            actual_cwd, expected_cwd,
+            "spawned cwd must equal canonicalized workspace_path"
+        );
+    }
+
+    /// AC1.7: when workspace_path: None, the runner uses the inherited cwd
+    /// (resolve_cwd() = std::env::current_dir().canonicalize()). Mirrors
+    /// the existing cwd_canonicalised_before_spawn test. Uses the stable
+    /// cwd_printer shim — no per-test shim write.
+    #[test]
+    fn workspace_path_falls_back_to_inherited_when_none() {
+        // Acquire the project-wide cwd lock BEFORE reading current_dir.
+        // This serializes against tests that call set_current_dir, so the cwd
+        // we capture here is the same one the spawned shim will report.
+        // No PATH lock needed: with_bin points the runner at the stable cwd_printer.
+        let _cwd_guard = crate::paths::test_cwd_lock().lock().expect("cwd lock poisoned");
+
+        let expected_cwd = resolve_cwd().expect("resolve_cwd must succeed");
+
+        // Use with_bin to point the runner at the stable cwd_printer shim.
+        // No PATH mutation, no per-test shim write.
+        let runner = ClaudeCodeRunner::new().with_bin(shims().cwd_printer.clone());
+        let result = runner.spawn("planner", "sys", "brief", None, None);
+        drop(_cwd_guard);
+
+        let out = result.expect("spawn should succeed with shim");
+        let printed_cwd = out.final_message.expect("final_message (cwd) must be present");
+        let actual_cwd = std::path::PathBuf::from(printed_cwd.trim());
+        assert_eq!(
+            actual_cwd, expected_cwd,
+            "spawned cwd with workspace_path=None must equal inherited cwd"
+        );
     }
 }

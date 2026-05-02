@@ -27,11 +27,12 @@ use super::{Runner, RunnerOutput};
 ///     structured_output_source: None,
 /// }];
 /// let runner = MockRunner::new(queue);
-/// let out = runner.spawn("planner", "sys", "brief", None).unwrap();
+/// let out = runner.spawn("planner", "sys", "brief", None, None).unwrap();
 /// assert_eq!(out.exit_code, 0);
 /// ```
 pub struct MockRunner {
     queue: RefCell<Vec<RunnerOutput>>,
+    workspace_paths_seen: RefCell<Vec<Option<String>>>,
 }
 
 impl MockRunner {
@@ -45,6 +46,7 @@ impl MockRunner {
         q.reverse();
         Self {
             queue: RefCell::new(q),
+            workspace_paths_seen: RefCell::new(Vec::new()),
         }
     }
 
@@ -52,6 +54,11 @@ impl MockRunner {
     /// A value of 0 means all queued responses were consumed (the runner was fully drained).
     pub fn remaining_count(&self) -> usize {
         self.queue.borrow().len()
+    }
+
+    /// Return the `workspace_path` arguments recorded across all `spawn` calls, in order.
+    pub fn workspace_paths_seen(&self) -> Vec<Option<String>> {
+        self.workspace_paths_seen.borrow().clone()
     }
 }
 
@@ -65,7 +72,8 @@ impl Runner for MockRunner {
         "mock"
     }
 
-    fn spawn(&self, role: &str, _system_prompt: &str, _brief: &str, _schema: Option<&str>) -> Result<RunnerOutput> {
+    fn spawn(&self, role: &str, _system_prompt: &str, _brief: &str, _schema: Option<&str>, workspace_path: Option<&str>) -> Result<RunnerOutput> {
+        self.workspace_paths_seen.borrow_mut().push(workspace_path.map(|s| s.to_string()));
         let mut queue = self.queue.borrow_mut();
         match queue.pop() {
             Some(output) => Ok(output),
@@ -102,12 +110,12 @@ mod tests {
         let second = make_output("second output", 0, Some(r#"{"role":"executor"}"#));
         let runner = MockRunner::new(vec![first, second]);
 
-        let out1 = runner.spawn("planner", "sys", "brief1", None).unwrap();
+        let out1 = runner.spawn("planner", "sys", "brief1", None, None).unwrap();
         assert_eq!(out1.stdout, "first output");
         assert_eq!(out1.exit_code, 0);
         assert_eq!(out1.final_message.as_deref(), Some(r#"{"role":"planner"}"#));
 
-        let out2 = runner.spawn("executor", "sys", "brief2", None).unwrap();
+        let out2 = runner.spawn("executor", "sys", "brief2", None, None).unwrap();
         assert_eq!(out2.stdout, "second output");
         assert_eq!(out2.final_message.as_deref(), Some(r#"{"role":"executor"}"#));
     }
@@ -115,7 +123,7 @@ mod tests {
     #[test]
     fn empty_queue_returns_error() {
         let runner = MockRunner::new(vec![]);
-        let err = runner.spawn("planner", "sys", "brief", None).unwrap_err();
+        let err = runner.spawn("planner", "sys", "brief", None, None).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("queue exhausted"),
@@ -130,15 +138,15 @@ mod tests {
     #[test]
     fn queue_exhaustion_after_consuming_all() {
         let runner = MockRunner::new(vec![make_output("only", 0, None)]);
-        runner.spawn("r", "s", "b", None).unwrap(); // consumes the one item
-        let err = runner.spawn("r", "s", "b", None).unwrap_err();
+        runner.spawn("r", "s", "b", None, None).unwrap(); // consumes the one item
+        let err = runner.spawn("r", "s", "b", None, None).unwrap_err();
         assert!(err.to_string().contains("queue exhausted"));
     }
 
     #[test]
     fn non_zero_exit_code_returned_not_errored() {
         let runner = MockRunner::new(vec![make_output("fail output", 1, None)]);
-        let out = runner.spawn("executor", "sys", "brief", None).unwrap();
+        let out = runner.spawn("executor", "sys", "brief", None, None).unwrap();
         assert_eq!(out.exit_code, 1);
         assert_eq!(out.stdout, "fail output");
     }
@@ -163,7 +171,7 @@ mod tests {
         };
         let runner = MockRunner::new(vec![output]);
         // schema arg is ignored by mock
-        let out = runner.spawn("planner", "sys", "brief", Some(r#"{"$schema":"ignored"}"#)).unwrap();
+        let out = runner.spawn("planner", "sys", "brief", Some(r#"{"$schema":"ignored"}"#), None).unwrap();
         assert_eq!(out.structured_output.as_ref(), Some(&structured));
         assert_eq!(out.session_id, None);
     }
