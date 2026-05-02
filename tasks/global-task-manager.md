@@ -6,8 +6,9 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
+| T011 | Document the wrapper boundary in philosophy.md | Normal | PLANNING | PLANNING | [main.md](./planning/T011-docs-wrapper-boundary/main.md) |
 
-Next available task id: T011
+Next available task id: T012
 
 ---
 
