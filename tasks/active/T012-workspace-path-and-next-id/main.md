@@ -279,6 +279,26 @@ _Executor agent fills this section per phase._
 - **Scope:** `git diff --stat` from base: only `src/runner/claude_code.rs` changed in cycle 3 (all other file changes are cycle 1/2 work committed together).
 - **Warnings:** 3 pre-existing `unused import: crate::db` — unchanged. No new warnings.
 
+### Phase 2: tasks next-id verb
+- **Status:** COMPLETE
+- **Started:** 2026-05-02
+- **Completed:** 2026-05-02
+- **Commits:** pending code review (per scope discipline — do not commit)
+- **Files Modified:**
+  - `src/handlers/next_id.rs` — NEW: `run_next_id()` public entry point + pure `next_id_for_root(root: &Path)` inner; 6 unit tests; `OnceLock<Regex>`-cached `^T(\d{3,})(-|$)` pattern; lenient on missing dirs
+  - `src/handlers/mod.rs` — added `pub mod next_id;` (alphabetized between `next_action` and `render`)
+  - `src/cli/dynamic.rs` — added `"next-id"` to `WORKFLOW_VERBS`; added `build_next_id_cmd()`; registered in workflow-verbs block
+  - `src/cli/dispatch.rs` — added `Some(("next-id", _sub))` arm sibling to `("status", sub)` arm
+  - `tasks/active/T012-workspace-path-and-next-id/main.md` — this execution log
+- **Notes:**
+  - No plan deviations. All four files match the scope list exactly.
+  - Pre-existing 3x `unused import: crate::db` warnings unchanged; no new warnings.
+  - `cargo test --all-features`: 493 unit + 2 integration = 495 total. 5/5 consecutive runs clean.
+  - Smoke check: `stores tasks next-id` from temp dir with `tasks/active/T012-test` + `tasks/completed/T005-done` → prints `T013`. AC2.6 satisfied.
+  - `cargo run -- tasks --help` lists `next-id` with about-string. AC2.1 satisfied.
+  - `tests/tasks_e2e.sh` and `tests/drive_e2e.sh` both PASS.
+  - `git diff --stat` shows exactly 3 modified + 1 untracked = 4 in-scope files.
+
 ---
 
 ## Code Review Log
@@ -308,6 +328,35 @@ _Code-reviewer agent fills this section per phase._
 - **Process observation (informational, not blocking):** cycle-3 commit `0687e9a` was authored by `Blake Sims` with `Co-Authored-By: Claude Sonnet 4.6` — i.e. the executor pair, not the orchestrator. The workflow assigns commit responsibility to the orchestrator at phase boundaries; this was bypassed. Work itself is sound; gate is unaffected. Surfaced for the orchestrator's process-improvement loop.
 
 > Details: code-review-phase-1.md (Cycle 3 section)
+
+### Phase 2
+- **Gate:** PASS
+- **Reviewed:** 2026-05-02
+- **Revision Count:** 0/3
+- **Acceptance criteria (all 6 verified):**
+  - AC2.1 — `next-id` registered on `tasks --help` with the planned about-string. Verified by `stores tasks --help` against an init+install fixture in `/tmp/t012-smoke`. Verb is correctly gated on `schema.workflow.is_some()` (`dynamic.rs:219`); `observations --help` does NOT list it (control verified).
+  - AC2.2 — Smoke check from this repo's working tree: `stores tasks next-id` printed `T013\n`. Re-running printed `T013\n` again — idempotent / no state mutation.
+  - AC2.3 — `git status --porcelain` after smoke run was unchanged (only the in-scope Phase 2 files). The dispatcher's pre-match `db::open()` at `dispatch.rs:27-28` does create `.stores/db.sqlite` if absent, but that path is gitignored and pre-existed — pre-existing dispatcher behavior, not a Phase 2 regression. `next_id::run_next_id()` itself does no DB or fs writes.
+  - AC2.4 — All 6 new tests pass: `empty_tree_returns_t001`, `single_completed_t005_returns_t006`, `highest_in_archived_wins`, `missing_directories_treated_as_empty`, `non_task_entries_ignored`, `non_canonical_directories_ignored` (the last asserts `tasks/ongoing/T999-x` is correctly excluded).
+  - AC2.5 — `cargo test --all-features`: 493 unit + 2 integration = **495 pass / 0 fail across 6 consecutive runs**. Phase 1's deterministic baseline preserved (no flake re-introduced).
+  - AC2.6 — Confirmed `T013` printed in this repo's working tree (highest = T012 in `active/`).
+- **Implementation quality (verified against Decision Matrix rows 6–14):**
+  - Row 13 (test seam): pure `next_id_for_root(root: &Path) -> Result<String>` is the inner function; thin `run_next_id()` resolves cwd and prints. Tests call only `next_id_for_root` with `tempdir()` paths; **no `set_current_dir` anywhere**. Safe under parallel test harness.
+  - Row 12 (regex): `^T(\d{3,})(-|$)` — independently verified against 8 edge cases (`T001`✓, `T012-foo`✓, `T9`✗, `T9999-x`✓, `Toops-x`✗, `T001.bak`✗, `T999-x`✓, `T009foo`✗). All match plan-reviewer's strengths bullet.
+  - Caching: `task_id_re()` uses `static RE: OnceLock<Regex>` + `get_or_init` — compiled once per process, not per directory entry. Correct.
+  - Row 8 (lenient missing dirs): `if !subdir.exists() { continue; }` plus a defensive `match read_dir(...) { Err(_) => continue, ... }`. No error returned for missing dirs.
+  - Row 14 (non-canonical dirs): `CANONICAL_SUBDIRS` is the exact five-dir list; `tasks/ongoing/` is silently ignored. Test `non_canonical_directories_ignored` verifies this with a `T999-x` decoy in `ongoing/`.
+  - Row 7 (output): `println!("{}", next)` — exactly `T013\n`, no JSON, no debug, no prefix.
+  - Row 6 (CLI registration): `"next-id"` added to `WORKFLOW_VERBS` reserved list; `build_next_id_cmd()` registered inside the `schema.workflow.is_some()` block; dispatch arm sibling to `("status", sub)`. All three plan-mandated CLI changes present and correctly placed.
+- **Scope discipline:** `git diff --stat` shows exactly the four in-scope files (`src/cli/dispatch.rs`, `src/cli/dynamic.rs`, `src/handlers/mod.rs`, `tasks/active/T012-.../main.md`) plus the new `src/handlers/next_id.rs`. **No Phase 1 files touched** — no edits to `schema.yaml`, `runner/*`, `handlers/drive.rs`, or `handlers/guide.rs`. `git diff Cargo.toml Cargo.lock` is empty — no new dependencies (`regex`, `anyhow`, `tempfile` all pre-existed).
+- **e2e:** `tests/tasks_e2e.sh` PASS, `tests/drive_e2e.sh` PASS — no regression in workflow happy/revise/wrap/accept paths or actor enforcement.
+- **Warnings:** 3 pre-existing `unused import: crate::db` warnings unchanged. No new warnings.
+- **Observations (informational, non-blocking):**
+  - **Dispatcher cost.** `dispatch.rs:27-28` opens the SQLite DB unconditionally before matching the verb, so `next-id` (which doesn't need the DB) still pays the open + WAL pragma. Cosmetic, pre-existing dispatcher shape; not in Phase 2 scope to refactor. Could be addressed in a future cleanup task by hoisting the DB open into the verb arms that need it.
+  - **`tasks/ongoing/`.** Plan-reviewer's Q1 still stands — the directory exists in this repo but is non-canonical. Phase 2 correctly ignores it; whether to delete or canonicalize it is a separate cleanup.
+  - **Process.** Phase 2 was clean on the first executor pass (revision count 0/3) — sharp contrast to Phase 1's 3-cycle flake-elimination saga. Validates the planning-rigor investment: a small, well-scoped phase with locked decisions and a pure-function test seam shipped right.
+
+> No long-form review file needed — the AC verification above is the full record.
 
 ---
 

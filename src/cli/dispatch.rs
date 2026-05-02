@@ -217,6 +217,9 @@ pub fn dispatch(
                     };
                     handlers::status::run_status(args)?;
                 }
+                Some(("next-id", _sub)) => {
+                    handlers::next_id::run_next_id()?;
+                }
                 Some((verb, sub)) => {
                     // Check if this is a declared lifecycle transition verb
                     if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {

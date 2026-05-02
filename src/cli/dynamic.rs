@@ -203,7 +203,7 @@ fn build_store_command(schema: &Schema) -> Command {
     // Workflow verb names that are registered separately above — must not be duplicated
     // as lifecycle transition subcommands even if the schema declares them as transition verbs.
     const WORKFLOW_VERBS: &[&str] = &[
-        "next-action", "brief", "render", "drive", "status", "guide",
+        "next-action", "brief", "render", "drive", "status", "guide", "next-id",
         "submit-plan", "submit-plan-review", "submit-execute", "submit-review", "submit-wrap", "resume",
     ];
 
@@ -223,6 +223,7 @@ fn build_store_command(schema: &Schema) -> Command {
             .subcommand(build_render_cmd())
             .subcommand(build_drive_cmd())
             .subcommand(build_status_cmd())
+            .subcommand(build_next_id_cmd())
             .subcommand(build_submit_plan_cmd())
             .subcommand(build_submit_plan_review_cmd())
             .subcommand(build_submit_execute_cmd())
@@ -543,6 +544,16 @@ fn build_status_cmd() -> Command {
                 .hide(true)
                 .required(false),
         )
+}
+
+/// Build the `next-id` command.
+///
+/// Read-only verb: scans `tasks/{active,planning,paused,completed,archived}/` for the
+/// highest `T###` directory and prints the next available ID formatted as `T{:03}`.
+/// No flags in v0.3 — callers consume the single-line output via shell substitution.
+fn build_next_id_cmd() -> Command {
+    Command::new("next-id")
+        .about("Print the next available task ID by scanning tasks/{active,planning,paused,completed,archived}/")
 }
 
 /// Build the `guide` command.
