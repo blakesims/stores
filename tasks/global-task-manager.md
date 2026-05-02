@@ -6,7 +6,6 @@ Tracks all tasks. The orchestrator maintains this file.
 
 | ID | Task Name | Priority | Phase | Status | Link |
 |:---|:----------|:---------|:------|:-------|:-----|
-| T012 | workspace_path field + tasks next-id verb | High | 2/2 | EXECUTING_PHASE_2 | [main.md](./active/T012-workspace-path-and-next-id/main.md) |
 
 Next available task id: T013
 
@@ -16,6 +15,7 @@ Next available task id: T013
 
 | ID | Task Name | Completed | Link |
 |:---|:----------|:----------|:-----|
+| T012 | workspace_path field + tasks next-id verb | 2026-05-02 | [main.md](./completed/T012-workspace-path-and-next-id/main.md) |
 | T011 | Document the wrapper boundary in philosophy.md | 2026-05-02 | [main.md](./completed/T011-docs-wrapper-boundary/main.md) |
 | T010 | Wrap workflow + GO/NO_GO (last 10%) | 2026-05-01 | [main.md](./completed/T010-wrap-workflow/main.md) |
 | T009 | Port the 10.06 `observations` store — second real migration | 2026-05-01 | [main.md](./completed/T009-port-10-06-observations/main.md) |

@@ -1,7 +1,7 @@
 # T012: workspace_path field + tasks next-id verb
 
 ## Meta
-- **Status:** EXECUTING_PHASE_2
+- **Status:** COMPLETE
 - **Created:** 2026-05-02
 - **Last Updated:** 2026-05-02
 - **Blocked Reason:** —
@@ -361,9 +361,22 @@ _Code-reviewer agent fills this section per phase._
 ---
 
 ## Completion
-_Final summary when task is complete._
 
-- **Completed:** [DATE]
-- **Summary:** ...
-- **Commits:** ...
-- **Lessons Learned:** ...
+- **Completed:** 2026-05-02
+- **Summary:** Shipped both substrate-side hooks for T011's wrapper boundary. (1) Optional `workspace_path: text` field on the `tasks` row; drive validates pre-spawn (errors loud on missing path AND on path-is-a-file — the latter caught by CodeRabbit Stage 6); `ClaudeCodeRunner::spawn` canonicalizes the path once at spawn entry, preserving the SDK session-fresh-on-cwd-mismatch guard. `MockRunner` updated, `Runner::spawn` trait gains `Option<&str>`, drive + guide call sites threaded. (2) Read-only `stores tasks next-id` verb: pure `next_id_for_root(&Path)` + thin CLI wrapper, scans the five canonical `tasks/{active,planning,paused,completed,archived}/` dirs (lenient on missing, ignores non-canonical `tasks/ongoing/`), `OnceLock<Regex>`-cached `^T(\d{3,})(-|$)`, prints `T{:03}\n`. Phase 1 took 3 cycles to land deterministically under parallel test harness (initial flake from `unsafe set_var(PATH)` libc-level race; eliminated cycle 3 via `ClaudeCodeRunner::with_bin` injection + `OnceLock<ShimDir>`). Phase 2 PASS first cycle. Stage 6 CodeRabbit: 1 batch (2 findings, both legit, both inline-fixed: `is_dir()` validation + test rename), then No findings. Final test count: 494 unit + 2 integration = 496 deterministic across parallel harness. e2e scripts PASS.
+- **Commits:**
+  - `995b9e8` chore(T012): scaffold — Intent Contract + GTM row, status PLANNING
+  - `9e90a82` chore(T012): plan READY — move to active/, status EXECUTING_PHASE_1
+  - `0687e9a` feat(T012 Phase 1 cycle 3): eliminate test flake — with_bin + OnceLock shims + cwd_lock
+  - `3b224f1` review(T012 P1 cycle-3): PASS — flake eliminated; status EXECUTING_PHASE_2
+  - `1d7b352` feat(T012 Phase 2): add `stores tasks next-id` verb
+  - `e5ae0e9` fix(T012 Stage 6 CR): is_dir validation + test rename for honesty
+- **Lessons Learned:**
+  - **`unsafe std::env::set_var` is unsafe in tests, not just unsound.** Pre-existing tests had used the pattern for months without failure. Adding two more pushed the parallel-execution probability over the visibility threshold. The fix is not a mutex (cycle 2 attempted that and only narrowed the window) but eliminating the global mutation entirely (`with_bin` injection — cycle 3). Don't paper over libc-level races with Rust-level locks.
+  - **The orchestrator-fix budget is for fixes whose mechanism is correct AND scope is small.** Cycle 2's mutex was small (~21 LOC) but mechanically insufficient. When uncertain whether a fix actually closes the race, bounce to executor — they have the end-to-end context to verify.
+  - **CodeRabbit caught a real bug Phase 1's review missed.** `exists()`-vs-`is_dir()` is a textbook "validate at the boundary" fix that the cycle-1 reviewer overlooked because the test suite happened to exercise only the missing-path branch. Stage 6 does real work even when per-phase reviews pass.
+  - **Honest test names matter.** `workspace_path_set_and_exists_canonicalizes` claimed more than it verified (MockRunner doesn't canonicalize — the runner-level tests do). Renaming to `workspace_path_set_propagates_to_runner` cost zero and made the test layer more honest.
+  - **Phase split was correct.** Phase 2 shipped clean while Phase 1 was burning revisions; entangling them would have cost more time. Defending phase splits in the Decision Matrix paid off.
+  - **Carry-forward from T011 honored:** filled `## Completion` BEFORE flipping `Status: COMPLETE`. CR did not catch a workflow-protocol violation this time.
+  - **Process miss (cycle 3 executor commit):** Executor committed `0687e9a` themselves instead of letting the orchestrator commit. Surfaced in cycle-3 review. Phase 2 brief explicitly added the no-commit rule and Phase 2 obeyed. Good signal that briefing-tightening works.
+- **Worklog note:** [03-t012-workspace-path-and-next-id.md](../../../docs/worklog/2026-05-02/03-t012-workspace-path-and-next-id.md)
