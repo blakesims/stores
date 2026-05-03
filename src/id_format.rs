@@ -109,6 +109,62 @@ pub fn render(template: &str, pk: i64) -> String {
     format!("{prefix}{pk:0>width$}{suffix}", pk = pk, width = width)
 }
 
+/// Parse a display_id string against an `id_format` template, returning the
+/// numeric portion as `i64`.
+///
+/// The supplied id must:
+/// - exactly match the template's literal prefix (case-sensitive)
+/// - exactly match the template's literal suffix (case-sensitive)
+/// - contain only ASCII digits in the placeholder slot
+/// - have a digit count >= the template's minimum width (zero-pad width).
+///   Longer numeric portions are allowed (so `T1000` parses against `T{:03d}`).
+///
+/// Example: `parse("T{:03d}", "T013")` → `Ok(13)`.
+/// Example: `parse("T{:03d}", "Tabc")` → `Err(...)`.
+pub fn parse(template: &str, supplied: &str) -> Result<i64> {
+    let start = template
+        .find('{')
+        .ok_or_else(|| anyhow::anyhow!("id_format '{template}' missing placeholder"))?;
+    let end = template
+        .find('}')
+        .ok_or_else(|| anyhow::anyhow!("id_format '{template}' missing closing brace"))?;
+    let inner = &template[start + 1..end];
+    if !is_valid_placeholder_inner(inner) {
+        bail!("id_format '{template}' has invalid placeholder");
+    }
+    let width_str = &inner[2..inner.len() - 1];
+    let min_width: usize = width_str.parse().unwrap_or(1);
+    let prefix = &template[..start];
+    let suffix = &template[end + 1..];
+
+    if !supplied.starts_with(prefix) || !supplied.ends_with(suffix) {
+        bail!(
+            "id '{supplied}' does not match id_format '{template}' \
+             (expected prefix '{prefix}', suffix '{suffix}')"
+        );
+    }
+    if supplied.len() < prefix.len() + suffix.len() {
+        bail!("id '{supplied}' too short for id_format '{template}'");
+    }
+    let digits = &supplied[prefix.len()..supplied.len() - suffix.len()];
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        bail!(
+            "id '{supplied}' does not match id_format '{template}' \
+             (numeric portion must be ASCII digits)"
+        );
+    }
+    if digits.len() < min_width {
+        bail!(
+            "id '{supplied}' does not match id_format '{template}' \
+             (numeric portion must be at least {min_width} digits, got {})",
+            digits.len()
+        );
+    }
+    digits
+        .parse::<i64>()
+        .map_err(|e| anyhow::anyhow!("id '{supplied}' numeric portion overflows i64: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +199,44 @@ mod tests {
     #[test]
     fn l003_format() {
         validate("L{:03d}").unwrap();
+    }
+
+    // ---- L001: parse() round-trip and rejection cases ----
+
+    #[test]
+    fn parse_accepts_padded_id() {
+        assert_eq!(parse("T{:03d}", "T013").unwrap(), 13);
+        assert_eq!(parse("T{:03d}", "T001").unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_accepts_id_wider_than_min_width() {
+        // Template requires at least 3 digits, but T1000 is fine (4 digits).
+        assert_eq!(parse("T{:03d}", "T1000").unwrap(), 1000);
+    }
+
+    #[test]
+    fn parse_rejects_non_digit_body() {
+        let err = parse("T{:03d}", "Tabc").unwrap_err();
+        assert!(err.to_string().contains("ASCII digits"));
+    }
+
+    #[test]
+    fn parse_rejects_wrong_prefix() {
+        let err = parse("T{:03d}", "X013").unwrap_err();
+        assert!(err.to_string().contains("prefix"));
+    }
+
+    #[test]
+    fn parse_rejects_too_few_digits() {
+        let err = parse("T{:03d}", "T13").unwrap_err();
+        assert!(err.to_string().contains("at least 3 digits"));
+    }
+
+    #[test]
+    fn parse_round_trips_with_render() {
+        let rendered = render("T{:03d}", 42);
+        assert_eq!(rendered, "T042");
+        assert_eq!(parse("T{:03d}", &rendered).unwrap(), 42);
     }
 }

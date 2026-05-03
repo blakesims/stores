@@ -732,11 +732,27 @@ fn build_leaf_cmd_owned(
 }
 
 /// Build the `add` command with leaf args.
+///
+/// L001: also exposes an optional `--display-id <ID>` flag so callers can
+/// pre-allocate the substrate row's display id (e.g. align with a filesystem
+/// `next-id` scan). The handler validates the supplied id against the schema's
+/// `id_format` and rejects collisions.
 fn build_add_cmd(
     leaves: &[crate::schema::flatten::LeafArg<'_>],
-    _schema: &Schema,
+    schema: &Schema,
 ) -> Command {
-    build_leaf_cmd("add", leaves, false)
+    let mut cmd = build_leaf_cmd("add", leaves, false);
+    cmd = cmd.arg(
+        Arg::new("display-id")
+            .long("display-id")
+            .help(format!(
+                "Pre-allocate the row's display id (must match id_format '{}'). \
+                 If absent, the substrate auto-mints the next id.",
+                schema.id_format
+            ))
+            .required(false),
+    );
+    cmd
 }
 
 /// Build the `update` command with leaf args + positional display_id.

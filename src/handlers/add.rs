@@ -47,6 +47,40 @@ pub fn run(
         anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
     })?;
 
+    // L001: optional --display-id override. When supplied, parse + collision-check
+    // up-front so we fail before any INSERT.
+    let explicit_display_id: Option<(String, i64)> = match matches
+        .try_get_one::<String>("display-id")
+        .ok()
+        .flatten()
+    {
+        Some(supplied) => {
+            let parsed_id = id_format::parse(&schema.id_format, supplied).map_err(|e| {
+                anyhow::anyhow!("--display-id format error: {e}")
+            })?;
+            // Collision check against existing rows.
+            let existing: Option<i64> = conn
+                .query_row(
+                    &format!(
+                        "SELECT id FROM {} WHERE display_id = ?1",
+                        quote_ident(&schema.name)
+                    ),
+                    rusqlite::params![supplied],
+                    |r| r.get(0),
+                )
+                .ok();
+            if existing.is_some() {
+                anyhow::bail!(
+                    "--display-id collision: '{}' already exists in store '{}'",
+                    supplied,
+                    schema.name
+                );
+            }
+            Some((supplied.clone(), parsed_id))
+        }
+        None => None,
+    };
+
     // Populate reserved fields
     let now = now_iso8601();
     let initial_status = schema.lifecycle.resolved_initial_state()?.to_string();
@@ -57,32 +91,41 @@ pub fn run(
     //           created_by, updated_by
     // Schema fields: iterate, serialize Record/List as JSON
 
-    let mut col_names: Vec<String> = vec![
-        "display_id".to_string(),
-        "status".to_string(),
-        "created_at".to_string(),
-        "updated_at".to_string(),
-        "created_by".to_string(),
-        "updated_by".to_string(),
-    ];
-    let mut placeholders: Vec<String> = vec![
-        "?1".to_string(),
-        "?2".to_string(),
-        "?3".to_string(),
-        "?4".to_string(),
-        "?5".to_string(),
-        "?6".to_string(),
-    ];
-    let mut values: Vec<rusqlite::types::Value> = vec![
-        rusqlite::types::Value::Text("__PLACEHOLDER__".to_string()),
-        rusqlite::types::Value::Text(initial_status.clone()),
-        rusqlite::types::Value::Text(now.clone()),
-        rusqlite::types::Value::Text(now.clone()),
-        rusqlite::types::Value::Text(invoker_str.clone()),
-        rusqlite::types::Value::Text(invoker_str.clone()),
-    ];
+    let mut col_names: Vec<String> = Vec::new();
+    let mut placeholders: Vec<String> = Vec::new();
+    let mut values: Vec<rusqlite::types::Value> = Vec::new();
 
-    let mut param_idx = 7usize;
+    // L001: if --display-id was supplied, INSERT an explicit `id` column first so
+    // the resulting rowid matches the supplied display_id's numeric portion.
+    if let Some((_, parsed_id)) = &explicit_display_id {
+        col_names.push("id".to_string());
+        placeholders.push(format!("?{}", values.len() + 1));
+        values.push(rusqlite::types::Value::Integer(*parsed_id));
+    }
+
+    // Reserved fields (display_id is a placeholder; we UPDATE it after insert
+    // unless --display-id was supplied, in which case we set it directly here.)
+    col_names.push("display_id".to_string());
+    placeholders.push(format!("?{}", values.len() + 1));
+    let display_id_placeholder = match &explicit_display_id {
+        Some((supplied, _)) => supplied.clone(),
+        None => "__PLACEHOLDER__".to_string(),
+    };
+    values.push(rusqlite::types::Value::Text(display_id_placeholder));
+
+    for (col, val) in [
+        ("status", initial_status.clone()),
+        ("created_at", now.clone()),
+        ("updated_at", now.clone()),
+        ("created_by", invoker_str.clone()),
+        ("updated_by", invoker_str.clone()),
+    ] {
+        col_names.push(col.to_string());
+        placeholders.push(format!("?{}", values.len() + 1));
+        values.push(rusqlite::types::Value::Text(val));
+    }
+
+    let mut param_idx = values.len() + 1;
     for field in &schema.fields {
         let val = entry.get(&field.name);
         col_names.push(field.name.clone());
@@ -139,17 +182,58 @@ pub fn run(
     let sql = format!("INSERT INTO {} ({col_list}) VALUES ({ph_list})", quote_ident(&schema.name));
 
     // Execute inside a transaction; render display_id from last_insert_rowid
+    // (or use the explicit one supplied via --display-id).
     let tx = conn.unchecked_transaction()?;
     {
         let mut stmt = tx.prepare(&sql).context("prepare insert")?;
         stmt.execute(rusqlite::params_from_iter(values.iter()))?;
     }
     let rowid = tx.last_insert_rowid();
-    let display_id = id_format::render(&schema.id_format, rowid);
-    tx.execute(
-        &format!("UPDATE {} SET display_id = ?1 WHERE id = ?2", quote_ident(&schema.name)),
-        rusqlite::params![display_id, rowid],
-    )?;
+    let display_id = match &explicit_display_id {
+        Some((supplied, _)) => {
+            // L001: bump the AUTOINCREMENT counter past the supplied id so the
+            // next auto-mint does not collide. SQLite tracks the high-water mark
+            // in `sqlite_sequence`; AUTOINCREMENT picks max(sqlite_sequence,
+            // max(rowid)) + 1, so we only need to write when our explicit id
+            // exceeds the existing sqlite_sequence value.
+            let current_seq: Option<i64> = tx
+                .query_row(
+                    "SELECT seq FROM sqlite_sequence WHERE name = ?1",
+                    rusqlite::params![&schema.name],
+                    |r| r.get(0),
+                )
+                .ok();
+            match current_seq {
+                Some(seq) if seq >= rowid => {
+                    // Already past the explicit id — nothing to do.
+                }
+                Some(_) => {
+                    tx.execute(
+                        "UPDATE sqlite_sequence SET seq = ?1 WHERE name = ?2",
+                        rusqlite::params![rowid, &schema.name],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO sqlite_sequence (name, seq) VALUES (?1, ?2)",
+                        rusqlite::params![&schema.name, rowid],
+                    )?;
+                }
+            }
+            supplied.clone()
+        }
+        None => {
+            let rendered = id_format::render(&schema.id_format, rowid);
+            tx.execute(
+                &format!(
+                    "UPDATE {} SET display_id = ?1 WHERE id = ?2",
+                    quote_ident(&schema.name)
+                ),
+                rusqlite::params![rendered, rowid],
+            )?;
+            rendered
+        }
+    };
     tx.commit()?;
 
     println!("{display_id}");
@@ -726,5 +810,151 @@ fields:
             .query_row("SELECT notes FROM jstore WHERE display_id = 'J001'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(stored_notes, "null", "absent Json field must store \"null\" literal (Decision 4)");
+    }
+
+    // ---- L001: --display-id flag on `add` ----
+    //
+    // The four AC tests from the L001 contract:
+    //   1. explicit --display-id succeeds and stores the supplied id
+    //   2. subsequent auto-mint advances past the supplied id (no collision)
+    //   3. duplicate --display-id is rejected with a collision error
+    //   4. malformed --display-id is rejected with a format error
+    // Plus a safety test that the auto-mint path still works when the flag is absent.
+
+    /// Build an `add` command that includes the `--display-id` flag, mirroring
+    /// what `cli/dynamic.rs::build_add_cmd` registers at runtime.
+    fn build_test_add_cmd_with_display_id(schema: &Schema) -> clap::Command {
+        let mut cmd = build_test_add_cmd(schema);
+        cmd = cmd.arg(
+            clap::Arg::new("display-id")
+                .long("display-id")
+                .required(false),
+        );
+        cmd
+    }
+
+    #[test]
+    fn add_with_explicit_display_id_succeeds() {
+        let (schema, conn) = in_memory_schema_and_conn();
+        let cmd = build_test_add_cmd_with_display_id(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--display-id", "T013",
+            "--title", "explicit id row",
+        ]);
+
+        run(&schema, &conn, &matches, Actor::Human).unwrap();
+
+        let (rowid, display_id): (i64, String) = conn
+            .query_row(
+                "SELECT id, display_id FROM tstore WHERE display_id = 'T013'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row with display_id=T013 must exist");
+        assert_eq!(display_id, "T013", "stored display_id must equal supplied value");
+        assert_eq!(rowid, 13, "rowid must equal numeric portion of supplied display id");
+    }
+
+    #[test]
+    fn add_after_explicit_display_id_advances_auto_mint_past_supplied() {
+        let (schema, conn) = in_memory_schema_and_conn();
+        let cmd1 = build_test_add_cmd_with_display_id(&schema);
+        let m1 = cmd1.get_matches_from([
+            "add",
+            "--display-id", "T013",
+            "--title", "first",
+        ]);
+        run(&schema, &conn, &m1, Actor::Human).unwrap();
+
+        // Subsequent auto-mint must be T014, not T002 — the AUTOINCREMENT counter
+        // must have been bumped past the explicit id.
+        let cmd2 = build_test_add_cmd_with_display_id(&schema);
+        let m2 = cmd2.get_matches_from([
+            "add",
+            "--title", "second",
+        ]);
+        run(&schema, &conn, &m2, Actor::Human).unwrap();
+
+        let display_id: String = conn
+            .query_row(
+                "SELECT display_id FROM tstore WHERE title = 'second'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(display_id, "T014", "auto-mint must advance past explicitly-supplied id");
+    }
+
+    #[test]
+    fn add_with_colliding_display_id_is_rejected() {
+        let (schema, conn) = in_memory_schema_and_conn();
+        // Seed: insert T013 explicitly.
+        let cmd1 = build_test_add_cmd_with_display_id(&schema);
+        run(
+            &schema,
+            &conn,
+            &cmd1.get_matches_from([
+                "add",
+                "--display-id", "T013",
+                "--title", "first",
+            ]),
+            Actor::Human,
+        )
+        .unwrap();
+
+        // Second insert with the same explicit id must fail.
+        let cmd2 = build_test_add_cmd_with_display_id(&schema);
+        let m2 = cmd2.get_matches_from([
+            "add",
+            "--display-id", "T013",
+            "--title", "second",
+        ]);
+        let err = run(&schema, &conn, &m2, Actor::Human).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("collision"),
+            "error must mention 'collision'; got: {msg}"
+        );
+        assert!(
+            msg.contains("T013"),
+            "error must name the colliding id; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn add_with_malformed_display_id_is_rejected() {
+        let (schema, conn) = in_memory_schema_and_conn();
+        let cmd = build_test_add_cmd_with_display_id(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--display-id", "Tabc",
+            "--title", "bad id",
+        ]);
+
+        let err = run(&schema, &conn, &matches, Actor::Human).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("format error") || msg.contains("ASCII digits"),
+            "error must indicate a format problem; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn add_without_display_id_flag_still_auto_mints() {
+        // Regression-trap: the auto-mint path must continue to work unchanged
+        // when --display-id is absent (AC5).
+        let (schema, conn) = in_memory_schema_and_conn();
+        let cmd = build_test_add_cmd_with_display_id(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--title", "auto",
+        ]);
+        run(&schema, &conn, &matches, Actor::Human).unwrap();
+
+        let display_id: String = conn
+            .query_row("SELECT display_id FROM tstore WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(display_id, "T001", "auto-mint path must still produce T001 when no flag");
     }
 }
