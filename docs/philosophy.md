@@ -24,7 +24,16 @@ The `intent_contract` record on `observations` has `required_when: "intent_contr
 
 ### 2. Per-field `actor` — authority is a structural property of the field, not a convention
 
-The `gate.answer` field carries `actor: human`. An AI invoker (auto-detected from `$CLAUDECODE`) attempting to write it is rejected — with the field name, the required actor, and the detection source in the error. The override (`--invoker human`) is explicit and audited. This is not "the AI agrees not to answer human-only questions"; it is the database refusing the row.
+The `gate.answer` field carries `actor: human`. An AI invoker (auto-detected from `$CLAUDECODE`) attempting to write it is rejected — with the field name, the required actor, and the detection source in the error. This is not "the AI agrees not to answer human-only questions"; it is the database refusing the row.
+
+A field with `actor: human` has **two equivalent grounding paths**, both schema-verified:
+
+- **`--invoker human`** — the user types the verb themselves. The CLI invocation is the human's signature.
+- **`--invoker ai_with_human --approve-token <T>`** — the user has pre-decrypted an age-encrypted token (user-presence required: passphrase or hardware tap) and pasted it into the AI's chat context. The AI executes the write with the token attached; the substrate verifies via constant-time hash compare against `~/.config/stores/approve.token.hash`. The token IS the user's signature, transmitted through the AI as agent.
+
+Both paths are equally valid grounding. The difference is cardinality: path one is per-row (the user sits at the keyboard for *this* verb); path two is per-session (the user pre-authorized a session of work and the AI executes individual writes within it). The substrate doesn't care which path produced the write; it cares only that the row is grounded.
+
+The threat model is named explicitly. The token at rest is age-encrypted to a user-presence-required identity (passphrase-protected age key, hardware-backed key, etc.); a malicious or runaway AI cannot decrypt it without the user. The `auth init` verb refuses to bootstrap against a raw plaintext age key — that would defeat the encryption. Once the user decrypts the token into chat context, the AI possesses it for the remainder of the session; the AI's *ask-first* behavioral discipline (propose ONE action; await `go` before each U-moment) is the runtime protection during that window. Session-end → token leaves AI context.
 
 ### 3. Lifecycle transitions as guarded edges
 
