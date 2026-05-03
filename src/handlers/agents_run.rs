@@ -10,10 +10,13 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::Connection;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::flow::{AgentEntry, AgentsYaml};
+use crate::codegen::ddl::quote_ident;
+use crate::flow::{decide, AgentEntry, AgentsYaml, Decision, NotifyEvent, PoliciesYaml};
 
 /// Args parsed from the CLI.
 pub struct RunArgs {
@@ -53,12 +56,19 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
 
     // Load policies.yaml — fail-loud on parse error; missing file → empty.
     let policies_path = stores_dir.join("policies.yaml");
-    if policies_path.exists() {
+    let policies = if policies_path.exists() {
         let bytes = std::fs::read_to_string(&policies_path)
             .with_context(|| format!("reading {}", policies_path.display()))?;
         crate::flow::policies_yaml::PoliciesYaml::from_yaml(&bytes)
-            .context("parsing .stores/policies.yaml")?;
-    }
+            .context("parsing .stores/policies.yaml")?
+    } else {
+        PoliciesYaml {
+            hash: String::new(),
+            policies: vec![],
+        }
+    };
+
+    let config_path = stores_dir.join("config.yaml");
 
     if args.detach {
         detach_process(&args.log_file)?;
@@ -76,7 +86,7 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
             eprintln!("[daemon] shutdown received, exiting after {} iterations", iter);
             break;
         }
-        match poll_once(&conn, &agents, &claimer) {
+        match poll_once(&conn, &agents, &policies, &config_path, &claimer) {
             Ok(n) if n > 0 => eprintln!("[daemon] dispatched {} job(s) in iteration {}", n, iter),
             Ok(_) => {}
             Err(e) => eprintln!("[daemon] poll error: {}", e),
@@ -108,9 +118,16 @@ fn sleep_interruptible(ms: u64) {
 }
 
 /// One poll iteration: scan `transition_history` for entries that match each
-/// agent's subscriptions, claim atomically, and dispatch. Returns the number
-/// of dispatches performed.
-pub fn poll_once(conn: &Connection, agents: &AgentsYaml, claimer: &str) -> Result<usize> {
+/// agent's subscriptions, gate via the policy layer, claim atomically, and
+/// dispatch. Returns the number of dispatches performed (Halt-policied rows
+/// do NOT count).
+pub fn poll_once(
+    conn: &Connection,
+    agents: &AgentsYaml,
+    policies: &PoliciesYaml,
+    config_path: &Path,
+    claimer: &str,
+) -> Result<usize> {
     let mut dispatched = 0;
     for agent in &agents.agents {
         for sub in &agent.subscribes_to {
@@ -127,6 +144,41 @@ pub fn poll_once(conn: &Connection, agents: &AgentsYaml, claimer: &str) -> Resul
                 .filter_map(|r| r.ok())
                 .collect();
             for (transition_id, row_id, display_id) in rows {
+                // Policy gate: read the row as JSON, run decide().
+                // On Halt: ntfy + skip (do NOT claim or retry).
+                let row_json = read_row_as_json(conn, &sub.store, row_id)
+                    .unwrap_or(Value::Object(serde_json::Map::new()));
+                let decision = decide(
+                    policies,
+                    &sub.store,
+                    &sub.transition.from,
+                    &sub.transition.to,
+                    &row_json,
+                )
+                .unwrap_or(Decision::Allow {
+                    policy_id: "default-allow".into(),
+                });
+                let policy_id = match &decision {
+                    Decision::Allow { policy_id } => policy_id.clone(),
+                    Decision::Halt { policy_id } => {
+                        let event = NotifyEvent {
+                            row_id: display_id.clone(),
+                            transition_attempted: format!(
+                                "{}: {}→{}",
+                                sub.store, sub.transition.from, sub.transition.to
+                            ),
+                            policy_id_or_actor_halt: policy_id.clone(),
+                            summary: format!(
+                                "policy '{}' halted dispatch to agent '{}'",
+                                policy_id, agent.name
+                            ),
+                        };
+                        let _ =
+                            crate::flow::notify_with_path(config_path, event);
+                        continue;
+                    }
+                };
+
                 let claimed = try_claim(
                     conn,
                     &sub.store,
@@ -146,6 +198,8 @@ pub fn poll_once(conn: &Connection, agents: &AgentsYaml, claimer: &str) -> Resul
                     &display_id,
                     &sub.transition.from,
                     &sub.transition.to,
+                    &policy_id,
+                    &policies.hash,
                 );
                 let (status_str, code) = match exit_code {
                     Ok(c) => (
@@ -218,6 +272,13 @@ fn mark_claim_finished(
 }
 
 /// Run an agent's command. For builtins this is a stub until Phase 6.
+///
+/// `policy_ref` and `policies_hash` are forwarded as env vars
+/// `STORES_POLICY_REF` / `STORES_POLICIES_HASH` so any follow-on substrate
+/// transition the dispatched subprocess performs can record them on
+/// `transition_history` (see `transition.rs::run_in_tx`). This is the
+/// daemon→subscriber→substrate plumbing for AC5.3 / Task 5.2.
+#[allow(clippy::too_many_arguments)]
 fn run_dispatch(
     agent: &AgentEntry,
     store: &str,
@@ -225,11 +286,13 @@ fn run_dispatch(
     display_id: &str,
     from: &str,
     to: &str,
+    policy_ref: &str,
+    policies_hash: &str,
 ) -> Result<i32> {
     if agent.is_builtin() {
         eprintln!(
-            "[daemon] builtin '{}' (stub) for {}/{} ({}->{})",
-            agent.command, store, display_id, from, to
+            "[daemon] builtin '{}' (stub) for {}/{} ({}->{}) policy_ref='{}'",
+            agent.command, store, display_id, from, to, policy_ref
         );
         return Ok(0);
     }
@@ -242,9 +305,55 @@ fn run_dispatch(
         .env("STORES_TRANSITION_FROM", from)
         .env("STORES_TRANSITION_TO", to)
         .env("STORES_STORE", store)
+        .env("STORES_POLICY_REF", policy_ref)
+        .env("STORES_POLICIES_HASH", policies_hash)
         .status()
         .with_context(|| format!("spawning agent '{}'", agent.name))?;
     Ok(status.code().unwrap_or(-1))
+}
+
+/// Read a single row from `<store>` as a flat JSON object. JSON-typed columns
+/// (TEXT-encoded) are best-effort parsed back into structured Values so
+/// nested predicates work (`$linked_observations[0]`, etc).
+fn read_row_as_json(conn: &Connection, store: &str, row_id: i64) -> Result<Value> {
+    let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(store));
+    let mut stmt = conn.prepare(&sql)?;
+    let cols: Vec<String> = stmt
+        .column_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut rows = stmt.query(rusqlite::params![row_id])?;
+    let row = rows
+        .next()?
+        .ok_or_else(|| anyhow!("row id={} not found in {}", row_id, store))?;
+    let mut obj = serde_json::Map::new();
+    for (i, name) in cols.iter().enumerate() {
+        let v: rusqlite::types::Value = row.get(i)?;
+        let jv = match v {
+            rusqlite::types::Value::Null => Value::Null,
+            rusqlite::types::Value::Integer(i) => Value::from(i),
+            rusqlite::types::Value::Real(f) => {
+                Value::from(serde_json::Number::from_f64(f).unwrap_or(0.into()))
+            }
+            rusqlite::types::Value::Text(s) => match serde_json::from_str::<Value>(&s) {
+                Ok(parsed @ (Value::Object(_) | Value::Array(_))) => parsed,
+                _ => Value::String(s),
+            },
+            rusqlite::types::Value::Blob(b) => {
+                Value::String(String::from_utf8_lossy(&b).to_string())
+            }
+        };
+        obj.insert(name.clone(), jv);
+    }
+    Ok(Value::Object(obj))
+}
+
+/// Public, just so a caller in lib.rs can resolve `.stores/config.yaml` for
+/// tests without re-implementing path logic.
+#[allow(dead_code)]
+pub(crate) fn default_config_path() -> Result<PathBuf> {
+    Ok(crate::paths::stores_dir()?.join("config.yaml"))
 }
 
 fn detach_process(log_file: &Option<String>) -> Result<()> {
@@ -293,13 +402,38 @@ impl AgentsYaml {
 mod tests {
     use super::*;
     use crate::codegen::ddl::SUBSTRATE_DDL;
-    use crate::flow::{AgentEntry, BackoffKind, RetryPolicy, Subscription};
     use crate::flow::agents_yaml::TransitionEdge;
+    use crate::flow::{AgentEntry, BackoffKind, RetryPolicy, Subscription};
 
     fn fresh_db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(SUBSTRATE_DDL).unwrap();
+        // Minimal `tasks` table the policy/dispatch tests rely on. Fields
+        // mirror what the production schema would expose to predicates.
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_id TEXT UNIQUE NOT NULL,
+                status TEXT NOT NULL,
+                tier_hint TEXT,
+                branch TEXT
+            );",
+        )
+        .unwrap();
         c
+    }
+
+    fn empty_policies() -> PoliciesYaml {
+        PoliciesYaml {
+            hash: String::new(),
+            policies: vec![],
+        }
+    }
+
+    fn cfg_path() -> std::path::PathBuf {
+        // Pointing at a non-existent file is fine: notify_with_path falls
+        // through to the env var (also unset in tests) → stderr-only.
+        std::path::PathBuf::from("/tmp/stores-test-nonexistent-config.yaml")
     }
 
     fn insert_history(
@@ -315,6 +449,22 @@ mod tests {
              (store, row_id, display_id, from_status, to_status, verb, invoker, occurred_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, 'submit', 'ai_autonomous', '2026-05-03T00:00:00Z')",
             rusqlite::params![store, row_id, display_id, from, to],
+        )
+        .unwrap();
+    }
+
+    fn insert_task_row(
+        conn: &Connection,
+        row_id: i64,
+        display_id: &str,
+        status: &str,
+        tier: &str,
+        branch: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, status, tier_hint, branch) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![row_id, display_id, status, tier, branch],
         )
         .unwrap();
     }
@@ -344,13 +494,16 @@ mod tests {
     #[test]
     fn poll_dispatches_matching_row_once() {
         let conn = fresh_db();
+        insert_task_row(&conn, 42, "T042", "in_review", "T2", "feat/x");
         insert_history(&conn, "tasks", 42, "T042", "ready", "in_review");
         let agents = AgentsYaml {
             agents: vec![noop_agent("noop", "tasks", "ready", "in_review")],
             deployment_specialist: None,
         };
+        let policies = empty_policies();
+        let cfg = cfg_path();
 
-        let n = poll_once(&conn, &agents, "test-claimer").unwrap();
+        let n = poll_once(&conn, &agents, &policies, &cfg, "test-claimer").unwrap();
         assert_eq!(n, 1, "first poll dispatches the matching row exactly once");
 
         // Lock recorded.
@@ -364,7 +517,7 @@ mod tests {
         assert_eq!(cnt, 1);
 
         // Second poll on same db is a no-op (already claimed).
-        let n2 = poll_once(&conn, &agents, "test-claimer").unwrap();
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test-claimer").unwrap();
         assert_eq!(n2, 0, "second poll does not re-dispatch an already-claimed row");
     }
 
@@ -426,6 +579,282 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("command"), "expected field path; got: {err}");
+    }
+
+    // ---- Phase 5: policy integration tests (AC5.1 cases d/e/f/g/h) ----
+    pub(super) mod policy {
+        use super::*;
+        use crate::flow::policies_yaml::PoliciesYaml;
+        use crate::flow::{install_notifier, MockNotifier, NotifierBackend, NotifyEvent};
+        use std::sync::Mutex;
+
+        /// Helper: build a PoliciesYaml from inline YAML and seed agents with
+        /// a single noop subscriber on tasks: ready→in_review.
+        fn fixture(policies_yaml: &str) -> (Connection, AgentsYaml, PoliciesYaml) {
+            let conn = fresh_db();
+            let agents = AgentsYaml {
+                agents: vec![noop_agent("noop", "tasks", "ready", "in_review")],
+                deployment_specialist: None,
+            };
+            let policies = if policies_yaml.is_empty() {
+                empty_policies()
+            } else {
+                PoliciesYaml::from_yaml(policies_yaml).unwrap()
+            };
+            (conn, agents, policies)
+        }
+
+        /// Capture-and-forward shim so the test can assert on events after
+        /// the boxed backend is installed into the OnceLock.
+        struct Shim {
+            inner: &'static MockNotifier,
+        }
+        impl NotifierBackend for Shim {
+            fn send(&self, url: &str, event: &NotifyEvent) -> Result<()> {
+                self.inner.send(url, event)
+            }
+        }
+
+        /// Install a fresh global mock notifier and return its handle.
+        fn install_mock() -> &'static MockNotifier {
+            let mock: &'static MockNotifier = Box::leak(Box::new(MockNotifier::new()));
+            install_notifier(Box::new(Shim { inner: mock }));
+            mock
+        }
+
+        /// All policy tests share the global notifier + STORES_NTFY_URL env.
+        /// Serialize them to keep the captured events scoped.
+        fn lock() -> &'static Mutex<()> {
+            use std::sync::OnceLock;
+            static L: OnceLock<Mutex<()>> = OnceLock::new();
+            L.get_or_init(|| Mutex::new(()))
+        }
+
+        /// AC5.1 case (d): integration — policy match drives daemon dispatch.
+        /// An Allow policy with a matching predicate lets the row through;
+        /// the same policy with a non-matching predicate falls through to
+        /// default-allow.
+        #[test]
+        fn d_policy_match_drives_dispatch() {
+            let _g = lock().lock().unwrap();
+            let yaml = r#"
+policies:
+  - id: allow-T2-fast-path
+    transition: { store: tasks, from: ready, to: in_review }
+    predicate: { op: "==", left: "$tier_hint", right: "T2" }
+    action: allow
+"#;
+            let (conn, agents, policies) = fixture(yaml);
+            insert_task_row(&conn, 11, "T011", "in_review", "T2", "feat/x");
+            insert_history(&conn, "tasks", 11, "T011", "ready", "in_review");
+
+            let n =
+                poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            assert_eq!(n, 1, "T2 row matches allow policy and is dispatched");
+        }
+
+        /// AC5.1 case (e): default-allow — no rule matches, row still flows.
+        #[test]
+        fn e_default_allow_when_no_rule_matches() {
+            let _g = lock().lock().unwrap();
+            let (conn, agents, policies) = fixture("");
+            insert_task_row(&conn, 21, "T021", "in_review", "T2", "feat/x");
+            insert_history(&conn, "tasks", 21, "T021", "ready", "in_review");
+
+            let n =
+                poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            assert_eq!(n, 1, "default-allow lets the row flow");
+        }
+
+        /// AC5.1 case (f) + AC5.2: NEVER overrides Allow → halt + ntfy fired.
+        #[test]
+        fn f_never_overrides_allow_and_skips_dispatch() {
+            let _g = lock().lock().unwrap();
+            std::env::set_var("STORES_NTFY_URL", "https://test.local");
+            let mock = install_mock();
+            let yaml = r#"
+policies:
+  - id: never-T3-fast-path
+    transition: { store: tasks, from: ready, to: in_review }
+    predicate: { op: "==", left: "$tier_hint", right: "T3" }
+    action: never
+  - id: allow-all
+    transition: { store: tasks, from: ready, to: in_review }
+    predicate: { op: "!=", left: "$tier_hint", right: "" }
+    action: allow
+"#;
+            let (conn, agents, policies) = fixture(yaml);
+            insert_task_row(&conn, 31, "T031", "in_review", "T3", "feat/x");
+            insert_history(&conn, "tasks", 31, "T031", "ready", "in_review");
+
+            let n = poll_once(
+                &conn,
+                &agents,
+                &policies,
+                &cfg_path(),
+                "test-claimer",
+            )
+            .unwrap();
+            assert_eq!(n, 0, "NEVER halts dispatch (overrides Allow)");
+
+            // No claim recorded.
+            let cnt: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM dispatch_locks WHERE row_id = 31",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(cnt, 0, "halted row must not be claimed");
+
+            // AC5.2: a single MockNotifier event with the halting policy id.
+            let evs = mock.events();
+            assert_eq!(evs.len(), 1, "exactly one ntfy event recorded");
+            assert_eq!(evs[0].1.policy_id_or_actor_halt, "never-T3-fast-path");
+            assert_eq!(evs[0].1.row_id, "T031");
+            std::env::remove_var("STORES_NTFY_URL");
+        }
+
+        /// AC5.1 case (g) + AC5.3: when the dispatched subscriber writes a
+        /// substrate transition, transition_history captures the policy_ref
+        /// (matched id or 'default-allow') AND policies_hash. Manual writes
+        /// (no env) record NULL.
+        #[test]
+        fn g_policy_ref_recording_on_auto_path_and_null_on_manual() {
+            let _g = lock().lock().unwrap();
+            // Auto path: env vars set → write into transition_history.
+            std::env::set_var("STORES_POLICY_REF", "allow-T1-fast-path");
+            std::env::set_var("STORES_POLICIES_HASH", "deadbeef");
+            let conn = fresh_db();
+            // Need a real schema-driven write for this; use the same minimal
+            // observations schema the transition.rs tests use.
+            let schema_yaml = r#"
+name: observations
+id_format: "L{:03d}"
+default_actor: ai_with_human
+lifecycle:
+  states: [open, triaged]
+  transitions:
+    - {from: open, to: triaged, verb: triage, actor: ai_with_human}
+fields:
+  - name: summary
+    type: text
+    required: true
+"#;
+            let schema = crate::schema::Schema::from_yaml(schema_yaml).unwrap();
+            // Create the per-store observations table on the same conn.
+            conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO observations (display_id, status, summary) VALUES ('L001', 'open', 'x')",
+                [],
+            )
+            .unwrap();
+            let cmd = clap::Command::new("triage")
+                .arg(clap::Arg::new("display_id").required(true).index(1))
+                .arg(clap::Arg::new("summary").long("summary"));
+            let m = cmd.get_matches_from(["triage", "L001"]);
+            crate::handlers::transition::run(
+                &schema,
+                &conn,
+                &m,
+                crate::schema::actor::Actor::Human.into(),
+                "triage",
+            )
+            .unwrap();
+
+            let (pref, phash): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT policy_ref, policies_hash FROM transition_history \
+                     WHERE store='observations' AND display_id='L001'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(pref.as_deref(), Some("allow-T1-fast-path"));
+            assert_eq!(phash.as_deref(), Some("deadbeef"));
+
+            // Manual path: clear envs → next write must record NULL.
+            std::env::remove_var("STORES_POLICY_REF");
+            std::env::remove_var("STORES_POLICIES_HASH");
+            let schema2_yaml = r#"
+name: tasks2
+id_format: "T{:03d}"
+default_actor: ai_with_human
+lifecycle:
+  states: [open, triaged]
+  transitions:
+    - {from: open, to: triaged, verb: triage, actor: ai_with_human}
+fields:
+  - name: summary
+    type: text
+    required: true
+"#;
+            let schema2 = crate::schema::Schema::from_yaml(schema2_yaml).unwrap();
+            conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema2))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO tasks2 (display_id, status, summary) VALUES ('T001', 'open', 'x')",
+                [],
+            )
+            .unwrap();
+            let cmd2 = clap::Command::new("triage")
+                .arg(clap::Arg::new("display_id").required(true).index(1))
+                .arg(clap::Arg::new("summary").long("summary"));
+            let m2 = cmd2.get_matches_from(["triage", "T001"]);
+            crate::handlers::transition::run(
+                &schema2,
+                &conn,
+                &m2,
+                crate::schema::actor::Actor::Human.into(),
+                "triage",
+            )
+            .unwrap();
+            let (pref2, phash2): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT policy_ref, policies_hash FROM transition_history \
+                     WHERE store='tasks2' AND display_id='T001'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(pref2.is_none(), "manual path: policy_ref must be NULL");
+            assert!(phash2.is_none(), "manual path: policies_hash must be NULL");
+        }
+
+        /// AC5.1 case (h): ntfy mock — halt event body contains the row id
+        /// and the halting policy id.
+        #[test]
+        fn h_ntfy_halt_event_body() {
+            let _g = lock().lock().unwrap();
+            std::env::set_var("STORES_NTFY_URL", "https://test.local");
+            let mock = install_mock();
+            let yaml = r#"
+policies:
+  - id: halt-on-empty-branch
+    transition: { store: tasks, from: ready, to: in_review }
+    predicate: { op: "==", left: "$branch", right: "" }
+    action: halt
+"#;
+            let (conn, agents, policies) = fixture(yaml);
+            insert_task_row(&conn, 99, "T099", "in_review", "T2", "");
+            insert_history(&conn, "tasks", 99, "T099", "ready", "in_review");
+
+            let n =
+                poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            assert_eq!(n, 0, "halt policy must skip dispatch");
+
+            let evs = mock.events();
+            assert_eq!(evs.len(), 1);
+            assert_eq!(evs[0].1.row_id, "T099");
+            assert_eq!(evs[0].1.policy_id_or_actor_halt, "halt-on-empty-branch");
+            assert!(
+                evs[0].1.transition_attempted.contains("ready"),
+                "transition descriptor must mention from-state; got: {}",
+                evs[0].1.transition_attempted
+            );
+            std::env::remove_var("STORES_NTFY_URL");
+        }
     }
 
     /// SHUTDOWN flag is observed by sleep_interruptible.

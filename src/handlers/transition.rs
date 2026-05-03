@@ -13,6 +13,20 @@ use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601, read_row};
 
+/// Read the policy_ref/policies_hash env vars set by the autonomous flow
+/// daemon (Phase 5: agents_run.rs::run_dispatch). When unset (the manual CLI
+/// path), returns `(None, None)` so transition_history records NULL — the
+/// distinct sentinel for "manual transition" per AC5.4.
+pub(crate) fn read_policy_env() -> (Option<String>, Option<String>) {
+    let pref = std::env::var("STORES_POLICY_REF")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let phash = std::env::var("STORES_POLICIES_HASH")
+        .ok()
+        .filter(|s| !s.is_empty());
+    (pref, phash)
+}
+
 /// Entry point for direct CLI use: opens its own transaction and delegates to `run_in_tx`.
 pub fn run(
     schema: &Schema,
@@ -173,6 +187,7 @@ pub fn run_close_as_addressed(
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
+    let (pref, phash) = read_policy_env();
     execute_transition_write(
         &tx,
         schema,
@@ -184,8 +199,8 @@ pub fn run_close_as_addressed(
         &diff,
         &merged,
         invoker.actor,
-        None,
-        None,
+        pref.as_deref(),
+        phash.as_deref(),
     )?;
 
     tx.commit().context("close_as_addressed: commit tx")?;
@@ -301,6 +316,7 @@ pub(crate) fn run_in_tx(
     }
 
     // Write: UPDATE merged fields + status = transition.to + updated_*
+    let (pref, phash) = read_policy_env();
     execute_transition_write(
         tx,
         schema,
@@ -312,8 +328,8 @@ pub(crate) fn run_in_tx(
         &diff,
         &merged,
         invoker.actor,
-        None,
-        None,
+        pref.as_deref(),
+        phash.as_deref(),
     )?;
 
     println!(
