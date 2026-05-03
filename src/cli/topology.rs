@@ -591,10 +591,47 @@ pub fn render_via_dot(dot_source: &str) -> RenderOutcome {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Build the `Format::Auto` stdout string. Per-zone rendering through
+/// `graph-easy --as=boxart`; on missing/failing graph-easy, returns the
+/// combined `emit_dot` source so the caller can print it with an
+/// install-hint to stderr.  The `Option<FallbackReason>` lets `run()`
+/// decide which stderr note to emit.
+fn render_auto_with_reason(
+    manifest: &Manifest,
+    schemas: &HashMap<String, Schema>,
+    opts: &Opts,
+) -> (String, Option<FallbackReason>) {
+    let zones = zones_for_auto(manifest, schemas, opts);
+    let mut rendered: Vec<(String, String)> = Vec::with_capacity(zones.len());
+    for (header, dot_source) in &zones {
+        match render_via_dot(dot_source) {
+            RenderOutcome::Rendered(s) => rendered.push((header.clone(), s)),
+            RenderOutcome::Fallback { reason, .. } => {
+                let combined = emit_dot(manifest, schemas, opts);
+                return (combined, Some(reason));
+            }
+        }
+    }
+    let mut out = String::new();
+    for (header, body) in rendered {
+        let _ = write!(out, "## {header}\n\n{body}\n\n");
+    }
+    (out, None)
+}
+
+/// Test-friendly helper: returns the same string `Format::Auto` would
+/// print to stdout (rendered zones, or combined dot source on fallback).
+/// Stderr install-hints remain the responsibility of `run()`.
+#[allow(dead_code)]
+pub fn render_auto(
+    manifest: &Manifest,
+    schemas: &HashMap<String, Schema>,
+    opts: &Opts,
+) -> String {
+    render_auto_with_reason(manifest, schemas, opts).0
+}
+
 /// Entry point for the `topology` subcommand.
-///
-/// `Format::Auto` shells out to `dot -Tutf8`; on missing or failing `dot` it
-/// prints the dot source and a one-line install hint to stderr.
 pub fn run(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts: Opts) -> Result<()> {
     match opts.format {
         Format::Mermaid => {
@@ -604,29 +641,12 @@ pub fn run(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts: Opts) -
             print!("{}", emit_dot(manifest, schemas, &opts));
         }
         Format::Auto => {
-            let zones = zones_for_auto(manifest, schemas, &opts);
-            let mut rendered: Vec<(String, String)> = Vec::with_capacity(zones.len());
-            let mut fallback_reason: Option<FallbackReason> = None;
-            for (header, dot_source) in &zones {
-                match render_via_dot(dot_source) {
-                    RenderOutcome::Rendered(s) => rendered.push((header.clone(), s)),
-                    RenderOutcome::Fallback { reason, .. } => {
-                        fallback_reason = Some(reason);
-                        break;
-                    }
-                }
-            }
-            if let Some(reason) = fallback_reason {
-                let combined = emit_dot(manifest, schemas, &opts);
-                print!("{combined}");
-                match reason {
-                    FallbackReason::DotMissing => eprintln!("{FALLBACK_NOTE_MISSING}"),
-                    FallbackReason::DotFailed(_) => eprintln!("{FALLBACK_NOTE_FAILED}"),
-                }
-            } else {
-                for (header, body) in rendered {
-                    print!("## {header}\n\n{body}\n\n");
-                }
+            let (stdout, reason) = render_auto_with_reason(manifest, schemas, &opts);
+            print!("{stdout}");
+            match reason {
+                Some(FallbackReason::DotMissing) => eprintln!("{FALLBACK_NOTE_MISSING}"),
+                Some(FallbackReason::DotFailed(_)) => eprintln!("{FALLBACK_NOTE_FAILED}"),
+                None => {}
             }
         }
     }
