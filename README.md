@@ -107,33 +107,39 @@ stores topology --store tasks           # filter Z1/Z2 to one store; Z0 still sh
 stores topology --no-icons              # disable Nerd Font glyphs (text codes A / H+ / H! / F)
 ```
 
-Representative `--format dot` output (trimmed) for the bundled `observations` / `gate` / `tasks` trio:
+Representative `--format auto` output (trimmed) for the bundled `observations` / `gate` / `tasks` trio. Each zone is rendered as its own standalone boxart graph under a `## Z<n>: …` header, so multi-cluster layouts no longer blow up horizontally:
 
-```dot
-digraph stores_topology {
-  rankdir=TB;
-  compound=true;
-
-  subgraph cluster_z0_cross_store {
-    label="Z0: cross-store soft-FKs";
-    "z0_tasks" [shape=box, label="tasks"];
-    "z0_observations" [shape=box, label="observations"];
-    "z0_gate" [shape=box, label="gate"];
-    "z0_tasks" -> "z0_tasks" [label="depends_on"];
-    "z0_tasks" -> "z0_observations" [label="linked_observations"];
-  }
-
-  subgraph cluster_z1_tasks {
-    label="Z1: tasks state machine";
-    "z1_tasks__planning" [label="planning", style=bold, peripheries=2];
-    "z1_tasks__planning" -> "z1_tasks__plan_review" [label=" A submit-plan", color=green, fontcolor=green];
-    "z1_tasks__plan_review" -> "z1_tasks__ready" [label=" A submit-plan-review", color=green, fontcolor=green];
-    "z1_tasks__ready" -> "z1_tasks__executing" [label=" F start", color=gray, fontcolor=gray];
-    "z1_tasks__executing" -> "z1_tasks__code_review" [label=" A submit-execute", color=green, fontcolor=green];
-    "z1_tasks__code_review" -> "z1_tasks__complete" [label=" A submit-review", color=green, fontcolor=green];
-  }
-}
 ```
+## Z0: cross-store soft-FKs
+
+┌──────────────────────┐
+│         gate         │
+└──────────────────────┘
+┌──────────────────────┐   depends_on
+│        tasks         │ ─────────────┐
+│                      │ ◀────────────┘
+└──────────────────────┘
+  │ linked_observations
+  ▼
+┌──────────────────────┐
+│     observations     │
+└──────────────────────┘
+
+
+## Z1: tasks state machine
+
+  ╔═════════════╗  A submit-plan   ┌─────────────┐  A submit-plan-review   ┌───────┐
+  ║  planning   ║ ───────────────▶ │ plan_review │ ──────────────────────▶ │ ready │
+  ╚═════════════╝                  └─────────────┘                         └───────┘
+                                                                             │  F start
+                                                                             ▼
+                                                                           ┌───────────┐
+                                                                           │ executing │ …
+                                                                           └───────────┘
+… (Z1: observations state machine, Z1: gate state machine, Z2: tasks workflow firing order follow)
+```
+
+For graphviz pipelines (`dot -Tsvg` / `-Tpng`), `--format dot` still emits a single combined `digraph stores_topology { … }` document with one `subgraph cluster_*` per zone — backward-compatible with prior releases.
 
 Edge labels use a single-letter actor marker (`A` ai_autonomous, `H+` ai_with_human, `H!` human, `F` framework) plus the verb. Colors map to the same actor classes (green / yellow / red / gray); pass `--no-icons` or set `NO_COLOR=1` for plain text codes.
 
