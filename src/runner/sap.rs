@@ -249,7 +249,10 @@ mod tests {
         // First { block is malformed JSON; second is valid.
         let input = "{ invalid json here } and then {\"role\":\"planner\",\"phases\":[]}";
         let result = extract_envelope_from_text(input, None);
-        assert!(result.is_some(), "expected Some when second candidate is valid");
+        assert!(
+            result.is_some(),
+            "expected Some when second candidate is valid"
+        );
         let v = result.unwrap();
         assert_eq!(v["role"].as_str(), Some("planner"));
     }
@@ -273,7 +276,10 @@ mod tests {
         // Second candidate matches schema.
         let input = r#"{"role":"not-planner"} and then {"role":"planner","phases":[]}"#;
         let result = extract_envelope_from_text(input, Some(&schema));
-        assert!(result.is_some(), "expected Some when second candidate passes schema");
+        assert!(
+            result.is_some(),
+            "expected Some when second candidate passes schema"
+        );
         let v = result.unwrap();
         assert_eq!(v["role"].as_str(), Some("planner"));
     }

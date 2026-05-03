@@ -54,7 +54,10 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 fn install_sigint_handler() {
     // Use the `signal` syscall via libc.  This is the only direct `unsafe` block.
     unsafe {
-        libc::signal(libc::SIGINT, sigint_handler as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGINT,
+            sigint_handler as *const () as libc::sighandler_t,
+        );
     }
 }
 
@@ -236,7 +239,11 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
             let total_phases = plan_json
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .and_then(|v| v.get("phases").and_then(|p| p.as_array()).map(|a| a.len() as i64));
+                .and_then(|v| {
+                    v.get("phases")
+                        .and_then(|p| p.as_array())
+                        .map(|a| a.len() as i64)
+                });
             Ok(TaskState {
                 display_id: id,
                 status,
@@ -278,7 +285,11 @@ pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
         let total_phases = plan_json
             .as_deref()
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
-            .and_then(|v| v.get("phases").and_then(|p| p.as_array()).map(|a| a.len() as i64));
+            .and_then(|v| {
+                v.get("phases")
+                    .and_then(|p| p.as_array())
+                    .map(|a| a.len() as i64)
+            });
         result.push(TaskState {
             display_id: id,
             status,
@@ -485,25 +496,57 @@ mod tests {
         let frame = compute_status_frame(&task);
 
         // Timestamp prefix
-        assert!(frame.contains('[') && frame.contains(']'), "frame should have timestamp: {frame}");
+        assert!(
+            frame.contains('[') && frame.contains(']'),
+            "frame should have timestamp: {frame}"
+        );
         assert!(frame.contains("T001"), "frame should contain id: {frame}");
-        assert!(frame.contains("status=executing"), "frame should contain status: {frame}");
-        assert!(frame.contains("phase=2/3"), "frame should contain phase: {frame}");
-        assert!(frame.contains("cycle=1"), "frame should contain cycle: {frame}");
-        assert!(frame.contains("next=executor"), "frame should contain next: {frame}");
-        assert!(frame.contains("blocked=false"), "frame should contain blocked: {frame}");
+        assert!(
+            frame.contains("status=executing"),
+            "frame should contain status: {frame}"
+        );
+        assert!(
+            frame.contains("phase=2/3"),
+            "frame should contain phase: {frame}"
+        );
+        assert!(
+            frame.contains("cycle=1"),
+            "frame should contain cycle: {frame}"
+        );
+        assert!(
+            frame.contains("next=executor"),
+            "frame should contain next: {frame}"
+        );
+        assert!(
+            frame.contains("blocked=false"),
+            "frame should contain blocked: {frame}"
+        );
     }
 
     #[test]
     fn single_frame_blocked_task() {
         let (_dir, conn) = open_test_conn();
-        insert_task(&conn, "T002", "blocked", None, None, Some("Needs human input"), None);
+        insert_task(
+            &conn,
+            "T002",
+            "blocked",
+            None,
+            None,
+            Some("Needs human input"),
+            None,
+        );
 
         let task = fetch_task(&conn, "T002").unwrap();
         let frame = compute_status_frame(&task);
 
-        assert!(frame.contains("status=blocked"), "frame should contain status=blocked: {frame}");
-        assert!(frame.contains("blocked=true"), "frame should contain blocked=true: {frame}");
+        assert!(
+            frame.contains("status=blocked"),
+            "frame should contain status=blocked: {frame}"
+        );
+        assert!(
+            frame.contains("blocked=true"),
+            "frame should contain blocked=true: {frame}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -527,7 +570,15 @@ mod tests {
     #[test]
     fn blocked_helper_empty_reason() {
         let (_dir, conn) = open_test_conn();
-        insert_task(&conn, "T011", "executing", Some(1), Some(1), Some(""), Some(2));
+        insert_task(
+            &conn,
+            "T011",
+            "executing",
+            Some(1),
+            Some(1),
+            Some(""),
+            Some(2),
+        );
         let task = fetch_task(&conn, "T011").unwrap();
         let line = format_task_line(&task);
         assert!(
@@ -541,7 +592,15 @@ mod tests {
     #[test]
     fn blocked_helper_real_reason() {
         let (_dir, conn) = open_test_conn();
-        insert_task(&conn, "T012", "executing", Some(1), Some(1), Some("real reason"), Some(2));
+        insert_task(
+            &conn,
+            "T012",
+            "executing",
+            Some(1),
+            Some(1),
+            Some("real reason"),
+            Some(2),
+        );
         let task = fetch_task(&conn, "T012").unwrap();
         let line = format_task_line(&task);
         assert!(
@@ -556,7 +615,15 @@ mod tests {
         let (_dir, conn) = open_test_conn();
         insert_task(&conn, "T013", "blocked", None, None, None, None);
         insert_task(&conn, "T014", "blocked", None, None, Some(""), None);
-        insert_task(&conn, "T015", "blocked", None, None, Some("real reason"), None);
+        insert_task(
+            &conn,
+            "T015",
+            "blocked",
+            None,
+            None,
+            Some("real reason"),
+            None,
+        );
 
         for id in &["T013", "T014", "T015"] {
             let task = fetch_task(&conn, id).unwrap();
@@ -582,13 +649,31 @@ mod tests {
         assert_eq!(tasks.len(), 2, "should fetch 2 non-terminal tasks");
 
         let frame = compute_multi_frame(&tasks);
-        assert!(frame.contains("T001"), "multi-frame should contain T001: {frame}");
-        assert!(frame.contains("T002"), "multi-frame should contain T002: {frame}");
-        assert!(frame.contains("status=executing"), "multi-frame should contain executing: {frame}");
-        assert!(frame.contains("status=plan_review"), "multi-frame should contain plan_review: {frame}");
+        assert!(
+            frame.contains("T001"),
+            "multi-frame should contain T001: {frame}"
+        );
+        assert!(
+            frame.contains("T002"),
+            "multi-frame should contain T002: {frame}"
+        );
+        assert!(
+            frame.contains("status=executing"),
+            "multi-frame should contain executing: {frame}"
+        );
+        assert!(
+            frame.contains("status=plan_review"),
+            "multi-frame should contain plan_review: {frame}"
+        );
         // Both lines indented
-        assert!(frame.contains("  T001"), "T001 line should be indented: {frame}");
-        assert!(frame.contains("  T002"), "T002 line should be indented: {frame}");
+        assert!(
+            frame.contains("  T001"),
+            "T001 line should be indented: {frame}"
+        );
+        assert!(
+            frame.contains("  T002"),
+            "T002 line should be indented: {frame}"
+        );
     }
 
     #[test]
@@ -600,7 +685,11 @@ mod tests {
         insert_task(&conn, "T003", "executing", Some(1), Some(1), None, Some(2));
 
         let tasks = fetch_all_tasks(&conn).unwrap();
-        assert_eq!(tasks.len(), 1, "should only fetch non-terminal tasks: {tasks:?}");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "should only fetch non-terminal tasks: {tasks:?}"
+        );
         assert_eq!(tasks[0].display_id, "T003");
     }
 
@@ -616,7 +705,10 @@ mod tests {
             current_cycle: Some(1),
             blocked_reason: None,
         };
-        assert!(should_print(None, &key), "first frame (None prev) should always print");
+        assert!(
+            should_print(None, &key),
+            "first frame (None prev) should always print"
+        );
     }
 
     #[test]
@@ -627,7 +719,10 @@ mod tests {
             current_cycle: Some(1),
             blocked_reason: None,
         };
-        assert!(!should_print(Some(&key), &key), "identical state should be suppressed");
+        assert!(
+            !should_print(Some(&key), &key),
+            "identical state should be suppressed"
+        );
     }
 
     #[test]
@@ -644,7 +739,10 @@ mod tests {
             current_cycle: Some(1),
             blocked_reason: None,
         };
-        assert!(should_print(Some(&prev), &next), "status change should print");
+        assert!(
+            should_print(Some(&prev), &next),
+            "status change should print"
+        );
     }
 
     #[test]
@@ -661,7 +759,10 @@ mod tests {
             current_cycle: Some(1),
             blocked_reason: None,
         };
-        assert!(should_print(Some(&prev), &next), "phase change should print");
+        assert!(
+            should_print(Some(&prev), &next),
+            "phase change should print"
+        );
     }
 
     #[test]
@@ -678,7 +779,10 @@ mod tests {
             current_cycle: Some(2),
             blocked_reason: None,
         };
-        assert!(should_print(Some(&prev), &next), "cycle change should print");
+        assert!(
+            should_print(Some(&prev), &next),
+            "cycle change should print"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -702,7 +806,10 @@ mod tests {
         };
         // Use run_follow_loop directly (it takes a &Path)
         let result = run_follow_loop(&db_path_val, args);
-        assert!(result.is_ok(), "bounded follow loop should succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "bounded follow loop should succeed: {result:?}"
+        );
     }
 
     #[test]
@@ -717,11 +824,14 @@ mod tests {
             display_id: Some("T001".to_string()),
             follow: true,
             interval_ms: 0,
-            max_iters: 100,  // high limit, should exit early
+            max_iters: 100, // high limit, should exit early
         };
         let result = run_follow_loop(&db_path_val, args);
         // Should exit 0 immediately (terminal state on first iter)
-        assert!(result.is_ok(), "follow loop should exit 0 on accepted task: {result:?}");
+        assert!(
+            result.is_ok(),
+            "follow loop should exit 0 on accepted task: {result:?}"
+        );
     }
 
     #[test]
@@ -739,7 +849,10 @@ mod tests {
             max_iters: 100,
         };
         let result = run_follow_loop(&db_path_val, args);
-        assert!(result.is_ok(), "follow loop should exit 0 on in_review task: {result:?}");
+        assert!(
+            result.is_ok(),
+            "follow loop should exit 0 on in_review task: {result:?}"
+        );
     }
 
     #[test]
@@ -758,6 +871,9 @@ mod tests {
             max_iters: 100,
         };
         let result = run_follow_loop(&db_path_val, args);
-        assert!(result.is_ok(), "multi follow loop should exit 0 when all terminal: {result:?}");
+        assert!(
+            result.is_ok(),
+            "multi follow loop should exit 0 when all terminal: {result:?}"
+        );
     }
 }

@@ -22,11 +22,7 @@ fn to_kebab(name: &str) -> String {
 /// - Non-Record fields are leaves themselves.
 /// - Record fields recurse one level into their sub-fields.
 /// - `List(_)` is treated as a single leaf (not recursed), regardless of inner type.
-fn walk_field<'a>(
-    field: &'a Field,
-    parent_path: &[String],
-    out: &mut Vec<LeafArg<'a>>,
-) {
+fn walk_field<'a>(field: &'a Field, parent_path: &[String], out: &mut Vec<LeafArg<'a>>) {
     match &field.ty {
         FieldType::Record(sub_fields) => {
             let mut path = parent_path.to_vec();
@@ -67,15 +63,16 @@ pub fn leaf_args(schema: &Schema) -> Result<Vec<LeafArg<'_>>> {
             .or_default()
             .push(leaf.path.join("."));
     }
-    let collisions: Vec<_> = seen
-        .iter()
-        .filter(|(_, paths)| paths.len() > 1)
-        .collect();
+    let collisions: Vec<_> = seen.iter().filter(|(_, paths)| paths.len() > 1).collect();
     if !collisions.is_empty() {
         let msgs: Vec<String> = collisions
             .iter()
             .map(|(name, paths)| {
-                format!("cli_name '{}' collides at paths: {}", name, paths.join(", "))
+                format!(
+                    "cli_name '{}' collides at paths: {}",
+                    name,
+                    paths.join(", ")
+                )
             })
             .collect();
         return Err(anyhow!(
@@ -125,8 +122,19 @@ fields:
         let schema = Schema::from_yaml(FIXTURE).unwrap();
         let args = leaf_args(&schema).unwrap();
         let names: Vec<&str> = args.iter().map(|a| a.cli_name.as_str()).collect();
-        assert_eq!(names, vec!["title", "verdict", "notes", "done-when", "scope-in", "scope-out"],
-            "got: {:?}", names);
+        assert_eq!(
+            names,
+            vec![
+                "title",
+                "verdict",
+                "notes",
+                "done-when",
+                "scope-in",
+                "scope-out"
+            ],
+            "got: {:?}",
+            names
+        );
         // AC6: exactly these 5 (plus title = 6 total, but AC says 5 for the two Records fixture;
         // our fixture also has top-level 'title' so 6 total — that's fine, AC6 fixture
         // has no top-level scalars, so let's also test the exact AC6 fixture)
@@ -163,7 +171,10 @@ fields:
         let args = leaf_args(&schema).unwrap();
         assert_eq!(args.len(), 5);
         let names: Vec<&str> = args.iter().map(|a| a.cli_name.as_str()).collect();
-        assert_eq!(names, vec!["verdict", "notes", "done-when", "scope-in", "scope-out"]);
+        assert_eq!(
+            names,
+            vec!["verdict", "notes", "done-when", "scope-in", "scope-out"]
+        );
     }
 
     #[test]
@@ -210,7 +221,13 @@ fields:
         let err = leaf_args(&schema).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("notes"), "should mention 'notes': {msg}");
-        assert!(msg.contains("triage.notes"), "should mention triage.notes: {msg}");
-        assert!(msg.contains("review.notes"), "should mention review.notes: {msg}");
+        assert!(
+            msg.contains("triage.notes"),
+            "should mention triage.notes: {msg}"
+        );
+        assert!(
+            msg.contains("review.notes"),
+            "should mention review.notes: {msg}"
+        );
     }
 }

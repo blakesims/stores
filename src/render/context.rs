@@ -43,10 +43,7 @@ pub fn build_context(schema: &Schema, entry: &EntryMap) -> Value {
     // reserved keys if a schema declares a field with the same name — schema field
     // wins since it's inserted after).
     for field in &schema.fields {
-        let val = entry
-            .get(&field.name)
-            .cloned()
-            .unwrap_or(Value::Null);
+        let val = entry.get(&field.name).cloned().unwrap_or(Value::Null);
         obj.insert(field.name.clone(), val);
     }
 
@@ -65,14 +62,24 @@ pub fn build_context(schema: &Schema, entry: &EntryMap) -> Value {
         .and_then(|v| parse_json_if_string(v))
         .and_then(|v| v.get("phases").and_then(|p| p.as_array()).map(|a| a.len()))
         .unwrap_or(0);
-    obj.insert("plan_phases_count".to_string(), Value::from(plan_phases_count as i64));
+    obj.insert(
+        "plan_phases_count".to_string(),
+        Value::from(plan_phases_count as i64),
+    );
 
     let current_phase = entry
         .get("current_phase")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let current_phase_idx = if current_phase > 0 { current_phase - 1 } else { 0 };
-    obj.insert("current_phase_idx".to_string(), Value::from(current_phase_idx));
+    let current_phase_idx = if current_phase > 0 {
+        current_phase - 1
+    } else {
+        0
+    };
+    obj.insert(
+        "current_phase_idx".to_string(),
+        Value::from(current_phase_idx),
+    );
 
     // Derive `cycles_have_reviews` — true if any cycle has a non-null review.
     let cycles_have_reviews = entry
@@ -82,7 +89,10 @@ pub fn build_context(schema: &Schema, entry: &EntryMap) -> Value {
         .unwrap_or_default()
         .iter()
         .any(|c| c.get("review").map(|r| !r.is_null()).unwrap_or(false));
-    obj.insert("cycles_have_reviews".to_string(), Value::from(cycles_have_reviews));
+    obj.insert(
+        "cycles_have_reviews".to_string(),
+        Value::from(cycles_have_reviews),
+    );
 
     Value::Object(obj)
 }
@@ -141,10 +151,7 @@ fn derive_current_cycle_for_phase(entry: &EntryMap) -> Value {
 
         if let (Some(ph), Some(cy)) = (phase_num, cycle_num) {
             let key = ph.to_string();
-            let current = map
-                .get(&key)
-                .and_then(|v| v.as_i64())
-                .unwrap_or(i64::MIN);
+            let current = map.get(&key).and_then(|v| v.as_i64()).unwrap_or(i64::MIN);
             if cy > current {
                 map.insert(key, Value::Number(cy.into()));
             }
@@ -324,15 +331,30 @@ mod tests {
 
         // Verify all four substitution patterns are exercised:
         // 1. Text passthrough — the heading text "Planner Briefing" is literal.
-        assert!(rendered.contains("# Planner Briefing —"), "static text missing");
+        assert!(
+            rendered.contains("# Planner Briefing —"),
+            "static text missing"
+        );
         // 2. Variable substitution — {{title}}.
-        assert!(rendered.contains("Implement feature X"), "title substitution failed");
+        assert!(
+            rendered.contains("Implement feature X"),
+            "title substitution failed"
+        );
         // 3. {{#each cycles}} list iteration.
-        assert!(rendered.contains("- Phase 1: Research done"), "each cycles item 1 failed");
-        assert!(rendered.contains("- Phase 2: Code written"), "each cycles item 2 failed");
+        assert!(
+            rendered.contains("- Phase 1: Research done"),
+            "each cycles item 1 failed"
+        );
+        assert!(
+            rendered.contains("- Phase 2: Code written"),
+            "each cycles item 2 failed"
+        );
         // 4. {{#if (eq status "BLOCKED")}} — status is "planning" so else branch fires.
         assert!(rendered.contains("Not blocked."), "eq conditional failed");
-        assert!(!rendered.contains("This task is blocked"), "eq true branch should not fire");
+        assert!(
+            !rendered.contains("This task is blocked"),
+            "eq true branch should not fire"
+        );
 
         // Full byte-for-byte expected output.
         // Note: Handlebars {{#each}} emits each item with its trailing newline

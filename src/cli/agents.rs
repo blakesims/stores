@@ -350,7 +350,11 @@ mod tests {
         assert!(names.contains(&"code-reviewer"));
         assert!(names.contains(&"guide"));
         assert!(names.contains(&"wrap"));
-        assert_eq!(names.len(), 6, "BUNDLED_AGENTS must contain exactly 6 entries");
+        assert_eq!(
+            names.len(),
+            6,
+            "BUNDLED_AGENTS must contain exactly 6 entries"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -187,7 +187,9 @@ mod tests {
 
     #[test]
     fn select_unknown() {
-        let err = select("does-not-exist").err().expect("should error for unknown runner");
+        let err = select("does-not-exist")
+            .err()
+            .expect("should error for unknown runner");
         let msg = err.to_string();
         assert!(
             msg.contains("unknown runner"),
@@ -202,7 +204,9 @@ mod tests {
     #[test]
     #[cfg(not(feature = "runner-claude-code"))]
     fn select_claude_code_without_feature() {
-        let err = select("claude-code").err().expect("should error without feature");
+        let err = select("claude-code")
+            .err()
+            .expect("should error without feature");
         let msg = err.to_string();
         assert!(
             msg.contains("runner-claude-code"),
@@ -213,7 +217,8 @@ mod tests {
     #[test]
     #[cfg(feature = "runner-claude-code")]
     fn select_claude_code_with_feature() {
-        let runner = select("claude-code").expect("claude-code runner should be available with feature");
+        let runner =
+            select("claude-code").expect("claude-code runner should be available with feature");
         assert_eq!(runner.name(), "claude-code");
     }
 }

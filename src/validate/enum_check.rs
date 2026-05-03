@@ -1,7 +1,7 @@
 use crate::schema::Field;
-use crate::validate::{EntryMap, ValidationError};
 use crate::validate::error::RuleKind;
 use crate::validate::required::lookup;
+use crate::validate::{EntryMap, ValidationError};
 
 /// Check that the field's value, if present, is one of the declared enum_values.
 pub fn check_enum(
@@ -73,7 +73,10 @@ mod tests {
     fn invalid_enum_value_fails() {
         let field = enum_field("priority", vec!["low", "medium", "high"]);
         let mut entry: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        entry.insert("priority".into(), serde_json::Value::String("critical".into()));
+        entry.insert(
+            "priority".into(),
+            serde_json::Value::String("critical".into()),
+        );
         let mut errors = vec![];
         check_enum(&field, &["priority".to_string()], &entry, &mut errors);
         assert_eq!(errors.len(), 1);

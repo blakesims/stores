@@ -31,9 +31,12 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 use crate::codegen::ddl::quote_ident;
-use crate::schema::{actor::{Actor, InvokerCtx}, Schema};
-use crate::validate::{self, EntryMap, Op};
+use crate::schema::{
+    actor::{Actor, InvokerCtx},
+    Schema,
+};
 use crate::validate::expr_eval::eval;
+use crate::validate::{self, EntryMap, Op};
 
 use super::row::{now_iso8601, read_row};
 
@@ -69,12 +72,7 @@ pub struct SubmitOutput {
 /// Returns Ok(()) if the lock was acquired (1 row changed).
 /// Returns Err(...) if the row is currently held by another invoker
 /// within the 5-minute window.
-fn acquire_lock(
-    tx: &Transaction,
-    table: &str,
-    display_id: &str,
-    invoker: &str,
-) -> Result<()> {
+fn acquire_lock(tx: &Transaction, table: &str, display_id: &str, invoker: &str) -> Result<()> {
     let now = now_iso8601();
     let five_min_ago = iso_subtract_seconds(300);
     let qtable = quote_ident(table);
@@ -100,9 +98,7 @@ fn acquire_lock(
         let (holder, held_at) = lock_info.unwrap_or((None, None));
         let holder = holder.unwrap_or_else(|| "unknown".to_string());
         let held_at = held_at.unwrap_or_else(|| "unknown".to_string());
-        bail!(
-            "row {display_id} is claimed by '{holder}' since {held_at}; retry after 5 minutes"
-        );
+        bail!("row {display_id} is claimed by '{holder}' since {held_at}; retry after 5 minutes");
     }
 
     Ok(())
@@ -111,9 +107,8 @@ fn acquire_lock(
 /// Release the row lock (final action inside tx, per 5.3 step 10).
 fn release_lock(tx: &Transaction, table: &str, display_id: &str) -> Result<()> {
     let qtable = quote_ident(table);
-    let sql = format!(
-        "UPDATE {qtable} SET claimed_by = NULL, claimed_at = NULL WHERE display_id = ?1"
-    );
+    let sql =
+        format!("UPDATE {qtable} SET claimed_by = NULL, claimed_at = NULL WHERE display_id = ?1");
     tx.execute(&sql, rusqlite::params![display_id])
         .context("release lock")?;
     Ok(())
@@ -145,27 +140,45 @@ fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
     let mut year = 1970u32;
     loop {
         let dy = days_in_year(year) as u64;
-        if days < dy { break; }
+        if days < dy {
+            break;
+        }
         days -= dy;
         year += 1;
     }
     let mut month = 1u32;
     loop {
         let dm = days_in_month(year, month) as u64;
-        if days < dm { break; }
+        if days < dm {
+            break;
+        }
         days -= dm;
         month += 1;
     }
     (year, month, days as u32 + 1)
 }
 
-fn is_leap(y: u32) -> bool { (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) }
-fn days_in_year(y: u32) -> u32 { if is_leap(y) { 366 } else { 365 } }
+fn is_leap(y: u32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+}
+fn days_in_year(y: u32) -> u32 {
+    if is_leap(y) {
+        366
+    } else {
+        365
+    }
+}
 fn days_in_month(y: u32, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap(y) { 29 } else { 28 },
+        2 => {
+            if is_leap(y) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 31,
     }
 }
@@ -296,7 +309,10 @@ pub(crate) fn fire_on_entry_follow_ons(
                     anyhow::anyhow!(
                         "on_state[{}] declares transition_to: {} but no framework transition \
                          from '{}' to '{}' exists in schema",
-                        state, target_state, state, target_state
+                        state,
+                        target_state,
+                        state,
+                        target_state
                     )
                 })?;
 
@@ -306,7 +322,8 @@ pub(crate) fn fire_on_entry_follow_ons(
                     bail!(
                         "framework-fired follow-on guard failed: {} → {} — schema author error \
                          (guards must always be satisfied when on_state fires)",
-                        state, target_state
+                        state,
+                        target_state
                     );
                 }
             }
@@ -375,11 +392,15 @@ fn compute_on_entry_framework_fields(
 // Require workflow helper
 // ---------------------------------------------------------------------------
 
-fn require_workflow<'a>(schema: &'a Schema, verb: &str) -> Result<&'a crate::schema::workflow::Workflow> {
+fn require_workflow<'a>(
+    schema: &'a Schema,
+    verb: &str,
+) -> Result<&'a crate::schema::workflow::Workflow> {
     schema.workflow.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "store '{}' has no workflow declaration; {} is not available",
-            schema.name, verb
+            schema.name,
+            verb
         )
     })
 }
@@ -399,7 +420,9 @@ pub(crate) fn compute_submit_plan(
     require_workflow(schema, "submit-plan")?;
 
     // Step 1: open transaction
-    let tx = conn.unchecked_transaction().context("submit-plan: begin tx")?;
+    let tx = conn
+        .unchecked_transaction()
+        .context("submit-plan: begin tx")?;
 
     // Step 2: acquire lock
     acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
@@ -408,7 +431,10 @@ pub(crate) fn compute_submit_plan(
     let (row_id, existing) = read_row(schema, &tx, display_id)?;
 
     // State-machine check
-    let current_status = existing.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if current_status != "planning" {
         bail!(
             "cannot submit-plan: row is in state '{}', expected 'planning'",
@@ -434,7 +460,10 @@ pub(crate) fn compute_submit_plan(
 
     // Step 6: validator pass
     validate::validate(schema, &merged, Op::SubmitPlan(diff), invoker.into()).map_err(|errs| {
-        anyhow::anyhow!("submit-plan validation failed:\n{}", validate::pretty_print(&errs))
+        anyhow::anyhow!(
+            "submit-plan validation failed:\n{}",
+            validate::pretty_print(&errs)
+        )
     })?;
 
     // Step 7: find transition planning → plan_review
@@ -449,8 +478,13 @@ pub(crate) fn compute_submit_plan(
     let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
 
     write_status_and_fields(
-        &tx, &schema.name, row_id, &new_status,
-        &invoker.to_string(), &fw_fields, &text_fields,
+        &tx,
+        &schema.name,
+        row_id,
+        &new_status,
+        &invoker.to_string(),
+        &fw_fields,
+        &text_fields,
     )?;
 
     // Step 9: no follow-on for submit-plan
@@ -492,7 +526,7 @@ pub(crate) fn compute_submit_plan_review(
     schema: &Schema,
     conn: &Connection,
     display_id: &str,
-    gate: &str,       // READY | NEEDS_WORK | NOT_READY
+    gate: &str, // READY | NEEDS_WORK | NOT_READY
     summary: &str,
     open_questions: Option<Vec<String>>,
     invoker: Actor,
@@ -505,12 +539,17 @@ pub(crate) fn compute_submit_plan_review(
         .map(|s| s.as_str())
         .unwrap_or("plan_review_log");
 
-    let tx = conn.unchecked_transaction().context("submit-plan-review: begin tx")?;
+    let tx = conn
+        .unchecked_transaction()
+        .context("submit-plan-review: begin tx")?;
     acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
 
     let (row_id, existing) = read_row(schema, &tx, display_id)?;
 
-    let current_status = existing.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if current_status != "plan_review" {
         bail!(
             "cannot submit-plan-review: row is in state '{}', expected 'plan_review'",
@@ -554,7 +593,8 @@ pub(crate) fn compute_submit_plan_review(
 
     // Validator pass (against post-append merged — ensures content validity)
     validate::validate(
-        schema, &merged,
+        schema,
+        &merged,
         Op::SubmitPlanReview(gate.to_string(), diff),
         invoker.into(),
     )
@@ -566,7 +606,13 @@ pub(crate) fn compute_submit_plan_review(
     })?;
 
     // Find transition based on gate (guard evaluated against pre-append state per AC5.8)
-    let transition = find_transition(schema, "plan_review", "submit-plan-review", Some(gate), &guard_entry)?;
+    let transition = find_transition(
+        schema,
+        "plan_review",
+        "submit-plan-review",
+        Some(gate),
+        &guard_entry,
+    )?;
     let new_status = transition.to.clone();
 
     // Compute post-action fields
@@ -588,8 +634,13 @@ pub(crate) fn compute_submit_plan_review(
     text_fields.insert(log_field.to_string(), log_json);
 
     write_status_and_fields(
-        &tx, &schema.name, row_id, &new_status,
-        &invoker.to_string(), &fw_fields, &text_fields,
+        &tx,
+        &schema.name,
+        row_id,
+        &new_status,
+        &invoker.to_string(),
+        &fw_fields,
+        &text_fields,
     )?;
 
     // Step 9: fire on-entry follow-ons (e.g. ready → executing)
@@ -631,7 +682,15 @@ pub fn run_submit_plan_review(
     open_questions: Option<Vec<String>>,
     invoker: InvokerCtx,
 ) -> Result<()> {
-    let out = compute_submit_plan_review(schema, conn, display_id, gate, summary, open_questions, invoker.actor)?;
+    let out = compute_submit_plan_review(
+        schema,
+        conn,
+        display_id,
+        gate,
+        summary,
+        open_questions,
+        invoker.actor,
+    )?;
     println!("{}", out.summary);
     Ok(())
 }
@@ -658,12 +717,17 @@ pub(crate) fn compute_submit_execute(
         .map(|s| s.as_str())
         .unwrap_or("cycles");
 
-    let tx = conn.unchecked_transaction().context("submit-execute: begin tx")?;
+    let tx = conn
+        .unchecked_transaction()
+        .context("submit-execute: begin tx")?;
     acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
 
     let (row_id, existing) = read_row(schema, &tx, display_id)?;
 
-    let current_status = existing.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if current_status != "executing" {
         bail!(
             "cannot submit-execute: row is in state '{}', expected 'executing'",
@@ -683,7 +747,10 @@ pub(crate) fn compute_submit_execute(
     // Build new cycles entry
     let mut executor_obj = serde_json::Map::new();
     executor_obj.insert("at".to_string(), Value::String(now_iso8601()));
-    executor_obj.insert("summary".to_string(), Value::String(exec_summary.to_string()));
+    executor_obj.insert(
+        "summary".to_string(),
+        Value::String(exec_summary.to_string()),
+    );
     if let Some(sha) = commit_sha {
         executor_obj.insert("commit".to_string(), Value::String(sha.to_string()));
     }
@@ -721,13 +788,14 @@ pub(crate) fn compute_submit_execute(
     let mut merged = existing.clone();
     merged.insert(cycles_field.to_string(), Value::Array(cycles.clone()));
 
-    validate::validate(schema, &merged, Op::SubmitExecute(diff), invoker.into())
-        .map_err(|errs| {
+    validate::validate(schema, &merged, Op::SubmitExecute(diff), invoker.into()).map_err(
+        |errs| {
             anyhow::anyhow!(
                 "submit-execute validation failed:\n{}",
                 validate::pretty_print(&errs)
             )
-        })?;
+        },
+    )?;
 
     let transition = find_transition(schema, "executing", "submit-execute", None, &merged)?;
     let new_status = transition.to.clone();
@@ -739,8 +807,13 @@ pub(crate) fn compute_submit_execute(
     let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
 
     write_status_and_fields(
-        &tx, &schema.name, row_id, &new_status,
-        &invoker.to_string(), &fw_fields, &text_fields,
+        &tx,
+        &schema.name,
+        row_id,
+        &new_status,
+        &invoker.to_string(),
+        &fw_fields,
+        &text_fields,
     )?;
 
     // No follow-on for submit-execute
@@ -772,7 +845,14 @@ pub fn run_submit_execute(
     invoker: InvokerCtx,
 ) -> Result<()> {
     let out = compute_submit_execute(
-        schema, conn, display_id, exec_summary, commit_sha, files_changed, notes, invoker.actor,
+        schema,
+        conn,
+        display_id,
+        exec_summary,
+        commit_sha,
+        files_changed,
+        notes,
+        invoker.actor,
     )?;
     println!("{}", out.summary);
     Ok(())
@@ -786,7 +866,7 @@ pub(crate) fn compute_submit_review(
     schema: &Schema,
     conn: &Connection,
     display_id: &str,
-    gate: &str,       // PASS | REVISE | FAIL
+    gate: &str, // PASS | REVISE | FAIL
     review_summary: &str,
     review_details: Option<&str>,
     critical: i64,
@@ -802,12 +882,17 @@ pub(crate) fn compute_submit_review(
         .map(|s| s.as_str())
         .unwrap_or("cycles");
 
-    let tx = conn.unchecked_transaction().context("submit-review: begin tx")?;
+    let tx = conn
+        .unchecked_transaction()
+        .context("submit-review: begin tx")?;
     acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
 
     let (row_id, existing) = read_row(schema, &tx, display_id)?;
 
-    let current_status = existing.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if current_status != "code_review" {
         bail!(
             "cannot submit-review: row is in state '{}', expected 'code_review'",
@@ -839,7 +924,8 @@ pub(crate) fn compute_submit_review(
     let cycle_idx = cycle_idx.ok_or_else(|| {
         anyhow::anyhow!(
             "no cycles[] entry found for phase {} cycle {} — was submit-execute called first?",
-            current_phase, current_cycle
+            current_phase,
+            current_cycle
         )
     })?;
 
@@ -847,7 +933,10 @@ pub(crate) fn compute_submit_review(
     let mut review_obj_map = serde_json::Map::new();
     review_obj_map.insert("at".to_string(), Value::String(now_iso8601()));
     review_obj_map.insert("gate".to_string(), Value::String(gate.to_string()));
-    review_obj_map.insert("summary".to_string(), Value::String(review_summary.to_string()));
+    review_obj_map.insert(
+        "summary".to_string(),
+        Value::String(review_summary.to_string()),
+    );
     if let Some(details) = review_details {
         review_obj_map.insert("details".to_string(), Value::String(details.to_string()));
     }
@@ -869,7 +958,8 @@ pub(crate) fn compute_submit_review(
     merged.insert(cycles_field.to_string(), Value::Array(cycles.clone()));
 
     validate::validate(
-        schema, &merged,
+        schema,
+        &merged,
         Op::SubmitReview(gate.to_string(), diff),
         invoker.into(),
     )
@@ -898,7 +988,11 @@ pub(crate) fn compute_submit_review(
             guard_entry.insert("current_cycle".to_string(), Value::from(bumped_cycle));
 
             let transition = find_transition(
-                schema, "code_review", "submit-review", Some("REVISE"), &guard_entry,
+                schema,
+                "code_review",
+                "submit-review",
+                Some("REVISE"),
+                &guard_entry,
             )?;
             new_status = transition.to.clone();
 
@@ -919,7 +1013,11 @@ pub(crate) fn compute_submit_review(
         "PASS" => {
             // 5.5b: two PASS transitions disambiguated by guard
             let transition = find_transition(
-                schema, "code_review", "submit-review", Some("PASS"), &merged,
+                schema,
+                "code_review",
+                "submit-review",
+                Some("PASS"),
+                &merged,
             )?;
             new_status = transition.to.clone();
 
@@ -941,13 +1039,21 @@ pub(crate) fn compute_submit_review(
         }
 
         other => {
-            bail!("submit-review: unknown gate '{}'; expected PASS, REVISE, or FAIL", other);
+            bail!(
+                "submit-review: unknown gate '{}'; expected PASS, REVISE, or FAIL",
+                other
+            );
         }
     }
 
     write_status_and_fields(
-        &tx, &schema.name, row_id, &new_status,
-        &invoker.to_string(), &fw_fields, &text_fields,
+        &tx,
+        &schema.name,
+        row_id,
+        &new_status,
+        &invoker.to_string(),
+        &fw_fields,
+        &text_fields,
     )?;
 
     // Fire on-entry follow-ons for the new state (e.g. complete → in_review via on_state.complete).
@@ -967,7 +1073,11 @@ pub(crate) fn compute_submit_review(
     tx.commit().context("submit-review: commit")?;
 
     let blocked_reason = text_fields.get("blocked_reason").and_then(|r| {
-        if r.is_empty() { None } else { Some(r.clone()) }
+        if r.is_empty() {
+            None
+        } else {
+            Some(r.clone())
+        }
     });
 
     Ok(SubmitOutput {
@@ -996,7 +1106,16 @@ pub fn run_submit_review(
     invoker: InvokerCtx,
 ) -> Result<()> {
     let out = compute_submit_review(
-        schema, conn, display_id, gate, review_summary, review_details, critical, major, minor, invoker.actor,
+        schema,
+        conn,
+        display_id,
+        gate,
+        review_summary,
+        review_details,
+        critical,
+        major,
+        minor,
+        invoker.actor,
     )?;
     println!("{}", out.summary);
     // Non-zero exit when the submit routes the row to blocked (e.g. 4th REVISE guard failure).
@@ -1052,7 +1171,9 @@ pub(crate) fn compute_submit_wrap(
         .unwrap_or("wrap_log");
 
     // Step 1: open tx
-    let tx = conn.unchecked_transaction().context("submit-wrap: begin tx")?;
+    let tx = conn
+        .unchecked_transaction()
+        .context("submit-wrap: begin tx")?;
 
     // Step 2: acquire lock
     acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
@@ -1061,7 +1182,10 @@ pub(crate) fn compute_submit_wrap(
     let (row_id, existing) = read_row(schema, &tx, display_id)?;
 
     // State-machine check (AC3.1): must be in_review
-    let current_status = existing.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if current_status != "in_review" {
         bail!(
             "cannot submit-wrap: row is in state '{}', expected 'in_review'",
@@ -1073,7 +1197,10 @@ pub(crate) fn compute_submit_wrap(
     let mut entry_obj = match wrap_entry {
         Value::Object(m) => m,
         other => {
-            bail!("submit-wrap: wrap_entry must be a JSON object, got {}", other);
+            bail!(
+                "submit-wrap: wrap_entry must be a JSON object, got {}",
+                other
+            );
         }
     };
     // Step 6: defense-in-depth shape check — executive_summary must be present and non-empty.
@@ -1112,8 +1239,13 @@ pub(crate) fn compute_submit_wrap(
     let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
 
     write_status_and_fields(
-        &tx, &schema.name, row_id, "in_review",
-        &invoker.to_string(), &fw_fields, &text_fields,
+        &tx,
+        &schema.name,
+        row_id,
+        "in_review",
+        &invoker.to_string(),
+        &fw_fields,
+        &text_fields,
     )?;
 
     // Step 9: no follow-on transitions
@@ -1179,7 +1311,10 @@ pub(crate) fn compute_resume(
     let (row_id, existing) = read_row(schema, &tx, display_id)?;
 
     // State-machine check
-    let current_status = existing.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if current_status != "blocked" {
         bail!(
             "cannot resume: row is in state '{}', expected 'blocked'",
@@ -1191,10 +1326,18 @@ pub(crate) fn compute_resume(
     let diff: EntryMap = BTreeMap::new();
 
     // Step 6: validator pass — enforces `actor: ai_with_human` on the resume transition
-    validate::validate(schema, &existing, Op::Transition("resume".to_string(), diff), invoker.into())
-        .map_err(|errs| {
-            anyhow::anyhow!("resume validation failed:\n{}", validate::pretty_print(&errs))
-        })?;
+    validate::validate(
+        schema,
+        &existing,
+        Op::Transition("resume".to_string(), diff),
+        invoker.into(),
+    )
+    .map_err(|errs| {
+        anyhow::anyhow!(
+            "resume validation failed:\n{}",
+            validate::pretty_print(&errs)
+        )
+    })?;
 
     // Step 7: compute post-action fields
     //   current_cycle reset to 1; current_phase UNCHANGED; blocked_reason cleared
@@ -1205,8 +1348,13 @@ pub(crate) fn compute_resume(
 
     // Step 8: write blocked → ready
     write_status_and_fields(
-        &tx, &schema.name, row_id, "ready",
-        &invoker.to_string(), &fw_fields, &txt_fields,
+        &tx,
+        &schema.name,
+        row_id,
+        "ready",
+        &invoker.to_string(),
+        &fw_fields,
+        &txt_fields,
     )?;
 
     // Step 9: fire on-entry follow-ons (ready → executing)
@@ -1511,7 +1659,8 @@ workflow:
             "phases": (0..plan_phases_count)
                 .map(|i| json!({"name": format!("phase {}", i + 1)}))
                 .collect::<Vec<_>>()
-        })).unwrap();
+        }))
+        .unwrap();
         let cycles_json = serde_json::to_string(&cycles).unwrap();
         let log_json = serde_json::to_string(&plan_review_log).unwrap();
         let br = blocked_reason.unwrap_or("");
@@ -1522,49 +1671,72 @@ workflow:
              plan, cycles, plan_review_log, blocked_reason) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
-                "WF001", status, now, now, "human", "human", "Test task",
-                current_phase, current_cycle,
-                plan_json, cycles_json, log_json, br
+                "WF001",
+                status,
+                now,
+                now,
+                "human",
+                "human",
+                "Test task",
+                current_phase,
+                current_cycle,
+                plan_json,
+                cycles_json,
+                log_json,
+                br
             ],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn read_status(conn: &Connection) -> String {
         conn.query_row(
             "SELECT status FROM wf_tasks WHERE display_id = 'WF001'",
-            [], |r| r.get(0),
-        ).unwrap()
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
     }
 
     fn read_i64(conn: &Connection, col: &str) -> i64 {
         conn.query_row(
             &format!("SELECT {col} FROM wf_tasks WHERE display_id = 'WF001'"),
-            [], |r| r.get(0),
-        ).unwrap_or(0)
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
     }
 
     fn read_text(conn: &Connection, col: &str) -> Option<String> {
         conn.query_row(
             &format!("SELECT {col} FROM wf_tasks WHERE display_id = 'WF001'"),
-            [], |r| r.get(0),
-        ).unwrap_or(None)
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(None)
     }
 
     fn read_cycles(conn: &Connection) -> Vec<Value> {
-        let json_str: Option<String> = conn.query_row(
-            "SELECT cycles FROM wf_tasks WHERE display_id = 'WF001'",
-            [], |r| r.get(0),
-        ).unwrap_or(None);
+        let json_str: Option<String> = conn
+            .query_row(
+                "SELECT cycles FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
         json_str
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
     }
 
     fn read_plan_review_log(conn: &Connection) -> Vec<Value> {
-        let json_str: Option<String> = conn.query_row(
-            "SELECT plan_review_log FROM wf_tasks WHERE display_id = 'WF001'",
-            [], |r| r.get(0),
-        ).unwrap_or(None);
+        let json_str: Option<String> = conn
+            .query_row(
+                "SELECT plan_review_log FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
         json_str
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
@@ -1578,10 +1750,16 @@ workflow:
         assert_eq!(status, "executing");
         let summary = format!("attempt phase {} cycle {}", phase, cycle);
         compute_submit_execute(
-            schema, conn, "WF001",
-            &summary, Some("abc"), None, None,
+            schema,
+            conn,
+            "WF001",
+            &summary,
+            Some("abc"),
+            None,
+            None,
             Actor::AiAutonomous,
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn force_status(conn: &Connection, status: &str, phase: i64, cycle: i64) {
@@ -1596,7 +1774,8 @@ workflow:
         conn.execute(
             "UPDATE wf_tasks SET cycles = ?1 WHERE display_id = 'WF001'",
             rusqlite::params![j],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // ---------------------------------------------------------------------------
@@ -1609,10 +1788,16 @@ workflow:
         insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
 
         let out = compute_submit_execute(
-            &schema, &conn, "WF001",
-            "phase 2 done", Some("abc123"), Some("src/foo.rs,src/bar.rs"), None,
+            &schema,
+            &conn,
+            "WF001",
+            "phase 2 done",
+            Some("abc123"),
+            Some("src/foo.rs,src/bar.rs"),
+            None,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(out.new_status, "code_review");
         assert_eq!(out.cycles_idx, Some(0));
@@ -1620,7 +1805,10 @@ workflow:
         assert_eq!(read_status(&conn), "code_review");
         let cycles = read_cycles(&conn);
         assert_eq!(cycles.len(), 1);
-        assert_eq!(cycles[0]["executor"]["summary"].as_str().unwrap(), "phase 2 done");
+        assert_eq!(
+            cycles[0]["executor"]["summary"].as_str().unwrap(),
+            "phase 2 done"
+        );
         assert_eq!(cycles[0]["executor"]["commit"].as_str().unwrap(), "abc123");
         assert_eq!(cycles[0]["phase"].as_i64().unwrap(), 1);
         assert_eq!(cycles[0]["cycle"].as_i64().unwrap(), 1);
@@ -1629,7 +1817,8 @@ workflow:
         let claimed_by = read_text(&conn, "claimed_by");
         assert!(
             claimed_by.is_none() || claimed_by.as_deref() == Some(""),
-            "lock should be released: {:?}", claimed_by
+            "lock should be released: {:?}",
+            claimed_by
         );
     }
 
@@ -1645,13 +1834,31 @@ workflow:
             "executor": {"summary": "done", "commit": "abc"},
             "review": null
         })];
-        insert_row_at(&conn, &schema, "code_review", 1, 1, 2, initial_cycles, vec![], None);
+        insert_row_at(
+            &conn,
+            &schema,
+            "code_review",
+            1,
+            1,
+            2,
+            initial_cycles,
+            vec![],
+            None,
+        );
 
         let out = compute_submit_review(
-            &schema, &conn, "WF001",
-            "PASS", "approved", None, 0, 0, 1,
+            &schema,
+            &conn,
+            "WF001",
+            "PASS",
+            "approved",
+            None,
+            0,
+            0,
+            1,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(out.new_status, "executing");
         assert_eq!(out.gate, Some("PASS".to_string()));
@@ -1677,13 +1884,31 @@ workflow:
             "review": null
         })];
         // plan with 1 phase, current_phase = 1 (== plan.phases.length)
-        insert_row_at(&conn, &schema, "code_review", 1, 1, 1, initial_cycles, vec![], None);
+        insert_row_at(
+            &conn,
+            &schema,
+            "code_review",
+            1,
+            1,
+            1,
+            initial_cycles,
+            vec![],
+            None,
+        );
 
         let out = compute_submit_review(
-            &schema, &conn, "WF001",
-            "PASS", "final approved", None, 0, 0, 0,
+            &schema,
+            &conn,
+            "WF001",
+            "PASS",
+            "final approved",
+            None,
+            0,
+            0,
+            0,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
         // on_state.complete fires request_review (framework) → in_review in same tx
         assert_eq!(out.new_status, "in_review");
@@ -1706,63 +1931,106 @@ workflow:
             "executor": {"summary": "attempt 1", "commit": "abc"},
             "review": null
         })];
-        insert_row_at(&conn, &schema, "code_review", 1, 1, 2, initial_cycles, vec![], None);
+        insert_row_at(
+            &conn,
+            &schema,
+            "code_review",
+            1,
+            1,
+            2,
+            initial_cycles,
+            vec![],
+            None,
+        );
 
         // Helper: do a REVISE and assert it produces executing
         let do_revise = |summary: &str| {
-            compute_submit_review(&schema, &conn, "WF001", "REVISE", summary, None, 1, 0, 0, Actor::AiAutonomous)
+            compute_submit_review(
+                &schema,
+                &conn,
+                "WF001",
+                "REVISE",
+                summary,
+                None,
+                1,
+                0,
+                0,
+                Actor::AiAutonomous,
+            )
         };
 
         // 1st REVISE: current_cycle 1 → 2 (guard 2 <= 4 true) → executing
         let out1 = do_revise("needs work 1").unwrap();
-        assert_eq!(out1.new_status, "executing", "1st REVISE must produce executing");
+        assert_eq!(
+            out1.new_status, "executing",
+            "1st REVISE must produce executing"
+        );
         assert_eq!(read_i64(&conn, "current_cycle"), 2);
 
         // Prep cycle 2 execute
         force_status(&conn, "executing", 1, 2);
-        set_cycles_json(&conn, &[
-            json!({"phase":1,"cycle":1,"executor":{"summary":"attempt 1","commit":"abc"},"review":{"gate":"REVISE","summary":"needs work 1","critical":1,"major":0,"minor":0}}),
-            json!({"phase":1,"cycle":2,"executor":{"summary":"attempt 2","commit":"def"},"review":null}),
-        ]);
+        set_cycles_json(
+            &conn,
+            &[
+                json!({"phase":1,"cycle":1,"executor":{"summary":"attempt 1","commit":"abc"},"review":{"gate":"REVISE","summary":"needs work 1","critical":1,"major":0,"minor":0}}),
+                json!({"phase":1,"cycle":2,"executor":{"summary":"attempt 2","commit":"def"},"review":null}),
+            ],
+        );
         do_execute(&schema, &conn);
 
         // 2nd REVISE: current_cycle 2 → 3 (guard 3 <= 4 true) → executing
         let out2 = do_revise("needs work 2").unwrap();
-        assert_eq!(out2.new_status, "executing", "2nd REVISE must produce executing");
+        assert_eq!(
+            out2.new_status, "executing",
+            "2nd REVISE must produce executing"
+        );
         assert_eq!(read_i64(&conn, "current_cycle"), 3);
 
         // Prep cycle 3 execute
         force_status(&conn, "executing", 1, 3);
-        set_cycles_json(&conn, &[
-            json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw1","critical":1,"major":0,"minor":0}}),
-            json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":{"gate":"REVISE","summary":"nw2","critical":1,"major":0,"minor":0}}),
-            json!({"phase":1,"cycle":3,"executor":{"summary":"attempt 3","commit":"ghi"},"review":null}),
-        ]);
+        set_cycles_json(
+            &conn,
+            &[
+                json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw1","critical":1,"major":0,"minor":0}}),
+                json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":{"gate":"REVISE","summary":"nw2","critical":1,"major":0,"minor":0}}),
+                json!({"phase":1,"cycle":3,"executor":{"summary":"attempt 3","commit":"ghi"},"review":null}),
+            ],
+        );
         do_execute(&schema, &conn);
 
         // 3rd REVISE: current_cycle 3 → 4 (guard 4 <= 4 true) → executing
         let out3 = do_revise("needs work 3").unwrap();
-        assert_eq!(out3.new_status, "executing", "3rd REVISE must produce executing");
+        assert_eq!(
+            out3.new_status, "executing",
+            "3rd REVISE must produce executing"
+        );
         assert_eq!(read_i64(&conn, "current_cycle"), 4);
 
         // Prep cycle 4 execute
         force_status(&conn, "executing", 1, 4);
-        set_cycles_json(&conn, &[
-            json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw1","critical":1,"major":0,"minor":0}}),
-            json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":{"gate":"REVISE","summary":"nw2","critical":1,"major":0,"minor":0}}),
-            json!({"phase":1,"cycle":3,"executor":{"summary":"a3","commit":"c"},"review":{"gate":"REVISE","summary":"nw3","critical":0,"major":1,"minor":0}}),
-            json!({"phase":1,"cycle":4,"executor":{"summary":"attempt 4","commit":"jkl"},"review":null}),
-        ]);
+        set_cycles_json(
+            &conn,
+            &[
+                json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw1","critical":1,"major":0,"minor":0}}),
+                json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":{"gate":"REVISE","summary":"nw2","critical":1,"major":0,"minor":0}}),
+                json!({"phase":1,"cycle":3,"executor":{"summary":"a3","commit":"c"},"review":{"gate":"REVISE","summary":"nw3","critical":0,"major":1,"minor":0}}),
+                json!({"phase":1,"cycle":4,"executor":{"summary":"attempt 4","commit":"jkl"},"review":null}),
+            ],
+        );
         do_execute(&schema, &conn);
 
         // 4th REVISE attempt: would-be cycle 5, guard 5 <= 4 false → BLOCKED
         let out4 = do_revise("4th attempt").unwrap();
-        assert_eq!(out4.new_status, "blocked", "4th REVISE must produce blocked");
+        assert_eq!(
+            out4.new_status, "blocked",
+            "4th REVISE must produce blocked"
+        );
         assert_eq!(read_status(&conn), "blocked");
 
         // current_cycle must NOT be bumped (working-copy bump stays rolled back)
         assert_eq!(
-            read_i64(&conn, "current_cycle"), 4,
+            read_i64(&conn, "current_cycle"),
+            4,
             "current_cycle must remain 4, not bumped to 5"
         );
 
@@ -1770,15 +2038,18 @@ workflow:
         let br = read_text(&conn, "blocked_reason").unwrap_or_default();
         assert!(
             br.contains("4th revise rejected"),
-            "blocked_reason must cite guard rejection: {:?}", br
+            "blocked_reason must cite guard rejection: {:?}",
+            br
         );
         assert!(
             br.contains("phase 1"),
-            "blocked_reason must name the phase: {:?}", br
+            "blocked_reason must name the phase: {:?}",
+            br
         );
         assert!(
             br.contains("cycle 4"),
-            "blocked_reason must name the cycle: {:?}", br
+            "blocked_reason must name the cycle: {:?}",
+            br
         );
     }
 
@@ -1796,69 +2067,148 @@ workflow:
             "executor": {"summary": "phase1 attempt1", "commit": "a"},
             "review": null
         })];
-        insert_row_at(&conn, &schema, "code_review", 1, 1, 2, initial_cycles, vec![], None);
+        insert_row_at(
+            &conn,
+            &schema,
+            "code_review",
+            1,
+            1,
+            2,
+            initial_cycles,
+            vec![],
+            None,
+        );
 
         // 1st REVISE phase 1: cycle 1 → 2
         {
-            let out = compute_submit_review(&schema, &conn, "WF001", "REVISE", "needs work", None, 1, 0, 0, Actor::AiAutonomous).unwrap();
+            let out = compute_submit_review(
+                &schema,
+                &conn,
+                "WF001",
+                "REVISE",
+                "needs work",
+                None,
+                1,
+                0,
+                0,
+                Actor::AiAutonomous,
+            )
+            .unwrap();
             assert_eq!(out.new_status, "executing");
             assert_eq!(read_i64(&conn, "current_cycle"), 2);
 
             force_status(&conn, "executing", 1, 2);
-            set_cycles_json(&conn, &[
-                json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw","critical":1,"major":0,"minor":0}}),
-                json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":null}),
-            ]);
+            set_cycles_json(
+                &conn,
+                &[
+                    json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw","critical":1,"major":0,"minor":0}}),
+                    json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":null}),
+                ],
+            );
             do_execute(&schema, &conn);
         }
 
         // 2nd REVISE phase 1: cycle 2 → 3
         {
-            let out = compute_submit_review(&schema, &conn, "WF001", "REVISE", "still needs work", None, 0, 1, 0, Actor::AiAutonomous).unwrap();
+            let out = compute_submit_review(
+                &schema,
+                &conn,
+                "WF001",
+                "REVISE",
+                "still needs work",
+                None,
+                0,
+                1,
+                0,
+                Actor::AiAutonomous,
+            )
+            .unwrap();
             assert_eq!(out.new_status, "executing");
             assert_eq!(read_i64(&conn, "current_cycle"), 3);
 
             force_status(&conn, "executing", 1, 3);
-            set_cycles_json(&conn, &[
-                json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw","critical":1,"major":0,"minor":0}}),
-                json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":{"gate":"REVISE","summary":"snw","critical":0,"major":1,"minor":0}}),
-                json!({"phase":1,"cycle":3,"executor":{"summary":"a3","commit":"c"},"review":null}),
-            ]);
+            set_cycles_json(
+                &conn,
+                &[
+                    json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw","critical":1,"major":0,"minor":0}}),
+                    json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":{"gate":"REVISE","summary":"snw","critical":0,"major":1,"minor":0}}),
+                    json!({"phase":1,"cycle":3,"executor":{"summary":"a3","commit":"c"},"review":null}),
+                ],
+            );
             do_execute(&schema, &conn);
         }
 
         // PASS on phase 1 → phase 2 (current_phase bumps to 2, current_cycle resets to 1)
         {
-            let out = compute_submit_review(&schema, &conn, "WF001", "PASS", "phase 1 approved", None, 0, 0, 0, Actor::AiAutonomous).unwrap();
+            let out = compute_submit_review(
+                &schema,
+                &conn,
+                "WF001",
+                "PASS",
+                "phase 1 approved",
+                None,
+                0,
+                0,
+                0,
+                Actor::AiAutonomous,
+            )
+            .unwrap();
             assert_eq!(out.new_status, "executing");
-            assert_eq!(read_i64(&conn, "current_phase"), 2, "current_phase must advance to 2");
-            assert_eq!(read_i64(&conn, "current_cycle"), 1, "current_cycle must reset to 1 on phase advance");
+            assert_eq!(
+                read_i64(&conn, "current_phase"),
+                2,
+                "current_phase must advance to 2"
+            );
+            assert_eq!(
+                read_i64(&conn, "current_cycle"),
+                1,
+                "current_cycle must reset to 1 on phase advance"
+            );
         }
 
         // Phase 2: first REVISE — counter reset to 1, bumps to 2 (2 <= 4 true)
         // Prep: add a cycle entry for phase 2 cycle 1
         force_status(&conn, "executing", 2, 1);
-        set_cycles_json(&conn, &[
-            json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw","critical":1,"major":0,"minor":0}}),
-            json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":{"gate":"REVISE","summary":"snw","critical":0,"major":1,"minor":0}}),
-            json!({"phase":1,"cycle":3,"executor":{"summary":"a3","commit":"c"},"review":{"gate":"PASS","summary":"ok","critical":0,"major":0,"minor":0}}),
-            json!({"phase":2,"cycle":1,"executor":{"summary":"phase2 attempt1","commit":"d"},"review":null}),
-        ]);
+        set_cycles_json(
+            &conn,
+            &[
+                json!({"phase":1,"cycle":1,"executor":{"summary":"a1","commit":"a"},"review":{"gate":"REVISE","summary":"nw","critical":1,"major":0,"minor":0}}),
+                json!({"phase":1,"cycle":2,"executor":{"summary":"a2","commit":"b"},"review":{"gate":"REVISE","summary":"snw","critical":0,"major":1,"minor":0}}),
+                json!({"phase":1,"cycle":3,"executor":{"summary":"a3","commit":"c"},"review":{"gate":"PASS","summary":"ok","critical":0,"major":0,"minor":0}}),
+                json!({"phase":2,"cycle":1,"executor":{"summary":"phase2 attempt1","commit":"d"},"review":null}),
+            ],
+        );
         do_execute(&schema, &conn);
 
         // Phase 2's first REVISE: counter was 1, bumps to 2 (2 <= 4 true)
         let out = compute_submit_review(
-            &schema, &conn, "WF001",
-            "REVISE", "phase 2 needs work", None, 0, 1, 0,
+            &schema,
+            &conn,
+            "WF001",
+            "REVISE",
+            "phase 2 needs work",
+            None,
+            0,
+            1,
+            0,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
-        assert_eq!(out.new_status, "executing",
-            "Phase 2's first REVISE must succeed (per-phase counter does not carry from phase 1)");
-        assert_eq!(read_i64(&conn, "current_cycle"), 2,
-            "current_cycle should be 2 (reset to 1 on phase advance, bumped to 2 by first REVISE)");
-        assert_eq!(read_i64(&conn, "current_phase"), 2,
-            "current_phase must remain 2");
+        assert_eq!(
+            out.new_status, "executing",
+            "Phase 2's first REVISE must succeed (per-phase counter does not carry from phase 1)"
+        );
+        assert_eq!(
+            read_i64(&conn, "current_cycle"),
+            2,
+            "current_cycle should be 2 (reset to 1 on phase advance, bumped to 2 by first REVISE)"
+        );
+        assert_eq!(
+            read_i64(&conn, "current_phase"),
+            2,
+            "current_phase must remain 2"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1878,9 +2228,16 @@ workflow:
         ).unwrap();
 
         let err = compute_submit_execute(
-            &schema, &conn, "WF001",
-            "attempt", None, None, None, Actor::AiAutonomous,
-        ).unwrap_err();
+            &schema,
+            &conn,
+            "WF001",
+            "attempt",
+            None,
+            None,
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap_err();
 
         let msg = err.to_string();
         assert!(
@@ -1893,13 +2250,21 @@ workflow:
         conn.execute(
             "UPDATE wf_tasks SET claimed_at = ?1 WHERE display_id = 'WF001'",
             rusqlite::params![old_time],
-        ).unwrap();
+        )
+        .unwrap();
 
         // After expiry, submit should succeed
         let out = compute_submit_execute(
-            &schema, &conn, "WF001",
-            "attempt after expiry", None, None, None, Actor::AiAutonomous,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            "attempt after expiry",
+            None,
+            None,
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
         assert_eq!(out.new_status, "code_review");
     }
 
@@ -1922,10 +2287,13 @@ workflow:
         assert_eq!(out.new_status, "plan_review");
         assert_eq!(read_status(&conn), "plan_review");
 
-        let plan_json: Option<String> = conn.query_row(
-            "SELECT plan FROM wf_tasks WHERE display_id = 'WF001'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let plan_json: Option<String> = conn
+            .query_row(
+                "SELECT plan FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         let stored_plan: Value = serde_json::from_str(&plan_json.unwrap()).unwrap();
         assert_eq!(stored_plan["summary"].as_str().unwrap(), "my plan");
         assert_eq!(stored_plan["phases"].as_array().unwrap().len(), 2);
@@ -1945,20 +2313,34 @@ workflow:
         insert_row_at(&conn, &schema, "plan_review", 0, 0, 2, vec![], vec![], None);
 
         let out = compute_submit_plan_review(
-            &schema, &conn, "WF001",
-            "READY", "plan approved", None, Actor::AiAutonomous,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            "READY",
+            "plan approved",
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
 
         // Both plan_review→ready AND ready→executing must have fired inside the same tx
-        assert_eq!(out.new_status, "executing",
-            "READY gate: status must be executing after on-entry follow-on");
+        assert_eq!(
+            out.new_status, "executing",
+            "READY gate: status must be executing after on-entry follow-on"
+        );
         assert_eq!(read_status(&conn), "executing");
 
         // on-entry follow-on sets current_phase=1, current_cycle=1
-        assert_eq!(read_i64(&conn, "current_phase"), 1,
-            "current_phase must be 1 after ready → executing");
-        assert_eq!(read_i64(&conn, "current_cycle"), 1,
-            "current_cycle must be 1 after ready → executing");
+        assert_eq!(
+            read_i64(&conn, "current_phase"),
+            1,
+            "current_phase must be 1 after ready → executing"
+        );
+        assert_eq!(
+            read_i64(&conn, "current_cycle"),
+            1,
+            "current_cycle must be 1 after ready → executing"
+        );
 
         // Lock released
         let claimed_by = read_text(&conn, "claimed_by");
@@ -1977,40 +2359,82 @@ workflow:
         // 1st NEEDS_WORK: log.length = 0 < 3 → planning
         {
             let out = compute_submit_plan_review(
-                &schema, &conn, "WF001", "NEEDS_WORK", "needs changes 1", None, Actor::AiAutonomous,
-            ).unwrap();
+                &schema,
+                &conn,
+                "WF001",
+                "NEEDS_WORK",
+                "needs changes 1",
+                None,
+                Actor::AiAutonomous,
+            )
+            .unwrap();
             assert_eq!(out.new_status, "planning");
             assert_eq!(read_plan_review_log(&conn).len(), 1);
-            conn.execute("UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'", []).unwrap();
+            conn.execute(
+                "UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'",
+                [],
+            )
+            .unwrap();
         }
 
         // 2nd NEEDS_WORK: log.length = 1 < 3 → planning
         {
             let out = compute_submit_plan_review(
-                &schema, &conn, "WF001", "NEEDS_WORK", "needs changes 2", None, Actor::AiAutonomous,
-            ).unwrap();
+                &schema,
+                &conn,
+                "WF001",
+                "NEEDS_WORK",
+                "needs changes 2",
+                None,
+                Actor::AiAutonomous,
+            )
+            .unwrap();
             assert_eq!(out.new_status, "planning");
             assert_eq!(read_plan_review_log(&conn).len(), 2);
-            conn.execute("UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'", []).unwrap();
+            conn.execute(
+                "UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'",
+                [],
+            )
+            .unwrap();
         }
 
         // 3rd NEEDS_WORK: log.length = 2 < 3 → planning
         {
             let out = compute_submit_plan_review(
-                &schema, &conn, "WF001", "NEEDS_WORK", "needs changes 3", None, Actor::AiAutonomous,
-            ).unwrap();
+                &schema,
+                &conn,
+                "WF001",
+                "NEEDS_WORK",
+                "needs changes 3",
+                None,
+                Actor::AiAutonomous,
+            )
+            .unwrap();
             assert_eq!(out.new_status, "planning");
             assert_eq!(read_plan_review_log(&conn).len(), 3);
-            conn.execute("UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'", []).unwrap();
+            conn.execute(
+                "UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'",
+                [],
+            )
+            .unwrap();
         }
 
         // 4th NEEDS_WORK: log.length = 3 < 3 false → blocked (unguarded fallback)
         {
             let out = compute_submit_plan_review(
-                &schema, &conn, "WF001", "NEEDS_WORK", "still needs changes", None, Actor::AiAutonomous,
-            ).unwrap();
-            assert_eq!(out.new_status, "blocked",
-                "4th NEEDS_WORK must route to blocked (guard plan_review_log.length < 3 fails)");
+                &schema,
+                &conn,
+                "WF001",
+                "NEEDS_WORK",
+                "still needs changes",
+                None,
+                Actor::AiAutonomous,
+            )
+            .unwrap();
+            assert_eq!(
+                out.new_status, "blocked",
+                "4th NEEDS_WORK must route to blocked (guard plan_review_log.length < 3 fails)"
+            );
             assert_eq!(read_status(&conn), "blocked");
         }
     }
@@ -2025,9 +2449,15 @@ workflow:
         insert_row_at(&conn, &schema, "plan_review", 0, 0, 2, vec![], vec![], None);
 
         let out = compute_submit_plan_review(
-            &schema, &conn, "WF001",
-            "NOT_READY", "plan is fundamentally flawed", None, Actor::AiAutonomous,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            "NOT_READY",
+            "plan is fundamentally flawed",
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
 
         assert_eq!(out.new_status, "blocked");
         assert_eq!(read_status(&conn), "blocked");
@@ -2035,7 +2465,8 @@ workflow:
         let br = read_text(&conn, "blocked_reason").unwrap_or_default();
         assert!(
             br.contains("NOT_READY") || br.contains("fundamentally flawed"),
-            "blocked_reason must be populated: {:?}", br
+            "blocked_reason must be populated: {:?}",
+            br
         );
     }
 
@@ -2066,9 +2497,16 @@ fields:
         conn.execute_batch(&ddl).unwrap();
 
         let err = compute_submit_execute(
-            &schema, &conn, "L001",
-            "done", None, None, None, Actor::AiAutonomous,
-        ).unwrap_err();
+            &schema,
+            &conn,
+            "L001",
+            "done",
+            None,
+            None,
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap_err();
 
         assert!(
             err.to_string().contains("no workflow"),
@@ -2104,20 +2542,34 @@ fields:
             tx.execute(
                 "UPDATE wf_tasks SET status = 'plan_review', plan = ?1 WHERE display_id = 'WF001'",
                 rusqlite::params![r#"{"summary":"rolled back plan"}"#],
-            ).unwrap();
+            )
+            .unwrap();
             // Drop tx WITHOUT commit → automatic rollback
         }
 
         // All state must be identical to pre-tx
         assert_eq!(read_status(&conn), pre_status, "status must be unchanged");
-        assert_eq!(read_i64(&conn, "current_phase"), pre_phase, "current_phase must be unchanged");
-        assert_eq!(read_i64(&conn, "current_cycle"), pre_cycle, "current_cycle must be unchanged");
-        assert_eq!(read_cycles(&conn).len(), pre_cycles_len, "cycles must be unchanged");
+        assert_eq!(
+            read_i64(&conn, "current_phase"),
+            pre_phase,
+            "current_phase must be unchanged"
+        );
+        assert_eq!(
+            read_i64(&conn, "current_cycle"),
+            pre_cycle,
+            "current_cycle must be unchanged"
+        );
+        assert_eq!(
+            read_cycles(&conn).len(),
+            pre_cycles_len,
+            "cycles must be unchanged"
+        );
 
         let post_claimed = read_text(&conn, "claimed_by");
         assert_eq!(
             post_claimed, pre_claimed,
-            "claimed_by must be rolled back to pre-tx value: {:?}", post_claimed
+            "claimed_by must be rolled back to pre-tx value: {:?}",
+            post_claimed
         );
     }
 
@@ -2136,7 +2588,10 @@ fields:
         // Simulating render: repeated reads after commit must be consistent
         let status1 = read_status(&conn);
         let status2 = read_status(&conn);
-        assert_eq!(status1, status2, "repeated reads after commit must be consistent");
+        assert_eq!(
+            status1, status2,
+            "repeated reads after commit must be consistent"
+        );
         assert_eq!(status1, "plan_review");
     }
 
@@ -2152,9 +2607,15 @@ fields:
         // submit-plan-review READY fires two transitions inside one tx:
         //   plan_review → ready → executing
         let out = compute_submit_plan_review(
-            &schema, &conn, "WF001",
-            "READY", "approved", None, Actor::AiAutonomous,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            "READY",
+            "approved",
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
 
         assert_eq!(out.new_status, "executing");
 
@@ -2162,13 +2623,15 @@ fields:
         let claimed_by = read_text(&conn, "claimed_by");
         assert!(
             claimed_by.is_none() || claimed_by.as_deref() == Some(""),
-            "claimed_by must be NULL after commit: {:?}", claimed_by
+            "claimed_by must be NULL after commit: {:?}",
+            claimed_by
         );
 
         let claimed_at = read_text(&conn, "claimed_at");
         assert!(
             claimed_at.is_none() || claimed_at.as_deref() == Some(""),
-            "claimed_at must be NULL after commit: {:?}", claimed_at
+            "claimed_at must be NULL after commit: {:?}",
+            claimed_at
         );
     }
 
@@ -2188,8 +2651,14 @@ fields:
             json!({"phase":1,"cycle":4,"executor":{"summary":"a4"},"review":{"gate":"REVISE"}}),
         ];
         insert_row_at(
-            &conn, &schema, "blocked", 1, 4, 2,
-            audit_cycles, vec![],
+            &conn,
+            &schema,
+            "blocked",
+            1,
+            4,
+            2,
+            audit_cycles,
+            vec![],
             Some("4th revise rejected by guard current_cycle <= 4 on phase 1 cycle 4: test"),
         );
 
@@ -2199,29 +2668,44 @@ fields:
         assert_eq!(out.new_status, "executing");
         assert!(out.summary.contains("WF001"));
 
-        assert_eq!(read_status(&conn), "executing",
-            "after resume, status must be executing");
-        assert_eq!(read_i64(&conn, "current_phase"), 1,
-            "current_phase must be UNCHANGED (remains at 1)");
-        assert_eq!(read_i64(&conn, "current_cycle"), 1,
-            "current_cycle must be RESET to 1");
+        assert_eq!(
+            read_status(&conn),
+            "executing",
+            "after resume, status must be executing"
+        );
+        assert_eq!(
+            read_i64(&conn, "current_phase"),
+            1,
+            "current_phase must be UNCHANGED (remains at 1)"
+        );
+        assert_eq!(
+            read_i64(&conn, "current_cycle"),
+            1,
+            "current_cycle must be RESET to 1"
+        );
 
         // blocked_reason must be cleared (not the stale "4th revise..." string)
         let br = read_text(&conn, "blocked_reason").unwrap_or_default();
         assert!(
             br.is_empty(),
-            "blocked_reason must be cleared after resume, got: {:?}", br
+            "blocked_reason must be cleared after resume, got: {:?}",
+            br
         );
 
         // Audit trail preserved
         let cycles = read_cycles(&conn);
-        assert_eq!(cycles.len(), 4, "cycles audit trail must be preserved after resume");
+        assert_eq!(
+            cycles.len(),
+            4,
+            "cycles audit trail must be preserved after resume"
+        );
 
         // Lock released
         let claimed_by = read_text(&conn, "claimed_by");
         assert!(
             claimed_by.is_none() || claimed_by.as_deref() == Some(""),
-            "lock must be released after resume: {:?}", claimed_by
+            "lock must be released after resume: {:?}",
+            claimed_by
         );
     }
 
@@ -2233,7 +2717,14 @@ fields:
     fn ac5_14_resume_actor_mismatch_rejected() {
         let (schema, conn) = setup();
         insert_row_at(
-            &conn, &schema, "blocked", 1, 4, 2, vec![], vec![],
+            &conn,
+            &schema,
+            "blocked",
+            1,
+            4,
+            2,
+            vec![],
+            vec![],
             Some("blocked for testing"),
         );
 
@@ -2250,11 +2741,16 @@ fields:
         );
 
         // DB state must be completely unchanged (lock acquired then rolled back with tx)
-        assert_eq!(read_status(&conn), "blocked", "status must not change on actor mismatch");
+        assert_eq!(
+            read_status(&conn),
+            "blocked",
+            "status must not change on actor mismatch"
+        );
         let claimed_by = read_text(&conn, "claimed_by");
         assert!(
             claimed_by.is_none() || claimed_by.as_deref() == Some(""),
-            "lock must not remain after failed compute_resume: {:?}", claimed_by
+            "lock must not remain after failed compute_resume: {:?}",
+            claimed_by
         );
     }
 
@@ -2266,7 +2762,14 @@ fields:
     fn ac5_14_resume_acquires_lock() {
         let (schema, conn) = setup();
         insert_row_at(
-            &conn, &schema, "blocked", 1, 4, 2, vec![], vec![],
+            &conn,
+            &schema,
+            "blocked",
+            1,
+            4,
+            2,
+            vec![],
+            vec![],
             Some("blocked for testing"),
         );
 
@@ -2309,27 +2812,44 @@ fields:
         acquire_lock(&tx, &schema.name, "WF001", "ai_autonomous").unwrap();
 
         // Assert lock held before step 8
-        let claimed_after_acquire: Option<String> = tx.query_row(
-            "SELECT claimed_by FROM wf_tasks WHERE display_id = 'WF001'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let claimed_after_acquire: Option<String> = tx
+            .query_row(
+                "SELECT claimed_by FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(
-            claimed_after_acquire.as_deref(), Some("ai_autonomous"),
+            claimed_after_acquire.as_deref(),
+            Some("ai_autonomous"),
             "lock must be held after acquire_lock"
         );
 
         // Step 8: write status → ready
         let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
         let txt_fields: BTreeMap<String, String> = BTreeMap::new();
-        write_status_and_fields(&tx, &schema.name, row_id, "ready", "ai_autonomous", &fw_fields, &txt_fields).unwrap();
+        write_status_and_fields(
+            &tx,
+            &schema.name,
+            row_id,
+            "ready",
+            "ai_autonomous",
+            &fw_fields,
+            &txt_fields,
+        )
+        .unwrap();
 
         // Probe BETWEEN step 8 and step 9: lock must still be held
-        let claimed_between: Option<String> = tx.query_row(
-            "SELECT claimed_by FROM wf_tasks WHERE display_id = 'WF001'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let claimed_between: Option<String> = tx
+            .query_row(
+                "SELECT claimed_by FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(
-            claimed_between.as_deref(), Some("ai_autonomous"),
+            claimed_between.as_deref(),
+            Some("ai_autonomous"),
             "lock must still be held DURING follow-on (between write and follow-on)"
         );
 
@@ -2337,12 +2857,16 @@ fields:
         fire_on_entry_follow_ons(&tx, &schema, "WF001", row_id, "ready").unwrap();
 
         // Probe AFTER follow-on, BEFORE release: lock must still be held
-        let claimed_after_followon: Option<String> = tx.query_row(
-            "SELECT claimed_by FROM wf_tasks WHERE display_id = 'WF001'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let claimed_after_followon: Option<String> = tx
+            .query_row(
+                "SELECT claimed_by FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(
-            claimed_after_followon.as_deref(), Some("ai_autonomous"),
+            claimed_after_followon.as_deref(),
+            Some("ai_autonomous"),
             "lock must still be held AFTER follow-on, before release_lock"
         );
 
@@ -2356,7 +2880,8 @@ fields:
         let claimed_post_commit = read_text(&conn, "claimed_by");
         assert!(
             claimed_post_commit.is_none() || claimed_post_commit.as_deref() == Some(""),
-            "lock must be NULL after commit: {:?}", claimed_post_commit
+            "lock must be NULL after commit: {:?}",
+            claimed_post_commit
         );
         // Final status must be executing (follow-on fired)
         assert_eq!(read_status(&conn), "executing");
@@ -2386,10 +2911,16 @@ fields:
         // Note: Actor::AiWithHuman does NOT satisfy Actor::AiAutonomous (see actor_allowed in actor.rs).
         // The validator will fire the transition actor mismatch error and return Err before tx.commit().
         let err = compute_submit_execute(
-            &schema, &conn, "WF001",
-            "attempted summary", Some("abc"), None, None,
+            &schema,
+            &conn,
+            "WF001",
+            "attempted summary",
+            Some("abc"),
+            None,
+            None,
             Actor::AiWithHuman,
-        ).unwrap_err();
+        )
+        .unwrap_err();
 
         // Must be a validation error (actor mismatch for submit-execute)
         let msg = err.to_string();
@@ -2399,15 +2930,32 @@ fields:
         );
 
         // DB state must be completely unchanged — proves the handler's tx rolled back
-        assert_eq!(read_status(&conn), pre_status, "status must be unchanged after validator failure");
-        assert_eq!(read_i64(&conn, "current_phase"), pre_phase, "current_phase must be unchanged");
-        assert_eq!(read_i64(&conn, "current_cycle"), pre_cycle, "current_cycle must be unchanged");
-        assert_eq!(read_cycles(&conn).len(), pre_cycles_len, "cycles must be unchanged");
+        assert_eq!(
+            read_status(&conn),
+            pre_status,
+            "status must be unchanged after validator failure"
+        );
+        assert_eq!(
+            read_i64(&conn, "current_phase"),
+            pre_phase,
+            "current_phase must be unchanged"
+        );
+        assert_eq!(
+            read_i64(&conn, "current_cycle"),
+            pre_cycle,
+            "current_cycle must be unchanged"
+        );
+        assert_eq!(
+            read_cycles(&conn).len(),
+            pre_cycles_len,
+            "cycles must be unchanged"
+        );
 
         let post_claimed = read_text(&conn, "claimed_by");
         assert_eq!(
             post_claimed, pre_claimed,
-            "claimed_by must be rolled back (lock released by tx rollback): {:?}", post_claimed
+            "claimed_by must be rolled back (lock released by tx rollback): {:?}",
+            post_claimed
         );
     }
 
@@ -2421,17 +2969,24 @@ fields:
         insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
 
         compute_submit_execute(
-            &schema, &conn, "WF001",
-            "did stuff", Some("abc1234"), Some("src/foo.rs,src/bar.rs"), None,
+            &schema,
+            &conn,
+            "WF001",
+            "did stuff",
+            Some("abc1234"),
+            Some("src/foo.rs,src/bar.rs"),
+            None,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
         let cycles = read_cycles(&conn);
         assert_eq!(cycles.len(), 1);
         let files = &cycles[0]["executor"]["files_changed"];
         assert!(
             files.is_array(),
-            "files_changed must be a JSON array, got: {:?}", files
+            "files_changed must be a JSON array, got: {:?}",
+            files
         );
         let arr = files.as_array().unwrap();
         assert_eq!(arr.len(), 2, "expected 2 files, got: {:?}", arr);
@@ -2445,10 +3000,16 @@ fields:
         insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
 
         compute_submit_execute(
-            &schema, &conn, "WF001",
-            "did stuff", Some("abc"), Some(" a.rs , b.rs , , c.rs "), None,
+            &schema,
+            &conn,
+            "WF001",
+            "did stuff",
+            Some("abc"),
+            Some(" a.rs , b.rs , , c.rs "),
+            None,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
         let cycles = read_cycles(&conn);
         let files = cycles[0]["executor"]["files_changed"].as_array().unwrap();
@@ -2468,15 +3029,23 @@ fields:
         insert_row_at(&conn, &schema, "plan_review", 0, 0, 2, vec![], vec![], None);
 
         compute_submit_plan_review(
-            &schema, &conn, "WF001", "NEEDS_WORK", "revise plan", None, Actor::AiAutonomous,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            "NEEDS_WORK",
+            "revise plan",
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
 
         let log = read_plan_review_log(&conn);
         assert_eq!(log.len(), 1);
         let at = log[0].get("at").and_then(|v| v.as_str());
         assert!(
             at.is_some(),
-            "plan_review_log[0] must have 'at' field, entry: {:?}", log[0]
+            "plan_review_log[0] must have 'at' field, entry: {:?}",
+            log[0]
         );
         let at_str = at.unwrap();
         assert!(
@@ -2484,7 +3053,11 @@ fields:
             "at must be ISO-8601, got: {at_str}"
         );
         // Reset status for continued use
-        conn.execute("UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'", []).unwrap();
+        conn.execute(
+            "UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2493,17 +3066,24 @@ fields:
         insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
 
         compute_submit_execute(
-            &schema, &conn, "WF001",
-            "done", Some("abc"), None, None,
+            &schema,
+            &conn,
+            "WF001",
+            "done",
+            Some("abc"),
+            None,
+            None,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
         let cycles = read_cycles(&conn);
         assert_eq!(cycles.len(), 1);
         let at = cycles[0]["executor"].get("at").and_then(|v| v.as_str());
         assert!(
             at.is_some(),
-            "cycles[0].executor must have 'at' field, entry: {:?}", cycles[0]
+            "cycles[0].executor must have 'at' field, entry: {:?}",
+            cycles[0]
         );
         let at_str = at.unwrap();
         assert!(
@@ -2520,19 +3100,38 @@ fields:
             "executor": {"summary": "done", "commit": "abc", "at": "2026-01-01T00:00:00Z"},
             "review": null
         })];
-        insert_row_at(&conn, &schema, "code_review", 1, 1, 2, initial_cycles, vec![], None);
+        insert_row_at(
+            &conn,
+            &schema,
+            "code_review",
+            1,
+            1,
+            2,
+            initial_cycles,
+            vec![],
+            None,
+        );
 
         compute_submit_review(
-            &schema, &conn, "WF001",
-            "REVISE", "needs work", None, 1, 0, 0,
+            &schema,
+            &conn,
+            "WF001",
+            "REVISE",
+            "needs work",
+            None,
+            1,
+            0,
+            0,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
         let cycles = read_cycles(&conn);
         let at = cycles[0]["review"].get("at").and_then(|v| v.as_str());
         assert!(
             at.is_some(),
-            "cycles[0].review must have 'at' field, review: {:?}", cycles[0]["review"]
+            "cycles[0].review must have 'at' field, review: {:?}",
+            cycles[0]["review"]
         );
         let at_str = at.unwrap();
         assert!(
@@ -2552,14 +3151,24 @@ fields:
 
         let questions = Some(vec!["question one".to_string(), "question two".to_string()]);
         compute_submit_plan_review(
-            &schema, &conn, "WF001",
-            "NEEDS_WORK", "see questions", questions, Actor::AiAutonomous,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            "NEEDS_WORK",
+            "see questions",
+            questions,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
 
         let log = read_plan_review_log(&conn);
         assert_eq!(log.len(), 1);
         let qs = log[0].get("open_questions").and_then(|v| v.as_array());
-        assert!(qs.is_some(), "plan_review_log[0] must have 'open_questions': {:?}", log[0]);
+        assert!(
+            qs.is_some(),
+            "plan_review_log[0] must have 'open_questions': {:?}",
+            log[0]
+        );
         let arr = qs.unwrap();
         assert_eq!(arr.len(), 2, "expected 2 questions, got: {:?}", arr);
         assert_eq!(arr[0].as_str().unwrap(), "question one");
@@ -2661,32 +3270,57 @@ workflow:
         let now = now_iso8601();
         let plan_json = serde_json::to_string(&json!({
             "phases": [{"name": "phase 1"}]
-        })).unwrap();
+        }))
+        .unwrap();
         conn.execute(
             "INSERT INTO wf_custom (display_id, status, created_at, updated_at, \
              created_by, updated_by, title, current_phase, current_cycle, plan, my_exec_log) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
-                "C001", "executing", now, now, "human", "human", "Custom task",
-                1i64, 1i64, plan_json, "[]"
+                "C001",
+                "executing",
+                now,
+                now,
+                "human",
+                "human",
+                "Custom task",
+                1i64,
+                1i64,
+                plan_json,
+                "[]"
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         compute_submit_execute(
-            &schema, &conn, "C001",
-            "done via custom target", Some("abc"), None, None,
+            &schema,
+            &conn,
+            "C001",
+            "done via custom target",
+            Some("abc"),
+            None,
+            None,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Read my_exec_log — must have the entry
-        let log_json: Option<String> = conn.query_row(
-            "SELECT my_exec_log FROM wf_custom WHERE display_id = 'C001'",
-            [], |r| r.get(0),
-        ).unwrap_or(None);
+        let log_json: Option<String> = conn
+            .query_row(
+                "SELECT my_exec_log FROM wf_custom WHERE display_id = 'C001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
         let log: Vec<serde_json::Value> = log_json
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        assert_eq!(log.len(), 1, "entry must be written to my_exec_log, got: {:?}", log);
+        assert_eq!(
+            log.len(),
+            1,
+            "entry must be written to my_exec_log, got: {:?}",
+            log
+        );
         assert_eq!(
             log[0]["executor"]["summary"].as_str().unwrap(),
             "done via custom target"
@@ -2705,20 +3339,44 @@ workflow:
             "executor": {"summary": "done", "commit": "abc"},
             "review": null
         })];
-        insert_row_at(&conn, &schema, "code_review", 1, 1, 2, initial_cycles, vec![], None);
+        insert_row_at(
+            &conn,
+            &schema,
+            "code_review",
+            1,
+            1,
+            2,
+            initial_cycles,
+            vec![],
+            None,
+        );
 
         compute_submit_review(
-            &schema, &conn, "WF001",
-            "REVISE", "short summary S", Some("long detailed report D"), 1, 2, 3,
+            &schema,
+            &conn,
+            "WF001",
+            "REVISE",
+            "short summary S",
+            Some("long detailed report D"),
+            1,
+            2,
+            3,
             Actor::AiAutonomous,
-        ).unwrap();
+        )
+        .unwrap();
 
         let cycles = read_cycles(&conn);
         let review = &cycles[0]["review"];
-        assert_eq!(review["summary"].as_str().unwrap(), "short summary S",
-            "review.summary must be the --summary value");
-        assert_eq!(review["details"].as_str().unwrap(), "long detailed report D",
-            "review.details must be the --details value as a separate key");
+        assert_eq!(
+            review["summary"].as_str().unwrap(),
+            "short summary S",
+            "review.summary must be the --summary value"
+        );
+        assert_eq!(
+            review["details"].as_str().unwrap(),
+            "long detailed report D",
+            "review.details must be the --details value as a separate key"
+        );
         // Confirm they are genuinely separate (different values)
         assert_ne!(
             review["summary"].as_str().unwrap(),
@@ -2738,16 +3396,21 @@ workflow:
 
         // Load the bundled tasks schema
         let tasks_yaml = BUNDLED_STORE_SCHEMAS
-            .iter().find(|(n, _)| *n == "tasks").map(|(_, y)| *y)
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
             .expect("tasks bundled schema must be present");
         let schema = crate::schema::Schema::from_yaml(tasks_yaml).unwrap();
 
         // Verify BUNDLED_STORE_TEMPLATES contains "tasks" with the planner template
         let tasks_templates = BUNDLED_STORE_TEMPLATES
-            .iter().find(|(n, _)| *n == "tasks").map(|(_, t)| *t)
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, t)| *t)
             .expect("tasks templates must be in BUNDLED_STORE_TEMPLATES");
         let planner_tpl = tasks_templates
-            .iter().find(|(p, _)| *p == "templates/planner-brief.md.tpl")
+            .iter()
+            .find(|(p, _)| *p == "templates/planner-brief.md.tpl")
             .map(|(_, c)| *c)
             .expect("planner-brief.md.tpl must be in bundled templates");
         // Verify the known sentinel string is present
@@ -2769,17 +3432,29 @@ workflow:
             m.insert("slug".to_string(), serde_json::json!("sentinel-test"));
             m.insert("current_phase".to_string(), serde_json::json!(1));
             m.insert("current_cycle".to_string(), serde_json::json!(1));
-            m.insert("created_at".to_string(), serde_json::json!("2026-01-01T00:00:00Z"));
-            m.insert("updated_at".to_string(), serde_json::json!("2026-01-01T00:00:00Z"));
-            m.insert("contract".to_string(), serde_json::json!({
-                "done_when": "Sentinel detected",
-                "scope_in": "All",
-                "scope_out": "None"
-            }));
-            m.insert("plan".to_string(), serde_json::json!({
-                "objective": "Test bundled sentinel",
-                "phases": []
-            }));
+            m.insert(
+                "created_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert(
+                "updated_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert(
+                "contract".to_string(),
+                serde_json::json!({
+                    "done_when": "Sentinel detected",
+                    "scope_in": "All",
+                    "scope_out": "None"
+                }),
+            );
+            m.insert(
+                "plan".to_string(),
+                serde_json::json!({
+                    "objective": "Test bundled sentinel",
+                    "phases": []
+                }),
+            );
             m.insert("plan_review_log".to_string(), serde_json::json!([]));
             m.insert("cycles".to_string(), serde_json::json!([]));
             m
@@ -2789,10 +3464,7 @@ workflow:
         let rendered = crate::render::render_template(planner_tpl, &ctx)
             .expect("bundled planner template must render without error");
 
-        assert!(
-            !rendered.is_empty(),
-            "rendered briefing must be non-empty"
-        );
+        assert!(!rendered.is_empty(), "rendered briefing must be non-empty");
         assert!(
             rendered.contains("Methodical and thorough"),
             "rendered briefing must contain planner persona text from bundled template"
@@ -2808,10 +3480,13 @@ workflow:
     // ---------------------------------------------------------------------------
 
     fn read_wrap_log(conn: &Connection) -> Vec<Value> {
-        let json_str: Option<String> = conn.query_row(
-            "SELECT wrap_log FROM wf_tasks WHERE display_id = 'WF001'",
-            [], |r| r.get(0),
-        ).unwrap_or(None);
+        let json_str: Option<String> = conn
+            .query_row(
+                "SELECT wrap_log FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
         json_str
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()
@@ -2822,7 +3497,8 @@ workflow:
         let plan_json = serde_json::to_string(&json!({
             "summary": "test plan",
             "phases": [{"name": "phase 1"}]
-        })).unwrap();
+        }))
+        .unwrap();
         let cycles_json = serde_json::to_string(&json!([])).unwrap();
         let log_json = serde_json::to_string(&json!([])).unwrap();
         let wrap_log_json = serde_json::to_string(&wrap_log).unwrap();
@@ -2836,10 +3512,16 @@ workflow:
              VALUES (?1, 'in_review', ?2, ?3, 'human', 'human', 'Test task', \
              1, 1, ?4, ?5, ?6, '', ?7)",
             rusqlite::params![
-                "WF001", now, now,
-                plan_json, cycles_json, log_json, wrap_log_json
+                "WF001",
+                now,
+                now,
+                plan_json,
+                cycles_json,
+                log_json,
+                wrap_log_json
             ],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn make_wrap_entry() -> Value {
@@ -2862,9 +3544,13 @@ workflow:
         insert_row_at(&conn, &schema, "executing", 1, 1, 2, vec![], vec![], None);
 
         let err = compute_submit_wrap(
-            &schema, &conn, "WF001",
-            make_wrap_entry(), Actor::AiAutonomous,
-        ).unwrap_err();
+            &schema,
+            &conn,
+            "WF001",
+            make_wrap_entry(),
+            Actor::AiAutonomous,
+        )
+        .unwrap_err();
 
         let msg = err.to_string();
         assert!(
@@ -2894,9 +3580,13 @@ workflow:
         insert_row_at_in_review(&conn, &schema, vec![]);
 
         let out = compute_submit_wrap(
-            &schema, &conn, "WF001",
-            make_wrap_entry(), Actor::AiAutonomous,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            make_wrap_entry(),
+            Actor::AiAutonomous,
+        )
+        .unwrap();
 
         // Status remains in_review (no transition fired)
         assert_eq!(out.new_status, "in_review");
@@ -2914,7 +3604,10 @@ workflow:
         );
         assert_eq!(entry["deviations"].as_array().unwrap().len(), 1);
         assert_eq!(entry["residual_risks"].as_array().unwrap().len(), 1);
-        assert_eq!(entry["recommended_sanity_checks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            entry["recommended_sanity_checks"].as_array().unwrap().len(),
+            1
+        );
 
         // `at` must be set by handler (ISO-8601)
         let at = entry["at"].as_str().expect("at must be a string");
@@ -2934,19 +3627,25 @@ workflow:
         insert_row_at_in_review(&conn, &schema, vec![]);
 
         compute_submit_wrap(
-            &schema, &conn, "WF001",
-            make_wrap_entry(), Actor::AiAutonomous,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            make_wrap_entry(),
+            Actor::AiAutonomous,
+        )
+        .unwrap();
 
         let claimed_by = read_text(&conn, "claimed_by");
         assert!(
             claimed_by.is_none() || claimed_by.as_deref() == Some(""),
-            "lock must be released after commit: {:?}", claimed_by
+            "lock must be released after commit: {:?}",
+            claimed_by
         );
         let claimed_at = read_text(&conn, "claimed_at");
         assert!(
             claimed_at.is_none() || claimed_at.as_deref() == Some(""),
-            "claimed_at must be NULL after commit: {:?}", claimed_at
+            "claimed_at must be NULL after commit: {:?}",
+            claimed_at
         );
     }
 
@@ -2977,10 +3676,8 @@ workflow:
             "residual_risks": [],
             "recommended_sanity_checks": ["smoke test after deploy"]
         });
-        let out = compute_submit_wrap(
-            &schema, &conn, "WF001",
-            second_entry, Actor::AiAutonomous,
-        ).unwrap();
+        let out = compute_submit_wrap(&schema, &conn, "WF001", second_entry, Actor::AiAutonomous)
+            .unwrap();
 
         assert_eq!(out.new_status, "in_review");
         let log = read_wrap_log(&conn);
@@ -3016,9 +3713,13 @@ workflow:
         });
 
         compute_submit_wrap(
-            &schema, &conn, "WF001",
-            entry_with_stale_at, Actor::AiAutonomous,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            entry_with_stale_at,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
 
         let log = read_wrap_log(&conn);
         let at = log[0]["at"].as_str().unwrap();

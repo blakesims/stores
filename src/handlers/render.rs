@@ -17,9 +17,12 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::manifest::Manifest;
-use crate::render::{build_context, render_template};
 use crate::render::path::{find_existing_task_dir, maybe_move_dir, resolve_render_path};
-use crate::schema::{actor::{Actor, InvokerCtx}, Schema};
+use crate::render::{build_context, render_template};
+use crate::schema::{
+    actor::{Actor, InvokerCtx},
+    Schema,
+};
 
 use super::row::read_row;
 
@@ -90,12 +93,12 @@ pub(crate) fn compute_render_in(
 
     // Determine if a directory move is needed.
     let target_dir = target_path.parent().map(PathBuf::from);
-    let was_directory_move =
-        if let (Some(existing), Some(target_d)) = (&existing_dir, &target_dir) {
-            existing != target_d && existing.exists()
-        } else {
-            false
-        };
+    let was_directory_move = if let (Some(existing), Some(target_d)) = (&existing_dir, &target_dir)
+    {
+        existing != target_d && existing.exists()
+    } else {
+        false
+    };
 
     // Load the render template.
     // P6-m2: detect "bundled:<name>" sentinel in schema_path; if present, look up
@@ -111,13 +114,18 @@ pub(crate) fn compute_render_in(
                 .iter()
                 .find(|(name, _)| *name == bundled_name)
                 .and_then(|(_, templates)| {
-                    templates.iter().find(|(path, _)| *path == tpl_key.as_ref()).map(|(_, content)| content.to_string())
+                    templates
+                        .iter()
+                        .find(|(path, _)| *path == tpl_key.as_ref())
+                        .map(|(_, content)| content.to_string())
                 })
-                .ok_or_else(|| anyhow::anyhow!(
-                    "bundled store '{}': no render template '{}' in BUNDLED_STORE_TEMPLATES",
-                    bundled_name,
-                    tpl_key
-                ))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "bundled store '{}': no render template '{}' in BUNDLED_STORE_TEMPLATES",
+                        bundled_name,
+                        tpl_key
+                    )
+                })?
         } else {
             let full_path = entry.schema_path.join(render_tpl_path);
             std::fs::read_to_string(&full_path).map_err(|e| {
@@ -171,7 +179,13 @@ pub(crate) fn run_render_in(
     manifest_root: &Path,
 ) -> Result<()> {
     let output = compute_render_in(
-        schema, conn, display_id, dry_run, invoker, repo_root, manifest_root,
+        schema,
+        conn,
+        display_id,
+        dry_run,
+        invoker,
+        repo_root,
+        manifest_root,
     )?;
 
     if output.dry_run {
@@ -256,8 +270,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn fixture_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/workflow_minimal")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workflow_minimal")
     }
 
     fn fixture_schema() -> Schema {
@@ -299,14 +312,24 @@ mod tests {
              current_cycle, blocked_reason, plan, cycles, plan_review_log) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
             rusqlite::params![
-                display_id, status, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z",
-                "human", "human", "Test Task", slug,
-                None::<String>, 1i64, 1i64, None::<String>,
+                display_id,
+                status,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+                "human",
+                "human",
+                "Test Task",
+                slug,
+                None::<String>,
+                1i64,
+                1i64,
+                None::<String>,
                 r#"{"objective":"","phases":[]}"#,
                 "[]",
                 "[]",
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         (tmp, conn, schema)
     }
@@ -318,12 +341,25 @@ mod tests {
         let tmp_path = tmp.path().to_path_buf();
 
         let output = compute_render_in(
-            &schema, &conn, "WF001", false, Actor::Human, &tmp_path, &tmp_path,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
 
-        assert!(!output.content.is_empty(), "rendered content should not be empty");
         assert!(
-            output.path.to_string_lossy().contains("tasks/active/WF001-my-task/main.md"),
+            !output.content.is_empty(),
+            "rendered content should not be empty"
+        );
+        assert!(
+            output
+                .path
+                .to_string_lossy()
+                .contains("tasks/active/WF001-my-task/main.md"),
             "path should contain tasks/active/WF001-my-task/main.md: {}",
             output.path.display()
         );
@@ -358,11 +394,23 @@ mod tests {
         let (tmp, conn, schema) = setup_fixture_env("executing", "render-test", "WF001");
         let tmp_path = tmp.path().to_path_buf();
 
-        run_render_in(&schema, &conn, "WF001", false, Actor::Human, &tmp_path, &tmp_path)
-            .unwrap();
+        run_render_in(
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
 
         let expected_path = tmp_path.join("tasks/active/WF001-render-test/main.md");
-        assert!(expected_path.exists(), "main.md should exist at {}", expected_path.display());
+        assert!(
+            expected_path.exists(),
+            "main.md should exist at {}",
+            expected_path.display()
+        );
 
         let content = std::fs::read_to_string(&expected_path).unwrap();
         assert!(!content.is_empty(), "rendered content should not be empty");
@@ -381,12 +429,24 @@ mod tests {
         std::fs::create_dir_all(&old_dir).unwrap();
         std::fs::write(old_dir.join("notes.md"), "some notes").unwrap();
 
-        run_render_in(&schema, &conn, "WF001", false, Actor::Human, &tmp_path, &tmp_path)
-            .unwrap();
+        run_render_in(
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
 
         // The directory should have moved to completed/.
         let new_dir = tmp_path.join("tasks/completed/WF001-dir-move-task");
-        assert!(new_dir.exists(), "directory should be at completed/: {}", new_dir.display());
+        assert!(
+            new_dir.exists(),
+            "directory should be at completed/: {}",
+            new_dir.display()
+        );
         assert!(
             !old_dir.exists(),
             "old active/ directory should no longer exist: {}",
@@ -394,7 +454,11 @@ mod tests {
         );
         // main.md should be in the new location.
         let main_md = new_dir.join("main.md");
-        assert!(main_md.exists(), "main.md should exist in completed dir: {}", main_md.display());
+        assert!(
+            main_md.exists(),
+            "main.md should exist in completed dir: {}",
+            main_md.display()
+        );
     }
 
     // AC6.4: idempotency — two renders produce byte-identical content.
@@ -403,13 +467,29 @@ mod tests {
         let (tmp, conn, schema) = setup_fixture_env("executing", "idem-test", "WF001");
         let tmp_path = tmp.path().to_path_buf();
 
-        run_render_in(&schema, &conn, "WF001", false, Actor::Human, &tmp_path, &tmp_path)
-            .unwrap();
+        run_render_in(
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
         let expected_path = tmp_path.join("tasks/active/WF001-idem-test/main.md");
         let content1 = std::fs::read_to_string(&expected_path).unwrap();
 
-        run_render_in(&schema, &conn, "WF001", false, Actor::Human, &tmp_path, &tmp_path)
-            .unwrap();
+        run_render_in(
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
         let content2 = std::fs::read_to_string(&expected_path).unwrap();
 
         assert_eq!(
@@ -421,8 +501,8 @@ mod tests {
     // AC6.5: blocked_reason appears in render context.
     #[test]
     fn compute_render_blocked_reason_in_context() {
-        use crate::render::build_context;
         use crate::handlers::row::read_row;
+        use crate::render::build_context;
 
         let (tmp, conn, schema) = setup_fixture_env("blocked", "blocked-task", "WF001");
 
@@ -430,7 +510,8 @@ mod tests {
         conn.execute(
             "UPDATE wf_tasks SET blocked_reason = ?1 WHERE display_id = ?2",
             rusqlite::params!["Waiting for human input on scope", "WF001"],
-        ).unwrap();
+        )
+        .unwrap();
 
         let tmp_path = tmp.path().to_path_buf();
         let (_id, entry) = read_row(&schema, &conn, "WF001").unwrap();
@@ -445,8 +526,15 @@ mod tests {
 
         // Full render should also succeed.
         let output = compute_render_in(
-            &schema, &conn, "WF001", false, Actor::Human, &tmp_path, &tmp_path,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
         assert!(
             output.path.to_string_lossy().contains("tasks/paused/"),
             "blocked status should route to paused/: {}",
@@ -464,12 +552,23 @@ mod tests {
 
         let (_, entry_before) = read_row(&schema, &conn, "WF001").unwrap();
 
-        run_render_in(&schema, &conn, "WF001", false, Actor::Human, &tmp_path, &tmp_path)
-            .unwrap();
+        run_render_in(
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
 
         let (_, entry_after) = read_row(&schema, &conn, "WF001").unwrap();
 
-        assert_eq!(entry_before, entry_after, "render must not modify any DB row");
+        assert_eq!(
+            entry_before, entry_after,
+            "render must not modify any DB row"
+        );
     }
 
     // AC6.2: dry-run returns content without writing to disk.
@@ -479,11 +578,21 @@ mod tests {
         let tmp_path = tmp.path().to_path_buf();
 
         let output = compute_render_in(
-            &schema, &conn, "WF001", true, Actor::Human, &tmp_path, &tmp_path,
-        ).unwrap();
+            &schema,
+            &conn,
+            "WF001",
+            true,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
 
         assert!(output.dry_run, "dry_run flag should be set");
-        assert!(!output.content.is_empty(), "content should be populated in dry-run");
+        assert!(
+            !output.content.is_empty(),
+            "content should be populated in dry-run"
+        );
 
         // Nothing should be written.
         let expected_path = tmp_path.join("tasks/active/WF001-dry-test/main.md");

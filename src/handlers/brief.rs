@@ -65,11 +65,8 @@ pub(crate) fn compute(
     let agent_role: String = if let Some(explicit) = for_agent {
         // AC4.5: validate against known roles.
         if !workflow.agent_roles.contains_key(explicit) {
-            let mut available: Vec<&str> = workflow
-                .agent_roles
-                .keys()
-                .map(|k| k.as_str())
-                .collect();
+            let mut available: Vec<&str> =
+                workflow.agent_roles.keys().map(|k| k.as_str()).collect();
             available.sort();
             bail!(
                 "unknown agent role '{}'; available roles: {}",
@@ -126,13 +123,18 @@ pub(crate) fn compute(
             .iter()
             .find(|(name, _)| *name == bundled_name)
             .and_then(|(_, templates)| {
-                templates.iter().find(|(path, _)| *path == tpl_key.as_ref()).map(|(_, content)| content.to_string())
+                templates
+                    .iter()
+                    .find(|(path, _)| *path == tpl_key.as_ref())
+                    .map(|(_, content)| content.to_string())
             })
-            .ok_or_else(|| anyhow::anyhow!(
-                "bundled store '{}': no template '{}' in BUNDLED_STORE_TEMPLATES",
-                bundled_name,
-                tpl_key
-            ))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "bundled store '{}': no template '{}' in BUNDLED_STORE_TEMPLATES",
+                    bundled_name,
+                    tpl_key
+                )
+            })?
     } else {
         let store_root = manifest
             .stores
@@ -282,15 +284,20 @@ workflow:
         ).unwrap();
 
         let matches = matches_for("T001", Some("nonexistent_agent"));
-        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous.into())
-            .unwrap_err();
+        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous.into()).unwrap_err();
         let msg = err.to_string();
 
         // AC4.5: all four roles AND the unknown role must appear in the real error.
         assert!(msg.contains("planner"), "must contain 'planner': {msg}");
-        assert!(msg.contains("plan_reviewer"), "must contain 'plan_reviewer': {msg}");
+        assert!(
+            msg.contains("plan_reviewer"),
+            "must contain 'plan_reviewer': {msg}"
+        );
         assert!(msg.contains("executor"), "must contain 'executor': {msg}");
-        assert!(msg.contains("code_reviewer"), "must contain 'code_reviewer': {msg}");
+        assert!(
+            msg.contains("code_reviewer"),
+            "must contain 'code_reviewer': {msg}"
+        );
         assert!(
             msg.contains("nonexistent_agent"),
             "must contain the bad role name: {msg}"
@@ -314,8 +321,7 @@ fields:
         let (_dir, conn) = open_db_with_schema(&schema);
 
         let matches = matches_for("O001", None);
-        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous.into())
-            .unwrap_err();
+        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous.into()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("obs"), "error must name the store: {msg}");
         assert!(
@@ -337,7 +343,9 @@ fields:
 
         // Load the tasks schema
         let tasks_yaml = BUNDLED_STORE_SCHEMAS
-            .iter().find(|(n, _)| *n == "tasks").map(|(_, y)| *y)
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
             .expect("tasks schema");
         let schema = Schema::from_yaml(tasks_yaml).unwrap();
 
@@ -350,13 +358,22 @@ fields:
             m.insert("slug".to_string(), serde_json::json!("test-task"));
             m.insert("current_phase".to_string(), serde_json::json!(1));
             m.insert("current_cycle".to_string(), serde_json::json!(1));
-            m.insert("created_at".to_string(), serde_json::json!("2026-01-01T00:00:00Z"));
-            m.insert("updated_at".to_string(), serde_json::json!("2026-01-01T00:00:00Z"));
-            m.insert("contract".to_string(), serde_json::json!({
-                "done_when": "Feature X works end-to-end",
-                "scope_in": "All API endpoints",
-                "scope_out": "UI changes"
-            }));
+            m.insert(
+                "created_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert(
+                "updated_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert(
+                "contract".to_string(),
+                serde_json::json!({
+                    "done_when": "Feature X works end-to-end",
+                    "scope_in": "All API endpoints",
+                    "scope_out": "UI changes"
+                }),
+            );
             m.insert("plan".to_string(), serde_json::json!({
                 "objective": "Implement the feature",
                 "phases": [
@@ -371,7 +388,9 @@ fields:
 
         // Get templates from BUNDLED_STORE_TEMPLATES
         let templates = BUNDLED_STORE_TEMPLATES
-            .iter().find(|(n, _)| *n == "tasks").map(|(_, t)| *t)
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, t)| *t)
             .expect("tasks templates");
 
         let roles = ["planner", "plan_reviewer", "executor", "code_reviewer"];
@@ -384,7 +403,9 @@ fields:
 
         for (role, tpl_path) in roles.iter().zip(template_paths.iter()) {
             let content = templates
-                .iter().find(|(p, _)| p == tpl_path).map(|(_, c)| *c)
+                .iter()
+                .find(|(p, _)| p == tpl_path)
+                .map(|(_, c)| *c)
                 .unwrap_or_else(|| panic!("template {} missing", tpl_path));
             let rendered = render_template(content, &ctx)
                 .unwrap_or_else(|e| panic!("{} render failed: {}", role, e));
@@ -392,7 +413,8 @@ fields:
             assert!(
                 rendered.contains("Test Task"),
                 "{} brief must contain title: {}",
-                role, &rendered[..200.min(rendered.len())]
+                role,
+                &rendered[..200.min(rendered.len())]
             );
             assert!(
                 rendered.contains("Feature X works end-to-end"),

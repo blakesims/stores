@@ -247,10 +247,7 @@ mod tests {
         });
         let root = Path::new("/repo");
         let p = resolve_render_path(tpl, &ctx, root).unwrap();
-        assert_eq!(
-            p,
-            PathBuf::from("/repo/tasks/active/T003-my-task/main.md")
-        );
+        assert_eq!(p, PathBuf::from("/repo/tasks/active/T003-my-task/main.md"));
     }
 
     #[test]
@@ -264,10 +261,7 @@ mod tests {
         });
         let root = Path::new("/repo");
         let p = resolve_render_path(tpl, &ctx, root).unwrap();
-        assert_eq!(
-            p,
-            PathBuf::from("/repo/tasks/active/T003-my-task/main.md")
-        );
+        assert_eq!(p, PathBuf::from("/repo/tasks/active/T003-my-task/main.md"));
     }
 
     #[test]
@@ -297,10 +291,7 @@ mod tests {
         });
         let root = Path::new("/repo");
         let p = resolve_render_path(tpl, &ctx, root).unwrap();
-        assert_eq!(
-            p,
-            PathBuf::from("/repo/tasks/paused/T003-my-task/main.md")
-        );
+        assert_eq!(p, PathBuf::from("/repo/tasks/paused/T003-my-task/main.md"));
     }
 
     // find_existing_task_dir

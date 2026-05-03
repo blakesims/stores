@@ -42,7 +42,11 @@ pub fn run(
         match matches.try_get_many::<String>(cli_name) {
             Ok(Some(vals)) => {
                 let collected: Vec<String> = vals.cloned().collect();
-                if collected.is_empty() { None } else { Some(collected) }
+                if collected.is_empty() {
+                    None
+                } else {
+                    Some(collected)
+                }
             }
             _ => None,
         }
@@ -52,9 +56,10 @@ pub fn run(
     // sub-fields not present in the diff are preserved.
     let mut merged = existing.clone();
     for (k, v) in &diff {
-        let is_record = schema.fields.iter().any(|f| {
-            f.name == *k && matches!(f.ty, crate::schema::FieldType::Record(_))
-        });
+        let is_record = schema
+            .fields
+            .iter()
+            .any(|f| f.name == *k && matches!(f.ty, crate::schema::FieldType::Record(_)));
         if is_record {
             if let (Some(Value::Object(existing_obj)), Value::Object(new_obj)) =
                 (merged.get(k).cloned(), v)
@@ -71,18 +76,14 @@ pub fn run(
     }
 
     // Run validator against merged entry; actor checks scoped to diff only.
-    validate::validate(schema, &merged, Op::Update(diff.clone()), invoker).map_err(|errs| {
-        anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
-    })?;
+    validate::validate(schema, &merged, Op::Update(diff.clone()), invoker)
+        .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
     // Build SET clause for only the fields in diff + updated_*
     let now = now_iso8601();
     let invoker_str = invoker.actor.to_string();
 
-    let mut set_parts: Vec<String> = vec![
-        format!("updated_at = ?1"),
-        format!("updated_by = ?2"),
-    ];
+    let mut set_parts: Vec<String> = vec![format!("updated_at = ?1"), format!("updated_by = ?2")];
     let mut sql_values: Vec<rusqlite::types::Value> = vec![
         rusqlite::types::Value::Text(now),
         rusqlite::types::Value::Text(invoker_str),
@@ -99,18 +100,27 @@ pub fn run(
                     // Use the deep-merged value (not the partial diff) so sibling
                     // sub-fields preserved in `merged` are written to the DB.
                     let write_val = merged.get(&field.name).unwrap_or(new_val);
-                    let json_str = serde_json::to_string(write_val)
-                        .unwrap_or_else(|_| "null".to_string());
+                    let json_str =
+                        serde_json::to_string(write_val).unwrap_or_else(|_| "null".to_string());
                     sql_values.push(rusqlite::types::Value::Text(json_str));
                 }
-                FieldType::List(_) | FieldType::ListRecord(_) | FieldType::ListFk { .. } | FieldType::Json => {
-                    let json_str = serde_json::to_string(new_val)
-                        .unwrap_or_else(|_| "null".to_string());
+                FieldType::List(_)
+                | FieldType::ListRecord(_)
+                | FieldType::ListFk { .. }
+                | FieldType::Json => {
+                    let json_str =
+                        serde_json::to_string(new_val).unwrap_or_else(|_| "null".to_string());
                     sql_values.push(rusqlite::types::Value::Text(json_str));
                 }
                 FieldType::Bool => {
                     let i = match new_val {
-                        Value::Bool(b) => if *b { 1 } else { 0 },
+                        Value::Bool(b) => {
+                            if *b {
+                                1
+                            } else {
+                                0
+                            }
+                        }
                         Value::Number(n) => n.as_i64().unwrap_or(0) as i32 as i64,
                         _ => 0,
                     };
@@ -204,22 +214,28 @@ fields:
 
         // INSERT row with both sub-fields populated (cli_name = sub-field name only)
         let add_cmd = build_cmd(&schema, "add", false);
-        let add_matches = add_cmd
-            .get_matches_from(["add", "--notes", "keep-me", "--severity", "info"]);
+        let add_matches =
+            add_cmd.get_matches_from(["add", "--notes", "keep-me", "--severity", "info"]);
         crate::handlers::add::run(&schema, &conn, &add_matches, Actor::Human.into()).unwrap();
 
         // UPDATE only severity
         let upd_cmd = build_cmd(&schema, "update", true);
-        let upd_matches = upd_cmd
-            .get_matches_from(["update", "R001", "--severity", "warning"]);
+        let upd_matches = upd_cmd.get_matches_from(["update", "R001", "--severity", "warning"]);
         run(&schema, &conn, &upd_matches, Actor::Human.into()).unwrap();
 
         // Read back and assert notes is preserved, severity is updated
         let json_str: String = conn
-            .query_row("SELECT details FROM rstore WHERE display_id = 'R001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT details FROM rstore WHERE display_id = 'R001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(v["notes"], "keep-me", "notes must be preserved after partial Record update");
+        assert_eq!(
+            v["notes"], "keep-me",
+            "notes must be preserved after partial Record update"
+        );
         assert_eq!(v["severity"], "warning", "severity must reflect the update");
     }
 }

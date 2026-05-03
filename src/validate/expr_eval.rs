@@ -10,7 +10,6 @@
 ///   - Object (record) → `object.len()` as `i64`.
 ///   - Any other shape / missing path → predicate is `false` (never panics).
 /// - Missing / null paths always return `false`.
-
 use crate::schema::expr::{Expr, Lhs, Op, Rhs};
 use crate::validate::EntryMap;
 use serde_json::Value;
@@ -136,12 +135,10 @@ fn eval_path(path: &[String], op: &Op, rhs: &Rhs, entry: &EntryMap) -> bool {
                 None => return false,
             };
             match (val, rhs_val) {
-                (Value::Number(l), Value::Number(r)) => {
-                    match (l.as_i64(), r.as_i64()) {
-                        (Some(li), Some(ri)) => compare_i64(li, ri, op),
-                        _ => false,
-                    }
-                }
+                (Value::Number(l), Value::Number(r)) => match (l.as_i64(), r.as_i64()) {
+                    (Some(li), Some(ri)) => compare_i64(li, ri, op),
+                    _ => false,
+                },
                 (Value::String(l), Value::String(r)) => {
                     let (ls, rs) = (l.as_str(), r.as_str());
                     match op {
@@ -212,8 +209,8 @@ fn compare_i64(lhs: i64, rhs: i64, op: &Op) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::expr::{Expr, Lhs, Op, Rhs};
     use crate::schema::expr::parse_guard;
+    use crate::schema::expr::{Expr, Lhs, Op, Rhs};
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
 
@@ -309,7 +306,10 @@ mod tests {
         let entry = entry_from_json(json!({
             "plan": { "phases": [{"name": "p1"}, {"name": "p2"}] }
         }));
-        assert!(!eval(&expr, &entry), "missing current_phase should return false");
+        assert!(
+            !eval(&expr, &entry),
+            "missing current_phase should return false"
+        );
     }
 
     // ---- path == path form ----
@@ -332,7 +332,11 @@ mod tests {
 
     #[test]
     fn eq_integer() {
-        let e = Expr { lhs: Lhs::Path(vec!["n".into()]), op: Op::Eq, rhs: Rhs::Integer(3) };
+        let e = Expr {
+            lhs: Lhs::Path(vec!["n".into()]),
+            op: Op::Eq,
+            rhs: Rhs::Integer(3),
+        };
         let entry = entry_from_json(json!({ "n": 3 }));
         assert!(eval(&e, &entry));
         let entry2 = entry_from_json(json!({ "n": 4 }));
@@ -341,7 +345,11 @@ mod tests {
 
     #[test]
     fn neq_integer() {
-        let e = Expr { lhs: Lhs::Path(vec!["n".into()]), op: Op::Neq, rhs: Rhs::Integer(3) };
+        let e = Expr {
+            lhs: Lhs::Path(vec!["n".into()]),
+            op: Op::Neq,
+            rhs: Rhs::Integer(3),
+        };
         let entry = entry_from_json(json!({ "n": 5 }));
         assert!(eval(&e, &entry));
         let entry2 = entry_from_json(json!({ "n": 3 }));
@@ -350,7 +358,11 @@ mod tests {
 
     #[test]
     fn lt_integer() {
-        let e = Expr { lhs: Lhs::Path(vec!["n".into()]), op: Op::Lt, rhs: Rhs::Integer(5) };
+        let e = Expr {
+            lhs: Lhs::Path(vec!["n".into()]),
+            op: Op::Lt,
+            rhs: Rhs::Integer(5),
+        };
         let entry = entry_from_json(json!({ "n": 4 }));
         assert!(eval(&e, &entry));
         let entry2 = entry_from_json(json!({ "n": 5 }));
@@ -359,7 +371,11 @@ mod tests {
 
     #[test]
     fn gt_integer() {
-        let e = Expr { lhs: Lhs::Path(vec!["n".into()]), op: Op::Gt, rhs: Rhs::Integer(3) };
+        let e = Expr {
+            lhs: Lhs::Path(vec!["n".into()]),
+            op: Op::Gt,
+            rhs: Rhs::Integer(3),
+        };
         let entry = entry_from_json(json!({ "n": 4 }));
         assert!(eval(&e, &entry));
         let entry2 = entry_from_json(json!({ "n": 3 }));
@@ -368,7 +384,11 @@ mod tests {
 
     #[test]
     fn ge_integer() {
-        let e = Expr { lhs: Lhs::Path(vec!["n".into()]), op: Op::Ge, rhs: Rhs::Integer(3) };
+        let e = Expr {
+            lhs: Lhs::Path(vec!["n".into()]),
+            op: Op::Ge,
+            rhs: Rhs::Integer(3),
+        };
         let entry = entry_from_json(json!({ "n": 3 }));
         assert!(eval(&e, &entry));
         let entry2 = entry_from_json(json!({ "n": 2 }));

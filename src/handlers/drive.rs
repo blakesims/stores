@@ -42,16 +42,15 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::cli::agents::{BUNDLED_AGENT_SCHEMAS, BUNDLED_AGENTS};
-use crate::codegen::ddl::quote_ident;
+use crate::cli::agents::{BUNDLED_AGENTS, BUNDLED_AGENT_SCHEMAS};
 use crate::cli::dynamic::BUNDLED_STORE_TEMPLATES;
+use crate::codegen::ddl::quote_ident;
 use crate::db;
 use crate::handlers::next_action::compute as compute_next_action;
 use crate::handlers::render::compute_render_in;
 use crate::handlers::row::read_row;
 use crate::handlers::submit::{
-    compute_submit_execute, compute_submit_plan, compute_submit_plan_review,
-    compute_submit_review,
+    compute_submit_execute, compute_submit_plan, compute_submit_plan_review, compute_submit_review,
 };
 use crate::paths::db_path;
 use crate::render::{build_context, render_template_with_overlay};
@@ -212,13 +211,23 @@ fn is_leap(y: u32) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 fn days_in_year(y: u32) -> u32 {
-    if is_leap(y) { 366 } else { 365 }
+    if is_leap(y) {
+        366
+    } else {
+        365
+    }
 }
 fn days_in_month(y: u32, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap(y) { 29 } else { 28 },
+        2 => {
+            if is_leap(y) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 31,
     }
 }
@@ -226,14 +235,18 @@ fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
     let mut year = 1970u32;
     loop {
         let dy = days_in_year(year) as u64;
-        if days < dy { break; }
+        if days < dy {
+            break;
+        }
         days -= dy;
         year += 1;
     }
     let mut month = 1u32;
     loop {
         let dm = days_in_month(year, month) as u64;
-        if days < dm { break; }
+        if days < dm {
+            break;
+        }
         days -= dm;
         month += 1;
     }
@@ -265,11 +278,8 @@ pub(crate) fn resolve_task_id(
          LIMIT 1"
     );
 
-    let result: rusqlite::Result<String> = conn.query_row(
-        &sql,
-        rusqlite::params![lock_expiry],
-        |row| row.get(0),
-    );
+    let result: rusqlite::Result<String> =
+        conn.query_row(&sql, rusqlite::params![lock_expiry], |row| row.get(0));
 
     match result {
         Ok(id) => Ok(id),
@@ -363,7 +373,11 @@ pub(crate) fn compute_git_diff_summary(
         let out = Command::new("git").args(args).output().ok()?;
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         } else {
             None
         }
@@ -398,8 +412,8 @@ pub(crate) fn compute_git_diff_summary(
     let range = format!("{since_ref}..HEAD");
     let log_part = run_git(&["log", "--oneline", &range])
         .unwrap_or_else(|| "(no commits since branch point)".to_string());
-    let stat_part = run_git(&["diff", "--stat", &range])
-        .unwrap_or_else(|| "(no file changes)".to_string());
+    let stat_part =
+        run_git(&["diff", "--stat", &range]).unwrap_or_else(|| "(no file changes)".to_string());
 
     format!("```\n{log_part}\n\n{stat_part}\n```")
 }
@@ -468,20 +482,14 @@ pub(crate) fn drive_loop(
         // Terminal: rejected — human rejected; nothing more to dispatch.
         // (Use `stores tasks amend` to re-open the contract.)
         if na.status == "rejected" {
-            eprintln!(
-                "[{display_id}] rejected; run `stores tasks {display_id} amend` to re-open"
-            );
+            eprintln!("[{display_id}] rejected; run `stores tasks {display_id} amend` to re-open");
             let _ = std::io::stderr().flush();
             return Ok(());
         }
 
         // Terminal: blocked (AC3.9) — exit 0
         if na.blocked {
-            let reason = na
-                .blocked_reason
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string();
+            let reason = na.blocked_reason.as_str().unwrap_or("unknown").to_string();
             eprintln!(
                 "[{display_id}] blocked: {reason}; run `stores gate {display_id} guide` for help"
             );
@@ -510,15 +518,12 @@ pub(crate) fn drive_loop(
             let workflow = schema.workflow.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("store '{}' has no workflow declaration", schema.name)
             })?;
-            let template_path = workflow
-                .briefing_templates
-                .get(agent_role)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "workflow: no briefing_template for agent role '{}'",
-                        agent_role
-                    )
-                })?;
+            let template_path = workflow.briefing_templates.get(agent_role).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "workflow: no briefing_template for agent role '{}'",
+                    agent_role
+                )
+            })?;
             let tpl_key = template_path.to_string_lossy();
             let tpl_content = BUNDLED_STORE_TEMPLATES
                 .iter()
@@ -533,7 +538,8 @@ pub(crate) fn drive_loop(
                     anyhow::anyhow!(
                         "no bundled template '{}' for store '{}'; \
                          drive requires a bundled store",
-                        tpl_key, schema.name
+                        tpl_key,
+                        schema.name
                     )
                 })?;
             let ctx = build_context(schema, &entry);
@@ -559,10 +565,8 @@ pub(crate) fn drive_loop(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
-                    let diff_summary = compute_git_diff_summary(
-                        branch.as_deref(),
-                        first_commit.as_deref(),
-                    );
+                    let diff_summary =
+                        compute_git_diff_summary(branch.as_deref(), first_commit.as_deref());
                     let mut m = std::collections::HashMap::new();
                     m.insert(
                         "git_diff_summary".to_string(),
@@ -583,7 +587,8 @@ pub(crate) fn drive_loop(
                 anyhow::anyhow!(
                     "no bundled agent for role '{}' (tried '{}'); \
                      run `stores agents install --all` first",
-                    agent_role, agent_name_normalized
+                    agent_role,
+                    agent_name_normalized
                 )
             })?;
 
@@ -596,9 +601,7 @@ pub(crate) fn drive_loop(
             .map(|(_, s)| *s);
 
         // Extract workspace_path from the task row (same pattern as branch above).
-        let workspace_path = entry
-            .get("workspace_path")
-            .and_then(|v| v.as_str());
+        let workspace_path = entry.get("workspace_path").and_then(|v| v.as_str());
 
         // Validate: if set but path does not exist OR is not a directory, error before spawn
         // (no silent fallback). exists()-only would let a regular file slip through and defer
@@ -630,7 +633,13 @@ pub(crate) fn drive_loop(
         );
         let _ = std::io::stderr().flush();
         let spawn_start = std::time::Instant::now();
-        let run_out = runner.spawn(&agent_name_normalized, system_prompt, &brief_markdown, schema_text, workspace_path)?;
+        let run_out = runner.spawn(
+            &agent_name_normalized,
+            system_prompt,
+            &brief_markdown,
+            schema_text,
+            workspace_path,
+        )?;
         let spawn_elapsed = spawn_start.elapsed();
         eprintln!(
             "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: {agent_role} returned (exit={}, {:.1}s)",
@@ -641,7 +650,10 @@ pub(crate) fn drive_loop(
 
         // AC2.7: surface schema validation retry exhaustion before the exit-code
         // check so the user always sees it, even on non-zero exit.
-        if run_out.stderr.contains("schema validation retries exhausted") {
+        if run_out
+            .stderr
+            .contains("schema validation retries exhausted")
+        {
             let transcript_hint = run_out
                 .session_id
                 .as_deref()
@@ -677,20 +689,21 @@ pub(crate) fn drive_loop(
         }
 
         // ── Step 2e: parse envelope + dispatch submit ─────────────────────
-        let (envelope, source_tag) = parse_envelope(&run_out, &agent_name_normalized).map_err(|e| {
-            eprintln!("[{display_id}] envelope parse failed: {e}");
-            let _ = std::io::stderr().flush();
-            if !run_out.stdout.is_empty() {
-                eprintln!("runner stdout:\n{}", run_out.stdout);
+        let (envelope, source_tag) =
+            parse_envelope(&run_out, &agent_name_normalized).map_err(|e| {
+                eprintln!("[{display_id}] envelope parse failed: {e}");
                 let _ = std::io::stderr().flush();
-            }
-            if !run_out.stderr.is_empty() {
-                eprintln!("runner stderr:\n{}", run_out.stderr);
-                let _ = std::io::stderr().flush();
-            }
-            // Return the error so the caller sees it (no submit was called).
-            anyhow::anyhow!("envelope parse error: {e}")
-        })?;
+                if !run_out.stdout.is_empty() {
+                    eprintln!("runner stdout:\n{}", run_out.stdout);
+                    let _ = std::io::stderr().flush();
+                }
+                if !run_out.stderr.is_empty() {
+                    eprintln!("runner stderr:\n{}", run_out.stderr);
+                    let _ = std::io::stderr().flush();
+                }
+                // Return the error so the caller sees it (no submit was called).
+                anyhow::anyhow!("envelope parse error: {e}")
+            })?;
 
         let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;
 
@@ -705,7 +718,15 @@ pub(crate) fn drive_loop(
         // ── Step 2f: render ───────────────────────────────────────────────
         // Render is best-effort; failure is logged but does not abort the loop.
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        match compute_render_in(schema, conn, display_id, false, Actor::AiAutonomous, &cwd, &cwd) {
+        match compute_render_in(
+            schema,
+            conn,
+            display_id,
+            false,
+            Actor::AiAutonomous,
+            &cwd,
+            &cwd,
+        ) {
             Ok(render_out) => {
                 if !render_out.dry_run {
                     if let Err(e) = apply_render(&render_out) {
@@ -765,7 +786,10 @@ pub(crate) fn drive_loop(
 ///
 /// Returns `(AgentEnvelope, source_tag)` where `source_tag` is one of
 /// `"sdk"`, `"sap"`, or `"legacy"`.
-fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(AgentEnvelope, &'static str)> {
+fn parse_envelope(
+    out: &RunnerOutput,
+    agent_role_normalized: &str,
+) -> Result<(AgentEnvelope, &'static str)> {
     // Helper: peek the "role" string field from a JSON Value without consuming it.
     fn peek_role(v: &serde_json::Value) -> Option<&str> {
         v.get("role").and_then(|r| r.as_str())
@@ -811,9 +835,7 @@ fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(Ag
     // role would be overwritten by the inject and the check would trivially pass.
     if let Some(fm) = &out.final_message {
         if !fm.trim().is_empty() {
-            if let Some(mut candidate) =
-                crate::runner::sap::extract_envelope_from_text(fm, None)
-            {
+            if let Some(mut candidate) = crate::runner::sap::extract_envelope_from_text(fm, None) {
                 // Peek BEFORE inject.
                 check_role_mismatch(peek_role(&candidate), agent_role_normalized, session_id)?;
                 if let serde_json::Value::Object(ref mut map) = &mut candidate {
@@ -821,8 +843,8 @@ fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(Ag
                         serde_json::Value::String(agent_role_normalized.to_string())
                     });
                 }
-                let envelope = serde_json::from_value::<AgentEnvelope>(candidate.clone())
-                    .map_err(|e| {
+                let envelope =
+                    serde_json::from_value::<AgentEnvelope>(candidate.clone()).map_err(|e| {
                         anyhow::anyhow!("SAP candidate deserialise failed: {e}\nvalue: {candidate}")
                     })?;
                 return Ok((envelope, "sap"));
@@ -844,11 +866,7 @@ fn parse_envelope(out: &RunnerOutput, agent_role_normalized: &str) -> Result<(Ag
     }
 
     // Last-resort: scan stdout for last non-empty JSON line.
-    let last_line = out
-        .stdout
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty());
+    let last_line = out.stdout.lines().rev().find(|l| !l.trim().is_empty());
 
     match last_line {
         None => bail!(
@@ -942,8 +960,7 @@ fn dispatch_submit(
                     current_status
                 );
             }
-            let files_str: Option<String> =
-                files_changed.map(|v| v.join(","));
+            let files_str: Option<String> = files_changed.map(|v| v.join(","));
             compute_submit_execute(
                 schema,
                 conn,
@@ -1006,21 +1023,43 @@ fn dispatch_submit(
             // recommended_sanity_checks, reject_reason, at.
             let _ = reasoning; // consumed here; intentionally discarded
             let mut obj = serde_json::Map::new();
-            obj.insert("executive_summary".to_string(),
-                serde_json::Value::String(executive_summary));
-            obj.insert("deviations".to_string(),
-                serde_json::Value::Array(deviations.into_iter()
-                    .map(serde_json::Value::String).collect()));
-            obj.insert("residual_risks".to_string(),
-                serde_json::Value::Array(residual_risks.into_iter()
-                    .map(serde_json::Value::String).collect()));
-            obj.insert("recommended_sanity_checks".to_string(),
-                serde_json::Value::Array(recommended_sanity_checks.into_iter()
-                    .map(serde_json::Value::String).collect()));
+            obj.insert(
+                "executive_summary".to_string(),
+                serde_json::Value::String(executive_summary),
+            );
+            obj.insert(
+                "deviations".to_string(),
+                serde_json::Value::Array(
+                    deviations
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+            obj.insert(
+                "residual_risks".to_string(),
+                serde_json::Value::Array(
+                    residual_risks
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+            obj.insert(
+                "recommended_sanity_checks".to_string(),
+                serde_json::Value::Array(
+                    recommended_sanity_checks
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
             let wrap_entry = serde_json::Value::Object(obj);
 
             crate::handlers::submit::compute_submit_wrap(
-                schema, conn, display_id,
+                schema,
+                conn,
+                display_id,
                 wrap_entry,
                 crate::schema::actor::Actor::AiAutonomous,
             )
@@ -1067,8 +1106,7 @@ mod tests {
     /// Full tasks-like workflow schema for drive tests.
     fn tasks_schema() -> Schema {
         let yaml = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("stores/tasks/schema.yaml"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stores/tasks/schema.yaml"),
         )
         .expect("tasks schema.yaml");
         Schema::from_yaml(&yaml).unwrap()
@@ -1149,7 +1187,11 @@ mod tests {
 
     fn make_run_output(stdout: &str, exit_code: i32) -> RunnerOutput {
         // Use final_message as the last line of stdout for convenience.
-        let last_line = stdout.lines().rev().find(|l| !l.trim().is_empty()).map(|s| s.to_string());
+        let last_line = stdout
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(|s| s.to_string());
         RunnerOutput {
             stdout: stdout.to_string(),
             stderr: String::new(),
@@ -1205,8 +1247,15 @@ mod tests {
 
         // Insert task in planning state, phase=0 (not yet started)
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
 
         // Queue: planner → plan_reviewer → executor → code_reviewer → wrap
@@ -1219,20 +1268,30 @@ mod tests {
         let code_reviewer_out = make_run_output(code_reviewer_fixture_json(), 0);
         let wrap_out = make_run_output(wrap_fixture_json(), 0);
 
-        let runner = MockRunner::new(vec![planner_out, plan_reviewer_out, executor_out, code_reviewer_out, wrap_out]);
+        let runner = MockRunner::new(vec![
+            planner_out,
+            plan_reviewer_out,
+            executor_out,
+            code_reviewer_out,
+            wrap_out,
+        ]);
 
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
 
         // Verify final status: in_review (drive exits after wrap dispatch, row awaits human)
         let na = compute_next_action(&schema, &conn, "T001").unwrap();
-        assert_eq!(na.status, "in_review", "task should be in_review after drive (awaiting human GO/NO_GO)");
+        assert_eq!(
+            na.status, "in_review",
+            "task should be in_review after drive (awaiting human GO/NO_GO)"
+        );
 
         // AC4.3 eager-dispatch regression guard: all 5 queued mock responses must be
         // consumed. If the wrap response (5th) was not consumed, the runner still has
         // 1 item remaining — this catches the status-only guard regression where
         // drive exits at in_review without dispatching wrap.
         assert_eq!(
-            runner.remaining_count(), 0,
+            runner.remaining_count(),
+            0,
             "all 5 mock responses (including wrap) must be consumed; {} remain — \
              eager-wrap dispatch did not fire",
             runner.remaining_count()
@@ -1250,12 +1309,26 @@ mod tests {
 
         // Insert two tasks; T002 has earlier created_at
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-02-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-02-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
         insert_task(
-            &conn, &schema, "T002", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T002",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
 
         let args = DriveArgs {
@@ -1270,7 +1343,10 @@ mod tests {
         };
 
         let selected = resolve_task_id(&schema, &conn, &args).unwrap();
-        assert_eq!(selected, "T002", "should pick T002 with earliest created_at");
+        assert_eq!(
+            selected, "T002",
+            "should pick T002 with earliest created_at"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1297,14 +1373,27 @@ mod tests {
         };
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0,
-            Some("other-runner"), Some(&now),
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            Some("other-runner"),
+            Some(&now),
         );
         // T002 is not claimed
         insert_task(
-            &conn, &schema, "T002", "planning",
-            "2026-01-02T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T002",
+            "planning",
+            "2026-01-02T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
 
         let args = DriveArgs {
@@ -1319,7 +1408,10 @@ mod tests {
         };
 
         let selected = resolve_task_id(&schema, &conn, &args).unwrap();
-        assert_eq!(selected, "T002", "should skip live-claimed T001 and pick T002");
+        assert_eq!(
+            selected, "T002",
+            "should skip live-claimed T001 and pick T002"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1332,8 +1424,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
 
         // Queue only 1 planner response (advances to plan_review), then the loop
@@ -1342,8 +1441,8 @@ mod tests {
         let planner_out = make_run_output(planner_fixture_json(), 0);
         let runner = MockRunner::new(vec![planner_out]);
 
-        let err = drive_loop(&schema, &conn, "T001", &runner, 1)
-            .expect_err("should fail with max-iters");
+        let err =
+            drive_loop(&schema, &conn, "T001", &runner, 1).expect_err("should fail with max-iters");
         let msg = err.to_string();
         assert!(
             msg.contains("max iterations exceeded"),
@@ -1361,8 +1460,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
 
         // Read the row before the failed runner call.
@@ -1424,15 +1530,25 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "complete",
-            "2026-01-01T00:00:00Z", 1, 1, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "complete",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
         );
 
         let runner = MockRunner::new(vec![]);
 
         // Should return Err (non-zero), NOT Ok(()), because `complete` is not terminal.
         let result = drive_loop(&schema, &conn, "T001", &runner, 50);
-        assert!(result.is_err(), "drive_loop must error when row is at 'complete' (schema bug state)");
+        assert!(
+            result.is_err(),
+            "drive_loop must error when row is at 'complete' (schema bug state)"
+        );
         let msg = format!("{:?}", result.unwrap_err());
         assert!(
             msg.contains("complete") && msg.contains("follow-on"),
@@ -1455,8 +1571,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "in_review",
-            "2026-01-01T00:00:00Z", 1, 1, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
         );
 
         // One wrap response queued — must be consumed for the test to pass.
@@ -1464,12 +1587,14 @@ mod tests {
         let runner = MockRunner::new(vec![wrap_out]);
 
         // Drive must succeed (not error) and consume the wrap response.
-        drive_loop(&schema, &conn, "T001", &runner, 50)
-            .expect("in_review with dispatched_wrap_this_run=false must dispatch wrap and exit Ok(())");
+        drive_loop(&schema, &conn, "T001", &runner, 50).expect(
+            "in_review with dispatched_wrap_this_run=false must dispatch wrap and exit Ok(())",
+        );
 
         // Assert the runner was fully drained — wrap response was consumed.
         assert_eq!(
-            runner.remaining_count(), 0,
+            runner.remaining_count(),
+            0,
             "wrap response must have been consumed (eager dispatch); {} responses remain",
             runner.remaining_count()
         );
@@ -1485,8 +1610,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "in_review",
-            "2026-01-01T00:00:00Z", 1, 1, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
         );
         // Simulate non-empty wrap_log from a prior wrap dispatch (Phase 1 stub; Phase 3
         // will write this via compute_submit_wrap).
@@ -1511,7 +1643,8 @@ mod tests {
 
         // Assert the runner was fully drained — the fresh wrap response was consumed.
         assert_eq!(
-            runner.remaining_count(), 0,
+            runner.remaining_count(),
+            0,
             "wrap response must have been consumed on re-entry; {} responses remain",
             runner.remaining_count()
         );
@@ -1523,20 +1656,30 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "blocked",
-            "2026-01-01T00:00:00Z", 1, 1, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "blocked",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
         );
         // Write a blocked_reason
         conn.execute(
-            &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", quote_ident(&schema.name)),
+            &format!(
+                "UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2",
+                quote_ident(&schema.name)
+            ),
             rusqlite::params!["test block reason", "T001"],
-        ).unwrap();
+        )
+        .unwrap();
 
         let runner = MockRunner::new(vec![]);
 
         // Blocked → exit 0 (not Err).
-        drive_loop(&schema, &conn, "T001", &runner, 50)
-            .expect("blocked status should exit Ok(())");
+        drive_loop(&schema, &conn, "T001", &runner, 50).expect("blocked status should exit Ok(())");
     }
 
     // ---------------------------------------------------------------------------
@@ -1561,12 +1704,16 @@ mod tests {
             session_id: None,
             structured_output_source: None,
         };
-        let (env, source) = parse_envelope(&out, "planner").expect("should succeed via structured_output");
+        let (env, source) =
+            parse_envelope(&out, "planner").expect("should succeed via structured_output");
         assert!(
             matches!(env, AgentEnvelope::Planner { .. }),
             "should be Planner envelope"
         );
-        assert_eq!(source, "sdk", "source must be sdk when structured_output is present");
+        assert_eq!(
+            source, "sdk",
+            "source must be sdk when structured_output is present"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -1579,8 +1726,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
 
         // Runner output that contains "schema validation retries exhausted" in
@@ -1626,7 +1780,8 @@ mod tests {
             session_id: None,
             structured_output_source: None,
         };
-        let (env, source) = parse_envelope(&out, "planner").expect("should parse with commentary above");
+        let (env, source) =
+            parse_envelope(&out, "planner").expect("should parse with commentary above");
         assert!(
             matches!(env, AgentEnvelope::Planner { .. }),
             "should be Planner envelope"
@@ -1648,7 +1803,8 @@ mod tests {
     #[test]
     fn parse_envelope_from_plan_reviewer_fixture() {
         let out = make_run_output(plan_reviewer_fixture_json(), 0);
-        let (env, _) = parse_envelope(&out, "plan-reviewer").expect("plan-reviewer fixture should parse");
+        let (env, _) =
+            parse_envelope(&out, "plan-reviewer").expect("plan-reviewer fixture should parse");
         assert!(matches!(env, AgentEnvelope::PlanReviewer { .. }));
     }
 
@@ -1662,7 +1818,8 @@ mod tests {
     #[test]
     fn parse_envelope_from_code_reviewer_fixture() {
         let out = make_run_output(code_reviewer_fixture_json(), 0);
-        let (env, _) = parse_envelope(&out, "code-reviewer").expect("code-reviewer fixture should parse");
+        let (env, _) =
+            parse_envelope(&out, "code-reviewer").expect("code-reviewer fixture should parse");
         assert!(matches!(env, AgentEnvelope::CodeReviewer { .. }));
     }
 
@@ -1687,7 +1844,10 @@ mod tests {
             structured_output_source: None,
         };
         let (env, source) = parse_envelope(&out, "wrap").expect("wrap fixture should parse");
-        assert_eq!(source, "sdk", "fixture via structured_output must use sdk layer");
+        assert_eq!(
+            source, "sdk",
+            "fixture via structured_output must use sdk layer"
+        );
         match env {
             AgentEnvelope::Wrap {
                 reasoning,
@@ -1696,10 +1856,22 @@ mod tests {
                 residual_risks,
                 recommended_sanity_checks,
             } => {
-                assert!(reasoning.is_some(), "reasoning should be present in fixture");
-                assert!(!executive_summary.is_empty(), "executive_summary must be non-empty");
-                assert!(!deviations.is_empty(), "deviations must be non-empty in fixture");
-                assert!(!residual_risks.is_empty(), "residual_risks must be non-empty in fixture");
+                assert!(
+                    reasoning.is_some(),
+                    "reasoning should be present in fixture"
+                );
+                assert!(
+                    !executive_summary.is_empty(),
+                    "executive_summary must be non-empty"
+                );
+                assert!(
+                    !deviations.is_empty(),
+                    "deviations must be non-empty in fixture"
+                );
+                assert!(
+                    !residual_risks.is_empty(),
+                    "residual_risks must be non-empty in fixture"
+                );
                 assert!(
                     !recommended_sanity_checks.is_empty(),
                     "recommended_sanity_checks must be non-empty in fixture"
@@ -1721,8 +1893,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "executing",
-            "2026-01-01T00:00:00Z", 1, 1, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
         );
 
         let misrouted = RunnerOutput {
@@ -1730,7 +1909,7 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             final_message: Some(
-                r#"{"role":"wrap","executive_summary":"wrong agent sent this"}"#.to_string()
+                r#"{"role":"wrap","executive_summary":"wrong agent sent this"}"#.to_string(),
             ),
             structured_output: None,
             session_id: Some("wrap-mismatch-session".to_string()),
@@ -1842,7 +2021,8 @@ mod tests {
     #[test]
     fn parse_envelope_source_tag_sap_layer() {
         // Layer 2 (SAP): structured_output is None, final_message has markdown-fenced JSON.
-        let fenced = "Thinking...\n```json\n{\"role\":\"executor\",\"summary\":\"all done\"}\n```\n";
+        let fenced =
+            "Thinking...\n```json\n{\"role\":\"executor\",\"summary\":\"all done\"}\n```\n";
         let out = RunnerOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -1874,7 +2054,8 @@ mod tests {
             session_id: None,
             structured_output_source: None,
         };
-        let (_, source) = parse_envelope(&out, "executor").expect("legacy last-line scan must succeed");
+        let (_, source) =
+            parse_envelope(&out, "executor").expect("legacy last-line scan must succeed");
         assert_eq!(source, "legacy");
     }
 
@@ -1891,8 +2072,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "executing",
-            "2026-01-01T00:00:00Z", 1, 1, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
         );
 
         let misrouted = RunnerOutput {
@@ -1956,8 +2144,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
 
         let runner = MockRunner::new(vec![
@@ -1971,11 +2166,19 @@ mod tests {
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
 
         // Queue drain: all 5 mock responses consumed.
-        assert_eq!(runner.remaining_count(), 0, "all 5 responses must be consumed");
+        assert_eq!(
+            runner.remaining_count(),
+            0,
+            "all 5 responses must be consumed"
+        );
 
         // AC4.7 strengthening: wrap_log[] has 1 entry.
         let log = read_wrap_log_for(&conn, &schema, "T001");
-        assert_eq!(log.len(), 1, "wrap_log must have exactly 1 entry after wrap dispatch");
+        assert_eq!(
+            log.len(),
+            1,
+            "wrap_log must have exactly 1 entry after wrap dispatch"
+        );
 
         // Latest entry's executive_summary == "stub" (matches wrap_fixture_json()).
         let latest = &log[0];
@@ -1986,10 +2189,7 @@ mod tests {
         );
 
         // Latest entry's `at` is set (non-empty).
-        let at_val = latest
-            .get("at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let at_val = latest.get("at").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
             !at_val.is_empty(),
             "wrap_log[0].at must be non-empty ISO-8601 string; got: {at_val:?}"
@@ -2004,18 +2204,33 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "in_review",
-            "2026-01-01T00:00:00Z", 1, 1, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
         );
 
         let runner = MockRunner::new(vec![make_run_output(wrap_fixture_json(), 0)]);
         drive_loop(&schema, &conn, "T001", &runner, 50)
             .expect("drive must succeed for in_review first iteration");
 
-        assert_eq!(runner.remaining_count(), 0, "wrap response must be consumed");
+        assert_eq!(
+            runner.remaining_count(),
+            0,
+            "wrap response must be consumed"
+        );
 
         let log = read_wrap_log_for(&conn, &schema, "T001");
-        assert_eq!(log.len(), 1, "wrap_log must have 1 entry after first dispatch");
+        assert_eq!(
+            log.len(),
+            1,
+            "wrap_log must have 1 entry after first dispatch"
+        );
         assert_eq!(
             log[0].get("executive_summary").and_then(|v| v.as_str()),
             Some("stub"),
@@ -2033,8 +2248,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "in_review",
-            "2026-01-01T00:00:00Z", 1, 1, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
         );
 
         // Pre-seed one entry (simulating prior wrap cycle).
@@ -2050,14 +2272,21 @@ mod tests {
         ).unwrap();
 
         let runner = MockRunner::new(vec![make_run_output(wrap_fixture_json(), 0)]);
-        drive_loop(&schema, &conn, "T001", &runner, 50)
-            .expect("drive must succeed for re-entry");
+        drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive must succeed for re-entry");
 
-        assert_eq!(runner.remaining_count(), 0, "wrap response must be consumed on re-entry");
+        assert_eq!(
+            runner.remaining_count(),
+            0,
+            "wrap response must be consumed on re-entry"
+        );
 
         // AC4.7: wrap_log grows to 2 entries.
         let log = read_wrap_log_for(&conn, &schema, "T001");
-        assert_eq!(log.len(), 2, "wrap_log must have 2 entries after re-entry wrap");
+        assert_eq!(
+            log.len(),
+            2,
+            "wrap_log must have 2 entries after re-entry wrap"
+        );
 
         // Latest (index 1) executive_summary == "stub".
         assert_eq!(
@@ -2082,8 +2311,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "in_review",
-            "2026-01-01T00:00:00Z", 3, 1, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            3,
+            1,
+            None,
+            None,
         );
 
         // Add some cycles to the row.
@@ -2127,15 +2363,39 @@ mod tests {
             .expect("wrap-brief template must render without error");
 
         // Assert key sections appear.
-        assert!(rendered.contains("T001"), "rendered brief must contain task ID");
-        assert!(rendered.contains("Promise"), "rendered brief must contain Promise section");
-        assert!(rendered.contains("Reality"), "rendered brief must contain Reality section");
-        assert!(rendered.contains("Diff"), "rendered brief must contain Diff section");
-        assert!(rendered.contains("<git diff unavailable>"), "Diff section must include the overlay value");
-        assert!(rendered.contains("Your Job"), "rendered brief must contain Your Job section");
+        assert!(
+            rendered.contains("T001"),
+            "rendered brief must contain task ID"
+        );
+        assert!(
+            rendered.contains("Promise"),
+            "rendered brief must contain Promise section"
+        );
+        assert!(
+            rendered.contains("Reality"),
+            "rendered brief must contain Reality section"
+        );
+        assert!(
+            rendered.contains("Diff"),
+            "rendered brief must contain Diff section"
+        );
+        assert!(
+            rendered.contains("<git diff unavailable>"),
+            "Diff section must include the overlay value"
+        );
+        assert!(
+            rendered.contains("Your Job"),
+            "rendered brief must contain Your Job section"
+        );
         // Cycles table rows.
-        assert!(rendered.contains("did phase 1"), "Reality table must include phase 1 executor summary");
-        assert!(rendered.contains("REVISE"), "Reality table must include REVISE gate");
+        assert!(
+            rendered.contains("did phase 1"),
+            "Reality table must include phase 1 executor summary"
+        );
+        assert!(
+            rendered.contains("REVISE"),
+            "Reality table must include REVISE gate"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -2190,7 +2450,10 @@ mod tests {
         // The invariant we assert: the function always returns a non-empty string
         // and never panics.
         let result = compute_git_diff_summary(None, None);
-        assert!(!result.is_empty(), "compute_git_diff_summary must return non-empty string");
+        assert!(
+            !result.is_empty(),
+            "compute_git_diff_summary must return non-empty string"
+        );
     }
 
     #[test]
@@ -2200,7 +2463,10 @@ mod tests {
         // unavailable placeholder if the commit doesn't exist in this repo).
         // The invariant: returns non-empty, no panic.
         let result = compute_git_diff_summary(None, Some("HEAD~2"));
-        assert!(!result.is_empty(), "compute_git_diff_summary with fallback commit must return non-empty string");
+        assert!(
+            !result.is_empty(),
+            "compute_git_diff_summary with fallback commit must return non-empty string"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -2214,8 +2480,15 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
 
         let runner = MockRunner::new(vec![
@@ -2250,8 +2523,15 @@ mod tests {
         let canonical_str = canonical.to_str().unwrap().to_string();
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
         conn.execute(
             &format!(
@@ -2259,7 +2539,8 @@ mod tests {
                 crate::codegen::ddl::quote_ident(&schema.name)
             ),
             rusqlite::params![workspace_path, "T001"],
-        ).unwrap();
+        )
+        .unwrap();
 
         let runner = MockRunner::new(vec![
             make_run_output(planner_fixture_json(), 0),
@@ -2298,8 +2579,15 @@ mod tests {
         let missing_path = "/tmp/stores-test-nonexistent-workspace-path-99999";
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
         conn.execute(
             &format!(
@@ -2307,7 +2595,8 @@ mod tests {
                 crate::codegen::ddl::quote_ident(&schema.name)
             ),
             rusqlite::params![missing_path, "T001"],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Queue has one response; if spawn is called, remaining_count drops to 0.
         let runner = MockRunner::new(vec![make_run_output(planner_fixture_json(), 0)]);
@@ -2327,7 +2616,8 @@ mod tests {
 
         // Runner queue undrained — no spawn occurred.
         assert_eq!(
-            runner.remaining_count(), 1,
+            runner.remaining_count(),
+            1,
             "runner queue must be undrained (no spawn should have occurred)"
         );
     }
@@ -2345,8 +2635,15 @@ mod tests {
         let file_str = file_path.to_str().unwrap().to_string();
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
         conn.execute(
             &format!(
@@ -2354,7 +2651,8 @@ mod tests {
                 crate::codegen::ddl::quote_ident(&schema.name)
             ),
             rusqlite::params![file_str, "T001"],
-        ).unwrap();
+        )
+        .unwrap();
 
         let runner = MockRunner::new(vec![make_run_output(planner_fixture_json(), 0)]);
 
@@ -2362,15 +2660,22 @@ mod tests {
             .expect_err("drive_loop must return Err when workspace_path is a file");
 
         let msg = err.to_string();
-        assert!(msg.contains("T001"), "error must contain display_id, got: {msg}");
-        assert!(msg.contains(&file_str), "error must contain the offending path, got: {msg}");
+        assert!(
+            msg.contains("T001"),
+            "error must contain display_id, got: {msg}"
+        );
+        assert!(
+            msg.contains(&file_str),
+            "error must contain the offending path, got: {msg}"
+        );
         assert!(
             msg.contains("not a directory"),
             "error must say 'not a directory' to distinguish from missing-path case, got: {msg}"
         );
 
         assert_eq!(
-            runner.remaining_count(), 1,
+            runner.remaining_count(),
+            1,
             "runner queue must be undrained (no spawn should have occurred)"
         );
     }
@@ -2386,8 +2691,15 @@ mod tests {
         let workspace_path = workspace_dir.path().to_str().unwrap().to_string();
 
         insert_task(
-            &conn, &schema, "T001", "planning",
-            "2026-01-01T00:00:00Z", 0, 0, None, None,
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
         );
         conn.execute(
             &format!(
@@ -2395,7 +2707,8 @@ mod tests {
                 crate::codegen::ddl::quote_ident(&schema.name)
             ),
             rusqlite::params![workspace_path, "T001"],
-        ).unwrap();
+        )
+        .unwrap();
 
         let runner = MockRunner::new(vec![
             make_run_output(planner_fixture_json(), 0),
@@ -2408,14 +2721,18 @@ mod tests {
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
 
         let paths = runner.workspace_paths_seen();
-        assert!(paths.len() >= 2, "must have at least 2 spawns to test stability");
+        assert!(
+            paths.len() >= 2,
+            "must have at least 2 spawns to test stability"
+        );
 
         // All recorded paths must be byte-identical — demonstrating the value is stable
         // across consecutive spawns (as it would be across spawn/resume calls with ClaudeCodeRunner).
         let first = paths[0].as_deref();
         for (i, p) in paths.iter().enumerate() {
             assert_eq!(
-                p.as_deref(), first,
+                p.as_deref(),
+                first,
                 "workspace_path at spawn {i} differs from spawn 0: expected {first:?}, got {p:?}"
             );
         }

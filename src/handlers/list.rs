@@ -5,8 +5,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::codegen::ddl::quote_ident;
-use crate::schema::{actor::InvokerCtx, FieldType, Schema};
 use crate::output;
+use crate::schema::{actor::InvokerCtx, FieldType, Schema};
 
 pub fn run(
     schema: &Schema,
@@ -111,7 +111,10 @@ pub fn run(
 
     let sql = format!(
         "SELECT {col_list} FROM {}{}{}{} ",
-        quote_ident(&schema.name), where_str, order_str, limit_str
+        quote_ident(&schema.name),
+        where_str,
+        order_str,
+        limit_str
     );
 
     // ---------- execute ----------
@@ -133,7 +136,14 @@ pub fn run(
         let mut entry: BTreeMap<String, Value> = BTreeMap::new();
 
         // Reserved columns
-        for key in &["display_id", "status", "created_at", "updated_at", "created_by", "updated_by"] {
+        for key in &[
+            "display_id",
+            "status",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+        ] {
             if let Some(v) = raw_map.get(*key) {
                 entry.insert(key.to_string(), v.clone());
             }
@@ -198,7 +208,9 @@ fn validate_date_format(s: &str) -> Result<()> {
             continue;
         }
         if !b.is_ascii_digit() {
-            bail!("--since date must be in YYYY-MM-DD format (all digits except dashes), got: '{s}'");
+            bail!(
+                "--since date must be in YYYY-MM-DD format (all digits except dashes), got: '{s}'"
+            );
         }
     }
     Ok(())
@@ -365,7 +377,11 @@ fields:
 
         // Verify the SQL limit is applied: query directly
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM (SELECT id FROM tstore LIMIT 2)", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT id FROM tstore LIMIT 2)",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 2);
     }
@@ -497,20 +513,39 @@ fields:
         // Invoke list's decode loop directly by querying and decoding inline.
         // We simulate what run() does: pull raw rows, decode per schema.
         let raw_map: std::collections::BTreeMap<String, serde_json::Value> = {
-            let mut stmt = conn.prepare("SELECT display_id, status, title, notes FROM jstore WHERE display_id = 'J001'").unwrap();
-            let row = stmt.query_row([], |r| {
-                let mut m = std::collections::BTreeMap::new();
-                m.insert("display_id".to_string(), serde_json::Value::String(r.get::<_, String>(0).unwrap()));
-                m.insert("status".to_string(), serde_json::Value::String(r.get::<_, String>(1).unwrap()));
-                m.insert("title".to_string(), serde_json::Value::String(r.get::<_, String>(2).unwrap()));
-                m.insert("notes".to_string(), serde_json::Value::String(r.get::<_, String>(3).unwrap()));
-                Ok(m)
-            }).unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT display_id, status, title, notes FROM jstore WHERE display_id = 'J001'",
+                )
+                .unwrap();
+            let row = stmt
+                .query_row([], |r| {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert(
+                        "display_id".to_string(),
+                        serde_json::Value::String(r.get::<_, String>(0).unwrap()),
+                    );
+                    m.insert(
+                        "status".to_string(),
+                        serde_json::Value::String(r.get::<_, String>(1).unwrap()),
+                    );
+                    m.insert(
+                        "title".to_string(),
+                        serde_json::Value::String(r.get::<_, String>(2).unwrap()),
+                    );
+                    m.insert(
+                        "notes".to_string(),
+                        serde_json::Value::String(r.get::<_, String>(3).unwrap()),
+                    );
+                    Ok(m)
+                })
+                .unwrap();
             row
         };
 
         // Apply the same decode logic as list.rs
-        let mut entry: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
+        let mut entry: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
         for field in &schema.fields {
             if let Some(raw_val) = raw_map.get(&field.name) {
                 match &field.ty {
@@ -521,7 +556,9 @@ fields:
                     | FieldType::Json => {
                         if let serde_json::Value::String(json_str) = raw_val {
                             if !json_str.is_empty() && json_str != "null" {
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(json_str)
+                                {
                                     entry.insert(field.name.clone(), parsed);
                                     continue;
                                 }
@@ -539,11 +576,21 @@ fields:
         let notes = entry.get("notes").expect("notes should be present");
         match notes {
             serde_json::Value::Object(map) => {
-                assert_eq!(map.get("k").and_then(|v| v.as_str()), Some("v"), "notes.k should be 'v'");
-                let arr = map.get("arr").and_then(|v| v.as_array()).expect("notes.arr should be array");
+                assert_eq!(
+                    map.get("k").and_then(|v| v.as_str()),
+                    Some("v"),
+                    "notes.k should be 'v'"
+                );
+                let arr = map
+                    .get("arr")
+                    .and_then(|v| v.as_array())
+                    .expect("notes.arr should be array");
                 assert_eq!(arr.len(), 2);
             }
-            other => panic!("expected Value::Object for notes in list output, got: {:?}", other),
+            other => panic!(
+                "expected Value::Object for notes in list output, got: {:?}",
+                other
+            ),
         }
     }
 
@@ -565,17 +612,28 @@ fields:
 
         // Decode using the same logic as list.rs post-P4
         let raw_map: std::collections::BTreeMap<String, serde_json::Value> = {
-            let mut stmt = conn.prepare("SELECT tags, refs FROM lrstore WHERE display_id = 'R001'").unwrap();
-            let row = stmt.query_row([], |r| {
-                let mut m = std::collections::BTreeMap::new();
-                m.insert("tags".to_string(), serde_json::Value::String(r.get::<_, String>(0).unwrap()));
-                m.insert("refs".to_string(), serde_json::Value::String(r.get::<_, String>(1).unwrap()));
-                Ok(m)
-            }).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT tags, refs FROM lrstore WHERE display_id = 'R001'")
+                .unwrap();
+            let row = stmt
+                .query_row([], |r| {
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert(
+                        "tags".to_string(),
+                        serde_json::Value::String(r.get::<_, String>(0).unwrap()),
+                    );
+                    m.insert(
+                        "refs".to_string(),
+                        serde_json::Value::String(r.get::<_, String>(1).unwrap()),
+                    );
+                    Ok(m)
+                })
+                .unwrap();
             row
         };
 
-        let mut entry: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
+        let mut entry: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
         for field in &schema.fields {
             if let Some(raw_val) = raw_map.get(&field.name) {
                 match &field.ty {
@@ -586,7 +644,9 @@ fields:
                     | FieldType::Json => {
                         if let serde_json::Value::String(json_str) = raw_val {
                             if !json_str.is_empty() && json_str != "null" {
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                if let Ok(parsed) =
+                                    serde_json::from_str::<serde_json::Value>(json_str)
+                                {
                                     entry.insert(field.name.clone(), parsed);
                                     continue;
                                 }
@@ -609,7 +669,10 @@ fields:
                 assert_eq!(arr[0]["label"], "alpha");
                 assert_eq!(arr[1]["score"], 2i64);
             }
-            other => panic!("expected Value::Array for tags (ListRecord parity), got: {:?}", other),
+            other => panic!(
+                "expected Value::Array for tags (ListRecord parity), got: {:?}",
+                other
+            ),
         }
 
         // refs must be an array of strings, not a raw string
@@ -619,7 +682,10 @@ fields:
                 assert_eq!(arr.len(), 2);
                 assert_eq!(arr[0].as_str(), Some("R001"));
             }
-            other => panic!("expected Value::Array for refs (ListFk parity), got: {:?}", other),
+            other => panic!(
+                "expected Value::Array for refs (ListFk parity), got: {:?}",
+                other
+            ),
         }
     }
 }

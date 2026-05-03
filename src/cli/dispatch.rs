@@ -7,7 +7,10 @@ use crate::db;
 use crate::handlers;
 use crate::manifest::Manifest;
 use crate::paths::db_path;
-use crate::schema::{actor::{Actor, InvokerCtx}, Schema};
+use crate::schema::{
+    actor::{Actor, InvokerCtx},
+    Schema,
+};
 
 /// Route parsed ArgMatches to the right handler.
 pub fn dispatch(
@@ -54,52 +57,71 @@ pub fn dispatch(
                     handlers::render::run(schema, &conn, sub, invoker)?;
                 }
                 Some(("submit-plan", sub)) => {
-                    let display_id = sub.get_one::<String>("display_id")
+                    let display_id = sub
+                        .get_one::<String>("display_id")
                         .map(|s| s.as_str())
                         .unwrap_or("");
                     let plan_json = read_plan_json(sub)?;
-                    handlers::submit::run_submit_plan(schema, &conn, display_id, plan_json, invoker)?;
+                    handlers::submit::run_submit_plan(
+                        schema, &conn, display_id, plan_json, invoker,
+                    )?;
                 }
                 Some(("submit-plan-review", sub)) => {
-                    let display_id = sub.get_one::<String>("display_id")
+                    let display_id = sub
+                        .get_one::<String>("display_id")
                         .map(|s| s.as_str())
                         .unwrap_or("");
-                    let gate = sub.get_one::<String>("gate")
+                    let gate = sub
+                        .get_one::<String>("gate")
                         .ok_or_else(|| anyhow::anyhow!("submit-plan-review requires --gate"))?
                         .as_str();
-                    let summary = read_text_or_file(sub, "summary", "summary-from-file")
-                        .unwrap_or_default();
+                    let summary =
+                        read_text_or_file(sub, "summary", "summary-from-file").unwrap_or_default();
                     // P5-m2: --open-questions-from-file reads a file with one question per line
                     let open_questions = read_lines_from_file(sub, "open-questions-from-file");
                     handlers::submit::run_submit_plan_review(
-                        schema, &conn, display_id, gate, &summary, open_questions, invoker,
+                        schema,
+                        &conn,
+                        display_id,
+                        gate,
+                        &summary,
+                        open_questions,
+                        invoker,
                     )?;
                 }
                 Some(("submit-execute", sub)) => {
-                    let display_id = sub.get_one::<String>("display_id")
+                    let display_id = sub
+                        .get_one::<String>("display_id")
                         .map(|s| s.as_str())
                         .unwrap_or("");
-                    let exec_summary = read_text_or_file(sub, "summary", "summary-from-file")
-                        .unwrap_or_default();
+                    let exec_summary =
+                        read_text_or_file(sub, "summary", "summary-from-file").unwrap_or_default();
                     let commit_sha = sub.get_one::<String>("commit").map(|s| s.as_str());
                     let files_changed = sub.get_one::<String>("files-changed").map(|s| s.as_str());
                     let notes = read_notes_from_file(sub);
                     handlers::submit::run_submit_execute(
-                        schema, &conn, display_id,
-                        &exec_summary, commit_sha, files_changed,
+                        schema,
+                        &conn,
+                        display_id,
+                        &exec_summary,
+                        commit_sha,
+                        files_changed,
                         notes.as_deref(),
                         invoker,
                     )?;
                 }
                 Some(("submit-review", sub)) => {
-                    let display_id = sub.get_one::<String>("display_id")
+                    let display_id = sub
+                        .get_one::<String>("display_id")
                         .map(|s| s.as_str())
                         .unwrap_or("");
-                    let gate = sub.get_one::<String>("gate")
+                    let gate = sub
+                        .get_one::<String>("gate")
                         .ok_or_else(|| anyhow::anyhow!("submit-review requires --gate"))?
                         .as_str();
                     // P5-m4: --summary is a string; --details-from-file reads file content into details sub-field
-                    let summary = sub.get_one::<String>("summary")
+                    let summary = sub
+                        .get_one::<String>("summary")
                         .map(|s| s.as_str())
                         .unwrap_or("");
                     let details = read_file_content(sub, "details-from-file");
@@ -107,39 +129,67 @@ pub fn dispatch(
                     let major = sub.get_one::<i64>("major").copied().unwrap_or(0);
                     let minor = sub.get_one::<i64>("minor").copied().unwrap_or(0);
                     handlers::submit::run_submit_review(
-                        schema, &conn, display_id,
-                        gate, summary, details.as_deref(), critical, major, minor,
+                        schema,
+                        &conn,
+                        display_id,
+                        gate,
+                        summary,
+                        details.as_deref(),
+                        critical,
+                        major,
+                        minor,
                         invoker,
                     )?;
                 }
                 Some(("submit-wrap", sub)) => {
-                    let display_id = sub.get_one::<String>("display_id")
+                    let display_id = sub
+                        .get_one::<String>("display_id")
                         .map(|s| s.as_str())
                         .unwrap_or("");
-                    let executive_summary = read_file_content(sub, "summary-from-file")
-                        .unwrap_or_default();
-                    let deviations = read_lines_from_file(sub, "deviations-from-file")
-                        .unwrap_or_default();
-                    let residual_risks = read_lines_from_file(sub, "residual-risks-from-file")
-                        .unwrap_or_default();
-                    let sanity_checks = read_lines_from_file(sub, "sanity-checks-from-file")
-                        .unwrap_or_default();
+                    let executive_summary =
+                        read_file_content(sub, "summary-from-file").unwrap_or_default();
+                    let deviations =
+                        read_lines_from_file(sub, "deviations-from-file").unwrap_or_default();
+                    let residual_risks =
+                        read_lines_from_file(sub, "residual-risks-from-file").unwrap_or_default();
+                    let sanity_checks =
+                        read_lines_from_file(sub, "sanity-checks-from-file").unwrap_or_default();
                     // `reasoning-from-file` is accepted at the CLI but not persisted;
                     // it is consumed here for completeness and discarded (not in schema).
                     let _reasoning = read_file_content(sub, "reasoning-from-file");
 
                     let mut obj = serde_json::Map::new();
-                    obj.insert("executive_summary".to_string(),
-                        serde_json::Value::String(executive_summary));
-                    obj.insert("deviations".to_string(),
-                        serde_json::Value::Array(deviations.into_iter()
-                            .map(serde_json::Value::String).collect()));
-                    obj.insert("residual_risks".to_string(),
-                        serde_json::Value::Array(residual_risks.into_iter()
-                            .map(serde_json::Value::String).collect()));
-                    obj.insert("recommended_sanity_checks".to_string(),
-                        serde_json::Value::Array(sanity_checks.into_iter()
-                            .map(serde_json::Value::String).collect()));
+                    obj.insert(
+                        "executive_summary".to_string(),
+                        serde_json::Value::String(executive_summary),
+                    );
+                    obj.insert(
+                        "deviations".to_string(),
+                        serde_json::Value::Array(
+                            deviations
+                                .into_iter()
+                                .map(serde_json::Value::String)
+                                .collect(),
+                        ),
+                    );
+                    obj.insert(
+                        "residual_risks".to_string(),
+                        serde_json::Value::Array(
+                            residual_risks
+                                .into_iter()
+                                .map(serde_json::Value::String)
+                                .collect(),
+                        ),
+                    );
+                    obj.insert(
+                        "recommended_sanity_checks".to_string(),
+                        serde_json::Value::Array(
+                            sanity_checks
+                                .into_iter()
+                                .map(serde_json::Value::String)
+                                .collect(),
+                        ),
+                    );
                     let wrap_entry = serde_json::Value::Object(obj);
 
                     handlers::submit::run_submit_wrap(
@@ -147,7 +197,8 @@ pub fn dispatch(
                     )?;
                 }
                 Some(("resume", sub)) if schema.workflow.is_some() => {
-                    let display_id = sub.get_one::<String>("display_id")
+                    let display_id = sub
+                        .get_one::<String>("display_id")
                         .map(|s| s.as_str())
                         .unwrap_or("");
                     handlers::submit::run_resume(schema, &conn, display_id, invoker)?;
@@ -232,9 +283,10 @@ pub fn dispatch(
                             handlers::transition::run_reject(schema, &conn, sub, invoker, reason)?;
                         } else if verb == "close_as_addressed" {
                             // close_as_addressed requires --resolution; clap enforces required=true.
-                            let resolution = sub
-                                .get_one::<String>("resolution")
-                                .ok_or_else(|| anyhow::anyhow!("close_as_addressed requires --resolution"))?;
+                            let resolution =
+                                sub.get_one::<String>("resolution").ok_or_else(|| {
+                                    anyhow::anyhow!("close_as_addressed requires --resolution")
+                                })?;
                             handlers::transition::run_close_as_addressed(
                                 schema, &conn, sub, invoker, resolution,
                             )?;
@@ -320,7 +372,11 @@ fn read_lines_from_file(sub: &ArgMatches, from_file: &str) -> Option<Vec<String>
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect();
-    if lines.is_empty() { None } else { Some(lines) }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines)
+    }
 }
 
 /// Read notes from --notes-from-file (if present).
@@ -468,7 +524,11 @@ mod tests {
     fn matches_with_token(invoker: Option<&str>, token: Option<&str>) -> ArgMatches {
         let cmd = Command::new("test")
             .arg(Arg::new("invoker").long("invoker").required(false))
-            .arg(Arg::new("approve-token").long("approve-token").required(false));
+            .arg(
+                Arg::new("approve-token")
+                    .long("approve-token")
+                    .required(false),
+            );
         let mut argv: Vec<&str> = vec!["test"];
         if let Some(v) = invoker {
             argv.push("--invoker");
@@ -484,7 +544,11 @@ mod tests {
     fn write_hash_for(token_dir: &std::path::Path, plaintext: &str) {
         let mut h = Sha256::new();
         h.update(plaintext.as_bytes());
-        std::fs::write(token_dir.join("approve.token.hash"), hex::encode(h.finalize())).unwrap();
+        std::fs::write(
+            token_dir.join("approve.token.hash"),
+            hex::encode(h.finalize()),
+        )
+        .unwrap();
     }
 
     fn unique_token_dir(tag: &str) -> std::path::PathBuf {

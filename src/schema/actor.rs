@@ -36,7 +36,10 @@ pub struct InvokerCtx {
 impl InvokerCtx {
     /// Construct a context with no approve-token (the common case).
     pub fn bare(actor: Actor) -> Self {
-        Self { actor, token_valid: false }
+        Self {
+            actor,
+            token_valid: false,
+        }
     }
 }
 

@@ -20,9 +20,7 @@ use schema::Schema;
 
 fn main() -> Result<()> {
     // Determine whether a manifest exists (init must work without one)
-    let manifest_exists = paths::manifest_path()
-        .map(|p| p.exists())
-        .unwrap_or(false);
+    let manifest_exists = paths::manifest_path().map(|p| p.exists()).unwrap_or(false);
 
     // Load manifest + schemas if available
     let (manifest, schemas) = if manifest_exists {
@@ -126,7 +124,7 @@ fn main() -> Result<()> {
             cli::watch::run(interval_ms)?;
         }
         Some(("skills", sub)) => {
-            use cli::skills::{SkillsCmd, run as skills_run};
+            use cli::skills::{run as skills_run, SkillsCmd};
             let cmd = match sub.subcommand() {
                 Some(("list", _)) => SkillsCmd::List,
                 Some(("install", isub)) => SkillsCmd::Install {
@@ -151,7 +149,7 @@ fn main() -> Result<()> {
             skills_run(cmd)?;
         }
         Some(("agents", sub)) => {
-            use cli::agents::{AgentsCmd, run as agents_run};
+            use cli::agents::{run as agents_run, AgentsCmd};
             let cmd = match sub.subcommand() {
                 Some(("list", _)) => AgentsCmd::List,
                 Some(("install", isub)) => AgentsCmd::Install {

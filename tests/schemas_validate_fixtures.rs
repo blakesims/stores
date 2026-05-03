@@ -46,12 +46,30 @@ struct RoleCase {
 
 fn role_cases() -> &'static [RoleCase] {
     &[
-        RoleCase { role: "planner", stray_key: "unexpected_planner_field" },
-        RoleCase { role: "plan-reviewer", stray_key: "unexpected_pr_field" },
-        RoleCase { role: "executor", stray_key: "unexpected_executor_field" },
-        RoleCase { role: "code-reviewer", stray_key: "unexpected_cr_field" },
-        RoleCase { role: "guide", stray_key: "unexpected_guide_field" },
-        RoleCase { role: "wrap", stray_key: "unexpected_wrap_field" },
+        RoleCase {
+            role: "planner",
+            stray_key: "unexpected_planner_field",
+        },
+        RoleCase {
+            role: "plan-reviewer",
+            stray_key: "unexpected_pr_field",
+        },
+        RoleCase {
+            role: "executor",
+            stray_key: "unexpected_executor_field",
+        },
+        RoleCase {
+            role: "code-reviewer",
+            stray_key: "unexpected_cr_field",
+        },
+        RoleCase {
+            role: "guide",
+            stray_key: "unexpected_guide_field",
+        },
+        RoleCase {
+            role: "wrap",
+            stray_key: "unexpected_wrap_field",
+        },
     ]
 }
 
@@ -90,7 +108,10 @@ fn fixtures_with_stray_field_rejected_by_schema() {
         fixture_val
             .as_object_mut()
             .expect("fixture must be a JSON object")
-            .insert(case.stray_key.to_string(), Value::String("stray".to_string()));
+            .insert(
+                case.stray_key.to_string(),
+                Value::String("stray".to_string()),
+            );
 
         let result = compiled.validate(&fixture_val);
         assert!(

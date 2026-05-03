@@ -15,7 +15,6 @@
 ///
 /// `required_when.rs` re-exports `expr::Expr` so call-sites that used
 /// `RequiredWhenExpr` keep working.
-
 use anyhow::{bail, Result};
 
 // ---------------------------------------------------------------------------
@@ -83,8 +82,7 @@ fn contains_keyword(s: &str, keyword: &str) -> bool {
     for i in 0..=(haystack.len() - kw.len()) {
         if haystack[i..i + kw.len()] == *kw {
             let before_ok = i == 0 || !is_word_char(haystack[i - 1]);
-            let after_ok =
-                i + kw.len() == haystack.len() || !is_word_char(haystack[i + kw.len()]);
+            let after_ok = i + kw.len() == haystack.len() || !is_word_char(haystack[i + kw.len()]);
             if before_ok && after_ok {
                 return true;
             }
@@ -341,7 +339,8 @@ mod tests {
     fn reject_length_with_string_rhs() {
         let err = parse_guard("phases.length < 'foo'").unwrap_err();
         assert!(
-            err.to_string().contains("length comparison requires an integer"),
+            err.to_string()
+                .contains("length comparison requires an integer"),
             "err: {err}"
         );
     }

@@ -10,8 +10,8 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use crate::manifest::Manifest;
-use crate::schema::Schema;
 use crate::schema::actor::Actor;
+use crate::schema::Schema;
 use crate::schema::{FieldType, StateAction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,11 +79,7 @@ fn no_color_env() -> bool {
 ///
 /// Determinism: stores are walked in `manifest.stores` order; states/transitions
 /// in their declared order. No HashMap iteration appears in output paths.
-pub fn emit_dot(
-    manifest: &Manifest,
-    schemas: &HashMap<String, Schema>,
-    opts: &Opts,
-) -> String {
+pub fn emit_dot(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts: &Opts) -> String {
     let color_disabled = no_color_env();
     let mut out = String::new();
     out.push_str("digraph stores_topology {\n");
@@ -121,11 +117,7 @@ pub fn emit_dot(
     out
 }
 
-fn write_z0_dot(
-    out: &mut String,
-    manifest: &Manifest,
-    schemas: &HashMap<String, Schema>,
-) {
+fn write_z0_dot(out: &mut String, manifest: &Manifest, schemas: &HashMap<String, Schema>) {
     out.push_str("  subgraph cluster_z0_cross_store {\n");
     out.push_str("    label=\"Z0: cross-store soft-FKs\";\n");
 
@@ -138,7 +130,9 @@ fn write_z0_dot(
     }
 
     for store in &manifest.stores {
-        let Some(schema) = schemas.get(&store.name) else { continue; };
+        let Some(schema) = schemas.get(&store.name) else {
+            continue;
+        };
         for field in &schema.fields {
             if let FieldType::ListFk { ref_store } = &field.ty {
                 if manifest.stores.iter().any(|s| &s.name == ref_store) {
@@ -173,10 +167,7 @@ fn write_z1_dot(
                 "    \"z1_{store_name}__{state}\" [label=\"{state}\", style=bold, peripheries=2];"
             );
         } else {
-            let _ = writeln!(
-                out,
-                "    \"z1_{store_name}__{state}\" [label=\"{state}\"];"
-            );
+            let _ = writeln!(out, "    \"z1_{store_name}__{state}\" [label=\"{state}\"];");
         }
     }
 
@@ -207,38 +198,27 @@ fn write_z2_dot(
 ) {
     let wf = schema.workflow.as_ref().unwrap();
     let _ = writeln!(out, "  subgraph cluster_z2_workflow_{store_name} {{");
-    let _ = writeln!(
-        out,
-        "    label=\"Z2: {store_name} workflow firing order\";"
-    );
+    let _ = writeln!(out, "    label=\"Z2: {store_name} workflow firing order\";");
 
     // Walk lifecycle states in declaration order; emit only those with on_state actions.
     for state in &schema.lifecycle.states {
-        let Some(actions) = wf.on_state.get(state) else { continue; };
+        let Some(actions) = wf.on_state.get(state) else {
+            continue;
+        };
         if actions.is_empty() {
             continue;
         }
-        let _ = writeln!(
-            out,
-            "    \"z2_{store_name}__{state}\" [label=\"{state}\"];"
-        );
+        let _ = writeln!(out, "    \"z2_{store_name}__{state}\" [label=\"{state}\"];");
         for (idx, action) in actions.iter().enumerate() {
             match action {
                 StateAction::DispatchAgent(role) => {
-                    let style = actor_style(
-                        Some(Actor::AiAutonomous),
-                        opts.no_icons,
-                        color_disabled,
-                    );
-                    let role_node =
-                        format!("z2_{store_name}__{state}__role_{idx}_{role}");
+                    let style =
+                        actor_style(Some(Actor::AiAutonomous), opts.no_icons, color_disabled);
+                    let role_node = format!("z2_{store_name}__{state}__role_{idx}_{role}");
                     let color_attr = if style.dot_color.is_empty() {
                         String::new()
                     } else {
-                        format!(
-                            ", color={}, fontcolor={}",
-                            style.dot_color, style.dot_color
-                        )
+                        format!(", color={}, fontcolor={}", style.dot_color, style.dot_color)
                     };
                     let _ = writeln!(
                         out,
@@ -250,18 +230,11 @@ fn write_z2_dot(
                     );
                 }
                 StateAction::TransitionTo(to_state) => {
-                    let style = actor_style(
-                        Some(Actor::Framework),
-                        opts.no_icons,
-                        color_disabled,
-                    );
+                    let style = actor_style(Some(Actor::Framework), opts.no_icons, color_disabled);
                     let color_attr = if style.dot_color.is_empty() {
                         String::new()
                     } else {
-                        format!(
-                            ", color={}, fontcolor={}",
-                            style.dot_color, style.dot_color
-                        )
+                        format!(", color={}, fontcolor={}", style.dot_color, style.dot_color)
                     };
                     let _ = writeln!(
                         out,
@@ -289,11 +262,7 @@ fn write_z2_dot(
 /// Emit a markdown document with one `stateDiagram-v2` block per zone,
 /// separated by `---` and `## Zk …` headings.  Mermaid does not support
 /// per-edge color, so labels carry icon-only (or text-code-only) prefixes.
-pub fn emit_mermaid(
-    manifest: &Manifest,
-    schemas: &HashMap<String, Schema>,
-    opts: &Opts,
-) -> String {
+pub fn emit_mermaid(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts: &Opts) -> String {
     let mut out = String::new();
 
     // Z0
@@ -303,15 +272,13 @@ pub fn emit_mermaid(
         let _ = writeln!(out, "  state \"{}\" as {}", store.name, store.name);
     }
     for store in &manifest.stores {
-        let Some(schema) = schemas.get(&store.name) else { continue; };
+        let Some(schema) = schemas.get(&store.name) else {
+            continue;
+        };
         for field in &schema.fields {
             if let FieldType::ListFk { ref_store } = &field.ty {
                 if manifest.stores.iter().any(|s| &s.name == ref_store) {
-                    let _ = writeln!(
-                        out,
-                        "  {} --> {} : {}",
-                        store.name, ref_store, field.name
-                    );
+                    let _ = writeln!(out, "  {} --> {} : {}", store.name, ref_store, field.name);
                 }
             }
         }
@@ -325,7 +292,9 @@ pub fn emit_mermaid(
                 continue;
             }
         }
-        let Some(schema) = schemas.get(&store.name) else { continue; };
+        let Some(schema) = schemas.get(&store.name) else {
+            continue;
+        };
         out.push_str("---\n\n");
         let _ = writeln!(out, "## Z1: {} state machine\n", store.name);
         out.push_str("```mermaid\nstateDiagram-v2\n");
@@ -352,28 +321,27 @@ pub fn emit_mermaid(
                 continue;
             }
         }
-        let Some(schema) = schemas.get(&store.name) else { continue; };
-        let Some(wf) = schema.workflow.as_ref() else { continue; };
+        let Some(schema) = schemas.get(&store.name) else {
+            continue;
+        };
+        let Some(wf) = schema.workflow.as_ref() else {
+            continue;
+        };
         out.push_str("---\n\n");
         let _ = writeln!(out, "## Z2: {} workflow firing order\n", store.name);
         out.push_str("```mermaid\nstateDiagram-v2\n");
         for state in &schema.lifecycle.states {
-            let Some(actions) = wf.on_state.get(state) else { continue; };
+            let Some(actions) = wf.on_state.get(state) else {
+                continue;
+            };
             if actions.is_empty() {
                 continue;
             }
             for (idx, action) in actions.iter().enumerate() {
                 match action {
                     StateAction::DispatchAgent(role) => {
-                        let style = actor_style(
-                            Some(Actor::AiAutonomous),
-                            opts.no_icons,
-                            true,
-                        );
-                        let _ = writeln!(
-                            out,
-                            "  state \"{role}\" as {state}_role_{idx}_{role}"
-                        );
+                        let style = actor_style(Some(Actor::AiAutonomous), opts.no_icons, true);
+                        let _ = writeln!(out, "  state \"{role}\" as {state}_role_{idx}_{role}");
                         let _ = writeln!(
                             out,
                             "  {state} --> {state}_role_{idx}_{role} : {} \u{2192} {role}",
@@ -381,11 +349,7 @@ pub fn emit_mermaid(
                         );
                     }
                     StateAction::TransitionTo(to_state) => {
-                        let style = actor_style(
-                            Some(Actor::Framework),
-                            opts.no_icons,
-                            true,
-                        );
+                        let style = actor_style(Some(Actor::Framework), opts.no_icons, true);
                         let _ = writeln!(
                             out,
                             "  {state} --> {to_state} : {} \u{21d2} auto",
@@ -500,11 +464,7 @@ pub fn render_via_dot(dot_source: &str) -> RenderOutcome {
 ///
 /// `Format::Auto` shells out to `dot -Tutf8`; on missing or failing `dot` it
 /// prints the dot source and a one-line install hint to stderr.
-pub fn run(
-    manifest: &Manifest,
-    schemas: &HashMap<String, Schema>,
-    opts: Opts,
-) -> Result<()> {
+pub fn run(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts: Opts) -> Result<()> {
     match opts.format {
         Format::Mermaid => {
             print!("{}", emit_mermaid(manifest, schemas, &opts));
@@ -604,8 +564,8 @@ mod tests {
     /// AC2.7: NO_COLOR=1 suppresses `color=` attributes on dot edges.
     #[test]
     fn ac2_7_no_color_env_suppresses_dot_color_attrs() {
-        use crate::cli::test_support::ENV_LOCK;
         use crate::cli::dynamic::BUNDLED_STORE_SCHEMAS;
+        use crate::cli::test_support::ENV_LOCK;
         use crate::manifest::{InstalledStore, Manifest};
         use crate::schema::StoreScope;
         use std::path::PathBuf;
@@ -613,7 +573,9 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Snapshot prior value, set NO_COLOR, restore after.
         let prior = std::env::var_os("NO_COLOR");
-        unsafe { std::env::set_var("NO_COLOR", "1"); }
+        unsafe {
+            std::env::set_var("NO_COLOR", "1");
+        }
 
         let mut schemas: HashMap<String, Schema> = HashMap::new();
         for (name, yaml) in BUNDLED_STORE_SCHEMAS {
@@ -637,8 +599,12 @@ mod tests {
 
         // Restore env BEFORE assertions so a panic doesn't leak NO_COLOR.
         match prior {
-            Some(v) => unsafe { std::env::set_var("NO_COLOR", v); },
-            None => unsafe { std::env::remove_var("NO_COLOR"); },
+            Some(v) => unsafe {
+                std::env::set_var("NO_COLOR", v);
+            },
+            None => unsafe {
+                std::env::remove_var("NO_COLOR");
+            },
         }
 
         assert!(

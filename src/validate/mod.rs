@@ -7,7 +7,10 @@ pub mod required;
 
 use std::collections::BTreeMap;
 
-use crate::schema::{actor::{Actor, InvokerCtx}, FieldType, Schema};
+use crate::schema::{
+    actor::{Actor, InvokerCtx},
+    FieldType, Schema,
+};
 
 pub use error::{pretty_print, ValidationError};
 
@@ -84,12 +87,28 @@ pub fn validate(
     // required/enum/pattern checks run against the full merged entry;
     // actor checks run against actor_entry (diff-only for Transition/Update, full entry for Add).
     for field in &schema.fields {
-        validate_field(field, entry, actor_entry, &[], &schema.default_actor, invoker, &mut errors);
+        validate_field(
+            field,
+            entry,
+            actor_entry,
+            &[],
+            &schema.default_actor,
+            invoker,
+            &mut errors,
+        );
 
         if let FieldType::Record(sub_fields) = &field.ty {
             let parent_path = vec![field.name.clone()];
             for sub in sub_fields {
-                validate_field(sub, entry, actor_entry, &parent_path, &schema.default_actor, invoker, &mut errors);
+                validate_field(
+                    sub,
+                    entry,
+                    actor_entry,
+                    &parent_path,
+                    &schema.default_actor,
+                    invoker,
+                    &mut errors,
+                );
             }
         }
 
@@ -115,7 +134,9 @@ pub fn validate(
                         // Corresponding actor-scoped elem-level entry
                         let actor_elem_entry: EntryMap = match actor_list_val {
                             Some(serde_json::Value::Array(actor_elems)) => {
-                                if let Some(serde_json::Value::Object(ae)) = actor_elems.get(elem_idx) {
+                                if let Some(serde_json::Value::Object(ae)) =
+                                    actor_elems.get(elem_idx)
+                                {
                                     ae.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                                 } else {
                                     BTreeMap::new() // not in diff → skip actor checks
@@ -174,14 +195,23 @@ fn validate_field(
     // Value::Null is a valid nullable value (doesn't trigger required for optional fields);
     // Value::String is never valid for list_record/list_fk columns, so this check fires
     // unconditionally regardless of whether the field is required or optional.
-    if matches!(&field.ty, FieldType::ListRecord(_) | FieldType::ListFk { .. }) {
+    if matches!(
+        &field.ty,
+        FieldType::ListRecord(_) | FieldType::ListFk { .. }
+    ) {
         if let Some(serde_json::Value::String(raw)) = required::lookup(entry, &field_path) {
             errors.push(ValidationError {
                 field_path: field_path.clone(),
-                rule: error::RuleKind::InvalidJson { expected: "JSON array".to_string() },
+                rule: error::RuleKind::InvalidJson {
+                    expected: "JSON array".to_string(),
+                },
                 message: format!(
                     "value must be a JSON array, got string '{}'",
-                    if raw.len() > 60 { &raw[..60] } else { raw.as_str() }
+                    if raw.len() > 60 {
+                        &raw[..60]
+                    } else {
+                        raw.as_str()
+                    }
                 ),
             });
             // Short-circuit: don't run required/enum/pattern/actor checks on a sentinel string —
@@ -201,10 +231,16 @@ fn validate_field(
                 // Sentinel detected: bad JSON was written via coerce_value.
                 errors.push(ValidationError {
                     field_path: field_path.clone(),
-                    rule: error::RuleKind::InvalidJson { expected: "valid JSON".to_string() },
+                    rule: error::RuleKind::InvalidJson {
+                        expected: "valid JSON".to_string(),
+                    },
                     message: format!(
                         "value must be valid JSON, got string '{}'",
-                        if raw.len() > 60 { &raw[..60] } else { raw.as_str() }
+                        if raw.len() > 60 {
+                            &raw[..60]
+                        } else {
+                            raw.as_str()
+                        }
                     ),
                 });
                 // Short-circuit: InvalidJson is the only relevant diagnostic for a sentinel.
@@ -224,7 +260,14 @@ fn validate_field(
     regex_check::check_pattern(field, &field_path, entry, errors);
 
     // actor check — uses actor_entry (diff only for Transition/Update, full entry for Add)
-    actor::check_actor(field, &field_path, actor_entry, invoker, *default_actor, errors);
+    actor::check_actor(
+        field,
+        &field_path,
+        actor_entry,
+        invoker,
+        *default_actor,
+        errors,
+    );
 }
 
 #[cfg(test)]
@@ -289,7 +332,10 @@ fields:
     }
 
     fn entry_from(pairs: &[(&str, serde_json::Value)]) -> EntryMap {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
     }
 
     fn str_val(s: &str) -> serde_json::Value {
@@ -312,7 +358,9 @@ fields:
         // no summary
         let entry = entry_from(&[]);
         let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
-        assert!(errs.iter().any(|e| e.field_path == vec!["summary".to_string()]));
+        assert!(errs
+            .iter()
+            .any(|e| e.field_path == vec!["summary".to_string()]));
     }
 
     #[test]
@@ -333,18 +381,14 @@ fields:
         ]);
         let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
         assert!(errs.iter().any(|e| {
-            e.field_path == vec!["priority".to_string()]
-                && e.rule == error::RuleKind::Enum
+            e.field_path == vec!["priority".to_string()] && e.rule == error::RuleKind::Enum
         }));
     }
 
     #[test]
     fn valid_enum_value_passes() {
         let s = schema();
-        let entry = entry_from(&[
-            ("summary", str_val("hello")),
-            ("priority", str_val("high")),
-        ]);
+        let entry = entry_from(&[("summary", str_val("hello")), ("priority", str_val("high"))]);
         validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap();
     }
 
@@ -379,10 +423,7 @@ fields:
     #[test]
     fn ai_invoker_human_field_fails() {
         let s = schema();
-        let entry = entry_from(&[
-            ("summary", str_val("hello")),
-            ("answer", str_val("yes")),
-        ]);
+        let entry = entry_from(&[("summary", str_val("hello")), ("answer", str_val("yes"))]);
         let errs = validate(&s, &entry, Op::Add, Actor::AiAutonomous.into()).unwrap_err();
         assert!(errs.iter().any(|e| {
             e.field_path == vec!["answer".to_string()]
@@ -394,10 +435,7 @@ fields:
     #[test]
     fn human_invoker_human_field_passes() {
         let s = schema();
-        let entry = entry_from(&[
-            ("summary", str_val("hello")),
-            ("answer", str_val("yes")),
-        ]);
+        let entry = entry_from(&[("summary", str_val("hello")), ("answer", str_val("yes"))]);
         validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap();
     }
 
@@ -416,15 +454,18 @@ fields:
         let paths: Vec<String> = errs.iter().map(|e| e.field_path.join(".")).collect();
         assert!(
             paths.contains(&"contract.done_when".to_string()),
-            "expected contract.done_when in errors; got: {:?}", paths
+            "expected contract.done_when in errors; got: {:?}",
+            paths
         );
         assert!(
             paths.contains(&"contract.scope_in".to_string()),
-            "expected contract.scope_in in errors; got: {:?}", paths
+            "expected contract.scope_in in errors; got: {:?}",
+            paths
         );
         assert!(
             paths.contains(&"contract.scope_out".to_string()),
-            "expected contract.scope_out in errors; got: {:?}", paths
+            "expected contract.scope_out in errors; got: {:?}",
+            paths
         );
     }
 
@@ -458,7 +499,9 @@ fields:
             errs.len() >= 5,
             "expected ≥5 errors but got {}: {:?}",
             errs.len(),
-            errs.iter().map(|e| e.field_path.join(".")).collect::<Vec<_>>()
+            errs.iter()
+                .map(|e| e.field_path.join("."))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -470,11 +513,18 @@ fields:
         let entry = entry_from(&[("summary", str_val("hello"))]);
         // "triage" transition requires ai_with_human; bare ai_autonomous must be rejected
         let diff = entry_from(&[]);
-        let errs = validate(&s, &entry, Op::Transition("triage".to_string(), diff), Actor::AiAutonomous.into())
-            .unwrap_err();
+        let errs = validate(
+            &s,
+            &entry,
+            Op::Transition("triage".to_string(), diff),
+            Actor::AiAutonomous.into(),
+        )
+        .unwrap_err();
         assert!(
-            errs.iter().any(|e| e.rule == error::RuleKind::Actor && e.message.contains("ai_with_human")),
-            "expected actor error citing ai_with_human; got: {:?}", errs
+            errs.iter()
+                .any(|e| e.rule == error::RuleKind::Actor && e.message.contains("ai_with_human")),
+            "expected actor error citing ai_with_human; got: {:?}",
+            errs
         );
     }
 
@@ -483,7 +533,13 @@ fields:
         let s = schema();
         let entry = entry_from(&[("summary", str_val("hello"))]);
         let diff = entry_from(&[]);
-        validate(&s, &entry, Op::Transition("triage".to_string(), diff), Actor::Human.into()).unwrap();
+        validate(
+            &s,
+            &entry,
+            Op::Transition("triage".to_string(), diff),
+            Actor::Human.into(),
+        )
+        .unwrap();
     }
 
     // ---- Op::Update actor scoping — regression test for carry-forward fix ----
@@ -516,18 +572,16 @@ fields:
     fn update_with_ai_invoker_writing_human_field_fails() {
         // Sanity: AI trying to update the human-actor `answer` field directly must still fail.
         let s = schema();
-        let merged = entry_from(&[
-            ("summary", str_val("hello")),
-        ]);
+        let merged = entry_from(&[("summary", str_val("hello"))]);
         // The AI's diff includes `answer` — this should be caught.
-        let diff = entry_from(&[
-            ("answer", str_val("ai-wrote-this")),
-        ]);
-        let errs = validate(&s, &merged, Op::Update(diff), Actor::AiAutonomous.into())
-            .unwrap_err();
+        let diff = entry_from(&[("answer", str_val("ai-wrote-this"))]);
+        let errs = validate(&s, &merged, Op::Update(diff), Actor::AiAutonomous.into()).unwrap_err();
         assert!(
-            errs.iter().any(|e| e.field_path == vec!["answer".to_string()] && e.rule == error::RuleKind::Actor),
-            "expected actor error on answer for AI invoker; got: {:?}", errs
+            errs.iter()
+                .any(|e| e.field_path == vec!["answer".to_string()]
+                    && e.rule == error::RuleKind::Actor),
+            "expected actor error on answer for AI invoker; got: {:?}",
+            errs
         );
     }
 
@@ -536,9 +590,7 @@ fields:
     #[test]
     fn pretty_print_sorted_by_field_path() {
         let s = schema();
-        let entry = entry_from(&[
-            ("triage", nested_val(&[("verdict", "T3")])),
-        ]);
+        let entry = entry_from(&[("triage", nested_val(&[("verdict", "T3")]))]);
         let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
         let output = pretty_print(&errs);
         // Alphabetically: "contract.*" sorts before "summary"
@@ -698,10 +750,7 @@ fields:
     fn validate_json_required_field_bad_value_emits_invalid_json() {
         let s = Schema::from_yaml(JSON_SCHEMA_REQUIRED).unwrap();
         // Simulate sentinel written by coerce_value on bad JSON.
-        let entry = entry_from(&[
-            ("title", str_val("hello")),
-            ("notes", str_val("{not json")),
-        ]);
+        let entry = entry_from(&[("title", str_val("hello")), ("notes", str_val("{not json"))]);
         let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
 
         let notes_errs: Vec<&ValidationError> = errs
@@ -711,7 +760,8 @@ fields:
 
         // Exactly one error for `notes` (short-circuit: no Required also firing).
         assert_eq!(
-            notes_errs.len(), 1,
+            notes_errs.len(),
+            1,
             "expected exactly 1 error for notes; got: {:?}",
             notes_errs.iter().map(|e| &e.rule).collect::<Vec<_>>()
         );
@@ -719,13 +769,15 @@ fields:
         // Rule is InvalidJson { expected: "valid JSON" }.
         assert!(
             matches!(&notes_errs[0].rule, error::RuleKind::InvalidJson { expected } if expected == "valid JSON"),
-            "expected InvalidJson{{valid JSON}}; got: {:?}", notes_errs[0].rule
+            "expected InvalidJson{{valid JSON}}; got: {:?}",
+            notes_errs[0].rule
         );
 
         // Message contains field-relevant phrase.
         assert!(
             notes_errs[0].message.contains("valid JSON"),
-            "message should contain 'valid JSON'; got: {}", notes_errs[0].message
+            "message should contain 'valid JSON'; got: {}",
+            notes_errs[0].message
         );
     }
 
@@ -746,16 +798,20 @@ fields:
             .collect();
 
         assert_eq!(
-            notes_errs.len(), 1,
-            "optional field: expected exactly 1 InvalidJson error; got: {:?}", notes_errs
+            notes_errs.len(),
+            1,
+            "optional field: expected exactly 1 InvalidJson error; got: {:?}",
+            notes_errs
         );
         assert!(
             matches!(&notes_errs[0].rule, error::RuleKind::InvalidJson { expected } if expected == "valid JSON"),
-            "optional field: expected InvalidJson{{valid JSON}}; got: {:?}", notes_errs[0].rule
+            "optional field: expected InvalidJson{{valid JSON}}; got: {:?}",
+            notes_errs[0].rule
         );
         assert!(
             notes_errs[0].message.contains("valid JSON"),
-            "message should contain 'valid JSON'; got: {}", notes_errs[0].message
+            "message should contain 'valid JSON'; got: {}",
+            notes_errs[0].message
         );
     }
 
@@ -780,12 +836,15 @@ fields:
             .collect();
         // Confirm the false-flag behaviour is pinned (InvalidJson fires for top-level string).
         assert_eq!(
-            notes_errs.len(), 1,
-            "known limitation: top-level JSON string triggers sentinel; got: {:?}", notes_errs
+            notes_errs.len(),
+            1,
+            "known limitation: top-level JSON string triggers sentinel; got: {:?}",
+            notes_errs
         );
         assert!(
             matches!(&notes_errs[0].rule, error::RuleKind::InvalidJson { .. }),
-            "known limitation: InvalidJson expected; got: {:?}", notes_errs[0].rule
+            "known limitation: InvalidJson expected; got: {:?}",
+            notes_errs[0].rule
         );
     }
 
@@ -824,21 +883,29 @@ fields:
             .filter(|e| e.field_path == vec!["entries".to_string()])
             .collect();
 
-        assert_eq!(entries_errs.len(), 1, "expected 1 error for entries; got: {:?}", entries_errs);
+        assert_eq!(
+            entries_errs.len(),
+            1,
+            "expected 1 error for entries; got: {:?}",
+            entries_errs
+        );
 
         // Rule shape: InvalidJson { expected: "JSON array" } (renamed from InvalidJsonArray).
         assert!(
             matches!(&entries_errs[0].rule, error::RuleKind::InvalidJson { expected } if expected == "JSON array"),
-            "expected InvalidJson{{JSON array}}; got: {:?}", entries_errs[0].rule
+            "expected InvalidJson{{JSON array}}; got: {:?}",
+            entries_errs[0].rule
         );
 
         // User-facing message must read "value must be a JSON array, got string '...'" (T006 P2 compat).
         assert!(
-            entries_errs[0].message.starts_with("value must be a JSON array, got string '"),
-            "message backwards-compat check failed; got: {}", entries_errs[0].message
+            entries_errs[0]
+                .message
+                .starts_with("value must be a JSON array, got string '"),
+            "message backwards-compat check failed; got: {}",
+            entries_errs[0].message
         );
     }
-
 }
 
 // ---- T001 P2 / AC2.4: InvokerCtx shape tests ----
@@ -880,7 +947,10 @@ mod invoker_ctx {
     /// (no implicit downgrade). Phase 3 relies on this bit being honest.
     #[test]
     fn explicit_token_valid_is_preserved() {
-        let ctx = InvokerCtx { actor: Actor::AiWithHuman, token_valid: true };
+        let ctx = InvokerCtx {
+            actor: Actor::AiWithHuman,
+            token_valid: true,
+        };
         assert_eq!(ctx.actor, Actor::AiWithHuman);
         assert!(ctx.token_valid);
     }
@@ -889,9 +959,16 @@ mod invoker_ctx {
     #[test]
     fn display_matches_underlying_actor() {
         assert_eq!(InvokerCtx::bare(Actor::Human).to_string(), "human");
-        assert_eq!(InvokerCtx::bare(Actor::AiAutonomous).to_string(), "ai_autonomous");
         assert_eq!(
-            InvokerCtx { actor: Actor::AiWithHuman, token_valid: true }.to_string(),
+            InvokerCtx::bare(Actor::AiAutonomous).to_string(),
+            "ai_autonomous"
+        );
+        assert_eq!(
+            InvokerCtx {
+                actor: Actor::AiWithHuman,
+                token_valid: true
+            }
+            .to_string(),
             "ai_with_human"
         );
     }

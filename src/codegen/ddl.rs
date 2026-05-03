@@ -26,7 +26,9 @@ fn scalar_col_def(field_name: &str, ty: &FieldType) -> Option<String> {
     match ty {
         FieldType::Text => Some(format!("{field_name} TEXT")),
         FieldType::Integer => Some(format!("{field_name} INTEGER")),
-        FieldType::Bool => Some(format!("{field_name} INTEGER CHECK ({field_name} IN (0,1))")),
+        FieldType::Bool => Some(format!(
+            "{field_name} INTEGER CHECK ({field_name} IN (0,1))"
+        )),
         FieldType::Timestamp => Some(format!("{field_name} TEXT")),
         FieldType::DisplayId => Some(format!("{field_name} TEXT")),
         FieldType::Enum(values) => {
@@ -119,9 +121,18 @@ mod tests {
     fn ddl_contains_reserved_columns() {
         let schema = Schema::from_yaml(ALL_TYPES_FIXTURE).unwrap();
         let ddl = ddl_for(&schema);
-        assert!(ddl.contains("id INTEGER PRIMARY KEY AUTOINCREMENT"), "missing id: {ddl}");
-        assert!(ddl.contains("display_id TEXT UNIQUE NOT NULL"), "missing display_id: {ddl}");
-        assert!(ddl.contains("status TEXT NOT NULL"), "missing status: {ddl}");
+        assert!(
+            ddl.contains("id INTEGER PRIMARY KEY AUTOINCREMENT"),
+            "missing id: {ddl}"
+        );
+        assert!(
+            ddl.contains("display_id TEXT UNIQUE NOT NULL"),
+            "missing display_id: {ddl}"
+        );
+        assert!(
+            ddl.contains("status TEXT NOT NULL"),
+            "missing status: {ddl}"
+        );
         assert!(ddl.contains("created_at TEXT"), "missing created_at: {ddl}");
         assert!(ddl.contains("updated_at TEXT"), "missing updated_at: {ddl}");
         assert!(ddl.contains("created_by TEXT"), "missing created_by: {ddl}");
@@ -135,11 +146,20 @@ mod tests {
         // Text
         assert!(ddl.contains("title TEXT"), "missing title TEXT: {ddl}");
         // Integer
-        assert!(ddl.contains("count INTEGER"), "missing count INTEGER: {ddl}");
+        assert!(
+            ddl.contains("count INTEGER"),
+            "missing count INTEGER: {ddl}"
+        );
         // Bool → INTEGER with CHECK
-        assert!(ddl.contains("active INTEGER CHECK (active IN (0,1))"), "missing bool check: {ddl}");
+        assert!(
+            ddl.contains("active INTEGER CHECK (active IN (0,1))"),
+            "missing bool check: {ddl}"
+        );
         // Timestamp → TEXT
-        assert!(ddl.contains("observed_at TEXT"), "missing observed_at TEXT: {ddl}");
+        assert!(
+            ddl.contains("observed_at TEXT"),
+            "missing observed_at TEXT: {ddl}"
+        );
         // DisplayId → TEXT
         assert!(ddl.contains("ref_id TEXT"), "missing ref_id TEXT: {ddl}");
     }
@@ -164,9 +184,15 @@ mod tests {
         // Record → TEXT (JSON)
         assert!(ddl.contains("details TEXT"), "missing details TEXT: {ddl}");
         // Json → TEXT (no CHECK clause)
-        assert!(ddl.contains("metadata TEXT"), "missing metadata TEXT: {ddl}");
+        assert!(
+            ddl.contains("metadata TEXT"),
+            "missing metadata TEXT: {ddl}"
+        );
         // Ensure no CHECK clause for the json column
-        assert!(!ddl.contains("metadata TEXT CHECK"), "json field must not have CHECK clause: {ddl}");
+        assert!(
+            !ddl.contains("metadata TEXT CHECK"),
+            "json field must not have CHECK clause: {ddl}"
+        );
     }
 
     #[test]
@@ -247,8 +273,14 @@ fields:
             "framework-actor fields must produce identical DDL to non-actor fields.\nFW:\n{ddl_fw}\nNO:\n{ddl_no}"
         );
         // Specifically check that claimed_by is TEXT (not modified by actor attribute)
-        assert!(ddl_fw.contains("claimed_by TEXT"), "claimed_by must be TEXT: {ddl_fw}");
-        assert!(ddl_fw.contains("current_phase INTEGER"), "current_phase must be INTEGER: {ddl_fw}");
+        assert!(
+            ddl_fw.contains("claimed_by TEXT"),
+            "claimed_by must be TEXT: {ddl_fw}"
+        );
+        assert!(
+            ddl_fw.contains("current_phase INTEGER"),
+            "current_phase must be INTEGER: {ddl_fw}"
+        );
     }
 
     // ---- quote_ident tests (Phase 3 / Finding C) ----

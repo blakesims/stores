@@ -124,7 +124,11 @@ fn helper_default(
                 } else {
                     v.render()
                 };
-                if s.is_empty() { fallback } else { s }
+                if s.is_empty() {
+                    fallback
+                } else {
+                    s
+                }
             }
         }
     };
@@ -339,19 +343,13 @@ mod tests {
     #[test]
     fn gt_helper_missing_key_returns_false() {
         // Missing top-level key on first arg.
-        let out = render_template(
-            "{{#if (gt missing_key 3)}}yes{{else}}no{{/if}}",
-            &json!({}),
-        )
-        .unwrap();
+        let out =
+            render_template("{{#if (gt missing_key 3)}}yes{{else}}no{{/if}}", &json!({})).unwrap();
         assert_eq!(out, "no");
 
         // Missing key on second arg.
-        let out = render_template(
-            "{{#if (gt 5 missing_key)}}yes{{else}}no{{/if}}",
-            &json!({}),
-        )
-        .unwrap();
+        let out =
+            render_template("{{#if (gt 5 missing_key)}}yes{{else}}no{{/if}}", &json!({})).unwrap();
         assert_eq!(out, "no");
 
         // Non-numeric value (string) → false.
@@ -363,11 +361,7 @@ mod tests {
         assert_eq!(out, "no");
 
         // Both keys missing → false.
-        let out = render_template(
-            "{{#if (gt a b)}}yes{{else}}no{{/if}}",
-            &json!({}),
-        )
-        .unwrap();
+        let out = render_template("{{#if (gt a b)}}yes{{else}}no{{/if}}", &json!({})).unwrap();
         assert_eq!(out, "no");
     }
 
@@ -379,7 +373,10 @@ mod tests {
         let tpl = "diff: {{git_diff_summary}}";
         let ctx = json!({});
         let mut overlay = std::collections::HashMap::new();
-        overlay.insert("git_diff_summary".to_string(), json!("abc123..HEAD: 3 files changed"));
+        overlay.insert(
+            "git_diff_summary".to_string(),
+            json!("abc123..HEAD: 3 files changed"),
+        );
         let out = super::render_template_with_overlay(tpl, &ctx, &overlay).unwrap();
         assert_eq!(out, "diff: abc123..HEAD: 3 files changed");
 
@@ -395,7 +392,8 @@ mod tests {
         assert_eq!(out3, "diff: abc123..HEAD: 3 files changed");
 
         // 4. Empty overlay → same as render_template.
-        let empty: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+        let empty: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
         let ctx4 = json!({"val": "hello"});
         let tpl4 = "val: {{val}}";
         let out4 = super::render_template_with_overlay(tpl4, &ctx4, &empty).unwrap();
@@ -406,19 +404,13 @@ mod tests {
     #[test]
     fn lt_helper_missing_key_returns_false() {
         // Missing top-level key on first arg.
-        let out = render_template(
-            "{{#if (lt missing_key 3)}}yes{{else}}no{{/if}}",
-            &json!({}),
-        )
-        .unwrap();
+        let out =
+            render_template("{{#if (lt missing_key 3)}}yes{{else}}no{{/if}}", &json!({})).unwrap();
         assert_eq!(out, "no");
 
         // Missing key on second arg.
-        let out = render_template(
-            "{{#if (lt 1 missing_key)}}yes{{else}}no{{/if}}",
-            &json!({}),
-        )
-        .unwrap();
+        let out =
+            render_template("{{#if (lt 1 missing_key)}}yes{{else}}no{{/if}}", &json!({})).unwrap();
         assert_eq!(out, "no");
 
         // Non-numeric value (string) → false.
@@ -430,11 +422,7 @@ mod tests {
         assert_eq!(out, "no");
 
         // Both keys missing → false.
-        let out = render_template(
-            "{{#if (lt a b)}}yes{{else}}no{{/if}}",
-            &json!({}),
-        )
-        .unwrap();
+        let out = render_template("{{#if (lt a b)}}yes{{else}}no{{/if}}", &json!({})).unwrap();
         assert_eq!(out, "no");
     }
 }

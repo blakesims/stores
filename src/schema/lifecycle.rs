@@ -1,7 +1,7 @@
 use crate::schema::actor::Actor;
-use crate::schema::expr::{Expr, parse_guard};
-use crate::validate::EntryMap;
+use crate::schema::expr::{parse_guard, Expr};
 use crate::validate::expr_eval::eval;
+use crate::validate::EntryMap;
 use anyhow::bail;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -15,7 +15,9 @@ where
     let opt: Option<String> = Option::deserialize(d)?;
     match opt {
         None => Ok(None),
-        Some(s) => parse_guard(&s).map(Some).map_err(|e| D::Error::custom(e.to_string())),
+        Some(s) => parse_guard(&s)
+            .map(Some)
+            .map_err(|e| D::Error::custom(e.to_string())),
     }
 }
 
@@ -97,10 +99,7 @@ impl Lifecycle {
         for t in &self.transitions {
             if t.requires_gate.is_none() && t.guard.is_none() {
                 let key = (t.from.clone(), t.verb.clone());
-                fully_unguarded
-                    .entry(key)
-                    .or_default()
-                    .push(&t.to);
+                fully_unguarded.entry(key).or_default().push(&t.to);
             }
         }
 
@@ -142,11 +141,7 @@ pub fn select_transition<'a>(
 ) -> anyhow::Result<&'a Transition> {
     let candidates: Vec<_> = transitions
         .iter()
-        .filter(|t| {
-            t.from == from_state
-                && t.verb == verb
-                && t.requires_gate.as_deref() == gate
-        })
+        .filter(|t| t.from == from_state && t.verb == verb && t.requires_gate.as_deref() == gate)
         .collect();
 
     if candidates.is_empty() {
@@ -178,7 +173,11 @@ pub fn select_transition<'a>(
         };
 
         if dedup.is_empty() {
-            bail!("{}; verb '{}' is not declared anywhere in this schema", prefix, verb);
+            bail!(
+                "{}; verb '{}' is not declared anywhere in this schema",
+                prefix,
+                verb
+            );
         }
 
         // Find a hop FROM current state TO one of the reachable_froms (one-step lookahead).
@@ -231,7 +230,11 @@ pub fn select_transition<'a>(
     }
 
     // No guarded-true match: use the unguarded fallback (catch-all).
-    let unguarded: Vec<_> = candidates.iter().filter(|t| t.guard.is_none()).copied().collect();
+    let unguarded: Vec<_> = candidates
+        .iter()
+        .filter(|t| t.guard.is_none())
+        .copied()
+        .collect();
     if let Some(t) = unguarded.first() {
         return Ok(t);
     }
@@ -248,10 +251,8 @@ mod tests {
 
     #[test]
     fn initial_state_defaults_to_first() {
-        let lc: Lifecycle = serde_yaml::from_str(
-            "states: [triage, active, done]\ntransitions: []",
-        )
-        .unwrap();
+        let lc: Lifecycle =
+            serde_yaml::from_str("states: [triage, active, done]\ntransitions: []").unwrap();
         assert!(lc.initial_state.is_none());
         assert_eq!(lc.resolved_initial_state().unwrap(), "triage");
     }
@@ -280,7 +281,8 @@ mod tests {
 
     #[test]
     fn requires_gate_parses() {
-        let lc: Lifecycle = serde_yaml::from_str(r#"
+        let lc: Lifecycle = serde_yaml::from_str(
+            r#"
 states: [code_review, executing, blocked, complete]
 transitions:
   - from: code_review
@@ -298,7 +300,9 @@ transitions:
     verb: submit-review
     requires_gate: FAIL
     actor: ai_autonomous
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let revise = lc.transitions.iter().find(|t| t.to == "executing").unwrap();
         assert_eq!(revise.requires_gate.as_deref(), Some("REVISE"));
         let pass = lc.transitions.iter().find(|t| t.to == "complete").unwrap();
@@ -309,13 +313,16 @@ transitions:
 
     #[test]
     fn no_requires_gate_defaults_to_none() {
-        let lc: Lifecycle = serde_yaml::from_str(r#"
+        let lc: Lifecycle = serde_yaml::from_str(
+            r#"
 states: [open, done]
 transitions:
   - from: open
     to: done
     verb: close
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(lc.transitions[0].requires_gate.is_none());
     }
 
@@ -366,7 +373,8 @@ transitions:
 
     #[test]
     fn transition_guard_parses() {
-        let lc: Lifecycle = serde_yaml::from_str(r#"
+        let lc: Lifecycle = serde_yaml::from_str(
+            r#"
 states: [code_review, executing, blocked]
 transitions:
   - from: code_review
@@ -380,24 +388,35 @@ transitions:
     verb: submit-review
     requires_gate: REVISE
     actor: ai_autonomous
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let revise_guarded = lc.transitions.iter().find(|t| t.guard.is_some()).unwrap();
         assert!(revise_guarded.guard.is_some(), "guard should parse");
-        let unguarded = lc.transitions.iter().find(|t| t.guard.is_none() && t.to == "blocked").unwrap();
+        let unguarded = lc
+            .transitions
+            .iter()
+            .find(|t| t.guard.is_none() && t.to == "blocked")
+            .unwrap();
         assert!(unguarded.guard.is_none());
     }
 
     #[test]
     fn transition_guard_invalid_expression_errors() {
-        let result: Result<Lifecycle, _> = serde_yaml::from_str(r#"
+        let result: Result<Lifecycle, _> = serde_yaml::from_str(
+            r#"
 states: [open, done]
 transitions:
   - from: open
     to: done
     verb: close
     guard: "a && b"
-"#);
-        assert!(result.is_err(), "invalid guard expression should fail deserialization");
+"#,
+        );
+        assert!(
+            result.is_err(),
+            "invalid guard expression should fail deserialization"
+        );
     }
 
     // ---- "no transition found" wording: surface next-hop hint ----
@@ -406,7 +425,8 @@ transitions:
     // reachable and the verb that gets you there from the current state.
 
     fn obs_lifecycle_with_claim_resolve() -> Lifecycle {
-        serde_yaml::from_str(r#"
+        serde_yaml::from_str(
+            r#"
 states: [open, confirmed, in_progress, resolved]
 transitions:
   - from: open
@@ -420,25 +440,35 @@ transitions:
     to: resolved
     verb: resolve
     actor: ai_autonomous
-"#).unwrap()
+"#,
+        )
+        .unwrap()
     }
 
     #[test]
     fn select_transition_unreachable_verb_names_reachable_froms() {
         let lc = obs_lifecycle_with_claim_resolve();
         let entry = std::collections::BTreeMap::new();
-        let err = select_transition(&lc.transitions, "confirmed", "resolve", None, &entry).unwrap_err();
+        let err =
+            select_transition(&lc.transitions, "confirmed", "resolve", None, &entry).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("verb 'resolve' is reachable from {in_progress}"), "msg: {msg}");
+        assert!(
+            msg.contains("verb 'resolve' is reachable from {in_progress}"),
+            "msg: {msg}"
+        );
     }
 
     #[test]
     fn select_transition_unreachable_verb_names_next_hop_when_unique() {
         let lc = obs_lifecycle_with_claim_resolve();
         let entry = std::collections::BTreeMap::new();
-        let err = select_transition(&lc.transitions, "confirmed", "resolve", None, &entry).unwrap_err();
+        let err =
+            select_transition(&lc.transitions, "confirmed", "resolve", None, &entry).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("transitions there via verb 'claim'"), "msg: {msg}");
+        assert!(
+            msg.contains("transitions there via verb 'claim'"),
+            "msg: {msg}"
+        );
     }
 
     #[test]
@@ -447,12 +477,16 @@ transitions:
         let entry = std::collections::BTreeMap::new();
         let err = select_transition(&lc.transitions, "open", "teleport", None, &entry).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("verb 'teleport' is not declared anywhere in this schema"), "msg: {msg}");
+        assert!(
+            msg.contains("verb 'teleport' is not declared anywhere in this schema"),
+            "msg: {msg}"
+        );
     }
 
     #[test]
     fn transition_guard_path_length_parses() {
-        let lc: Lifecycle = serde_yaml::from_str(r#"
+        let lc: Lifecycle = serde_yaml::from_str(
+            r#"
 states: [code_review, complete, executing]
 transitions:
   - from: code_review
@@ -467,7 +501,9 @@ transitions:
     requires_gate: PASS
     guard: "current_phase < plan.phases.length"
     actor: ai_autonomous
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert_eq!(lc.transitions.len(), 2);
         assert!(lc.transitions.iter().all(|t| t.guard.is_some()));
     }

@@ -50,21 +50,14 @@ fn print_text(schema: &Schema) {
                 .as_ref()
                 .map(|a| format!("  [actor: {a}]"))
                 .unwrap_or_default();
-            println!(
-                "    {} {} -> {}{}",
-                t.verb, t.from, t.to, actor_str
-            );
+            println!("    {} {} -> {}{}", t.verb, t.from, t.to, actor_str);
         }
     }
 }
 
 fn print_field_text(field: &Field, indent: &str) {
     let ty_str = field_type_str(&field.ty);
-    let req_str = if field.required {
-        " [required]"
-    } else {
-        ""
-    };
+    let req_str = if field.required { " [required]" } else { "" };
     let actor_str = field
         .actor
         .as_ref()
@@ -176,11 +169,7 @@ fn field_to_json(field: &Field) -> Value {
     }
 
     if let Some(ref rw) = field.required_when {
-        obj["required_when"] = json!(format!(
-            "{} == '{}'",
-            rw.lhs_path.join("."),
-            rw.rhs_literal
-        ));
+        obj["required_when"] = json!(format!("{} == '{}'", rw.lhs_path.join("."), rw.rhs_literal));
     }
 
     if let Some(ref a) = field.actor {
@@ -279,9 +268,15 @@ fields:
             .find(|f| f["name"] == "contract")
             .unwrap();
         let sub_fields = contract["fields"].as_array().unwrap();
-        let done_when = sub_fields.iter().find(|f| f["name"] == "done_when").unwrap();
+        let done_when = sub_fields
+            .iter()
+            .find(|f| f["name"] == "done_when")
+            .unwrap();
         let rw = done_when["required_when"].as_str().unwrap();
-        assert!(rw.contains("triage.verdict"), "required_when should mention triage.verdict: {rw}");
+        assert!(
+            rw.contains("triage.verdict"),
+            "required_when should mention triage.verdict: {rw}"
+        );
         assert!(rw.contains("T3"), "required_when should mention T3: {rw}");
     }
 

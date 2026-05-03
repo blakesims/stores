@@ -14,14 +14,8 @@ pub static BUNDLED_SKILLS: &[(&str, &str)] = &[
         "observation:triage",
         include_str!("../../skills/observation:triage/SKILL.md"),
     ),
-    (
-        "gate:walk",
-        include_str!("../../skills/gate:walk/SKILL.md"),
-    ),
-    (
-        "task:next",
-        include_str!("../../skills/task:next/SKILL.md"),
-    ),
+    ("gate:walk", include_str!("../../skills/gate:walk/SKILL.md")),
+    ("task:next", include_str!("../../skills/task:next/SKILL.md")),
     (
         "tasks:start",
         include_str!("../../skills/tasks:start/SKILL.md"),
@@ -34,8 +28,15 @@ pub static BUNDLED_SKILLS: &[(&str, &str)] = &[
 
 pub enum SkillsCmd {
     List,
-    Install { name: Option<String>, all: bool, global: bool },
-    Uninstall { name: String, global: bool },
+    Install {
+        name: Option<String>,
+        all: bool,
+        global: bool,
+    },
+    Uninstall {
+        name: String,
+        global: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +331,9 @@ mod tests {
 
         let on_disk = fs::read_to_string(&dest).unwrap();
         let bundled = BUNDLED_SKILLS.iter().find(|(n, _)| *n == name).unwrap().1;
-        assert_eq!(on_disk, bundled, "installed content must be byte-identical to bundled");
+        assert_eq!(
+            on_disk, bundled,
+            "installed content must be byte-identical to bundled"
+        );
     }
 }

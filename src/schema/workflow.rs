@@ -111,7 +111,10 @@ impl<'de> Deserialize<'de> for RawStateAction {
         impl<'de> Visitor<'de> for V {
             type Value = RawStateAction;
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "a state action map (dispatch_agent/increment/transition_to)")
+                write!(
+                    f,
+                    "a state action map (dispatch_agent/increment/transition_to)"
+                )
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let key: String = map
@@ -470,8 +473,14 @@ max_revise_cycles: 3
         let w: Workflow = serde_yaml::from_str(minimal_workflow_yaml()).unwrap();
         let executing = w.on_state.get("executing").unwrap();
         assert_eq!(executing.len(), 2);
-        assert_eq!(executing[0], StateAction::DispatchAgent("executor".to_string()));
-        assert_eq!(executing[1], StateAction::Increment("current_cycle".to_string()));
+        assert_eq!(
+            executing[0],
+            StateAction::DispatchAgent("executor".to_string())
+        );
+        assert_eq!(
+            executing[1],
+            StateAction::Increment("current_cycle".to_string())
+        );
     }
 
     #[test]
@@ -492,9 +501,7 @@ max_revise_cycles: 3
     fn workflow_validate_unknown_on_state_errors() {
         let w: Workflow = serde_yaml::from_str(minimal_workflow_yaml()).unwrap();
         let states = vec!["open".to_string()]; // "planning" and "executing" missing
-        let err = w
-            .validate_cross_refs(&states, &|_| None)
-            .unwrap_err();
+        let err = w.validate_cross_refs(&states, &|_| None).unwrap_err();
         assert!(
             err.to_string().contains("unknown lifecycle state"),
             "err: {err}"
@@ -515,9 +522,7 @@ on_state:
 "#;
         let w: Workflow = serde_yaml::from_str(yaml).unwrap();
         let states = vec!["planning".to_string()];
-        let err = w
-            .validate_cross_refs(&states, &|_| None)
-            .unwrap_err();
+        let err = w.validate_cross_refs(&states, &|_| None).unwrap_err();
         assert!(
             err.to_string().contains("unknown agent role 'ghost_role'"),
             "err: {err}"
@@ -538,9 +543,7 @@ on_state: {}
 "#;
         let w: Workflow = serde_yaml::from_str(yaml).unwrap();
         let states: Vec<String> = vec![];
-        let err = w
-            .validate_cross_refs(&states, &|_| None)
-            .unwrap_err();
+        let err = w.validate_cross_refs(&states, &|_| None).unwrap_err();
         assert!(
             err.to_string().contains("executor") && err.to_string().contains("briefing_templates"),
             "err: {err}"
@@ -558,13 +561,8 @@ submit_targets:
 "#;
         let w: Workflow = serde_yaml::from_str(yaml).unwrap();
         let states: Vec<String> = vec![];
-        let err = w
-            .validate_cross_refs(&states, &|_| None)
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("nonexistent_field"),
-            "err: {err}"
-        );
+        let err = w.validate_cross_refs(&states, &|_| None).unwrap_err();
+        assert!(err.to_string().contains("nonexistent_field"), "err: {err}");
     }
 
     #[test]
@@ -660,7 +658,10 @@ on_state:
 "#;
         let w: Workflow = serde_yaml::from_str(yaml).unwrap();
         let actions = w.on_state.get("planning").unwrap();
-        assert_eq!(actions[0], StateAction::TransitionTo("executing".to_string()));
+        assert_eq!(
+            actions[0],
+            StateAction::TransitionTo("executing".to_string())
+        );
     }
 
     // ---- Task 2.3+2.4: resolve_from_disk ----
@@ -695,10 +696,7 @@ on_state: {}
         let wf: Workflow = serde_yaml::from_str(yaml).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let err = wf.resolve_from_disk(tmp.path()).unwrap_err();
-        assert!(
-            err.to_string().contains("nonexistent.md.tpl"),
-            "err: {err}"
-        );
+        assert!(err.to_string().contains("nonexistent.md.tpl"), "err: {err}");
     }
 
     #[test]

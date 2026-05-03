@@ -584,12 +584,34 @@ fn extract_cycles_table(task_val: &Value) -> String {
         "|-------|-------|-----------------|-------------|----------------|".to_string(),
     ];
     for c in cycles {
-        let phase = c.get("phase").and_then(|v| v.as_i64()).map(|n| n.to_string()).unwrap_or_else(|| "—".to_string());
-        let cycle = c.get("cycle").and_then(|v| v.as_i64()).map(|n| n.to_string()).unwrap_or_else(|| "—".to_string());
-        let exec_summary = c.get("executor").and_then(|e| e.get("summary")).and_then(|v| v.as_str()).unwrap_or("—");
-        let review_gate = c.get("review").and_then(|r| r.get("gate")).and_then(|v| v.as_str()).unwrap_or("—");
-        let review_summary = c.get("review").and_then(|r| r.get("summary")).and_then(|v| v.as_str()).unwrap_or("—");
-        rows.push(format!("| {phase} | {cycle} | {exec_summary} | {review_gate} | {review_summary} |"));
+        let phase = c
+            .get("phase")
+            .and_then(|v| v.as_i64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let cycle = c
+            .get("cycle")
+            .and_then(|v| v.as_i64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let exec_summary = c
+            .get("executor")
+            .and_then(|e| e.get("summary"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("—");
+        let review_gate = c
+            .get("review")
+            .and_then(|r| r.get("gate"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("—");
+        let review_summary = c
+            .get("review")
+            .and_then(|r| r.get("summary"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("—");
+        rows.push(format!(
+            "| {phase} | {cycle} | {exec_summary} | {review_gate} | {review_summary} |"
+        ));
     }
     rows.join("\n")
 }
@@ -645,7 +667,11 @@ fn extract_last_n_cycles(task_val: &Value, n: usize) -> String {
         Some(Value::Array(arr)) if !arr.is_empty() => arr,
         _ => return String::new(),
     };
-    let start = if cycles.len() > n { cycles.len() - n } else { 0 };
+    let start = if cycles.len() > n {
+        cycles.len() - n
+    } else {
+        0
+    };
     let last: Vec<&Value> = cycles[start..].iter().collect();
     if last.is_empty() {
         return String::new();
@@ -709,7 +735,10 @@ mod tests {
         (dir, conn)
     }
 
-    fn open_db_both(gate_schema: &Schema, tasks_schema: &Schema) -> (tempfile::TempDir, Connection) {
+    fn open_db_both(
+        gate_schema: &Schema,
+        tasks_schema: &Schema,
+    ) -> (tempfile::TempDir, Connection) {
         let dir = tempdir().unwrap();
         let db_file = dir.path().join("test.db");
         let conn = db::open(&db_file).unwrap();
@@ -816,7 +845,13 @@ mod tests {
         let tasks_s = tasks_schema_loaded();
         let (_dir, conn) = open_db_both(&gate_s, &tasks_s);
 
-        insert_gate(&conn, "G001", "Should we use flat layout?", Some("T001"), "pending");
+        insert_gate(
+            &conn,
+            "G001",
+            "Should we use flat layout?",
+            Some("T001"),
+            "pending",
+        );
         insert_task_row(&conn, "T001", "planning");
 
         let (_, gate_entry) = read_row(&gate_s, &conn, "G001").unwrap();
@@ -944,7 +979,10 @@ mod tests {
 
         let brief = build_tasks_brief("T002", &task_entry, &na_text, &last_review);
 
-        assert!(brief.contains("Last Review Cycle"), "review section present");
+        assert!(
+            brief.contains("Last Review Cycle"),
+            "review section present"
+        );
         assert!(
             brief.contains("REVISE") || brief.contains("needs work"),
             "review content present"
@@ -1038,7 +1076,10 @@ mod tests {
         let result = check_gate_transition("G002", "pending", "pending");
         assert!(result.is_err(), "pending→pending must return Err");
         assert!(
-            result.unwrap_err().to_string().contains("without answering gate"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("without answering gate"),
             "error must cite 'without answering gate'"
         );
     }
@@ -1072,13 +1113,15 @@ mod tests {
         insert_gate(&conn, "G002", "Use flat layout?", None, "pending");
 
         // Mock runner returns 0 but gate stays pending (no DB write).
-        let noop_envelope =
-            r#"{"role":"guide","action":"noop","summary":"Nothing to do"}"#;
+        let noop_envelope = r#"{"role":"guide","action":"noop","summary":"Nothing to do"}"#;
         let runner_out = make_run_output(noop_envelope, 0);
         let runner = MockRunner::new(vec![runner_out]);
 
         let result = run_gate_guide_with_runner(&gate_s, &conn, "G002", &runner);
-        assert!(result.is_err(), "should exit 1 (Err) when gate stays pending");
+        assert!(
+            result.is_err(),
+            "should exit 1 (Err) when gate stays pending"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("without answering gate"),
@@ -1268,7 +1311,11 @@ mod tests {
 
         // Should succeed (runner exits 0).
         let result = run_tasks_guide_with_runner(&tasks_s, &conn, "T010", &runner);
-        assert!(result.is_ok(), "in_review guide should exit Ok: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "in_review guide should exit Ok: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -1341,8 +1388,14 @@ mod tests {
         }
 
         // AC5.3: accept and reject verbs present.
-        assert!(brief.contains("stores tasks accept"), "brief must contain accept verb");
-        assert!(brief.contains("stores tasks reject"), "brief must contain reject verb");
+        assert!(
+            brief.contains("stores tasks accept"),
+            "brief must contain accept verb"
+        );
+        assert!(
+            brief.contains("stores tasks reject"),
+            "brief must contain reject verb"
+        );
 
         // Schema-enforced restriction note.
         assert!(
@@ -1362,7 +1415,10 @@ mod tests {
         let task_entry: crate::validate::EntryMap = {
             let mut map = std::collections::BTreeMap::new();
             map.insert("status".to_string(), json!("in_review"));
-            map.insert("contract".to_string(), json!({"done_when": "X", "scope_in": "Y", "scope_out": "Z"}));
+            map.insert(
+                "contract".to_string(),
+                json!({"done_when": "X", "scope_in": "Y", "scope_out": "Z"}),
+            );
             map.insert("cycles".to_string(), json!([]));
             map
         };
@@ -1378,7 +1434,10 @@ mod tests {
         );
         // Verbs still present.
         for verb in WRAP_MODE_VERBS {
-            assert!(brief.contains(verb), "verb '{verb}' must appear even without wrap_log");
+            assert!(
+                brief.contains(verb),
+                "verb '{verb}' must appear even without wrap_log"
+            );
         }
     }
 
@@ -1389,14 +1448,23 @@ mod tests {
         let task_entry: crate::validate::EntryMap = {
             let mut map = std::collections::BTreeMap::new();
             map.insert("status".to_string(), json!("executing"));
-            map.insert("contract".to_string(), json!({"done_when": "X", "scope_in": "Y", "scope_out": "Z"}));
+            map.insert(
+                "contract".to_string(),
+                json!({"done_when": "X", "scope_in": "Y", "scope_out": "Z"}),
+            );
             map.insert("cycles".to_string(), json!([]));
             map
         };
 
         // build_tasks_brief is called for executing status.
         let brief = build_tasks_brief("T888", &task_entry, "{}", "");
-        assert!(brief.contains("Task Mode"), "executing status must get Task Mode brief");
-        assert!(!brief.contains("Wrap Mode"), "executing status must NOT get Wrap Mode brief");
+        assert!(
+            brief.contains("Task Mode"),
+            "executing status must get Task Mode brief"
+        );
+        assert!(
+            !brief.contains("Wrap Mode"),
+            "executing status must NOT get Wrap Mode brief"
+        );
     }
 }

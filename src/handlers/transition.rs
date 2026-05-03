@@ -4,7 +4,11 @@ use rusqlite::{Connection, Transaction};
 use serde_json::Value;
 
 use crate::codegen::ddl::quote_ident;
-use crate::schema::{actor::{Actor, InvokerCtx}, lifecycle::select_transition, FieldType, Schema};
+use crate::schema::{
+    actor::{Actor, InvokerCtx},
+    lifecycle::select_transition,
+    FieldType, Schema,
+};
 use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601, read_row};
@@ -17,7 +21,9 @@ pub fn run(
     invoker: InvokerCtx,
     verb: &str,
 ) -> Result<()> {
-    let tx = conn.unchecked_transaction().context("transition: begin tx")?;
+    let tx = conn
+        .unchecked_transaction()
+        .context("transition: begin tx")?;
     run_in_tx(&tx, schema, matches, invoker, verb)?;
     tx.commit().context("transition: commit tx")?;
     Ok(())
@@ -58,12 +64,18 @@ pub fn run_reject(
     // Mutate wrap_log[-1].reject_reason (option b: update latest entry in-place).
     if let Some(last) = wrap_list.last_mut() {
         if let Value::Object(ref mut obj) = last {
-            obj.insert("reject_reason".to_string(), Value::String(reason.to_string()));
+            obj.insert(
+                "reject_reason".to_string(),
+                Value::String(reason.to_string()),
+            );
         }
     } else {
         // wrap agent hasn't run yet — append a stub entry so the reason is never lost.
         let mut stub = serde_json::Map::new();
-        stub.insert("reject_reason".to_string(), Value::String(reason.to_string()));
+        stub.insert(
+            "reject_reason".to_string(),
+            Value::String(reason.to_string()),
+        );
         stub.insert("at".to_string(), Value::String(now_iso8601()));
         wrap_list.push(Value::Object(stub));
     }
@@ -125,7 +137,11 @@ pub fn run_close_as_addressed(
         match matches.try_get_many::<String>(cli_name) {
             Ok(Some(vals)) => {
                 let collected: Vec<String> = vals.cloned().collect();
-                if collected.is_empty() { None } else { Some(collected) }
+                if collected.is_empty() {
+                    None
+                } else {
+                    Some(collected)
+                }
             }
             _ => None,
         }
@@ -218,7 +234,11 @@ pub(crate) fn run_in_tx(
         match matches.try_get_many::<String>(cli_name) {
             Ok(Some(vals)) => {
                 let collected: Vec<String> = vals.cloned().collect();
-                if collected.is_empty() { None } else { Some(collected) }
+                if collected.is_empty() {
+                    None
+                } else {
+                    Some(collected)
+                }
             }
             _ => None,
         }
@@ -258,9 +278,13 @@ pub(crate) fn run_in_tx(
     )?;
 
     // Run validator against merged entry; actor checks scoped to diff only.
-    validate::validate(schema, &merged, Op::Transition(verb.to_string(), diff.clone()), invoker).map_err(
-        |errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)),
-    )?;
+    validate::validate(
+        schema,
+        &merged,
+        Op::Transition(verb.to_string(), diff.clone()),
+        invoker,
+    )
+    .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
     // F2: `amend` (rejected → planning) resets current_phase/current_cycle to 0.
     // Decision Matrix row (i): "resets the row to phase 0".
@@ -272,7 +296,15 @@ pub(crate) fn run_in_tx(
     }
 
     // Write: UPDATE merged fields + status = transition.to + updated_*
-    execute_transition_write(tx, schema, row_id, &transition.to, &diff, &merged, invoker.actor)?;
+    execute_transition_write(
+        tx,
+        schema,
+        row_id,
+        &transition.to,
+        &diff,
+        &merged,
+        invoker.actor,
+    )?;
 
     println!(
         "Transitioned {display_id}: {} → {}",
@@ -316,13 +348,16 @@ pub(crate) fn execute_transition_write(
             match &field.ty {
                 FieldType::Record(_) => {
                     let write_val = merged.get(&field.name).unwrap_or(new_val);
-                    let json_str = serde_json::to_string(write_val)
-                        .unwrap_or_else(|_| "null".to_string());
+                    let json_str =
+                        serde_json::to_string(write_val).unwrap_or_else(|_| "null".to_string());
                     sql_values.push(rusqlite::types::Value::Text(json_str));
                 }
-                FieldType::List(_) | FieldType::ListRecord(_) | FieldType::ListFk { .. } | FieldType::Json => {
-                    let json_str = serde_json::to_string(new_val)
-                        .unwrap_or_else(|_| "null".to_string());
+                FieldType::List(_)
+                | FieldType::ListRecord(_)
+                | FieldType::ListFk { .. }
+                | FieldType::Json => {
+                    let json_str =
+                        serde_json::to_string(new_val).unwrap_or_else(|_| "null".to_string());
                     sql_values.push(rusqlite::types::Value::Text(json_str));
                 }
                 FieldType::Bool => {
@@ -442,11 +477,8 @@ fields:
 
     fn build_cmd(schema: &Schema, verb: &'static str) -> clap::Command {
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
-        let mut cmd = clap::Command::new(verb).arg(
-            clap::Arg::new("display_id")
-                .required(true)
-                .index(1),
-        );
+        let mut cmd =
+            clap::Command::new(verb).arg(clap::Arg::new("display_id").required(true).index(1));
         for leaf in &leaves {
             cmd = cmd.arg(
                 clap::Arg::new(leaf.cli_name.clone())
@@ -491,7 +523,10 @@ fields:
         let matches = cmd.get_matches_from(["triage", "L001", "--verdict", "T3"]);
         let err = run(&schema, &conn, &matches, Actor::Human.into(), "triage").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("done_when") || msg.contains("validation failed"), "expected contract error: {msg}");
+        assert!(
+            msg.contains("done_when") || msg.contains("validation failed"),
+            "expected contract error: {msg}"
+        );
     }
 
     #[test]
@@ -501,16 +536,25 @@ fields:
 
         let cmd = build_cmd(&schema, "triage");
         let matches = cmd.get_matches_from([
-            "triage", "L001",
-            "--verdict", "T3",
-            "--done-when", "X works",
-            "--scope-in", "backend",
-            "--scope-out", "frontend",
+            "triage",
+            "L001",
+            "--verdict",
+            "T3",
+            "--done-when",
+            "X works",
+            "--scope-in",
+            "backend",
+            "--scope-out",
+            "frontend",
         ]);
         run(&schema, &conn, &matches, Actor::Human.into(), "triage").unwrap();
 
         let status: String = conn
-            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT status FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(status, "triaged");
     }
@@ -522,10 +566,7 @@ fields:
 
         // First triage succeeds
         let cmd = build_cmd(&schema, "triage");
-        let matches = cmd.get_matches_from([
-            "triage", "L001",
-            "--verdict", "T1",
-        ]);
+        let matches = cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
         run(&schema, &conn, &matches, Actor::Human.into(), "triage").unwrap();
 
         // Second triage is rejected (state-machine legality now enforced by select_transition)
@@ -550,7 +591,14 @@ fields:
 
         let cmd = build_cmd(&schema, "triage");
         let matches = cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
-        let err = run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "triage").unwrap_err();
+        let err = run(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "triage",
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("ai_with_human"),
@@ -580,12 +628,26 @@ fields:
         // First triage with Human (ai_with_human transition)
         let triage_cmd = build_cmd(&schema, "triage");
         let triage_matches = triage_cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
-        run(&schema, &conn, &triage_matches, Actor::Human.into(), "triage").unwrap();
+        run(
+            &schema,
+            &conn,
+            &triage_matches,
+            Actor::Human.into(),
+            "triage",
+        )
+        .unwrap();
 
         // resolve is ai_autonomous; invoker AiAutonomous should succeed
         let resolve_cmd = build_cmd(&schema, "resolve");
         let resolve_matches = resolve_cmd.get_matches_from(["resolve", "L001"]);
-        run(&schema, &conn, &resolve_matches, Actor::AiAutonomous.into(), "resolve").unwrap();
+        run(
+            &schema,
+            &conn,
+            &resolve_matches,
+            Actor::AiAutonomous.into(),
+            "resolve",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -595,17 +657,34 @@ fields:
 
         // Triage first
         let triage_cmd = build_cmd(&schema, "triage");
-        let triage_matches =
-            triage_cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
-        run(&schema, &conn, &triage_matches, Actor::Human.into(), "triage").unwrap();
+        let triage_matches = triage_cmd.get_matches_from(["triage", "L001", "--verdict", "T1"]);
+        run(
+            &schema,
+            &conn,
+            &triage_matches,
+            Actor::Human.into(),
+            "triage",
+        )
+        .unwrap();
 
         // Resolve (actor: ai_autonomous)
         let resolve_cmd = build_cmd(&schema, "resolve");
         let resolve_matches = resolve_cmd.get_matches_from(["resolve", "L001"]);
-        run(&schema, &conn, &resolve_matches, Actor::AiAutonomous.into(), "resolve").unwrap();
+        run(
+            &schema,
+            &conn,
+            &resolve_matches,
+            Actor::AiAutonomous.into(),
+            "resolve",
+        )
+        .unwrap();
 
         let status: String = conn
-            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT status FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(status, "resolved");
     }
@@ -627,7 +706,11 @@ fields:
         tx.commit().unwrap();
 
         let status: String = conn
-            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT status FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(status, "triaged");
     }
@@ -648,7 +731,11 @@ fields:
         }
 
         let status: String = conn
-            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT status FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(status, "open", "rollback must restore original status");
     }
@@ -707,12 +794,26 @@ fields:
 
         let cmd = build_cmd(&schema, "ratify");
         let matches = cmd.get_matches_from(["ratify", "L001"]);
-        run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "ratify").unwrap();
+        run(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "ratify",
+        )
+        .unwrap();
 
         let status: String = conn
-            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT status FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(status, "in_progress_t3", "T3 row must land in in_progress_t3, not in_progress_t2");
+        assert_eq!(
+            status, "in_progress_t3",
+            "T3 row must land in in_progress_t3, not in_progress_t2"
+        );
     }
 
     #[test]
@@ -722,12 +823,26 @@ fields:
 
         let cmd = build_cmd(&schema, "ratify");
         let matches = cmd.get_matches_from(["ratify", "L001"]);
-        run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "ratify").unwrap();
+        run(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "ratify",
+        )
+        .unwrap();
 
         let status: String = conn
-            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT status FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(status, "in_progress_t2", "T2 row must land in in_progress_t2, not in_progress_t3");
+        assert_eq!(
+            status, "in_progress_t2",
+            "T2 row must land in in_progress_t2, not in_progress_t3"
+        );
     }
 
     #[test]
@@ -738,7 +853,14 @@ fields:
 
         let cmd = build_cmd(&schema, "ratify");
         let matches = cmd.get_matches_from(["ratify", "L001"]);
-        let err = run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "ratify").unwrap_err();
+        let err = run(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "ratify",
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("guard not satisfied") || msg.contains("no unguarded fallback"),
@@ -771,7 +893,8 @@ fields:
 "#;
         let schema = Schema::from_yaml(schema_yaml).unwrap();
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema)).unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
 
         conn.execute(
             "INSERT INTO observations (display_id, status, summary, tier_hint) VALUES ('L001', 'confirmed', 'test', 'not_ready')",
@@ -780,7 +903,14 @@ fields:
 
         let cmd = build_cmd(&schema, "ratify");
         let matches = cmd.get_matches_from(["ratify", "L001"]);
-        let err = run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "ratify").unwrap_err();
+        let err = run(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "ratify",
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("guard not satisfied") || msg.contains("no unguarded fallback"),
@@ -812,7 +942,8 @@ fields:
 "#;
         let schema = Schema::from_yaml(schema_yaml).unwrap();
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema)).unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
 
         conn.execute(
             "INSERT INTO observations (display_id, status, summary, tier_hint) VALUES ('L001', 'confirmed', 'test', 'ready')",
@@ -821,10 +952,21 @@ fields:
 
         let cmd = build_cmd(&schema, "ratify");
         let matches = cmd.get_matches_from(["ratify", "L001"]);
-        run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "ratify").unwrap();
+        run(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "ratify",
+        )
+        .unwrap();
 
         let status: String = conn
-            .query_row("SELECT status FROM observations WHERE display_id = 'L001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT status FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(status, "ready");
     }
@@ -857,9 +999,8 @@ transitions:
     /// all leaf args + required `--resolution`.
     fn build_close_cmd(schema: &Schema) -> clap::Command {
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
-        let mut cmd = clap::Command::new("close_as_addressed").arg(
-            clap::Arg::new("display_id").required(true).index(1),
-        );
+        let mut cmd = clap::Command::new("close_as_addressed")
+            .arg(clap::Arg::new("display_id").required(true).index(1));
         for leaf in &leaves {
             if leaf.cli_name == "resolution" {
                 continue;
@@ -894,13 +1035,17 @@ transitions:
 
         let cmd = build_close_cmd(&schema);
         let matches = cmd.get_matches_from(["close_as_addressed", "L001", "--resolution", "T001"]);
-        run_close_as_addressed(&schema, &conn, &matches, Actor::AiAutonomous.into(), "T001").unwrap();
+        run_close_as_addressed(&schema, &conn, &matches, Actor::AiAutonomous.into(), "T001")
+            .unwrap();
 
         let (status, resolution, resolved_at) = read_obs(&conn);
         assert_eq!(status, "resolved");
         assert_eq!(resolution.as_deref(), Some("T001"));
         assert!(
-            resolved_at.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
+            resolved_at
+                .as_deref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
             "resolved_at must be populated; got: {:?}",
             resolved_at
         );
@@ -913,8 +1058,7 @@ transitions:
 
         let sha = "82501d3abcdef0123456789012345678901234ab"; // 40-char hex
         let cmd = build_close_cmd(&schema);
-        let matches =
-            cmd.get_matches_from(["close_as_addressed", "L001", "--resolution", sha]);
+        let matches = cmd.get_matches_from(["close_as_addressed", "L001", "--resolution", sha]);
         run_close_as_addressed(&schema, &conn, &matches, Actor::AiAutonomous.into(), sha).unwrap();
 
         let (status, resolution, _resolved_at) = read_obs(&conn);
@@ -952,14 +1096,9 @@ transitions:
 
         let cmd = build_close_cmd(&schema);
         let matches = cmd.get_matches_from(["close_as_addressed", "L001", "--resolution", "T001"]);
-        let err = run_close_as_addressed(
-            &schema,
-            &conn,
-            &matches,
-            Actor::AiAutonomous.into(),
-            "T001",
-        )
-        .unwrap_err();
+        let err =
+            run_close_as_addressed(&schema, &conn, &matches, Actor::AiAutonomous.into(), "T001")
+                .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("close_as_addressed")
@@ -1021,7 +1160,10 @@ transitions:
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(status, "open", "row must remain open after format rejection");
+        assert_eq!(
+            status, "open",
+            "row must remain open after format rejection"
+        );
     }
 
     // ---- Phase 6 (T010): accept / reject / amend transition tests ----
@@ -1078,10 +1220,17 @@ fields:
         conn.execute(
             "INSERT INTO tasks (display_id, status, title, wrap_log) VALUES (?1, ?2, 'Test', ?3)",
             rusqlite::params!["T001", status, wrap_log_json],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
-    fn insert_wrap_row_with_phase(conn: &Connection, status: &str, wrap_log_json: &str, current_phase: i64, current_cycle: i64) {
+    fn insert_wrap_row_with_phase(
+        conn: &Connection,
+        status: &str,
+        wrap_log_json: &str,
+        current_phase: i64,
+        current_cycle: i64,
+    ) {
         conn.execute(
             "INSERT INTO tasks (display_id, status, title, wrap_log, current_phase, current_cycle) VALUES (?1, ?2, 'Test', ?3, ?4, ?5)",
             rusqlite::params!["T001", status, wrap_log_json, current_phase, current_cycle],
@@ -1090,9 +1239,8 @@ fields:
 
     fn build_wrap_cmd(schema: &Schema, verb: &'static str) -> clap::Command {
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
-        let mut cmd = clap::Command::new(verb).arg(
-            clap::Arg::new("display_id").required(true).index(1),
-        );
+        let mut cmd =
+            clap::Command::new(verb).arg(clap::Arg::new("display_id").required(true).index(1));
         for leaf in &leaves {
             cmd = cmd.arg(
                 clap::Arg::new(leaf.cli_name.clone())
@@ -1106,23 +1254,31 @@ fields:
     fn read_status_wrap(conn: &Connection) -> String {
         conn.query_row(
             "SELECT status FROM tasks WHERE display_id = 'T001'",
-            [], |r| r.get(0),
-        ).unwrap()
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
     }
 
     fn read_wrap_log(conn: &Connection) -> Vec<serde_json::Value> {
-        let raw: Option<String> = conn.query_row(
-            "SELECT wrap_log FROM tasks WHERE display_id = 'T001'",
-            [], |r| r.get(0),
-        ).unwrap();
-        raw.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT wrap_log FROM tasks WHERE display_id = 'T001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        raw.and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
     }
 
     fn read_phase_cycle(conn: &Connection) -> (i64, i64) {
         conn.query_row(
             "SELECT current_phase, current_cycle FROM tasks WHERE display_id = 'T001'",
-            [], |r| Ok((r.get(0).unwrap_or(0), r.get(1).unwrap_or(0))),
-        ).unwrap()
+            [],
+            |r| Ok((r.get(0).unwrap_or(0), r.get(1).unwrap_or(0))),
+        )
+        .unwrap()
     }
 
     // --- accept ---
@@ -1131,7 +1287,8 @@ fields:
     fn ac6_accept_happy_path_in_review_human_lands_accepted() {
         let (schema, conn) = setup_wrap();
         insert_wrap_row(
-            &conn, "in_review",
+            &conn,
+            "in_review",
             r#"[{"executive_summary":"Done","reject_reason":null,"at":"2026-01-01T00:00:00Z"}]"#,
         );
 
@@ -1166,7 +1323,14 @@ fields:
 
         let cmd = build_wrap_cmd(&schema, "accept");
         let matches = cmd.get_matches_from(["accept", "T001"]);
-        let err = run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "accept").unwrap_err();
+        let err = run(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "accept",
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("transition 'accept'"),
@@ -1189,9 +1353,8 @@ fields:
     fn build_reject_cmd(schema: &Schema) -> clap::Command {
         // build_wrap_cmd plus the required --reason arg (mirrors dynamic.rs augmentation).
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
-        let mut cmd = clap::Command::new("reject").arg(
-            clap::Arg::new("display_id").required(true).index(1),
-        );
+        let mut cmd =
+            clap::Command::new("reject").arg(clap::Arg::new("display_id").required(true).index(1));
         for leaf in &leaves {
             cmd = cmd.arg(
                 clap::Arg::new(leaf.cli_name.clone())
@@ -1199,11 +1362,7 @@ fields:
                     .required(false),
             );
         }
-        cmd = cmd.arg(
-            clap::Arg::new("reason")
-                .long("reason")
-                .required(true),
-        );
+        cmd = cmd.arg(clap::Arg::new("reason").long("reason").required(true));
         cmd
     }
 
@@ -1212,7 +1371,8 @@ fields:
     fn ac6_reject_writes_reason_to_wrap_log() {
         let (schema, conn) = setup_wrap();
         insert_wrap_row(
-            &conn, "in_review",
+            &conn,
+            "in_review",
             r#"[{"executive_summary":"Done","reject_reason":null,"at":"2026-01-01T00:00:00Z"}]"#,
         );
 
@@ -1224,8 +1384,14 @@ fields:
         assert_eq!(read_status_wrap(&conn), "rejected");
         let wrap_log = read_wrap_log(&conn);
         let last = wrap_log.last().expect("wrap_log must not be empty");
-        let got = last.get("reject_reason").and_then(|v| v.as_str()).unwrap_or("");
-        assert_eq!(got, "scope was wrong", "reject_reason must equal supplied --reason");
+        let got = last
+            .get("reject_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            got, "scope was wrong",
+            "reject_reason must equal supplied --reason"
+        );
     }
 
     /// F1 actor check: AiAutonomous invoker must be rejected at the transition layer.
@@ -1237,7 +1403,14 @@ fields:
         let cmd = build_reject_cmd(&schema);
         let matches = cmd.get_matches_from(["reject", "T001", "--reason", "x"]);
         let reason = matches.get_one::<String>("reason").unwrap().clone();
-        let err = run_reject(&schema, &conn, &matches, Actor::AiAutonomous.into(), &reason).unwrap_err();
+        let err = run_reject(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            &reason,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("transition 'reject'"),
@@ -1266,7 +1439,10 @@ fields:
         let wrap_log = read_wrap_log(&conn);
         assert!(!wrap_log.is_empty(), "wrap_log must have a stub entry");
         let last = wrap_log.last().unwrap();
-        let got = last.get("reject_reason").and_then(|v| v.as_str()).unwrap_or("");
+        let got = last
+            .get("reject_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert_eq!(got, "no wrap agent run");
     }
 
@@ -1281,8 +1457,11 @@ fields:
         let matches = cmd.get_matches_from(["amend", "T001"]);
         run(&schema, &conn, &matches, Actor::Human.into(), "amend").unwrap();
 
-        assert_eq!(read_status_wrap(&conn), "planning",
-            "amend must land at planning (Decision Matrix row i)");
+        assert_eq!(
+            read_status_wrap(&conn),
+            "planning",
+            "amend must land at planning (Decision Matrix row i)"
+        );
     }
 
     /// F2: amend resets current_phase and current_cycle to 0 (Decision Matrix row i).
@@ -1300,8 +1479,11 @@ fields:
         let matches = cmd.get_matches_from(["amend", "T001"]);
         run(&schema, &conn, &matches, Actor::Human.into(), "amend").unwrap();
 
-        assert_eq!(read_status_wrap(&conn), "planning",
-            "amend must land at planning");
+        assert_eq!(
+            read_status_wrap(&conn),
+            "planning",
+            "amend must land at planning"
+        );
         let (phase_after, cycle_after) = read_phase_cycle(&conn);
         assert_eq!(phase_after, 0, "amend must reset current_phase to 0");
         assert_eq!(cycle_after, 0, "amend must reset current_cycle to 0");

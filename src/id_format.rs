@@ -15,9 +15,7 @@ pub fn validate(template: &str) -> Result<()> {
         );
     }
     if count > 1 {
-        bail!(
-            "id_format '{template}' contains {count} placeholders; exactly one is required"
-        );
+        bail!("id_format '{template}' contains {count} placeholders; exactly one is required");
     }
 
     // Reject any remaining `{` or `}` that are not part of a valid placeholder.
@@ -98,7 +96,9 @@ fn strip_first_placeholder(s: &str) -> String {
 pub fn render(template: &str, pk: i64) -> String {
     // Find the placeholder position and width specifier.
     let start = template.find('{').expect("template must have placeholder");
-    let end = template.find('}').expect("template must have closing brace");
+    let end = template
+        .find('}')
+        .expect("template must have closing brace");
     // inner is ":0Nd"
     let inner = &template[start + 1..end];
     // inner starts with ":0" — width follows

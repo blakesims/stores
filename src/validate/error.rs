@@ -2,14 +2,20 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleKind {
     Required,
-    RequiredWhen { expr: String },
+    RequiredWhen {
+        expr: String,
+    },
     Enum,
-    Pattern { pattern: String },
+    Pattern {
+        pattern: String,
+    },
     Actor,
     /// The field requires a specific JSON shape but received an unparseable or
     /// incorrect-type value.  `expected` names the required form (e.g. "JSON array"
     /// for list_record/list_fk, "valid JSON" for Json fields).
-    InvalidJson { expected: String },
+    InvalidJson {
+        expected: String,
+    },
 }
 
 /// A single validation violation.

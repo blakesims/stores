@@ -27,7 +27,11 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::schema::{actor::InvokerCtx, workflow::{StateAction, Workflow}, Schema};
+use crate::schema::{
+    actor::InvokerCtx,
+    workflow::{StateAction, Workflow},
+    Schema,
+};
 
 use super::row::read_row;
 
@@ -154,7 +158,10 @@ pub fn run(
             out.next_agent.as_deref().unwrap_or("null")
         );
         println!("blocked: {}", out.blocked);
-        println!("blocked_reason: {}", json_value_to_text(&out.blocked_reason));
+        println!(
+            "blocked_reason: {}",
+            json_value_to_text(&out.blocked_reason)
+        );
         println!("claimed_by: {}", json_value_to_text(&out.claimed_by));
         println!("claimed_at: {}", json_value_to_text(&out.claimed_at));
     }
@@ -247,7 +254,12 @@ workflow:
         current_cycle: i64,
     ) {
         const RESERVED: &[&str] = &[
-            "display_id", "status", "created_at", "updated_at", "created_by", "updated_by",
+            "display_id",
+            "status",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
         ];
 
         let mut cols: Vec<String> = vec![
@@ -294,7 +306,8 @@ workflow:
             placeholders.join(", ")
         );
 
-        conn.execute(&sql, rusqlite::params_from_iter(params)).unwrap();
+        conn.execute(&sql, rusqlite::params_from_iter(params))
+            .unwrap();
     }
 
     // AC4.1: executing row → next_agent: executor, blocked: false
@@ -312,7 +325,17 @@ workflow:
         assert_eq!(out.current_cycle, json!(1));
         // AC4.2: JSON round-trip — all 9 keys present
         let v = serde_json::to_value(&out).unwrap();
-        for key in &["id","status","current_phase","current_cycle","next_agent","blocked","blocked_reason","claimed_by","claimed_at"] {
+        for key in &[
+            "id",
+            "status",
+            "current_phase",
+            "current_cycle",
+            "next_agent",
+            "blocked",
+            "blocked_reason",
+            "claimed_by",
+            "claimed_at",
+        ] {
             assert!(v.get(key).is_some(), "missing key in JSON output: {key}");
         }
     }
@@ -368,9 +391,9 @@ workflow:
         // Insert rows for each combination.
         // reason shapes: NULL, "", "real reason"
         let reason_shapes: &[(&str, Option<&str>)] = &[
-            ("null",   None),
-            ("empty",  Some("")),
-            ("real",   Some("real reason")),
+            ("null", None),
+            ("empty", Some("")),
+            ("real", Some("real reason")),
         ];
 
         for (label, reason) in reason_shapes {
@@ -379,7 +402,10 @@ workflow:
             insert_wf_row(&conn, &schema, &exec_id, "executing", 1, 1);
             if let Some(r) = reason {
                 conn.execute(
-                    &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", quote_ident(&schema.name)),
+                    &format!(
+                        "UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2",
+                        quote_ident(&schema.name)
+                    ),
                     rusqlite::params![r, exec_id],
                 )
                 .unwrap();
@@ -397,7 +423,10 @@ workflow:
             insert_wf_row(&conn, &schema, &blk_id, "blocked", 1, 1);
             if let Some(r) = reason {
                 conn.execute(
-                    &format!("UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2", quote_ident(&schema.name)),
+                    &format!(
+                        "UPDATE {} SET blocked_reason = ?1 WHERE display_id = ?2",
+                        quote_ident(&schema.name)
+                    ),
                     rusqlite::params![r, blk_id],
                 )
                 .unwrap();
@@ -430,10 +459,7 @@ fields:
         // compute() must return an error; the message names the store.
         let err = compute(&schema, &conn, "O001").unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("obs"),
-            "error must name the store: {msg}"
-        );
+        assert!(msg.contains("obs"), "error must name the store: {msg}");
         assert!(
             msg.contains("no workflow declaration"),
             "error must mention workflow: {msg}"

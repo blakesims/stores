@@ -305,7 +305,10 @@ fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) {
     }
     let path = runs_dir.join(format!("{session_id}.jsonl"));
     if let Err(e) = fs::write(&path, stdout) {
-        eprintln!("warning: could not write transcript {}: {e}", path.display());
+        eprintln!(
+            "warning: could not write transcript {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -536,13 +539,22 @@ mod tests {
             "\nexit 0\n",
         ));
         // The cwd_printer shim emits {"type":"result","result":"<cwd>"} where cwd is pwd.
-        let cwd_printer = write("cwd_printer", concat!(
-            "#!/bin/sh\n",
-            "printf '{\"type\":\"result\",\"result\":\"%s\"}\\n' \"$(pwd)\"",
-            "\nexit 0\n",
-        ));
+        let cwd_printer = write(
+            "cwd_printer",
+            concat!(
+                "#!/bin/sh\n",
+                "printf '{\"type\":\"result\",\"result\":\"%s\"}\\n' \"$(pwd)\"",
+                "\nexit 0\n",
+            ),
+        );
 
-        ShimDir { dir, silent, planner, executor, cwd_printer }
+        ShimDir {
+            dir,
+            silent,
+            planner,
+            executor,
+            cwd_printer,
+        }
     }
 
     /// Return a reference to the process-wide shim directory, initializing it
@@ -622,9 +634,13 @@ mod tests {
 
     #[test]
     fn extract_tools_basic() {
-        let prompt = "---\nname: planner\ntools:\n  - Read\n  - Bash(git log:*)\n---\n\nYou are a planner.";
+        let prompt =
+            "---\nname: planner\ntools:\n  - Read\n  - Bash(git log:*)\n---\n\nYou are a planner.";
         let tools = extract_tools_from_frontmatter(prompt).expect("tools list");
-        assert_eq!(tools, vec!["Read".to_string(), "Bash(git log:*)".to_string()]);
+        assert_eq!(
+            tools,
+            vec!["Read".to_string(), "Bash(git log:*)".to_string()]
+        );
     }
 
     #[test]
@@ -656,10 +672,13 @@ mod tests {
         // Run the stable executor shim directly.
         let output = std::process::Command::new(shim_path)
             .arg("-p")
-            .arg("--append-system-prompt").arg("sys")
-            .arg("--output-format").arg("stream-json")
+            .arg("--append-system-prompt")
+            .arg("sys")
+            .arg("--output-format")
+            .arg("stream-json")
             .arg("--verbose")
-            .arg("--permission-mode").arg("bypassPermissions")
+            .arg("--permission-mode")
+            .arg("bypassPermissions")
             .arg("do work")
             .output()
             .expect("shim run");
@@ -667,10 +686,19 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
 
         let (_, fm, _) = extract_structured_output_from_stream_json(&stdout);
-        assert!(fm.is_some(), "expected final_message from stream-json, got None. stdout: {stdout}");
+        assert!(
+            fm.is_some(),
+            "expected final_message from stream-json, got None. stdout: {stdout}"
+        );
         let msg = fm.unwrap();
-        assert!(msg.contains("executor"), "expected 'executor' in final_message, got: {msg}");
-        assert!(msg.contains("abc"), "expected 'abc' commit in final_message, got: {msg}");
+        assert!(
+            msg.contains("executor"),
+            "expected 'executor' in final_message, got: {msg}"
+        );
+        assert!(
+            msg.contains("abc"),
+            "expected 'abc' commit in final_message, got: {msg}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -699,7 +727,10 @@ mod tests {
         let stream = r#"{"type":"result","error":{"subtype":"error_max_structured_output_retries","message":"retries exhausted"},"result":""}
 "#;
         let (so, _, err) = extract_structured_output_from_stream_json(stream);
-        assert!(so.is_none(), "expected structured_output to be None on retry exhaustion");
+        assert!(
+            so.is_none(),
+            "expected structured_output to be None on retry exhaustion"
+        );
         assert_eq!(
             err.as_deref(),
             Some("error_max_structured_output_retries"),
@@ -711,10 +742,7 @@ mod tests {
     /// path equal to std::env::current_dir()?.canonicalize()?.
     #[test]
     fn cwd_canonicalised_before_spawn() {
-        let expected = std::env::current_dir()
-            .unwrap()
-            .canonicalize()
-            .unwrap();
+        let expected = std::env::current_dir().unwrap().canonicalize().unwrap();
         let got = resolve_cwd().unwrap();
         assert_eq!(
             got, expected,
@@ -767,7 +795,13 @@ mod tests {
         // against the cwd-dangling race from paths::tests.
         let workspace = env!("CARGO_MANIFEST_DIR").to_string();
         let runner = ClaudeCodeRunner::new().with_bin(shims().silent.clone());
-        let result = runner.spawn("planner", "sys", "brief", Some(schema_text), Some(&workspace));
+        let result = runner.spawn(
+            "planner",
+            "sys",
+            "brief",
+            Some(schema_text),
+            Some(&workspace),
+        );
 
         // The spawn should succeed (shim exits 0).
         result.expect("spawn should succeed with shim");
@@ -775,7 +809,10 @@ mod tests {
         // Verify by constructing the expected arg — the runner must use
         // --json-schema=<text> form. We verify negatively that no temp-file
         // path was constructed by inspecting this module's source directly.
-        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runner/claude_code.rs"));
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/runner/claude_code.rs"
+        ));
         // The deprecated temp-file pattern used a path prefix "stores-schema-" inside /tmp.
         // Split the needle so this very assertion doesn't match itself.
         let bad_needle = ["/tmp/stores", "-schema-"].concat();
@@ -834,7 +871,10 @@ mod tests {
         );
 
         // error_subtype must be None (this was a success result).
-        assert!(err.is_none(), "error_subtype must be None for success result");
+        assert!(
+            err.is_none(),
+            "error_subtype must be None for success result"
+        );
 
         // final_msg: the extractor may or may not find a JSON line depending on
         // whether the last-line scan picks up the JSON inside the fence.
@@ -861,7 +901,10 @@ mod tests {
         );
 
         let (so, _, err) = extract_structured_output_from_stream_json(stream);
-        assert!(so.is_some(), "structured_output must be Some when result event has it");
+        assert!(
+            so.is_some(),
+            "structured_output must be Some when result event has it"
+        );
         let val = so.unwrap();
         assert_eq!(val["role"].as_str(), Some("planner"));
         assert!(val["phases"].is_array());
@@ -887,7 +930,9 @@ mod tests {
         // set_current_dir itself, but holding the lock serializes against
         // paths::tests that do, preventing ETXTBSY from a concurrent write fd
         // colliding with the cwd_printer shim exec.
-        let _cwd_guard = crate::paths::test_cwd_lock().lock().expect("cwd lock poisoned");
+        let _cwd_guard = crate::paths::test_cwd_lock()
+            .lock()
+            .expect("cwd lock poisoned");
 
         // Use the cargo target directory as the workspace — it always exists,
         // has stable inodes, and never collides with the shim files' inodes.
@@ -901,7 +946,9 @@ mod tests {
         let result = runner.spawn("planner", "sys", "brief", None, Some(&workspace_str));
 
         let out = result.expect("spawn should succeed with shim");
-        let printed_cwd = out.final_message.expect("final_message (cwd) must be present");
+        let printed_cwd = out
+            .final_message
+            .expect("final_message (cwd) must be present");
         let actual_cwd = std::path::PathBuf::from(printed_cwd.trim());
         assert_eq!(
             actual_cwd, expected_cwd,
@@ -919,7 +966,9 @@ mod tests {
         // This serializes against tests that call set_current_dir, so the cwd
         // we capture here is the same one the spawned shim will report.
         // No PATH lock needed: with_bin points the runner at the stable cwd_printer.
-        let _cwd_guard = crate::paths::test_cwd_lock().lock().expect("cwd lock poisoned");
+        let _cwd_guard = crate::paths::test_cwd_lock()
+            .lock()
+            .expect("cwd lock poisoned");
 
         let expected_cwd = resolve_cwd().expect("resolve_cwd must succeed");
 
@@ -930,7 +979,9 @@ mod tests {
         drop(_cwd_guard);
 
         let out = result.expect("spawn should succeed with shim");
-        let printed_cwd = out.final_message.expect("final_message (cwd) must be present");
+        let printed_cwd = out
+            .final_message
+            .expect("final_message (cwd) must be present");
         let actual_cwd = std::path::PathBuf::from(printed_cwd.trim());
         assert_eq!(
             actual_cwd, expected_cwd,

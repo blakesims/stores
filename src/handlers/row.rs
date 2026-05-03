@@ -210,27 +210,45 @@ fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
     let mut year = 1970u32;
     loop {
         let dy = days_in_year(year) as u64;
-        if days < dy { break; }
+        if days < dy {
+            break;
+        }
         days -= dy;
         year += 1;
     }
     let mut month = 1u32;
     loop {
         let dm = days_in_month(year, month) as u64;
-        if days < dm { break; }
+        if days < dm {
+            break;
+        }
         days -= dm;
         month += 1;
     }
     (year, month, days as u32 + 1)
 }
 
-fn is_leap(y: u32) -> bool { (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) }
-fn days_in_year(y: u32) -> u32 { if is_leap(y) { 366 } else { 365 } }
+fn is_leap(y: u32) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+}
+fn days_in_year(y: u32) -> u32 {
+    if is_leap(y) {
+        366
+    } else {
+        365
+    }
+}
 fn days_in_month(y: u32, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap(y) { 29 } else { 28 },
+        2 => {
+            if is_leap(y) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 31,
     }
 }
@@ -241,11 +259,7 @@ fn days_in_month(y: u32, m: u32) -> u32 {
 /// back into their native `serde_json::Value` shapes.  Depth ≥ 3 nesting
 /// (e.g. `cycles[0].executor.summary`) is preserved verbatim — the JSON
 /// round-trip is identity for arbitrary nesting.
-pub fn read_row(
-    schema: &Schema,
-    conn: &Connection,
-    display_id: &str,
-) -> Result<(i64, EntryMap)> {
+pub fn read_row(schema: &Schema, conn: &Connection, display_id: &str) -> Result<(i64, EntryMap)> {
     // Determine all column names we want to read
     let mut cols: Vec<String> = vec![
         "id".to_string(),
@@ -268,10 +282,8 @@ pub fn read_row(
         table = quote_ident(&schema.name)
     );
 
-    let row_data: Result<(i64, BTreeMap<String, Value>), _> = conn.query_row(
-        &sql,
-        rusqlite::params![display_id],
-        |row| {
+    let row_data: Result<(i64, BTreeMap<String, Value>), _> =
+        conn.query_row(&sql, rusqlite::params![display_id], |row| {
             let mut map: BTreeMap<String, Value> = BTreeMap::new();
             for (i, col) in cols.iter().enumerate() {
                 let v: rusqlite::types::Value = row.get(i)?;
@@ -279,8 +291,7 @@ pub fn read_row(
             }
             let id: i64 = row.get(0)?;
             Ok((id, map))
-        },
-    );
+        });
 
     let (id, raw_map) = row_data.map_err(|e| {
         if e == rusqlite::Error::QueryReturnedNoRows {
@@ -294,7 +305,14 @@ pub fn read_row(
     let mut entry: EntryMap = BTreeMap::new();
 
     // Copy reserved columns
-    for key in &["display_id", "status", "created_at", "updated_at", "created_by", "updated_by"] {
+    for key in &[
+        "display_id",
+        "status",
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+    ] {
         if let Some(v) = raw_map.get(*key) {
             entry.insert(key.to_string(), v.clone());
         }
@@ -344,9 +362,7 @@ fn sqlite_to_json(v: rusqlite::types::Value) -> Value {
             Value::from(serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)))
         }
         rusqlite::types::Value::Text(s) => Value::String(s),
-        rusqlite::types::Value::Blob(b) => {
-            Value::String(String::from_utf8_lossy(&b).to_string())
-        }
+        rusqlite::types::Value::Blob(b) => Value::String(String::from_utf8_lossy(&b).to_string()),
     }
 }
 
@@ -467,7 +483,9 @@ mod tests {
     #[test]
     fn coerce_value_list_fk_valid_json_returns_array() {
         use crate::schema::FieldType;
-        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
+        let ty = FieldType::ListFk {
+            ref_store: "tasks".to_string(),
+        };
         let raw = r#"["L001","L002"]"#;
         let result = coerce_value(&ty, raw);
         match result {
@@ -483,7 +501,9 @@ mod tests {
     fn coerce_value_list_fk_bad_json_returns_sentinel_string() {
         // T006 REVISE 1: bad JSON returns Value::String(raw) sentinel, not Value::Null.
         use crate::schema::FieldType;
-        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
+        let ty = FieldType::ListFk {
+            ref_store: "tasks".to_string(),
+        };
         let raw = "{not json";
         let result = coerce_value(&ty, raw);
         assert_eq!(result, Value::String(raw.to_string()));
@@ -495,14 +515,18 @@ mod tests {
 
     #[test]
     fn assemble_list_fk_bare_string_auto_promotes_to_single_element_array() {
-        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
+        let ty = FieldType::ListFk {
+            ref_store: "tasks".to_string(),
+        };
         let v = assemble_field_value(&ty, &["L001".to_string()]);
         assert_eq!(v, Value::Array(vec![Value::String("L001".to_string())]));
     }
 
     #[test]
     fn assemble_list_fk_single_json_array_passes_through() {
-        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
+        let ty = FieldType::ListFk {
+            ref_store: "tasks".to_string(),
+        };
         let v = assemble_field_value(&ty, &[r#"["L001","L002"]"#.to_string()]);
         match v {
             Value::Array(arr) => {
@@ -515,8 +539,13 @@ mod tests {
 
     #[test]
     fn assemble_list_fk_repeated_flags_collect_to_array() {
-        let ty = FieldType::ListFk { ref_store: "tasks".to_string() };
-        let v = assemble_field_value(&ty, &["L001".to_string(), "L002".to_string(), "L003".to_string()]);
+        let ty = FieldType::ListFk {
+            ref_store: "tasks".to_string(),
+        };
+        let v = assemble_field_value(
+            &ty,
+            &["L001".to_string(), "L002".to_string(), "L003".to_string()],
+        );
         match v {
             Value::Array(arr) => {
                 let ids: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
@@ -558,10 +587,13 @@ mod tests {
     #[test]
     fn assemble_list_record_repeated_json_objects_collect_to_array() {
         let ty = FieldType::ListRecord(vec![]);
-        let v = assemble_field_value(&ty, &[
-            r#"{"system":"sentry","kind":"issue","id":"X"}"#.to_string(),
-            r#"{"system":"github","kind":"commit","id":"abc"}"#.to_string(),
-        ]);
+        let v = assemble_field_value(
+            &ty,
+            &[
+                r#"{"system":"sentry","kind":"issue","id":"X"}"#.to_string(),
+                r#"{"system":"github","kind":"commit","id":"abc"}"#.to_string(),
+            ],
+        );
         match v {
             Value::Array(arr) => {
                 assert_eq!(arr.len(), 2);
@@ -635,8 +667,15 @@ fields:
         // Must be a structured object, not a string
         match notes {
             Value::Object(map) => {
-                assert_eq!(map.get("k").and_then(|v| v.as_str()), Some("v"), "notes.k should be 'v'");
-                let arr = map.get("arr").and_then(|v| v.as_array()).expect("notes.arr should be array");
+                assert_eq!(
+                    map.get("k").and_then(|v| v.as_str()),
+                    Some("v"),
+                    "notes.k should be 'v'"
+                );
+                let arr = map
+                    .get("arr")
+                    .and_then(|v| v.as_array())
+                    .expect("notes.arr should be array");
                 assert_eq!(arr.len(), 2);
                 assert_eq!(arr[0], Value::from(1i64));
                 assert_eq!(arr[1], Value::from(2i64));
@@ -661,7 +700,11 @@ fields:
 
         let (_id, entry) = read_row(&schema, &conn, "J002").unwrap();
         let notes = entry.get("notes").expect("notes key should be present");
-        assert_eq!(*notes, Value::Null, "stored 'null' literal should read back as Value::Null");
+        assert_eq!(
+            *notes,
+            Value::Null,
+            "stored 'null' literal should read back as Value::Null"
+        );
     }
 
     // Schema with depth-3 nesting: plan.phases[N].name and cycles[N].executor.summary
@@ -726,7 +769,10 @@ fields:
         let ddl = crate::codegen::ddl::ddl_for(&schema);
         assert!(ddl.contains("plan TEXT"), "plan should be TEXT: {ddl}");
         assert!(ddl.contains("cycles TEXT"), "cycles should be TEXT: {ddl}");
-        assert!(ddl.contains("depends_on TEXT"), "depends_on should be TEXT: {ddl}");
+        assert!(
+            ddl.contains("depends_on TEXT"),
+            "depends_on should be TEXT: {ddl}"
+        );
     }
 
     /// AC1.9: plan.phases[2].name (record → list_record → element → string) round-trips.
@@ -760,8 +806,13 @@ fields:
         // Verify plan.phases[2].name round-trips
         let plan = entry.get("plan").expect("plan should be present");
         let phases = plan.get("phases").expect("phases should be present");
-        let phase3_name = phases[2]["name"].as_str().expect("phase 3 name should be a string");
-        assert_eq!(phase3_name, "Phase 3", "plan.phases[2].name should round-trip");
+        let phase3_name = phases[2]["name"]
+            .as_str()
+            .expect("phase 3 name should be a string");
+        assert_eq!(
+            phase3_name, "Phase 3",
+            "plan.phases[2].name should round-trip"
+        );
     }
 
     /// AC1.9: cycles[1].executor.summary (list_record → record → string) round-trips.
@@ -796,9 +847,13 @@ fields:
         let (_id, entry) = read_row(&schema, &conn, "T002").unwrap();
 
         let cycles = entry.get("cycles").expect("cycles should be present");
-        let summary = cycles[1]["executor"]["summary"].as_str()
+        let summary = cycles[1]["executor"]["summary"]
+            .as_str()
             .expect("cycles[1].executor.summary should be a string");
-        assert_eq!(summary, "Revised cycle", "cycles[1].executor.summary should round-trip");
+        assert_eq!(
+            summary, "Revised cycle",
+            "cycles[1].executor.summary should round-trip"
+        );
     }
 
     /// AC1.8: depends_on list_fk round-trips as Vec<String>.
@@ -819,8 +874,12 @@ fields:
         ).unwrap();
 
         let (_id, entry) = read_row(&schema, &conn, "T003").unwrap();
-        let dep = entry.get("depends_on").expect("depends_on should be present");
-        let ids: Vec<&str> = dep.as_array().unwrap()
+        let dep = entry
+            .get("depends_on")
+            .expect("depends_on should be present");
+        let ids: Vec<&str> = dep
+            .as_array()
+            .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
@@ -850,7 +909,11 @@ fields:
 
         // Read back initial
         let (_id, entry) = read_row(&schema, &conn, "T004").unwrap();
-        let cycles = entry.get("cycles").expect("cycles present").as_array().unwrap();
+        let cycles = entry
+            .get("cycles")
+            .expect("cycles present")
+            .as_array()
+            .unwrap();
         assert_eq!(cycles.len(), 1);
         assert_eq!(cycles[0]["executor"]["summary"], "first draft");
 
@@ -861,15 +924,17 @@ fields:
         ]);
         conn.execute(
             "UPDATE tasks SET cycles = ?1 WHERE display_id = ?2",
-            rusqlite::params![
-                serde_json::to_string(&updated_cycles).unwrap(),
-                "T004",
-            ],
-        ).unwrap();
+            rusqlite::params![serde_json::to_string(&updated_cycles).unwrap(), "T004",],
+        )
+        .unwrap();
 
         // Read back updated
         let (_id, entry2) = read_row(&schema, &conn, "T004").unwrap();
-        let cycles2 = entry2.get("cycles").expect("cycles present").as_array().unwrap();
+        let cycles2 = entry2
+            .get("cycles")
+            .expect("cycles present")
+            .as_array()
+            .unwrap();
         assert_eq!(cycles2.len(), 2, "should have 2 cycles after update");
         assert_eq!(cycles2[0]["executor"]["summary"], "revised draft");
         assert_eq!(cycles2[0]["executor"]["commit"], "def");

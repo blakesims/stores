@@ -122,8 +122,7 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64) -> Result<String
         sorted.sort_by(|a, b| {
             let ra = if a.status == "open" { 0 } else { 1 };
             let rb = if b.status == "open" { 0 } else { 1 };
-            ra.cmp(&rb)
-                .then_with(|| b.updated_at.cmp(&a.updated_at))
+            ra.cmp(&rb).then_with(|| b.updated_at.cmp(&a.updated_at))
         });
         for o in sorted.iter().take(10) {
             out.push_str(&render_obs_line(o));
@@ -250,7 +249,11 @@ fn format_task_status(t: &TaskRow) -> String {
     match t.status.as_str() {
         "plan_review" => "reviewing plan".to_string(),
         "executing" | "code_review" => {
-            let verb = if t.status == "executing" { "execute" } else { "review " };
+            let verb = if t.status == "executing" {
+                "execute"
+            } else {
+                "review "
+            };
             match (t.current_phase, t.total_phases, t.current_cycle) {
                 (Some(p), Some(n), Some(c)) => {
                     format!("{verb} P{p}/{n} R{c}/{MAX_CYCLES_DISPLAY}")

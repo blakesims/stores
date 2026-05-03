@@ -1,7 +1,7 @@
 use crate::schema::Field;
-use crate::validate::{EntryMap, ValidationError};
 use crate::validate::error::RuleKind;
 use crate::validate::required::lookup;
+use crate::validate::{EntryMap, ValidationError};
 
 /// Check that a Text field's value, if present, matches the declared `pattern` regex.
 pub fn check_pattern(
@@ -30,7 +30,9 @@ pub fn check_pattern(
         Err(e) => {
             errors.push(ValidationError {
                 field_path: field_path.to_vec(),
-                rule: RuleKind::Pattern { pattern: pattern.clone() },
+                rule: RuleKind::Pattern {
+                    pattern: pattern.clone(),
+                },
                 message: format!("invalid pattern '{}': {}", pattern, e),
             });
             return;
@@ -40,11 +42,10 @@ pub fn check_pattern(
     if !re.is_match(s) {
         errors.push(ValidationError {
             field_path: field_path.to_vec(),
-            rule: RuleKind::Pattern { pattern: pattern.clone() },
-            message: format!(
-                "value '{}' does not match pattern '{}'",
-                s, pattern
-            ),
+            rule: RuleKind::Pattern {
+                pattern: pattern.clone(),
+            },
+            message: format!("value '{}' does not match pattern '{}'", s, pattern),
         });
     }
 }
@@ -75,7 +76,10 @@ mod tests {
     fn matching_pattern_passes() {
         let field = text_field_with_pattern("slug", r"^[a-z0-9-]+$");
         let mut entry: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        entry.insert("slug".into(), serde_json::Value::String("hello-world".into()));
+        entry.insert(
+            "slug".into(),
+            serde_json::Value::String("hello-world".into()),
+        );
         let mut errors = vec![];
         check_pattern(&field, &["slug".to_string()], &entry, &mut errors);
         assert!(errors.is_empty());
@@ -85,7 +89,10 @@ mod tests {
     fn non_matching_pattern_fails() {
         let field = text_field_with_pattern("slug", r"^[a-z0-9-]+$");
         let mut entry: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        entry.insert("slug".into(), serde_json::Value::String("Hello World!".into()));
+        entry.insert(
+            "slug".into(),
+            serde_json::Value::String("Hello World!".into()),
+        );
         let mut errors = vec![];
         check_pattern(&field, &["slug".to_string()], &entry, &mut errors);
         assert_eq!(errors.len(), 1);

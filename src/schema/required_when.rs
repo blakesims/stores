@@ -120,7 +120,10 @@ pub fn parse(input: &str) -> Result<Expr> {
 
     let lhs_path: Vec<String> = lhs.split('.').map(|s| s.to_string()).collect();
 
-    Ok(Expr { lhs_path, rhs_literal: literal })
+    Ok(Expr {
+        lhs_path,
+        rhs_literal: literal,
+    })
 }
 
 #[cfg(test)]

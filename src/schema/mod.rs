@@ -65,7 +65,9 @@ pub enum FieldType {
     /// A soft foreign-key list stored as JSON TEXT containing an array of
     /// display_ids referencing another store.  No referential-integrity
     /// enforcement at write time.  (Task 1.8)
-    ListFk { ref_store: String },
+    ListFk {
+        ref_store: String,
+    },
     /// An opaque free-shape JSON payload stored as TEXT.  The framework does
     /// not impose any sub-key shape; value must be parseable JSON.  Only valid
     /// at the top level — not inside `record:` or `list_record:` sub-fields.
@@ -215,9 +217,7 @@ impl<'de> Deserialize<'de> for RawFieldType {
                         let _: serde::de::IgnoredAny = map.next_value()?;
                         Ok(RawFieldType::ListFk)
                     }
-                    other => Err(de::Error::custom(format!(
-                        "unknown type map key '{other}'"
-                    ))),
+                    other => Err(de::Error::custom(format!("unknown type map key '{other}'"))),
                 }
             }
         }
@@ -363,8 +363,8 @@ struct RawSchema {
 
 impl Schema {
     pub fn from_yaml(yaml: &str) -> anyhow::Result<Schema> {
-        let raw: RawSchema = serde_yaml::from_str(yaml)
-            .map_err(|e| anyhow::anyhow!("YAML parse error: {}", e))?;
+        let raw: RawSchema =
+            serde_yaml::from_str(yaml).map_err(|e| anyhow::anyhow!("YAML parse error: {}", e))?;
 
         // Validate id_format
         crate::id_format::validate(&raw.id_format)?;
@@ -381,12 +381,10 @@ impl Schema {
         // Validate workflow cross-references (Task 2.5)
         if let Some(ref wf) = raw.workflow {
             let field_lookup = |name: &str| {
-                fields.iter().find(|f| f.name == name).map(|f| {
-                    match &f.ty {
-                        FieldType::Record(_) => workflow::FieldShape::Record,
-                        FieldType::ListRecord(_) => workflow::FieldShape::ListRecord,
-                        _ => workflow::FieldShape::Other,
-                    }
+                fields.iter().find(|f| f.name == name).map(|f| match &f.ty {
+                    FieldType::Record(_) => workflow::FieldShape::Record,
+                    FieldType::ListRecord(_) => workflow::FieldShape::ListRecord,
+                    _ => workflow::FieldShape::Other,
                 })
             };
             wf.validate_cross_refs(&raw.lifecycle.states, &field_lookup)
@@ -556,7 +554,10 @@ fields:
         let schema = Schema::from_yaml(FULL_FIXTURE).unwrap();
         let contract = schema.fields.iter().find(|f| f.name == "contract").unwrap();
         // Parent Record itself must NOT carry required_when
-        assert!(contract.required_when.is_none(), "parent Record must not carry required_when");
+        assert!(
+            contract.required_when.is_none(),
+            "parent Record must not carry required_when"
+        );
 
         // Sub-field done_when must carry required_when
         let sub_fields = match &contract.ty {
@@ -564,7 +565,10 @@ fields:
             _ => panic!("contract must be Record"),
         };
         let done_when = sub_fields.iter().find(|f| f.name == "done_when").unwrap();
-        let rw = done_when.required_when.as_ref().expect("done_when must have required_when");
+        let rw = done_when
+            .required_when
+            .as_ref()
+            .expect("done_when must have required_when");
         assert_eq!(rw.lhs_path, vec!["triage", "verdict"]);
         assert_eq!(rw.rhs_literal, "T3");
     }
@@ -670,7 +674,8 @@ fields:
 "#;
         let err = Schema::from_yaml(yaml).unwrap_err();
         assert!(
-            err.to_string().contains("auto_increment requires type 'integer'"),
+            err.to_string()
+                .contains("auto_increment requires type 'integer'"),
             "err: {err}"
         );
     }
@@ -691,7 +696,8 @@ fields:
 "#;
         let err = Schema::from_yaml(yaml).unwrap_err();
         assert!(
-            err.to_string().contains("auto_increment requires actor 'framework'"),
+            err.to_string()
+                .contains("auto_increment requires actor 'framework'"),
             "err: {err}"
         );
     }
@@ -713,7 +719,8 @@ fields:
 "#;
         let err = Schema::from_yaml(yaml).unwrap_err();
         assert!(
-            err.to_string().contains("auto_increment_within target 'nonexistent_field' not found"),
+            err.to_string()
+                .contains("auto_increment_within target 'nonexistent_field' not found"),
             "err: {err}"
         );
     }
@@ -735,7 +742,8 @@ fields:
 "#;
         let err = Schema::from_yaml(yaml).unwrap_err();
         assert!(
-            err.to_string().contains("auto_increment_within cannot reference itself"),
+            err.to_string()
+                .contains("auto_increment_within cannot reference itself"),
             "err: {err}"
         );
     }
@@ -852,8 +860,17 @@ fields:
     ref: tasks
 "#;
         let schema = Schema::from_yaml(yaml).unwrap();
-        let dep = schema.fields.iter().find(|f| f.name == "depends_on").unwrap();
-        assert_eq!(dep.ty, FieldType::ListFk { ref_store: "tasks".to_string() });
+        let dep = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "depends_on")
+            .unwrap();
+        assert_eq!(
+            dep.ty,
+            FieldType::ListFk {
+                ref_store: "tasks".to_string()
+            }
+        );
     }
 
     #[test]
@@ -882,7 +899,10 @@ fields:
     #[test]
     fn schema_without_workflow_is_none() {
         let schema = Schema::from_yaml(FULL_FIXTURE).unwrap();
-        assert!(schema.workflow.is_none(), "v0.1 schema must have workflow == None");
+        assert!(
+            schema.workflow.is_none(),
+            "v0.1 schema must have workflow == None"
+        );
     }
 
     /// AC2.2: A schema with a complete `workflow:` block parses and all key
@@ -1071,9 +1091,14 @@ fields:
 
     #[test]
     fn field_type_json_parses() {
-        let schema = Schema::from_yaml(JSON_FIELD_SCHEMA).expect("schema with type: json should parse");
+        let schema =
+            Schema::from_yaml(JSON_FIELD_SCHEMA).expect("schema with type: json should parse");
         let notes = schema.fields.iter().find(|f| f.name == "notes").unwrap();
-        assert_eq!(notes.ty, FieldType::Json, "type: json must resolve to FieldType::Json");
+        assert_eq!(
+            notes.ty,
+            FieldType::Json,
+            "type: json must resolve to FieldType::Json"
+        );
     }
 
     #[test]
@@ -1163,34 +1188,87 @@ fields:
         let schema = Schema::from_yaml(yaml).expect("tasks schema must parse without errors");
         assert_eq!(schema.name, "tasks");
         assert_eq!(schema.scope, StoreScope::Repo);
-        assert!(schema.workflow.is_some(), "tasks schema must have a workflow block");
+        assert!(
+            schema.workflow.is_some(),
+            "tasks schema must have a workflow block"
+        );
 
         let wf = schema.workflow.as_ref().unwrap();
         // All four agent roles must be present
-        assert!(wf.agent_roles.contains_key("planner"), "planner role missing");
-        assert!(wf.agent_roles.contains_key("plan_reviewer"), "plan_reviewer role missing");
-        assert!(wf.agent_roles.contains_key("executor"), "executor role missing");
-        assert!(wf.agent_roles.contains_key("code_reviewer"), "code_reviewer role missing");
+        assert!(
+            wf.agent_roles.contains_key("planner"),
+            "planner role missing"
+        );
+        assert!(
+            wf.agent_roles.contains_key("plan_reviewer"),
+            "plan_reviewer role missing"
+        );
+        assert!(
+            wf.agent_roles.contains_key("executor"),
+            "executor role missing"
+        );
+        assert!(
+            wf.agent_roles.contains_key("code_reviewer"),
+            "code_reviewer role missing"
+        );
 
         // All four briefing templates must be declared
-        assert!(wf.briefing_templates.contains_key("planner"), "planner template missing");
-        assert!(wf.briefing_templates.contains_key("plan_reviewer"), "plan_reviewer template missing");
-        assert!(wf.briefing_templates.contains_key("executor"), "executor template missing");
-        assert!(wf.briefing_templates.contains_key("code_reviewer"), "code_reviewer template missing");
+        assert!(
+            wf.briefing_templates.contains_key("planner"),
+            "planner template missing"
+        );
+        assert!(
+            wf.briefing_templates.contains_key("plan_reviewer"),
+            "plan_reviewer template missing"
+        );
+        assert!(
+            wf.briefing_templates.contains_key("executor"),
+            "executor template missing"
+        );
+        assert!(
+            wf.briefing_templates.contains_key("code_reviewer"),
+            "code_reviewer template missing"
+        );
 
         // render_template must be present
         assert!(wf.render_template.is_some(), "render_template missing");
 
         // submit_targets must map all four submit verbs
-        assert_eq!(wf.submit_targets.get("submit-plan").map(|s| s.as_str()), Some("plan"));
-        assert_eq!(wf.submit_targets.get("submit-plan-review").map(|s| s.as_str()), Some("plan_review_log"));
-        assert_eq!(wf.submit_targets.get("submit-execute").map(|s| s.as_str()), Some("cycles"));
-        assert_eq!(wf.submit_targets.get("submit-review").map(|s| s.as_str()), Some("cycles"));
+        assert_eq!(
+            wf.submit_targets.get("submit-plan").map(|s| s.as_str()),
+            Some("plan")
+        );
+        assert_eq!(
+            wf.submit_targets
+                .get("submit-plan-review")
+                .map(|s| s.as_str()),
+            Some("plan_review_log")
+        );
+        assert_eq!(
+            wf.submit_targets.get("submit-execute").map(|s| s.as_str()),
+            Some("cycles")
+        );
+        assert_eq!(
+            wf.submit_targets.get("submit-review").map(|s| s.as_str()),
+            Some("cycles")
+        );
 
         // lifecycle must have all expected states
         let states = &schema.lifecycle.states;
-        for expected in &["planning", "plan_review", "ready", "executing", "code_review", "blocked", "complete"] {
-            assert!(states.iter().any(|s| s == expected), "missing state: {}", expected);
+        for expected in &[
+            "planning",
+            "plan_review",
+            "ready",
+            "executing",
+            "code_review",
+            "blocked",
+            "complete",
+        ] {
+            assert!(
+                states.iter().any(|s| s == expected),
+                "missing state: {}",
+                expected
+            );
         }
     }
 
@@ -1204,11 +1282,26 @@ fields:
             .expect("tasks must be in BUNDLED_STORE_TEMPLATES");
 
         let template_names: Vec<&str> = templates.iter().map(|(name, _)| *name).collect();
-        assert!(template_names.contains(&"templates/planner-brief.md.tpl"), "planner template missing");
-        assert!(template_names.contains(&"templates/plan-reviewer-brief.md.tpl"), "plan-reviewer template missing");
-        assert!(template_names.contains(&"templates/executor-brief.md.tpl"), "executor template missing");
-        assert!(template_names.contains(&"templates/code-reviewer-brief.md.tpl"), "code-reviewer template missing");
-        assert!(template_names.contains(&"templates/main.md.tpl"), "main.md template missing");
+        assert!(
+            template_names.contains(&"templates/planner-brief.md.tpl"),
+            "planner template missing"
+        );
+        assert!(
+            template_names.contains(&"templates/plan-reviewer-brief.md.tpl"),
+            "plan-reviewer template missing"
+        );
+        assert!(
+            template_names.contains(&"templates/executor-brief.md.tpl"),
+            "executor template missing"
+        );
+        assert!(
+            template_names.contains(&"templates/code-reviewer-brief.md.tpl"),
+            "code-reviewer template missing"
+        );
+        assert!(
+            template_names.contains(&"templates/main.md.tpl"),
+            "main.md template missing"
+        );
 
         // Each template must have non-empty content
         for (name, content) in templates {
@@ -1227,10 +1320,26 @@ fields:
             .expect("tasks schema must be in BUNDLED_STORE_SCHEMAS");
         let schema = Schema::from_yaml(yaml).unwrap();
 
-        let current_phase = schema.fields.iter().find(|f| f.name == "current_phase").unwrap();
-        assert_eq!(current_phase.actor, Some(Actor::Framework), "current_phase must have actor: framework");
+        let current_phase = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "current_phase")
+            .unwrap();
+        assert_eq!(
+            current_phase.actor,
+            Some(Actor::Framework),
+            "current_phase must have actor: framework"
+        );
 
-        let current_cycle = schema.fields.iter().find(|f| f.name == "current_cycle").unwrap();
-        assert_eq!(current_cycle.actor, Some(Actor::Framework), "current_cycle must have actor: framework");
+        let current_cycle = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "current_cycle")
+            .unwrap();
+        assert_eq!(
+            current_cycle.actor,
+            Some(Actor::Framework),
+            "current_cycle must have actor: framework"
+        );
     }
 }

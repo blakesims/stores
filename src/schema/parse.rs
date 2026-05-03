@@ -10,7 +10,8 @@ mod tests {
 
     #[test]
     fn from_yaml_surfaces_serde_error_message() {
-        let bad = "name: 123\nid_format: ok\nlifecycle:\n  states: [a]\n  transitions: []\nfields: []";
+        let bad =
+            "name: 123\nid_format: ok\nlifecycle:\n  states: [a]\n  transitions: []\nfields: []";
         // name should be a string — serde_yaml accepts integers as strings, so
         // test a genuinely invalid YAML structure instead.
         let bad_yaml = ": broken [[[";

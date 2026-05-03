@@ -39,15 +39,15 @@ pub fn run(path: &Path) -> Result<()> {
         .with_context(|| format!("schema parse error in '{}'", schema_file.display()))?;
 
     // 3. Run leaf_args uniqueness check (errors if leaves collide)
-    leaf_args(&schema).with_context(|| {
-        format!("schema '{}' has leaf-arg collisions", schema.name)
-    })?;
+    leaf_args(&schema)
+        .with_context(|| format!("schema '{}' has leaf-arg collisions", schema.name))?;
 
     // 3b. If the schema declares a workflow, resolve templates from disk to
     //     verify they all exist and are readable (AC2.5).
     if let Some(ref wf) = schema.workflow {
-        wf.resolve_from_disk(&canonical)
-            .with_context(|| format!("workflow template resolution failed for '{}'", schema.name))?;
+        wf.resolve_from_disk(&canonical).with_context(|| {
+            format!("workflow template resolution failed for '{}'", schema.name)
+        })?;
     }
 
     // 4. Ensure .stores/ is initialized; open DB
@@ -60,11 +60,7 @@ pub fn run(path: &Path) -> Result<()> {
 
     // Check for re-install by same canonical path
     let canonical_str = canonical.to_string_lossy();
-    if let Some(existing) = manifest
-        .stores
-        .iter()
-        .find(|s| s.schema_path == canonical)
-    {
+    if let Some(existing) = manifest.stores.iter().find(|s| s.schema_path == canonical) {
         bail!(
             "store '{}' is already installed from this path ({}); \
              v0.1 has no migrations — to reinstall, remove it from the manifest manually",
@@ -103,10 +99,7 @@ pub fn run(path: &Path) -> Result<()> {
     manifest.save()?;
 
     // 9. Print success
-    println!(
-        "Installed store '{}' (table: {})",
-        schema.name, schema.name
-    );
+    println!("Installed store '{}' (table: {})", schema.name, schema.name);
 
     Ok(())
 }
@@ -116,9 +109,8 @@ fn install_bundled(name: &str, schema_yaml: &str) -> Result<()> {
     let schema = Schema::from_yaml(schema_yaml)
         .with_context(|| format!("bundled schema parse error for '{name}'"))?;
 
-    leaf_args(&schema).with_context(|| {
-        format!("bundled schema '{}' has leaf-arg collisions", schema.name)
-    })?;
+    leaf_args(&schema)
+        .with_context(|| format!("bundled schema '{}' has leaf-arg collisions", schema.name))?;
 
     ensure_initialized()?;
     let db = db_path()?;
@@ -130,7 +122,11 @@ fn install_bundled(name: &str, schema_yaml: &str) -> Result<()> {
     // We store a relative sentinel so the manifest records the source clearly.
     let sentinel_path = std::path::PathBuf::from(format!("bundled:{name}"));
 
-    if let Some(existing) = manifest.stores.iter().find(|s| s.schema_path == sentinel_path) {
+    if let Some(existing) = manifest
+        .stores
+        .iter()
+        .find(|s| s.schema_path == sentinel_path)
+    {
         bail!(
             "bundled store '{}' is already installed (from {}); \
              v0.1 has no migrations — to reinstall, remove it from the manifest manually",
@@ -226,14 +222,24 @@ fn is_leap(y: u32) -> bool {
 }
 
 fn days_in_year(y: u32) -> u32 {
-    if is_leap(y) { 366 } else { 365 }
+    if is_leap(y) {
+        366
+    } else {
+        365
+    }
 }
 
 fn days_in_month(y: u32, m: u32) -> u32 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap(y) { 29 } else { 28 },
+        2 => {
+            if is_leap(y) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 31,
     }
 }

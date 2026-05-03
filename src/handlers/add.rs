@@ -36,50 +36,49 @@ pub fn run(
         match matches.try_get_many::<String>(cli_name) {
             Ok(Some(vals)) => {
                 let collected: Vec<String> = vals.cloned().collect();
-                if collected.is_empty() { None } else { Some(collected) }
+                if collected.is_empty() {
+                    None
+                } else {
+                    Some(collected)
+                }
             }
             _ => None,
         }
     })?;
 
     // Run validator
-    validate::validate(schema, &entry, Op::Add, invoker).map_err(|errs| {
-        anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
-    })?;
+    validate::validate(schema, &entry, Op::Add, invoker)
+        .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
     // L001: optional --display-id override. When supplied, parse + collision-check
     // up-front so we fail before any INSERT.
-    let explicit_display_id: Option<(String, i64)> = match matches
-        .try_get_one::<String>("display-id")
-        .ok()
-        .flatten()
-    {
-        Some(supplied) => {
-            let parsed_id = id_format::parse(&schema.id_format, supplied).map_err(|e| {
-                anyhow::anyhow!("--display-id format error: {e}")
-            })?;
-            // Collision check against existing rows.
-            let existing: Option<i64> = conn
-                .query_row(
-                    &format!(
-                        "SELECT id FROM {} WHERE display_id = ?1",
-                        quote_ident(&schema.name)
-                    ),
-                    rusqlite::params![supplied],
-                    |r| r.get(0),
-                )
-                .ok();
-            if existing.is_some() {
-                anyhow::bail!(
-                    "--display-id collision: '{}' already exists in store '{}'",
-                    supplied,
-                    schema.name
-                );
+    let explicit_display_id: Option<(String, i64)> =
+        match matches.try_get_one::<String>("display-id").ok().flatten() {
+            Some(supplied) => {
+                let parsed_id = id_format::parse(&schema.id_format, supplied)
+                    .map_err(|e| anyhow::anyhow!("--display-id format error: {e}"))?;
+                // Collision check against existing rows.
+                let existing: Option<i64> = conn
+                    .query_row(
+                        &format!(
+                            "SELECT id FROM {} WHERE display_id = ?1",
+                            quote_ident(&schema.name)
+                        ),
+                        rusqlite::params![supplied],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                if existing.is_some() {
+                    anyhow::bail!(
+                        "--display-id collision: '{}' already exists in store '{}'",
+                        supplied,
+                        schema.name
+                    );
+                }
+                Some((supplied.clone(), parsed_id))
             }
-            Some((supplied.clone(), parsed_id))
-        }
-        None => None,
-    };
+            None => None,
+        };
 
     // Populate reserved fields
     let now = now_iso8601();
@@ -133,11 +132,14 @@ pub fn run(
         param_idx += 1;
 
         match &field.ty {
-            FieldType::Record(_) | FieldType::List(_) | FieldType::ListRecord(_) | FieldType::ListFk { .. } | FieldType::Json => {
+            FieldType::Record(_)
+            | FieldType::List(_)
+            | FieldType::ListRecord(_)
+            | FieldType::ListFk { .. }
+            | FieldType::Json => {
                 // Serialize to JSON string
                 let json_str = match val {
-                    Some(v) => serde_json::to_string(v)
-                        .unwrap_or_else(|_| "null".to_string()),
+                    Some(v) => serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()),
                     None => "null".to_string(),
                 };
                 values.push(rusqlite::types::Value::Text(json_str));
@@ -145,7 +147,9 @@ pub fn run(
             FieldType::Bool => {
                 let sql_val = match val {
                     Some(Value::Bool(b)) => rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
-                    Some(Value::Number(n)) => rusqlite::types::Value::Integer(n.as_i64().unwrap_or(0)),
+                    Some(Value::Number(n)) => {
+                        rusqlite::types::Value::Integer(n.as_i64().unwrap_or(0))
+                    }
                     _ => rusqlite::types::Value::Null,
                 };
                 values.push(sql_val);
@@ -179,7 +183,10 @@ pub fn run(
 
     let col_list = col_names.join(", ");
     let ph_list = placeholders.join(", ");
-    let sql = format!("INSERT INTO {} ({col_list}) VALUES ({ph_list})", quote_ident(&schema.name));
+    let sql = format!(
+        "INSERT INTO {} ({col_list}) VALUES ({ph_list})",
+        quote_ident(&schema.name)
+    );
 
     // Execute inside a transaction; render display_id from last_insert_rowid
     // (or use the explicit one supplied via --display-id).
@@ -287,7 +294,11 @@ fields:
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
         let mut cmd = clap::Command::new("add");
         for leaf in &leaves {
-            cmd = cmd.arg(clap::Arg::new(leaf.cli_name.clone()).long(leaf.cli_name.clone()).required(false));
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name.clone())
+                    .required(false),
+            );
         }
         cmd
     }
@@ -349,7 +360,9 @@ fields:
         run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let display_id: String = conn
-            .query_row("SELECT display_id FROM tstore WHERE id = 1", [], |r| r.get(0))
+            .query_row("SELECT display_id FROM tstore WHERE id = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(display_id, "T001");
     }
@@ -371,16 +384,15 @@ fields:
         let (schema, conn) = list_record_schema_and_conn();
         let cmd = build_test_add_cmd(&schema);
         let raw_refs = r#"[{"system":"docker","kind":"container","id":"foo"}]"#;
-        let matches = cmd.get_matches_from([
-            "add",
-            "--title", "test row",
-            "--external-refs", raw_refs,
-        ]);
+        let matches =
+            cmd.get_matches_from(["add", "--title", "test row", "--external-refs", raw_refs]);
 
         run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let (_, entry) = crate::handlers::row::read_row(&schema, &conn, "R001").unwrap();
-        let refs_val = entry.get("external_refs").expect("external_refs must be present");
+        let refs_val = entry
+            .get("external_refs")
+            .expect("external_refs must be present");
         match refs_val {
             serde_json::Value::Array(arr) => {
                 assert_eq!(arr.len(), 1, "expected 1 element");
@@ -421,13 +433,11 @@ fields:
 "#;
         let schema = Schema::from_yaml(REQUIRED_LR_SCHEMA).unwrap();
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema)).unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
 
         let cmd = build_test_add_cmd(&schema);
-        let matches = cmd.get_matches_from([
-            "add",
-            "--external-refs", "{not json",
-        ]);
+        let matches = cmd.get_matches_from(["add", "--external-refs", "{not json"]);
 
         let err = run(&schema, &conn, &matches, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
@@ -469,13 +479,11 @@ fields:
 "#;
         let schema = Schema::from_yaml(OPTIONAL_LR_SCHEMA).unwrap();
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema)).unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
 
         let cmd = build_test_add_cmd(&schema);
-        let matches = cmd.get_matches_from([
-            "add",
-            "--external-refs", "{not json",
-        ]);
+        let matches = cmd.get_matches_from(["add", "--external-refs", "{not json"]);
 
         let err = run(&schema, &conn, &matches, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
@@ -543,9 +551,8 @@ fields:
 
     fn build_verb_cmd_for(schema: &Schema, verb: &'static str) -> clap::Command {
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
-        let mut cmd = clap::Command::new(verb).arg(
-            clap::Arg::new("display_id").required(true).index(1),
-        );
+        let mut cmd =
+            clap::Command::new(verb).arg(clap::Arg::new("display_id").required(true).index(1));
         for leaf in &leaves {
             cmd = cmd.arg(
                 clap::Arg::new(leaf.cli_name.clone())
@@ -567,9 +574,12 @@ fields:
         let add_cmd = build_add_cmd_for(&schema);
         let add_matches = add_cmd.get_matches_from([
             "add",
-            "--summary", "hyphen store test",
-            "--priority", "high",
-            "--tags", "a|b",
+            "--summary",
+            "hyphen store test",
+            "--priority",
+            "high",
+            "--tags",
+            "a|b",
         ]);
         run(&schema, &conn, &add_matches, Actor::Human.into())
             .expect("add must succeed against hyphenated store name");
@@ -589,8 +599,18 @@ fields:
             cmd = cmd.arg(clap::Arg::new("status").long("status").required(false));
             cmd = cmd.arg(clap::Arg::new("limit").long("limit").required(false));
             cmd = cmd.arg(clap::Arg::new("sort").long("sort").required(false));
-            cmd = cmd.arg(clap::Arg::new("reverse").long("reverse").required(false).action(clap::ArgAction::SetTrue));
-            cmd = cmd.arg(clap::Arg::new("json").long("json").required(false).action(clap::ArgAction::SetTrue));
+            cmd = cmd.arg(
+                clap::Arg::new("reverse")
+                    .long("reverse")
+                    .required(false)
+                    .action(clap::ArgAction::SetTrue),
+            );
+            cmd = cmd.arg(
+                clap::Arg::new("json")
+                    .long("json")
+                    .required(false)
+                    .action(clap::ArgAction::SetTrue),
+            );
             cmd = cmd.arg(clap::Arg::new("since").long("since").required(false));
             cmd
         };
@@ -600,10 +620,8 @@ fields:
 
         // 4. update — tests UPDATE site
         let update_cmd = build_verb_cmd_for(&schema, "update");
-        let update_matches = update_cmd.get_matches_from([
-            "update", "O001",
-            "--summary", "updated summary",
-        ]);
+        let update_matches =
+            update_cmd.get_matches_from(["update", "O001", "--summary", "updated summary"]);
         crate::handlers::update::run(&schema, &conn, &update_matches, Actor::Human.into())
             .expect("update must succeed against hyphenated store name");
 
@@ -618,8 +636,14 @@ fields:
         // 5. transition — tests UPDATE inside execute_transition_write
         let trans_cmd = build_verb_cmd_for(&schema, "review");
         let trans_matches = trans_cmd.get_matches_from(["review", "O001"]);
-        crate::handlers::transition::run(&schema, &conn, &trans_matches, Actor::Human.into(), "review")
-            .expect("transition must succeed against hyphenated store name");
+        crate::handlers::transition::run(
+            &schema,
+            &conn,
+            &trans_matches,
+            Actor::Human.into(),
+            "review",
+        )
+        .expect("transition must succeed against hyphenated store name");
 
         let (_, entry3) = crate::handlers::row::read_row(&schema, &conn, "O001").unwrap();
         assert_eq!(
@@ -697,13 +721,21 @@ fields:
         let cmd = build_add_cmd_with_append(&schema);
         let matches = cmd.get_matches_from([
             "add",
-            "--title", "repeatable test",
-            "--in-scope", "a",
-            "--in-scope", "b",
+            "--title",
+            "repeatable test",
+            "--in-scope",
+            "a",
+            "--in-scope",
+            "b",
         ]);
         run(&schema, &conn, &matches, Actor::Human.into()).expect("repeatable form must succeed");
         let items = get_in_scope(&conn, "S001");
-        assert_eq!(items, vec!["a", "b"], "repeatable form: expected [\"a\", \"b\"], got {:?}", items);
+        assert_eq!(
+            items,
+            vec!["a", "b"],
+            "repeatable form: expected [\"a\", \"b\"], got {:?}",
+            items
+        );
     }
 
     /// AC Phase 4 — backwards-compat pipe form: `--in-scope "a|b"` → `["a", "b"]`.
@@ -712,14 +744,15 @@ fields:
     fn list_field_pipe_form() {
         let (schema, conn) = list_flag_schema_and_conn();
         let cmd = build_add_cmd_with_append(&schema);
-        let matches = cmd.get_matches_from([
-            "add",
-            "--title", "pipe test",
-            "--in-scope", "a|b",
-        ]);
+        let matches = cmd.get_matches_from(["add", "--title", "pipe test", "--in-scope", "a|b"]);
         run(&schema, &conn, &matches, Actor::Human.into()).expect("pipe form must succeed");
         let items = get_in_scope(&conn, "S001");
-        assert_eq!(items, vec!["a", "b"], "pipe form: expected [\"a\", \"b\"], got {:?}", items);
+        assert_eq!(
+            items,
+            vec!["a", "b"],
+            "pipe form: expected [\"a\", \"b\"], got {:?}",
+            items
+        );
     }
 
     /// AC Phase 4 — mixed form: `--in-scope "a|b" --in-scope "c"` → `["a", "b", "c"]`.
@@ -733,13 +766,21 @@ fields:
         let cmd = build_add_cmd_with_append(&schema);
         let matches = cmd.get_matches_from([
             "add",
-            "--title", "mixed test",
-            "--in-scope", "a|b",
-            "--in-scope", "c",
+            "--title",
+            "mixed test",
+            "--in-scope",
+            "a|b",
+            "--in-scope",
+            "c",
         ]);
         run(&schema, &conn, &matches, Actor::Human.into()).expect("mixed form must succeed");
         let items = get_in_scope(&conn, "S001");
-        assert_eq!(items, vec!["a", "b", "c"], "mixed form: expected [\"a\", \"b\", \"c\"], got {:?}", items);
+        assert_eq!(
+            items,
+            vec!["a", "b", "c"],
+            "mixed form: expected [\"a\", \"b\", \"c\"], got {:?}",
+            items
+        );
     }
 
     // ---- T008 Phase 2: Json field write-then-read integration test ----
@@ -774,11 +815,8 @@ fields:
         let (schema, conn) = json_schema_and_conn();
         let cmd = build_test_add_cmd(&schema);
         let raw_notes = r#"{"k":"v","arr":[1,2]}"#;
-        let matches = cmd.get_matches_from([
-            "add",
-            "--title", "json test row",
-            "--notes", raw_notes,
-        ]);
+        let matches =
+            cmd.get_matches_from(["add", "--title", "json test row", "--notes", raw_notes]);
 
         run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
@@ -786,13 +824,21 @@ fields:
         // extends the read-path match to include FieldType::Json. Until Phase 4 ships,
         // verify that the stored TEXT is correctly serialised by querying SQLite directly.
         let stored_notes: String = conn
-            .query_row("SELECT notes FROM jstore WHERE display_id = 'J001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT notes FROM jstore WHERE display_id = 'J001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         // The value stored must be parseable JSON matching the original object
-        let parsed: serde_json::Value = serde_json::from_str(&stored_notes)
-            .expect("stored notes must be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stored_notes).expect("stored notes must be valid JSON");
         assert_eq!(parsed["k"], "v", "notes.k must round-trip");
-        assert_eq!(parsed["arr"], serde_json::json!([1, 2]), "notes.arr must round-trip");
+        assert_eq!(
+            parsed["arr"],
+            serde_json::json!([1, 2]),
+            "notes.arr must round-trip"
+        );
     }
 
     /// T008 Phase 2: absent Json field stores the JSON literal "null" (Decision 4).
@@ -800,17 +846,21 @@ fields:
     fn json_field_absent_stores_null_literal() {
         let (schema, conn) = json_schema_and_conn();
         let cmd = build_test_add_cmd(&schema);
-        let matches = cmd.get_matches_from([
-            "add",
-            "--title", "no notes row",
-        ]);
+        let matches = cmd.get_matches_from(["add", "--title", "no notes row"]);
 
         run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let stored_notes: String = conn
-            .query_row("SELECT notes FROM jstore WHERE display_id = 'J001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT notes FROM jstore WHERE display_id = 'J001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(stored_notes, "null", "absent Json field must store \"null\" literal (Decision 4)");
+        assert_eq!(
+            stored_notes, "null",
+            "absent Json field must store \"null\" literal (Decision 4)"
+        );
     }
 
     // ---- L001: --display-id flag on `add` ----
@@ -838,11 +888,8 @@ fields:
     fn add_with_explicit_display_id_succeeds() {
         let (schema, conn) = in_memory_schema_and_conn();
         let cmd = build_test_add_cmd_with_display_id(&schema);
-        let matches = cmd.get_matches_from([
-            "add",
-            "--display-id", "T013",
-            "--title", "explicit id row",
-        ]);
+        let matches =
+            cmd.get_matches_from(["add", "--display-id", "T013", "--title", "explicit id row"]);
 
         run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
@@ -853,28 +900,27 @@ fields:
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .expect("row with display_id=T013 must exist");
-        assert_eq!(display_id, "T013", "stored display_id must equal supplied value");
-        assert_eq!(rowid, 13, "rowid must equal numeric portion of supplied display id");
+        assert_eq!(
+            display_id, "T013",
+            "stored display_id must equal supplied value"
+        );
+        assert_eq!(
+            rowid, 13,
+            "rowid must equal numeric portion of supplied display id"
+        );
     }
 
     #[test]
     fn add_after_explicit_display_id_advances_auto_mint_past_supplied() {
         let (schema, conn) = in_memory_schema_and_conn();
         let cmd1 = build_test_add_cmd_with_display_id(&schema);
-        let m1 = cmd1.get_matches_from([
-            "add",
-            "--display-id", "T013",
-            "--title", "first",
-        ]);
+        let m1 = cmd1.get_matches_from(["add", "--display-id", "T013", "--title", "first"]);
         run(&schema, &conn, &m1, Actor::Human.into()).unwrap();
 
         // Subsequent auto-mint must be T014, not T002 — the AUTOINCREMENT counter
         // must have been bumped past the explicit id.
         let cmd2 = build_test_add_cmd_with_display_id(&schema);
-        let m2 = cmd2.get_matches_from([
-            "add",
-            "--title", "second",
-        ]);
+        let m2 = cmd2.get_matches_from(["add", "--title", "second"]);
         run(&schema, &conn, &m2, Actor::Human.into()).unwrap();
 
         let display_id: String = conn
@@ -884,7 +930,10 @@ fields:
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(display_id, "T014", "auto-mint must advance past explicitly-supplied id");
+        assert_eq!(
+            display_id, "T014",
+            "auto-mint must advance past explicitly-supplied id"
+        );
     }
 
     #[test]
@@ -895,22 +944,14 @@ fields:
         run(
             &schema,
             &conn,
-            &cmd1.get_matches_from([
-                "add",
-                "--display-id", "T013",
-                "--title", "first",
-            ]),
+            &cmd1.get_matches_from(["add", "--display-id", "T013", "--title", "first"]),
             Actor::Human.into(),
         )
         .unwrap();
 
         // Second insert with the same explicit id must fail.
         let cmd2 = build_test_add_cmd_with_display_id(&schema);
-        let m2 = cmd2.get_matches_from([
-            "add",
-            "--display-id", "T013",
-            "--title", "second",
-        ]);
+        let m2 = cmd2.get_matches_from(["add", "--display-id", "T013", "--title", "second"]);
         let err = run(&schema, &conn, &m2, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -927,11 +968,7 @@ fields:
     fn add_with_malformed_display_id_is_rejected() {
         let (schema, conn) = in_memory_schema_and_conn();
         let cmd = build_test_add_cmd_with_display_id(&schema);
-        let matches = cmd.get_matches_from([
-            "add",
-            "--display-id", "Tabc",
-            "--title", "bad id",
-        ]);
+        let matches = cmd.get_matches_from(["add", "--display-id", "Tabc", "--title", "bad id"]);
 
         let err = run(&schema, &conn, &matches, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
@@ -947,15 +984,17 @@ fields:
         // when --display-id is absent (AC5).
         let (schema, conn) = in_memory_schema_and_conn();
         let cmd = build_test_add_cmd_with_display_id(&schema);
-        let matches = cmd.get_matches_from([
-            "add",
-            "--title", "auto",
-        ]);
+        let matches = cmd.get_matches_from(["add", "--title", "auto"]);
         run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let display_id: String = conn
-            .query_row("SELECT display_id FROM tstore WHERE id = 1", [], |r| r.get(0))
+            .query_row("SELECT display_id FROM tstore WHERE id = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(display_id, "T001", "auto-mint path must still produce T001 when no flag");
+        assert_eq!(
+            display_id, "T001",
+            "auto-mint path must still produce T001 when no flag"
+        );
     }
 }

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
-use stores::cli::topology::{Format, Opts, RenderOutcome, emit_dot, render_via_dot};
+use stores::cli::topology::{emit_dot, render_via_dot, Format, Opts, RenderOutcome};
 use stores::manifest::{InstalledStore, Manifest};
 use stores::schema::{Schema, StoreScope};
 
@@ -51,7 +51,10 @@ fn ac3_1_render_via_dot_produces_utf8_when_graphviz_installed() {
     match render_via_dot(&source) {
         RenderOutcome::Rendered(s) => {
             assert!(!s.is_empty(), "rendered output must be non-empty");
-            assert!(s.is_char_boundary(s.len()), "rendered output must be valid UTF-8");
+            assert!(
+                s.is_char_boundary(s.len()),
+                "rendered output must be valid UTF-8"
+            );
         }
         RenderOutcome::Fallback { reason, .. } => {
             panic!("expected Rendered with dot on PATH, got Fallback: {reason:?}");

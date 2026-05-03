@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use anyhow::{bail, Result};
+use std::path::PathBuf;
 
 use crate::schema::StoreScope;
 
@@ -138,7 +138,9 @@ mod tests {
     use std::path::Path;
 
     /// Serialize tests that mutate `current_dir` so they don't race.
-    fn cwd_lock() -> &'static std::sync::Mutex<()> { test_cwd_lock() }
+    fn cwd_lock() -> &'static std::sync::Mutex<()> {
+        test_cwd_lock()
+    }
 
     /// Create a temporary directory containing a bare git repo and test worktree.
     /// Returns (tmp_dir, worktree_path, expected_stores_dir).
@@ -219,7 +221,11 @@ mod tests {
     fn stores_dir_for_repo_in_git_repo() {
         let _guard = cwd_lock().lock().unwrap();
         // Only run if git is available.
-        if std::process::Command::new("git").arg("--version").output().is_err() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return;
         }
 
@@ -242,10 +248,10 @@ mod tests {
         );
         // The parent of <repo>/.git is <repo>; our result should be sibling of .git
         let git_dir = repo_path.join(".git");
-        let expected = git_dir
-            .parent()
-            .unwrap()
-            .join(".stores");
-        assert_eq!(dir, expected, "Repo scope should resolve to <git-root>/.stores");
+        let expected = git_dir.parent().unwrap().join(".stores");
+        assert_eq!(
+            dir, expected,
+            "Repo scope should resolve to <git-root>/.stores"
+        );
     }
 }

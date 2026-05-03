@@ -1,6 +1,6 @@
 use crate::schema::{Field, RequiredWhenExpr};
-use crate::validate::{EntryMap, ValidationError};
 use crate::validate::error::RuleKind;
+use crate::validate::{EntryMap, ValidationError};
 use serde_json::Value;
 
 /// Walk the entry using a dotted path, descending into nested Objects.
@@ -52,21 +52,21 @@ pub fn check_required(
     }
 
     // --- required_when ---
-    if let Some(RequiredWhenExpr { lhs_path, rhs_literal }) = &field.required_when {
+    if let Some(RequiredWhenExpr {
+        lhs_path,
+        rhs_literal,
+    }) = &field.required_when
+    {
         let lhs_value = lookup(entry, lhs_path);
-        let triggered = lhs_value
-            .and_then(|v| v.as_str())
-            == Some(rhs_literal.as_str());
+        let triggered = lhs_value.and_then(|v| v.as_str()) == Some(rhs_literal.as_str());
 
         if triggered && is_absent {
-            let condition = format!(
-                "{} == '{}'",
-                lhs_path.join("."),
-                rhs_literal
-            );
+            let condition = format!("{} == '{}'", lhs_path.join("."), rhs_literal);
             errors.push(ValidationError {
                 field_path: field_path.to_vec(),
-                rule: RuleKind::RequiredWhen { expr: condition.clone() },
+                rule: RuleKind::RequiredWhen {
+                    expr: condition.clone(),
+                },
                 message: format!("required (because {})", condition),
             });
         }
@@ -76,8 +76,8 @@ pub fn check_required(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Field, FieldType};
     use crate::schema::required_when::parse as parse_rw;
+    use crate::schema::{Field, FieldType};
     use std::collections::BTreeMap;
 
     fn text_field(name: &str, required: bool, required_when: Option<&str>) -> Field {
@@ -167,7 +167,10 @@ mod tests {
         triage.insert("verdict".into(), serde_json::Value::String("T3".into()));
         entry.insert("triage".into(), serde_json::Value::Object(triage));
         let mut contract = serde_json::Map::new();
-        contract.insert("done_when".into(), serde_json::Value::String("fix it".into()));
+        contract.insert(
+            "done_when".into(),
+            serde_json::Value::String("fix it".into()),
+        );
         entry.insert("contract".into(), serde_json::Value::Object(contract));
 
         let mut errors = vec![];

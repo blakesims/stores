@@ -20,7 +20,11 @@ fn print_map_text(map: &BTreeMap<String, Value>, indent: usize) {
             Value::Array(arr) => {
                 let parts: Vec<String> = arr
                     .iter()
-                    .map(|v| v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()))
+                    .map(|v| {
+                        v.as_str()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| v.to_string())
+                    })
                     .collect();
                 println!("{pad}{k}: {}", parts.join("|"));
             }
@@ -59,7 +63,10 @@ pub fn print_list_text(display_id: &str, entry: &BTreeMap<String, Value>) {
 /// Print a single entry as JSON.
 pub fn print_entry_json(entry: &BTreeMap<String, Value>) {
     let v = Value::Object(entry.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
-    println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string())
+    );
 }
 
 /// Print a list of entries as JSON array.
@@ -70,7 +77,6 @@ pub fn print_list_json(entries: &[BTreeMap<String, Value>]) {
         .collect();
     println!(
         "{}",
-        serde_json::to_string_pretty(&Value::Array(arr))
-            .unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_else(|_| "[]".to_string())
     );
 }

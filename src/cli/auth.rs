@@ -39,7 +39,13 @@ fn token_hash_path() -> Result<PathBuf> {
 
 fn default_identity_path() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(".config").join("sops").join("age").join("keys.txt"))
+    Some(
+        PathBuf::from(home)
+            .join(".config")
+            .join("sops")
+            .join("age")
+            .join("keys.txt"),
+    )
 }
 
 fn age_bin() -> String {
@@ -53,9 +59,8 @@ fn age_bin() -> String {
 /// Auto-discover an age recipient from a sops/age keys.txt file by parsing the
 /// `# public key: age1...` comment line.
 fn discover_recipient(identity: &Path) -> Result<String> {
-    let content = std::fs::read_to_string(identity).with_context(|| {
-        format!("failed to read identity file {}", identity.display())
-    })?;
+    let content = std::fs::read_to_string(identity)
+        .with_context(|| format!("failed to read identity file {}", identity.display()))?;
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("# public key:") {
@@ -78,9 +83,8 @@ fn discover_recipient(identity: &Path) -> Result<String> {
 /// Reject a raw plaintext age identity (`AGE-SECRET-KEY-...`). Accept armored
 /// (`-----BEGIN AGE ENCRYPTED FILE-----`) or plugin (`AGE-PLUGIN-...`) forms.
 fn validate_identity_protected(identity: &Path) -> Result<()> {
-    let content = std::fs::read_to_string(identity).with_context(|| {
-        format!("failed to read identity file {}", identity.display())
-    })?;
+    let content = std::fs::read_to_string(identity)
+        .with_context(|| format!("failed to read identity file {}", identity.display()))?;
 
     for line in content.lines() {
         let t = line.trim();
@@ -160,8 +164,7 @@ fn init_with_secret(
     secret: &[u8],
 ) -> Result<String> {
     let dir = token_dir()?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
 
     let age_path = token_age_path()?;
     let hash_path = token_hash_path()?;
@@ -327,9 +330,7 @@ pub(crate) fn verify_approve_token(token: &str) -> bool {
     match verify_token(token) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!(
-                "warning: approve-token verification failed to read/parse hash file: {e}"
-            );
+            eprintln!("warning: approve-token verification failed to read/parse hash file: {e}");
             false
         }
     }
@@ -350,12 +351,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!(
-            "stores-auth-{}-{}-{}",
-            tag,
-            std::process::id(),
-            ns
-        ));
+        let p =
+            std::env::temp_dir().join(format!("stores-auth-{}-{}-{}", tag, std::process::id(), ns));
         fs::create_dir_all(&p).unwrap();
         p
     }
@@ -562,22 +559,19 @@ fi
     fn verify_token_round_trip() {
         let tdir = unique_dir("verify");
 
-        with_env(
-            &[("STORES_TOKEN_DIR", tdir.to_str().unwrap())],
-            || {
-                let known = "literal-secret-token";
-                let mut h = Sha256::new();
-                h.update(known.as_bytes());
-                let known_hash = hex::encode(h.finalize());
-                fs::write(tdir.join("approve.token.hash"), &known_hash).unwrap();
+        with_env(&[("STORES_TOKEN_DIR", tdir.to_str().unwrap())], || {
+            let known = "literal-secret-token";
+            let mut h = Sha256::new();
+            h.update(known.as_bytes());
+            let known_hash = hex::encode(h.finalize());
+            fs::write(tdir.join("approve.token.hash"), &known_hash).unwrap();
 
-                assert!(verify_token(known).unwrap(), "valid token must verify");
-                assert!(
-                    !verify_token("wrong-token").unwrap(),
-                    "wrong token must reject"
-                );
-            },
-        );
+            assert!(verify_token(known).unwrap(), "valid token must verify");
+            assert!(
+                !verify_token("wrong-token").unwrap(),
+                "wrong token must reject"
+            );
+        });
     }
 
     #[test]
@@ -609,45 +603,36 @@ fi
     #[test]
     fn verify_approve_token_matching_returns_true() {
         let tdir = unique_dir("vatok");
-        with_env(
-            &[("STORES_TOKEN_DIR", tdir.to_str().unwrap())],
-            || {
-                let plaintext = "correct-horse-battery-staple";
-                let mut h = Sha256::new();
-                h.update(plaintext.as_bytes());
-                let hex_hash = hex::encode(h.finalize());
-                fs::write(tdir.join("approve.token.hash"), &hex_hash).unwrap();
-                assert!(verify_approve_token(plaintext));
-            },
-        );
+        with_env(&[("STORES_TOKEN_DIR", tdir.to_str().unwrap())], || {
+            let plaintext = "correct-horse-battery-staple";
+            let mut h = Sha256::new();
+            h.update(plaintext.as_bytes());
+            let hex_hash = hex::encode(h.finalize());
+            fs::write(tdir.join("approve.token.hash"), &hex_hash).unwrap();
+            assert!(verify_approve_token(plaintext));
+        });
     }
 
     /// Phase 2 / Task 2.5(b): wrong plaintext returns false.
     #[test]
     fn verify_approve_token_mismatching_returns_false() {
         let tdir = unique_dir("vatok-bad");
-        with_env(
-            &[("STORES_TOKEN_DIR", tdir.to_str().unwrap())],
-            || {
-                let mut h = Sha256::new();
-                h.update(b"the-real-token");
-                fs::write(tdir.join("approve.token.hash"), hex::encode(h.finalize())).unwrap();
-                assert!(!verify_approve_token("not-the-real-token"));
-            },
-        );
+        with_env(&[("STORES_TOKEN_DIR", tdir.to_str().unwrap())], || {
+            let mut h = Sha256::new();
+            h.update(b"the-real-token");
+            fs::write(tdir.join("approve.token.hash"), hex::encode(h.finalize())).unwrap();
+            assert!(!verify_approve_token("not-the-real-token"));
+        });
     }
 
     /// Phase 2 / Task 2.5(c): missing hash file → false (never panics).
     #[test]
     fn verify_approve_token_missing_hash_returns_false() {
         let tdir = unique_dir("vatok-miss");
-        with_env(
-            &[("STORES_TOKEN_DIR", tdir.to_str().unwrap())],
-            || {
-                // Note: NO hash file written.
-                assert!(!verify_approve_token("anything"));
-            },
-        );
+        with_env(&[("STORES_TOKEN_DIR", tdir.to_str().unwrap())], || {
+            // Note: NO hash file written.
+            assert!(!verify_approve_token("anything"));
+        });
     }
 
     /// Phase 2 / Task 2.5(d): equal-prefix-different-suffix smoke-tests the
@@ -658,21 +643,18 @@ fi
     #[test]
     fn verify_approve_token_equal_prefix_different_suffix_returns_false() {
         let tdir = unique_dir("vatok-prefix");
-        with_env(
-            &[("STORES_TOKEN_DIR", tdir.to_str().unwrap())],
-            || {
-                let real = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 32 A's
-                let mut h = Sha256::new();
-                h.update(real.as_bytes());
-                fs::write(tdir.join("approve.token.hash"), hex::encode(h.finalize())).unwrap();
+        with_env(&[("STORES_TOKEN_DIR", tdir.to_str().unwrap())], || {
+            let real = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 32 A's
+            let mut h = Sha256::new();
+            h.update(real.as_bytes());
+            fs::write(tdir.join("approve.token.hash"), hex::encode(h.finalize())).unwrap();
 
-                // Same prefix (first 28 chars), different last 4.
-                let attacker = "AAAAAAAAAAAAAAAAAAAAAAAAAAAABBBB";
-                assert!(!verify_approve_token(attacker));
-                // Sanity: real token still verifies.
-                assert!(verify_approve_token(real));
-            },
-        );
+            // Same prefix (first 28 chars), different last 4.
+            let attacker = "AAAAAAAAAAAAAAAAAAAAAAAAAAAABBBB";
+            assert!(!verify_approve_token(attacker));
+            // Sanity: real token still verifies.
+            assert!(verify_approve_token(real));
+        });
     }
 
     #[test]
@@ -693,8 +675,7 @@ fi
                 ("STORES_AGE_BIN", stub.to_str().unwrap()),
             ],
             || {
-                let recip =
-                    init_with_secret(None, Some(id.clone()), false, &[1u8; 32]).unwrap();
+                let recip = init_with_secret(None, Some(id.clone()), false, &[1u8; 32]).unwrap();
                 assert_eq!(recip, pubkey);
                 assert!(tdir.join("approve.token.age").exists());
             },

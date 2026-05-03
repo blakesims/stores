@@ -2,8 +2,8 @@ use clap::{Arg, ArgAction, Command};
 use std::collections::HashMap;
 
 use crate::manifest::Manifest;
-use crate::schema::{FieldType, Schema};
 use crate::schema::flatten::leaf_args;
+use crate::schema::{FieldType, Schema};
 
 // ---------------------------------------------------------------------------
 // Bundled stores — embedded at compile time
@@ -18,14 +18,8 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
         "observations",
         include_str!("../../stores/observations/schema.yaml"),
     ),
-    (
-        "gate",
-        include_str!("../../stores/gate/schema.yaml"),
-    ),
-    (
-        "tasks",
-        include_str!("../../stores/tasks/schema.yaml"),
-    ),
+    ("gate", include_str!("../../stores/gate/schema.yaml")),
+    ("tasks", include_str!("../../stores/tasks/schema.yaml")),
 ];
 
 /// Embedded template content for bundled workflow stores.
@@ -33,22 +27,35 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
 /// Map: store-name → list of (template-relative-path, content).
 /// Path keys must match schema's `briefing_templates` and `render_template` values.
 /// Used by brief.rs and render.rs when `schema_path` starts with `"bundled:"`.
-pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[
-    ("tasks", &[
-        ("templates/planner-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/planner-brief.md.tpl")),
-        ("templates/plan-reviewer-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/plan-reviewer-brief.md.tpl")),
-        ("templates/executor-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/executor-brief.md.tpl")),
-        ("templates/code-reviewer-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/code-reviewer-brief.md.tpl")),
-        ("templates/wrap-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/wrap-brief.md.tpl")),
-        ("templates/main.md.tpl",
-            include_str!("../../stores/tasks/templates/main.md.tpl")),
-    ]),
-];
+pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[(
+    "tasks",
+    &[
+        (
+            "templates/planner-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/planner-brief.md.tpl"),
+        ),
+        (
+            "templates/plan-reviewer-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/plan-reviewer-brief.md.tpl"),
+        ),
+        (
+            "templates/executor-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/executor-brief.md.tpl"),
+        ),
+        (
+            "templates/code-reviewer-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/code-reviewer-brief.md.tpl"),
+        ),
+        (
+            "templates/wrap-brief.md.tpl",
+            include_str!("../../stores/tasks/templates/wrap-brief.md.tpl"),
+        ),
+        (
+            "templates/main.md.tpl",
+            include_str!("../../stores/tasks/templates/main.md.tpl"),
+        ),
+    ],
+)];
 
 /// Build the root `stores` Command with all installed stores added as subcommands.
 pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Command {
@@ -280,8 +287,19 @@ fn build_store_command(schema: &Schema) -> Command {
     // Workflow verb names that are registered separately above — must not be duplicated
     // as lifecycle transition subcommands even if the schema declares them as transition verbs.
     const WORKFLOW_VERBS: &[&str] = &[
-        "next-action", "brief", "render", "drive", "status", "guide", "next-id",
-        "submit-plan", "submit-plan-review", "submit-execute", "submit-review", "submit-wrap", "resume",
+        "next-action",
+        "brief",
+        "render",
+        "drive",
+        "status",
+        "guide",
+        "next-id",
+        "submit-plan",
+        "submit-plan-review",
+        "submit-execute",
+        "submit-review",
+        "submit-wrap",
+        "resume",
     ];
 
     let mut store_cmd = Command::new(schema.name.clone())
@@ -549,7 +567,9 @@ fn build_submit_review_cmd() -> Command {
 /// Build the `submit-wrap` command.
 fn build_submit_wrap_cmd() -> Command {
     Command::new("submit-wrap")
-        .about("Submit the wrap agent's synthesis brief (in_review; append-only write to wrap_log[])")
+        .about(
+            "Submit the wrap agent's synthesis brief (in_review; append-only write to wrap_log[])",
+        )
         .arg(Arg::new("display_id").help("Display ID").required(true))
         .arg(
             Arg::new("summary-from-file")
@@ -754,10 +774,7 @@ fn build_drive_cmd() -> Command {
 }
 
 /// Build a transition verb subcommand: positional display_id + all leaf args.
-fn build_transition_cmd(
-    verb: &str,
-    leaves: &[crate::schema::flatten::LeafArg<'_>],
-) -> Command {
+fn build_transition_cmd(verb: &str, leaves: &[crate::schema::flatten::LeafArg<'_>]) -> Command {
     build_leaf_cmd_owned(verb.to_string(), leaves, true)
 }
 
@@ -831,10 +848,7 @@ fn build_leaf_cmd_owned(
 /// pre-allocate the substrate row's display id (e.g. align with a filesystem
 /// `next-id` scan). The handler validates the supplied id against the schema's
 /// `id_format` and rejects collisions.
-fn build_add_cmd(
-    leaves: &[crate::schema::flatten::LeafArg<'_>],
-    schema: &Schema,
-) -> Command {
+fn build_add_cmd(leaves: &[crate::schema::flatten::LeafArg<'_>], schema: &Schema) -> Command {
     let mut cmd = build_leaf_cmd("add", leaves, false);
     cmd = cmd.arg(
         Arg::new("display-id")
@@ -850,10 +864,7 @@ fn build_add_cmd(
 }
 
 /// Build the `update` command with leaf args + positional display_id.
-fn build_update_cmd(
-    leaves: &[crate::schema::flatten::LeafArg<'_>],
-    _schema: &Schema,
-) -> Command {
+fn build_update_cmd(leaves: &[crate::schema::flatten::LeafArg<'_>], _schema: &Schema) -> Command {
     build_leaf_cmd("update", leaves, true)
 }
 
@@ -923,13 +934,11 @@ fn build_leaf_cmd(
 
 /// Build the `show` command.
 fn build_show_cmd() -> Command {
-    Command::new("show")
-        .about("show an entry")
-        .arg(
-            Arg::new("display_id")
-                .help("Display ID of the entry")
-                .required(true),
-        )
+    Command::new("show").about("show an entry").arg(
+        Arg::new("display_id")
+            .help("Display ID of the entry")
+            .required(true),
+    )
 }
 
 /// Build the `list` command with filter/sort/limit flags.
@@ -969,7 +978,9 @@ fn build_list_cmd(schema: &Schema) -> Command {
         .arg(
             Arg::new("sort")
                 .long("sort")
-                .help(format!("Order by column ascending. Valid columns: {cols_help}"))
+                .help(format!(
+                    "Order by column ascending. Valid columns: {cols_help}"
+                ))
                 .required(false),
         )
         .arg(
@@ -996,8 +1007,7 @@ fn build_schema_cmd() -> Command {
 fn is_reserved(name: &str) -> bool {
     matches!(
         name,
-        "id"
-            | "display-id"
+        "id" | "display-id"
             | "status"
             | "created-at"
             | "updated-at"

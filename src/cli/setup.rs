@@ -9,10 +9,10 @@
 /// A failure in any layer aborts subsequent layers and propagates the error (AC4.6).
 use anyhow::Result;
 
-use crate::cli::agents::{AgentsCmd, run as agents_run};
+use crate::cli::agents::{run as agents_run, AgentsCmd};
 use crate::cli::dynamic::BUNDLED_STORE_NAMES;
 use crate::cli::init;
-use crate::cli::skills::{SkillsCmd, run as skills_run};
+use crate::cli::skills::{run as skills_run, SkillsCmd};
 use crate::install;
 
 pub fn run(global: bool) -> Result<()> {
@@ -100,8 +100,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .subsec_nanos();
-        let tmp = std::env::temp_dir()
-            .join(format!("stores-setup-test-{}-{}", std::process::id(), ns));
+        let tmp =
+            std::env::temp_dir().join(format!("stores-setup-test-{}-{}", std::process::id(), ns));
         fs::create_dir_all(&tmp).unwrap();
 
         // Save original state
@@ -162,15 +162,30 @@ mod tests {
             // 5 skill files under .claude/skills/
             use crate::cli::skills::BUNDLED_SKILLS;
             for (name, _) in BUNDLED_SKILLS {
-                let p = tmp.join(".claude").join("skills").join(name).join("SKILL.md");
-                assert!(p.exists(), "skill '{name}' should be installed at {}", p.display());
+                let p = tmp
+                    .join(".claude")
+                    .join("skills")
+                    .join(name)
+                    .join("SKILL.md");
+                assert!(
+                    p.exists(),
+                    "skill '{name}' should be installed at {}",
+                    p.display()
+                );
             }
 
             // 5 agent files under .claude/agents/
             use crate::cli::agents::BUNDLED_AGENTS;
             for (name, _) in BUNDLED_AGENTS {
-                let p = tmp.join(".claude").join("agents").join(format!("{name}.md"));
-                assert!(p.exists(), "agent '{name}' should be installed at {}", p.display());
+                let p = tmp
+                    .join(".claude")
+                    .join("agents")
+                    .join(format!("{name}.md"));
+                assert!(
+                    p.exists(),
+                    "agent '{name}' should be installed at {}",
+                    p.display()
+                );
             }
         });
     }

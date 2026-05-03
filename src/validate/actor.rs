@@ -1,7 +1,10 @@
-use crate::schema::{actor::{Actor, InvokerCtx}, Field};
-use crate::validate::{EntryMap, ValidationError};
+use crate::schema::{
+    actor::{Actor, InvokerCtx},
+    Field,
+};
 use crate::validate::error::RuleKind;
 use crate::validate::required::lookup;
+use crate::validate::{EntryMap, ValidationError};
 
 /// Determine the effective actor for a field, falling back to the store default.
 fn effective_actor(field: &Field, default_actor: Option<Actor>) -> Option<Actor> {
@@ -61,10 +64,7 @@ pub fn check_transition_actor(
             rule: RuleKind::Actor,
             message: format!(
                 "transition '{}' requires actor '{}'; invoker is '{}'{}",
-                verb,
-                transition_actor,
-                invoker.actor,
-                remedy,
+                verb, transition_actor, invoker.actor, remedy,
             ),
         });
     }
@@ -87,14 +87,9 @@ pub fn check_transition_actor(
 ///   no human or agent invoker can satisfy this. Token irrelevant.
 fn actor_allowed(invoker: Actor, required: Actor, token_valid: bool) -> bool {
     match required {
-        Actor::Human => {
-            invoker == Actor::Human
-                || (invoker == Actor::AiWithHuman && token_valid)
-        }
+        Actor::Human => invoker == Actor::Human || (invoker == Actor::AiWithHuman && token_valid),
         Actor::AiAutonomous => invoker == Actor::AiAutonomous,
-        Actor::AiWithHuman => {
-            invoker == Actor::Human || invoker == Actor::AiWithHuman
-        }
+        Actor::AiWithHuman => invoker == Actor::Human || invoker == Actor::AiWithHuman,
         Actor::Framework => invoker == Actor::Framework,
     }
 }
@@ -121,7 +116,9 @@ fn invoker_remedy(invoker: Actor, required: Actor) -> String {
     // name it explicitly so the operator sees both routes.
     // For `ai_with_human`, a `human` invoker is also accepted — name both.
     let flag_clause = match required {
-        Actor::Human => "pass --invoker human, or --invoker ai_with_human --approve-token <T>".to_string(),
+        Actor::Human => {
+            "pass --invoker human, or --invoker ai_with_human --approve-token <T>".to_string()
+        }
         Actor::AiAutonomous => "pass --invoker ai_autonomous".to_string(),
         Actor::AiWithHuman => "pass --invoker ai_with_human (or --invoker human)".to_string(),
         Actor::Framework => unreachable!(), // handled above
@@ -162,7 +159,10 @@ mod tests {
     }
 
     fn ctx_token(actor: Actor) -> InvokerCtx {
-        InvokerCtx { actor, token_valid: true }
+        InvokerCtx {
+            actor,
+            token_valid: true,
+        }
     }
 
     // ---- check_actor tests ----
@@ -172,7 +172,14 @@ mod tests {
         let field = text_field_with_actor("answer", Some(Actor::Human));
         let entry = entry_with("answer", "yes");
         let mut errors = vec![];
-        check_actor(&field, &["answer".to_string()], &entry, ctx(Actor::Human), None, &mut errors);
+        check_actor(
+            &field,
+            &["answer".to_string()],
+            &entry,
+            ctx(Actor::Human),
+            None,
+            &mut errors,
+        );
         assert!(errors.is_empty());
     }
 
@@ -181,7 +188,14 @@ mod tests {
         let field = text_field_with_actor("answer", Some(Actor::Human));
         let entry = entry_with("answer", "yes");
         let mut errors = vec![];
-        check_actor(&field, &["answer".to_string()], &entry, ctx(Actor::AiAutonomous), None, &mut errors);
+        check_actor(
+            &field,
+            &["answer".to_string()],
+            &entry,
+            ctx(Actor::AiAutonomous),
+            None,
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].rule, RuleKind::Actor);
         let msg = &errors[0].message;
@@ -197,8 +211,18 @@ mod tests {
         let field = text_field_with_actor("answer", Some(Actor::Human));
         let entry: BTreeMap<String, serde_json::Value> = BTreeMap::new();
         let mut errors = vec![];
-        check_actor(&field, &["answer".to_string()], &entry, ctx(Actor::AiAutonomous), None, &mut errors);
-        assert!(errors.is_empty(), "absent fields must not trigger actor errors");
+        check_actor(
+            &field,
+            &["answer".to_string()],
+            &entry,
+            ctx(Actor::AiAutonomous),
+            None,
+            &mut errors,
+        );
+        assert!(
+            errors.is_empty(),
+            "absent fields must not trigger actor errors"
+        );
     }
 
     #[test]
@@ -206,7 +230,14 @@ mod tests {
         let field = text_field_with_actor("title", None);
         let entry = entry_with("title", "foo");
         let mut errors = vec![];
-        check_actor(&field, &["title".to_string()], &entry, ctx(Actor::AiAutonomous), None, &mut errors);
+        check_actor(
+            &field,
+            &["title".to_string()],
+            &entry,
+            ctx(Actor::AiAutonomous),
+            None,
+            &mut errors,
+        );
         assert!(errors.is_empty());
     }
 
@@ -233,11 +264,31 @@ mod tests {
         let field = text_field_with_actor("notes", Some(Actor::AiWithHuman));
         let entry = entry_with("notes", "text");
         let mut errors = vec![];
-        check_actor(&field, &["notes".to_string()], &entry, ctx(Actor::Human), None, &mut errors);
-        assert!(errors.is_empty(), "human should be allowed for ai_with_human");
+        check_actor(
+            &field,
+            &["notes".to_string()],
+            &entry,
+            ctx(Actor::Human),
+            None,
+            &mut errors,
+        );
+        assert!(
+            errors.is_empty(),
+            "human should be allowed for ai_with_human"
+        );
         let mut errors2 = vec![];
-        check_actor(&field, &["notes".to_string()], &entry, ctx(Actor::AiWithHuman), None, &mut errors2);
-        assert!(errors2.is_empty(), "ai_with_human invoker should be allowed for ai_with_human");
+        check_actor(
+            &field,
+            &["notes".to_string()],
+            &entry,
+            ctx(Actor::AiWithHuman),
+            None,
+            &mut errors2,
+        );
+        assert!(
+            errors2.is_empty(),
+            "ai_with_human invoker should be allowed for ai_with_human"
+        );
     }
 
     #[test]
@@ -245,9 +296,24 @@ mod tests {
         let field = text_field_with_actor("notes", Some(Actor::AiWithHuman));
         let entry = entry_with("notes", "text");
         let mut errors = vec![];
-        check_actor(&field, &["notes".to_string()], &entry, ctx(Actor::AiAutonomous), None, &mut errors);
-        assert_eq!(errors.len(), 1, "bare ai_autonomous must be rejected for ai_with_human field");
-        assert!(errors[0].message.contains("requires actor 'ai_with_human'"), "msg: {}", errors[0].message);
+        check_actor(
+            &field,
+            &["notes".to_string()],
+            &entry,
+            ctx(Actor::AiAutonomous),
+            None,
+            &mut errors,
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "bare ai_autonomous must be rejected for ai_with_human field"
+        );
+        assert!(
+            errors[0].message.contains("requires actor 'ai_with_human'"),
+            "msg: {}",
+            errors[0].message
+        );
     }
 
     #[test]
@@ -256,17 +322,41 @@ mod tests {
         let entry = entry_with("current_phase", "1");
         // Human invoker must be rejected
         let mut errors = vec![];
-        check_actor(&field, &["current_phase".to_string()], &entry, ctx(Actor::Human), None, &mut errors);
+        check_actor(
+            &field,
+            &["current_phase".to_string()],
+            &entry,
+            ctx(Actor::Human),
+            None,
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("framework"));
         // AiAutonomous invoker must be rejected
         let mut errors2 = vec![];
-        check_actor(&field, &["current_phase".to_string()], &entry, ctx(Actor::AiAutonomous), None, &mut errors2);
+        check_actor(
+            &field,
+            &["current_phase".to_string()],
+            &entry,
+            ctx(Actor::AiAutonomous),
+            None,
+            &mut errors2,
+        );
         assert_eq!(errors2.len(), 1);
         // Framework invoker must pass
         let mut errors3 = vec![];
-        check_actor(&field, &["current_phase".to_string()], &entry, ctx(Actor::Framework), None, &mut errors3);
-        assert!(errors3.is_empty(), "Framework invoker must satisfy framework field");
+        check_actor(
+            &field,
+            &["current_phase".to_string()],
+            &entry,
+            ctx(Actor::Framework),
+            None,
+            &mut errors3,
+        );
+        assert!(
+            errors3.is_empty(),
+            "Framework invoker must satisfy framework field"
+        );
     }
 
     // ---- check_transition_actor tests ----
@@ -274,7 +364,12 @@ mod tests {
     #[test]
     fn transition_actor_mismatch_fires() {
         let mut errors = vec![];
-        check_transition_actor("answer", Actor::Human, ctx(Actor::AiAutonomous), &mut errors);
+        check_transition_actor(
+            "answer",
+            Actor::Human,
+            ctx(Actor::AiAutonomous),
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         let msg = &errors[0].message;
         assert!(msg.contains("transition 'answer'"), "msg: {msg}");
@@ -287,12 +382,20 @@ mod tests {
     #[test]
     fn transition_remedy_for_ai_autonomous_required_does_not_suggest_human() {
         let mut errors = vec![];
-        check_transition_actor("claim", Actor::AiAutonomous, ctx(Actor::AiWithHuman), &mut errors);
+        check_transition_actor(
+            "claim",
+            Actor::AiAutonomous,
+            ctx(Actor::AiWithHuman),
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         let msg = &errors[0].message;
         assert!(msg.contains("requires actor 'ai_autonomous'"), "msg: {msg}");
         assert!(msg.contains("pass --invoker ai_autonomous"), "msg: {msg}");
-        assert!(!msg.contains("pass --invoker human"), "msg must NOT suggest human: {msg}");
+        assert!(
+            !msg.contains("pass --invoker human"),
+            "msg must NOT suggest human: {msg}"
+        );
     }
 
     #[test]
@@ -300,11 +403,21 @@ mod tests {
         let field = text_field_with_actor("notes", Some(Actor::AiWithHuman));
         let entry = entry_with("notes", "text");
         let mut errors = vec![];
-        check_actor(&field, &["notes".to_string()], &entry, ctx(Actor::AiAutonomous), None, &mut errors);
+        check_actor(
+            &field,
+            &["notes".to_string()],
+            &entry,
+            ctx(Actor::AiAutonomous),
+            None,
+            &mut errors,
+        );
         assert_eq!(errors.len(), 1);
         let msg = &errors[0].message;
         assert!(msg.contains("--invoker ai_with_human"), "msg: {msg}");
-        assert!(msg.contains("--invoker human"), "msg should also mention human as alternative: {msg}");
+        assert!(
+            msg.contains("--invoker human"),
+            "msg should also mention human as alternative: {msg}"
+        );
     }
 
     #[test]
@@ -314,13 +427,21 @@ mod tests {
         assert_eq!(errors.len(), 1);
         let msg = &errors[0].message;
         assert!(msg.contains("framework engine"), "msg: {msg}");
-        assert!(!msg.contains("--invoker"), "framework remedy must not suggest --invoker: {msg}");
+        assert!(
+            !msg.contains("--invoker"),
+            "framework remedy must not suggest --invoker: {msg}"
+        );
     }
 
     #[test]
     fn transition_actor_match_passes() {
         let mut errors = vec![];
-        check_transition_actor("close", Actor::AiAutonomous, ctx(Actor::AiAutonomous), &mut errors);
+        check_transition_actor(
+            "close",
+            Actor::AiAutonomous,
+            ctx(Actor::AiAutonomous),
+            &mut errors,
+        );
         assert!(errors.is_empty());
     }
 
@@ -334,10 +455,17 @@ mod tests {
         let entry = entry_with("answer", "yes");
         let mut errors = vec![];
         check_actor(
-            &field, &["answer".to_string()], &entry,
-            ctx_token(Actor::AiWithHuman), None, &mut errors,
+            &field,
+            &["answer".to_string()],
+            &entry,
+            ctx_token(Actor::AiWithHuman),
+            None,
+            &mut errors,
         );
-        assert!(errors.is_empty(), "ai_with_human + valid token must satisfy actor:human");
+        assert!(
+            errors.is_empty(),
+            "ai_with_human + valid token must satisfy actor:human"
+        );
     }
 
     /// AC3.1 (b): actor:human + invoker=ai_with_human + token_valid=false → rejected.
@@ -348,10 +476,18 @@ mod tests {
         let entry = entry_with("answer", "yes");
         let mut errors = vec![];
         check_actor(
-            &field, &["answer".to_string()], &entry,
-            ctx(Actor::AiWithHuman), None, &mut errors,
+            &field,
+            &["answer".to_string()],
+            &entry,
+            ctx(Actor::AiWithHuman),
+            None,
+            &mut errors,
         );
-        assert_eq!(errors.len(), 1, "ai_with_human without token must NOT satisfy actor:human");
+        assert_eq!(
+            errors.len(),
+            1,
+            "ai_with_human without token must NOT satisfy actor:human"
+        );
         assert!(errors[0].message.contains("requires actor 'human'"));
     }
 
@@ -363,10 +499,18 @@ mod tests {
         let entry = entry_with("answer", "yes");
         let mut errors = vec![];
         check_actor(
-            &field, &["answer".to_string()], &entry,
-            ctx_token(Actor::AiAutonomous), None, &mut errors,
+            &field,
+            &["answer".to_string()],
+            &entry,
+            ctx_token(Actor::AiAutonomous),
+            None,
+            &mut errors,
         );
-        assert_eq!(errors.len(), 1, "ai_autonomous + token must STILL be rejected for actor:human");
+        assert_eq!(
+            errors.len(),
+            1,
+            "ai_autonomous + token must STILL be rejected for actor:human"
+        );
         assert!(errors[0].message.contains("requires actor 'human'"));
     }
 
@@ -377,10 +521,17 @@ mod tests {
         let entry = entry_with("answer", "yes");
         let mut errors = vec![];
         check_actor(
-            &field, &["answer".to_string()], &entry,
-            ctx(Actor::Human), None, &mut errors,
+            &field,
+            &["answer".to_string()],
+            &entry,
+            ctx(Actor::Human),
+            None,
+            &mut errors,
         );
-        assert!(errors.is_empty(), "human invoker preserves prior behaviour without token");
+        assert!(
+            errors.is_empty(),
+            "human invoker preserves prior behaviour without token"
+        );
     }
 
     /// AC3.1 (e): actor:ai_autonomous + token_valid=true → still rejected for non-autonomous.
@@ -391,10 +542,18 @@ mod tests {
         let entry = entry_with("internal", "x");
         let mut errors = vec![];
         check_actor(
-            &field, &["internal".to_string()], &entry,
-            ctx_token(Actor::AiWithHuman), None, &mut errors,
+            &field,
+            &["internal".to_string()],
+            &entry,
+            ctx_token(Actor::AiWithHuman),
+            None,
+            &mut errors,
         );
-        assert_eq!(errors.len(), 1, "token does NOT unlock actor:ai_autonomous from ai_with_human");
+        assert_eq!(
+            errors.len(),
+            1,
+            "token does NOT unlock actor:ai_autonomous from ai_with_human"
+        );
     }
 
     /// AC3.1 (f): remedy for actor:human mentions both `--invoker human` AND `--approve-token`.
@@ -404,28 +563,55 @@ mod tests {
         let entry = entry_with("answer", "yes");
         let mut errors = vec![];
         check_actor(
-            &field, &["answer".to_string()], &entry,
-            ctx(Actor::AiAutonomous), None, &mut errors,
+            &field,
+            &["answer".to_string()],
+            &entry,
+            ctx(Actor::AiAutonomous),
+            None,
+            &mut errors,
         );
         assert_eq!(errors.len(), 1);
         let msg = &errors[0].message;
-        assert!(msg.contains("--invoker human"), "remedy must name --invoker human; got: {msg}");
-        assert!(msg.contains("--approve-token"), "remedy must name --approve-token; got: {msg}");
+        assert!(
+            msg.contains("--invoker human"),
+            "remedy must name --invoker human; got: {msg}"
+        );
+        assert!(
+            msg.contains("--approve-token"),
+            "remedy must name --approve-token; got: {msg}"
+        );
     }
 
     /// Mirror of (a) for transitions: actor:human transition + ai_with_human + token → allowed.
     #[test]
     fn human_transition_allows_ai_with_human_when_token_valid() {
         let mut errors = vec![];
-        check_transition_actor("confirm", Actor::Human, ctx_token(Actor::AiWithHuman), &mut errors);
-        assert!(errors.is_empty(), "ai_with_human + valid token must satisfy actor:human transition");
+        check_transition_actor(
+            "confirm",
+            Actor::Human,
+            ctx_token(Actor::AiWithHuman),
+            &mut errors,
+        );
+        assert!(
+            errors.is_empty(),
+            "ai_with_human + valid token must satisfy actor:human transition"
+        );
     }
 
     /// Mirror of (c) for transitions: actor:human transition + ai_autonomous + token → still rejected.
     #[test]
     fn human_transition_rejects_ai_autonomous_even_with_valid_token() {
         let mut errors = vec![];
-        check_transition_actor("confirm", Actor::Human, ctx_token(Actor::AiAutonomous), &mut errors);
-        assert_eq!(errors.len(), 1, "token must NOT unlock ai_autonomous on actor:human transition");
+        check_transition_actor(
+            "confirm",
+            Actor::Human,
+            ctx_token(Actor::AiAutonomous),
+            &mut errors,
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "token must NOT unlock ai_autonomous on actor:human transition"
+        );
     }
 }
