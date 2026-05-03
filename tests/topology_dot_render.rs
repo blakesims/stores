@@ -1,7 +1,15 @@
-//! AC3.1: when `dot` is on PATH, `render_via_dot` exercises the live
-//! production spawn path and produces non-empty UTF-8 output. Gated on
-//! `dot -V` succeeding so CI without graphviz still passes (fallback is
-//! covered by the unit tests in src/cli/topology.rs).
+//! AC3.1: when `graph-easy` is on PATH, `render_via_dot` exercises the
+//! live production spawn path and produces non-empty UTF-8 output.
+//! Gated on `graph-easy --version` succeeding so CI without it still
+//! passes (fallback is covered by the unit tests in src/cli/topology.rs).
+//!
+//! L036: pre-fix this gated on `dot -V` and asserted the renderer (then
+//! `dot -Tutf8`) emitted boxart. `dot -Tutf8` is not a real graphviz
+//! format, so the live path failed silently — the gate skipped on
+//! hosts without graphviz, and on hosts WITH graphviz the test would
+//! have panicked at Fallback. The renderer is now `graph-easy
+//! --as=boxart` (Debian/Ubuntu pkg `libgraph-easy-perl`); the gate
+//! moves to match.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,9 +19,9 @@ use stores::cli::topology::{emit_dot, render_via_dot, Format, Opts, RenderOutcom
 use stores::manifest::{InstalledStore, Manifest};
 use stores::schema::{Schema, StoreScope};
 
-fn dot_on_path() -> bool {
-    std::process::Command::new("dot")
-        .arg("-V")
+fn graph_easy_on_path() -> bool {
+    std::process::Command::new("graph-easy")
+        .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -23,8 +31,8 @@ fn dot_on_path() -> bool {
 
 #[test]
 fn ac3_1_render_via_dot_produces_utf8_when_graphviz_installed() {
-    if !dot_on_path() {
-        eprintln!("skipping: graphviz `dot` not on PATH");
+    if !graph_easy_on_path() {
+        eprintln!("skipping: `graph-easy` not on PATH (apt install libgraph-easy-perl)");
         return;
     }
 

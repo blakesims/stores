@@ -404,13 +404,29 @@ pub struct DotResult {
 /// `ErrorKind::NotFound` to simulate a missing `dot` binary.
 pub type DotSpawner = fn(&str) -> std::io::Result<DotResult>;
 
-/// One-line note printed to stderr when the fallback path engages.
-pub const FALLBACK_NOTE: &str =
-    "note: 'dot' not found on PATH \u{2014} install graphviz (e.g. apt install graphviz) or use --format mermaid";
+/// One-line note printed to stderr when graph-easy is not on PATH.
+///
+/// L036: graphviz has no `dot -Tutf8` format. The in-terminal ASCII
+/// render is supplied by Perl's `graph-easy` (Debian/Ubuntu pkg
+/// `libgraph-easy-perl`), which reads dot source and emits boxart.
+pub const FALLBACK_NOTE_MISSING: &str =
+    "note: 'graph-easy' not found on PATH \u{2014} install it for ASCII art \
+     (e.g. apt install libgraph-easy-perl), or use --format mermaid / --format dot";
+
+/// One-line note printed to stderr when graph-easy ran but exited non-zero.
+pub const FALLBACK_NOTE_FAILED: &str =
+    "note: 'graph-easy' ran but failed; falling back to dot source \u{2014} \
+     try --format mermaid or report a bug";
+
+/// Back-compat alias kept for any external readers; prefer the
+/// reason-specific constants above.
+#[deprecated(note = "use FALLBACK_NOTE_MISSING or FALLBACK_NOTE_FAILED")]
+#[allow(dead_code)]
+pub const FALLBACK_NOTE: &str = FALLBACK_NOTE_MISSING;
 
 pub fn real_dot_spawner(dot_source: &str) -> std::io::Result<DotResult> {
-    let mut child = Command::new("dot")
-        .args(["-Tutf8"])
+    let mut child = Command::new("graph-easy")
+        .args(["--as=boxart"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -476,9 +492,12 @@ pub fn run(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts: Opts) -
             let source = emit_dot(manifest, schemas, &opts);
             match render_via_dot(&source) {
                 RenderOutcome::Rendered(s) => print!("{s}"),
-                RenderOutcome::Fallback { source, reason: _ } => {
+                RenderOutcome::Fallback { source, reason } => {
                     print!("{source}");
-                    eprintln!("{FALLBACK_NOTE}");
+                    match reason {
+                        FallbackReason::DotMissing => eprintln!("{FALLBACK_NOTE_MISSING}"),
+                        FallbackReason::DotFailed(_) => eprintln!("{FALLBACK_NOTE_FAILED}"),
+                    }
                 }
             }
         }
@@ -636,11 +655,14 @@ mod tests {
     }
 
     /// AC3.2 surface check: the install-hint constant carries both pointers
-    /// the user needs (apt package + mermaid alternative).
+    /// the user needs (apt package + mermaid alternative). L036 swapped
+    /// the renderer from `dot -Tutf8` (no such format in graphviz) to
+    /// `graph-easy --as=boxart` (Perl libgraph-easy-perl).
     #[test]
     fn fallback_note_mentions_install_and_mermaid_alternative() {
-        assert!(FALLBACK_NOTE.contains("apt install graphviz"));
-        assert!(FALLBACK_NOTE.contains("--format mermaid"));
+        assert!(FALLBACK_NOTE_MISSING.contains("libgraph-easy-perl"));
+        assert!(FALLBACK_NOTE_MISSING.contains("--format mermaid"));
+        assert!(FALLBACK_NOTE_FAILED.contains("--format mermaid"));
     }
 
     /// Non-zero exit from the spawner is also a fallback (not an error).

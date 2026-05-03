@@ -97,10 +97,10 @@ stores tasks drive --auto --claude-code
 
 ### Topology
 
-`stores topology` prints a static schematic of the installed stores: cross-store soft-FK edges (Z0), per-store state machines (Z1), and the tasks workflow firing order (Z2). Default `--format auto` shells out to `dot -Tutf8` for an ASCII render, falling back to raw dot source with a one-line install hint when graphviz is missing.
+`stores topology` prints a static schematic of the installed stores: cross-store soft-FK edges (Z0), per-store state machines (Z1), and the tasks workflow firing order (Z2). Default `--format auto` shells out to `graph-easy --as=boxart` (Debian/Ubuntu pkg `libgraph-easy-perl`) for an in-terminal ASCII render, falling back to raw dot source with a one-line install hint when graph-easy is missing.
 
 ```bash
-stores topology                         # auto: dot -Tutf8 render, or dot source + hint
+stores topology                         # auto: graph-easy ASCII render, or dot source + hint
 stores topology --format dot            # raw graphviz source
 stores topology --format mermaid        # stateDiagram-v2 for markdown embedding
 stores topology --store tasks           # filter Z1/Z2 to one store; Z0 still shows full graph
