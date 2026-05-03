@@ -100,6 +100,11 @@ fn main() -> Result<()> {
             };
             auth_run(cmd)?;
         }
+        Some(("watch", sub)) => {
+            let interval_secs = sub.get_one::<f64>("interval").copied().unwrap_or(1.0);
+            let interval_ms = (interval_secs * 1000.0).max(100.0) as u64;
+            cli::watch::run(interval_ms)?;
+        }
         Some(("skills", sub)) => {
             use cli::skills::{SkillsCmd, run as skills_run};
             let cmd = match sub.subcommand() {

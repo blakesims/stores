@@ -178,6 +178,18 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .about("Decrypt and print the approval token (prompts for passphrase / hardware tap)"),
                 ),
         )
+        // Watch subcommand — POC live dashboard
+        .subcommand(
+            Command::new("watch")
+                .about("Live-tail the substrate: tasks + observations, refreshing in place (POC)")
+                .arg(
+                    Arg::new("interval")
+                        .long("interval")
+                        .help("Refresh interval in seconds (default 1.0)")
+                        .value_parser(clap::value_parser!(f64))
+                        .required(false),
+                ),
+        )
         // Agents subcommand (parallel to skills; installs flat <name>.md files to .claude/agents/)
         .subcommand(
             Command::new("agents")

@@ -5,6 +5,7 @@ pub mod dynamic;
 pub mod init;
 pub mod setup;
 pub mod skills;
+pub mod watch;
 
 /// Shared test-only synchronization for env-var mutation across modules.
 /// Both `auth::tests` and `dispatch::tests` mutate `STORES_TOKEN_DIR` and
