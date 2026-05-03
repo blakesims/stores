@@ -164,6 +164,18 @@ struct TaskRow {
 /// Hardcoded here for the POC; promote to a schema read when this graduates.
 const MAX_CYCLES_DISPLAY: i64 = 3;
 
+// T015 P1: phase-box + cycle-dot glyphs.
+const GLYPH_DONE: char = '▰';
+const GLYPH_CURRENT_EXEC: char = '▮';
+const GLYPH_CURRENT_REVIEW: char = '◐';
+const GLYPH_FUTURE: char = '▱';
+const GLYPH_DOT_BURNED: char = '●';
+const GLYPH_DOT_AVAILABLE: char = '·';
+
+/// Visible-column budget for the status column. Fits 6 boxes + spacer + 3 dots
+/// (10) with headroom for the longest non-cycling label, "reviewing plan" (14).
+const STATUS_COL_WIDTH: usize = 16;
+
 #[derive(Debug)]
 struct ObsRow {
     display_id: String,
@@ -217,7 +229,6 @@ fn query_observations(conn: &Connection) -> Result<Vec<ObsRow>> {
 // ---------------------------------------------------------------------------
 
 fn render_task_line(t: &TaskRow) -> String {
-    let color = task_status_color(&t.status);
     let claimed = t
         .claimed_by
         .as_deref()
@@ -227,45 +238,143 @@ fn render_task_line(t: &TaskRow) -> String {
     let title = truncate(&t.title, 50);
     let updated = clock_suffix(&t.updated_at);
     let status_str = format_task_status(t);
+    let pad = STATUS_COL_WIDTH.saturating_sub(visible_width(&status_str));
+    let pad_str = " ".repeat(pad);
     format!(
-        "  {ANSI_CYAN}{:<5}{ANSI_RESET} {color}{:<19}{ANSI_RESET} {:<50}{} {ANSI_DIM}{updated}{ANSI_RESET}\n",
-        t.display_id, status_str, title, claimed
+        "  {ANSI_CYAN}{:<5}{ANSI_RESET} {status_str}{pad_str} {:<50}{claimed} {ANSI_DIM}{updated}{ANSI_RESET}\n",
+        t.display_id, title
     )
 }
 
-/// Compact status renderer with phase/cycle info on the cycling states.
+/// Compact status renderer.
 ///
-/// Examples (matches user's spec):
-///   planning              → "planning"
-///   plan_review           → "reviewing plan"
-///   ready                 → "ready"
-///   executing P=2 N=4 C=1 → "execute P2/4 R1/3"
-///   code_review P=2 N=4 C=2 → "review P2/4 R2/3"
-///   in_review             → "in_review"
-///   complete/accepted/blocked/rejected → as-is
-///
-/// Falls back to bare state name when phase/cycle data is missing.
+/// For executing/code_review with full phase data, returns the phase-box +
+/// cycle-dot visualization (the current box self-colors via embedded ANSI;
+/// other boxes/dots remain default-color). Falls back to the legacy text
+/// format when phase data is partial, and to a bare colored state name
+/// otherwise.
 fn format_task_status(t: &TaskRow) -> String {
+    let bare_color = task_status_color(&t.status);
+    let wrap = |s: &str| format!("{bare_color}{s}{ANSI_RESET}");
     match t.status.as_str() {
-        "plan_review" => "reviewing plan".to_string(),
+        "plan_review" => wrap("reviewing plan"),
         "executing" | "code_review" => {
-            let verb = if t.status == "executing" {
-                "execute"
-            } else {
-                "review "
-            };
             match (t.current_phase, t.total_phases, t.current_cycle) {
-                (Some(p), Some(n), Some(c)) => {
-                    format!("{verb} P{p}/{n} R{c}/{MAX_CYCLES_DISPLAY}")
+                (Some(p), Some(n), Some(c)) if n > 0 => {
+                    let in_review = t.status == "code_review";
+                    let color = current_box_color(&t.status, c);
+                    let boxes = render_phase_boxes(p, n, in_review, color);
+                    let dots = render_cycle_dots(c, MAX_CYCLES_DISPLAY);
+                    format!("{boxes} {dots}")
                 }
                 (Some(p), None, Some(c)) => {
-                    format!("{verb} P{p}/? R{c}/{MAX_CYCLES_DISPLAY}")
+                    let verb = if t.status == "executing" { "execute" } else { "review " };
+                    wrap(&format!("{verb} P{p}/? R{c}/{MAX_CYCLES_DISPLAY}"))
                 }
-                _ => t.status.clone(),
+                _ => wrap(&t.status),
             }
         }
-        other => other.to_string(),
+        other => wrap(other),
     }
+}
+
+/// Render the phase-box row. `current_phase` is 1-indexed. Only the current
+/// box is wrapped in ANSI color; other boxes use the terminal default.
+/// For total_phases > 6, truncates to `<3 boxes>…<current><next?>`.
+fn render_phase_boxes(
+    current_phase: i64,
+    total_phases: i64,
+    in_code_review: bool,
+    color: &'static str,
+) -> String {
+    let current_glyph = if in_code_review {
+        GLYPH_CURRENT_REVIEW
+    } else {
+        GLYPH_CURRENT_EXEC
+    };
+    let glyph_for = |i: i64| -> char {
+        if i < current_phase {
+            GLYPH_DONE
+        } else if i == current_phase {
+            current_glyph
+        } else {
+            GLYPH_FUTURE
+        }
+    };
+    let mut out = String::new();
+    let push_box = |out: &mut String, i: i64| {
+        let g = glyph_for(i);
+        if i == current_phase {
+            out.push_str(color);
+            out.push(g);
+            out.push_str(ANSI_RESET);
+        } else {
+            out.push(g);
+        }
+    };
+    if total_phases <= 6 {
+        for i in 1..=total_phases {
+            push_box(&mut out, i);
+        }
+    } else {
+        for i in 1..=3 {
+            push_box(&mut out, i);
+        }
+        out.push('…');
+        push_box(&mut out, current_phase);
+        if current_phase < total_phases {
+            out.push(GLYPH_FUTURE);
+        }
+    }
+    out
+}
+
+/// Render the cycle-dot row: `max_cycles` chars total, one ● per cycle past 1
+/// (clamped to max_cycles), · for remaining slots.
+fn render_cycle_dots(current_cycle: i64, max_cycles: i64) -> String {
+    let burned = (current_cycle - 1).clamp(0, max_cycles);
+    let mut out = String::new();
+    for i in 0..max_cycles {
+        if i < burned {
+            out.push(GLYPH_DOT_BURNED);
+        } else {
+            out.push(GLYPH_DOT_AVAILABLE);
+        }
+    }
+    out
+}
+
+/// Color for the CURRENT box. The blocked/in_review branch is currently dead
+/// (those statuses don't enter the cycling renderer) but kept to honor the
+/// done-when wording so future flag-flips Just Work.
+fn current_box_color(task_status: &str, current_cycle: i64) -> &'static str {
+    if current_cycle > MAX_CYCLES_DISPLAY {
+        ANSI_RED
+    } else if task_status == "blocked" || task_status == "in_review" {
+        ANSI_YELLOW
+    } else {
+        ANSI_GREEN
+    }
+}
+
+/// Count visible columns in `s`, ignoring ANSI CSI escape sequences
+/// (`\x1b[...m`). Treats every other char as one column — fine for our
+/// monospace single-cell glyphs (▰▮◐▱●·).
+fn visible_width(s: &str) -> usize {
+    let mut count = 0usize;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c2 in chars.by_ref() {
+                if c2 == 'm' {
+                    break;
+                }
+            }
+        } else {
+            count += 1;
+        }
+    }
+    count
 }
 
 fn render_obs_line(o: &ObsRow) -> String {
