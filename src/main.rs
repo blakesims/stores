@@ -169,7 +169,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             if let Some(("backfill", _)) = sub.subcommand() {
-                handlers::agents_run::run_backfill_placeholder()?;
+                handlers::agents_backfill::run_backfill()?;
                 return Ok(());
             }
             let cmd = match sub.subcommand() {

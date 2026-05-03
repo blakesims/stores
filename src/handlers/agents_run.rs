@@ -102,11 +102,6 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn run_backfill_placeholder() -> Result<()> {
-    eprintln!("agents backfill: not yet implemented (Phase 7).");
-    Ok(())
-}
-
 /// Sleep `ms` milliseconds in 50ms slices, returning early if SHUTDOWN is set.
 fn sleep_interruptible(ms: u64) {
     let mut remaining = ms;
