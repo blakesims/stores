@@ -136,6 +136,37 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         ),
                 ),
         )
+        // Auth subcommand: approval-token init/show
+        .subcommand(
+            Command::new("auth")
+                .about("Manage the approval token for chat-mediated human assent")
+                .subcommand(
+                    Command::new("init")
+                        .about("Generate and age-encrypt the approval token (refuses raw plaintext age keys)")
+                        .arg(
+                            Arg::new("recipient")
+                                .long("recipient")
+                                .help("age recipient (age1...); auto-discovered from --identity if omitted")
+                                .required(false),
+                        )
+                        .arg(
+                            Arg::new("identity")
+                                .long("identity")
+                                .help("Path to age identity file (default: ~/.config/sops/age/keys.txt)")
+                                .required(false),
+                        )
+                        .arg(
+                            Arg::new("force")
+                                .long("force")
+                                .action(ArgAction::SetTrue)
+                                .help("Overwrite existing approve.token.{age,hash}"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("show")
+                        .about("Decrypt and print the approval token (prompts for passphrase / hardware tap)"),
+                ),
+        )
         // Agents subcommand (parallel to skills; installs flat <name>.md files to .claude/agents/)
         .subcommand(
             Command::new("agents")

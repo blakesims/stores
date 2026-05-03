@@ -78,6 +78,28 @@ fn main() -> Result<()> {
             let global = *sub.get_one::<bool>("global").unwrap_or(&false);
             cli::setup::run(global)?;
         }
+        Some(("auth", sub)) => {
+            use cli::auth::{run as auth_run, AuthCmd};
+            let cmd = match sub.subcommand() {
+                Some(("init", isub)) => AuthCmd::Init {
+                    recipient: isub.get_one::<String>("recipient").cloned(),
+                    identity: isub
+                        .get_one::<String>("identity")
+                        .map(std::path::PathBuf::from),
+                    force: *isub.get_one::<bool>("force").unwrap_or(&false),
+                },
+                Some(("show", _)) => AuthCmd::Show,
+                _ => {
+                    let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
+                    if let Some(auth_cmd) = cmd2.find_subcommand_mut("auth") {
+                        auth_cmd.print_help()?;
+                        println!();
+                    }
+                    return Ok(());
+                }
+            };
+            auth_run(cmd)?;
+        }
         Some(("skills", sub)) => {
             use cli::skills::{SkillsCmd, run as skills_run};
             let cmd = match sub.subcommand() {

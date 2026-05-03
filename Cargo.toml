@@ -19,6 +19,10 @@ thiserror = "1"
 handlebars = "5"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+subtle = "2"
+getrandom = "0.2"
+hex = "0.4"
 jsonschema = { version = "0.18", optional = true }
 
 [features]
