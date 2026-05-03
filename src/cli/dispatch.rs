@@ -453,4 +453,104 @@ mod tests {
         // env detection always returns Ok — we just check it doesn't error
         assert!(detect_actor(&m).is_ok());
     }
+
+    // ---- Phase 2: --approve-token plumbing ----
+
+    use sha2::{Digest, Sha256};
+    use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn matches_with_token(invoker: Option<&str>, token: Option<&str>) -> ArgMatches {
+        let cmd = Command::new("test")
+            .arg(Arg::new("invoker").long("invoker").required(false))
+            .arg(Arg::new("approve-token").long("approve-token").required(false));
+        let mut argv: Vec<&str> = vec!["test"];
+        if let Some(v) = invoker {
+            argv.push("--invoker");
+            argv.push(v);
+        }
+        if let Some(t) = token {
+            argv.push("--approve-token");
+            argv.push(t);
+        }
+        cmd.get_matches_from(argv)
+    }
+
+    fn write_hash_for(token_dir: &std::path::Path, plaintext: &str) {
+        let mut h = Sha256::new();
+        h.update(plaintext.as_bytes());
+        std::fs::write(token_dir.join("approve.token.hash"), hex::encode(h.finalize())).unwrap();
+    }
+
+    fn unique_token_dir(tag: &str) -> std::path::PathBuf {
+        let ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!(
+            "stores-dispatch-{}-{}-{}",
+            tag,
+            std::process::id(),
+            ns
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// AC2.5: `--approve-token` absent → token_valid=false; behaviour identical to today.
+    #[test]
+    fn approve_token_absent_yields_token_valid_false() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let m = matches_with_token(Some("human"), None);
+        let ctx = detect_invoker(&m).unwrap();
+        assert_eq!(ctx.actor, Actor::Human);
+        assert!(!ctx.token_valid);
+    }
+
+    /// AC2.2: valid token → token_valid=true, no error from the token check.
+    #[test]
+    fn approve_token_valid_yields_token_valid_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tdir = unique_token_dir("valid");
+        let prev = std::env::var("STORES_TOKEN_DIR").ok();
+        std::env::set_var("STORES_TOKEN_DIR", &tdir);
+
+        let plaintext = "the-real-token-xyz";
+        write_hash_for(&tdir, plaintext);
+
+        let m = matches_with_token(Some("ai_with_human"), Some(plaintext));
+        let ctx = detect_invoker(&m).unwrap();
+        assert_eq!(ctx.actor, Actor::AiWithHuman);
+        assert!(ctx.token_valid);
+
+        match prev {
+            Some(v) => std::env::set_var("STORES_TOKEN_DIR", v),
+            None => std::env::remove_var("STORES_TOKEN_DIR"),
+        }
+    }
+
+    /// AC2.1: invalid token → bail with `invalid approval token` in the error.
+    #[test]
+    fn approve_token_invalid_bails_with_clear_error() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tdir = unique_token_dir("invalid");
+        let prev = std::env::var("STORES_TOKEN_DIR").ok();
+        std::env::set_var("STORES_TOKEN_DIR", &tdir);
+
+        write_hash_for(&tdir, "real-token");
+
+        let m = matches_with_token(Some("ai_with_human"), Some("wrong-token"));
+        let err = detect_invoker(&m).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid approval token"),
+            "error must contain 'invalid approval token'; got: {msg}"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("STORES_TOKEN_DIR", v),
+            None => std::env::remove_var("STORES_TOKEN_DIR"),
+        }
+    }
 }

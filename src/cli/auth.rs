@@ -587,6 +587,77 @@ fi
         );
     }
 
+    /// Phase 2 / Task 2.5(a): plaintext token whose sha256 matches the on-disk
+    /// hash returns true.
+    #[test]
+    fn verify_approve_token_matching_returns_true() {
+        let tdir = unique_dir("vatok");
+        with_env(
+            &[("STORES_TOKEN_DIR", tdir.to_str().unwrap())],
+            || {
+                let plaintext = "correct-horse-battery-staple";
+                let mut h = Sha256::new();
+                h.update(plaintext.as_bytes());
+                let hex_hash = hex::encode(h.finalize());
+                fs::write(tdir.join("approve.token.hash"), &hex_hash).unwrap();
+                assert!(verify_approve_token(plaintext));
+            },
+        );
+    }
+
+    /// Phase 2 / Task 2.5(b): wrong plaintext returns false.
+    #[test]
+    fn verify_approve_token_mismatching_returns_false() {
+        let tdir = unique_dir("vatok-bad");
+        with_env(
+            &[("STORES_TOKEN_DIR", tdir.to_str().unwrap())],
+            || {
+                let mut h = Sha256::new();
+                h.update(b"the-real-token");
+                fs::write(tdir.join("approve.token.hash"), hex::encode(h.finalize())).unwrap();
+                assert!(!verify_approve_token("not-the-real-token"));
+            },
+        );
+    }
+
+    /// Phase 2 / Task 2.5(c): missing hash file → false (never panics).
+    #[test]
+    fn verify_approve_token_missing_hash_returns_false() {
+        let tdir = unique_dir("vatok-miss");
+        with_env(
+            &[("STORES_TOKEN_DIR", tdir.to_str().unwrap())],
+            || {
+                // Note: NO hash file written.
+                assert!(!verify_approve_token("anything"));
+            },
+        );
+    }
+
+    /// Phase 2 / Task 2.5(d): equal-prefix-different-suffix smoke-tests the
+    /// constant-time path. (This does NOT prove timing-equality at the byte
+    /// level — that requires statistical timing analysis — but it confirms the
+    /// `subtle::ConstantTimeEq` code path is exercised and correctly returns
+    /// false when only the suffix differs.)
+    #[test]
+    fn verify_approve_token_equal_prefix_different_suffix_returns_false() {
+        let tdir = unique_dir("vatok-prefix");
+        with_env(
+            &[("STORES_TOKEN_DIR", tdir.to_str().unwrap())],
+            || {
+                let real = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; // 32 A's
+                let mut h = Sha256::new();
+                h.update(real.as_bytes());
+                fs::write(tdir.join("approve.token.hash"), hex::encode(h.finalize())).unwrap();
+
+                // Same prefix (first 28 chars), different last 4.
+                let attacker = "AAAAAAAAAAAAAAAAAAAAAAAAAAAABBBB";
+                assert!(!verify_approve_token(attacker));
+                // Sanity: real token still verifies.
+                assert!(verify_approve_token(real));
+            },
+        );
+    }
+
     #[test]
     fn auto_discovers_recipient_from_keys_txt() {
         let tdir = unique_dir("discover");
