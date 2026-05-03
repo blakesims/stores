@@ -407,18 +407,22 @@ pub fn emit_mermaid(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-#[allow(dead_code)] // `DotFailed`'s stderr payload is for diagnostics + tests.
 pub enum FallbackReason {
     DotMissing,
+    // The `String` payload is read by tests and available to future diagnostics;
+    // `run()` currently ignores it via `reason: _`.
+    #[allow(dead_code)]
     DotFailed(String),
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // `reason` is informational; `run()` ignores it but tests inspect it.
 pub enum RenderOutcome {
     Rendered(String),
     Fallback {
         source: String,
+        // `run()` ignores `reason` (prints the fixed install hint); tests
+        // pattern-match on it to verify the missing-vs-failed branch.
+        #[allow(dead_code)]
         reason: FallbackReason,
     },
 }
@@ -464,31 +468,27 @@ pub fn real_dot_spawner(dot_source: &str) -> std::io::Result<DotResult> {
 
 /// Pipe `dot_source` through `dot -Tutf8` (production) or a stubbed spawner
 /// (tests).  Missing-binary or non-zero-exit conditions degrade into a
-/// `Fallback` outcome carrying the original source — they are not errors.
-/// The outer `Result` is reserved for the (currently unreachable) case where
-/// we want to surface a non-spawn IO failure unchanged.
-pub fn render_via_dot_with(
-    spawner: DotSpawner,
-    dot_source: &str,
-) -> Result<RenderOutcome> {
+/// `Fallback` outcome carrying the original source — they are not errors,
+/// so the function is infallible.
+pub fn render_via_dot_with(spawner: DotSpawner, dot_source: &str) -> RenderOutcome {
     match spawner(dot_source) {
-        Ok(r) if r.success => Ok(RenderOutcome::Rendered(r.stdout)),
-        Ok(r) => Ok(RenderOutcome::Fallback {
+        Ok(r) if r.success => RenderOutcome::Rendered(r.stdout),
+        Ok(r) => RenderOutcome::Fallback {
             source: dot_source.to_string(),
             reason: FallbackReason::DotFailed(r.stderr),
-        }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RenderOutcome::Fallback {
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RenderOutcome::Fallback {
             source: dot_source.to_string(),
             reason: FallbackReason::DotMissing,
-        }),
-        Err(e) => Ok(RenderOutcome::Fallback {
+        },
+        Err(e) => RenderOutcome::Fallback {
             source: dot_source.to_string(),
             reason: FallbackReason::DotFailed(e.to_string()),
-        }),
+        },
     }
 }
 
-pub fn render_via_dot(dot_source: &str) -> Result<RenderOutcome> {
+pub fn render_via_dot(dot_source: &str) -> RenderOutcome {
     render_via_dot_with(real_dot_spawner, dot_source)
 }
 
@@ -514,7 +514,7 @@ pub fn run(
         }
         Format::Auto => {
             let source = emit_dot(manifest, schemas, &opts);
-            match render_via_dot(&source)? {
+            match render_via_dot(&source) {
                 RenderOutcome::Rendered(s) => print!("{s}"),
                 RenderOutcome::Fallback { source, reason: _ } => {
                     print!("{source}");
@@ -654,7 +654,7 @@ mod tests {
         fn missing_spawner(_src: &str) -> std::io::Result<DotResult> {
             Err(std::io::Error::from(std::io::ErrorKind::NotFound))
         }
-        let outcome = render_via_dot_with(missing_spawner, "digraph X {}").unwrap();
+        let outcome = render_via_dot_with(missing_spawner, "digraph X {}");
         match outcome {
             RenderOutcome::Fallback {
                 source,
@@ -687,7 +687,7 @@ mod tests {
                 stderr: "syntax error near line 1".into(),
             })
         }
-        let outcome = render_via_dot_with(failing_spawner, "digraph X {}").unwrap();
+        let outcome = render_via_dot_with(failing_spawner, "digraph X {}");
         match outcome {
             RenderOutcome::Fallback {
                 source,
@@ -710,7 +710,7 @@ mod tests {
                 stderr: String::new(),
             })
         }
-        let outcome = render_via_dot_with(ok_spawner, "digraph X {}").unwrap();
+        let outcome = render_via_dot_with(ok_spawner, "digraph X {}");
         match outcome {
             RenderOutcome::Rendered(s) => assert_eq!(s, "rendered ascii here"),
             other => panic!("expected Rendered, got {other:?}"),
