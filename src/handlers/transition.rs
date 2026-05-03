@@ -177,10 +177,15 @@ pub fn run_close_as_addressed(
         &tx,
         schema,
         row_id,
+        display_id,
+        current_status,
         &transition.to,
+        "close_as_addressed",
         &diff,
         &merged,
         invoker.actor,
+        None,
+        None,
     )?;
 
     tx.commit().context("close_as_addressed: commit tx")?;
@@ -300,10 +305,15 @@ pub(crate) fn run_in_tx(
         tx,
         schema,
         row_id,
+        display_id,
+        current_status,
         &transition.to,
+        verb,
         &diff,
         &merged,
         invoker.actor,
+        None,
+        None,
     )?;
 
     println!(
@@ -315,14 +325,21 @@ pub(crate) fn run_in_tx(
 
 /// Write the transition state change into the DB (inside a caller-supplied transaction).
 /// Used by both `run_in_tx` (CLI path) and submit handlers (engine path).
+/// Also inserts an audit row into `transition_history` (T014 P1).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_transition_write(
     tx: &Transaction,
     schema: &Schema,
     row_id: i64,
+    display_id: &str,
+    from_status: &str,
     new_status: &str,
+    verb: &str,
     diff: &crate::validate::EntryMap,
     merged: &crate::validate::EntryMap,
     invoker: Actor,
+    policy_ref: Option<&str>,
+    policies_hash: Option<&str>,
 ) -> Result<()> {
     let now = now_iso8601();
     let invoker_str = invoker.to_string();
@@ -334,7 +351,7 @@ pub(crate) fn execute_transition_write(
     ];
     let mut sql_values: Vec<rusqlite::types::Value> = vec![
         rusqlite::types::Value::Text(now),
-        rusqlite::types::Value::Text(invoker_str),
+        rusqlite::types::Value::Text(invoker_str.clone()),
         rusqlite::types::Value::Text(new_status.to_string()),
     ];
     let mut param_idx = 4usize;
@@ -403,6 +420,19 @@ pub(crate) fn execute_transition_write(
 
     tx.execute(&sql, rusqlite::params_from_iter(sql_values.iter()))
         .context("transition update row")?;
+
+    crate::db::insert_transition_history(
+        tx,
+        &schema.name,
+        row_id,
+        display_id,
+        from_status,
+        new_status,
+        verb,
+        &invoker_str,
+        policy_ref,
+        policies_hash,
+    )?;
 
     Ok(())
 }

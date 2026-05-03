@@ -79,7 +79,7 @@ fields:
       - {name: at, type: timestamp}
 
 lifecycle:
-  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected]
+  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected, deploy_blocked]
   initial_state: planning
   transitions:
     # planning → plan_review (submit-plan)
@@ -112,6 +112,11 @@ lifecycle:
 
     # blocked → ready (resume)
     - {from: blocked, to: ready, verb: resume, actor: ai_with_human}
+
+    # accepted → deploy_blocked (framework, fired by accept-merge agent on conflict)
+    - {from: accepted, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework}
+    # deploy_blocked → ready (resume after specialist intervention)
+    - {from: deploy_blocked, to: ready, verb: resume, actor: ai_with_human}
 
     # complete → in_review (framework on-entry follow-on)
     - {from: complete, to: in_review, verb: request_review, actor: framework}
@@ -160,6 +165,7 @@ workflow:
     code_review:
       - dispatch_agent: code_reviewer
     blocked: []
+    deploy_blocked: []
     complete:
       - transition_to: in_review
     in_review:

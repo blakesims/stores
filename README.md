@@ -137,6 +137,8 @@ digraph stores_topology {
 
 Edge labels use a single-letter actor marker (`A` ai_autonomous, `H+` ai_with_human, `H!` human, `F` framework) plus the verb. Colors map to the same actor classes (green / yellow / red / gray); pass `--no-icons` or set `NO_COLOR=1` for plain text codes.
 
+The tasks lifecycle also includes a `deploy_blocked` state reached via `accepted → deploy_blocked` (framework-fired by the autonomous flow engine when accept-merge hits a conflict) and resolvable via `resume` after specialist intervention.
+
 ## Install (manual)
 
 ```bash
