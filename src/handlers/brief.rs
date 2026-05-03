@@ -424,6 +424,160 @@ fields:
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // T016: Decision Matrix rendering in plan-reviewer brief.
+    // ---------------------------------------------------------------------------
+
+    fn render_plan_reviewer_brief_with_plan(plan: serde_json::Value) -> String {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+        use crate::render::{build_context, render_template};
+
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .expect("tasks schema");
+        let schema = Schema::from_yaml(tasks_yaml).unwrap();
+
+        let entry: crate::validate::EntryMap = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("display_id".to_string(), serde_json::json!("T001"));
+            m.insert("status".to_string(), serde_json::json!("plan_review"));
+            m.insert("title".to_string(), serde_json::json!("Test Task"));
+            m.insert("slug".to_string(), serde_json::json!("test-task"));
+            m.insert("current_phase".to_string(), serde_json::json!(1));
+            m.insert("current_cycle".to_string(), serde_json::json!(1));
+            m.insert(
+                "created_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert(
+                "updated_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert(
+                "contract".to_string(),
+                serde_json::json!({
+                    "done_when": "Feature X works end-to-end",
+                    "scope_in": "All API endpoints",
+                    "scope_out": "UI changes"
+                }),
+            );
+            m.insert("plan".to_string(), plan);
+            m.insert("plan_review_log".to_string(), serde_json::json!([]));
+            m.insert("cycles".to_string(), serde_json::json!([]));
+            m
+        };
+        let ctx = build_context(&schema, &entry);
+
+        let templates = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, t)| *t)
+            .expect("tasks templates");
+        let content = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/plan-reviewer-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("plan-reviewer template");
+        render_template(content, &ctx).expect("render")
+    }
+
+    #[test]
+    fn plan_reviewer_brief_renders_decision_matrix_with_three_entries() {
+        let plan = serde_json::json!({
+            "objective": "Implement the feature",
+            "phases": [
+                {"name": "Phase 1: Setup", "objective": "Configure", "tasks": [], "acceptance_criteria": [], "files": [], "dependencies": []}
+            ],
+            "decision_matrix": [
+                {
+                    "decision": "Storage backend choice",
+                    "options": ["sqlite", "postgres", "in-memory"],
+                    "chosen": "sqlite",
+                    "rationale": "Embedded zero-config fits single-user CLI."
+                },
+                {
+                    "decision": "Template engine selection",
+                    "options": ["handlebars", "tera"],
+                    "chosen": "handlebars",
+                    "rationale": "Already a dependency; familiar syntax."
+                },
+                {
+                    "decision": "Brief delivery channel",
+                    "options": ["stdin pipe", "tempfile path", "env var"],
+                    "chosen": "stdin pipe",
+                    "rationale": "Avoids tempfile cleanup; works on all platforms."
+                }
+            ]
+        });
+        let rendered = render_plan_reviewer_brief_with_plan(plan);
+
+        assert!(
+            rendered.contains("## Decision Matrix"),
+            "must contain Decision Matrix header: {rendered}"
+        );
+        for name in [
+            "Storage backend choice",
+            "Template engine selection",
+            "Brief delivery channel",
+        ] {
+            assert!(rendered.contains(name), "missing decision name {name}");
+        }
+        for chosen in ["sqlite", "handlebars", "stdin pipe"] {
+            assert!(
+                rendered.contains(chosen),
+                "missing chosen value {chosen}"
+            );
+        }
+        for rationale in [
+            "Embedded zero-config fits single-user CLI.",
+            "Already a dependency; familiar syntax.",
+            "Avoids tempfile cleanup; works on all platforms.",
+        ] {
+            assert!(
+                rendered.contains(rationale),
+                "missing rationale {rationale}"
+            );
+        }
+
+        // AC2.4: section ordering.
+        let cur = rendered.find("## Current Plan").expect("Current Plan");
+        let dm = rendered.find("## Decision Matrix").expect("Decision Matrix");
+        let prior = rendered
+            .find("## Prior Plan Reviews")
+            .expect("Prior Plan Reviews");
+        assert!(cur < dm, "Decision Matrix must come after Current Plan");
+        assert!(
+            dm < prior,
+            "Decision Matrix must come before Prior Plan Reviews"
+        );
+    }
+
+    #[test]
+    fn plan_reviewer_brief_omits_decision_matrix_when_absent() {
+        let plan = serde_json::json!({
+            "objective": "Implement the feature",
+            "phases": [
+                {"name": "Phase 1: Setup", "objective": "Configure", "tasks": [], "acceptance_criteria": [], "files": [], "dependencies": []}
+            ]
+        });
+        let rendered = render_plan_reviewer_brief_with_plan(plan);
+
+        assert!(
+            rendered.contains("(no decisions recorded)"),
+            "empty-state placeholder must render: {rendered}"
+        );
+        assert!(
+            !rendered.contains("{{"),
+            "rendered output must not contain literal handlebars markup"
+        );
+        assert!(
+            !rendered.contains("undefined"),
+            "rendered output must not contain 'undefined'"
+        );
+    }
+
     // find_next_agent helper test — kept for regression coverage.
     #[test]
     fn find_next_agent_returns_first_dispatch() {
