@@ -7,6 +7,40 @@ pub(crate) fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Generic, store-agnostic substrate tables. Created once at `stores init`.
+/// Currently: `transition_history` — one row per successful lifecycle transition
+/// (manual or automatic). policy_ref / policies_hash are NULL for manual paths;
+/// the autonomous flow engine fills them on policy-mediated transitions.
+pub const SUBSTRATE_DDL: &str = "\
+CREATE TABLE IF NOT EXISTS transition_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    store TEXT NOT NULL,
+    row_id INTEGER NOT NULL,
+    display_id TEXT NOT NULL,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    verb TEXT NOT NULL,
+    invoker TEXT NOT NULL,
+    policy_ref TEXT,
+    policies_hash TEXT,
+    occurred_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS dispatch_locks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    store TEXT NOT NULL,
+    row_id INTEGER NOT NULL,
+    display_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    transition_id INTEGER,
+    claimed_at TEXT NOT NULL,
+    claimed_by TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    last_status TEXT,
+    finished_at TEXT,
+    UNIQUE(store, row_id, agent_name)
+);
+";
+
 /// Reserved columns prepended to every generated table.
 /// Order is fixed for determinism.
 const RESERVED_COLUMNS: &[&str] = &[
@@ -157,7 +191,12 @@ pub fn ddl_for(schema: &Schema) -> String {
         .map(|c| format!("    {}", c.full_def))
         .collect::<Vec<_>>()
         .join(",\n");
-    format!("CREATE TABLE IF NOT EXISTS {table} (\n{col_block}\n);")
+
+    // Prepend the substrate-level DDL so any caller that runs `ddl_for(schema)`
+    // (production install path *and* every test that builds a fresh connection)
+    // gets the substrate `transition_history` table for free. Both blocks are
+    // idempotent (CREATE IF NOT EXISTS), so running them twice is a no-op.
+    format!("{SUBSTRATE_DDL}\nCREATE TABLE IF NOT EXISTS {table} (\n{col_block}\n);")
 }
 
 #[cfg(test)]
@@ -257,28 +296,31 @@ mod tests {
     fn ddl_snapshot() {
         let schema = Schema::from_yaml(ALL_TYPES_FIXTURE).unwrap();
         let ddl = ddl_for(&schema);
-        let expected = concat!(
-            "CREATE TABLE IF NOT EXISTS \"kitchen_sink\" (\n",
-            "    id INTEGER PRIMARY KEY AUTOINCREMENT,\n",
-            "    display_id TEXT UNIQUE NOT NULL,\n",
-            "    status TEXT NOT NULL,\n",
-            "    created_at TEXT,\n",
-            "    updated_at TEXT,\n",
-            "    created_by TEXT,\n",
-            "    updated_by TEXT,\n",
-            "    title TEXT,\n",
-            "    slug TEXT,\n",
-            "    count INTEGER,\n",
-            "    active INTEGER CHECK (active IN (0,1)),\n",
-            "    priority TEXT CHECK (priority IN ('low', 'medium', 'high')),\n",
-            "    ref_id TEXT,\n",
-            "    observed_at TEXT,\n",
-            "    tags TEXT,\n",
-            "    triage TEXT,\n",
-            "    contract TEXT,\n",
-            "    details TEXT,\n",
-            "    metadata TEXT\n",
-            ");"
+        let expected = format!(
+            "{SUBSTRATE_DDL}\n{}",
+            concat!(
+                "CREATE TABLE IF NOT EXISTS \"kitchen_sink\" (\n",
+                "    id INTEGER PRIMARY KEY AUTOINCREMENT,\n",
+                "    display_id TEXT UNIQUE NOT NULL,\n",
+                "    status TEXT NOT NULL,\n",
+                "    created_at TEXT,\n",
+                "    updated_at TEXT,\n",
+                "    created_by TEXT,\n",
+                "    updated_by TEXT,\n",
+                "    title TEXT,\n",
+                "    slug TEXT,\n",
+                "    count INTEGER,\n",
+                "    active INTEGER CHECK (active IN (0,1)),\n",
+                "    priority TEXT CHECK (priority IN ('low', 'medium', 'high')),\n",
+                "    ref_id TEXT,\n",
+                "    observed_at TEXT,\n",
+                "    tags TEXT,\n",
+                "    triage TEXT,\n",
+                "    contract TEXT,\n",
+                "    details TEXT,\n",
+                "    metadata TEXT\n",
+                ");"
+            )
         );
         assert_eq!(ddl, expected, "DDL snapshot mismatch.\nGot:\n{ddl}");
     }

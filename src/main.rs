@@ -1,6 +1,7 @@
 mod cli;
 mod codegen;
 mod db;
+pub mod flow;
 pub mod handlers;
 pub mod id_format;
 mod install;
@@ -153,6 +154,27 @@ fn main() -> Result<()> {
         }
         Some(("agents", sub)) => {
             use cli::agents::{run as agents_run, AgentsCmd};
+            // `agents run` and `agents backfill` are dispatched separately
+            // (handlers::agents_run) — they need DB access, not file install.
+            if let Some(("run", rsub)) = sub.subcommand() {
+                let poll_interval_secs =
+                    rsub.get_one::<f64>("poll-interval").copied().unwrap_or(5.0);
+                let detach = *rsub.get_one::<bool>("detach").unwrap_or(&false);
+                let log_file = rsub.get_one::<String>("log-file").cloned();
+                let max_iters = rsub.get_one::<usize>("max-iters").copied();
+                let args = handlers::agents_run::RunArgs {
+                    poll_interval_ms: (poll_interval_secs * 1000.0).max(50.0) as u64,
+                    detach,
+                    log_file,
+                    max_iters,
+                };
+                handlers::agents_run::run_daemon(args)?;
+                return Ok(());
+            }
+            if let Some(("backfill", _)) = sub.subcommand() {
+                handlers::agents_backfill::run_backfill()?;
+                return Ok(());
+            }
             let cmd = match sub.subcommand() {
                 Some(("list", _)) => AgentsCmd::List,
                 Some(("install", isub)) => AgentsCmd::Install {

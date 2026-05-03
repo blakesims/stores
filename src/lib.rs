@@ -4,6 +4,7 @@
 pub mod cli;
 pub mod codegen;
 pub mod db;
+pub mod flow;
 pub mod handlers;
 pub mod id_format;
 pub mod install;

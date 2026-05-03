@@ -267,6 +267,43 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .action(ArgAction::SetTrue)
                                 .help("Remove from ~/.claude/agents/ instead of ./.claude/agents/"),
                         ),
+                )
+                // Phase 4: autonomous-flow daemon
+                .subcommand(
+                    Command::new("run")
+                        .about("Run the autonomous-flow daemon: poll subscribed transitions, claim, dispatch")
+                        .arg(
+                            Arg::new("poll-interval")
+                                .long("poll-interval")
+                                .help("Poll interval in seconds (default: 5)")
+                                .value_parser(clap::value_parser!(f64))
+                                .required(false),
+                        )
+                        .arg(
+                            Arg::new("detach")
+                                .long("detach")
+                                .action(ArgAction::SetTrue)
+                                .help("Daemonize (fork + setsid); parent prints child PID and exits"),
+                        )
+                        .arg(
+                            Arg::new("log-file")
+                                .long("log-file")
+                                .help("Redirect stdout/stderr to this file (required with --detach)")
+                                .required(false),
+                        )
+                        .arg(
+                            Arg::new("max-iters")
+                                .long("max-iters")
+                                .help("Maximum poll iterations before exiting (for testing)")
+                                .value_parser(clap::value_parser!(usize))
+                                .hide(true)
+                                .required(false),
+                        ),
+                )
+                // Phase 4: backfill placeholder (impl in Phase 7)
+                .subcommand(
+                    Command::new("backfill")
+                        .about("One-off scan for accepted-but-unmerged rows; applies accept-merge sequentially (Phase 7)"),
                 ),
         );
 

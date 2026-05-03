@@ -13,6 +13,20 @@ use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601, read_row};
 
+/// Read the policy_ref/policies_hash env vars set by the autonomous flow
+/// daemon (Phase 5: agents_run.rs::run_dispatch). When unset (the manual CLI
+/// path), returns `(None, None)` so transition_history records NULL — the
+/// distinct sentinel for "manual transition" per AC5.4.
+pub(crate) fn read_policy_env() -> (Option<String>, Option<String>) {
+    let pref = std::env::var("STORES_POLICY_REF")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let phash = std::env::var("STORES_POLICIES_HASH")
+        .ok()
+        .filter(|s| !s.is_empty());
+    (pref, phash)
+}
+
 /// Entry point for direct CLI use: opens its own transaction and delegates to `run_in_tx`.
 pub fn run(
     schema: &Schema,
@@ -173,14 +187,20 @@ pub fn run_close_as_addressed(
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
+    let (pref, phash) = read_policy_env();
     execute_transition_write(
         &tx,
         schema,
         row_id,
+        display_id,
+        current_status,
         &transition.to,
+        "close_as_addressed",
         &diff,
         &merged,
         invoker.actor,
+        pref.as_deref(),
+        phash.as_deref(),
     )?;
 
     tx.commit().context("close_as_addressed: commit tx")?;
@@ -296,14 +316,20 @@ pub(crate) fn run_in_tx(
     }
 
     // Write: UPDATE merged fields + status = transition.to + updated_*
+    let (pref, phash) = read_policy_env();
     execute_transition_write(
         tx,
         schema,
         row_id,
+        display_id,
+        current_status,
         &transition.to,
+        verb,
         &diff,
         &merged,
         invoker.actor,
+        pref.as_deref(),
+        phash.as_deref(),
     )?;
 
     println!(
@@ -315,14 +341,21 @@ pub(crate) fn run_in_tx(
 
 /// Write the transition state change into the DB (inside a caller-supplied transaction).
 /// Used by both `run_in_tx` (CLI path) and submit handlers (engine path).
+/// Also inserts an audit row into `transition_history` (T014 P1).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_transition_write(
     tx: &Transaction,
     schema: &Schema,
     row_id: i64,
+    display_id: &str,
+    from_status: &str,
     new_status: &str,
+    verb: &str,
     diff: &crate::validate::EntryMap,
     merged: &crate::validate::EntryMap,
     invoker: Actor,
+    policy_ref: Option<&str>,
+    policies_hash: Option<&str>,
 ) -> Result<()> {
     let now = now_iso8601();
     let invoker_str = invoker.to_string();
@@ -334,7 +367,7 @@ pub(crate) fn execute_transition_write(
     ];
     let mut sql_values: Vec<rusqlite::types::Value> = vec![
         rusqlite::types::Value::Text(now),
-        rusqlite::types::Value::Text(invoker_str),
+        rusqlite::types::Value::Text(invoker_str.clone()),
         rusqlite::types::Value::Text(new_status.to_string()),
     ];
     let mut param_idx = 4usize;
@@ -403,6 +436,19 @@ pub(crate) fn execute_transition_write(
 
     tx.execute(&sql, rusqlite::params_from_iter(sql_values.iter()))
         .context("transition update row")?;
+
+    crate::db::insert_transition_history(
+        tx,
+        &schema.name,
+        row_id,
+        display_id,
+        from_status,
+        new_status,
+        verb,
+        &invoker_str,
+        policy_ref,
+        policies_hash,
+    )?;
 
     Ok(())
 }

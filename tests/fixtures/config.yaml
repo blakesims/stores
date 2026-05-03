@@ -1,0 +1,5 @@
+# Example .stores/config.yaml — phase 3 fixture.
+# `ntfy.url` is the only key the flow engine reads today; unknown keys are
+# tolerated for forward compatibility.
+ntfy:
+  url: https://ntfy.example.invalid/stores-test

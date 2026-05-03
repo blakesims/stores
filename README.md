@@ -93,6 +93,17 @@ cargo install --path . --features runner-claude-code
 stores tasks drive --auto --claude-code
 ```
 
+### Autonomous flow
+
+`stores agents run` is a long-lived daemon that polls
+`transition_history`, gates each candidate dispatch through the policy
+layer (`.stores/policies.yaml`), and runs registered subscribers
+(`.stores/agents.yaml`). The first builtin subscriber, `accept-merge`,
+fast-merges a task's branch into main when it transitions
+`in_review → accepted`; conflicts flip the row to `deploy_blocked` and
+fire `ntfy`. See [`docs/agents-and-policies.md`](./docs/agents-and-policies.md)
+for the full schema reference and runbook.
+
 ## Usage
 
 ### Topology
@@ -136,6 +147,8 @@ digraph stores_topology {
 ```
 
 Edge labels use a single-letter actor marker (`A` ai_autonomous, `H+` ai_with_human, `H!` human, `F` framework) plus the verb. Colors map to the same actor classes (green / yellow / red / gray); pass `--no-icons` or set `NO_COLOR=1` for plain text codes.
+
+The tasks lifecycle also includes a `deploy_blocked` state reached via `accepted → deploy_blocked` (framework-fired by the autonomous flow engine when accept-merge hits a conflict) and resolvable via `resume` after specialist intervention.
 
 ## Install (manual)
 

@@ -184,6 +184,22 @@ fn days_in_month(y: u32, m: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Audit metadata for transition_history (T014 P1)
+// ---------------------------------------------------------------------------
+
+/// Audit data threaded into `write_status_and_fields` when a real lifecycle
+/// transition is being committed. Manual paths (current code) pass
+/// `policy_ref = None` / `policies_hash = None`; the autonomous flow daemon
+/// supplies the policy id + full-policies-file hash for policy-mediated writes.
+pub(crate) struct TransitionAudit<'a> {
+    pub display_id: &'a str,
+    pub from_status: &'a str,
+    pub verb: &'a str,
+    pub policy_ref: Option<&'a str>,
+    pub policies_hash: Option<&'a str>,
+}
+
+// ---------------------------------------------------------------------------
 // Core DB write helper
 // ---------------------------------------------------------------------------
 
@@ -191,6 +207,13 @@ fn days_in_month(y: u32, m: u32) -> u32 {
 ///
 /// `framework_fields`: column name → integer value (e.g. current_phase, current_cycle).
 /// `text_fields`: column name → text value (e.g. blocked_reason, JSON for list/record fields).
+///
+/// T014 P1 audit: callers that perform a real status change supply
+/// `audit = Some(TransitionAudit { ... })`; this writes one row to
+/// `transition_history`. Callers that touch text/framework fields without changing
+/// the row's lifecycle status (e.g. submit-wrap appending wrap_log[] in-place)
+/// pass `audit = None`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_status_and_fields(
     tx: &Transaction,
     table: &str,
@@ -199,6 +222,7 @@ pub(crate) fn write_status_and_fields(
     invoker: &str,
     framework_fields: &BTreeMap<String, i64>,
     text_fields: &BTreeMap<String, String>,
+    audit: Option<TransitionAudit<'_>>,
 ) -> Result<()> {
     let now = now_iso8601();
 
@@ -235,6 +259,21 @@ pub(crate) fn write_status_and_fields(
 
     tx.execute(&sql, rusqlite::params_from_iter(sql_values.iter()))
         .context("write_status_and_fields")?;
+
+    if let Some(a) = audit {
+        crate::db::insert_transition_history(
+            tx,
+            table,
+            row_id,
+            a.display_id,
+            a.from_status,
+            new_status,
+            a.verb,
+            invoker,
+            a.policy_ref,
+            a.policies_hash,
+        )?;
+    }
 
     Ok(())
 }
@@ -340,6 +379,13 @@ pub(crate) fn fire_on_entry_follow_ons(
                 "framework",
                 &fw_fields,
                 &txt_fields,
+                Some(TransitionAudit {
+                    display_id,
+                    from_status: state,
+                    verb: &follow_on_t.verb,
+                    policy_ref: None,
+                    policies_hash: None,
+                }),
             )?;
 
             // Recurse: does target_state also have on-entry follow-ons?
@@ -485,6 +531,13 @@ pub(crate) fn compute_submit_plan(
         &invoker.to_string(),
         &fw_fields,
         &text_fields,
+        Some(TransitionAudit {
+            display_id,
+            from_status: "planning",
+            verb: "submit-plan",
+            policy_ref: None,
+            policies_hash: None,
+        }),
     )?;
 
     // Step 9: no follow-on for submit-plan
@@ -641,6 +694,13 @@ pub(crate) fn compute_submit_plan_review(
         &invoker.to_string(),
         &fw_fields,
         &text_fields,
+        Some(TransitionAudit {
+            display_id,
+            from_status: "plan_review",
+            verb: "submit-plan-review",
+            policy_ref: None,
+            policies_hash: None,
+        }),
     )?;
 
     // Step 9: fire on-entry follow-ons (e.g. ready → executing)
@@ -814,6 +874,13 @@ pub(crate) fn compute_submit_execute(
         &invoker.to_string(),
         &fw_fields,
         &text_fields,
+        Some(TransitionAudit {
+            display_id,
+            from_status: "executing",
+            verb: "submit-execute",
+            policy_ref: None,
+            policies_hash: None,
+        }),
     )?;
 
     // No follow-on for submit-execute
@@ -1054,6 +1121,13 @@ pub(crate) fn compute_submit_review(
         &invoker.to_string(),
         &fw_fields,
         &text_fields,
+        Some(TransitionAudit {
+            display_id,
+            from_status: "code_review",
+            verb: "submit-review",
+            policy_ref: None,
+            policies_hash: None,
+        }),
     )?;
 
     // Fire on-entry follow-ons for the new state (e.g. complete → in_review via on_state.complete).
@@ -1246,6 +1320,8 @@ pub(crate) fn compute_submit_wrap(
         &invoker.to_string(),
         &fw_fields,
         &text_fields,
+        // No status change (in_review → in_review is an in-place wrap_log append).
+        None,
     )?;
 
     // Step 9: no follow-on transitions
@@ -1355,6 +1431,13 @@ pub(crate) fn compute_resume(
         &invoker.to_string(),
         &fw_fields,
         &txt_fields,
+        Some(TransitionAudit {
+            display_id,
+            from_status: "blocked",
+            verb: "resume",
+            policy_ref: None,
+            policies_hash: None,
+        }),
     )?;
 
     // Step 9: fire on-entry follow-ons (ready → executing)
@@ -2836,6 +2919,13 @@ fields:
             "ai_autonomous",
             &fw_fields,
             &txt_fields,
+            Some(TransitionAudit {
+                display_id: "WF001",
+                from_status: "plan_review",
+                verb: "submit-plan-review",
+                policy_ref: None,
+                policies_hash: None,
+            }),
         )
         .unwrap();
 
