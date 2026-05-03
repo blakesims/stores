@@ -72,6 +72,9 @@ fn main() -> Result<()> {
                 println!("  {name}");
             }
         }
+        Some(("migrate", sub)) => {
+            handlers::migrate::run_migrate(sub.get_flag("apply"))?;
+        }
         Some(("setup", sub)) => {
             let global = *sub.get_one::<bool>("global").unwrap_or(&false);
             cli::setup::run(global)?;
