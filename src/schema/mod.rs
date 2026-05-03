@@ -1342,4 +1342,40 @@ fields:
             "current_cycle must have actor: framework"
         );
     }
+
+    /// T013 P1 AC1.4: tasks schema declares a top-level `tier_hint` field as
+    /// enum [T1, T2, T3], required: false, no actor.
+    #[test]
+    fn t013_p1_tasks_tier_hint_field_present() {
+        let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "tasks")
+            .map(|(_, content)| *content)
+            .expect("tasks schema must be in BUNDLED_STORE_SCHEMAS");
+        let schema = Schema::from_yaml(yaml).expect("tasks schema must parse");
+
+        let tier_hint = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "tier_hint")
+            .expect("tasks schema must declare a top-level `tier_hint` field");
+
+        match &tier_hint.ty {
+            FieldType::Enum(vals) => {
+                assert_eq!(
+                    vals,
+                    &vec!["T1".to_string(), "T2".to_string(), "T3".to_string()],
+                    "tier_hint enum_values must be [T1, T2, T3]"
+                );
+            }
+            other => panic!("tier_hint must be enum type, got {:?}", other),
+        }
+        assert_eq!(
+            tier_hint.enum_values.as_deref(),
+            Some(&["T1".to_string(), "T2".to_string(), "T3".to_string()][..]),
+            "tier_hint enum_values metadata must be [T1, T2, T3]"
+        );
+        assert!(!tier_hint.required, "tier_hint must be required: false (CLI-layer enforces presence)");
+        assert!(tier_hint.actor.is_none(), "tier_hint must have no actor (writable by any invoker)");
+    }
 }
