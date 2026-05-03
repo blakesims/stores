@@ -397,6 +397,10 @@ lifecycle:
       to: wont_fix
       verb: wont_fix
       actor: ai_with_human
+    - from: open
+      to: resolved
+      verb: close_as_addressed
+      actor: ai_autonomous
 fields:
   - name: summary
     type: text
@@ -426,6 +430,14 @@ fields:
     type:
       list: text
     required: false
+  - name: resolution
+    type: text
+    required: false
+    actor: ai_autonomous
+  - name: resolved_at
+    type: text
+    required: false
+    actor: ai_autonomous
 "#;
 
     fn build_cmd(schema: &Schema, verb: &'static str) -> clap::Command {
@@ -837,6 +849,179 @@ transitions:
             err.to_string().contains("ambiguous transition selection"),
             "install-time validator must still fire: {err}"
         );
+    }
+
+    // ---- T004 (L017): close_as_addressed (open → resolved) tests ----
+
+    /// Build a clap command mirroring dynamic.rs's close_as_addressed augmentation:
+    /// all leaf args + required `--resolution`.
+    fn build_close_cmd(schema: &Schema) -> clap::Command {
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd = clap::Command::new("close_as_addressed").arg(
+            clap::Arg::new("display_id").required(true).index(1),
+        );
+        for leaf in &leaves {
+            if leaf.cli_name == "resolution" {
+                continue;
+            }
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name.clone())
+                    .required(false),
+            );
+        }
+        cmd = cmd.arg(
+            clap::Arg::new("resolution")
+                .long("resolution")
+                .required(true),
+        );
+        cmd
+    }
+
+    fn read_obs(conn: &Connection) -> (String, Option<String>, Option<String>) {
+        conn.query_row(
+            "SELECT status, resolution, resolved_at FROM observations WHERE display_id = 'L001'",
+            [],
+            |r| Ok((r.get(0).unwrap(), r.get(1).ok(), r.get(2).ok())),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn close_as_addressed_with_task_id_succeeds() {
+        let (schema, conn) = setup();
+        insert_open_row(&schema, &conn);
+
+        let cmd = build_close_cmd(&schema);
+        let matches = cmd.get_matches_from(["close_as_addressed", "L001", "--resolution", "T001"]);
+        run_close_as_addressed(&schema, &conn, &matches, Actor::AiAutonomous.into(), "T001").unwrap();
+
+        let (status, resolution, resolved_at) = read_obs(&conn);
+        assert_eq!(status, "resolved");
+        assert_eq!(resolution.as_deref(), Some("T001"));
+        assert!(
+            resolved_at.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
+            "resolved_at must be populated; got: {:?}",
+            resolved_at
+        );
+    }
+
+    #[test]
+    fn close_as_addressed_with_commit_sha_succeeds() {
+        let (schema, conn) = setup();
+        insert_open_row(&schema, &conn);
+
+        let sha = "82501d3abcdef0123456789012345678901234ab"; // 40-char hex
+        let cmd = build_close_cmd(&schema);
+        let matches =
+            cmd.get_matches_from(["close_as_addressed", "L001", "--resolution", sha]);
+        run_close_as_addressed(&schema, &conn, &matches, Actor::AiAutonomous.into(), sha).unwrap();
+
+        let (status, resolution, _resolved_at) = read_obs(&conn);
+        assert_eq!(status, "resolved");
+        assert_eq!(resolution.as_deref(), Some(sha));
+    }
+
+    #[test]
+    fn close_as_addressed_without_resolution_rejected() {
+        // Reproduces clap-layer rejection: `--resolution` is required=true (mirrors dynamic.rs
+        // mut_arg). Parsing a close_as_addressed invocation without --resolution must fail
+        // before any handler runs.
+        let (schema, _conn) = setup();
+        let cmd = build_close_cmd(&schema);
+        let err = cmd
+            .try_get_matches_from(["close_as_addressed", "L001"])
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--resolution") || msg.contains("required"),
+            "expected clap error citing --resolution required; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn close_as_addressed_already_resolved_rejected() {
+        // Insert a row directly at status=resolved with a prior resolution.
+        let (schema, conn) = setup();
+        conn.execute(
+            "INSERT INTO observations (display_id, status, summary, resolution, resolved_at) \
+             VALUES ('L001', 'resolved', 'already done', 'T999', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let cmd = build_close_cmd(&schema);
+        let matches = cmd.get_matches_from(["close_as_addressed", "L001", "--resolution", "T001"]);
+        let err = run_close_as_addressed(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "T001",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("close_as_addressed")
+                || msg.contains("no transition")
+                || msg.contains("resolved"),
+            "expected state-machine error from already-resolved row; got: {msg}"
+        );
+
+        // Row unchanged: resolution still T999 (not overwritten by failed call).
+        let (status, resolution, _) = read_obs(&conn);
+        assert_eq!(status, "resolved");
+        assert_eq!(
+            resolution.as_deref(),
+            Some("T999"),
+            "row must be unchanged after rejected transition"
+        );
+    }
+
+    #[test]
+    fn close_as_addressed_with_invalid_format_rejected() {
+        let (schema, conn) = setup();
+        insert_open_row(&schema, &conn);
+
+        let cmd = build_close_cmd(&schema);
+        let matches = cmd.get_matches_from([
+            "close_as_addressed",
+            "L001",
+            "--resolution",
+            "not-a-valid-ref",
+        ]);
+        let err = run_close_as_addressed(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "not-a-valid-ref",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        // Error must enumerate the three accepted forms.
+        assert!(
+            msg.contains("task-id"),
+            "error should name task-id form; got: {msg}"
+        );
+        assert!(
+            msg.contains("observation-id"),
+            "error should name observation-id form; got: {msg}"
+        );
+        assert!(
+            msg.contains("commit-sha"),
+            "error should name commit-sha form; got: {msg}"
+        );
+
+        // Row unchanged
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "open", "row must remain open after format rejection");
     }
 
     // ---- Phase 6 (T010): accept / reject / amend transition tests ----

@@ -420,6 +420,48 @@ L007_APPROVED=$(stores observations show L007 --json | jq -r '.intent_contract.a
 pass "approved_by accepted for ai_with_human WITH correct --approve-token (L008 closed)"
 
 # ---------------------------------------------------------------------------
+# Step 11 — T004 (L017): close_as_addressed (open → resolved) end-to-end
+# ---------------------------------------------------------------------------
+echo "--- Step 11 — T004 (L017): close_as_addressed open → resolved"
+
+L008_OUT=$(stores observations add \
+    --summary "T004 close_as_addressed e2e test" \
+    --source dev \
+    --priority normal \
+    --captured-at 2026-05-03 \
+    --captured-week w18-d7)
+[[ "$L008_OUT" == "L008" ]] || fail "Step 11: expected L008, got: $L008_OUT"
+
+stores observations close_as_addressed L008 --resolution T001 --invoker ai_autonomous \
+    || fail "Step 11: close_as_addressed L008 --resolution T001 failed"
+
+L008_JSON=$(stores observations show L008 --json)
+echo "$L008_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d['status'] == 'resolved', f'expected resolved, got: {d[\"status\"]}'
+assert d.get('resolution') == 'T001', f'expected resolution=T001, got: {d.get(\"resolution\")}'
+ra = d.get('resolved_at') or ''
+assert ra != '', f'resolved_at must be non-empty; got: {ra!r}'
+" || fail "Step 11: post-close_as_addressed assertions failed"
+pass "status=resolved, resolution=T001, resolved_at non-empty (L008)"
+
+# Second close attempt must fail (already resolved; no resolved → resolved transition).
+set +e
+RECLOSE_ERR=$(stores observations close_as_addressed L008 --resolution T002 --invoker ai_autonomous 2>&1)
+RECLOSE_EXIT=$?
+set -e
+[[ "$RECLOSE_EXIT" -ne 0 ]] \
+    || fail "Step 11: expected non-zero exit closing already-resolved row; got 0"
+pass "second close_as_addressed on already-resolved row rejected (exit=$RECLOSE_EXIT)"
+
+# Row unchanged: resolution still T001 (not overwritten by failed retry).
+RESOLUTION_AFTER=$(stores observations show L008 --json | jq -r '.resolution')
+[[ "$RESOLUTION_AFTER" == "T001" ]] \
+    || fail "Step 11: row mutated by rejected retry; resolution=$RESOLUTION_AFTER (expected T001)"
+pass "row unchanged after rejected retry (resolution still T001)"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -434,3 +476,4 @@ echo "  #7 needs_info parking (confirmed→needs_info→confirmed; AI provide_in
 echo "  #8 cross-store task_id soft-FK (value round-trip; T010 guards out of scope): PASS"
 echo "  #9 T001 P4 — investigate is actor:ai_autonomous (L007): PASS"
 echo "  #10 T001 P4 — approved_by token-mediated (no/wrong/correct token; L008): PASS"
+echo "  #11 T004 (L017) — close_as_addressed open → resolved + idempotency: PASS"
