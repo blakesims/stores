@@ -156,7 +156,14 @@ struct TaskRow {
     title: String,
     claimed_by: Option<String>,
     updated_at: String,
+    current_phase: Option<i64>,
+    current_cycle: Option<i64>,
+    total_phases: Option<i64>,
 }
+
+/// Schema-declared limit (`max_revise_cycles: 3` in stores/tasks/schema.yaml).
+/// Hardcoded here for the POC; promote to a schema read when this graduates.
+const MAX_CYCLES_DISPLAY: i64 = 3;
 
 #[derive(Debug)]
 struct ObsRow {
@@ -169,7 +176,9 @@ struct ObsRow {
 
 fn query_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
     let mut stmt = conn.prepare(
-        "SELECT display_id, status, COALESCE(title, ''), claimed_by, COALESCE(updated_at, '')
+        "SELECT display_id, status, COALESCE(title, ''), claimed_by, COALESCE(updated_at, ''),
+                current_phase, current_cycle,
+                json_array_length(json_extract(plan, '$.phases'))
          FROM tasks",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -179,6 +188,9 @@ fn query_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
             title: r.get(2)?,
             claimed_by: r.get(3)?,
             updated_at: r.get(4)?,
+            current_phase: r.get(5)?,
+            current_cycle: r.get(6)?,
+            total_phases: r.get(7)?,
         })
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -211,14 +223,46 @@ fn render_task_line(t: &TaskRow) -> String {
         .claimed_by
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|c| format!(" {ANSI_DIM}· claimed by {c}{ANSI_RESET}"))
+        .map(|c| format!(" {ANSI_DIM}· {c}{ANSI_RESET}"))
         .unwrap_or_default();
     let title = truncate(&t.title, 50);
     let updated = clock_suffix(&t.updated_at);
+    let status_str = format_task_status(t);
     format!(
-        "  {ANSI_CYAN}{:<5}{ANSI_RESET} {color}{:<13}{ANSI_RESET} {:<50}{} {ANSI_DIM}{updated}{ANSI_RESET}\n",
-        t.display_id, t.status, title, claimed
+        "  {ANSI_CYAN}{:<5}{ANSI_RESET} {color}{:<19}{ANSI_RESET} {:<50}{} {ANSI_DIM}{updated}{ANSI_RESET}\n",
+        t.display_id, status_str, title, claimed
     )
+}
+
+/// Compact status renderer with phase/cycle info on the cycling states.
+///
+/// Examples (matches user's spec):
+///   planning              → "planning"
+///   plan_review           → "reviewing plan"
+///   ready                 → "ready"
+///   executing P=2 N=4 C=1 → "execute P2/4 R1/3"
+///   code_review P=2 N=4 C=2 → "review P2/4 R2/3"
+///   in_review             → "in_review"
+///   complete/accepted/blocked/rejected → as-is
+///
+/// Falls back to bare state name when phase/cycle data is missing.
+fn format_task_status(t: &TaskRow) -> String {
+    match t.status.as_str() {
+        "plan_review" => "reviewing plan".to_string(),
+        "executing" | "code_review" => {
+            let verb = if t.status == "executing" { "execute" } else { "review " };
+            match (t.current_phase, t.total_phases, t.current_cycle) {
+                (Some(p), Some(n), Some(c)) => {
+                    format!("{verb} P{p}/{n} R{c}/{MAX_CYCLES_DISPLAY}")
+                }
+                (Some(p), None, Some(c)) => {
+                    format!("{verb} P{p}/? R{c}/{MAX_CYCLES_DISPLAY}")
+                }
+                _ => t.status.clone(),
+            }
+        }
+        other => other.to_string(),
+    }
 }
 
 fn render_obs_line(o: &ObsRow) -> String {
