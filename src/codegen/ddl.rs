@@ -25,6 +25,20 @@ CREATE TABLE IF NOT EXISTS transition_history (
     policies_hash TEXT,
     occurred_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS dispatch_locks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    store TEXT NOT NULL,
+    row_id INTEGER NOT NULL,
+    display_id TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    transition_id INTEGER,
+    claimed_at TEXT NOT NULL,
+    claimed_by TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1,
+    last_status TEXT,
+    finished_at TEXT,
+    UNIQUE(store, row_id, agent_name)
+);
 ";
 
 /// Reserved columns prepended to every generated table.
