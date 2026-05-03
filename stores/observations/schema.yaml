@@ -24,6 +24,18 @@ lifecycle:
       verb: wont_fix
       actor: ai_with_human
 
+    # open → resolved: close-as-addressed shortcut (T004 / L017).
+    # First propulsion-visible task: drain the queue without walking the full
+    # 4-hop investigate → confirm → claim → resolve sequence when an
+    # observation has already been addressed by a prior task / observation /
+    # commit. Handler requires --resolution <T###|L###|commit-sha> and writes
+    # resolved_at atomically; autonomy is appropriate because the reference is
+    # an objective, externally-verifiable artifact.
+    - from: open
+      to: resolved
+      verb: close_as_addressed
+      actor: ai_autonomous
+
     # investigating → confirmed: contract must be ready before this fires (clause 2+3 backbone)
     - from: investigating
       to: confirmed

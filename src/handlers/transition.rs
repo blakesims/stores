@@ -84,6 +84,98 @@ pub fn run_reject(
     Ok(())
 }
 
+/// Entry point for `close_as_addressed` (observations, open → resolved):
+/// validates --resolution shape (T###, L###, or 7-40 hex commit sha), writes
+/// `resolution` and `resolved_at` into the diff, and runs the lifecycle
+/// transition atomically in one tx.
+pub fn run_close_as_addressed(
+    schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    invoker: InvokerCtx,
+    resolution: &str,
+) -> Result<()> {
+    let re = regex::Regex::new(r"^(T\d{3,}|L\d{3,}|[0-9a-f]{7,40})$").unwrap();
+    if !re.is_match(resolution) {
+        anyhow::bail!(
+            "--resolution '{resolution}' does not match an accepted reference form. \
+             Accepted: task-id (T### / T0123), observation-id (L### / L0042), \
+             or commit-sha (7-40 lowercase hex chars)."
+        );
+    }
+
+    let display_id = matches
+        .get_one::<String>("display_id")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    let tx = conn
+        .unchecked_transaction()
+        .context("close_as_addressed: begin tx")?;
+
+    let (row_id, existing) = read_row(schema, &tx, display_id)?;
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Build diff with resolution + resolved_at injected.
+    let now = now_iso8601();
+    let mut diff = build_entry_map(schema, |cli_name| {
+        match matches.try_get_many::<String>(cli_name) {
+            Ok(Some(vals)) => {
+                let collected: Vec<String> = vals.cloned().collect();
+                if collected.is_empty() { None } else { Some(collected) }
+            }
+            _ => None,
+        }
+    })?;
+    diff.insert(
+        "resolution".to_string(),
+        Value::String(resolution.to_string()),
+    );
+    diff.insert("resolved_at".to_string(), Value::String(now.clone()));
+
+    let mut merged = existing.clone();
+    for (k, v) in &diff {
+        merged.insert(k.clone(), v.clone());
+    }
+
+    let transition = select_transition(
+        &schema.lifecycle.transitions,
+        current_status,
+        "close_as_addressed",
+        None,
+        &merged,
+    )?;
+
+    validate::validate(
+        schema,
+        &merged,
+        Op::Transition("close_as_addressed".to_string(), diff.clone()),
+        invoker,
+    )
+    .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
+
+    execute_transition_write(
+        &tx,
+        schema,
+        row_id,
+        &transition.to,
+        &diff,
+        &merged,
+        invoker.actor,
+    )?;
+
+    tx.commit().context("close_as_addressed: commit tx")?;
+
+    println!(
+        "Transitioned {display_id}: {} → {} (resolution={resolution})",
+        transition.from, transition.to
+    );
+    Ok(())
+}
+
 /// Transaction-agnostic core.  All DB access uses `tx` (which is `Deref<Target=Connection>`).
 /// Called by `run` (single-call CLI path) and by submit handlers that pass their own `tx`
 /// for atomic multi-step operations (Phase 5 / task 5.7).

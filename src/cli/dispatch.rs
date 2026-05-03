@@ -230,6 +230,14 @@ pub fn dispatch(
                                 .get_one::<String>("reason")
                                 .ok_or_else(|| anyhow::anyhow!("reject requires --reason"))?;
                             handlers::transition::run_reject(schema, &conn, sub, invoker, reason)?;
+                        } else if verb == "close_as_addressed" {
+                            // close_as_addressed requires --resolution; clap enforces required=true.
+                            let resolution = sub
+                                .get_one::<String>("resolution")
+                                .ok_or_else(|| anyhow::anyhow!("close_as_addressed requires --resolution"))?;
+                            handlers::transition::run_close_as_addressed(
+                                schema, &conn, sub, invoker, resolution,
+                            )?;
                         } else {
                             handlers::transition::run(schema, &conn, sub, invoker, verb)?;
                         }

@@ -327,6 +327,23 @@ fn build_store_command(schema: &Schema) -> Command {
                     .required(true),
             );
         }
+        // close_as_addressed (observations open → resolved) requires a reference
+        // to the artifact that addressed the row: a task-id (T###), an
+        // observation-id (L###), or a commit-sha (7-40 hex chars). Substrate
+        // verifies the shape; the verb refuses without it.
+        if verb == "close_as_addressed" {
+            // The schema already declares a `resolution` text field, so the
+            // leaf-arg walker registered a non-required `--resolution`. Promote
+            // it to required and override the help text so the three accepted
+            // forms (T###, L###, commit-sha) are visible at --help.
+            transition_cmd = transition_cmd.mut_arg("resolution", |a| {
+                a.required(true).help(
+                    "Reference to the artifact that addressed this observation: \
+                     task-id (T###), observation-id (L###), or commit-sha \
+                     (7-40 hex chars)",
+                )
+            });
+        }
         store_cmd = store_cmd.subcommand(transition_cmd);
     }
 
