@@ -149,6 +149,38 @@ stores install tasks           # v0.2 workflow store
 
 Requires: Rust toolchain (stable). SQLite is bundled via `rusqlite-bundled` — no system SQLite dependency.
 
+## Schema migrations
+
+Run `stores migrate --apply` after every `cargo install` / binary upgrade
+until the L010 daemon-subscriber automates it. The verb diffs the live
+`.stores/db.sqlite` schema against the substrate's compiled-in
+`schema.yaml` for every installed store and brings the DB up to the new
+binary's expectations.
+
+```bash
+cargo install --path .       # upgrade the binary
+stores migrate               # DRY-RUN: print the SQL that would execute
+stores migrate --apply       # run the SQL inside a single transaction
+```
+
+Default mode is DRY-RUN: `stores migrate` prints the `ALTER TABLE …
+ADD COLUMN …` statements it would run and exits 0 with no DB changes.
+`stores migrate --apply` executes those statements inside a single
+transaction; partial failures roll back cleanly.
+
+**Additive-only.** `stores migrate` only emits `ADD COLUMN`. Destructive
+changes are deliberately out of scope:
+
+- Columns present in the DB but absent from `schema.yaml` are reported on
+  stderr as `orphaned column; not auto-dropped` and skipped.
+- Columns present in both with different types are reported on stderr as
+  a type mismatch and skipped — no auto-coercion.
+
+**Idempotent.** Running `stores migrate` against an already-in-sync DB is
+a clean no-op (exit 0, no SQL emitted, no warnings). Running
+`stores migrate --apply` twice in a row produces the same result as
+running it once.
+
 ## Manual workflow walk-through
 
 Run these commands in any empty directory. Each step closes a numbered verification point.
