@@ -190,6 +190,29 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .required(false),
                 ),
         )
+        // Topology subcommand — static schematic of stores, state machines, and workflow firing order
+        .subcommand(
+            Command::new("topology")
+                .about("Print a static schematic of stores, per-store state machines, and the tasks workflow firing order")
+                .arg(
+                    Arg::new("format")
+                        .long("format")
+                        .help("Output format: auto (dot via graphviz, falls back to source) | dot | mermaid")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("store")
+                        .long("store")
+                        .help("Filter Z1/Z2 to a single store (Z0 still shows the whole graph)")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("no-icons")
+                        .long("no-icons")
+                        .action(ArgAction::SetTrue)
+                        .help("Disable Nerd Font glyphs; use text codes (A / H+ / H! / F)"),
+                ),
+        )
         // Agents subcommand (parallel to skills; installs flat <name>.md files to .claude/agents/)
         .subcommand(
             Command::new("agents")

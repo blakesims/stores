@@ -93,6 +93,50 @@ cargo install --path . --features runner-claude-code
 stores tasks drive --auto --claude-code
 ```
 
+## Usage
+
+### Topology
+
+`stores topology` prints a static schematic of the installed stores: cross-store soft-FK edges (Z0), per-store state machines (Z1), and the tasks workflow firing order (Z2). Default `--format auto` shells out to `dot -Tutf8` for an ASCII render, falling back to raw dot source with a one-line install hint when graphviz is missing.
+
+```bash
+stores topology                         # auto: dot -Tutf8 render, or dot source + hint
+stores topology --format dot            # raw graphviz source
+stores topology --format mermaid        # stateDiagram-v2 for markdown embedding
+stores topology --store tasks           # filter Z1/Z2 to one store; Z0 still shows full graph
+stores topology --no-icons              # disable Nerd Font glyphs (text codes A / H+ / H! / F)
+```
+
+Representative `--format dot` output (trimmed) for the bundled `observations` / `gate` / `tasks` trio:
+
+```dot
+digraph stores_topology {
+  rankdir=TB;
+  compound=true;
+
+  subgraph cluster_z0_cross_store {
+    label="Z0: cross-store soft-FKs";
+    "z0_tasks" [shape=box, label="tasks"];
+    "z0_observations" [shape=box, label="observations"];
+    "z0_gate" [shape=box, label="gate"];
+    "z0_tasks" -> "z0_tasks" [label="depends_on"];
+    "z0_tasks" -> "z0_observations" [label="linked_observations"];
+  }
+
+  subgraph cluster_z1_tasks {
+    label="Z1: tasks state machine";
+    "z1_tasks__planning" [label="planning", style=bold, peripheries=2];
+    "z1_tasks__planning" -> "z1_tasks__plan_review" [label=" A submit-plan", color=green, fontcolor=green];
+    "z1_tasks__plan_review" -> "z1_tasks__ready" [label=" A submit-plan-review", color=green, fontcolor=green];
+    "z1_tasks__ready" -> "z1_tasks__executing" [label=" F start", color=gray, fontcolor=gray];
+    "z1_tasks__executing" -> "z1_tasks__code_review" [label=" A submit-execute", color=green, fontcolor=green];
+    "z1_tasks__code_review" -> "z1_tasks__complete" [label=" A submit-review", color=green, fontcolor=green];
+  }
+}
+```
+
+Edge labels use a single-letter actor marker (`A` ai_autonomous, `H+` ai_with_human, `H!` human, `F` framework) plus the verb. Colors map to the same actor classes (green / yellow / red / gray); pass `--no-icons` or set `NO_COLOR=1` for plain text codes.
+
 ## Install (manual)
 
 ```bash

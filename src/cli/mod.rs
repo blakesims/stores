@@ -5,6 +5,7 @@ pub mod dynamic;
 pub mod init;
 pub mod setup;
 pub mod skills;
+pub mod topology;
 pub mod watch;
 
 /// Shared test-only synchronization for env-var mutation across modules.
