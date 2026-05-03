@@ -143,14 +143,14 @@ fn ac2_8_no_icons_uses_text_codes() {
         no_icons: true,
     };
     let out = emit_dot(&manifest, &schemas, &opts);
-    // text-codes appear in labels:
+    // text-codes appear in labels (multi-line: actor prefix \n verb [\n [GATE]]):
     assert!(
-        out.contains("[label=\"A submit-plan\""),
-        "expected A-prefixed text-code label: {out}"
+        out.contains("[label=\"A\\nsubmit-plan\""),
+        "expected A-prefixed text-code label (multi-line, no gate): {out}"
     );
     assert!(
-        out.contains("H+ resume"),
-        "expected H+ text-code for resume"
+        out.contains("H+\\nresume"),
+        "expected H+ text-code for resume (multi-line)"
     );
     // No Nerd Font glyphs (the four code points)
     for glyph in &["\u{f544}", "\u{f2b5}", "\u{f007}", "\u{f013}"] {

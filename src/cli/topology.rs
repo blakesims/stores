@@ -222,7 +222,12 @@ fn write_z1_body(
 
     for t in &schema.lifecycle.transitions {
         let style = actor_style(t.actor, opts.no_icons, color_disabled);
-        let label = format!("{} {}", style.label_prefix, verb_with_gate(t));
+        // Multi-line label so graph-easy doesn't blow node widths out:
+        //   actor prefix \n verb \n [GATE] (when requires_gate is present)
+        let label = match t.requires_gate.as_deref() {
+            Some(gate) => format!("{}\\n{}\\n[{}]", style.label_prefix, t.verb, gate),
+            None => format!("{}\\n{}", style.label_prefix, t.verb),
+        };
         let color_attr = if style.dot_color.is_empty() {
             String::new()
         } else {
