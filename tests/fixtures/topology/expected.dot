@@ -1,0 +1,105 @@
+digraph stores_topology {
+  rankdir=TB;
+  compound=true;
+
+  subgraph cluster_z0_cross_store {
+    label="Z0: cross-store soft-FKs";
+    "z0_tasks" [shape=box, label="tasks"];
+    "z0_observations" [shape=box, label="observations"];
+    "z0_gate" [shape=box, label="gate"];
+    "z0_tasks" -> "z0_tasks" [label="depends_on"];
+    "z0_tasks" -> "z0_observations" [label="linked_observations"];
+  }
+
+  subgraph cluster_z1_tasks {
+    label="Z1: tasks state machine";
+    "z1_tasks__planning" [label="planning", style=bold, peripheries=2];
+    "z1_tasks__plan_review" [label="plan_review"];
+    "z1_tasks__ready" [label="ready"];
+    "z1_tasks__executing" [label="executing"];
+    "z1_tasks__code_review" [label="code_review"];
+    "z1_tasks__blocked" [label="blocked"];
+    "z1_tasks__complete" [label="complete"];
+    "z1_tasks__in_review" [label="in_review"];
+    "z1_tasks__accepted" [label="accepted"];
+    "z1_tasks__rejected" [label="rejected"];
+    "z1_tasks__planning" -> "z1_tasks__plan_review" [label=" A submit-plan", color=green, fontcolor=green];
+    "z1_tasks__plan_review" -> "z1_tasks__ready" [label=" A submit-plan-review", color=green, fontcolor=green];
+    "z1_tasks__plan_review" -> "z1_tasks__planning" [label=" A submit-plan-review", color=green, fontcolor=green];
+    "z1_tasks__plan_review" -> "z1_tasks__blocked" [label=" A submit-plan-review", color=green, fontcolor=green];
+    "z1_tasks__plan_review" -> "z1_tasks__blocked" [label=" A submit-plan-review", color=green, fontcolor=green];
+    "z1_tasks__ready" -> "z1_tasks__executing" [label=" F start", color=gray, fontcolor=gray];
+    "z1_tasks__executing" -> "z1_tasks__code_review" [label=" A submit-execute", color=green, fontcolor=green];
+    "z1_tasks__code_review" -> "z1_tasks__executing" [label=" A submit-review", color=green, fontcolor=green];
+    "z1_tasks__code_review" -> "z1_tasks__complete" [label=" A submit-review", color=green, fontcolor=green];
+    "z1_tasks__code_review" -> "z1_tasks__executing" [label=" A submit-review", color=green, fontcolor=green];
+    "z1_tasks__code_review" -> "z1_tasks__blocked" [label=" A submit-review", color=green, fontcolor=green];
+    "z1_tasks__code_review" -> "z1_tasks__blocked" [label=" A submit-review", color=green, fontcolor=green];
+    "z1_tasks__blocked" -> "z1_tasks__ready" [label=" H+ resume", color=gold, fontcolor=gold];
+    "z1_tasks__complete" -> "z1_tasks__in_review" [label=" F request_review", color=gray, fontcolor=gray];
+    "z1_tasks__in_review" -> "z1_tasks__accepted" [label=" H! accept", color=red, fontcolor=red];
+    "z1_tasks__in_review" -> "z1_tasks__rejected" [label=" H! reject", color=red, fontcolor=red];
+    "z1_tasks__rejected" -> "z1_tasks__planning" [label=" H+ amend", color=gold, fontcolor=gold];
+  }
+
+  subgraph cluster_z1_observations {
+    label="Z1: observations state machine";
+    "z1_observations__open" [label="open", style=bold, peripheries=2];
+    "z1_observations__investigating" [label="investigating"];
+    "z1_observations__confirmed" [label="confirmed"];
+    "z1_observations__needs_info" [label="needs_info"];
+    "z1_observations__in_progress" [label="in_progress"];
+    "z1_observations__resolved" [label="resolved"];
+    "z1_observations__wont_fix" [label="wont_fix"];
+    "z1_observations__open" -> "z1_observations__investigating" [label=" A investigate", color=green, fontcolor=green];
+    "z1_observations__open" -> "z1_observations__wont_fix" [label=" H+ wont_fix", color=gold, fontcolor=gold];
+    "z1_observations__open" -> "z1_observations__resolved" [label=" A close_as_addressed", color=green, fontcolor=green];
+    "z1_observations__investigating" -> "z1_observations__confirmed" [label=" H+ confirm", color=gold, fontcolor=gold];
+    "z1_observations__investigating" -> "z1_observations__needs_info" [label=" A request_info", color=green, fontcolor=green];
+    "z1_observations__confirmed" -> "z1_observations__needs_info" [label=" A park", color=green, fontcolor=green];
+    "z1_observations__needs_info" -> "z1_observations__confirmed" [label=" H! provide_info", color=red, fontcolor=red];
+    "z1_observations__confirmed" -> "z1_observations__in_progress" [label=" A claim", color=green, fontcolor=green];
+    "z1_observations__in_progress" -> "z1_observations__resolved" [label=" A resolve", color=green, fontcolor=green];
+    "z1_observations__confirmed" -> "z1_observations__wont_fix" [label=" H+ wont_fix", color=gold, fontcolor=gold];
+  }
+
+  subgraph cluster_z1_gate {
+    label="Z1: gate state machine";
+    "z1_gate__pending" [label="pending", style=bold, peripheries=2];
+    "z1_gate__answered" [label="answered"];
+    "z1_gate__deferred" [label="deferred"];
+    "z1_gate__cancelled" [label="cancelled"];
+    "z1_gate__pending" -> "z1_gate__answered" [label=" H! answer", color=red, fontcolor=red];
+    "z1_gate__pending" -> "z1_gate__cancelled" [label=" A cancel", color=green, fontcolor=green];
+    "z1_gate__deferred" -> "z1_gate__cancelled" [label=" A cancel", color=green, fontcolor=green];
+    "z1_gate__pending" -> "z1_gate__deferred" [label=" H+ defer", color=gold, fontcolor=gold];
+    "z1_gate__deferred" -> "z1_gate__pending" [label=" H+ resume", color=gold, fontcolor=gold];
+    "z1_gate__pending" -> "z1_gate__pending" [label=" H+ resume", color=gold, fontcolor=gold];
+  }
+
+  subgraph cluster_z2_workflow_tasks {
+    label="Z2: tasks workflow firing order";
+    "z2_tasks__planning" [label="planning"];
+    "z2_tasks__planning__role_0_planner" [shape=ellipse, label="planner"];
+    "z2_tasks__planning" -> "z2_tasks__planning__role_0_planner" [label="→ planner", color=green, fontcolor=green];
+    "z2_tasks__plan_review" [label="plan_review"];
+    "z2_tasks__plan_review__role_0_plan_reviewer" [shape=ellipse, label="plan_reviewer"];
+    "z2_tasks__plan_review" -> "z2_tasks__plan_review__role_0_plan_reviewer" [label="→ plan_reviewer", color=green, fontcolor=green];
+    "z2_tasks__ready" [label="ready"];
+    "z2_tasks__executing" [label="executing"];
+    "z2_tasks__ready" -> "z2_tasks__executing" [label="⇒ auto", color=gray, fontcolor=gray];
+    "z2_tasks__executing" [label="executing"];
+    "z2_tasks__executing__role_0_executor" [shape=ellipse, label="executor"];
+    "z2_tasks__executing" -> "z2_tasks__executing__role_0_executor" [label="→ executor", color=green, fontcolor=green];
+    "z2_tasks__code_review" [label="code_review"];
+    "z2_tasks__code_review__role_0_code_reviewer" [shape=ellipse, label="code_reviewer"];
+    "z2_tasks__code_review" -> "z2_tasks__code_review__role_0_code_reviewer" [label="→ code_reviewer", color=green, fontcolor=green];
+    "z2_tasks__complete" [label="complete"];
+    "z2_tasks__in_review" [label="in_review"];
+    "z2_tasks__complete" -> "z2_tasks__in_review" [label="⇒ auto", color=gray, fontcolor=gray];
+    "z2_tasks__in_review" [label="in_review"];
+    "z2_tasks__in_review__role_0_wrap" [shape=ellipse, label="wrap"];
+    "z2_tasks__in_review" -> "z2_tasks__in_review__role_0_wrap" [label="→ wrap", color=green, fontcolor=green];
+  }
+
+}
