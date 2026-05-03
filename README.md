@@ -170,14 +170,24 @@ Requires: Rust toolchain (stable). SQLite is bundled via `rusqlite-bundled` — 
 
 ## Schema migrations
 
-Run `stores migrate --apply` after every `cargo install` / binary upgrade
-until the L010 daemon-subscriber automates it. The verb diffs the live
-`.stores/db.sqlite` schema against the substrate's compiled-in
-`schema.yaml` for every installed store and brings the DB up to the new
-binary's expectations.
+Schema migrations run automatically as part of the **post-accept ceremony**:
+after every `stores tasks accept`, the daemon chains
+`builtin:accept-merge` → `builtin:cargo-install` → `builtin:schema-migrate`
+so the merged binary and the live `.stores/db.sqlite` schema stay in
+lockstep without operator intervention. See
+[Post-accept ceremony](#post-accept-ceremony) below for the chain
+configuration.
+
+The `stores migrate` verb diffs the live `.stores/db.sqlite` schema
+against the substrate's compiled-in `schema.yaml` for every installed
+store and brings the DB up to the new binary's expectations.
+
+### Manual / debug use
+
+The verb remains available for ad-hoc inspection or recovering from a
+chain that halted in `deploy_blocked`:
 
 ```bash
-cargo install --path .       # upgrade the binary
 stores migrate               # DRY-RUN: print the SQL that would execute
 stores migrate --apply       # run the SQL inside a single transaction
 ```
@@ -199,6 +209,61 @@ changes are deliberately out of scope:
 a clean no-op (exit 0, no SQL emitted, no warnings). Running
 `stores migrate --apply` twice in a row produces the same result as
 running it once.
+
+## Post-accept ceremony
+
+Every `stores tasks accept` kicks off a three-link chain in the
+`stores agents run` daemon. Each subscriber only fires after its
+predecessor reports success; failure at any link halts the chain, flips
+the row to `deploy_blocked` with stderr captured in `blocked_reason`,
+fires `ntfy`, and routes the row to the configured
+`deployment_specialist`.
+
+1. `builtin:accept-merge` (T014) — fast-merges the row's branch into
+   `main`.
+2. `builtin:cargo-install` (T019) — refreshes the `stores` binary via
+   `cargo install --path <project_root> --features <configured>` (default
+   features: `runner-claude-code`).
+3. `builtin:schema-migrate` (T019) — runs `stores migrate --apply` so the
+   live DB matches the freshly-installed binary's `schema.yaml`.
+
+Reference `.stores/agents.yaml`:
+
+```yaml
+agents:
+  - name: accept-merge
+    subscribes_to:
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+    command: "builtin:accept-merge"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 3, backoff: linear }
+
+  - name: cargo-install
+    subscribes_to:
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+    command: "builtin:cargo-install"
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+    command_args:
+      features:
+        - runner-claude-code
+
+  - name: schema-migrate
+    subscribes_to:
+      - store: tasks
+        transition: { from: accepted, to: cargo_installed }
+    command: "builtin:schema-migrate"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+deployment_specialist: user-escalation
+```
+
+The full reference (including the `user-escalation` specialist wiring
+and the failure-routing transitions) lives at
+[`docs/agents-yaml-example.yaml`](./docs/agents-yaml-example.yaml).
 
 ## Manual workflow walk-through
 
