@@ -120,11 +120,20 @@ pub fn emit_dot(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts: &O
 fn write_z0_dot(out: &mut String, manifest: &Manifest, schemas: &HashMap<String, Schema>) {
     out.push_str("  subgraph cluster_z0_cross_store {\n");
     out.push_str("    label=\"Z0: cross-store soft-FKs\";\n");
+    write_z0_body(out, manifest, schemas, "    ");
+    out.push_str("  }\n\n");
+}
 
+fn write_z0_body(
+    out: &mut String,
+    manifest: &Manifest,
+    schemas: &HashMap<String, Schema>,
+    indent: &str,
+) {
     for store in &manifest.stores {
         let _ = writeln!(
             out,
-            "    \"z0_{}\" [shape=box, label=\"{}\"];",
+            "{indent}\"z0_{}\" [shape=box, label=\"{}\"];",
             store.name, store.name
         );
     }
@@ -138,15 +147,27 @@ fn write_z0_dot(out: &mut String, manifest: &Manifest, schemas: &HashMap<String,
                 if manifest.stores.iter().any(|s| &s.name == ref_store) {
                     let _ = writeln!(
                         out,
-                        "    \"z0_{}\" -> \"z0_{}\" [label=\"{}\"];",
+                        "{indent}\"z0_{}\" -> \"z0_{}\" [label=\"{}\"];",
                         store.name, ref_store, field.name
                     );
                 }
             }
         }
     }
+}
 
-    out.push_str("  }\n\n");
+/// Emit a standalone `digraph` for the Z0 cross-store soft-FK zone.
+///
+/// Output begins with `digraph ` and ends with `}\n`; no `subgraph cluster_*`
+/// wrapper, no `compound=true`. Suitable for rendering one zone at a time
+/// through `graph-easy --as=boxart`.
+pub fn emit_zone_z0_dot(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> String {
+    let mut out = String::new();
+    out.push_str("digraph z0 {\n");
+    out.push_str("  rankdir=TB;\n");
+    write_z0_body(&mut out, manifest, schemas, "  ");
+    out.push_str("}\n");
+    out
 }
 
 fn write_z1_dot(
@@ -158,16 +179,30 @@ fn write_z1_dot(
 ) {
     let _ = writeln!(out, "  subgraph cluster_z1_{store_name} {{");
     let _ = writeln!(out, "    label=\"Z1: {store_name} state machine\";");
+    write_z1_body(out, store_name, schema, opts, color_disabled, "    ");
+    out.push_str("  }\n\n");
+}
 
+fn write_z1_body(
+    out: &mut String,
+    store_name: &str,
+    schema: &Schema,
+    opts: &Opts,
+    color_disabled: bool,
+    indent: &str,
+) {
     let initial = schema.lifecycle.resolved_initial_state().unwrap_or("");
     for state in &schema.lifecycle.states {
         if state == initial {
             let _ = writeln!(
                 out,
-                "    \"z1_{store_name}__{state}\" [label=\"{state}\", style=bold, peripheries=2];"
+                "{indent}\"z1_{store_name}__{state}\" [label=\"{state}\", style=bold, peripheries=2];"
             );
         } else {
-            let _ = writeln!(out, "    \"z1_{store_name}__{state}\" [label=\"{state}\"];");
+            let _ = writeln!(
+                out,
+                "{indent}\"z1_{store_name}__{state}\" [label=\"{state}\"];"
+            );
         }
     }
 
@@ -181,12 +216,21 @@ fn write_z1_dot(
         };
         let _ = writeln!(
             out,
-            "    \"z1_{store_name}__{}\" -> \"z1_{store_name}__{}\" [label=\"{}\"{}];",
+            "{indent}\"z1_{store_name}__{}\" -> \"z1_{store_name}__{}\" [label=\"{}\"{}];",
             t.from, t.to, label, color_attr
         );
     }
+}
 
-    out.push_str("  }\n\n");
+/// Emit a standalone `digraph` for one store's Z1 state machine.
+pub fn emit_zone_z1_dot(store_name: &str, schema: &Schema, opts: &Opts) -> String {
+    let color_disabled = no_color_env();
+    let mut out = String::new();
+    let _ = writeln!(out, "digraph z1_{store_name} {{");
+    out.push_str("  rankdir=TB;\n");
+    write_z1_body(&mut out, store_name, schema, opts, color_disabled, "  ");
+    out.push_str("}\n");
+    out
 }
 
 fn write_z2_dot(
@@ -196,10 +240,21 @@ fn write_z2_dot(
     opts: &Opts,
     color_disabled: bool,
 ) {
-    let wf = schema.workflow.as_ref().unwrap();
     let _ = writeln!(out, "  subgraph cluster_z2_workflow_{store_name} {{");
     let _ = writeln!(out, "    label=\"Z2: {store_name} workflow firing order\";");
+    write_z2_body(out, store_name, schema, opts, color_disabled, "    ");
+    out.push_str("  }\n\n");
+}
 
+fn write_z2_body(
+    out: &mut String,
+    store_name: &str,
+    schema: &Schema,
+    opts: &Opts,
+    color_disabled: bool,
+    indent: &str,
+) {
+    let wf = schema.workflow.as_ref().unwrap();
     // Walk lifecycle states in declaration order; emit only those with on_state actions.
     for state in &schema.lifecycle.states {
         let Some(actions) = wf.on_state.get(state) else {
@@ -208,7 +263,10 @@ fn write_z2_dot(
         if actions.is_empty() {
             continue;
         }
-        let _ = writeln!(out, "    \"z2_{store_name}__{state}\" [label=\"{state}\"];");
+        let _ = writeln!(
+            out,
+            "{indent}\"z2_{store_name}__{state}\" [label=\"{state}\"];"
+        );
         for (idx, action) in actions.iter().enumerate() {
             match action {
                 StateAction::DispatchAgent(role) => {
@@ -222,11 +280,11 @@ fn write_z2_dot(
                     };
                     let _ = writeln!(
                         out,
-                        "    \"{role_node}\" [shape=ellipse, label=\"{role}\"];"
+                        "{indent}\"{role_node}\" [shape=ellipse, label=\"{role}\"];"
                     );
                     let _ = writeln!(
                         out,
-                        "    \"z2_{store_name}__{state}\" -> \"{role_node}\" [label=\"\u{2192} {role}\"{color_attr}];"
+                        "{indent}\"z2_{store_name}__{state}\" -> \"{role_node}\" [label=\"\u{2192} {role}\"{color_attr}];"
                     );
                 }
                 StateAction::TransitionTo(to_state) => {
@@ -238,11 +296,11 @@ fn write_z2_dot(
                     };
                     let _ = writeln!(
                         out,
-                        "    \"z2_{store_name}__{to_state}\" [label=\"{to_state}\"];"
+                        "{indent}\"z2_{store_name}__{to_state}\" [label=\"{to_state}\"];"
                     );
                     let _ = writeln!(
                         out,
-                        "    \"z2_{store_name}__{state}\" -> \"z2_{store_name}__{to_state}\" [label=\"\u{21d2} auto\"{color_attr}];"
+                        "{indent}\"z2_{store_name}__{state}\" -> \"z2_{store_name}__{to_state}\" [label=\"\u{21d2} auto\"{color_attr}];"
                     );
                 }
                 StateAction::Increment(_) => {
@@ -251,8 +309,61 @@ fn write_z2_dot(
             }
         }
     }
+}
 
-    out.push_str("  }\n\n");
+/// Emit a standalone `digraph` for one store's Z2 workflow firing order.
+pub fn emit_zone_z2_dot(store_name: &str, schema: &Schema, opts: &Opts) -> String {
+    let color_disabled = no_color_env();
+    let mut out = String::new();
+    let _ = writeln!(out, "digraph z2_{store_name} {{");
+    out.push_str("  rankdir=TB;\n");
+    write_z2_body(&mut out, store_name, schema, opts, color_disabled, "  ");
+    out.push_str("}\n");
+    out
+}
+
+/// Walk Z0, then per-store Z1, then per-workflow-store Z2, returning a
+/// `(header, dot_source)` pair per zone. Headers match the wording used by
+/// the mermaid emitter so multi-format output is consistent.
+pub fn zones_for_auto(
+    manifest: &Manifest,
+    schemas: &HashMap<String, Schema>,
+    opts: &Opts,
+) -> Vec<(String, String)> {
+    let mut zones: Vec<(String, String)> = Vec::new();
+    zones.push((
+        "Z0: cross-store soft-FKs".to_string(),
+        emit_zone_z0_dot(manifest, schemas),
+    ));
+    for store in &manifest.stores {
+        if let Some(filter) = &opts.store_filter {
+            if &store.name != filter {
+                continue;
+            }
+        }
+        if let Some(schema) = schemas.get(&store.name) {
+            zones.push((
+                format!("Z1: {} state machine", store.name),
+                emit_zone_z1_dot(&store.name, schema, opts),
+            ));
+        }
+    }
+    for store in &manifest.stores {
+        if let Some(filter) = &opts.store_filter {
+            if &store.name != filter {
+                continue;
+            }
+        }
+        if let Some(schema) = schemas.get(&store.name) {
+            if schema.workflow.is_some() {
+                zones.push((
+                    format!("Z2: {} workflow firing order", store.name),
+                    emit_zone_z2_dot(&store.name, schema, opts),
+                ));
+            }
+        }
+    }
+    zones
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +494,10 @@ pub enum FallbackReason {
 pub enum RenderOutcome {
     Rendered(String),
     Fallback {
+        // Unused by `run()` after the per-zone rewrite (combined source is
+        // regenerated via `emit_dot`); kept for the existing render_via_dot
+        // unit tests that pattern-match on it.
+        #[allow(dead_code)]
         source: String,
         // `run()` ignores `reason` (prints the fixed install hint); tests
         // pattern-match on it to verify the missing-vs-failed branch.
@@ -489,15 +604,28 @@ pub fn run(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts: Opts) -
             print!("{}", emit_dot(manifest, schemas, &opts));
         }
         Format::Auto => {
-            let source = emit_dot(manifest, schemas, &opts);
-            match render_via_dot(&source) {
-                RenderOutcome::Rendered(s) => print!("{s}"),
-                RenderOutcome::Fallback { source, reason } => {
-                    print!("{source}");
-                    match reason {
-                        FallbackReason::DotMissing => eprintln!("{FALLBACK_NOTE_MISSING}"),
-                        FallbackReason::DotFailed(_) => eprintln!("{FALLBACK_NOTE_FAILED}"),
+            let zones = zones_for_auto(manifest, schemas, &opts);
+            let mut rendered: Vec<(String, String)> = Vec::with_capacity(zones.len());
+            let mut fallback_reason: Option<FallbackReason> = None;
+            for (header, dot_source) in &zones {
+                match render_via_dot(dot_source) {
+                    RenderOutcome::Rendered(s) => rendered.push((header.clone(), s)),
+                    RenderOutcome::Fallback { reason, .. } => {
+                        fallback_reason = Some(reason);
+                        break;
                     }
+                }
+            }
+            if let Some(reason) = fallback_reason {
+                let combined = emit_dot(manifest, schemas, &opts);
+                print!("{combined}");
+                match reason {
+                    FallbackReason::DotMissing => eprintln!("{FALLBACK_NOTE_MISSING}"),
+                    FallbackReason::DotFailed(_) => eprintln!("{FALLBACK_NOTE_FAILED}"),
+                }
+            } else {
+                for (header, body) in rendered {
+                    print!("## {header}\n\n{body}\n\n");
                 }
             }
         }
