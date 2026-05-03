@@ -20,12 +20,15 @@ The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by defa
 
 **Use `--invoker ai_with_human` only when the human just authorized this exact row in this turn.** Concretely: you've shown the user the row you're about to write, they typed assent (a "yes" / "go" / equivalent to that proposal), and you're writing it now. Not "the user is presumably available." Not "the user kicked off this work an hour ago." This turn, this row, just-said-yes.
 
-**The four user-authority moments (U1–U4) are the only places `ai_with_human` is appropriate:**
+**The three user-authority moments (U1, U3, U4) are the only places `ai_with_human` is appropriate:**
 
-- **U1 — Scope ratification.** `tasks add` (the row is born; the contract — `done_when` / `scope_in` / `scope_out` — is born with it). The human must have just approved the contract you're about to write.
-- **U2 — Promotion.** Observation → task. `tasks add ... --linked-observations <obs-id>`. The user has seen the observation and assented to it becoming a task.
+- **U1 — Contract ratification.** The human approves an observation's `intent_contract` (the dominant path) or directly authors a task contract (legacy / escape hatch). Two forms:
+  - **Observation-first (post-T020 — the path you should default to):** `observations update LXXX --contract-state ready --approved-by blake --approved-at <now> --invoker ai_with_human --approve-token <T>`. The auto-promote subscriber (L046) creates the task autonomously within ~5s; the human does **not** separately approve "promotion." U1 covers ratification; the framework-fired task creation is grounded transitively by the human-approved upstream contract.
+  - **Direct-task (escape hatch):** `tasks add --invoker ai_with_human --title ... --slug ... --done-when ... --scope-in ... --scope-out ...` for tasks born without an observation (emergency hot-fix; infrastructure work where filing→ratify→promote is overkill). Prefer observation-first when an observation would do; the observation row is the durable surface and the dominant path.
 - **U3 — Acceptance.** `tasks accept` / `tasks reject`. Tier-A (token-mediated): the user either types the verb (`--invoker human`) OR pre-authorizes via `--invoker ai_with_human --approve-token <T>` and the AI executes.
 - **U4 — Resume / amend.** `tasks resume` (blocked → ready), `tasks amend` (rejected → planning). The human must have seen the blocker / rejection and authorized the unblock.
+
+(The earlier "U2 — Promotion" moment is folded into U1: with auto-promote, ratifying the contract IS the act that produces the task. There is no longer a separate U2.)
 
 Each U-moment now has two equivalent grounding paths:
 
@@ -84,6 +87,18 @@ Observations get `L{:03d}` IDs (`L001`, `L002`, …) — distinct from tasks' `T
 
 If the substrate is so broken you cannot even file an observation: write a worklog note (`docs/worklog/<date>/NN-substrate-down-<slug>.md`) describing what broke and what you hand-edited, then open a fresh task (or observation, when substrate recovers) to address it. The worklog note IS the audit trail for the substrate-down period — git-tracked, timestamped, discoverable.
 
+### Triage routing (the L043 rule)
+
+When friction surfaces, **the orchestrator's job is to route, not investigate**. The discipline:
+
+1. **≤3 cheap tool calls** (a file read, a grep, a quick command) to triangulate.
+2. If the root cause is obvious within that budget — fix it (or file an observation describing the fix shape) and move on.
+3. If not — file the observation with `intent_contract.tier_hint` set, then **STOP**. Either flag `status=needs_investigation` (when L043 ships an investigator subagent) or halt and ask the user how to route.
+
+**Never start a 15-tool-call inline investigation as the orchestrator-on-main.** That is the L043 anti-pattern: the user-facing thread blocks on multi-minute reads while a subagent could have carried the dive in parallel without holding the orchestrator's context. The pain that earned this rule was a long L042 misdiagnosis followed by a long `eval_length` root-cause hunt, both of which should have been routed to a fresh subagent (or filed and halted) instead of swallowing the main thread.
+
+The L043 investigator subagent (filed; awaiting promotion) closes the substrate primitive for this. Until it ships, enforce the rule as orchestrator discipline.
+
 ### The great divide on IDs
 
 Tasks `fs/T001`–`fs/T012` lived only in the filesystem (`tasks/completed/`). The substrate database starts empty and counts up from `T001` again. Substrate-`T001` is "the first task done the new way" — it is not the same as `fs/T001`. **Don't try to reconcile.** Don't backfill placeholder rows. If you need to reference a pre-substrate task in writing, prefix it `fs/` (e.g. `fs/T012`) to disambiguate. The filesystem T001–T012 are the historical record; the substrate is the source of truth from substrate-`T001` onward.
@@ -94,6 +109,8 @@ Tasks `fs/T001`–`fs/T012` lived only in the filesystem (`tasks/completed/`). T
 - Don't paper over a substrate bug with a workaround in the task content. File the observation; then either fix the substrate (in this same task or a fresh one) or work around it explicitly so the next reader sees the friction.
 - Don't backfill placeholder rows to "align" filesystem and substrate IDs. The great divide is a feature.
 - Don't give the orchestrator agent privileged channels into the substrate (e.g. "let me pause drive"). Re-read `docs/philosophy.md` if tempted. The answer is no.
+- Don't dive deep on observations as the orchestrator. See *Triage routing (the L043 rule)* above. ≤3 cheap tool calls then halt-or-route; never inline-investigate.
+- Don't hand-crank ratified-but-unpromoted observations through `./dev new`. That's the orphan-prone pattern the auto-promote subscriber (L046, in T020) obsoletes — re-keying contract content into `./dev new` flags drifts the contract from the observation and leaves both rows un-linked. Ratifying the observation's contract is the only step the human does; auto-promote carries the rest.
 
 ### Pointers
 
