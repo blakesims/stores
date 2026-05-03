@@ -87,8 +87,137 @@ canonical_path() {
 # ---------------------------------------------------------------------------
 
 cmd_new() {
-    echo "not implemented"
-    exit 0
+    local slug="" title="" done_when="" scope_in="" scope_out=""
+    local assumptions="" base=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --slug)         slug="${2:-}";         shift 2 ;;
+            --slug=*)       slug="${1#--slug=}";   shift   ;;
+            --title)        title="${2:-}";        shift 2 ;;
+            --title=*)      title="${1#--title=}"; shift   ;;
+            --done-when)    done_when="${2:-}";    shift 2 ;;
+            --done-when=*)  done_when="${1#--done-when=}"; shift ;;
+            --scope-in)     scope_in="${2:-}";     shift 2 ;;
+            --scope-in=*)   scope_in="${1#--scope-in=}";   shift ;;
+            --scope-out)    scope_out="${2:-}";    shift 2 ;;
+            --scope-out=*)  scope_out="${1#--scope-out=}"; shift ;;
+            --assumptions)  assumptions="${2:-}";  shift 2 ;;
+            --assumptions=*) assumptions="${1#--assumptions=}"; shift ;;
+            --base)         base="${2:-}";         shift 2 ;;
+            --base=*)       base="${1#--base=}";   shift   ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                printf 'error: unknown flag: %s\n\n' "$1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    # Trap Ctrl-C during prompts: nothing has been created yet because we
+    # prompt BEFORE any side effect (worktree / row).
+    trap 'printf "\naborted\n" >&2; exit 130' INT
+
+    prompt_field() {
+        local var_name="$1" label="$2" current="$3"
+        if [[ -n "$current" ]]; then
+            return 0
+        fi
+        if ! [ -t 0 ]; then
+            printf 'error: missing required field: --%s (stdin not a TTY; cannot prompt)\n\n' "$label" >&2
+            usage >&2
+            exit 2
+        fi
+        local value=""
+        read -r -p "$label: " value
+        printf -v "$var_name" '%s' "$value"
+    }
+
+    prompt_field slug      slug      "$slug"
+    prompt_field title     title     "$title"
+    prompt_field done_when done-when "$done_when"
+    prompt_field scope_in  scope-in  "$scope_in"
+    prompt_field scope_out scope-out "$scope_out"
+
+    trap - INT
+
+    [[ -n "$slug"      ]] || die "missing required field: --slug"
+    [[ -n "$title"     ]] || die "missing required field: --title"
+    [[ -n "$done_when" ]] || die "missing required field: --done-when"
+    [[ -n "$scope_in"  ]] || die "missing required field: --scope-in"
+    [[ -n "$scope_out" ]] || die "missing required field: --scope-out"
+
+    validate_slug "$slug"
+
+    local root stores_bin
+    root=$(repo_root)
+    stores_bin=$(locate_stores)
+
+    # Resolve next T###
+    local task_id
+    task_id=$( cd "$root" && "$stores_bin" tasks next-id ) \
+        || die "stores tasks next-id failed"
+    if [[ ! "$task_id" =~ ^T[0-9]{3}$ ]]; then
+        die "stores tasks next-id returned unexpected value: '$task_id'"
+    fi
+
+    local worktree_path branch
+    worktree_path="$root/../stores-${task_id}-${slug}"
+    branch="feat/${task_id}-${slug}"
+
+    if [[ -e "$worktree_path" ]]; then
+        die "worktree path already exists: $worktree_path"
+    fi
+
+    # Determine base branch.
+    if [[ -z "$base" ]]; then
+        base=$( cd "$root" && git rev-parse --abbrev-ref HEAD ) \
+            || die "could not determine current branch"
+    fi
+
+    # Warn (don't fail) on uncommitted changes in repo_root.
+    if [[ -n "$( cd "$root" && git status --porcelain )" ]]; then
+        printf 'warning: base branch has uncommitted changes (proceeding)\n' >&2
+    fi
+
+    # Create the worktree.
+    if ! ( cd "$root" && git worktree add -b "$branch" "$worktree_path" "$base" ) >&2; then
+        die "git worktree add failed"
+    fi
+
+    # Canonicalize the worktree path BEFORE recording it.
+    local abs_worktree
+    abs_worktree=$(canonical_path "$worktree_path")
+
+    # Build the substrate add invocation.
+    local -a add_args=(
+        tasks add
+        --invoker ai_with_human
+        --display-id "$task_id"
+        --workspace-path "$abs_worktree"
+        --branch "$branch"
+        --slug "$slug"
+        --title "$title"
+        --done-when "$done_when"
+        --scope-in "$scope_in"
+        --scope-out "$scope_out"
+    )
+    if [[ -n "$assumptions" ]]; then
+        add_args+=( --assumptions "$assumptions" )
+    fi
+
+    if ! ( cd "$root" && "$stores_bin" "${add_args[@]}" >&2 ); then
+        # Roll back: remove the just-created worktree.
+        ( cd "$root" && git worktree remove --force "$worktree_path" ) >&2 || true
+        die "stores tasks add failed (worktree rolled back)"
+    fi
+
+    # Final line of stdout: the absolute worktree path.
+    printf '%s\n' "$abs_worktree"
 }
 
 cmd_done() {
