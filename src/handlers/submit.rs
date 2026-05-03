@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 use crate::codegen::ddl::quote_ident;
-use crate::schema::{actor::Actor, Schema};
+use crate::schema::{actor::{Actor, InvokerCtx}, Schema};
 use crate::validate::{self, EntryMap, Op};
 use crate::validate::expr_eval::eval;
 
@@ -477,9 +477,9 @@ pub fn run_submit_plan(
     conn: &Connection,
     display_id: &str,
     plan_json: Value,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
-    let out = compute_submit_plan(schema, conn, display_id, plan_json, invoker)?;
+    let out = compute_submit_plan(schema, conn, display_id, plan_json, invoker.actor)?;
     println!("{}", out.summary);
     Ok(())
 }
@@ -629,9 +629,9 @@ pub fn run_submit_plan_review(
     gate: &str,
     summary: &str,
     open_questions: Option<Vec<String>>,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
-    let out = compute_submit_plan_review(schema, conn, display_id, gate, summary, open_questions, invoker)?;
+    let out = compute_submit_plan_review(schema, conn, display_id, gate, summary, open_questions, invoker.actor)?;
     println!("{}", out.summary);
     Ok(())
 }
@@ -769,10 +769,10 @@ pub fn run_submit_execute(
     commit_sha: Option<&str>,
     files_changed: Option<&str>,
     notes: Option<&str>,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
     let out = compute_submit_execute(
-        schema, conn, display_id, exec_summary, commit_sha, files_changed, notes, invoker,
+        schema, conn, display_id, exec_summary, commit_sha, files_changed, notes, invoker.actor,
     )?;
     println!("{}", out.summary);
     Ok(())
@@ -993,10 +993,10 @@ pub fn run_submit_review(
     critical: i64,
     major: i64,
     minor: i64,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
     let out = compute_submit_review(
-        schema, conn, display_id, gate, review_summary, review_details, critical, major, minor, invoker,
+        schema, conn, display_id, gate, review_summary, review_details, critical, major, minor, invoker.actor,
     )?;
     println!("{}", out.summary);
     // Non-zero exit when the submit routes the row to blocked (e.g. 4th REVISE guard failure).
@@ -1143,9 +1143,9 @@ pub fn run_submit_wrap(
     conn: &Connection,
     display_id: &str,
     wrap_entry: Value,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
-    let out = compute_submit_wrap(schema, conn, display_id, wrap_entry, invoker)?;
+    let out = compute_submit_wrap(schema, conn, display_id, wrap_entry, invoker.actor)?;
     println!("{}", out.summary);
     Ok(())
 }
@@ -1245,9 +1245,9 @@ pub fn run_resume(
     schema: &Schema,
     conn: &Connection,
     display_id: &str,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
-    let out = compute_resume(schema, conn, display_id, invoker)?;
+    let out = compute_resume(schema, conn, display_id, invoker.actor)?;
     println!("{}", out.summary);
     Ok(())
 }

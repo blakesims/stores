@@ -21,6 +21,38 @@ impl Actor {
     }
 }
 
+/// Resolved invoker plus the validated approve-token bit.
+///
+/// `token_valid` is set to `true` only when the CLI was passed
+/// `--approve-token <T>` and `<T>` matched the on-disk hash via constant-time
+/// compare. Phase 3 will consume this bit to relax `actor: human` checks for
+/// `ai_with_human` writes; Phase 2 only plumbs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvokerCtx {
+    pub actor: Actor,
+    pub token_valid: bool,
+}
+
+impl InvokerCtx {
+    /// Construct a context with no approve-token (the common case).
+    pub fn bare(actor: Actor) -> Self {
+        Self { actor, token_valid: false }
+    }
+}
+
+impl From<Actor> for InvokerCtx {
+    fn from(actor: Actor) -> Self {
+        Self::bare(actor)
+    }
+}
+
+impl fmt::Display for InvokerCtx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Display matches the underlying actor so log/audit strings stay stable.
+        write!(f, "{}", self.actor)
+    }
+}
+
 impl fmt::Display for Actor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

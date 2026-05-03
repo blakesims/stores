@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::manifest::Manifest;
 use crate::paths::stores_dir_for;
 use crate::render::{build_context, render_template};
-use crate::schema::{actor::Actor, Schema};
+use crate::schema::{actor::InvokerCtx, Schema};
 
 use super::next_action::find_next_agent;
 use super::row::read_row;
@@ -38,7 +38,7 @@ pub(crate) fn compute(
     schema: &Schema,
     conn: &Connection,
     matches: &ArgMatches,
-    _invoker: Actor,
+    _invoker: InvokerCtx,
 ) -> Result<BriefOutput> {
     // AC4.7: must have a workflow declaration.
     let workflow = match &schema.workflow {
@@ -164,7 +164,7 @@ pub fn run(
     schema: &Schema,
     conn: &Connection,
     matches: &ArgMatches,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
     let json_flag = matches.get_flag("json");
 
@@ -191,6 +191,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::db;
+    use crate::schema::actor::Actor;
     use crate::schema::Schema;
     use clap::{Arg, ArgAction, Command};
     use rusqlite::Connection;
@@ -281,7 +282,7 @@ workflow:
         ).unwrap();
 
         let matches = matches_for("T001", Some("nonexistent_agent"));
-        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous)
+        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous.into())
             .unwrap_err();
         let msg = err.to_string();
 
@@ -313,7 +314,7 @@ fields:
         let (_dir, conn) = open_db_with_schema(&schema);
 
         let matches = matches_for("O001", None);
-        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous)
+        let err = compute(&schema, &conn, &matches, Actor::AiAutonomous.into())
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("obs"), "error must name the store: {msg}");

@@ -2,11 +2,12 @@ use anyhow::{bail, Result};
 use clap::ArgMatches;
 use std::collections::HashMap;
 
+use crate::cli::auth;
 use crate::db;
 use crate::handlers;
 use crate::manifest::Manifest;
 use crate::paths::db_path;
-use crate::schema::{actor::Actor, Schema};
+use crate::schema::{actor::{Actor, InvokerCtx}, Schema};
 
 /// Route parsed ArgMatches to the right handler.
 pub fn dispatch(
@@ -333,7 +334,7 @@ fn read_notes_from_file(sub: &ArgMatches) -> Option<String> {
 ///
 /// Returns `Err` if `--invoker` was explicitly supplied with an unrecognised value (including
 /// the empty string).  If the flag is absent, env-detection runs and always succeeds.
-fn detect_invoker(matches: &ArgMatches) -> Result<Actor> {
+fn detect_actor(matches: &ArgMatches) -> Result<Actor> {
     // --invoker explicit override
     if let Some(inv) = matches.get_one::<String>("invoker") {
         return match inv.as_str() {
@@ -358,6 +359,31 @@ fn detect_invoker(matches: &ArgMatches) -> Result<Actor> {
     }
 }
 
+/// Phase 2: resolve actor + validate `--approve-token`.
+///
+/// On `--approve-token <T>` supplied, verify the plaintext against the on-disk
+/// hash via constant-time compare. If the token is supplied but does not
+/// verify, exit non-zero with a clear error (do NOT silently drop). If the
+/// flag is absent, `token_valid` is `false` and behaviour is unchanged.
+fn detect_invoker(matches: &ArgMatches) -> Result<InvokerCtx> {
+    let actor = detect_actor(matches)?;
+    let token_valid = match matches.get_one::<String>("approve-token") {
+        Some(tok) => {
+            if !auth::verify_approve_token(tok) {
+                bail!(
+                    "invalid approval token: --approve-token did not match the \
+                     stored hash at ${{STORES_TOKEN_DIR:-~/.config/stores}}/approve.token.hash. \
+                     Run `stores auth show` to obtain a valid token, or `stores auth init` \
+                     if no token has been provisioned."
+                );
+            }
+            true
+        }
+        None => false,
+    };
+    Ok(InvokerCtx { actor, token_valid })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,7 +406,7 @@ mod tests {
     #[test]
     fn invoker_flag_rejects_framework() {
         let m = matches_with_invoker(Some("framework"));
-        let err = detect_invoker(&m).unwrap_err();
+        let err = detect_actor(&m).unwrap_err();
         assert!(
             err.to_string().contains("internal actor"),
             "error should cite 'internal actor': {err}"
@@ -394,7 +420,7 @@ mod tests {
     #[test]
     fn invoker_flag_rejects_unknown_value() {
         let m = matches_with_invoker(Some("zorblax"));
-        let err = detect_invoker(&m).unwrap_err();
+        let err = detect_actor(&m).unwrap_err();
         assert!(
             err.to_string().contains("zorblax"),
             "error should name the bad value: {err}"
@@ -408,7 +434,7 @@ mod tests {
     #[test]
     fn invoker_flag_rejects_empty_string() {
         let m = matches_with_invoker(Some(""));
-        let err = detect_invoker(&m).unwrap_err();
+        let err = detect_actor(&m).unwrap_err();
         assert!(
             err.to_string().contains("unknown --invoker value"),
             "error should reject empty string: {err}"
@@ -418,13 +444,13 @@ mod tests {
     #[test]
     fn invoker_flag_accepts_human() {
         let m = matches_with_invoker(Some("human"));
-        assert_eq!(detect_invoker(&m).unwrap(), Actor::Human);
+        assert_eq!(detect_actor(&m).unwrap(), Actor::Human);
     }
 
     #[test]
     fn invoker_flag_falls_back_to_env_when_absent() {
         let m = matches_with_invoker(None);
         // env detection always returns Ok — we just check it doesn't error
-        assert!(detect_invoker(&m).is_ok());
+        assert!(detect_actor(&m).is_ok());
     }
 }

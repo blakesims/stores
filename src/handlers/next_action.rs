@@ -27,7 +27,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::schema::{actor::Actor, workflow::{StateAction, Workflow}, Schema};
+use crate::schema::{actor::InvokerCtx, workflow::{StateAction, Workflow}, Schema};
 
 use super::row::read_row;
 
@@ -118,7 +118,7 @@ pub fn run(
     schema: &Schema,
     conn: &Connection,
     matches: &ArgMatches,
-    _invoker: Actor,
+    _invoker: InvokerCtx,
 ) -> Result<()> {
     let display_id = matches
         .get_one::<String>("display_id")

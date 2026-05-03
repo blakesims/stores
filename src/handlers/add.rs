@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::codegen::ddl::quote_ident;
 use crate::id_format;
-use crate::schema::{actor::Actor, FieldType, Schema};
+use crate::schema::{actor::InvokerCtx, FieldType, Schema};
 use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601};
@@ -14,7 +14,7 @@ pub fn run(
     schema: &Schema,
     conn: &Connection,
     matches: &ArgMatches,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
     // Build entry from CLI args
     let entry = build_entry_map(schema, |cli_name| {
@@ -43,7 +43,7 @@ pub fn run(
     })?;
 
     // Run validator
-    validate::validate(schema, &entry, Op::Add, invoker).map_err(|errs| {
+    validate::validate(schema, &entry, Op::Add, invoker.actor).map_err(|errs| {
         anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
     })?;
 
@@ -84,7 +84,7 @@ pub fn run(
     // Populate reserved fields
     let now = now_iso8601();
     let initial_status = schema.lifecycle.resolved_initial_state()?.to_string();
-    let invoker_str = invoker.to_string();
+    let invoker_str = invoker.actor.to_string();
 
     // Collect columns + values for INSERT
     // Reserved: display_id (placeholder ""), status, created_at, updated_at,
@@ -244,6 +244,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::db;
+    use crate::schema::actor::Actor;
     use crate::schema::Schema;
 
     const MINIMAL_SCHEMA: &str = r#"
@@ -308,7 +309,7 @@ fields:
         let cmd = build_test_add_cmd(&schema);
         let matches = cmd.get_matches_from(["add"]);
 
-        run(&schema, &conn, &matches, Actor::Human).unwrap();
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let status: String = conn
             .query_row("SELECT status FROM tstore WHERE id = 1", [], |r| r.get(0))
@@ -322,7 +323,7 @@ fields:
         let cmd = build_test_add_cmd(&schema);
         let matches = cmd.get_matches_from(["add"]);
 
-        run(&schema, &conn, &matches, Actor::Human).unwrap();
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let (created_at, updated_at, created_by, updated_by): (String, String, String, String) =
             conn.query_row(
@@ -345,7 +346,7 @@ fields:
         let cmd = build_test_add_cmd(&schema);
         let matches = cmd.get_matches_from(["add"]);
 
-        run(&schema, &conn, &matches, Actor::Human).unwrap();
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let display_id: String = conn
             .query_row("SELECT display_id FROM tstore WHERE id = 1", [], |r| r.get(0))
@@ -376,7 +377,7 @@ fields:
             "--external-refs", raw_refs,
         ]);
 
-        run(&schema, &conn, &matches, Actor::Human).unwrap();
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let (_, entry) = crate::handlers::row::read_row(&schema, &conn, "R001").unwrap();
         let refs_val = entry.get("external_refs").expect("external_refs must be present");
@@ -428,7 +429,7 @@ fields:
             "--external-refs", "{not json",
         ]);
 
-        let err = run(&schema, &conn, &matches, Actor::Human).unwrap_err();
+        let err = run(&schema, &conn, &matches, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
         // Must mention the field name AND include a JSON/array hint (REVISE 1 wording check)
         assert!(
@@ -476,7 +477,7 @@ fields:
             "--external-refs", "{not json",
         ]);
 
-        let err = run(&schema, &conn, &matches, Actor::Human).unwrap_err();
+        let err = run(&schema, &conn, &matches, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
         // Must mention the field name AND include a JSON/array hint
         assert!(
@@ -570,7 +571,7 @@ fields:
             "--priority", "high",
             "--tags", "a|b",
         ]);
-        run(&schema, &conn, &add_matches, Actor::Human)
+        run(&schema, &conn, &add_matches, Actor::Human.into())
             .expect("add must succeed against hyphenated store name");
 
         // 2. show (read_row) — tests SELECT FROM site
@@ -594,7 +595,7 @@ fields:
             cmd
         };
         let list_matches = list_cmd.get_matches_from(["list"]);
-        crate::handlers::list::run(&schema, &conn, &list_matches, Actor::Human)
+        crate::handlers::list::run(&schema, &conn, &list_matches, Actor::Human.into())
             .expect("list must succeed against hyphenated store name");
 
         // 4. update — tests UPDATE site
@@ -603,7 +604,7 @@ fields:
             "update", "O001",
             "--summary", "updated summary",
         ]);
-        crate::handlers::update::run(&schema, &conn, &update_matches, Actor::Human)
+        crate::handlers::update::run(&schema, &conn, &update_matches, Actor::Human.into())
             .expect("update must succeed against hyphenated store name");
 
         // Verify update applied
@@ -617,7 +618,7 @@ fields:
         // 5. transition — tests UPDATE inside execute_transition_write
         let trans_cmd = build_verb_cmd_for(&schema, "review");
         let trans_matches = trans_cmd.get_matches_from(["review", "O001"]);
-        crate::handlers::transition::run(&schema, &conn, &trans_matches, Actor::Human, "review")
+        crate::handlers::transition::run(&schema, &conn, &trans_matches, Actor::Human.into(), "review")
             .expect("transition must succeed against hyphenated store name");
 
         let (_, entry3) = crate::handlers::row::read_row(&schema, &conn, "O001").unwrap();
@@ -700,7 +701,7 @@ fields:
             "--in-scope", "a",
             "--in-scope", "b",
         ]);
-        run(&schema, &conn, &matches, Actor::Human).expect("repeatable form must succeed");
+        run(&schema, &conn, &matches, Actor::Human.into()).expect("repeatable form must succeed");
         let items = get_in_scope(&conn, "S001");
         assert_eq!(items, vec!["a", "b"], "repeatable form: expected [\"a\", \"b\"], got {:?}", items);
     }
@@ -716,7 +717,7 @@ fields:
             "--title", "pipe test",
             "--in-scope", "a|b",
         ]);
-        run(&schema, &conn, &matches, Actor::Human).expect("pipe form must succeed");
+        run(&schema, &conn, &matches, Actor::Human.into()).expect("pipe form must succeed");
         let items = get_in_scope(&conn, "S001");
         assert_eq!(items, vec!["a", "b"], "pipe form: expected [\"a\", \"b\"], got {:?}", items);
     }
@@ -736,7 +737,7 @@ fields:
             "--in-scope", "a|b",
             "--in-scope", "c",
         ]);
-        run(&schema, &conn, &matches, Actor::Human).expect("mixed form must succeed");
+        run(&schema, &conn, &matches, Actor::Human.into()).expect("mixed form must succeed");
         let items = get_in_scope(&conn, "S001");
         assert_eq!(items, vec!["a", "b", "c"], "mixed form: expected [\"a\", \"b\", \"c\"], got {:?}", items);
     }
@@ -779,7 +780,7 @@ fields:
             "--notes", raw_notes,
         ]);
 
-        run(&schema, &conn, &matches, Actor::Human).unwrap();
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         // NOTE: read_row currently returns Value::Null for Json columns because Phase 4
         // extends the read-path match to include FieldType::Json. Until Phase 4 ships,
@@ -804,7 +805,7 @@ fields:
             "--title", "no notes row",
         ]);
 
-        run(&schema, &conn, &matches, Actor::Human).unwrap();
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let stored_notes: String = conn
             .query_row("SELECT notes FROM jstore WHERE display_id = 'J001'", [], |r| r.get(0))
@@ -843,7 +844,7 @@ fields:
             "--title", "explicit id row",
         ]);
 
-        run(&schema, &conn, &matches, Actor::Human).unwrap();
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let (rowid, display_id): (i64, String) = conn
             .query_row(
@@ -865,7 +866,7 @@ fields:
             "--display-id", "T013",
             "--title", "first",
         ]);
-        run(&schema, &conn, &m1, Actor::Human).unwrap();
+        run(&schema, &conn, &m1, Actor::Human.into()).unwrap();
 
         // Subsequent auto-mint must be T014, not T002 — the AUTOINCREMENT counter
         // must have been bumped past the explicit id.
@@ -874,7 +875,7 @@ fields:
             "add",
             "--title", "second",
         ]);
-        run(&schema, &conn, &m2, Actor::Human).unwrap();
+        run(&schema, &conn, &m2, Actor::Human.into()).unwrap();
 
         let display_id: String = conn
             .query_row(
@@ -899,7 +900,7 @@ fields:
                 "--display-id", "T013",
                 "--title", "first",
             ]),
-            Actor::Human,
+            Actor::Human.into(),
         )
         .unwrap();
 
@@ -910,7 +911,7 @@ fields:
             "--display-id", "T013",
             "--title", "second",
         ]);
-        let err = run(&schema, &conn, &m2, Actor::Human).unwrap_err();
+        let err = run(&schema, &conn, &m2, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("collision"),
@@ -932,7 +933,7 @@ fields:
             "--title", "bad id",
         ]);
 
-        let err = run(&schema, &conn, &matches, Actor::Human).unwrap_err();
+        let err = run(&schema, &conn, &matches, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("format error") || msg.contains("ASCII digits"),
@@ -950,7 +951,7 @@ fields:
             "add",
             "--title", "auto",
         ]);
-        run(&schema, &conn, &matches, Actor::Human).unwrap();
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let display_id: String = conn
             .query_row("SELECT display_id FROM tstore WHERE id = 1", [], |r| r.get(0))

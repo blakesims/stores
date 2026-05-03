@@ -5,14 +5,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::codegen::ddl::quote_ident;
-use crate::schema::{actor::Actor, FieldType, Schema};
+use crate::schema::{actor::InvokerCtx, FieldType, Schema};
 use crate::output;
 
 pub fn run(
     schema: &Schema,
     conn: &Connection,
     matches: &ArgMatches,
-    _invoker: Actor,
+    _invoker: InvokerCtx,
 ) -> Result<()> {
     let json_flag = matches.get_flag("json");
 
@@ -225,6 +225,7 @@ mod tests {
     use super::*;
     use crate::codegen::ddl::ddl_for;
     use crate::handlers::add;
+    use crate::schema::actor::Actor;
     use crate::schema::Schema;
     use rusqlite::Connection;
 
@@ -311,7 +312,7 @@ fields:
     fn insert_entry(schema: &Schema, conn: &Connection, title: &str) {
         let cmd = make_add_cmd(schema);
         let m = cmd.get_matches_from(["add", "--title", title]);
-        add::run(schema, conn, &m, Actor::Human).unwrap();
+        add::run(schema, conn, &m, Actor::Human.into()).unwrap();
     }
 
     // -----------------------------------------------------------------------
@@ -343,7 +344,7 @@ fields:
         assert_eq!(count, 1);
 
         // run() must not error
-        run(&schema, &conn, &m, Actor::Human).unwrap();
+        run(&schema, &conn, &m, Actor::Human.into()).unwrap();
     }
 
     // -----------------------------------------------------------------------
@@ -360,7 +361,7 @@ fields:
         let m = cmd.get_matches_from(["list", "--limit", "2"]);
 
         // Run succeeds
-        run(&schema, &conn, &m, Actor::Human).unwrap();
+        run(&schema, &conn, &m, Actor::Human.into()).unwrap();
 
         // Verify the SQL limit is applied: query directly
         let count: i64 = conn
@@ -379,7 +380,7 @@ fields:
 
         let cmd = make_list_cmd(&schema);
         let m = cmd.get_matches_from(["list", "--sort", "bogus_field"]);
-        let err = run(&schema, &conn, &m, Actor::Human).unwrap_err();
+        let err = run(&schema, &conn, &m, Actor::Human.into()).unwrap_err();
         assert!(
             err.to_string().contains("bogus_field"),
             "error should name the bad column: {err}"
@@ -401,7 +402,7 @@ fields:
 
         let cmd = make_list_cmd(&schema);
         let m = cmd.get_matches_from(["list", "--sort", "created_at", "--reverse"]);
-        run(&schema, &conn, &m, Actor::Human).unwrap();
+        run(&schema, &conn, &m, Actor::Human.into()).unwrap();
     }
 
     // -----------------------------------------------------------------------
@@ -429,7 +430,7 @@ fields:
         let cmd = make_list_cmd(&schema);
         let m = cmd.get_matches_from(["list", "--status", "nonexistent_state"]);
         // Must succeed with 0 rows
-        run(&schema, &conn, &m, Actor::Human).unwrap();
+        run(&schema, &conn, &m, Actor::Human.into()).unwrap();
     }
 
     // -----------------------------------------------------------------------

@@ -68,6 +68,17 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .global(true)
                 .help("Override actor detection: human | ai_autonomous | ai_with_human"),
         )
+        .arg(
+            Arg::new("approve-token")
+                .long("approve-token")
+                .global(true)
+                .help(
+                    "Plaintext approval token (chat-mediated human assent). \
+                     Verified against ~/.config/stores/approve.token.hash via \
+                     constant-time compare. Phase 2: validated only; Phase 3 \
+                     consumes the bit to relax actor: human gates.",
+                ),
+        )
         // Init subcommand
         .subcommand(
             Command::new("init").about("Initialize .stores/ in the current directory"),

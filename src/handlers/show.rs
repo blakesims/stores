@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::ArgMatches;
 use rusqlite::Connection;
 
-use crate::schema::{actor::Actor, Schema};
+use crate::schema::{actor::InvokerCtx, Schema};
 
 use super::row::read_row;
 use crate::output;
@@ -11,7 +11,7 @@ pub fn run(
     schema: &Schema,
     conn: &Connection,
     matches: &ArgMatches,
-    _invoker: Actor,
+    _invoker: InvokerCtx,
 ) -> Result<()> {
     let display_id = matches
         .get_one::<String>("display_id")

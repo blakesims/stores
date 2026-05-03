@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use crate::manifest::Manifest;
 use crate::render::{build_context, render_template};
 use crate::render::path::{find_existing_task_dir, maybe_move_dir, resolve_render_path};
-use crate::schema::{actor::Actor, Schema};
+use crate::schema::{actor::{Actor, InvokerCtx}, Schema};
 
 use super::row::read_row;
 
@@ -231,7 +231,7 @@ pub fn run(
     schema: &Schema,
     conn: &Connection,
     matches: &ArgMatches,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
     let display_id = matches
         .get_one::<String>("display_id")
@@ -240,7 +240,7 @@ pub fn run(
 
     let dry_run = matches.get_flag("dry-run");
 
-    run_render(schema, conn, display_id, dry_run, invoker)
+    run_render(schema, conn, display_id, dry_run, invoker.actor)
 }
 
 // ---------------------------------------------------------------------------

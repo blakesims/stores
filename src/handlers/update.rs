@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::codegen::ddl::quote_ident;
-use crate::schema::{actor::Actor, FieldType, Schema};
+use crate::schema::{actor::InvokerCtx, FieldType, Schema};
 use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601, read_row};
@@ -13,7 +13,7 @@ pub fn run(
     schema: &Schema,
     conn: &Connection,
     matches: &ArgMatches,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<()> {
     let display_id = matches
         .get_one::<String>("display_id")
@@ -71,13 +71,13 @@ pub fn run(
     }
 
     // Run validator against merged entry; actor checks scoped to diff only.
-    validate::validate(schema, &merged, Op::Update(diff.clone()), invoker).map_err(|errs| {
+    validate::validate(schema, &merged, Op::Update(diff.clone()), invoker.actor).map_err(|errs| {
         anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
     })?;
 
     // Build SET clause for only the fields in diff + updated_*
     let now = now_iso8601();
-    let invoker_str = invoker.to_string();
+    let invoker_str = invoker.actor.to_string();
 
     let mut set_parts: Vec<String> = vec![
         format!("updated_at = ?1"),
@@ -155,6 +155,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::db;
+    use crate::schema::actor::Actor;
     use crate::schema::Schema;
 
     const RECORD_SCHEMA: &str = r#"
@@ -205,13 +206,13 @@ fields:
         let add_cmd = build_cmd(&schema, "add", false);
         let add_matches = add_cmd
             .get_matches_from(["add", "--notes", "keep-me", "--severity", "info"]);
-        crate::handlers::add::run(&schema, &conn, &add_matches, Actor::Human).unwrap();
+        crate::handlers::add::run(&schema, &conn, &add_matches, Actor::Human.into()).unwrap();
 
         // UPDATE only severity
         let upd_cmd = build_cmd(&schema, "update", true);
         let upd_matches = upd_cmd
             .get_matches_from(["update", "R001", "--severity", "warning"]);
-        run(&schema, &conn, &upd_matches, Actor::Human).unwrap();
+        run(&schema, &conn, &upd_matches, Actor::Human.into()).unwrap();
 
         // Read back and assert notes is preserved, severity is updated
         let json_str: String = conn

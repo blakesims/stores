@@ -297,7 +297,6 @@ pub fn stored_hash() -> Result<Option<String>> {
 }
 
 /// Constant-time check: does `token` (the plaintext) hash to the stored hash?
-#[allow(dead_code)]
 pub fn verify_token(token: &str) -> Result<bool> {
     use subtle::ConstantTimeEq;
     let stored = match stored_hash()? {
@@ -309,6 +308,13 @@ pub fn verify_token(token: &str) -> Result<bool> {
     let digest = hasher.finalize();
     let candidate = hex::encode(digest);
     Ok(candidate.as_bytes().ct_eq(stored.as_bytes()).into())
+}
+
+/// Phase 2 entry-point used by dispatch: returns `false` on every error path
+/// (missing hash file, IO error, mismatch). Never panics, never propagates.
+/// Constant-time compare is delegated to `verify_token`.
+pub fn verify_approve_token(token: &str) -> bool {
+    verify_token(token).unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
