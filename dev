@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# dev — substrate task scaffolding helper (T003)
+#
+# Subcommands:
+#   new   — scaffold a new task: resolve T###, create worktree, add substrate row
+#   done  — tear down a worktree once the task is accepted/rejected
+#   help  — print usage
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+usage() {
+    cat <<'EOF'
+Usage: ./dev <verb> [args]
+
+Verbs:
+  new     Scaffold a new substrate task + worktree.
+          Flags (all optional; interactive prompt if missing):
+            --slug <slug>          kebab-case slug (^[a-z0-9-]+$)
+            --title <text>         human-readable title
+            --done-when <text>     contract: done-when criteria
+            --scope-in <text>      contract: in-scope
+            --scope-out <text>     contract: out-of-scope
+            --assumptions <text>   contract: assumptions (optional)
+            --base <branch>        base branch (default: current branch)
+
+  done <T###>   Remove the worktree for a finished task.
+          Flags:
+            --force                skip status check (accepted/rejected)
+
+  help, -h, --help   Print this message.
+EOF
+}
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+locate_stores() {
+    if command -v stores >/dev/null 2>&1; then
+        command -v stores
+        return 0
+    fi
+    local root
+    root=$(repo_root)
+    if [[ -x "$root/target/debug/stores" ]]; then
+        printf '%s\n' "$root/target/debug/stores"
+        return 0
+    fi
+    if [[ -x "$root/target/release/stores" ]]; then
+        printf '%s\n' "$root/target/release/stores"
+        return 0
+    fi
+    die "could not locate 'stores' binary (not on PATH, no target/{debug,release}/stores)"
+}
+
+repo_root() {
+    git rev-parse --show-toplevel 2>/dev/null \
+        || die "not in a git repository"
+}
+
+validate_slug() {
+    local slug="$1"
+    if [[ ! "$slug" =~ ^[a-z0-9-]+$ ]]; then
+        die "invalid slug: '$slug' (must match ^[a-z0-9-]+\$)"
+    fi
+}
+
+canonical_path() {
+    local p="$1"
+    if realpath -m "$p" 2>/dev/null; then
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$p"
+        return 0
+    fi
+    die "cannot canonicalize path '$p' (no realpath -m, no python3)"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands (stubs filled in later phases)
+# ---------------------------------------------------------------------------
+
+cmd_new() {
+    echo "not implemented"
+    exit 0
+}
+
+cmd_done() {
+    echo "not implemented"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+main() {
+    if [[ $# -lt 1 ]]; then
+        usage >&2
+        exit 2
+    fi
+    local verb="$1"; shift
+    case "$verb" in
+        new)            cmd_new "$@" ;;
+        done)           cmd_done "$@" ;;
+        help|-h|--help) usage ;;
+        *)
+            printf 'error: unknown verb: %s\n\n' "$verb" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+main "$@"
