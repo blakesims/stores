@@ -17,18 +17,20 @@ stateDiagram-v2
 stateDiagram-v2
   [*] --> planning
   planning --> plan_review :  A submit-plan
-  plan_review --> ready :  A submit-plan-review
-  plan_review --> planning :  A submit-plan-review
-  plan_review --> blocked :  A submit-plan-review
-  plan_review --> blocked :  A submit-plan-review
+  plan_review --> ready :  A submit-plan-review [READY]
+  plan_review --> planning :  A submit-plan-review [NEEDS_WORK]
+  plan_review --> blocked :  A submit-plan-review [NEEDS_WORK]
+  plan_review --> blocked :  A submit-plan-review [NOT_READY]
   ready --> executing :  F start
   executing --> code_review :  A submit-execute
-  code_review --> executing :  A submit-review
-  code_review --> complete :  A submit-review
-  code_review --> executing :  A submit-review
-  code_review --> blocked :  A submit-review
-  code_review --> blocked :  A submit-review
+  code_review --> executing :  A submit-review [PASS]
+  code_review --> complete :  A submit-review [PASS]
+  code_review --> executing :  A submit-review [REVISE]
+  code_review --> blocked :  A submit-review [REVISE]
+  code_review --> blocked :  A submit-review [FAIL]
   blocked --> ready :  H+ resume
+  accepted --> deploy_blocked :  F mark_deploy_blocked
+  deploy_blocked --> ready :  H+ resume
   complete --> in_review :  F request_review
   in_review --> accepted :  H! accept
   in_review --> rejected :  H! reject

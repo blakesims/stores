@@ -71,6 +71,20 @@ fn no_color_env() -> bool {
     std::env::var("NO_COLOR").is_ok()
 }
 
+/// Render a transition's verb with its `requires_gate` suffix when present.
+///
+/// Without this, two transitions that share `(from, verb)` but differ on
+/// `requires_gate` (e.g. `submit-plan-review [NEEDS_WORK]` falling through
+/// to `blocked` vs `submit-plan-review [NOT_READY]` going there directly)
+/// render as visually identical duplicate arrows. Suffixing the gate makes
+/// the schema's gate-disambiguation visible.
+fn verb_with_gate(t: &crate::schema::lifecycle::Transition) -> String {
+    match t.requires_gate.as_deref() {
+        Some(gate) => format!("{} [{}]", t.verb, gate),
+        None => t.verb.clone(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dot emitter
 // ---------------------------------------------------------------------------
@@ -208,7 +222,7 @@ fn write_z1_body(
 
     for t in &schema.lifecycle.transitions {
         let style = actor_style(t.actor, opts.no_icons, color_disabled);
-        let label = format!("{} {}", style.label_prefix, t.verb);
+        let label = format!("{} {}", style.label_prefix, verb_with_gate(t));
         let color_attr = if style.dot_color.is_empty() {
             String::new()
         } else {
@@ -419,7 +433,10 @@ pub fn emit_mermaid(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts
             let _ = writeln!(
                 out,
                 "  {} --> {} : {} {}",
-                t.from, t.to, style.label_prefix, t.verb
+                t.from,
+                t.to,
+                style.label_prefix,
+                verb_with_gate(t)
             );
         }
         out.push_str("```\n\n");
