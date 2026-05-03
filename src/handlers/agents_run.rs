@@ -192,6 +192,9 @@ pub fn poll_once(
                     continue;
                 }
                 let exit_code = run_dispatch(
+                    conn,
+                    agents,
+                    config_path,
                     agent,
                     &sub.store,
                     row_id,
@@ -200,6 +203,7 @@ pub fn poll_once(
                     &sub.transition.to,
                     &policy_id,
                     &policies.hash,
+                    &row_json,
                 );
                 let (status_str, code) = match exit_code {
                     Ok(c) => (
@@ -280,6 +284,9 @@ fn mark_claim_finished(
 /// daemon→subscriber→substrate plumbing for AC5.3 / Task 5.2.
 #[allow(clippy::too_many_arguments)]
 fn run_dispatch(
+    conn: &Connection,
+    agents: &AgentsYaml,
+    config_path: &Path,
     agent: &AgentEntry,
     store: &str,
     row_id: i64,
@@ -288,13 +295,33 @@ fn run_dispatch(
     to: &str,
     policy_ref: &str,
     policies_hash: &str,
+    row_json: &Value,
 ) -> Result<i32> {
     if agent.is_builtin() {
-        eprintln!(
-            "[daemon] builtin '{}' (stub) for {}/{} ({}->{}) policy_ref='{}'",
-            agent.command, store, display_id, from, to, policy_ref
-        );
-        return Ok(0);
+        let kw = agent.command.trim_start_matches("builtin:");
+        let ctx = crate::flow::builtins::DispatchCtx {
+            conn,
+            agents,
+            config_path,
+            policies_hash,
+        };
+        match crate::flow::builtins::dispatch_builtin(kw, row_json, &ctx) {
+            Some(Ok(code)) => return Ok(code),
+            Some(Err(e)) => {
+                eprintln!(
+                    "[daemon] builtin '{}' for {}/{} ({}->{}) failed: {}",
+                    agent.command, store, display_id, from, to, e
+                );
+                return Ok(-1);
+            }
+            None => {
+                eprintln!(
+                    "[daemon] unknown builtin '{}' for {}/{} ({}->{}) policy_ref='{}'",
+                    agent.command, store, display_id, from, to, policy_ref
+                );
+                return Ok(0);
+            }
+        }
     }
     use std::process::Command;
     let status = Command::new("sh")

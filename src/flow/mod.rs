@@ -4,6 +4,7 @@
 //! No daemon yet.
 
 pub mod agents_yaml;
+pub mod builtins;
 pub mod config;
 pub mod ntfy;
 pub mod policies_yaml;
