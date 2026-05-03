@@ -101,8 +101,10 @@ pass "all required fields present and correct in show --json (L001)"
 # ---------------------------------------------------------------------------
 echo "--- Step 2/8 — triage flow (open → investigating → confirmed)"
 
-# open → investigating
-stores observations investigate L001 \
+# open → investigating (T001 P4: investigate is now actor:ai_autonomous;
+# closes L007. Pass --invoker ai_autonomous explicitly because the test
+# script unsets CLAUDECODE.)
+stores observations investigate L001 --invoker ai_autonomous \
     || fail "Step 2: investigate failed"
 
 L001_STATUS=$(stores observations show L001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
@@ -306,6 +308,118 @@ TASK_ID_VAL=$(stores observations show L001 --json | jq '.task_id')
 pass "task_id=\"T001\" round-trips (soft-FK value round-trip only; cross-store integrity is T010)"
 
 # ---------------------------------------------------------------------------
+# Step 9 — T001 P4: investigate works with --invoker ai_autonomous (closes L007)
+# ---------------------------------------------------------------------------
+echo "--- Step 9 — T001 P4: observations investigate works with --invoker ai_autonomous"
+
+L005_OUT=$(stores observations add \
+    --summary "ai_autonomous investigate test" \
+    --source dev \
+    --priority normal \
+    --captured-at 2026-04-30 \
+    --captured-week w11-d4)
+[[ "$L005_OUT" == "L005" ]] || fail "Step 9: expected L005, got: $L005_OUT"
+
+stores observations investigate L005 --invoker ai_autonomous \
+    || fail "Step 9: investigate --invoker ai_autonomous failed (actor should now be ai_autonomous)"
+
+L005_STATUS=$(stores observations show L005 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+[[ "$L005_STATUS" == "investigating" ]] \
+    || fail "Step 9: expected investigating after autonomous investigate, got: $L005_STATUS"
+pass "investigate transition is actor:ai_autonomous (L007 closed)"
+
+# Same path: with CLAUDECODE=1 and no --invoker, default ai_autonomous works.
+L006_OUT=$(stores observations add \
+    --summary "claudecode-detected investigate test" \
+    --source dev \
+    --priority normal \
+    --captured-at 2026-04-30 \
+    --captured-week w11-d4)
+[[ "$L006_OUT" == "L006" ]] || fail "Step 9: expected L006, got: $L006_OUT"
+
+CLAUDECODE=1 stores observations investigate L006 \
+    || fail "Step 9: investigate with CLAUDECODE=1 (auto-detect ai_autonomous) failed"
+pass "investigate auto-detects ai_autonomous from \$CLAUDECODE"
+
+# ---------------------------------------------------------------------------
+# Step 10 — T001 P4: approved_by writable via --invoker ai_with_human --approve-token (closes L008)
+# Sets STORES_TOKEN_DIR to an isolated tmp path and writes a known SHA-256 hash.
+# ---------------------------------------------------------------------------
+echo "--- Step 10 — T001 P4: intent_contract.approved_by token-mediated path"
+
+TOKEN_DIR="$TMPDIR/auth"
+mkdir -p "$TOKEN_DIR"
+TOKEN_PLAIN="t-p4-correct-token-xyz"
+TOKEN_WRONG="t-p4-wrong-token"
+# SHA-256 hex of TOKEN_PLAIN
+TOKEN_HASH=$(printf '%s' "$TOKEN_PLAIN" | python3 -c "import sys,hashlib; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())")
+printf '%s' "$TOKEN_HASH" > "$TOKEN_DIR/approve.token.hash"
+chmod 600 "$TOKEN_DIR/approve.token.hash"
+
+# Fresh observation, drive to investigating, fill contract draft (no approval yet).
+L007_OUT=$(stores observations add \
+    --summary "Token-mediated approval test" \
+    --source dev \
+    --priority high \
+    --captured-at 2026-04-30 \
+    --captured-week w11-d4 \
+    --contract-state draft \
+    --objective "Token path objective" \
+    --type work \
+    --in-scope "scope" \
+    --out-of-scope "noscope" \
+    --acceptance "passes" \
+    --tier-hint T1 \
+    --drafted-by t001-p4 \
+    --drafted-at 2026-04-30T08:00:00Z)
+[[ "$L007_OUT" == "L007" ]] || fail "Step 10: expected L007, got: $L007_OUT"
+
+stores observations investigate L007 --invoker ai_autonomous \
+    || fail "Step 10: investigate L007 failed"
+
+# (a) write approved_by/at WITHOUT token under --invoker ai_with_human → must fail
+set +e
+NO_TOKEN_ERR=$(STORES_TOKEN_DIR="$TOKEN_DIR" stores observations update L007 \
+    --approved-by blake \
+    --approved-at 2026-04-30T09:00:00Z \
+    --invoker ai_with_human 2>&1)
+NO_TOKEN_EXIT=$?
+set -e
+[[ "$NO_TOKEN_EXIT" -ne 0 ]] \
+    || fail "Step 10(a): expected non-zero exit writing approved_by w/o token; got 0"
+echo "$NO_TOKEN_ERR" | grep -q "actor" \
+    || fail "Step 10(a): expected 'actor' in error; got: $NO_TOKEN_ERR"
+echo "$NO_TOKEN_ERR" | grep -q "approved_by" \
+    || fail "Step 10(a): expected 'approved_by' in error; got: $NO_TOKEN_ERR"
+pass "approved_by rejected for ai_with_human WITHOUT --approve-token"
+
+# (b) write approved_by with WRONG token → must fail
+set +e
+WRONG_TOKEN_ERR=$(STORES_TOKEN_DIR="$TOKEN_DIR" stores observations update L007 \
+    --approved-by blake \
+    --approved-at 2026-04-30T09:00:00Z \
+    --invoker ai_with_human \
+    --approve-token "$TOKEN_WRONG" 2>&1)
+WRONG_TOKEN_EXIT=$?
+set -e
+[[ "$WRONG_TOKEN_EXIT" -ne 0 ]] \
+    || fail "Step 10(b): expected non-zero exit writing approved_by w/ WRONG token; got 0"
+pass "approved_by rejected for ai_with_human WITH wrong --approve-token"
+
+# (c) write approved_by with CORRECT token → must succeed
+STORES_TOKEN_DIR="$TOKEN_DIR" stores observations update L007 \
+    --approved-by blake \
+    --approved-at 2026-04-30T09:00:00Z \
+    --invoker ai_with_human \
+    --approve-token "$TOKEN_PLAIN" \
+    || fail "Step 10(c): update approved_by with correct --approve-token failed"
+
+L007_APPROVED=$(stores observations show L007 --json | jq -r '.intent_contract.approved_by')
+[[ "$L007_APPROVED" == "blake" ]] \
+    || fail "Step 10(c): expected approved_by=blake after token-mediated update; got: $L007_APPROVED"
+pass "approved_by accepted for ai_with_human WITH correct --approve-token (L008 closed)"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -318,3 +432,5 @@ echo "  #5 evidence.external_refs JSON array round-trip (list_record, T006 P2): 
 echo "  #6 notes JSON object round-trip (T008 substrate): PASS"
 echo "  #7 needs_info parking (confirmed→needs_info→confirmed; AI provide_info rejected): PASS"
 echo "  #8 cross-store task_id soft-FK (value round-trip; T010 guards out of scope): PASS"
+echo "  #9 T001 P4 — investigate is actor:ai_autonomous (L007): PASS"
+echo "  #10 T001 P4 — approved_by token-mediated (no/wrong/correct token; L008): PASS"

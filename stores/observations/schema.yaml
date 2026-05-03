@@ -10,10 +10,13 @@ lifecycle:
   initial_state: open
   transitions:
     # open → investigating: triage begins
+    # investigate is autonomous (closes L007). Drafting an investigation note
+    # does not require user-presence; subsequent confirm + intent_contract
+    # approval are the U-moments and remain actor:human / actor:ai_with_human.
     - from: open
       to: investigating
       verb: investigate
-      actor: ai_with_human
+      actor: ai_autonomous
 
     # open → wont_fix: direct discard path (per 10.06 lifecycle diagram)
     - from: open
@@ -311,18 +314,21 @@ fields:
         required: false
         description: "Sketch of the fix; null signals investigation needed first"
 
-      # Approval (actor:human + required_when ready — only Blake can ratify)
+      # Approval (actor:human + required_when ready — only Blake can ratify).
+      # T001 P3: actor:human is now reachable via --invoker ai_with_human +
+      # --approve-token <T> (token-mediated assent). Pure --invoker human still
+      # works; --invoker ai_autonomous is still rejected unconditionally.
       - name: approved_by
         type: text
         actor: human
         required_when: "intent_contract.contract_state == 'ready'"
-        description: "Who approved the contract (always blake for now)"
+        description: "Who approved the contract (always blake for now); writable via --invoker human OR --invoker ai_with_human --approve-token <T>"
 
       - name: approved_at
         type: timestamp
         actor: human
         required_when: "intent_contract.contract_state == 'ready'"
-        description: "When the contract was approved"
+        description: "When the contract was approved; writable via --invoker human OR --invoker ai_with_human --approve-token <T>"
 
   # --- Evidence record (list_record of external refs; T006 P2 substrate) ---
   - name: evidence
