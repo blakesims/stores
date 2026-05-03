@@ -134,10 +134,15 @@ pub fn run(cmd: AuthCmd) -> Result<()> {
 }
 
 fn init(recipient: Option<String>, identity: Option<PathBuf>, force: bool) -> Result<()> {
-    let mut secret = [0u8; 32];
-    getrandom::getrandom(&mut secret)
+    // L016 fix: hex-encode the random secret so it round-trips cleanly as a
+    // UTF-8 string through `--approve-token <T>`. Raw 32 random bytes almost
+    // never form valid UTF-8, breaking the verify path that hashes the
+    // string's bytes. Hex is 64 ASCII chars; safe for CLI args.
+    let mut secret_raw = [0u8; 32];
+    getrandom::getrandom(&mut secret_raw)
         .map_err(|e| anyhow!("failed to read system entropy: {e}"))?;
-    let recip = init_with_secret(recipient, identity, force, &secret)?;
+    let secret_hex = hex::encode(secret_raw);
+    let recip = init_with_secret(recipient, identity, force, secret_hex.as_bytes())?;
     println!("  recipient: {}", recip);
     println!();
     println!("Note: ~/.config/stores/ is OUTSIDE this repo and is NOT gitignored");
