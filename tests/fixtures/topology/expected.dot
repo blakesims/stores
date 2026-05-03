@@ -6,6 +6,7 @@ digraph stores_topology {
     label="Z0: cross-store soft-FKs";
     "z0_tasks" [shape=box, label="tasks"];
     "z0_observations" [shape=box, label="observations"];
+    "z0_gate" [shape=box, label="gate"];
     "z0_tasks" -> "z0_tasks" [label="depends_on"];
     "z0_tasks" -> "z0_observations" [label="linked_observations"];
   }
@@ -54,6 +55,7 @@ digraph stores_topology {
     "z1_observations__open" [label="open", style=bold, peripheries=2];
     "z1_observations__investigating" [label="investigating"];
     "z1_observations__confirmed" [label="confirmed"];
+    "z1_observations__ready" [label="ready"];
     "z1_observations__needs_info" [label="needs_info"];
     "z1_observations__in_progress" [label="in_progress"];
     "z1_observations__resolved" [label="resolved"];
@@ -62,12 +64,27 @@ digraph stores_topology {
     "z1_observations__open" -> "z1_observations__wont_fix" [label=" H+\nwont_fix", color=gold, fontcolor=gold];
     "z1_observations__open" -> "z1_observations__resolved" [label=" A\nclose_as_addressed", color=green, fontcolor=green];
     "z1_observations__investigating" -> "z1_observations__confirmed" [label=" H+\nconfirm", color=gold, fontcolor=gold];
+    "z1_observations__confirmed" -> "z1_observations__ready" [label=" F\nratify", color=gray, fontcolor=gray];
     "z1_observations__investigating" -> "z1_observations__needs_info" [label=" A\nrequest_info", color=green, fontcolor=green];
     "z1_observations__confirmed" -> "z1_observations__needs_info" [label=" A\npark", color=green, fontcolor=green];
     "z1_observations__needs_info" -> "z1_observations__confirmed" [label=" H!\nprovide_info", color=red, fontcolor=red];
     "z1_observations__confirmed" -> "z1_observations__in_progress" [label=" A\nclaim", color=green, fontcolor=green];
     "z1_observations__in_progress" -> "z1_observations__resolved" [label=" A\nresolve", color=green, fontcolor=green];
     "z1_observations__confirmed" -> "z1_observations__wont_fix" [label=" H+\nwont_fix", color=gold, fontcolor=gold];
+  }
+
+  subgraph cluster_z1_gate {
+    label="Z1: gate state machine";
+    "z1_gate__pending" [label="pending", style=bold, peripheries=2];
+    "z1_gate__answered" [label="answered"];
+    "z1_gate__deferred" [label="deferred"];
+    "z1_gate__cancelled" [label="cancelled"];
+    "z1_gate__pending" -> "z1_gate__answered" [label=" H!\nanswer", color=red, fontcolor=red];
+    "z1_gate__pending" -> "z1_gate__cancelled" [label=" A\ncancel", color=green, fontcolor=green];
+    "z1_gate__deferred" -> "z1_gate__cancelled" [label=" A\ncancel", color=green, fontcolor=green];
+    "z1_gate__pending" -> "z1_gate__deferred" [label=" H+\ndefer", color=gold, fontcolor=gold];
+    "z1_gate__deferred" -> "z1_gate__pending" [label=" H+\nresume", color=gold, fontcolor=gold];
+    "z1_gate__pending" -> "z1_gate__pending" [label=" H+\nresume", color=gold, fontcolor=gold];
   }
 
   subgraph cluster_z2_workflow_tasks {

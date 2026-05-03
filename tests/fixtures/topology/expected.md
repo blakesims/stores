@@ -4,6 +4,7 @@
 stateDiagram-v2
   state "tasks" as tasks
   state "observations" as observations
+  state "gate" as gate
   tasks --> tasks : depends_on
   tasks --> observations : linked_observations
 ```
@@ -50,12 +51,28 @@ stateDiagram-v2
   open --> wont_fix :  H+ wont_fix
   open --> resolved :  A close_as_addressed
   investigating --> confirmed :  H+ confirm
+  confirmed --> ready :  F ratify
   investigating --> needs_info :  A request_info
   confirmed --> needs_info :  A park
   needs_info --> confirmed :  H! provide_info
   confirmed --> in_progress :  A claim
   in_progress --> resolved :  A resolve
   confirmed --> wont_fix :  H+ wont_fix
+```
+
+---
+
+## Z1: gate state machine
+
+```mermaid
+stateDiagram-v2
+  [*] --> pending
+  pending --> answered :  H! answer
+  pending --> cancelled :  A cancel
+  deferred --> cancelled :  A cancel
+  pending --> deferred :  H+ defer
+  deferred --> pending :  H+ resume
+  pending --> pending :  H+ resume
 ```
 
 ---
