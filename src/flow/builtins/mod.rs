@@ -8,14 +8,22 @@
 //! `user-escalation` handles `deploy_blocked` rows by filing a substrate
 //! observation that points back at the blocked task.
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use rusqlite::Connection;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::flow::AgentsYaml;
+use crate::handlers::row::read_row;
+use crate::handlers::transition::execute_transition_write;
+use crate::schema::actor::Actor;
+use crate::schema::lifecycle::select_transition;
+use crate::schema::Schema;
+use crate::validate::{self, EntryMap, Op};
 
 pub mod accept_merge;
+pub mod cargo_install;
 pub mod user_escalation;
 
 /// Context handed to a builtin at dispatch time. Lives only for the duration
@@ -38,6 +46,7 @@ pub type BuiltinResult = Result<i32>;
 pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option<BuiltinResult> {
     match keyword {
         "accept-merge" => Some(accept_merge::run(row, ctx)),
+        "cargo-install" => Some(cargo_install::run(row, ctx)),
         "user-escalation" => Some(user_escalation::run(row, ctx)),
         _ => None,
     }
@@ -64,6 +73,180 @@ pub(crate) fn resolve_main_repo(workspace_path: &str) -> Option<PathBuf> {
     let canon = common.canonicalize().ok()?;
     // .git → parent is the main working tree
     canon.parent().map(|p| p.to_path_buf())
+}
+
+/// Refresh a `tasks` row by display_id and return it as a JSON object.
+/// Returns `None` if the row is missing or the query fails.
+pub(crate) fn refresh_task_row(conn: &Connection, display_id: &str) -> Option<Value> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM tasks WHERE display_id = ?1")
+        .ok()?;
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query(rusqlite::params![display_id]).ok()?;
+    let row = rows.next().ok()??;
+    let mut obj = serde_json::Map::new();
+    for (i, name) in cols.iter().enumerate() {
+        let v: rusqlite::types::Value = row.get(i).ok()?;
+        let jv = match v {
+            rusqlite::types::Value::Null => Value::Null,
+            rusqlite::types::Value::Integer(i) => Value::from(i),
+            rusqlite::types::Value::Real(f) => {
+                Value::from(serde_json::Number::from_f64(f).unwrap_or(0.into()))
+            }
+            rusqlite::types::Value::Text(s) => Value::String(s),
+            rusqlite::types::Value::Blob(b) => Value::String(String::from_utf8_lossy(&b).to_string()),
+        };
+        obj.insert(name.clone(), jv);
+    }
+    Some(Value::Object(obj))
+}
+
+pub(crate) fn load_tasks_schema() -> Result<Schema> {
+    let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "tasks")
+        .map(|(_, y)| *y)
+        .ok_or_else(|| anyhow!("tasks bundled schema not found"))?;
+    Schema::from_yaml(yaml).context("parsing bundled tasks schema")
+}
+
+/// Fire a framework-actor transition on a `tasks` row in-process. Optional
+/// `diff_extra` is merged into the write (e.g. `blocked_reason` for
+/// `mark_deploy_blocked`). The transition is selected by `verb` from the
+/// row's current state; the function fails if no such transition exists.
+pub(crate) fn fire_framework_transition(
+    conn: &Connection,
+    display_id: &str,
+    verb: &str,
+    diff_extra: EntryMap,
+    policies_hash: &str,
+) -> Result<()> {
+    let schema = load_tasks_schema()?;
+    let tx = conn.unchecked_transaction()?;
+
+    let (row_id, existing) = read_row(&schema, &tx, display_id)?;
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let diff = diff_extra;
+    let mut merged = existing.clone();
+    for (k, v) in &diff {
+        merged.insert(k.clone(), v.clone());
+    }
+
+    let transition = select_transition(
+        &schema.lifecycle.transitions,
+        &current_status,
+        verb,
+        None,
+        &merged,
+    )?;
+
+    validate::validate(
+        &schema,
+        &merged,
+        Op::Transition(verb.to_string(), diff.clone()),
+        Actor::Framework.into(),
+    )
+    .map_err(|errs| {
+        anyhow!(
+            "{} validation failed:\n{}",
+            verb,
+            validate::pretty_print(&errs)
+        )
+    })?;
+
+    let phash_opt = if policies_hash.is_empty() {
+        None
+    } else {
+        Some(policies_hash)
+    };
+    execute_transition_write(
+        &tx,
+        &schema,
+        row_id,
+        display_id,
+        &current_status,
+        &transition.to,
+        verb,
+        &diff,
+        &merged,
+        Actor::Framework,
+        None,
+        phash_opt,
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// Convenience: fire `mark_deploy_blocked` with `blocked_reason` populated.
+pub(crate) fn fire_mark_deploy_blocked(
+    conn: &Connection,
+    display_id: &str,
+    blocked_reason: &str,
+    policies_hash: &str,
+) -> Result<()> {
+    let mut diff: EntryMap = std::collections::BTreeMap::new();
+    diff.insert(
+        "blocked_reason".to_string(),
+        Value::String(blocked_reason.to_string()),
+    );
+    fire_framework_transition(conn, display_id, "mark_deploy_blocked", diff, policies_hash)
+}
+
+/// Dispatch the row to the configured `deployment_specialist` (default
+/// `builtin:user-escalation`). Used after a builtin flips a row to
+/// `deploy_blocked`. The `caller` tag is used in error logs.
+pub(crate) fn dispatch_to_specialist(
+    row: &Value,
+    ctx: &DispatchCtx,
+    display_id: &str,
+    caller: &str,
+) {
+    let spec_name = ctx
+        .agents
+        .deployment_specialist
+        .as_deref()
+        .unwrap_or("builtin:user-escalation");
+
+    let refreshed = refresh_task_row(ctx.conn, display_id).unwrap_or_else(|| row.clone());
+
+    if let Some(kw) = spec_name.strip_prefix("builtin:") {
+        if let Some(res) = dispatch_builtin(kw, &refreshed, ctx) {
+            if let Err(e) = res {
+                eprintln!("[{}] specialist '{}' failed: {}", caller, spec_name, e);
+            }
+        } else {
+            eprintln!("[{}] unknown builtin specialist: {}", caller, spec_name);
+        }
+        return;
+    }
+
+    if let Some(agent) = ctx.agents.agents.iter().find(|a| a.name == spec_name) {
+        if let Some(kw) = agent.command.strip_prefix("builtin:") {
+            if let Some(res) = dispatch_builtin(kw, &refreshed, ctx) {
+                if let Err(e) = res {
+                    eprintln!("[{}] specialist '{}' failed: {}", caller, agent.name, e);
+                }
+            }
+        } else {
+            let _ = Command::new("sh")
+                .arg("-c")
+                .arg(&agent.command)
+                .env("STORES_DISPLAY_ID", display_id)
+                .env("STORES_STORE", "tasks")
+                .status();
+        }
+    } else {
+        eprintln!(
+            "[{}] deployment_specialist '{}' not found in agents.yaml",
+            caller, spec_name
+        );
+    }
 }
 
 #[cfg(test)]
@@ -394,6 +577,155 @@ mod tests {
         };
         accept_merge::run(&row, &ctx).unwrap();
         let _ = reason;
+    }
+
+    /// Copy a tests/fixtures cargo project into a fresh temp dir and `git
+    /// init` the result so `resolve_main_repo` finds it. Returns the
+    /// tempdir handle (drop deletes) + the resolved repo path.
+    fn init_cargo_repo(fixture: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().to_path_buf();
+        let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture);
+        copy_dir(&src, &repo);
+
+        let g = git(&repo, &["init", "-b", "main"]);
+        assert!(g.status.success(), "git init failed: {:?}", g);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+        (tmp, repo)
+    }
+
+    fn copy_dir(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&from, &to);
+            } else {
+                std::fs::copy(&from, &to).unwrap();
+            }
+        }
+    }
+
+    /// AC2.2 / test (i): cargo-install succeeds on a clean fixture, fires
+    /// `mark_cargo_installed` (framework actor), and the row advances to
+    /// `cargo_installed`.
+    #[test]
+    fn i_cargo_install_clean_chains_to_mark_cargo_installed() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, repo) = init_cargo_repo("cargo-install-noop");
+
+        let cargo_home = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CARGO_HOME", cargo_home.path());
+        std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_accepted_task(&conn, "T400", "feat/x", repo.to_str().unwrap());
+        let row = task_row_json(&conn, "T400");
+        let agents = empty_agents_yaml();
+        let cfg = cfg_path();
+        let ctx = DispatchCtx {
+            conn: &conn,
+            agents: &agents,
+            config_path: &cfg,
+            policies_hash: "",
+        };
+
+        let res = cargo_install::run(&row, &ctx).unwrap();
+        assert_eq!(res, 0);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T400'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "cargo_installed");
+
+        let (verb, invoker): (String, String) = conn
+            .query_row(
+                "SELECT verb, invoker FROM transition_history \
+                 WHERE store='tasks' AND display_id='T400' AND verb='mark_cargo_installed'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(verb, "mark_cargo_installed");
+        assert_eq!(invoker, "framework");
+
+        std::env::remove_var("CARGO_HOME");
+        std::env::remove_var("CARGO_TARGET_DIR");
+    }
+
+    /// AC2.3 / test (j): cargo-install fails on a fixture with a deliberate
+    /// compile error → row=deploy_blocked, blocked_reason carries the cargo
+    /// stderr tail, ntfy fires.
+    #[test]
+    fn j_cargo_install_failure_flips_deploy_blocked() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("STORES_NTFY_URL", "https://test.local");
+        let mock = install_mock();
+
+        let (_tmp, repo) = init_cargo_repo("cargo-install-broken");
+        let cargo_home = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CARGO_HOME", cargo_home.path());
+        std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_accepted_task(&conn, "T401", "feat/y", repo.to_str().unwrap());
+        let row = task_row_json(&conn, "T401");
+        let agents = AgentsYaml {
+            agents: vec![],
+            deployment_specialist: None,
+        };
+        let cfg = cfg_path();
+        let ctx = DispatchCtx {
+            conn: &conn,
+            agents: &agents,
+            config_path: &cfg,
+            policies_hash: "cafebabe",
+        };
+
+        cargo_install::run(&row, &ctx).unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T401'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "deploy_blocked");
+        let reason = reason.unwrap_or_default();
+        assert!(
+            reason.contains("error[E") || reason.contains("error:"),
+            "blocked_reason must carry cargo stderr; got: {reason}"
+        );
+        assert!(
+            reason.contains(repo.to_str().unwrap()) || reason.contains("cargo-install-broken"),
+            "blocked_reason must reference the failing crate path; got: {reason}"
+        );
+
+        let evs = mock.events();
+        assert!(
+            evs.iter().any(|(_, e)| e.row_id == "T401"
+                && e.transition_attempted.contains("deploy_blocked")),
+            "expected deploy_blocked ntfy event; got: {:?}",
+            evs
+        );
+
+        std::env::remove_var("STORES_NTFY_URL");
+        std::env::remove_var("CARGO_HOME");
+        std::env::remove_var("CARGO_TARGET_DIR");
     }
 
     /// AC6.4 / test (l): user-escalation files exactly one observation row
