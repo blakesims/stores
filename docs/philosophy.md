@@ -51,7 +51,7 @@ The three enforcement moments above collapse, in practice, to exactly two halts 
 - **Multi-runtime.** Because the engine is in the framework, you can swap the agent runtime — mock for tests, `claude-code` today, something else tomorrow — without touching the workflow.
 - **Workflows compose.** Any new workflow-shaped problem (notes, runs, gates, reviews) is a YAML file away. You inherit `next-action`, `brief`, `submit-*`, `render`, `drive` for free.
 - **Audit trail is mechanical.** The DB is the log. `main.md` is just a view. There is no "did the agent actually do X" — there's a row, with a timestamp, with the actor, with the diff.
-- **Autonomous flow is in-substrate.** A daemon (`stores agents run`) polls state transitions and dispatches builtin subscribers — `accept-merge`, `cargo-install`, `schema-migrate`, `user-escalation` — under a `policies.yaml` predicate layer. Default action: allow. NEVER policies are sacrosanct. Every automatic write records `policy_ref` and the policies-file hash on the row's `transition_history` audit trail. The engine consumes itself: it ships *inside* the substrate, not above it.
+- **Autonomous flow is in-substrate.** A daemon (`stores agents run`) polls state transitions and dispatches subscribers declared in `agents.yaml` under a `policies.yaml` predicate layer. Default action: allow. NEVER policies are sacrosanct. Every automatic write records `policy_ref` and the policies-file hash on the row's `transition_history` audit trail. Builtin subscribers (`accept-merge`, `user-escalation`, and the post-accept ceremony chain stores' self-build uses to ship — `cargo-install`, `schema-migrate`) are one specialization of the subscriber primitive, not its definition; client projects declare their own deploy ceremonies in `agents.yaml` (e.g. `command: ./dev deploy prod`). The substrate is workflow primitives + lifecycle + per-field actor; it is not a deployment system. The engine consumes itself: it ships *inside* the substrate, not above it. Failure recovery follows the same shape — when a deploy ceremony fails, the substrate auto-promotes the failure into a fix task and drives it through the existing planner → executor → reviewer cycle. There is no specialized "blocker agent" role; the engine handles its own failures with its own primitives.
 
 ## What's outside the substrate
 
@@ -69,7 +69,12 @@ Most agent frameworks treat the LLM as the cognitive center and the surrounding 
 
 It's a bet that the durable assets in an AI-collaborative workflow are **not the prose**, but **the typed, validated, actor-attributed rows** — and that if you make those cheap to define and impossible to bypass, the prose can be rendered from them whenever anyone needs to read it.
 
+## Pull from real use
+
+The substrate is dogfooded by being used to build itself — but self-build alone pulls toward generalizations that fit only the self-build. (`cargo install` as the deploy verb is the canonical example: shipping it as a builtin made it look general, when it was only ever the self-build's deploy step.) The substrate stays honest by being driven by real client work in parallel, where the schema, the gates, and the deploy chain meet failure modes the self-build cannot surface — different deploy targets, different test gates, different gate categories, different lock-contention shapes. The dogfood doctrine ("use the substrate to build the substrate") is necessary; the realistic-pull doctrine ("AND use it on work where the substrate doesn't choose its environment") is what keeps it from collapsing inward. Generalizations that survive both pulls are durable; generalizations that survive only the self-build are leaks waiting to be discovered.
+
 ## Revision history
 
+- **v1.2** (2026-05-03) — substrate-vs-deployment-system distinction (subscribers are project-declared; cargo-install is one specialization, not the type); failure recovery as ordinary-task pattern; "Pull from real use" doctrine as complement to dogfood.
 - **v1.1** (2026-05-03) — added at-filing contract ratification (T013/L029); two-gate operational frame; autonomous-flow layer (T014/L018+L022+L026); daemon vs. wrapper boundary clarification.
 - **v1.0** — initial draft.
