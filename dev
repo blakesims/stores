@@ -221,8 +221,99 @@ cmd_new() {
 }
 
 cmd_done() {
-    echo "not implemented"
-    exit 0
+    local task_id="" force=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force=1; shift ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --*)
+                printf 'error: unknown flag: %s\n\n' "$1" >&2
+                usage >&2
+                exit 2
+                ;;
+            *)
+                if [[ -n "$task_id" ]]; then
+                    printf 'error: unexpected positional arg: %s\n\n' "$1" >&2
+                    usage >&2
+                    exit 2
+                fi
+                task_id="$1"; shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$task_id" ]]; then
+        printf 'error: missing required positional <T###>\n\n' >&2
+        usage >&2
+        exit 2
+    fi
+    if [[ ! "$task_id" =~ ^T[0-9]{3}$ ]]; then
+        die "invalid task id: '$task_id' (must match ^T[0-9]{3}\$)"
+    fi
+
+    # Pick a JSON parser: prefer python3, fall back to jq.
+    local json_parser=""
+    if command -v python3 >/dev/null 2>&1; then
+        json_parser="python3"
+    elif command -v jq >/dev/null 2>&1; then
+        json_parser="jq"
+    else
+        die "neither python3 nor jq found on PATH; cannot parse stores JSON"
+    fi
+
+    local root stores_bin
+    root=$(repo_root)
+    stores_bin=$(locate_stores)
+
+    # Fetch row JSON.
+    local show_json
+    if ! show_json=$( cd "$root" && "$stores_bin" tasks show "$task_id" --json 2>&1 ); then
+        printf '%s\n' "$show_json" >&2
+        die "stores tasks show $task_id failed"
+    fi
+
+    local status workspace_path
+    if [[ "$json_parser" == "python3" ]]; then
+        status=$(printf '%s' "$show_json" \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("status",""))') \
+            || die "failed to parse status from JSON"
+        workspace_path=$(printf '%s' "$show_json" \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("workspace_path") or "")') \
+            || die "failed to parse workspace_path from JSON"
+    else
+        status=$(printf '%s' "$show_json" | jq -r '.status // ""') \
+            || die "failed to parse status from JSON"
+        workspace_path=$(printf '%s' "$show_json" | jq -r '.workspace_path // ""') \
+            || die "failed to parse workspace_path from JSON"
+    fi
+
+    if [[ "$status" != "accepted" && "$status" != "rejected" ]]; then
+        if [[ "$force" -ne 1 ]]; then
+            printf 'error: refusing to remove worktree for %s: status=%s (expected accepted|rejected). Pass --force to override.\n' \
+                "$task_id" "$status" >&2
+            exit 1
+        fi
+    fi
+
+    if [[ -z "$workspace_path" ]]; then
+        die "$task_id has no workspace_path in substrate (row not created by ./dev new?)"
+    fi
+
+    local -a remove_args=( worktree remove )
+    if [[ "$force" -eq 1 ]]; then
+        remove_args+=( --force )
+    fi
+    remove_args+=( "$workspace_path" )
+
+    if ! ( cd "$root" && git "${remove_args[@]}" ); then
+        die "git worktree remove failed"
+    fi
+
+    printf 'removed worktree: %s\n' "$workspace_path"
+    printf 'note: branch left intact (delete manually after merge)\n'
 }
 
 # ---------------------------------------------------------------------------
