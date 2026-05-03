@@ -100,6 +100,26 @@ fn main() -> Result<()> {
             };
             auth_run(cmd)?;
         }
+        Some(("topology", sub)) => {
+            use cli::topology::{Format, Opts};
+            let format = match sub.get_one::<String>("format").map(|s| s.as_str()) {
+                Some("dot") => Format::Dot,
+                Some("mermaid") => Format::Mermaid,
+                Some("auto") | None => Format::Auto,
+                Some(other) => {
+                    eprintln!(
+                        "error: unknown --format '{other}'; expected 'auto', 'dot', or 'mermaid'"
+                    );
+                    std::process::exit(2);
+                }
+            };
+            let opts = Opts {
+                format,
+                store_filter: sub.get_one::<String>("store").cloned(),
+                no_icons: *sub.get_one::<bool>("no-icons").unwrap_or(&false),
+            };
+            cli::topology::run(&manifest, &schemas, opts)?;
+        }
         Some(("watch", sub)) => {
             let interval_secs = sub.get_one::<f64>("interval").copied().unwrap_or(1.0);
             let interval_ms = (interval_secs * 1000.0).max(100.0) as u64;
