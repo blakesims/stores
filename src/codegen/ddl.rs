@@ -64,18 +64,49 @@ fn scalar_col_def(field_name: &str, ty: &FieldType) -> Option<String> {
     }
 }
 
-/// Generate a `CREATE TABLE IF NOT EXISTS` DDL statement for the given schema.
+/// Description of a column the substrate expects a generated table to have.
 ///
-/// Column ordering: reserved columns first, then user-declared scalar fields
-/// in schema order, then JSON columns for List/Record fields in schema order.
-/// This produces deterministic SQL for the same input.
-pub fn ddl_for(schema: &Schema) -> String {
-    let table = quote_ident(&schema.name);
+/// `name` and `sql_type` are the two halves of the column definition that
+/// the migrate diff cares about; `full_def` is the complete fragment (with
+/// any CHECK clause) that DDL codegen needs to emit a CREATE TABLE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedColumn {
+    pub name: String,
+    pub sql_type: String,
+    pub full_def: String,
+    pub is_reserved: bool,
+}
 
-    // Collect scalar column defs (Text, Integer, Bool, Timestamp, DisplayId, Enum)
-    let mut scalar_defs: Vec<String> = Vec::new();
-    // Collect JSON column defs (List, Record)
-    let mut json_defs: Vec<String> = Vec::new();
+/// Parse a reserved-column static string ("id INTEGER PRIMARY KEY AUTOINCREMENT")
+/// into name + sql_type, keeping the full definition intact.
+fn parse_reserved(def: &str) -> ExpectedColumn {
+    let mut parts = def.splitn(3, ' ');
+    let name = parts.next().expect("reserved col has name").to_string();
+    let sql_type = parts.next().expect("reserved col has type").to_string();
+    ExpectedColumn {
+        name,
+        sql_type,
+        full_def: def.to_string(),
+        is_reserved: true,
+    }
+}
+
+/// Return the deterministic, ordered list of columns the substrate expects
+/// for a generated store table: reserved columns first, then user scalar
+/// fields in schema order, then JSON-blob columns (List/Record/etc.) in
+/// schema order.
+///
+/// `ddl_for` is built on top of this; migrate.rs uses it to diff the live
+/// DB against the compiled-in schema without re-implementing column logic.
+pub fn expected_columns(schema: &Schema) -> Vec<ExpectedColumn> {
+    let mut cols: Vec<ExpectedColumn> = Vec::new();
+
+    for def in RESERVED_COLUMNS {
+        cols.push(parse_reserved(def));
+    }
+
+    let mut scalar_cols: Vec<ExpectedColumn> = Vec::new();
+    let mut json_cols: Vec<ExpectedColumn> = Vec::new();
 
     for field in &schema.fields {
         match &field.ty {
@@ -84,28 +115,48 @@ pub fn ddl_for(schema: &Schema) -> String {
             | FieldType::ListRecord(_)
             | FieldType::ListFk { .. }
             | FieldType::Json => {
-                json_defs.push(format!("{} TEXT", field.name));
+                json_cols.push(ExpectedColumn {
+                    name: field.name.clone(),
+                    sql_type: "TEXT".to_string(),
+                    full_def: format!("{} TEXT", field.name),
+                    is_reserved: false,
+                });
             }
             ty => {
                 if let Some(def) = scalar_col_def(&field.name, ty) {
-                    scalar_defs.push(def);
+                    let sql_type = match ty {
+                        FieldType::Integer | FieldType::Bool => "INTEGER",
+                        _ => "TEXT",
+                    }
+                    .to_string();
+                    scalar_cols.push(ExpectedColumn {
+                        name: field.name.clone(),
+                        sql_type,
+                        full_def: def,
+                        is_reserved: false,
+                    });
                 }
             }
         }
     }
 
-    // Build full column list: reserved + scalars + JSON blobs
-    let mut all_cols: Vec<String> = Vec::new();
-    all_cols.extend(RESERVED_COLUMNS.iter().map(|s| s.to_string()));
-    all_cols.extend(scalar_defs);
-    all_cols.extend(json_defs);
+    cols.extend(scalar_cols);
+    cols.extend(json_cols);
+    cols
+}
 
-    let col_block = all_cols
+/// Generate a `CREATE TABLE IF NOT EXISTS` DDL statement for the given schema.
+///
+/// Column ordering: reserved columns first, then user-declared scalar fields
+/// in schema order, then JSON columns for List/Record fields in schema order.
+/// This produces deterministic SQL for the same input.
+pub fn ddl_for(schema: &Schema) -> String {
+    let table = quote_ident(&schema.name);
+    let col_block = expected_columns(schema)
         .iter()
-        .map(|c| format!("    {c}"))
+        .map(|c| format!("    {}", c.full_def))
         .collect::<Vec<_>>()
         .join(",\n");
-
     format!("CREATE TABLE IF NOT EXISTS {table} (\n{col_block}\n);")
 }
 
@@ -298,6 +349,98 @@ fields:
     #[test]
     fn quote_ident_escapes_internal_double_quote() {
         assert_eq!(quote_ident("foo\"bar"), "\"foo\"\"bar\"");
+    }
+
+    // ---- expected_columns tests (Phase 1, T017) ----
+
+    #[test]
+    fn expected_columns_reserved_present_in_order() {
+        let schema = Schema::from_yaml(ALL_TYPES_FIXTURE).unwrap();
+        let cols = expected_columns(&schema);
+        let reserved: Vec<&ExpectedColumn> = cols.iter().filter(|c| c.is_reserved).collect();
+        let names: Vec<&str> = reserved.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "id",
+                "display_id",
+                "status",
+                "created_at",
+                "updated_at",
+                "created_by",
+                "updated_by",
+            ]
+        );
+        // sql_type populated for every reserved entry
+        for c in &reserved {
+            assert!(
+                !c.sql_type.is_empty(),
+                "reserved column {} has empty sql_type",
+                c.name
+            );
+        }
+        // id is INTEGER, the rest are TEXT
+        assert_eq!(reserved[0].sql_type, "INTEGER");
+        for c in &reserved[1..] {
+            assert_eq!(c.sql_type, "TEXT", "reserved {} expected TEXT", c.name);
+        }
+    }
+
+    #[test]
+    fn expected_columns_text_field() {
+        let schema = Schema::from_yaml(ALL_TYPES_FIXTURE).unwrap();
+        let cols = expected_columns(&schema);
+        let title = cols.iter().find(|c| c.name == "title").expect("title col");
+        assert!(!title.is_reserved);
+        assert_eq!(title.sql_type, "TEXT");
+        assert_eq!(title.full_def, "title TEXT");
+    }
+
+    #[test]
+    fn expected_columns_bool_field_has_check() {
+        let schema = Schema::from_yaml(ALL_TYPES_FIXTURE).unwrap();
+        let cols = expected_columns(&schema);
+        let active = cols.iter().find(|c| c.name == "active").expect("active");
+        assert_eq!(active.sql_type, "INTEGER");
+        assert!(
+            active.full_def.contains("CHECK (active IN (0,1))"),
+            "bool full_def must include CHECK clause: {}",
+            active.full_def
+        );
+    }
+
+    #[test]
+    fn expected_columns_enum_field_has_check() {
+        let schema = Schema::from_yaml(ALL_TYPES_FIXTURE).unwrap();
+        let cols = expected_columns(&schema);
+        let priority = cols
+            .iter()
+            .find(|c| c.name == "priority")
+            .expect("priority");
+        assert_eq!(priority.sql_type, "TEXT");
+        assert!(
+            priority.full_def.contains("CHECK (priority IN ("),
+            "enum full_def must include CHECK clause: {}",
+            priority.full_def
+        );
+    }
+
+    #[test]
+    fn expected_columns_json_blob_fields_have_no_check() {
+        let schema = Schema::from_yaml(ALL_TYPES_FIXTURE).unwrap();
+        let cols = expected_columns(&schema);
+        for name in &["tags", "details", "metadata"] {
+            let c = cols
+                .iter()
+                .find(|c| &c.name == name)
+                .unwrap_or_else(|| panic!("missing json field {name}"));
+            assert_eq!(c.sql_type, "TEXT", "{name} should be TEXT");
+            assert_eq!(c.full_def, format!("{name} TEXT"), "{name} full_def");
+            assert!(
+                !c.full_def.contains("CHECK"),
+                "{name} must not have CHECK clause"
+            );
+        }
     }
 
     /// AC Phase 3: DDL for a hyphenated store name produces a quoted identifier

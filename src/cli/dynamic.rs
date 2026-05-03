@@ -105,6 +105,17 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
             Command::new("list-installable")
                 .about("List stores bundled with the binary (run `stores install <name>` to install one)"),
         )
+        // Migrate subcommand — diff installed-store schemas against the live DB
+        .subcommand(
+            Command::new("migrate")
+                .about("Diff installed-store schemas against the live DB and emit additive ALTER TABLE statements (DRY-RUN by default)")
+                .arg(
+                    Arg::new("apply")
+                        .long("apply")
+                        .action(ArgAction::SetTrue)
+                        .help("Execute the emitted SQL inside a transaction (default is DRY-RUN)"),
+                ),
+        )
         // Setup subcommand — single-command bootstrap
         .subcommand(
             Command::new("setup")
