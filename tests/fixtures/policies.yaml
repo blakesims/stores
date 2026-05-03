@@ -1,0 +1,32 @@
+# Sample .stores/policies.yaml fixture (Phase 2).
+policies:
+  - id: never-T3-fast-accept
+    transition:
+      store: tasks
+      from: planning
+      to: accepted
+    predicate:
+      op: "=="
+      left: "$tier_hint"
+      right: "T3"
+    action: never
+  - id: allow-T1-fast-accept
+    transition:
+      store: tasks
+      from: planning
+      to: accepted
+    predicate:
+      op: "=="
+      left: "$tier_hint"
+      right: "T1"
+    action: allow
+  - id: halt-empty-branch-on-merge
+    transition:
+      store: tasks
+      from: in_review
+      to: accepted
+    predicate:
+      op: "=="
+      left: "$branch"
+      right: ""
+    action: halt

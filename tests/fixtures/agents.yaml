@@ -1,0 +1,25 @@
+# Sample .stores/agents.yaml fixture (Phase 2).
+agents:
+  - name: accept-merge
+    subscribes_to:
+      - store: tasks
+        transition:
+          from: in_review
+          to: accepted
+    command: "builtin:accept-merge"
+    claim_window_secs: 300
+    retry_policy:
+      max_attempts: 3
+      backoff: linear
+  - name: user-escalation
+    subscribes_to:
+      - store: tasks
+        transition:
+          from: accepted
+          to: deploy_blocked
+    command: "builtin:user-escalation"
+    claim_window_secs: 300
+    retry_policy:
+      max_attempts: 1
+      backoff: linear
+deployment_specialist: user-escalation
