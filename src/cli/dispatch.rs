@@ -351,12 +351,9 @@ fn detect_actor(matches: &ArgMatches) -> Result<Actor> {
             ),
         };
     }
-    // Auto-detect from environment
-    if std::env::var("CLAUDECODE").is_ok() {
-        Ok(Actor::AiAutonomous)
-    } else {
-        Ok(Actor::Human)
-    }
+    // Auto-detect from environment — delegate to Actor::from_env so the two
+    // code paths cannot drift (e.g. on whether CLAUDECODE="" counts as AI).
+    Ok(Actor::from_env())
 }
 
 /// Phase 2: resolve actor + validate `--approve-token`.
@@ -456,10 +453,9 @@ mod tests {
 
     // ---- Phase 2: --approve-token plumbing ----
 
+    use crate::cli::test_support::ENV_LOCK;
     use sha2::{Digest, Sha256};
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn matches_with_token(invoker: Option<&str>, token: Option<&str>) -> ArgMatches {
         let cmd = Command::new("test")

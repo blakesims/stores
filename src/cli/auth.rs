@@ -313,8 +313,21 @@ pub fn verify_token(token: &str) -> Result<bool> {
 /// Phase 2 entry-point used by dispatch: returns `false` on every error path
 /// (missing hash file, IO error, mismatch). Never panics, never propagates.
 /// Constant-time compare is delegated to `verify_token`.
-pub fn verify_approve_token(token: &str) -> bool {
-    verify_token(token).unwrap_or(false)
+///
+/// On Err (corrupted hash file, IO error other than "not found"), we log a
+/// one-line diagnostic to stderr before collapsing to `false`, so the user
+/// can distinguish "wrong token" from "the hash file is unreadable" without
+/// having to add `--debug` plumbing.
+pub(crate) fn verify_approve_token(token: &str) -> bool {
+    match verify_token(token) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!(
+                "warning: approve-token verification failed to read/parse hash file: {e}"
+            );
+            false
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,8 +397,7 @@ fi
         haystack.windows(needle.len()).any(|w| w == needle)
     }
 
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::cli::test_support::ENV_LOCK;
 
     fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

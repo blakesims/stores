@@ -838,4 +838,61 @@ fields:
             "message backwards-compat check failed; got: {}", entries_errs[0].message
         );
     }
+
+}
+
+// ---- T001 P2 / AC2.4: InvokerCtx shape tests ----
+//
+// Top-level `validate::invoker_ctx` test module so `cargo test
+// validate::invoker_ctx` matches it literally (per AC2.4). These pin the
+// InvokerCtx contract that Phase 3 will consume to relax `actor: human`
+// checks for `ai_with_human` writes carrying a valid approve-token.
+#[cfg(test)]
+mod invoker_ctx {
+    use crate::schema::actor::{Actor, InvokerCtx};
+
+    /// `InvokerCtx::bare(actor)` defaults `token_valid` to `false`.
+    #[test]
+    fn bare_defaults_token_valid_to_false() {
+        let ctx = InvokerCtx::bare(Actor::Human);
+        assert_eq!(ctx.actor, Actor::Human);
+        assert!(!ctx.token_valid);
+    }
+
+    /// `From<Actor>` round-trip: the coercion preserves the actor and
+    /// sets `token_valid = false`. This is the path most handler callsites
+    /// use when they don't (yet) plumb the token.
+    #[test]
+    fn from_actor_roundtrip_preserves_actor_and_clears_token() {
+        for actor in [
+            Actor::Human,
+            Actor::AiAutonomous,
+            Actor::AiWithHuman,
+            Actor::Framework,
+        ] {
+            let ctx: InvokerCtx = actor.into();
+            assert_eq!(ctx.actor, actor);
+            assert!(!ctx.token_valid, "From<Actor> must set token_valid=false");
+        }
+    }
+
+    /// Explicit construction with `token_valid = true` is preserved
+    /// (no implicit downgrade). Phase 3 relies on this bit being honest.
+    #[test]
+    fn explicit_token_valid_is_preserved() {
+        let ctx = InvokerCtx { actor: Actor::AiWithHuman, token_valid: true };
+        assert_eq!(ctx.actor, Actor::AiWithHuman);
+        assert!(ctx.token_valid);
+    }
+
+    /// Display matches the underlying actor (audit/log strings stay stable).
+    #[test]
+    fn display_matches_underlying_actor() {
+        assert_eq!(InvokerCtx::bare(Actor::Human).to_string(), "human");
+        assert_eq!(InvokerCtx::bare(Actor::AiAutonomous).to_string(), "ai_autonomous");
+        assert_eq!(
+            InvokerCtx { actor: Actor::AiWithHuman, token_valid: true }.to_string(),
+            "ai_with_human"
+        );
+    }
 }
