@@ -293,14 +293,24 @@ pub fn resolve_cwd() -> Result<PathBuf> {
         .context("failed to canonicalize current_dir")
 }
 
-/// Write the stream-json transcript to `.stores/runs/<session_id>.jsonl`.
+/// Write the stream-json transcript to `<runs_dir>/<session_id>.jsonl`.
 ///
-/// Creates `.stores/runs/` if it does not exist. Failures are non-fatal and
-/// are logged to stderr rather than propagated.
+/// `runs_dir` defaults to `<cwd>/.stores/runs` but is overridden by
+/// `STORES_RUNS_DIR` if set — tests use this to redirect transcripts to a
+/// tempdir so they don't pollute the project's `.stores/runs/`.
+///
+/// Creates the dir if it does not exist. Failures are non-fatal and are
+/// logged to stderr rather than propagated.
 fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) {
-    let runs_dir = cwd.join(".stores").join("runs");
+    let runs_dir = match std::env::var_os("STORES_RUNS_DIR") {
+        Some(p) => PathBuf::from(p),
+        None => cwd.join(".stores").join("runs"),
+    };
     if let Err(e) = fs::create_dir_all(&runs_dir) {
-        eprintln!("warning: could not create .stores/runs/: {e}");
+        eprintln!(
+            "warning: could not create runs dir {}: {e}",
+            runs_dir.display()
+        );
         return;
     }
     let path = runs_dir.join(format!("{session_id}.jsonl"));
@@ -461,6 +471,20 @@ mod tests {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::OnceLock;
+
+    /// Redirect transcript writes to `<CARGO_MANIFEST_DIR>/target/test-runs/` so
+    /// shim-driven runner tests don't pollute the project's `.stores/runs/`
+    /// (which is the operator-facing transcript directory). The path lives
+    /// under `target/`, which is gitignored. All tests share the same dir;
+    /// transcripts are UUID-keyed so writes never collide.
+    fn redirect_runs_dir() {
+        let runs_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-runs");
+        // Safe to set unconditionally — all tests redirect to the same path,
+        // so concurrent set_var calls converge on the same value.
+        std::env::set_var("STORES_RUNS_DIR", &runs_dir);
+    }
 
     /// Module-level shim directory, created once for the lifetime of the test binary.
     ///
@@ -758,6 +782,7 @@ mod tests {
         // Pass a stable workspace_path so resolve_cwd() is never called — this
         // avoids a race with paths::tests that call set_current_dir and then
         // drop the tmp dir before restoring, leaving the process cwd dangling.
+        redirect_runs_dir();
         let workspace = env!("CARGO_MANIFEST_DIR").to_string();
         let runner = ClaudeCodeRunner::new().with_bin(shims().silent.clone());
         let result = runner.spawn("planner", "sys", "brief", None, Some(&workspace));
@@ -793,6 +818,7 @@ mod tests {
         // Use the stable silent shim via with_bin. No PATH mutation, no per-test write.
         // Pass a stable workspace_path so resolve_cwd() is never called — guards
         // against the cwd-dangling race from paths::tests.
+        redirect_runs_dir();
         let workspace = env!("CARGO_MANIFEST_DIR").to_string();
         let runner = ClaudeCodeRunner::new().with_bin(shims().silent.clone());
         let result = runner.spawn(
@@ -933,6 +959,7 @@ mod tests {
         let _cwd_guard = crate::paths::test_cwd_lock()
             .lock()
             .expect("cwd lock poisoned");
+        redirect_runs_dir();
 
         // Use the cargo target directory as the workspace — it always exists,
         // has stable inodes, and never collides with the shim files' inodes.
@@ -969,6 +996,7 @@ mod tests {
         let _cwd_guard = crate::paths::test_cwd_lock()
             .lock()
             .expect("cwd lock poisoned");
+        redirect_runs_dir();
 
         let expected_cwd = resolve_cwd().expect("resolve_cwd must succeed");
 
