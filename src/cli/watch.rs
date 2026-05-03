@@ -316,6 +316,11 @@ fn render_phase_boxes(
         for i in 1..=total_phases {
             push_box(&mut out, i);
         }
+    } else if current_phase <= 3 {
+        // Current still inside the prefix; render first 6 verbatim, no ellipsis.
+        for i in 1..=6 {
+            push_box(&mut out, i);
+        }
     } else {
         for i in 1..=3 {
             push_box(&mut out, i);
