@@ -6,6 +6,8 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
+use std::process::{Command, Stdio};
 
 use crate::manifest::Manifest;
 use crate::schema::Schema;
@@ -401,23 +403,126 @@ pub fn emit_mermaid(
 }
 
 // ---------------------------------------------------------------------------
+// Auto-format: shell out to `dot -Tutf8` with graceful fallback
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+#[allow(dead_code)] // `DotFailed`'s stderr payload is for diagnostics + tests.
+pub enum FallbackReason {
+    DotMissing,
+    DotFailed(String),
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // `reason` is informational; `run()` ignores it but tests inspect it.
+pub enum RenderOutcome {
+    Rendered(String),
+    Fallback {
+        source: String,
+        reason: FallbackReason,
+    },
+}
+
+/// Result of one spawn-and-wait cycle of the `dot` tool.
+#[derive(Debug)]
+pub struct DotResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Spawner contract: take a dot source, return the spawn-and-wait result.
+/// Production wires `real_dot_spawner`; tests pass a stub that returns
+/// `ErrorKind::NotFound` to simulate a missing `dot` binary.
+pub type DotSpawner = fn(&str) -> std::io::Result<DotResult>;
+
+/// One-line note printed to stderr when the fallback path engages.
+pub const FALLBACK_NOTE: &str =
+    "note: 'dot' not found on PATH \u{2014} install graphviz (e.g. apt install graphviz) or use --format mermaid";
+
+pub fn real_dot_spawner(dot_source: &str) -> std::io::Result<DotResult> {
+    let mut child = Command::new("dot")
+        .args(["-Tutf8"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("failed to open dot stdin"))?;
+        stdin.write_all(dot_source.as_bytes())?;
+    }
+    let out = child.wait_with_output()?;
+    Ok(DotResult {
+        success: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
+/// Pipe `dot_source` through `dot -Tutf8` (production) or a stubbed spawner
+/// (tests).  Missing-binary or non-zero-exit conditions degrade into a
+/// `Fallback` outcome carrying the original source — they are not errors.
+/// The outer `Result` is reserved for the (currently unreachable) case where
+/// we want to surface a non-spawn IO failure unchanged.
+pub fn render_via_dot_with(
+    spawner: DotSpawner,
+    dot_source: &str,
+) -> Result<RenderOutcome> {
+    match spawner(dot_source) {
+        Ok(r) if r.success => Ok(RenderOutcome::Rendered(r.stdout)),
+        Ok(r) => Ok(RenderOutcome::Fallback {
+            source: dot_source.to_string(),
+            reason: FallbackReason::DotFailed(r.stderr),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RenderOutcome::Fallback {
+            source: dot_source.to_string(),
+            reason: FallbackReason::DotMissing,
+        }),
+        Err(e) => Ok(RenderOutcome::Fallback {
+            source: dot_source.to_string(),
+            reason: FallbackReason::DotFailed(e.to_string()),
+        }),
+    }
+}
+
+pub fn render_via_dot(dot_source: &str) -> Result<RenderOutcome> {
+    render_via_dot_with(real_dot_spawner, dot_source)
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 /// Entry point for the `topology` subcommand.
 ///
-/// Phase 2: emits dot or mermaid source directly.  `Format::Auto` falls through
-/// to dot source (Phase 3 will add the `dot -Tutf8` shellout with fallback).
+/// `Format::Auto` shells out to `dot -Tutf8`; on missing or failing `dot` it
+/// prints the dot source and a one-line install hint to stderr.
 pub fn run(
     manifest: &Manifest,
     schemas: &HashMap<String, Schema>,
     opts: Opts,
 ) -> Result<()> {
-    let out = match opts.format {
-        Format::Mermaid => emit_mermaid(manifest, schemas, &opts),
-        Format::Dot | Format::Auto => emit_dot(manifest, schemas, &opts),
-    };
-    print!("{out}");
+    match opts.format {
+        Format::Mermaid => {
+            print!("{}", emit_mermaid(manifest, schemas, &opts));
+        }
+        Format::Dot => {
+            print!("{}", emit_dot(manifest, schemas, &opts));
+        }
+        Format::Auto => {
+            let source = emit_dot(manifest, schemas, &opts);
+            match render_via_dot(&source)? {
+                RenderOutcome::Rendered(s) => print!("{s}"),
+                RenderOutcome::Fallback { source, reason: _ } => {
+                    print!("{source}");
+                    eprintln!("{FALLBACK_NOTE}");
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -540,6 +645,76 @@ mod tests {
             !out.contains("color="),
             "NO_COLOR=1 must suppress all `color=` attributes; got: {out}"
         );
+    }
+
+    /// AC3.3: render_via_dot's fallback path engages when the spawner reports
+    /// `ErrorKind::NotFound` (the simulated dot-missing case).
+    #[test]
+    fn render_via_dot_falls_back_when_missing() {
+        fn missing_spawner(_src: &str) -> std::io::Result<DotResult> {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+        let outcome = render_via_dot_with(missing_spawner, "digraph X {}").unwrap();
+        match outcome {
+            RenderOutcome::Fallback {
+                source,
+                reason: FallbackReason::DotMissing,
+            } => {
+                assert!(
+                    source.starts_with("digraph"),
+                    "fallback source must be raw dot; got: {source}"
+                );
+            }
+            other => panic!("expected Fallback {{ DotMissing }}, got {other:?}"),
+        }
+    }
+
+    /// AC3.2 surface check: the install-hint constant carries both pointers
+    /// the user needs (apt package + mermaid alternative).
+    #[test]
+    fn fallback_note_mentions_install_and_mermaid_alternative() {
+        assert!(FALLBACK_NOTE.contains("apt install graphviz"));
+        assert!(FALLBACK_NOTE.contains("--format mermaid"));
+    }
+
+    /// Non-zero exit from the spawner is also a fallback (not an error).
+    #[test]
+    fn render_via_dot_falls_back_on_nonzero_exit() {
+        fn failing_spawner(_src: &str) -> std::io::Result<DotResult> {
+            Ok(DotResult {
+                success: false,
+                stdout: String::new(),
+                stderr: "syntax error near line 1".into(),
+            })
+        }
+        let outcome = render_via_dot_with(failing_spawner, "digraph X {}").unwrap();
+        match outcome {
+            RenderOutcome::Fallback {
+                source,
+                reason: FallbackReason::DotFailed(stderr),
+            } => {
+                assert!(source.starts_with("digraph"));
+                assert!(stderr.contains("syntax error"));
+            }
+            other => panic!("expected Fallback {{ DotFailed }}, got {other:?}"),
+        }
+    }
+
+    /// Successful render is forwarded verbatim.
+    #[test]
+    fn render_via_dot_returns_rendered_on_success() {
+        fn ok_spawner(_src: &str) -> std::io::Result<DotResult> {
+            Ok(DotResult {
+                success: true,
+                stdout: "rendered ascii here".into(),
+                stderr: String::new(),
+            })
+        }
+        let outcome = render_via_dot_with(ok_spawner, "digraph X {}").unwrap();
+        match outcome {
+            RenderOutcome::Rendered(s) => assert_eq!(s, "rendered ascii here"),
+            other => panic!("expected Rendered, got {other:?}"),
+        }
     }
 
     #[test]
