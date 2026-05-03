@@ -1,0 +1,62 @@
+# Reference `.stores/agents.yaml` — the post-accept ceremony.
+#
+# After a human-fired `tasks accept`, three subscribers chain in dependency
+# order:
+#
+#   1. builtin:accept-merge   (T014) — fast-merge the row's `branch` into main.
+#   2. builtin:cargo-install  (T019) — refresh the `stores` binary.
+#   3. builtin:schema-migrate (T019) — apply additive DB migrations.
+#
+# Each link only fires after its predecessor reports success:
+#   - accept-merge subscribes to in_review→accepted (the human accept verb).
+#   - cargo-install subscribes to in_review→accepted as a peer; it runs
+#     after accept-merge within the same poll iteration (declaration order
+#     is dispatch order) and on success fires mark_cargo_installed
+#     (accepted→cargo_installed).
+#   - schema-migrate subscribes to accepted→cargo_installed (cargo-install's
+#     output transition) and on success fires mark_schema_migrated.
+#
+# Failure at any link halts the chain: the row flips to `deploy_blocked`
+# (cargo_installed→deploy_blocked or accepted→deploy_blocked) with stderr
+# captured in `blocked_reason`, ntfy fires, and the row is dispatched to
+# `deployment_specialist` (default: `builtin:user-escalation`).
+
+agents:
+  - name: accept-merge
+    subscribes_to:
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+    command: "builtin:accept-merge"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 3, backoff: linear }
+
+  - name: cargo-install
+    subscribes_to:
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+    command: "builtin:cargo-install"
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+    command_args:
+      features:
+        - runner-claude-code
+
+  - name: schema-migrate
+    subscribes_to:
+      - store: tasks
+        transition: { from: accepted, to: cargo_installed }
+    command: "builtin:schema-migrate"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  - name: user-escalation
+    subscribes_to:
+      - store: tasks
+        transition: { from: accepted, to: deploy_blocked }
+      - store: tasks
+        transition: { from: cargo_installed, to: deploy_blocked }
+    command: "builtin:user-escalation"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+deployment_specialist: user-escalation

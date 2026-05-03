@@ -28,6 +28,11 @@ pub struct AgentEntry {
     pub claim_window_secs: u64,
     #[serde(default)]
     pub retry_policy: RetryPolicy,
+    /// Free-form arguments consumed by the builtin (e.g. cargo-install reads
+    /// `command_args.features`). Untyped on purpose so each builtin defines
+    /// its own contract; absence means "use defaults".
+    #[serde(default)]
+    pub command_args: Option<serde_yaml::Mapping>,
 }
 
 fn default_claim_window_secs() -> u64 {
@@ -255,6 +260,35 @@ agents:
 "#;
         let err = AgentsYaml::from_yaml(yaml).unwrap_err().to_string();
         assert!(err.contains("builtin"), "got: {err}");
+    }
+
+    /// AC2.4: agents.yaml fixture with `command: "builtin:cargo-install"`
+    /// (and an optional command_args.features list) parses cleanly.
+    #[test]
+    fn cargo_install_entry_parses() {
+        let yaml = r#"
+agents:
+  - name: cargo-install
+    subscribes_to:
+      - store: tasks
+        transition: { from: accepted, to: cargo_installed }
+    command: "builtin:cargo-install"
+    command_args:
+      features:
+        - runner-claude-code
+        - daemon
+"#;
+        let p = AgentsYaml::from_yaml(yaml).unwrap();
+        assert_eq!(p.agents.len(), 1);
+        assert_eq!(p.agents[0].command, "builtin:cargo-install");
+        assert!(p.agents[0].is_builtin());
+        let args = p.agents[0].command_args.as_ref().unwrap();
+        let feats = args
+            .get(serde_yaml::Value::String("features".into()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert_eq!(feats.len(), 2);
     }
 
     #[test]

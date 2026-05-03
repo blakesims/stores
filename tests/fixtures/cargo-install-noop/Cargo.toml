@@ -1,0 +1,13 @@
+[package]
+name = "cargo-install-noop"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "cargo-install-noop"
+path = "src/main.rs"
+
+[features]
+default = []
+runner-claude-code = []

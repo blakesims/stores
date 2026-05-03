@@ -515,6 +515,7 @@ mod tests {
                 max_attempts: 3,
                 backoff: BackoffKind::Linear,
             },
+            command_args: None,
         }
     }
 

@@ -1,10 +1,26 @@
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use crate::codegen::ddl::{expected_columns, quote_ident, ExpectedColumn};
 use crate::manifest::Manifest;
 use crate::schema::Schema;
+
+/// Outcome of an applied migration. Returned by `apply_with` / `apply_at`.
+#[derive(Debug, Default, Clone)]
+pub struct MigrateReport {
+    /// Names of `(store, column)` pairs that were ALTER TABLE-added.
+    pub applied_columns: Vec<(String, String)>,
+    pub orphaned: usize,
+    pub type_mismatches: usize,
+}
+
+impl MigrateReport {
+    pub fn is_no_op(&self) -> bool {
+        self.applied_columns.is_empty()
+    }
+}
 
 /// A diff between the substrate's compiled-in schema and the live DB.
 #[derive(Debug, Default)]
@@ -88,6 +104,48 @@ pub fn compute_plan(
     }
 
     Ok(plan)
+}
+
+/// In-process apply: take a connection + the schemas/manifest already loaded
+/// and apply additive migrations transactionally. Returns a `MigrateReport`
+/// summarizing the outcome (or no-op if nothing was missing).
+pub fn apply_with(
+    conn: &Connection,
+    schemas: &HashMap<String, Schema>,
+    manifest: &Manifest,
+) -> Result<MigrateReport> {
+    let plan = compute_plan(conn, schemas, manifest)?;
+    let mut report = MigrateReport {
+        applied_columns: Vec::new(),
+        orphaned: plan.orphaned.len(),
+        type_mismatches: plan.type_mismatches.len(),
+    };
+    if plan.additive.is_empty() {
+        return Ok(report);
+    }
+    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len());
+    for (store, col) in &plan.additive {
+        sql_lines.push(format!(
+            "ALTER TABLE {} ADD COLUMN {};",
+            quote_ident(store),
+            col.full_def
+        ));
+        report
+            .applied_columns
+            .push((store.clone(), col.name.clone()));
+    }
+    let batch = format!("BEGIN;\n{}\nCOMMIT;", sql_lines.join("\n"));
+    conn.execute_batch(&batch)
+        .context("failed to apply additive migrations (transaction rolled back)")?;
+    Ok(report)
+}
+
+/// Convenience: load manifest + schemas from `root/.stores/manifest.yaml`
+/// and apply against `conn`. Used by the `builtin:schema-migrate` subscriber.
+pub fn apply_at(conn: &Connection, root: &Path) -> Result<MigrateReport> {
+    let manifest = Manifest::load_from(root)?;
+    let schemas = load_schemas(&manifest)?;
+    apply_with(conn, &schemas, &manifest)
 }
 
 /// Run `stores migrate` (DRY-RUN unless `apply`).

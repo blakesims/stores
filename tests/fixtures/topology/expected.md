@@ -4,7 +4,6 @@
 stateDiagram-v2
   state "tasks" as tasks
   state "observations" as observations
-  state "gate" as gate
   tasks --> tasks : depends_on
   tasks --> observations : linked_observations
 ```
@@ -31,6 +30,9 @@ stateDiagram-v2
   blocked --> ready :  H+ resume
   accepted --> deploy_blocked :  F mark_deploy_blocked
   deploy_blocked --> ready :  H+ resume
+  accepted --> cargo_installed :  F mark_cargo_installed
+  cargo_installed --> schema_migrated :  F mark_schema_migrated
+  cargo_installed --> deploy_blocked :  F mark_deploy_blocked
   complete --> in_review :  F request_review
   in_review --> accepted :  H! accept
   in_review --> rejected :  H! reject
@@ -54,21 +56,6 @@ stateDiagram-v2
   confirmed --> in_progress :  A claim
   in_progress --> resolved :  A resolve
   confirmed --> wont_fix :  H+ wont_fix
-```
-
----
-
-## Z1: gate state machine
-
-```mermaid
-stateDiagram-v2
-  [*] --> pending
-  pending --> answered :  H! answer
-  pending --> cancelled :  A cancel
-  deferred --> cancelled :  A cancel
-  pending --> deferred :  H+ defer
-  deferred --> pending :  H+ resume
-  pending --> pending :  H+ resume
 ```
 
 ---

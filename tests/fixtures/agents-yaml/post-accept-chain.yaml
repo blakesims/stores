@@ -1,0 +1,43 @@
+# Test fixture mirroring docs/agents-yaml-example.yaml — the three-link
+# post-accept ceremony plus user-escalation. Parsed by
+# `tests/flow_chain_isolation.rs` and `cargo_install_entry_parses` adjacent
+# tests to assert AgentsYaml::from_yaml accepts the production layout.
+agents:
+  - name: accept-merge
+    subscribes_to:
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+    command: "builtin:accept-merge"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 3, backoff: linear }
+
+  - name: cargo-install
+    subscribes_to:
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+    command: "builtin:cargo-install"
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+    command_args:
+      features:
+        - runner-claude-code
+
+  - name: schema-migrate
+    subscribes_to:
+      - store: tasks
+        transition: { from: accepted, to: cargo_installed }
+    command: "builtin:schema-migrate"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  - name: user-escalation
+    subscribes_to:
+      - store: tasks
+        transition: { from: accepted, to: deploy_blocked }
+      - store: tasks
+        transition: { from: cargo_installed, to: deploy_blocked }
+    command: "builtin:user-escalation"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+deployment_specialist: user-escalation
