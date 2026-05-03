@@ -1375,7 +1375,13 @@ fields:
             Some(&["T1".to_string(), "T2".to_string(), "T3".to_string()][..]),
             "tier_hint enum_values metadata must be [T1, T2, T3]"
         );
-        assert!(!tier_hint.required, "tier_hint must be required: false (CLI-layer enforces presence)");
-        assert!(tier_hint.actor.is_none(), "tier_hint must have no actor (writable by any invoker)");
+        assert!(
+            !tier_hint.required,
+            "tier_hint must be required: false (CLI-layer enforces presence)"
+        );
+        assert!(
+            tier_hint.actor.is_none(),
+            "tier_hint must have no actor (writable by any invoker)"
+        );
     }
 }

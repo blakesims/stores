@@ -258,22 +258,24 @@ fn format_task_status(t: &TaskRow) -> String {
     let wrap = |s: &str| format!("{bare_color}{s}{ANSI_RESET}");
     match t.status.as_str() {
         "plan_review" => wrap("reviewing plan"),
-        "executing" | "code_review" => {
-            match (t.current_phase, t.total_phases, t.current_cycle) {
-                (Some(p), Some(n), Some(c)) if n > 0 => {
-                    let in_review = t.status == "code_review";
-                    let color = current_box_color(&t.status, c);
-                    let boxes = render_phase_boxes(p, n, in_review, color);
-                    let dots = render_cycle_dots(c, MAX_CYCLES_DISPLAY);
-                    format!("{boxes} {dots}")
-                }
-                (Some(p), None, Some(c)) => {
-                    let verb = if t.status == "executing" { "execute" } else { "review " };
-                    wrap(&format!("{verb} P{p}/? R{c}/{MAX_CYCLES_DISPLAY}"))
-                }
-                _ => wrap(&t.status),
+        "executing" | "code_review" => match (t.current_phase, t.total_phases, t.current_cycle) {
+            (Some(p), Some(n), Some(c)) if n > 0 => {
+                let in_review = t.status == "code_review";
+                let color = current_box_color(&t.status, c);
+                let boxes = render_phase_boxes(p, n, in_review, color);
+                let dots = render_cycle_dots(c, MAX_CYCLES_DISPLAY);
+                format!("{boxes} {dots}")
             }
-        }
+            (Some(p), None, Some(c)) => {
+                let verb = if t.status == "executing" {
+                    "execute"
+                } else {
+                    "review "
+                };
+                wrap(&format!("{verb} P{p}/? R{c}/{MAX_CYCLES_DISPLAY}"))
+            }
+            _ => wrap(&t.status),
+        },
         other => wrap(other),
     }
 }
@@ -504,31 +506,58 @@ mod tests {
 
     #[test]
     fn phase_boxes_3_phase_executing() {
-        assert_eq!(strip_ansi(&render_phase_boxes(1, 3, false, ANSI_GREEN)), "▮▱▱");
-        assert_eq!(strip_ansi(&render_phase_boxes(2, 3, false, ANSI_GREEN)), "▰▮▱");
-        assert_eq!(strip_ansi(&render_phase_boxes(3, 3, false, ANSI_GREEN)), "▰▰▮");
+        assert_eq!(
+            strip_ansi(&render_phase_boxes(1, 3, false, ANSI_GREEN)),
+            "▮▱▱"
+        );
+        assert_eq!(
+            strip_ansi(&render_phase_boxes(2, 3, false, ANSI_GREEN)),
+            "▰▮▱"
+        );
+        assert_eq!(
+            strip_ansi(&render_phase_boxes(3, 3, false, ANSI_GREEN)),
+            "▰▰▮"
+        );
     }
 
     #[test]
     fn phase_boxes_3_phase_code_review() {
-        assert_eq!(strip_ansi(&render_phase_boxes(1, 3, true, ANSI_GREEN)), "◐▱▱");
-        assert_eq!(strip_ansi(&render_phase_boxes(2, 3, true, ANSI_GREEN)), "▰◐▱");
-        assert_eq!(strip_ansi(&render_phase_boxes(3, 3, true, ANSI_GREEN)), "▰▰◐");
+        assert_eq!(
+            strip_ansi(&render_phase_boxes(1, 3, true, ANSI_GREEN)),
+            "◐▱▱"
+        );
+        assert_eq!(
+            strip_ansi(&render_phase_boxes(2, 3, true, ANSI_GREEN)),
+            "▰◐▱"
+        );
+        assert_eq!(
+            strip_ansi(&render_phase_boxes(3, 3, true, ANSI_GREEN)),
+            "▰▰◐"
+        );
     }
 
     #[test]
     fn phase_boxes_6_phase_at_phase_4() {
-        assert_eq!(strip_ansi(&render_phase_boxes(4, 6, false, ANSI_GREEN)), "▰▰▰▮▱▱");
+        assert_eq!(
+            strip_ansi(&render_phase_boxes(4, 6, false, ANSI_GREEN)),
+            "▰▰▰▮▱▱"
+        );
     }
 
     #[test]
     fn phase_boxes_12_phase_truncated() {
-        assert_eq!(strip_ansi(&render_phase_boxes(5, 12, false, ANSI_GREEN)), "▰▰▰…▮▱");
+        assert_eq!(
+            strip_ansi(&render_phase_boxes(5, 12, false, ANSI_GREEN)),
+            "▰▰▰…▮▱"
+        );
     }
 
     #[test]
     fn phase_boxes_12_phase_at_end_no_trailing_future() {
-        assert_eq!(strip_ansi(&render_phase_boxes(12, 12, false, ANSI_GREEN)), "▰▰▰…▮");
+        assert_eq!(
+            strip_ansi(&render_phase_boxes(12, 12, false, ANSI_GREEN)),
+            "▰▰▰…▮"
+        );
     }
 
     #[test]

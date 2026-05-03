@@ -5,7 +5,10 @@ use serde_json::Value;
 
 use crate::codegen::ddl::quote_ident;
 use crate::id_format;
-use crate::schema::{actor::{Actor, InvokerCtx}, FieldType, Schema};
+use crate::schema::{
+    actor::{Actor, InvokerCtx},
+    FieldType, Schema,
+};
 use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601};
@@ -20,9 +23,7 @@ pub fn run(
     // intent_contract atomically before validation runs. The flag is only
     // registered on the observations store; for any other store the lookup
     // returns false and this is a no-op.
-    let lock_contract = matches
-        .try_contains_id("lock-contract")
-        .unwrap_or(false)
+    let lock_contract = matches.try_contains_id("lock-contract").unwrap_or(false)
         && matches.get_flag("lock-contract");
 
     // Build entry from CLI args
@@ -122,34 +123,25 @@ pub fn run(
                             );
                         }
                         Some(s) => {
-                            let tier = serde_json::from_str::<Value>(&s)
-                                .ok()
-                                .and_then(|jv| {
-                                    jv.get("tier_hint")
-                                        .and_then(|t| t.as_str())
-                                        .map(|s| s.to_string())
-                                });
+                            let tier = serde_json::from_str::<Value>(&s).ok().and_then(|jv| {
+                                jv.get("tier_hint")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
+                            });
                             found.push((obs_id.to_string(), tier));
                         }
                     }
                 }
                 if !found.is_empty() {
                     let first = found[0].1.clone();
-                    let unanimous =
-                        first.is_some() && found.iter().all(|(_, t)| t == &first);
+                    let unanimous = first.is_some() && found.iter().all(|(_, t)| t == &first);
                     if unanimous {
-                        entry.insert(
-                            "tier_hint".to_string(),
-                            Value::String(first.unwrap()),
-                        );
+                        entry.insert("tier_hint".to_string(), Value::String(first.unwrap()));
                     } else {
                         let listing = found
                             .iter()
                             .map(|(id, t)| {
-                                format!(
-                                    "  {id} -> {}",
-                                    t.as_deref().unwrap_or("(no tier)")
-                                )
+                                format!("  {id} -> {}", t.as_deref().unwrap_or("(no tier)"))
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
@@ -1207,13 +1199,20 @@ fields:
     fn lock_contract_args() -> Vec<&'static str> {
         vec![
             "add",
-            "--summary", "lock test",
-            "--objective", "ship the lock-contract shorthand",
-            "--type", "work",
-            "--in-scope", "obs",
-            "--out-of-scope", "tasks",
-            "--acceptance", "lock works",
-            "--tier-hint", "T2",
+            "--summary",
+            "lock test",
+            "--objective",
+            "ship the lock-contract shorthand",
+            "--type",
+            "work",
+            "--in-scope",
+            "obs",
+            "--out-of-scope",
+            "tasks",
+            "--acceptance",
+            "lock works",
+            "--tier-hint",
+            "T2",
             "--lock-contract",
         ]
     }
@@ -1256,8 +1255,14 @@ fields:
         let ic: serde_json::Value = serde_json::from_str(&raw_ic).unwrap();
         assert_eq!(ic["contract_state"], "ready");
         assert_eq!(ic["approved_by"], "human");
-        assert!(ic["approved_at"].as_str().is_some(), "approved_at must be populated");
-        assert!(ic["drafted_at"].as_str().is_some(), "drafted_at must be populated");
+        assert!(
+            ic["approved_at"].as_str().is_some(),
+            "approved_at must be populated"
+        );
+        assert!(
+            ic["drafted_at"].as_str().is_some(),
+            "drafted_at must be populated"
+        );
     }
 
     /// AC2.3: --invoker ai_with_human --approve-token <T> --lock-contract with
@@ -1295,14 +1300,20 @@ fields:
         let cmd = build_obs_add_cmd(&schema);
         let matches = cmd.get_matches_from([
             "add",
-            "--summary", "missing required fields",
+            "--summary",
+            "missing required fields",
             "--lock-contract",
         ]);
 
         let err = run(&schema, &conn, &matches, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
         for required_field in [
-            "objective", "type", "in_scope", "out_of_scope", "acceptance", "tier_hint",
+            "objective",
+            "type",
+            "in_scope",
+            "out_of_scope",
+            "acceptance",
+            "tier_hint",
         ] {
             assert!(
                 msg.contains(required_field),
@@ -1322,8 +1333,10 @@ fields:
         let cmd = build_obs_add_cmd(&schema);
         let matches = cmd.get_matches_from([
             "add",
-            "--summary", "draft path",
-            "--contract-state", "draft",
+            "--summary",
+            "draft path",
+            "--contract-state",
+            "draft",
         ]);
 
         run(&schema, &conn, &matches, Actor::AiAutonomous.into())
@@ -1352,10 +1365,14 @@ fields:
         let cmd = build_obs_add_cmd(&schema);
         let matches = cmd.get_matches_from([
             "add",
-            "--summary", "two step",
-            "--contract-state", "draft",
-            "--approved-by", "human",
-            "--approved-at", "2026-05-03T12:00:00Z",
+            "--summary",
+            "two step",
+            "--contract-state",
+            "draft",
+            "--approved-by",
+            "human",
+            "--approved-at",
+            "2026-05-03T12:00:00Z",
         ]);
 
         run(&schema, &conn, &matches, Actor::Human.into())
@@ -1418,8 +1435,10 @@ fields:
         let obs = Schema::from_yaml(OBS_TIER_SCHEMA).unwrap();
         let tasks = Schema::from_yaml(TASKS_TIER_SCHEMA).unwrap();
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs)).unwrap();
-        conn.execute_batch(&crate::codegen::ddl::ddl_for(&tasks)).unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs))
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&tasks))
+            .unwrap();
         (obs, tasks, conn)
     }
 
@@ -1444,7 +1463,11 @@ fields:
     /// Seed an observation row with the given tier_hint (or none).
     fn seed_obs(conn: &Connection, obs_schema: &Schema, tier: Option<&str>) -> String {
         let cmd = build_obs_add_cmd(obs_schema);
-        let mut argv = vec!["add".to_string(), "--summary".to_string(), "seed".to_string()];
+        let mut argv = vec![
+            "add".to_string(),
+            "--summary".to_string(),
+            "seed".to_string(),
+        ];
         if let Some(t) = tier {
             argv.push("--tier-hint".to_string());
             argv.push(t.to_string());
@@ -1484,9 +1507,12 @@ fields:
         let cmd = build_tasks_add_cmd(&tasks);
         let matches = cmd.get_matches_from([
             "add",
-            "--title", "inherits T3",
-            "--linked-observations", &l1,
-            "--linked-observations", &l2,
+            "--title",
+            "inherits T3",
+            "--linked-observations",
+            &l1,
+            "--linked-observations",
+            &l2,
         ]);
         run(&tasks, &conn, &matches, Actor::Human.into())
             .expect("unanimous tier_hint must inherit");
@@ -1504,16 +1530,25 @@ fields:
         let cmd = build_tasks_add_cmd(&tasks);
         let matches = cmd.get_matches_from([
             "add",
-            "--title", "should fail",
-            "--linked-observations", &l1,
-            "--linked-observations", &l2,
+            "--title",
+            "should fail",
+            "--linked-observations",
+            &l1,
+            "--linked-observations",
+            &l2,
         ]);
         let err = run(&tasks, &conn, &matches, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains(&l1), "error must name '{l1}': {msg}");
         assert!(msg.contains(&l2), "error must name '{l2}': {msg}");
-        assert!(msg.contains("T2") && msg.contains("T3"), "error must show both tiers: {msg}");
-        assert!(msg.contains("--tier-hint"), "error must instruct passing --tier-hint: {msg}");
+        assert!(
+            msg.contains("T2") && msg.contains("T3"),
+            "error must show both tiers: {msg}"
+        );
+        assert!(
+            msg.contains("--tier-hint"),
+            "error must instruct passing --tier-hint: {msg}"
+        );
     }
 
     /// AC3.3: same disagreement WITH --tier-hint T3 → succeeds, tier_hint='T3'.
@@ -1526,10 +1561,14 @@ fields:
         let cmd = build_tasks_add_cmd(&tasks);
         let matches = cmd.get_matches_from([
             "add",
-            "--title", "explicit wins",
-            "--linked-observations", &l1,
-            "--linked-observations", &l2,
-            "--tier-hint", "T3",
+            "--title",
+            "explicit wins",
+            "--linked-observations",
+            &l1,
+            "--linked-observations",
+            &l2,
+            "--tier-hint",
+            "T3",
         ]);
         run(&tasks, &conn, &matches, Actor::Human.into())
             .expect("explicit --tier-hint must override disagreement");
@@ -1542,10 +1581,7 @@ fields:
         let (_obs, tasks, conn) = tier_inh_schemas_and_conn();
 
         let cmd = build_tasks_add_cmd(&tasks);
-        let matches = cmd.get_matches_from([
-            "add",
-            "--title", "no obs no flag",
-        ]);
+        let matches = cmd.get_matches_from(["add", "--title", "no obs no flag"]);
         run(&tasks, &conn, &matches, Actor::Human.into())
             .expect("no linked obs and no flag must succeed");
         assert_eq!(read_task_tier(&conn, "T001"), None);
@@ -1559,8 +1595,10 @@ fields:
         let cmd = build_tasks_add_cmd(&tasks);
         let matches = cmd.get_matches_from([
             "add",
-            "--title", "missing link",
-            "--linked-observations", "L999",
+            "--title",
+            "missing link",
+            "--linked-observations",
+            "L999",
         ]);
         // Warning goes to stderr; we cannot capture it from the test process
         // without redirection plumbing, but the call must succeed and tier_hint
@@ -1581,10 +1619,14 @@ fields:
         let cmd = build_tasks_add_cmd(&tasks);
         let matches = cmd.get_matches_from([
             "add",
-            "--title", "explicit beats agreement",
-            "--linked-observations", &l1,
-            "--linked-observations", &l2,
-            "--tier-hint", "T3",
+            "--title",
+            "explicit beats agreement",
+            "--linked-observations",
+            &l1,
+            "--linked-observations",
+            &l2,
+            "--tier-hint",
+            "T3",
         ]);
         run(&tasks, &conn, &matches, Actor::Human.into()).unwrap();
         assert_eq!(read_task_tier(&conn, "T001").as_deref(), Some("T3"));
@@ -1601,13 +1643,19 @@ fields:
         let cmd = build_tasks_add_cmd(&tasks);
         let matches = cmd.get_matches_from([
             "add",
-            "--title", "mixed null",
-            "--linked-observations", &l1,
-            "--linked-observations", &l2,
+            "--title",
+            "mixed null",
+            "--linked-observations",
+            &l1,
+            "--linked-observations",
+            &l2,
         ]);
         let err = run(&tasks, &conn, &matches, Actor::Human.into()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains(&l2), "error must name '{l2}': {msg}");
-        assert!(msg.contains("no tier"), "error must mention '(no tier)': {msg}");
+        assert!(
+            msg.contains("no tier"),
+            "error must mention '(no tier)': {msg}"
+        );
     }
 }
