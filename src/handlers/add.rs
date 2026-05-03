@@ -194,6 +194,16 @@ pub fn run(
     let initial_status = schema.lifecycle.resolved_initial_state()?.to_string();
     let invoker_str = invoker.actor.to_string();
 
+    // T020 P2 (Decision Matrix Q1): --lock-contract on observations lands the row
+    // directly at 'confirmed'. The synthetic open→investigating→confirmed walk
+    // markers are written into transition_history below; the post-INSERT
+    // auto-ratify hook (Phase 1, Task 1.3) then fires confirmed→ready.
+    let effective_initial_status = if lock_contract && schema.name == "observations" {
+        "confirmed".to_string()
+    } else {
+        initial_status.clone()
+    };
+
     // Collect columns + values for INSERT
     // Reserved: display_id (placeholder ""), status, created_at, updated_at,
     //           created_by, updated_by
@@ -222,7 +232,7 @@ pub fn run(
     values.push(rusqlite::types::Value::Text(display_id_placeholder));
 
     for (col, val) in [
-        ("status", initial_status.clone()),
+        ("status", effective_initial_status.clone()),
         ("created_at", now.clone()),
         ("updated_at", now.clone()),
         ("created_by", invoker_str.clone()),
@@ -350,6 +360,63 @@ pub fn run(
             rendered
         }
     };
+
+    // T020 P2 (Task 2.3, Decision Matrix Q2): emit a synthetic 'create' transition
+    // row for every successful add. from_status is the empty string '' (NOT NULL)
+    // so the daemon's `WHERE from_status = ?2` SQL in agents_run.rs:140 matches it
+    // — keeping the empty-string convention consistent across producers.
+    crate::db::insert_transition_history(
+        &tx,
+        &schema.name,
+        rowid,
+        &display_id,
+        "",
+        &initial_status,
+        "create",
+        &invoker_str,
+        None,
+        None,
+    )?;
+
+    // T020 P2 (Task 2.1 / Decision Matrix Q1): --lock-contract synthesises the
+    // open→investigating→confirmed walk and then fires the Phase 1 auto-ratify
+    // hook (confirmed→ready) so the row lands at 'ready' in a single transaction.
+    if lock_contract && schema.name == "observations" {
+        crate::db::insert_transition_history(
+            &tx,
+            &schema.name,
+            rowid,
+            &display_id,
+            "open",
+            "investigating",
+            "investigate",
+            "framework",
+            None,
+            None,
+        )?;
+        crate::db::insert_transition_history(
+            &tx,
+            &schema.name,
+            rowid,
+            &display_id,
+            "investigating",
+            "confirmed",
+            "confirm",
+            &invoker_str,
+            None,
+            None,
+        )?;
+        crate::handlers::transition::maybe_auto_ratify_observation(
+            &tx,
+            schema,
+            rowid,
+            &display_id,
+            &entry,
+            None,
+            None,
+        )?;
+    }
+
     tx.commit()?;
 
     println!("{display_id}");
@@ -1118,8 +1185,12 @@ fields:
 name: observations
 id_format: "L{:03d}"
 lifecycle:
-  states: [open]
-  transitions: []
+  states: [open, investigating, confirmed, ready]
+  initial_state: open
+  transitions:
+    - {from: open, to: investigating, verb: investigate, actor: ai_autonomous}
+    - {from: investigating, to: confirmed, verb: confirm, actor: ai_with_human}
+    - {from: confirmed, to: ready, verb: ratify, actor: framework}
 fields:
   - name: summary
     type: text
@@ -1657,5 +1728,143 @@ fields:
             msg.contains("no tier"),
             "error must mention '(no tier)': {msg}"
         );
+    }
+
+    // ---- T020 P2: synthetic 'create' transition_history row + lock-contract walk ----
+
+    /// AC2.2: tasks add inserts exactly one transition_history row with
+    /// from_status='' (empty string, not NULL), to_status='planning',
+    /// verb='create', store='tasks'.
+    #[test]
+    fn tasks_add_emits_planning_arrival() {
+        const TASKS_MINI: &str = r#"
+name: tasks
+id_format: "T{:03d}"
+lifecycle:
+  states: [planning, complete]
+  initial_state: planning
+  transitions: []
+fields:
+  - {name: title, type: text, required: true}
+"#;
+        let schema = Schema::from_yaml(TASKS_MINI).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
+
+        let cmd = build_test_add_cmd(&schema);
+        let matches = cmd.get_matches_from(["add", "--title", "first task"]);
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
+
+        // Exactly one row, with the synthetic create shape.
+        let (store, display_id, from, to, verb, invoker): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT store, display_id, from_status, to_status, verb, invoker \
+                 FROM transition_history WHERE store='tasks'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .expect("exactly one transition_history row for tasks add");
+        assert_eq!(store, "tasks");
+        assert_eq!(display_id, "T001");
+        assert_eq!(from, "", "from_status must be empty string, not NULL");
+        assert_eq!(to, "planning");
+        assert_eq!(verb, "create");
+        assert_eq!(invoker, "human");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history WHERE store='tasks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "tasks add must emit exactly one create row");
+    }
+
+    /// AC2.2 (b): observations add (no --lock-contract) inserts exactly one
+    /// synthetic create row with from_status='' to_status='open'.
+    #[test]
+    fn observations_add_no_lock_emits_open_arrival() {
+        let (schema, conn) = obs_lock_schema_and_conn();
+        let cmd = build_obs_add_cmd(&schema);
+        let matches = cmd.get_matches_from(["add", "--summary", "no lock"]);
+        run(&schema, &conn, &matches, Actor::AiAutonomous.into()).unwrap();
+
+        let rows: Vec<(String, String, String, String)> = conn
+            .prepare(
+                "SELECT from_status, to_status, verb, invoker FROM transition_history \
+                 WHERE store='observations' AND display_id='L001' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows.len(), 1, "expected one create row; got {rows:?}");
+        assert_eq!(rows[0].0, "", "from_status must be empty string");
+        assert_eq!(rows[0].1, "open");
+        assert_eq!(rows[0].2, "create");
+        assert_eq!(rows[0].3, "ai_autonomous");
+    }
+
+    /// AC2.3: observations add --lock-contract --invoker human inserts the
+    /// synthetic create row PLUS confirmed→ready transition (verb=ratify,
+    /// invoker=framework). Final row status='ready'.
+    #[test]
+    fn lock_contract_lands_at_ready() {
+        let (schema, conn) = obs_lock_schema_and_conn();
+        let cmd = build_obs_add_cmd(&schema);
+        let matches = cmd.get_matches_from(lock_contract_args());
+
+        run(&schema, &conn, &matches, Actor::Human.into()).expect("lock-contract must succeed");
+
+        // Final row status is 'ready'.
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM observations WHERE display_id='L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "ready", "row must land at 'ready' after lock-contract");
+
+        // transition_history contains the create row + the synthetic walk + ratify.
+        let rows: Vec<(String, String, String, String)> = conn
+            .prepare(
+                "SELECT from_status, to_status, verb, invoker FROM transition_history \
+                 WHERE store='observations' AND display_id='L001' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        // create + investigate + confirm + ratify = 4 rows
+        assert_eq!(rows.len(), 4, "expected 4 transition_history rows; got {rows:?}");
+        assert_eq!(rows[0], ("".to_string(), "open".to_string(), "create".to_string(), "human".to_string()));
+        assert_eq!(rows[1], ("open".to_string(), "investigating".to_string(), "investigate".to_string(), "framework".to_string()));
+        assert_eq!(rows[2], ("investigating".to_string(), "confirmed".to_string(), "confirm".to_string(), "human".to_string()));
+        assert_eq!(rows[3], ("confirmed".to_string(), "ready".to_string(), "ratify".to_string(), "framework".to_string()));
     }
 }

@@ -362,7 +362,7 @@ pub(crate) fn run_in_tx(
 /// `intent_contract` is `ready` AND has `approved_by` AND `approved_at`
 /// populated, fire framework `ratify` (confirmed → ready) atomically in the
 /// same caller-supplied transaction.
-fn maybe_auto_ratify_observation(
+pub(crate) fn maybe_auto_ratify_observation(
     tx: &Transaction,
     schema: &Schema,
     row_id: i64,
