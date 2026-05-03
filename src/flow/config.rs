@@ -11,11 +11,18 @@ use std::path::{Path, PathBuf};
 pub struct StoresConfig {
     #[serde(default)]
     pub ntfy: Option<NtfyCfg>,
+    #[serde(default)]
+    pub scaffold: Option<ScaffoldCfg>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NtfyCfg {
     pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ScaffoldCfg {
+    pub command: String,
 }
 
 /// Default location: `<.stores>/config.yaml` resolved against the worktree's
@@ -112,6 +119,18 @@ mod tests {
         let path = tmp.path().join("config.yaml");
         std::env::remove_var("STORES_NTFY_URL");
         assert!(resolve_ntfy_url(&path).is_none());
+    }
+
+    #[test]
+    fn parses_scaffold_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(&path, "scaffold:\n  command: \"./dev scaffold {display_id}\"\n").unwrap();
+        let cfg = load(&path).unwrap().unwrap();
+        assert_eq!(
+            cfg.scaffold.unwrap().command,
+            "./dev scaffold {display_id}"
+        );
     }
 
     #[test]
