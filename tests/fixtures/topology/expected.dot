@@ -24,6 +24,8 @@ digraph stores_topology {
     "z1_tasks__accepted" [label="accepted"];
     "z1_tasks__rejected" [label="rejected"];
     "z1_tasks__deploy_blocked" [label="deploy_blocked"];
+    "z1_tasks__cargo_installed" [label="cargo_installed"];
+    "z1_tasks__schema_migrated" [label="schema_migrated"];
     "z1_tasks__planning" -> "z1_tasks__plan_review" [label=" A submit-plan", color=green, fontcolor=green];
     "z1_tasks__plan_review" -> "z1_tasks__ready" [label=" A submit-plan-review", color=green, fontcolor=green];
     "z1_tasks__plan_review" -> "z1_tasks__planning" [label=" A submit-plan-review", color=green, fontcolor=green];
@@ -39,6 +41,8 @@ digraph stores_topology {
     "z1_tasks__blocked" -> "z1_tasks__ready" [label=" H+ resume", color=gold, fontcolor=gold];
     "z1_tasks__accepted" -> "z1_tasks__deploy_blocked" [label=" F mark_deploy_blocked", color=gray, fontcolor=gray];
     "z1_tasks__deploy_blocked" -> "z1_tasks__ready" [label=" H+ resume", color=gold, fontcolor=gold];
+    "z1_tasks__accepted" -> "z1_tasks__cargo_installed" [label=" F mark_cargo_installed", color=gray, fontcolor=gray];
+    "z1_tasks__cargo_installed" -> "z1_tasks__schema_migrated" [label=" F mark_schema_migrated", color=gray, fontcolor=gray];
     "z1_tasks__complete" -> "z1_tasks__in_review" [label=" F request_review", color=gray, fontcolor=gray];
     "z1_tasks__in_review" -> "z1_tasks__accepted" [label=" H! accept", color=red, fontcolor=red];
     "z1_tasks__in_review" -> "z1_tasks__rejected" [label=" H! reject", color=red, fontcolor=red];

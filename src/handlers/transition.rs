@@ -1551,4 +1551,72 @@ fields:
         // Row unchanged
         assert_eq!(read_status_wrap(&conn), "accepted");
     }
+
+    // ---- T019 Phase 1: mark_cargo_installed framework transition test (AC1.2) ----
+
+    /// Minimal schema mirroring T014's mark_deploy_blocked shape: a framework-actor
+    /// transition from accepted → cargo_installed via verb mark_cargo_installed.
+    const CARGO_INSTALL_SCHEMA: &str = r#"
+name: tasks
+id_format: "T{:03d}"
+lifecycle:
+  states: [accepted, cargo_installed]
+  transitions:
+    - from: accepted
+      to: cargo_installed
+      verb: mark_cargo_installed
+      actor: framework
+fields:
+  - name: title
+    type: text
+    required: true
+"#;
+
+    /// AC1.2: A framework-invoker `mark_cargo_installed` transition from `accepted`
+    /// lands the row at `cargo_installed` and writes a transition_history audit row
+    /// with verb=mark_cargo_installed and invoker=framework.
+    #[test]
+    fn ac1_2_mark_cargo_installed_writes_transition_history() {
+        let schema = Schema::from_yaml(CARGO_INSTALL_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
+
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title) VALUES ('T001', 'accepted', 'Test')",
+            [],
+        )
+        .unwrap();
+
+        let cmd = build_wrap_cmd(&schema, "mark_cargo_installed");
+        let matches = cmd.get_matches_from(["mark_cargo_installed", "T001"]);
+        run(
+            &schema,
+            &conn,
+            &matches,
+            Actor::Framework.into(),
+            "mark_cargo_installed",
+        )
+        .unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id = 'T001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "cargo_installed");
+
+        let (verb, invoker): (String, String) = conn
+            .query_row(
+                "SELECT verb, invoker FROM transition_history \
+                 WHERE store='tasks' AND display_id='T001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(verb, "mark_cargo_installed");
+        assert_eq!(invoker, "framework");
+    }
 }

@@ -29,6 +29,10 @@ stateDiagram-v2
   code_review --> blocked :  A submit-review
   code_review --> blocked :  A submit-review
   blocked --> ready :  H+ resume
+  accepted --> deploy_blocked :  F mark_deploy_blocked
+  deploy_blocked --> ready :  H+ resume
+  accepted --> cargo_installed :  F mark_cargo_installed
+  cargo_installed --> schema_migrated :  F mark_schema_migrated
   complete --> in_review :  F request_review
   in_review --> accepted :  H! accept
   in_review --> rejected :  H! reject
