@@ -22,6 +22,8 @@ This is the β architecture: **DB-as-truth + framework-as-engine.** Workflow-sha
 
 The `intent_contract` record on `observations` has `required_when: "intent_contract.contract_state == 'ready'"` on `objective`, `acceptance`, `in_scope`, `out_of_scope`, `tier_hint`, `approved_by`, and `approved_at`. When you ratify to `ready`, you must supply all of them together — the framework rejects the write otherwise, listing all violations in one error. The human is forced to bottle their context the moment they have it. Downstream, an AI drains a queue of T3 items without ever needing a context refresh, because the contract is already in the row.
 
+Ratification can happen at filing or at the investigation transition. `--lock-contract` on `observations add` lets a user-present session ratify at birth (when invoker is `human` or `ai_with_human` with token); `ai_autonomous` filings land with `contract_state: draft` and queue for review.
+
 ### 2. Per-field `actor` — authority is a structural property of the field, not a convention
 
 The `gate.answer` field carries `actor: human`. An AI invoker (auto-detected from `$CLAUDECODE`) attempting to write it is rejected — with the field name, the required actor, and the detection source in the error. This is not "the AI agrees not to answer human-only questions"; it is the database refusing the row.
@@ -39,12 +41,17 @@ The threat model is named explicitly. The token at rest is age-encrypted to a us
 
 States and transitions are first-class in the schema. A transition declares its actor (`framework`, `human`, `ai_autonomous`, `ai_with_human`), its guard predicate, and its required gates. The state machine is enforced at write time. A "4th REVISE attempt" doesn't fail because an agent decided to give up — it's rejected by a schema-level guard, with status auto-set to `BLOCKED`. The thing you can't break in the database, you don't have to remember to enforce in process.
 
+## The two-gate operational frame
+
+The three enforcement moments above collapse, in practice, to exactly two halts in any flow: a **front gate** (the contract must be locked — `contract_state: ready` — before work can promote past triage) and a **back gate** (a `actor: human` signature is required to accept finished work). Everything between the gates — investigation, planning, plan review, execution, code review, wrap, branch merge, deploy ceremony — flows under per-field actor + lifecycle guards without further halts. The human's role reduces to the two moments where authority must be present: capture intent, accept work.
+
 ## What falls out
 
 - **Agents become thin.** They don't track state, they don't decide what to do next, they don't render documents. The framework hands them a scoped briefing, they return a JSON envelope validated against a per-role schema (`agents/schemas/*.schema.json`), the framework writes it. v0.4 does this via `claude -p --json-schema` for SDK-native validation, with a Schema-Aligned Parser fallback. Postmortems are the full stream-json transcript in `.stores/runs/`.
 - **Multi-runtime.** Because the engine is in the framework, you can swap the agent runtime — mock for tests, `claude-code` today, something else tomorrow — without touching the workflow.
 - **Workflows compose.** Any new workflow-shaped problem (notes, runs, gates, reviews) is a YAML file away. You inherit `next-action`, `brief`, `submit-*`, `render`, `drive` for free.
 - **Audit trail is mechanical.** The DB is the log. `main.md` is just a view. There is no "did the agent actually do X" — there's a row, with a timestamp, with the actor, with the diff.
+- **Autonomous flow is in-substrate.** A daemon (`stores agents run`) polls state transitions and dispatches builtin subscribers — `accept-merge`, `cargo-install`, `schema-migrate`, `user-escalation` — under a `policies.yaml` predicate layer. Default action: allow. NEVER policies are sacrosanct. Every automatic write records `policy_ref` and the policies-file hash on the row's `transition_history` audit trail. The engine consumes itself: it ships *inside* the substrate, not above it.
 
 ## What's outside the substrate
 
@@ -54,8 +61,15 @@ That boundary has one implication worth making explicit: the substrate has exact
 
 The trap to resist is giving that outer layer a back-channel: "let the wrapping orchestrator pause `drive`, or inject a state transition, or signal the substrate through some side path." The temptation is real — it feels like coordination. What it actually does is push orchestration up a level, outside the schema's reach; break the substrate's atomicity, since a pause is now an unverified second write path the DB does not know about; and introduce a class of failures the framework cannot detect or log. The answer is not a richer inter-layer protocol. The answer is that the outer layer drives everything through the CLI, same as anyone else, and the substrate's guarantees hold unconditionally.
 
+The autonomous-flow daemon, the `agents.yaml` / `policies.yaml` files, and the builtin subscribers are *not* wrappers — they are substrate-internal services that share `stores`'s binary, schema, and write-path enforcement. What lives outside is genuinely external: project-side scripts (`./dev`), human-operator wrappers, observing orchestrators, deployment-specialist agents that aren't builtins. The line between "in" and "out" is whether the code ships in the `stores` binary itself.
+
 ## The deeper bet
 
 Most agent frameworks treat the LLM as the cognitive center and the surrounding system as scaffolding. `stores` inverts that: **the schema is the cognitive center, and the LLM is a constrained worker that fills in slots the schema demands.** The framework doesn't ask "what does the agent want to do?" — it asks "what does the next row require, who is allowed to write it, and what predicate must hold?" The agent's job is to produce a value that satisfies the schema. The schema's job is to make sure no work happens without intent, and no intent goes uncaptured.
 
 It's a bet that the durable assets in an AI-collaborative workflow are **not the prose**, but **the typed, validated, actor-attributed rows** — and that if you make those cheap to define and impossible to bypass, the prose can be rendered from them whenever anyone needs to read it.
+
+## Revision history
+
+- **v1.1** (2026-05-03) — added at-filing contract ratification (T013/L029); two-gate operational frame; autonomous-flow layer (T014/L018+L022+L026); daemon vs. wrapper boundary clarification.
+- **v1.0** — initial draft.
