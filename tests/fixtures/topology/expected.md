@@ -33,6 +33,7 @@ stateDiagram-v2
   deploy_blocked --> ready :  H+ resume
   accepted --> cargo_installed :  F mark_cargo_installed
   cargo_installed --> schema_migrated :  F mark_schema_migrated
+  cargo_installed --> deploy_blocked :  F mark_deploy_blocked
   complete --> in_review :  F request_review
   in_review --> accepted :  H! accept
   in_review --> rejected :  H! reject

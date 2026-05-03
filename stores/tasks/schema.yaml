@@ -127,6 +127,8 @@ lifecycle:
     - {from: accepted, to: cargo_installed, verb: mark_cargo_installed, actor: framework}
     # cargo_installed → schema_migrated (framework, fired by builtin:schema-migrate on success)
     - {from: cargo_installed, to: schema_migrated, verb: mark_schema_migrated, actor: framework}
+    # cargo_installed → deploy_blocked (framework, fired by builtin:schema-migrate on failure)
+    - {from: cargo_installed, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework}
 
     # complete → in_review (framework on-entry follow-on)
     - {from: complete, to: in_review, verb: request_review, actor: framework}
