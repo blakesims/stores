@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+# dev — substrate task scaffolding helper (T003)
+#
+# Subcommands:
+#   new   — scaffold a new task: resolve T###, create worktree, add substrate row
+#   done  — tear down a worktree once the task is accepted/rejected
+#   help  — print usage
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+usage() {
+    cat <<'EOF'
+Usage: ./dev <verb> [args]
+
+Verbs:
+  new     Scaffold a new substrate task + worktree.
+          Flags (all optional; interactive prompt if missing):
+            --slug <slug>          kebab-case slug (^[a-z0-9-]+$)
+            --title <text>         human-readable title
+            --done-when <text>     contract: done-when criteria
+            --scope-in <text>      contract: in-scope
+            --scope-out <text>     contract: out-of-scope
+            --assumptions <text>   contract: assumptions (optional)
+            --base <branch>        base branch (default: current branch)
+
+  done <T###>   Remove the worktree for a finished task.
+          Flags:
+            --force                skip status check (accepted/rejected)
+
+  help, -h, --help   Print this message.
+EOF
+}
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+locate_stores() {
+    if command -v stores >/dev/null 2>&1; then
+        command -v stores
+        return 0
+    fi
+    local root
+    root=$(repo_root)
+    if [[ -x "$root/target/debug/stores" ]]; then
+        printf '%s\n' "$root/target/debug/stores"
+        return 0
+    fi
+    if [[ -x "$root/target/release/stores" ]]; then
+        printf '%s\n' "$root/target/release/stores"
+        return 0
+    fi
+    die "could not locate 'stores' binary (not on PATH, no target/{debug,release}/stores)"
+}
+
+repo_root() {
+    git rev-parse --show-toplevel 2>/dev/null \
+        || die "not in a git repository"
+}
+
+validate_slug() {
+    local slug="$1"
+    if [[ ! "$slug" =~ ^[a-z0-9-]+$ ]]; then
+        die "invalid slug: '$slug' (must match ^[a-z0-9-]+\$)"
+    fi
+}
+
+canonical_path() {
+    local p="$1"
+    if realpath -m "$p" 2>/dev/null; then
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$p"
+        return 0
+    fi
+    die "cannot canonicalize path '$p' (no realpath -m, no python3)"
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands (stubs filled in later phases)
+# ---------------------------------------------------------------------------
+
+cmd_new() {
+    local slug="" title="" done_when="" scope_in="" scope_out=""
+    local assumptions="" base=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --slug)         slug="${2:-}";         shift 2 ;;
+            --slug=*)       slug="${1#--slug=}";   shift   ;;
+            --title)        title="${2:-}";        shift 2 ;;
+            --title=*)      title="${1#--title=}"; shift   ;;
+            --done-when)    done_when="${2:-}";    shift 2 ;;
+            --done-when=*)  done_when="${1#--done-when=}"; shift ;;
+            --scope-in)     scope_in="${2:-}";     shift 2 ;;
+            --scope-in=*)   scope_in="${1#--scope-in=}";   shift ;;
+            --scope-out)    scope_out="${2:-}";    shift 2 ;;
+            --scope-out=*)  scope_out="${1#--scope-out=}"; shift ;;
+            --assumptions)  assumptions="${2:-}";  shift 2 ;;
+            --assumptions=*) assumptions="${1#--assumptions=}"; shift ;;
+            --base)         base="${2:-}";         shift 2 ;;
+            --base=*)       base="${1#--base=}";   shift   ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                printf 'error: unknown flag: %s\n\n' "$1" >&2
+                usage >&2
+                exit 2
+                ;;
+        esac
+    done
+
+    # Trap Ctrl-C during prompts: nothing has been created yet because we
+    # prompt BEFORE any side effect (worktree / row).
+    trap 'printf "\naborted\n" >&2; exit 130' INT
+
+    prompt_field() {
+        local var_name="$1" label="$2" current="$3"
+        if [[ -n "$current" ]]; then
+            return 0
+        fi
+        if ! [ -t 0 ]; then
+            printf 'error: missing required field: --%s (stdin not a TTY; cannot prompt)\n\n' "$label" >&2
+            usage >&2
+            exit 2
+        fi
+        local value=""
+        read -r -p "$label: " value
+        printf -v "$var_name" '%s' "$value"
+    }
+
+    prompt_field slug      slug      "$slug"
+    prompt_field title     title     "$title"
+    prompt_field done_when done-when "$done_when"
+    prompt_field scope_in  scope-in  "$scope_in"
+    prompt_field scope_out scope-out "$scope_out"
+
+    trap - INT
+
+    [[ -n "$slug"      ]] || die "missing required field: --slug"
+    [[ -n "$title"     ]] || die "missing required field: --title"
+    [[ -n "$done_when" ]] || die "missing required field: --done-when"
+    [[ -n "$scope_in"  ]] || die "missing required field: --scope-in"
+    [[ -n "$scope_out" ]] || die "missing required field: --scope-out"
+
+    validate_slug "$slug"
+
+    local root stores_bin
+    root=$(repo_root)
+    stores_bin=$(locate_stores)
+
+    # Resolve next T###
+    local task_id
+    task_id=$( cd "$root" && "$stores_bin" tasks next-id ) \
+        || die "stores tasks next-id failed"
+    if [[ ! "$task_id" =~ ^T[0-9]{3}$ ]]; then
+        die "stores tasks next-id returned unexpected value: '$task_id'"
+    fi
+
+    local worktree_path branch
+    worktree_path="$root/../stores-${task_id}-${slug}"
+    branch="feat/${task_id}-${slug}"
+
+    if [[ -e "$worktree_path" ]]; then
+        die "worktree path already exists: $worktree_path"
+    fi
+
+    # Determine base branch.
+    if [[ -z "$base" ]]; then
+        base=$( cd "$root" && git rev-parse --abbrev-ref HEAD ) \
+            || die "could not determine current branch"
+    fi
+
+    # Warn (don't fail) on uncommitted changes in repo_root.
+    if [[ -n "$( cd "$root" && git status --porcelain )" ]]; then
+        printf 'warning: base branch has uncommitted changes (proceeding)\n' >&2
+    fi
+
+    # Create the worktree.
+    if ! ( cd "$root" && git worktree add -b "$branch" "$worktree_path" "$base" ) >&2; then
+        die "git worktree add failed"
+    fi
+
+    # Canonicalize the worktree path BEFORE recording it.
+    local abs_worktree
+    abs_worktree=$(canonical_path "$worktree_path")
+
+    # Build the substrate add invocation.
+    local -a add_args=(
+        tasks add
+        --invoker ai_with_human
+        --display-id "$task_id"
+        --workspace-path "$abs_worktree"
+        --branch "$branch"
+        --slug "$slug"
+        --title "$title"
+        --done-when "$done_when"
+        --scope-in "$scope_in"
+        --scope-out "$scope_out"
+    )
+    if [[ -n "$assumptions" ]]; then
+        add_args+=( --assumptions "$assumptions" )
+    fi
+
+    if ! ( cd "$root" && "$stores_bin" "${add_args[@]}" >&2 ); then
+        # Roll back: remove the just-created worktree.
+        ( cd "$root" && git worktree remove --force "$worktree_path" ) >&2 || true
+        die "stores tasks add failed (worktree rolled back)"
+    fi
+
+    # Final line of stdout: the absolute worktree path.
+    printf '%s\n' "$abs_worktree"
+}
+
+cmd_done() {
+    local task_id="" force=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force=1; shift ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --*)
+                printf 'error: unknown flag: %s\n\n' "$1" >&2
+                usage >&2
+                exit 2
+                ;;
+            *)
+                if [[ -n "$task_id" ]]; then
+                    printf 'error: unexpected positional arg: %s\n\n' "$1" >&2
+                    usage >&2
+                    exit 2
+                fi
+                task_id="$1"; shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$task_id" ]]; then
+        printf 'error: missing required positional <T###>\n\n' >&2
+        usage >&2
+        exit 2
+    fi
+    if [[ ! "$task_id" =~ ^T[0-9]{3}$ ]]; then
+        die "invalid task id: '$task_id' (must match ^T[0-9]{3}\$)"
+    fi
+
+    # Pick a JSON parser: prefer python3, fall back to jq.
+    local json_parser=""
+    if command -v python3 >/dev/null 2>&1; then
+        json_parser="python3"
+    elif command -v jq >/dev/null 2>&1; then
+        json_parser="jq"
+    else
+        die "neither python3 nor jq found on PATH; cannot parse stores JSON"
+    fi
+
+    local root stores_bin
+    root=$(repo_root)
+    stores_bin=$(locate_stores)
+
+    # Fetch row JSON.
+    local show_json
+    if ! show_json=$( cd "$root" && "$stores_bin" tasks show "$task_id" --json 2>&1 ); then
+        printf '%s\n' "$show_json" >&2
+        die "stores tasks show $task_id failed"
+    fi
+
+    local status workspace_path
+    if [[ "$json_parser" == "python3" ]]; then
+        status=$(printf '%s' "$show_json" \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("status",""))') \
+            || die "failed to parse status from JSON"
+        workspace_path=$(printf '%s' "$show_json" \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("workspace_path") or "")') \
+            || die "failed to parse workspace_path from JSON"
+    else
+        status=$(printf '%s' "$show_json" | jq -r '.status // ""') \
+            || die "failed to parse status from JSON"
+        workspace_path=$(printf '%s' "$show_json" | jq -r '.workspace_path // ""') \
+            || die "failed to parse workspace_path from JSON"
+    fi
+
+    if [[ "$status" != "accepted" && "$status" != "rejected" ]]; then
+        if [[ "$force" -ne 1 ]]; then
+            printf 'error: refusing to remove worktree for %s: status=%s (expected accepted|rejected). Pass --force to override.\n' \
+                "$task_id" "$status" >&2
+            exit 1
+        fi
+    fi
+
+    if [[ -z "$workspace_path" ]]; then
+        die "$task_id has no workspace_path in substrate (row not created by ./dev new?)"
+    fi
+
+    local -a remove_args=( worktree remove )
+    if [[ "$force" -eq 1 ]]; then
+        remove_args+=( --force )
+    fi
+    remove_args+=( "$workspace_path" )
+
+    if ! ( cd "$root" && git "${remove_args[@]}" ); then
+        die "git worktree remove failed"
+    fi
+
+    printf 'removed worktree: %s\n' "$workspace_path"
+    printf 'note: branch left intact (delete manually after merge)\n'
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+main() {
+    if [[ $# -lt 1 ]]; then
+        usage >&2
+        exit 2
+    fi
+    local verb="$1"; shift
+    case "$verb" in
+        new)            cmd_new "$@" ;;
+        done)           cmd_done "$@" ;;
+        help|-h|--help) usage ;;
+        *)
+            printf 'error: unknown verb: %s\n\n' "$verb" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+main "$@"

@@ -16,6 +16,20 @@ stores tasks drive --auto --claude-code
 - `stores setup` — initialises the local `.stores/` database, installs the `observations`, `gate`, and `tasks` bundled stores, and installs all bundled skills and agent prompts. Idempotent; safe to re-run.
 - `stores tasks drive --auto --claude-code` — picks the next non-complete task (by `created_at ASC`), loops `next-action → brief → spawn agent → submit → render` until the task reaches `complete` or `blocked`.
 
+## Spawning a task worktree
+
+The repo ships a `./dev` helper that wraps the two-step "scaffold a task + isolate it in a git worktree" flow so dogfooding stays cheap. See [`CLAUDE.md`](./CLAUDE.md) for the full dogfood doctrine.
+
+```bash
+./dev new --slug=my-task --title="my task" --done-when=... --scope-in=... --scope-out=...
+# resolves T###, creates ../stores-T###-my-task on feat/T###-my-task,
+# adds the substrate row with --invoker ai_with_human, prints the worktree path.
+
+./dev done T### [--force]
+# removes the worktree once the substrate row is accepted/rejected
+# (use --force to skip the status check); leaves the branch intact.
+```
+
 ## Key commands
 
 ### `stores tasks drive`
