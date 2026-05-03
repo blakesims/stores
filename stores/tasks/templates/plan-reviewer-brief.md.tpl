@@ -61,6 +61,23 @@ You are the gate. If the plan isn't ready, send it back.
 
 {{/each}}
 
+## Decision Matrix
+{{#if plan.decision_matrix}}
+{{#each plan.decision_matrix}}
+### {{this.decision}}
+**Options:**
+{{#each this.options}}
+- {{this}}
+{{/each}}
+**Chosen:** {{this.chosen}}
+
+{{this.rationale}}
+
+{{/each}}
+{{else}}
+_(no decisions recorded)_
+{{/if}}
+
 ## Prior Plan Reviews
 {{#if plan_review_log}}
 {{#each plan_review_log}}
