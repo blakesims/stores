@@ -462,6 +462,67 @@ RESOLUTION_AFTER=$(stores observations show L008 --json | jq -r '.resolution')
 pass "row unchanged after rejected retry (resolution still T001)"
 
 # ---------------------------------------------------------------------------
+# Step 12 — T013 P2: --lock-contract shorthand on observations add
+# ---------------------------------------------------------------------------
+echo "--- Step 12 — T013 P2: --lock-contract end-to-end"
+
+# (a) ai_autonomous + --lock-contract → must be rejected with a clear error.
+set +e
+LOCK_AI_OUT=$(CLAUDECODE=1 stores observations add \
+    --summary "lock-contract from ai_autonomous (must fail)" \
+    --source dev \
+    --priority normal \
+    --captured-at 2026-05-03 \
+    --captured-week w18-d7 \
+    --objective "fail because ai_autonomous" \
+    --type work \
+    --in-scope "x" \
+    --out-of-scope "y" \
+    --acceptance "rejected" \
+    --tier-hint T2 \
+    --lock-contract \
+    --invoker ai_autonomous 2>&1)
+LOCK_AI_RC=$?
+set -e
+[[ "$LOCK_AI_RC" -ne 0 ]] \
+    || fail "Step 12(a): expected non-zero exit for ai_autonomous + --lock-contract; got 0"
+echo "$LOCK_AI_OUT" | grep -q -- "--lock-contract" \
+    || fail "Step 12(a): error must mention --lock-contract; got: $LOCK_AI_OUT"
+echo "$LOCK_AI_OUT" | grep -q "ai_autonomous" \
+    || fail "Step 12(a): error must mention ai_autonomous; got: $LOCK_AI_OUT"
+pass "PASS: --lock-contract rejected for ai_autonomous"
+
+# (b) human + --lock-contract with all required fields → succeeds, contract_state=ready.
+LOCK_HUMAN_OUT=$(stores observations add \
+    --summary "lock-contract from human (must succeed)" \
+    --source dev \
+    --priority normal \
+    --captured-at 2026-05-03 \
+    --captured-week w18-d7 \
+    --objective "land lock-contract end-to-end" \
+    --type work \
+    --in-scope "obs" \
+    --out-of-scope "tasks" \
+    --acceptance "contract_state=ready and approved_by/at populated" \
+    --tier-hint T2 \
+    --lock-contract \
+    --invoker human)
+LOCK_HUMAN_ID="$LOCK_HUMAN_OUT"
+[[ -n "$LOCK_HUMAN_ID" ]] || fail "Step 12(b): add returned empty display_id"
+
+LOCK_JSON=$(stores observations show "$LOCK_HUMAN_ID" --json)
+echo "$LOCK_JSON" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+ic = d.get('intent_contract') or {}
+assert ic.get('contract_state') == 'ready', f'expected ready; got: {ic.get(\"contract_state\")}'
+assert ic.get('approved_by') == 'human', f'expected approved_by=human; got: {ic.get(\"approved_by\")}'
+assert ic.get('approved_at'), f'approved_at must be populated; got: {ic.get(\"approved_at\")!r}'
+assert ic.get('drafted_at'), f'drafted_at must be populated; got: {ic.get(\"drafted_at\")!r}'
+" || fail "Step 12(b): post-lock-contract assertions failed"
+pass "PASS: --lock-contract from human → contract_state=ready, approved_by=human, approved_at populated"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -477,3 +538,4 @@ echo "  #8 cross-store task_id soft-FK (value round-trip; T010 guards out of sco
 echo "  #9 T001 P4 — investigate is actor:ai_autonomous (L007): PASS"
 echo "  #10 T001 P4 — approved_by token-mediated (no/wrong/correct token; L008): PASS"
 echo "  #11 T004 (L017) — close_as_addressed open → resolved + idempotency: PASS"
+echo "  #12 T013 P2 — --lock-contract: ai_autonomous fail / human ready: PASS"
