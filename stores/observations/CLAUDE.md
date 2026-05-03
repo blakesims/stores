@@ -45,7 +45,7 @@ The substrate auto-mints an L-id (`L001`, `L002`, …) and lands the row in stat
 ### The lifecycle (and where the user gates apply)
 
 ```
-open ──investigate (U)──> investigating ──confirm (U, requires contract:ready)──> confirmed
+open ──investigate (auto)──> investigating ──confirm (tier-A, requires contract:ready)──> confirmed
                                             │
                                             └──request_info (auto)──> needs_info ──provide_info (human)──> confirmed
                                                                             │
@@ -55,9 +55,9 @@ confirmed ──wont_fix (U)──> wont_fix
 open ──wont_fix (U)──> wont_fix
 ```
 
-Legend: `(U)` = user-authority moment (`--invoker ai_with_human` only when human just assented to this exact transition this turn). `(auto)` = `ai_autonomous`. `(human)` = pure `actor: human`, the AI cannot do these.
+Legend: `(auto)` = `ai_autonomous`. `(U)` = user-authority moment (`--invoker ai_with_human`, honor-system tier-B — no token required). `(tier-A)` = token-mediated `actor: human` gate — accepts `--invoker human` OR `--invoker ai_with_human --approve-token <T>`. `(human)` = pure `actor: human`, the AI cannot do these without a token.
 
-The first U-moment is `investigate`. An open observation sits in the queue until the user (via `/pickup`) decides to triage it. Investigation produces a draft `intent_contract` on the observation; transitioning to `confirmed` requires the contract to be `ready` AND human-approved (`approved_by` / `approved_at` are `actor: human` on the contract).
+`investigate` is `(auto)` — an open observation can be picked up and triaged autonomously; producing a draft `intent_contract` is autonomous work. `confirm` is tier-A token-mediated: it requires the contract to be `ready` AND the `approved_by` / `approved_at` fields to be set under `actor: human` semantics (so either `--invoker human` or `--invoker ai_with_human --approve-token <T>`).
 
 ### Triage tiers (encoded in the observation's intent_contract)
 

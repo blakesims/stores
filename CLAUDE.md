@@ -24,14 +24,42 @@ The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by defa
 
 - **U1 — Scope ratification.** `tasks add` (the row is born; the contract — `done_when` / `scope_in` / `scope_out` — is born with it). The human must have just approved the contract you're about to write.
 - **U2 — Promotion.** Observation → task. `tasks add ... --linked-observations <obs-id>`. The user has seen the observation and assented to it becoming a task.
-- **U3 — Acceptance.** `tasks accept` / `tasks reject`. These are pure `actor: human` — the AI cannot do them at all. The user types the verb.
+- **U3 — Acceptance.** `tasks accept` / `tasks reject`. Tier-A (token-mediated): the user either types the verb (`--invoker human`) OR pre-authorizes via `--invoker ai_with_human --approve-token <T>` and the AI executes.
 - **U4 — Resume / amend.** `tasks resume` (blocked → ready), `tasks amend` (rejected → planning). The human must have seen the blocker / rejection and authorized the unblock.
+
+Each U-moment now has two equivalent grounding paths:
+
+(a) **`--invoker human`** — the user types the verb themselves (works for any U-moment, required where the field is `actor: human` and no token is presented).
+(b) **`--invoker ai_with_human --approve-token <T>`** — the user pre-authorized the row by decrypting the approval token (passphrase / hardware tap) and pasting it into chat; the AI executes the write with the token attached. The substrate verifies the token via constant-time hash-equality and accepts the write under tier-A semantics.
+
+Both paths are equally valid grounding. Pick (a) when the user is at the keyboard for this exact verb; pick (b) when the user has pre-authorized a session of work and wants the AI to execute without typing each verb.
 
 **Everything else is `ai_autonomous`:** every `submit-*` during a drive cycle, every `observations add` for friction encountered mid-work, every `tasks render` / `tasks status` / `tasks next-action`, every read.
 
 **Halting is a feature.** When autonomous work hits a moment that needs U1–U4 grounding, **halt and propose**, then write `ai_with_human` after assent. Do not pre-seek consent for autonomous moments; do not skip consent for grounding moments. The schema's rejection of an undergrounded write is the fail-loud signal we want — getting rejected is not an error to recover from, it's the substrate doing its job.
 
 See `docs/philosophy.md` § *What's outside the substrate*.
+
+## Approval-token doctrine (tier-A / tier-B)
+
+The substrate distinguishes two grades of "human-grounded" writes:
+
+- **Tier-A — `actor: human` gates (token-mediated).** Fields and transitions marked `actor: human` in `schema.yaml` are the highest-stakes assent moments: task acceptance/rejection, observation `confirm`, `intent_contract.approved_by/at`, and similar. They accept EITHER `--invoker human` (the user typed the verb) OR `--invoker ai_with_human --approve-token <T>` where `<T>` is the user's decrypted approval token. The token is generated at `stores auth init`, age-encrypted at rest under the user's age recipient at `~/.config/stores/approve.token.age` (gitignored, mode 0600), and can only be decrypted with passphrase or hardware tap. The substrate verifies the presented token by constant-time hash-equality. `ai_autonomous` is rejected even with a valid token — the token does not relax the AI-only case.
+
+- **Tier-B — `actor: ai_with_human` gates (honor-system, no token).** Fields and transitions marked `actor: ai_with_human` accept `--invoker ai_with_human` without a token. These are lower-stakes "human in the loop" moments where the AI's ask-first discipline is the runtime protection. The schema does not enforce token possession here; it enforces only that the invoker is not `ai_autonomous`.
+
+- **`ai_autonomous` is the autonomous default.** Everything not marked `actor: human` or `actor: ai_with_human` accepts `ai_autonomous` writes and is the AI's autonomous workspace.
+
+### Threat model
+
+The token mechanism's purpose is to make it **mechanically impossible for the AI to fabricate human assent on tier-A writes**. The threat is not malice; it's drift — an AI that gradually marks more rows `ai_with_human` because "the user is presumably available." The token closes that drift on tier-A:
+
+- **At rest:** the token is age-encrypted to the user's recipient. The on-disk file does NOT contain the raw secret. `stores auth init` REFUSES to initialize with a raw-plaintext age key — only passphrase-protected or hardware-backed keys are accepted. This means decryption requires user-presence (passphrase entry or hardware tap); the AI cannot decrypt unattended.
+- **Decryption is user-presence-bound.** `stores auth show` invokes `age` interactively — the user is prompted for the passphrase or asked to tap a hardware token. The AI cannot script around this.
+- **Once decrypted into chat, the AI possesses it for the session.** This is the residual exposure: after the user pastes the token into chat, it lives in the conversation context until the session ends. The runtime protection during this window is the AI's ask-first behavioral discipline — propose the row, wait for assent, attach the token to the proposed write. Session-end clears the AI's context window, so the exposure is bounded to one session.
+- **Pre-session and post-session, the AI cannot fabricate tier-A assent.** The cryptographic gate (decryption requires user-presence) plus the schema gate (constant-time hash-equality) means a tier-A write without a real, recently-decrypted token is rejected fail-loud.
+
+The doctrine is: tier-A is cryptographically gated; tier-B is honor-system; `ai_autonomous` is autonomous. Drift across the tiers is what the schema fights.
 
 ### Bugs are observations, not blockers
 
