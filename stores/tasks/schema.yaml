@@ -12,6 +12,11 @@ fields:
   - {name: infra, type: text}
   - {name: depends_on, type: list_fk, ref: tasks}
   - {name: linked_observations, type: list_fk, ref: observations}
+  - name: tier_hint
+    type: enum
+    enum_values: [T1, T2, T3]
+    required: false
+    description: "Triage tier (T1|T2|T3); inheritable from linked_observations when unanimous, else required explicitly"
   - name: contract
     type: record
     fields:
