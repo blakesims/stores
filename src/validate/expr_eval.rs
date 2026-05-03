@@ -166,6 +166,11 @@ fn eval_length(path: &[String], op: &Op, rhs: &Rhs, entry: &EntryMap) -> bool {
         Value::Array(arr) => arr.len() as i64,
         Value::String(s) => s.chars().count() as i64,
         Value::Object(map) => map.len() as i64,
+        // Null is the canonical "no value yet" state for list/record fields;
+        // treat it as length 0 so guards like `plan_review_log.length < 3`
+        // route correctly on a row whose list field hasn't been initialized
+        // (e.g. a freshly-added task before its first submit-plan-review).
+        Value::Null => 0,
         _ => return false,
     };
 
@@ -262,6 +267,22 @@ mod tests {
             "plan": { "phases": [{"name": "p1"}, {"name": "p2"}] }
         }));
         assert!(!eval(&expr, &entry), "length 2 > 3 should be false");
+    }
+
+    /// A null value for a list field must be treated as length=0 by length
+    /// comparisons. Without this, the very first NEEDS_WORK on a freshly-
+    /// added task wrongly routes to blocked because the guard
+    /// `plan_review_log.length < 3` evaluates false on Null. Surfaced by
+    /// T020 mid-drive on 2026-05-03.
+    #[test]
+    fn length_lt_constant_treats_null_as_zero() {
+        let expr = parse_guard("plan_review_log.length < 3").unwrap();
+        let mut entry: EntryMap = std::collections::BTreeMap::new();
+        entry.insert("plan_review_log".to_string(), Value::Null);
+        assert!(
+            eval(&expr, &entry),
+            "null list value must evaluate as length=0; 0 < 3 should be true"
+        );
     }
 
     // ---- AC1.4: path-vs-path-length form (C1 fix) ----
