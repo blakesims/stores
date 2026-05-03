@@ -433,7 +433,7 @@ pub(crate) fn compute_submit_plan(
     merged.insert(plan_field.to_string(), plan_json.clone());
 
     // Step 6: validator pass
-    validate::validate(schema, &merged, Op::SubmitPlan(diff), invoker).map_err(|errs| {
+    validate::validate(schema, &merged, Op::SubmitPlan(diff), invoker.into()).map_err(|errs| {
         anyhow::anyhow!("submit-plan validation failed:\n{}", validate::pretty_print(&errs))
     })?;
 
@@ -556,7 +556,7 @@ pub(crate) fn compute_submit_plan_review(
     validate::validate(
         schema, &merged,
         Op::SubmitPlanReview(gate.to_string(), diff),
-        invoker,
+        invoker.into(),
     )
     .map_err(|errs| {
         anyhow::anyhow!(
@@ -721,7 +721,7 @@ pub(crate) fn compute_submit_execute(
     let mut merged = existing.clone();
     merged.insert(cycles_field.to_string(), Value::Array(cycles.clone()));
 
-    validate::validate(schema, &merged, Op::SubmitExecute(diff), invoker)
+    validate::validate(schema, &merged, Op::SubmitExecute(diff), invoker.into())
         .map_err(|errs| {
             anyhow::anyhow!(
                 "submit-execute validation failed:\n{}",
@@ -871,7 +871,7 @@ pub(crate) fn compute_submit_review(
     validate::validate(
         schema, &merged,
         Op::SubmitReview(gate.to_string(), diff),
-        invoker,
+        invoker.into(),
     )
     .map_err(|errs| {
         anyhow::anyhow!(
@@ -1191,7 +1191,7 @@ pub(crate) fn compute_resume(
     let diff: EntryMap = BTreeMap::new();
 
     // Step 6: validator pass — enforces `actor: ai_with_human` on the resume transition
-    validate::validate(schema, &existing, Op::Transition("resume".to_string(), diff), invoker)
+    validate::validate(schema, &existing, Op::Transition("resume".to_string(), diff), invoker.into())
         .map_err(|errs| {
             anyhow::anyhow!("resume validation failed:\n{}", validate::pretty_print(&errs))
         })?;

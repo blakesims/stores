@@ -166,7 +166,7 @@ pub(crate) fn run_in_tx(
     )?;
 
     // Run validator against merged entry; actor checks scoped to diff only.
-    validate::validate(schema, &merged, Op::Transition(verb.to_string(), diff.clone()), invoker.actor).map_err(
+    validate::validate(schema, &merged, Op::Transition(verb.to_string(), diff.clone()), invoker).map_err(
         |errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)),
     )?;
 

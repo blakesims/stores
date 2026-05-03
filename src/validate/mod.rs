@@ -7,7 +7,7 @@ pub mod required;
 
 use std::collections::BTreeMap;
 
-use crate::schema::{actor::Actor, FieldType, Schema};
+use crate::schema::{actor::{Actor, InvokerCtx}, FieldType, Schema};
 
 pub use error::{pretty_print, ValidationError};
 
@@ -53,7 +53,7 @@ pub fn validate(
     schema: &Schema,
     entry: &EntryMap,
     op: Op,
-    invoker: Actor,
+    invoker: InvokerCtx,
 ) -> Result<(), Vec<ValidationError>> {
     let mut errors: Vec<ValidationError> = Vec::new();
 
@@ -163,7 +163,7 @@ fn validate_field(
     actor_entry: &EntryMap,
     parent_path: &[String],
     default_actor: &Option<Actor>,
-    invoker: Actor,
+    invoker: InvokerCtx,
     errors: &mut Vec<ValidationError>,
 ) {
     let mut field_path = parent_path.to_vec();
@@ -311,7 +311,7 @@ fields:
         let s = schema();
         // no summary
         let entry = entry_from(&[]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
         assert!(errs.iter().any(|e| e.field_path == vec!["summary".to_string()]));
     }
 
@@ -319,7 +319,7 @@ fields:
     fn required_field_present_passes() {
         let s = schema();
         let entry = entry_from(&[("summary", str_val("hello"))]);
-        validate(&s, &entry, Op::Add, Actor::Human).unwrap();
+        validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap();
     }
 
     // ---- enum rule ----
@@ -331,7 +331,7 @@ fields:
             ("summary", str_val("hello")),
             ("priority", str_val("critical")),
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
         assert!(errs.iter().any(|e| {
             e.field_path == vec!["priority".to_string()]
                 && e.rule == error::RuleKind::Enum
@@ -345,7 +345,7 @@ fields:
             ("summary", str_val("hello")),
             ("priority", str_val("high")),
         ]);
-        validate(&s, &entry, Op::Add, Actor::Human).unwrap();
+        validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap();
     }
 
     // ---- pattern rule ----
@@ -357,7 +357,7 @@ fields:
             ("summary", str_val("hello")),
             ("slug", str_val("Bad Slug!")),
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
         assert!(errs.iter().any(|e| {
             e.field_path == vec!["slug".to_string()]
                 && matches!(&e.rule, error::RuleKind::Pattern { .. })
@@ -371,7 +371,7 @@ fields:
             ("summary", str_val("hello")),
             ("slug", str_val("good-slug-123")),
         ]);
-        validate(&s, &entry, Op::Add, Actor::Human).unwrap();
+        validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap();
     }
 
     // ---- actor rule ----
@@ -383,7 +383,7 @@ fields:
             ("summary", str_val("hello")),
             ("answer", str_val("yes")),
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::AiAutonomous).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::AiAutonomous.into()).unwrap_err();
         assert!(errs.iter().any(|e| {
             e.field_path == vec!["answer".to_string()]
                 && e.rule == error::RuleKind::Actor
@@ -398,7 +398,7 @@ fields:
             ("summary", str_val("hello")),
             ("answer", str_val("yes")),
         ]);
-        validate(&s, &entry, Op::Add, Actor::Human).unwrap();
+        validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap();
     }
 
     // ---- cross-Record required_when (AC2) ----
@@ -411,7 +411,7 @@ fields:
             ("summary", str_val("something")),
             ("triage", nested_val(&[("verdict", "T3")])),
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
 
         let paths: Vec<String> = errs.iter().map(|e| e.field_path.join(".")).collect();
         assert!(
@@ -436,7 +436,7 @@ fields:
             ("triage", nested_val(&[("verdict", "T1")])),
         ]);
         // No contract sub-fields — should be fine since verdict != T3
-        validate(&s, &entry, Op::Add, Actor::Human).unwrap();
+        validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap();
     }
 
     // ---- errors aggregate (AC6) ----
@@ -451,7 +451,7 @@ fields:
             ("slug", str_val("BAD SLUG")),
             ("triage", nested_val(&[("verdict", "T3")])),
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
         // Must have at least 5 errors: summary required, priority enum, slug pattern,
         // done_when required_when, scope_in required_when, scope_out required_when
         assert!(
@@ -470,7 +470,7 @@ fields:
         let entry = entry_from(&[("summary", str_val("hello"))]);
         // "triage" transition requires ai_with_human; bare ai_autonomous must be rejected
         let diff = entry_from(&[]);
-        let errs = validate(&s, &entry, Op::Transition("triage".to_string(), diff), Actor::AiAutonomous)
+        let errs = validate(&s, &entry, Op::Transition("triage".to_string(), diff), Actor::AiAutonomous.into())
             .unwrap_err();
         assert!(
             errs.iter().any(|e| e.rule == error::RuleKind::Actor && e.message.contains("ai_with_human")),
@@ -483,7 +483,7 @@ fields:
         let s = schema();
         let entry = entry_from(&[("summary", str_val("hello"))]);
         let diff = entry_from(&[]);
-        validate(&s, &entry, Op::Transition("triage".to_string(), diff), Actor::Human).unwrap();
+        validate(&s, &entry, Op::Transition("triage".to_string(), diff), Actor::Human.into()).unwrap();
     }
 
     // ---- Op::Update actor scoping — regression test for carry-forward fix ----
@@ -508,7 +508,7 @@ fields:
 
         // Should succeed: human is only mutating `summary` (no actor constraint).
         // `answer` is in the merged entry (as Null) but NOT in the diff → must not error.
-        validate(&s, &merged, Op::Update(diff), Actor::Human)
+        validate(&s, &merged, Op::Update(diff), Actor::Human.into())
             .expect("update scoped to summary should succeed even though merged row has answer=null written by AI");
     }
 
@@ -523,7 +523,7 @@ fields:
         let diff = entry_from(&[
             ("answer", str_val("ai-wrote-this")),
         ]);
-        let errs = validate(&s, &merged, Op::Update(diff), Actor::AiAutonomous)
+        let errs = validate(&s, &merged, Op::Update(diff), Actor::AiAutonomous.into())
             .unwrap_err();
         assert!(
             errs.iter().any(|e| e.field_path == vec!["answer".to_string()] && e.rule == error::RuleKind::Actor),
@@ -539,7 +539,7 @@ fields:
         let entry = entry_from(&[
             ("triage", nested_val(&[("verdict", "T3")])),
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
         let output = pretty_print(&errs);
         // Alphabetically: "contract.*" sorts before "summary"
         let contract_pos = output.find("contract.").unwrap_or(usize::MAX);
@@ -595,7 +595,7 @@ fields:
             ("entries", serde_json::json!([{}])), // element missing required `note`
         ]);
         // Phase 5: error expected (ListRecord sub-fields are now walked).
-        validate(&s, &entry, Op::Add, Actor::Human)
+        validate(&s, &entry, Op::Add, Actor::Human.into())
             .expect_err("Phase 5: ListRecord required sub-field must produce validation error");
     }
 
@@ -624,7 +624,7 @@ fields:
             ("title", str_val("hello")),
             ("entries", serde_json::json!([{"note": "present"}])), // required field present
         ]);
-        validate(&s, &entry, Op::Add, Actor::Human)
+        validate(&s, &entry, Op::Add, Actor::Human.into())
             .expect("list_record element with required sub-field present should pass");
     }
 
@@ -654,7 +654,7 @@ fields:
             ("title", str_val("hello")),
             ("entries", serde_json::json!([])),
         ]);
-        validate(&s, &entry, Op::Add, Actor::Human)
+        validate(&s, &entry, Op::Add, Actor::Human.into())
             .expect("empty list_record should pass even with required sub-fields");
     }
 
@@ -702,7 +702,7 @@ fields:
             ("title", str_val("hello")),
             ("notes", str_val("{not json")),
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
 
         let notes_errs: Vec<&ValidationError> = errs
             .iter()
@@ -738,7 +738,7 @@ fields:
             ("title", str_val("hello")),
             ("notes", str_val("{bad json here")),
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
 
         let notes_errs: Vec<&ValidationError> = errs
             .iter()
@@ -773,7 +773,7 @@ fields:
             ("title", str_val("hello")),
             ("notes", str_val("hello")), // inner content after coerce_value strips quotes
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
         let notes_errs: Vec<&ValidationError> = errs
             .iter()
             .filter(|e| e.field_path == vec!["notes".to_string()])
@@ -817,7 +817,7 @@ fields:
             ("title", str_val("hello")),
             ("entries", str_val("{not an array")),
         ]);
-        let errs = validate(&s, &entry, Op::Add, Actor::Human).unwrap_err();
+        let errs = validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap_err();
 
         let entries_errs: Vec<&ValidationError> = errs
             .iter()

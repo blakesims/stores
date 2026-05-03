@@ -43,7 +43,7 @@ pub fn run(
     })?;
 
     // Run validator
-    validate::validate(schema, &entry, Op::Add, invoker.actor).map_err(|errs| {
+    validate::validate(schema, &entry, Op::Add, invoker).map_err(|errs| {
         anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
     })?;
 
