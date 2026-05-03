@@ -55,12 +55,12 @@ pub fn eval(expr: &PredicateExpr, row: &Value) -> Result<bool> {
         PredicateExpr::Matches { left, right } => {
             let l = resolve(left, row);
             let r = resolve(right, row);
-            let s = l.as_str().ok_or_else(|| {
-                anyhow!("'matches' lhs must resolve to a string, got {}", l)
-            })?;
-            let pat = r.as_str().ok_or_else(|| {
-                anyhow!("'matches' rhs must be a string regex, got {}", r)
-            })?;
+            let s = l
+                .as_str()
+                .ok_or_else(|| anyhow!("'matches' lhs must resolve to a string, got {}", l))?;
+            let pat = r
+                .as_str()
+                .ok_or_else(|| anyhow!("'matches' rhs must be a string regex, got {}", r))?;
             let re = Regex::new(pat).map_err(|e| anyhow!("invalid regex '{}': {}", pat, e))?;
             Ok(re.is_match(s))
         }

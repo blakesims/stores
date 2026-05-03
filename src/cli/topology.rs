@@ -623,11 +623,7 @@ fn render_auto_with_reason(
 /// print to stdout (rendered zones, or combined dot source on fallback).
 /// Stderr install-hints remain the responsibility of `run()`.
 #[allow(dead_code)]
-pub fn render_auto(
-    manifest: &Manifest,
-    schemas: &HashMap<String, Schema>,
-    opts: &Opts,
-) -> String {
+pub fn render_auto(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts: &Opts) -> String {
     render_auto_with_reason(manifest, schemas, opts).0
 }
 

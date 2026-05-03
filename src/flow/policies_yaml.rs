@@ -50,14 +50,18 @@ pub enum Action {
 pub enum Decision {
     /// Transition allowed. `policy_id` is the rule that decided, or
     /// `"default-allow"` when no policy matched.
-    Allow { policy_id: String },
-    Halt { policy_id: String },
+    Allow {
+        policy_id: String,
+    },
+    Halt {
+        policy_id: String,
+    },
 }
 
 impl PoliciesYaml {
     pub fn from_yaml(s: &str) -> Result<Self> {
-        let mut parsed: Self = serde_yaml::from_str(s)
-            .map_err(|e| anyhow!("policies.yaml parse error: {}", e))?;
+        let mut parsed: Self =
+            serde_yaml::from_str(s).map_err(|e| anyhow!("policies.yaml parse error: {}", e))?;
         parsed.hash = sha256_hex(s.as_bytes());
         parsed.validate()?;
         Ok(parsed)

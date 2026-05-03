@@ -43,10 +43,7 @@ impl NotifierBackend for CurlNotifier {
     fn send(&self, url: &str, event: &NotifyEvent) -> Result<()> {
         let body = format!(
             "{} | {} | {} | {}",
-            event.row_id,
-            event.transition_attempted,
-            event.policy_id_or_actor_halt,
-            event.summary,
+            event.row_id, event.transition_attempted, event.policy_id_or_actor_halt, event.summary,
         );
         let mut child = Command::new("curl")
             .args(["-fsS", "-X", "POST", "-d", &body, url])

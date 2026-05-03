@@ -13,10 +13,7 @@ use crate::flow::NotifyEvent;
 use crate::handlers::row::now_iso8601;
 
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
-    let display_id = row
-        .get("display_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let display_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
     let branch = row.get("branch").and_then(|v| v.as_str()).unwrap_or("");
     let blocked_reason = row
         .get("blocked_reason")
@@ -49,11 +46,9 @@ fn file_observation(
     blocked_reason: &str,
 ) -> Result<String> {
     let max_id: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM observations",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM observations", [], |r| {
+            r.get(0)
+        })
         .unwrap_or(0);
     let next_num = max_id + 1;
     let new_display_id = format!("L{:03}", next_num);

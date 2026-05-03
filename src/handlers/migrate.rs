@@ -285,7 +285,10 @@ mod tests {
 
         let plan = compute_plan(&conn, &schemas, &manifest).unwrap();
         assert!(plan.additive.is_empty());
-        assert_eq!(plan.orphaned, vec![("gate".to_string(), "extra_thing".to_string())]);
+        assert_eq!(
+            plan.orphaned,
+            vec![("gate".to_string(), "extra_thing".to_string())]
+        );
         assert!(plan.type_mismatches.is_empty());
     }
 

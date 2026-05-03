@@ -54,7 +54,10 @@ pub fn run_backfill() -> Result<()> {
             continue;
         }
         if branch_already_merged(workspace_path, branch) {
-            println!("  {} skipped: branch '{}' already merged", display_id, branch);
+            println!(
+                "  {} skipped: branch '{}' already merged",
+                display_id, branch
+            );
             continue;
         }
 
@@ -66,7 +69,10 @@ pub fn run_backfill() -> Result<()> {
         };
         match accept_merge::run(row, &ctx) {
             Ok(0) => println!("  {} merged: branch '{}'", display_id, branch),
-            Ok(c) => println!("  {} non-zero exit ({}): branch '{}'", display_id, c, branch),
+            Ok(c) => println!(
+                "  {} non-zero exit ({}): branch '{}'",
+                display_id, c, branch
+            ),
             Err(e) => println!("  {} error: {}", display_id, e),
         }
     }
@@ -80,11 +86,7 @@ pub fn run_backfill() -> Result<()> {
 fn scan_accepted_unmerged(conn: &Connection) -> Result<Vec<Value>> {
     // Some test DBs may not have all columns; SELECT * is robust.
     let mut stmt = conn.prepare("SELECT * FROM tasks WHERE status = 'accepted'")?;
-    let cols: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut out = Vec::new();
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {

@@ -37,8 +37,14 @@ extern "C" fn handle_sigterm(_: libc::c_int) {
 
 fn install_sigterm_handler() {
     unsafe {
-        libc::signal(libc::SIGTERM, handle_sigterm as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, handle_sigterm as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            handle_sigterm as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            handle_sigterm as *const () as libc::sighandler_t,
+        );
     }
 }
 
@@ -83,7 +89,10 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
     let mut iter = 0usize;
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
-            eprintln!("[daemon] shutdown received, exiting after {} iterations", iter);
+            eprintln!(
+                "[daemon] shutdown received, exiting after {} iterations",
+                iter
+            );
             break;
         }
         match poll_once(&conn, &agents, &policies, &config_path, &claimer) {
@@ -168,8 +177,7 @@ pub fn poll_once(
                                 policy_id, agent.name
                             ),
                         };
-                        let _ =
-                            crate::flow::notify_with_path(config_path, event);
+                        let _ = crate::flow::notify_with_path(config_path, event);
                         continue;
                     }
                 };
@@ -202,7 +210,11 @@ pub fn poll_once(
                 );
                 let (status_str, code) = match exit_code {
                     Ok(c) => (
-                        if c == 0 { "ok".to_string() } else { format!("exit={}", c) },
+                        if c == 0 {
+                            "ok".to_string()
+                        } else {
+                            format!("exit={}", c)
+                        },
                         c,
                     ),
                     Err(e) => (format!("error: {}", e), -1),
@@ -340,11 +352,7 @@ fn run_dispatch(
 fn read_row_as_json(conn: &Connection, store: &str, row_id: i64) -> Result<Value> {
     let sql = format!("SELECT * FROM {} WHERE id = ?1", quote_ident(store));
     let mut stmt = conn.prepare(&sql)?;
-    let cols: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut rows = stmt.query(rusqlite::params![row_id])?;
     let row = rows
         .next()?
@@ -540,7 +548,10 @@ mod tests {
 
         // Second poll on same db is a no-op (already claimed).
         let n2 = poll_once(&conn, &agents, &policies, &cfg, "test-claimer").unwrap();
-        assert_eq!(n2, 0, "second poll does not re-dispatch an already-claimed row");
+        assert_eq!(
+            n2, 0,
+            "second poll does not re-dispatch an already-claimed row"
+        );
     }
 
     /// AC4.3 test (c): two concurrent dispatch invocations against the same
@@ -670,8 +681,7 @@ policies:
             insert_task_row(&conn, 11, "T011", "in_review", "T2", "feat/x");
             insert_history(&conn, "tasks", 11, "T011", "ready", "in_review");
 
-            let n =
-                poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
             assert_eq!(n, 1, "T2 row matches allow policy and is dispatched");
         }
 
@@ -683,8 +693,7 @@ policies:
             insert_task_row(&conn, 21, "T021", "in_review", "T2", "feat/x");
             insert_history(&conn, "tasks", 21, "T021", "ready", "in_review");
 
-            let n =
-                poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
             assert_eq!(n, 1, "default-allow lets the row flow");
         }
 
@@ -709,14 +718,7 @@ policies:
             insert_task_row(&conn, 31, "T031", "in_review", "T3", "feat/x");
             insert_history(&conn, "tasks", 31, "T031", "ready", "in_review");
 
-            let n = poll_once(
-                &conn,
-                &agents,
-                &policies,
-                &cfg_path(),
-                "test-claimer",
-            )
-            .unwrap();
+            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
             assert_eq!(n, 0, "NEVER halts dispatch (overrides Allow)");
 
             // No claim recorded.
@@ -862,8 +864,7 @@ policies:
             insert_task_row(&conn, 99, "T099", "in_review", "T2", "");
             insert_history(&conn, "tasks", 99, "T099", "ready", "in_review");
 
-            let n =
-                poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
             assert_eq!(n, 0, "halt policy must skip dispatch");
 
             let evs = mock.events();

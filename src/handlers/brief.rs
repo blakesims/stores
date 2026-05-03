@@ -525,10 +525,7 @@ fields:
             assert!(rendered.contains(name), "missing decision name {name}");
         }
         for chosen in ["sqlite", "handlebars", "stdin pipe"] {
-            assert!(
-                rendered.contains(chosen),
-                "missing chosen value {chosen}"
-            );
+            assert!(rendered.contains(chosen), "missing chosen value {chosen}");
         }
         for rationale in [
             "Embedded zero-config fits single-user CLI.",
@@ -543,7 +540,9 @@ fields:
 
         // AC2.4: section ordering.
         let cur = rendered.find("## Current Plan").expect("Current Plan");
-        let dm = rendered.find("## Decision Matrix").expect("Decision Matrix");
+        let dm = rendered
+            .find("## Decision Matrix")
+            .expect("Decision Matrix");
         let prior = rendered
             .find("## Prior Plan Reviews")
             .expect("Prior Plan Reviews");

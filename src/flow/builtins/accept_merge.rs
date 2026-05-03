@@ -23,10 +23,7 @@ use crate::schema::Schema;
 use crate::validate::{self, EntryMap, Op};
 
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
-    let display_id = row
-        .get("display_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let display_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
     let branch = row.get("branch").and_then(|v| v.as_str()).unwrap_or("");
     let workspace_path = row
         .get("workspace_path")
@@ -158,9 +155,7 @@ fn dispatch_to_specialist(row: &Value, ctx: &DispatchCtx, display_id: &str) {
     // Two shapes accepted: a direct "builtin:<kw>" sentinel OR a named agent
     // declared in agents.yaml whose `command` is a builtin.
     if let Some(kw) = spec_name.strip_prefix("builtin:") {
-        if let Some(res) =
-            crate::flow::builtins::dispatch_builtin(kw, &refreshed, ctx)
-        {
+        if let Some(res) = crate::flow::builtins::dispatch_builtin(kw, &refreshed, ctx) {
             if let Err(e) = res {
                 eprintln!("[accept-merge] specialist '{}' failed: {}", spec_name, e);
             }
@@ -172,14 +167,9 @@ fn dispatch_to_specialist(row: &Value, ctx: &DispatchCtx, display_id: &str) {
 
     if let Some(agent) = ctx.agents.agents.iter().find(|a| a.name == spec_name) {
         if let Some(kw) = agent.command.strip_prefix("builtin:") {
-            if let Some(res) =
-                crate::flow::builtins::dispatch_builtin(kw, &refreshed, ctx)
-            {
+            if let Some(res) = crate::flow::builtins::dispatch_builtin(kw, &refreshed, ctx) {
                 if let Err(e) = res {
-                    eprintln!(
-                        "[accept-merge] specialist '{}' failed: {}",
-                        agent.name, e
-                    );
+                    eprintln!("[accept-merge] specialist '{}' failed: {}", agent.name, e);
                 }
             }
         } else {
@@ -203,11 +193,7 @@ fn refresh_row(conn: &Connection, display_id: &str) -> Option<Value> {
     let mut stmt = conn
         .prepare("SELECT * FROM tasks WHERE display_id = ?1")
         .ok()?;
-    let cols: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut rows = stmt.query(rusqlite::params![display_id]).ok()?;
     let row = rows.next().ok()??;
     let mut obj = serde_json::Map::new();

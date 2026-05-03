@@ -119,10 +119,7 @@ fn ac_max_line_width_under_120() {
     let out = render_auto(&manifest, &schemas, &opts);
     for (idx, line) in out.lines().enumerate() {
         let width = line.chars().count();
-        assert!(
-            width <= 120,
-            "line {idx} is {width} cols (>120): {line:?}"
-        );
+        assert!(width <= 120, "line {idx} is {width} cols (>120): {line:?}");
     }
 }
 

@@ -30,10 +30,10 @@ pub fn load(path: &Path) -> Result<Option<StoresConfig>> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let cfg: StoresConfig = serde_yaml::from_str(&bytes)
-        .map_err(|e| anyhow!("config.yaml parse error: {}", e))?;
+    let bytes =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let cfg: StoresConfig =
+        serde_yaml::from_str(&bytes).map_err(|e| anyhow!("config.yaml parse error: {}", e))?;
     Ok(Some(cfg))
 }
 

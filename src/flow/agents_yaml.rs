@@ -24,10 +24,7 @@ pub struct AgentEntry {
     pub name: String,
     pub subscribes_to: Vec<Subscription>,
     pub command: String,
-    #[serde(
-        default = "default_claim_window_secs",
-        rename = "claim_window_secs"
-    )]
+    #[serde(default = "default_claim_window_secs", rename = "claim_window_secs")]
     pub claim_window_secs: u64,
     #[serde(default)]
     pub retry_policy: RetryPolicy,

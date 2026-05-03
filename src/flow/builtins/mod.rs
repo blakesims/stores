@@ -35,11 +35,7 @@ pub type BuiltinResult = Result<i32>;
 /// Dispatch a builtin keyword like `"builtin:accept-merge"`. Returns
 /// `Ok(None)` for unknown keywords so the caller can fall back to the
 /// shell-command path or log "unknown builtin".
-pub fn dispatch_builtin(
-    keyword: &str,
-    row: &Value,
-    ctx: &DispatchCtx,
-) -> Option<BuiltinResult> {
+pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option<BuiltinResult> {
     match keyword {
         "accept-merge" => Some(accept_merge::run(row, ctx)),
         "user-escalation" => Some(user_escalation::run(row, ctx)),
@@ -166,11 +162,7 @@ mod tests {
         let mut stmt = conn
             .prepare("SELECT * FROM tasks WHERE display_id = ?1")
             .unwrap();
-        let cols: Vec<String> = stmt
-            .column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let mut rows = stmt.query(rusqlite::params![display_id]).unwrap();
         let row = rows.next().unwrap().unwrap();
         let mut obj = serde_json::Map::new();
@@ -179,9 +171,9 @@ mod tests {
             let jv = match v {
                 rusqlite::types::Value::Null => Value::Null,
                 rusqlite::types::Value::Integer(i) => Value::from(i),
-                rusqlite::types::Value::Real(f) => Value::from(
-                    serde_json::Number::from_f64(f).unwrap_or(0.into()),
-                ),
+                rusqlite::types::Value::Real(f) => {
+                    Value::from(serde_json::Number::from_f64(f).unwrap_or(0.into()))
+                }
                 rusqlite::types::Value::Text(s) => Value::String(s),
                 rusqlite::types::Value::Blob(b) => {
                     Value::String(String::from_utf8_lossy(&b).to_string())
@@ -291,7 +283,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(status, "deploy_blocked", "row must transition to deploy_blocked");
+        assert_eq!(
+            status, "deploy_blocked",
+            "row must transition to deploy_blocked"
+        );
         let reason = reason.unwrap_or_default();
         assert!(
             reason.contains("file.txt"),
@@ -301,8 +296,9 @@ mod tests {
         // ntfy captured the deploy_blocked event.
         let evs = mock.events();
         assert!(
-            evs.iter().any(|(_, e)| e.row_id == "T101"
-                && e.transition_attempted.contains("deploy_blocked")),
+            evs.iter()
+                .any(|(_, e)| e.row_id == "T101"
+                    && e.transition_attempted.contains("deploy_blocked")),
             "expected deploy_blocked ntfy event; got: {:?}",
             evs
         );
@@ -445,13 +441,18 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
-        assert!(display_id.starts_with("L"), "minted L-id; got: {display_id}");
+        assert!(
+            display_id.starts_with("L"),
+            "minted L-id; got: {display_id}"
+        );
         assert_eq!(status, "open");
-        assert_eq!(task_id, "T300", "task_id soft-FK must point at blocked task");
+        assert_eq!(
+            task_id, "T300",
+            "task_id soft-FK must point at blocked task"
+        );
         assert!(
             body.contains("T300"),
             "observation body must cite blocked task display_id; got: {body}"
         );
     }
 }
-
