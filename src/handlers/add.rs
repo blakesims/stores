@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::codegen::ddl::quote_ident;
 use crate::id_format;
-use crate::schema::{actor::InvokerCtx, FieldType, Schema};
+use crate::schema::{actor::{Actor, InvokerCtx}, FieldType, Schema};
 use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601};
@@ -16,8 +16,17 @@ pub fn run(
     matches: &ArgMatches,
     invoker: InvokerCtx,
 ) -> Result<()> {
+    // T013 P2: --lock-contract shorthand. When present we finalise the
+    // intent_contract atomically before validation runs. The flag is only
+    // registered on the observations store; for any other store the lookup
+    // returns false and this is a no-op.
+    let lock_contract = matches
+        .try_contains_id("lock-contract")
+        .unwrap_or(false)
+        && matches.get_flag("lock-contract");
+
     // Build entry from CLI args
-    let entry = build_entry_map(schema, |cli_name| {
+    let mut entry = build_entry_map(schema, |cli_name| {
         // --<name>-from-file takes precedence (single-element vec carrying the file body).
         let from_file_key = format!("{cli_name}-from-file");
         if matches.try_contains_id(&from_file_key).unwrap_or(false) {
@@ -41,6 +50,44 @@ pub fn run(
             _ => None,
         }
     })?;
+
+    // T013 P2: --lock-contract finalisation. Reject ai_autonomous up front
+    // (the lock implies human grounding); then set contract_state=ready and
+    // auto-fill drafted_at / approved_at / approved_by where the invoker is
+    // permitted to write them. Required-when rules on the contract sub-fields
+    // fire during validation below, so a lock without objective/acceptance/
+    // in_scope/out_of_scope/tier_hint/type produces the usual missing-field
+    // errors.
+    if lock_contract {
+        if invoker.actor == Actor::AiAutonomous {
+            anyhow::bail!(
+                "--lock-contract requires human grounding; --invoker ai_autonomous is rejected. \
+                 Pass --invoker human, or --invoker ai_with_human --approve-token <T>."
+            );
+        }
+
+        let now = now_iso8601();
+        let approver_permitted = invoker.actor == Actor::Human
+            || (invoker.actor == Actor::AiWithHuman && invoker.token_valid);
+
+        let ic = entry
+            .entry("intent_contract".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(map) = ic {
+            map.insert(
+                "contract_state".to_string(),
+                Value::String("ready".to_string()),
+            );
+            map.entry("drafted_at".to_string())
+                .or_insert_with(|| Value::String(now.clone()));
+            if approver_permitted {
+                map.entry("approved_at".to_string())
+                    .or_insert_with(|| Value::String(now.clone()));
+                map.entry("approved_by".to_string())
+                    .or_insert_with(|| Value::String(invoker.actor.to_string()));
+            }
+        }
+    }
 
     // Run validator
     validate::validate(schema, &entry, Op::Add, invoker).map_err(|errs| {
@@ -957,5 +1004,264 @@ fields:
             .query_row("SELECT display_id FROM tstore WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(display_id, "T001", "auto-mint path must still produce T001 when no flag");
+    }
+
+    // ---- T013 P2: --lock-contract shorthand on observations add ----
+    //
+    // Minimal observations-shaped schema with the intent_contract sub-fields
+    // that matter for the AC tests: contract_state enum, drafted_at,
+    // approved_by/approved_at (actor:human), and the required_when sub-fields
+    // (objective/type/in_scope/out_of_scope/acceptance/tier_hint).
+
+    const OBS_LOCK_SCHEMA: &str = r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: summary
+    type: text
+    required: true
+  - name: intent_contract
+    type: record
+    fields:
+      - name: contract_state
+        type: enum
+        enum_values: [draft, ready]
+      - name: drafted_at
+        type: timestamp
+      - name: objective
+        type: text
+        required_when: "intent_contract.contract_state == 'ready'"
+      - name: type
+        type: enum
+        enum_values: [work, investigation]
+        required_when: "intent_contract.contract_state == 'ready'"
+      - name: in_scope
+        type:
+          list: text
+        required_when: "intent_contract.contract_state == 'ready'"
+      - name: out_of_scope
+        type:
+          list: text
+        required_when: "intent_contract.contract_state == 'ready'"
+      - name: acceptance
+        type:
+          list: text
+        required_when: "intent_contract.contract_state == 'ready'"
+      - name: tier_hint
+        type: enum
+        enum_values: [T1, T2, T3]
+        required_when: "intent_contract.contract_state == 'ready'"
+      - name: approved_by
+        type: text
+        actor: human
+        required_when: "intent_contract.contract_state == 'ready'"
+      - name: approved_at
+        type: timestamp
+        actor: human
+        required_when: "intent_contract.contract_state == 'ready'"
+"#;
+
+    fn obs_lock_schema_and_conn() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(OBS_LOCK_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    /// Build an `add` command mirroring runtime: leaf args + --lock-contract
+    /// (registered for the observations store only).
+    fn build_obs_add_cmd(schema: &Schema) -> clap::Command {
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd = clap::Command::new("add");
+        for leaf in &leaves {
+            let mut arg = clap::Arg::new(leaf.cli_name.clone())
+                .long(leaf.cli_name.clone())
+                .required(false);
+            if matches!(leaf.field.ty, crate::schema::FieldType::List(_)) {
+                arg = arg.action(clap::ArgAction::Append);
+            }
+            cmd = cmd.arg(arg);
+        }
+        cmd = cmd.arg(
+            clap::Arg::new("lock-contract")
+                .long("lock-contract")
+                .action(clap::ArgAction::SetTrue)
+                .required(false),
+        );
+        cmd
+    }
+
+    fn lock_contract_args() -> Vec<&'static str> {
+        vec![
+            "add",
+            "--summary", "lock test",
+            "--objective", "ship the lock-contract shorthand",
+            "--type", "work",
+            "--in-scope", "obs",
+            "--out-of-scope", "tasks",
+            "--acceptance", "lock works",
+            "--tier-hint", "T2",
+            "--lock-contract",
+        ]
+    }
+
+    /// AC2.1: --lock-contract + --invoker ai_autonomous → reject with an error
+    /// naming both --lock-contract and ai_autonomous.
+    #[test]
+    fn lock_contract_rejects_ai_autonomous() {
+        let (schema, conn) = obs_lock_schema_and_conn();
+        let cmd = build_obs_add_cmd(&schema);
+        let matches = cmd.get_matches_from(lock_contract_args());
+
+        let err = run(&schema, &conn, &matches, Actor::AiAutonomous.into()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--lock-contract") && msg.contains("ai_autonomous"),
+            "error must name both --lock-contract and ai_autonomous; got: {msg}"
+        );
+    }
+
+    /// AC2.2 / Done When (4b): --invoker human + --lock-contract with all
+    /// required sub-fields → row inserted with contract_state='ready' and
+    /// approved_by/at populated.
+    #[test]
+    fn lock_contract_human_with_required_fields_writes_ready() {
+        let (schema, conn) = obs_lock_schema_and_conn();
+        let cmd = build_obs_add_cmd(&schema);
+        let matches = cmd.get_matches_from(lock_contract_args());
+
+        run(&schema, &conn, &matches, Actor::Human.into())
+            .expect("human + --lock-contract with required fields must succeed");
+
+        let raw_ic: String = conn
+            .query_row(
+                "SELECT intent_contract FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let ic: serde_json::Value = serde_json::from_str(&raw_ic).unwrap();
+        assert_eq!(ic["contract_state"], "ready");
+        assert_eq!(ic["approved_by"], "human");
+        assert!(ic["approved_at"].as_str().is_some(), "approved_at must be populated");
+        assert!(ic["drafted_at"].as_str().is_some(), "drafted_at must be populated");
+    }
+
+    /// AC2.3: --invoker ai_with_human --approve-token <T> --lock-contract with
+    /// required fields → row written; approved_by='ai_with_human'.
+    #[test]
+    fn lock_contract_ai_with_human_token_writes_ready() {
+        let (schema, conn) = obs_lock_schema_and_conn();
+        let cmd = build_obs_add_cmd(&schema);
+        let matches = cmd.get_matches_from(lock_contract_args());
+
+        let invoker = InvokerCtx {
+            actor: Actor::AiWithHuman,
+            token_valid: true,
+        };
+        run(&schema, &conn, &matches, invoker)
+            .expect("ai_with_human + token + --lock-contract must succeed");
+
+        let raw_ic: String = conn
+            .query_row(
+                "SELECT intent_contract FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let ic: serde_json::Value = serde_json::from_str(&raw_ic).unwrap();
+        assert_eq!(ic["contract_state"], "ready");
+        assert_eq!(ic["approved_by"], "ai_with_human");
+    }
+
+    /// AC2.4: --invoker human + --lock-contract WITHOUT required contract
+    /// sub-fields → validation fails citing each missing field.
+    #[test]
+    fn lock_contract_human_without_required_fields_fails_validation() {
+        let (schema, conn) = obs_lock_schema_and_conn();
+        let cmd = build_obs_add_cmd(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--summary", "missing required fields",
+            "--lock-contract",
+        ]);
+
+        let err = run(&schema, &conn, &matches, Actor::Human.into()).unwrap_err();
+        let msg = err.to_string();
+        for required_field in [
+            "objective", "type", "in_scope", "out_of_scope", "acceptance", "tier_hint",
+        ] {
+            assert!(
+                msg.contains(required_field),
+                "validation error must cite '{required_field}'; got: {msg}"
+            );
+        }
+    }
+
+    /// AC2.5 / Done When (4d): --invoker ai_autonomous WITHOUT --lock-contract
+    /// → row inserted with contract_state='draft' (default behaviour).
+    /// We seed contract_state explicitly here because the schema does not
+    /// default-fill it; the point of this test is that a non-locked add does
+    /// NOT mutate intent_contract.
+    #[test]
+    fn ai_autonomous_without_lock_writes_draft_unchanged() {
+        let (schema, conn) = obs_lock_schema_and_conn();
+        let cmd = build_obs_add_cmd(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--summary", "draft path",
+            "--contract-state", "draft",
+        ]);
+
+        run(&schema, &conn, &matches, Actor::AiAutonomous.into())
+            .expect("ai_autonomous without --lock-contract must succeed");
+
+        let raw_ic: String = conn
+            .query_row(
+                "SELECT intent_contract FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let ic: serde_json::Value = serde_json::from_str(&raw_ic).unwrap();
+        assert_eq!(ic["contract_state"], "draft");
+        assert!(ic.get("approved_by").map(|v| v.is_null()).unwrap_or(true));
+        assert!(ic.get("approved_at").map(|v| v.is_null()).unwrap_or(true));
+    }
+
+    /// Done When (4c): two-step file-now / approve-later flow — human supplies
+    /// --intent-contract-approved-by/at WITHOUT --lock-contract → the row is
+    /// inserted with those fields populated and contract_state stays draft
+    /// (because we did not promote it).
+    #[test]
+    fn human_without_lock_can_seed_approved_fields_without_promoting_state() {
+        let (schema, conn) = obs_lock_schema_and_conn();
+        let cmd = build_obs_add_cmd(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--summary", "two step",
+            "--contract-state", "draft",
+            "--approved-by", "human",
+            "--approved-at", "2026-05-03T12:00:00Z",
+        ]);
+
+        run(&schema, &conn, &matches, Actor::Human.into())
+            .expect("human without --lock-contract may seed approved_by/at on a draft contract");
+
+        let raw_ic: String = conn
+            .query_row(
+                "SELECT intent_contract FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let ic: serde_json::Value = serde_json::from_str(&raw_ic).unwrap();
+        assert_eq!(ic["contract_state"], "draft");
+        assert_eq!(ic["approved_by"], "human");
+        assert_eq!(ic["approved_at"], "2026-05-03T12:00:00Z");
     }
 }

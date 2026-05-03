@@ -823,6 +823,24 @@ fn build_add_cmd(
             ))
             .required(false),
     );
+    // T013 P2: --lock-contract shorthand on observations add. Atomically
+    // finalises a drafted intent_contract at add time: sets
+    // intent_contract.contract_state = "ready", auto-fills drafted_at/
+    // approved_at/approved_by where permitted, and rejects ai_autonomous.
+    if schema.name == "observations" {
+        cmd = cmd.arg(
+            Arg::new("lock-contract")
+                .long("lock-contract")
+                .action(ArgAction::SetTrue)
+                .help(
+                    "Finalise the intent_contract atomically: sets contract_state=ready \
+                     and auto-fills drafted_at/approved_at/approved_by. Requires --invoker \
+                     human (or --invoker ai_with_human --approve-token <T>); rejects \
+                     ai_autonomous. All required contract sub-fields must be supplied.",
+                )
+                .required(false),
+        );
+    }
     cmd
 }
 
