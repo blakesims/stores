@@ -12,6 +12,10 @@
 - `stores tasks status <id>` and `stores tasks next-action <id>` — observe the workflow without driving it.
 - `stores tasks brief <id> <agent-role>` — preview the brief drive would dispatch (debugging without spawning).
 
+### Cross-project filing (`--meta` / `STORES_META_PATH`)
+
+When friction surfaces while doing client work, file it against the stores substrate without context-switching: pass `--meta=<PATH>` (or set `STORES_META_PATH=<PATH>` once and use bare `--meta`) to route a single CLI invocation at a META substrate. The META substrate is just another `.stores/` — by convention, the stores repo itself. The flag is global, so it works uniformly with `observations add`, `tasks add`, `tasks render`, etc. Bare `--meta` with `STORES_META_PATH` unset, or a path that doesn't contain a `.stores/` directory, errors fail-loud — no silent fallback to CWD.
+
 ### `--invoker` discipline (the strict rule)
 
 The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by default. Fields marked `actor: ai_with_human` reject autonomous writes; fields marked `actor: human` reject any AI write. This is the wrapper boundary T011 documented, schema-enforced.
