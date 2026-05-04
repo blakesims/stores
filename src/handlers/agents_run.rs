@@ -182,6 +182,37 @@ pub fn poll_once(
                     }
                 };
 
+                // Per-subscription predicate gate (T022 P2). Runs AFTER the
+                // policy decide() halt-check so existing halt+ntfy semantics
+                // are preserved; runs BEFORE try_claim so a false predicate
+                // costs no claim and no ntfy.
+                if let Some(pred) = &sub.predicate {
+                    match crate::flow::predicate::eval(pred, &row_json) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(e) => {
+                            eprintln!(
+                                "[daemon] predicate eval error for agent '{}' on {}/{}: {}",
+                                agent.name, sub.store, display_id, e
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                // Pre-claim cap check for builtin:auto-drive (T022 P4 / Task
+                // 4.5). The `drive.max_parallel` config gates concurrent
+                // drives BEFORE we burn a claim; otherwise a row would be
+                // claimed-and-skipped, which would prevent retry on the next
+                // poll. Only the auto-drive builtin is special-cased.
+                if agent.command == "builtin:auto-drive" {
+                    let cap = crate::flow::config::resolve_drive_max_parallel(config_path);
+                    let live = count_live_drive_pids(conn).unwrap_or(0);
+                    if live >= cap as usize {
+                        continue;
+                    }
+                }
+
                 let claimed = try_claim(
                     conn,
                     &sub.store,
@@ -225,6 +256,16 @@ pub fn poll_once(
             }
         }
     }
+    // T022 P5: drive watchdog sweep — reconcile dispatch_locks for `auto-drive`
+    // whose grandchild PID is no longer alive. Errors are logged, not fatal.
+    if let Err(e) = crate::flow::builtins::auto_drive::sweep_drive_watchdog(
+        conn,
+        agents,
+        config_path,
+        &policies.hash,
+    ) {
+        eprintln!("[daemon] drive watchdog sweep error: {}", e);
+    }
     Ok(dispatched)
 }
 
@@ -266,7 +307,7 @@ pub fn try_claim(
     }
 }
 
-fn mark_claim_finished(
+pub(crate) fn mark_claim_finished(
     conn: &Connection,
     store: &str,
     row_id: i64,
@@ -384,6 +425,142 @@ fn read_row_as_json(conn: &Connection, store: &str, row_id: i64) -> Result<Value
 #[allow(dead_code)]
 pub(crate) fn default_config_path() -> Result<PathBuf> {
     Ok(crate::paths::stores_dir()?.join("config.yaml"))
+}
+
+/// True when `pid > 0` and `kill(pid, 0)` succeeds (signal-0 is the standard
+/// liveness probe — sends nothing, errors EPERM/ESRCH on dead/foreign).
+pub(crate) fn pid_is_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Count tasks rows whose `drive_pid` is set to a still-running process.
+/// Used by the daemon's `poll_once` cap-check (Task 4.5).
+pub(crate) fn count_live_drive_pids(conn: &Connection) -> Result<usize> {
+    let mut stmt = conn.prepare("SELECT drive_pid FROM tasks WHERE drive_pid IS NOT NULL")?;
+    let pids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(pids.into_iter().filter(|p| pid_is_alive(*p as i32)).count())
+}
+
+/// Spawn `argv` as an orphaned grandchild detached from the daemon. Returns
+/// the grandchild PID. Stdout/stderr go to `log_path` (created/appended).
+/// `cwd` becomes the grandchild's working directory.
+///
+/// Uses double-fork + a pipe so the parent can read the grandchild PID and
+/// reap the intermediate child without leaving a zombie. The grandchild is
+/// reparented to PID 1 once the intermediate child exits.
+pub(crate) fn spawn_detached_drive(
+    argv: &[String],
+    cwd: &Path,
+    log_path: &Path,
+) -> Result<i32> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::AsRawFd;
+
+    if argv.is_empty() {
+        bail!("spawn_detached_drive: empty argv");
+    }
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating log dir {}", parent.display()))?;
+    }
+
+    // Pipe for grandchild→parent PID communication.
+    let mut fds: [libc::c_int; 2] = [-1, -1];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        bail!("pipe() failed");
+    }
+    let read_fd = fds[0];
+    let write_fd = fds[1];
+
+    let argv_owned: Vec<std::ffi::CString> = argv
+        .iter()
+        .map(|s| std::ffi::CString::new(s.as_bytes()).unwrap_or_else(|_| std::ffi::CString::new("").unwrap()))
+        .collect();
+    let cwd_c = std::ffi::CString::new(cwd.as_os_str().as_bytes())
+        .map_err(|_| anyhow!("cwd contains NUL"))?;
+    let log_c = std::ffi::CString::new(log_path.as_os_str().as_bytes())
+        .map_err(|_| anyhow!("log_path contains NUL"))?;
+
+    unsafe {
+        let pid1 = libc::fork();
+        if pid1 < 0 {
+            libc::close(read_fd);
+            libc::close(write_fd);
+            bail!("first fork failed");
+        }
+        if pid1 == 0 {
+            // ---- intermediate child ----
+            libc::close(read_fd);
+            if libc::setsid() < 0 {
+                libc::_exit(11);
+            }
+            let pid2 = libc::fork();
+            if pid2 < 0 {
+                libc::_exit(12);
+            }
+            if pid2 == 0 {
+                // ---- grandchild ----
+                libc::close(write_fd);
+                // Open log file (create | append). Mode 0644.
+                let log_fd = libc::open(
+                    log_c.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                    0o644,
+                );
+                if log_fd >= 0 {
+                    libc::dup2(log_fd, libc::STDOUT_FILENO);
+                    libc::dup2(log_fd, libc::STDERR_FILENO);
+                    if log_fd > libc::STDERR_FILENO {
+                        libc::close(log_fd);
+                    }
+                }
+                // Close stdin (drive subprocess does not read it).
+                libc::close(libc::STDIN_FILENO);
+
+                if libc::chdir(cwd_c.as_ptr()) != 0 {
+                    libc::_exit(13);
+                }
+
+                // Build argv ptr array (NULL-terminated).
+                let mut argv_ptrs: Vec<*const libc::c_char> =
+                    argv_owned.iter().map(|c| c.as_ptr()).collect();
+                argv_ptrs.push(std::ptr::null());
+                libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr());
+                // Only reached on exec failure.
+                libc::_exit(127);
+            }
+            // ---- intermediate writes pid2 then exits ----
+            let bytes = (pid2 as i32).to_le_bytes();
+            let _ = libc::write(write_fd, bytes.as_ptr() as *const _, bytes.len());
+            libc::close(write_fd);
+            libc::_exit(0);
+        }
+
+        // ---- parent ----
+        libc::close(write_fd);
+        let mut buf = [0u8; 4];
+        let n = libc::read(read_fd, buf.as_mut_ptr() as *mut _, buf.len());
+        libc::close(read_fd);
+        // Reap the intermediate child.
+        let mut status: libc::c_int = 0;
+        libc::waitpid(pid1, &mut status as *mut _, 0);
+        if n != 4 {
+            bail!("spawn_detached_drive: short read from pid pipe ({} bytes)", n);
+        }
+        let pid2 = i32::from_le_bytes(buf);
+        if pid2 <= 0 {
+            bail!("spawn_detached_drive: invalid grandchild pid {}", pid2);
+        }
+        // Touch fd vars so the AsRawFd import isn't flagged unused.
+        let _ = std::io::stdout().as_raw_fd();
+        Ok(pid2)
+    }
 }
 
 fn detach_process(log_file: &Option<String>) -> Result<()> {
@@ -508,6 +685,7 @@ mod tests {
                     from: from.to_string(),
                     to: to.to_string(),
                 },
+                predicate: None,
             }],
             command: "/bin/true".to_string(),
             claim_window_secs: 300,
@@ -879,6 +1057,140 @@ policies:
             );
             std::env::remove_var("STORES_NTFY_URL");
         }
+    }
+
+    /// T022 P2 / AC2.2: when a subscription's predicate evaluates false on
+    /// the row, poll_once skips the claim and dispatch entirely — no
+    /// dispatch_locks row, no ntfy event, no return-count bump.
+    #[test]
+    fn predicate_false_skips_claim() {
+        let conn = fresh_db();
+        // workspace_path column is what auto-drive will gate on; add it.
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN workspace_path TEXT")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, status, tier_hint, branch, workspace_path) \
+             VALUES (?1, ?2, 'planning', 'T2', 'feat/x', '')",
+            rusqlite::params![55, "T055"],
+        )
+        .unwrap();
+        insert_history(&conn, "tasks", 55, "T055", "", "planning");
+
+        let mut agent = noop_agent("auto-drive", "tasks", "", "planning");
+        agent.subscribes_to[0].predicate =
+            Some(crate::flow::predicate::PredicateExpr::Neq {
+                left: serde_json::json!("$workspace_path"),
+                right: serde_json::json!(""),
+            });
+        let agents = AgentsYaml {
+            agents: vec![agent],
+            deployment_specialist: None,
+        };
+        let policies = empty_policies();
+
+        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+        assert_eq!(n, 0, "predicate-false rows must not dispatch");
+
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE row_id = 55",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 0, "predicate-false rows must not be claimed");
+    }
+
+    /// T022 P2 / AC2.2: predicate-true → claim+dispatch fires exactly once.
+    #[test]
+    fn predicate_true_claims_and_dispatches() {
+        let conn = fresh_db();
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN workspace_path TEXT")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, status, tier_hint, branch, workspace_path) \
+             VALUES (?1, ?2, 'planning', 'T2', 'feat/x', '/tmp/wt')",
+            rusqlite::params![56, "T056"],
+        )
+        .unwrap();
+        insert_history(&conn, "tasks", 56, "T056", "", "planning");
+
+        let mut agent = noop_agent("auto-drive", "tasks", "", "planning");
+        agent.subscribes_to[0].predicate =
+            Some(crate::flow::predicate::PredicateExpr::Neq {
+                left: serde_json::json!("$workspace_path"),
+                right: serde_json::json!(""),
+            });
+        let agents = AgentsYaml {
+            agents: vec![agent],
+            deployment_specialist: None,
+        };
+        let policies = empty_policies();
+
+        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+        assert_eq!(n, 1, "predicate-true row must dispatch once");
+
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE row_id = 56 AND agent_name='auto-drive'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 1);
+    }
+
+    /// T022 P4 / AC4.2: with `drive.max_parallel: 1` (default) and one drive
+    /// already running, a second auto-drive dispatch is skipped pre-claim.
+    /// `dispatch_locks` count for `auto-drive` must remain unchanged.
+    #[test]
+    fn auto_drive_cap_skips_when_full() {
+        let conn = fresh_db();
+        // Extend the minimal tasks table to carry workspace_path + drive_pid
+        // (auto-drive's gating columns).
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN workspace_path TEXT;
+             ALTER TABLE tasks ADD COLUMN drive_pid INTEGER;",
+        )
+        .unwrap();
+
+        // Row already mid-drive: drive_pid = our own pid (alive).
+        let our_pid = std::process::id() as i64;
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, status, tier_hint, branch, workspace_path, drive_pid) \
+             VALUES (?1, ?2, 'executing', 'T2', 'feat/x', '/tmp/wt', ?3)",
+            rusqlite::params![70, "T070", our_pid],
+        )
+        .unwrap();
+
+        // Candidate row at planning awaiting auto-drive.
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, status, tier_hint, branch, workspace_path) \
+             VALUES (?1, ?2, 'planning', 'T2', 'feat/y', '/tmp/wt2')",
+            rusqlite::params![71, "T071"],
+        )
+        .unwrap();
+        insert_history(&conn, "tasks", 71, "T071", "", "planning");
+
+        let mut agent = noop_agent("auto-drive", "tasks", "", "planning");
+        agent.command = "builtin:auto-drive".to_string();
+        let agents = AgentsYaml {
+            agents: vec![agent],
+            deployment_specialist: None,
+        };
+        let policies = empty_policies();
+
+        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+        assert_eq!(n, 0, "cap is full → no dispatch");
+
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE agent_name='auto-drive'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 0, "no claim must be taken when cap is full");
     }
 
     /// SHUTDOWN flag is observed by sleep_interruptible.
