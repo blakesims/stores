@@ -204,6 +204,23 @@ pub(crate) fn fire_mark_deploy_blocked(
     fire_framework_transition(conn, display_id, "mark_deploy_blocked", diff, policies_hash)
 }
 
+/// Convenience: fire `mark_drive_failed` with `blocked_reason` populated.
+/// Used by the auto-drive subscriber when the drive subprocess exits non-zero
+/// or the wrap envelope never lands. Mirrors `fire_mark_deploy_blocked`.
+pub(crate) fn fire_mark_drive_failed(
+    conn: &Connection,
+    display_id: &str,
+    blocked_reason: &str,
+    policies_hash: &str,
+) -> Result<()> {
+    let mut diff: EntryMap = std::collections::BTreeMap::new();
+    diff.insert(
+        "blocked_reason".to_string(),
+        Value::String(blocked_reason.to_string()),
+    );
+    fire_framework_transition(conn, display_id, "mark_drive_failed", diff, policies_hash)
+}
+
 /// Dispatch the row to the configured `deployment_specialist` (default
 /// `builtin:user-escalation`). Used after a builtin flips a row to
 /// `deploy_blocked`. The `caller` tag is used in error logs.
@@ -1052,5 +1069,106 @@ mod tests {
             )
             .unwrap();
         assert_eq!(phash.as_deref(), Some("deadbeef"));
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 1 (T022): mark_drive_failed transition mechanics
+    // -----------------------------------------------------------------
+
+    /// Insert a task at an arbitrary `status` with `workspace_path` set, so
+    /// fire_mark_drive_failed can drive the transition. The contract field is
+    /// minimally populated to satisfy required-field checks.
+    fn insert_task_at_status(conn: &Connection, display_id: &str, status: &str) -> i64 {
+        let now = "2026-05-03T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, ?2, 'test', 't', 'feat/x', '/tmp/no-such', ?3, ?4, ?4, 'framework', 'framework')",
+            rusqlite::params![display_id, status, contract, now],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// AC1.2: bare mark_drive_failed transition mechanics — call the helper on
+    /// a planning row and verify status / blocked_reason / transition_history.
+    #[test]
+    fn m_drive_failed_transition_mechanics() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_task_at_status(&conn, "T600", "planning");
+
+        fire_mark_drive_failed(&conn, "T600", "drive_failed", "").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T600'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked");
+        assert_eq!(reason.as_deref(), Some("drive_failed"));
+
+        let (verb, invoker): (String, String) = conn
+            .query_row(
+                "SELECT verb, invoker FROM transition_history \
+                 WHERE store='tasks' AND display_id='T600'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(verb, "mark_drive_failed");
+        assert_eq!(invoker, "framework");
+    }
+
+    /// AC1.3: mark_drive_failed succeeds from each of plan_review, ready,
+    /// executing, code_review (parameterised over source state).
+    #[test]
+    fn n_drive_failed_from_each_source_state() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let cases = [
+            ("T610", "plan_review"),
+            ("T611", "ready"),
+            ("T612", "executing"),
+            ("T613", "code_review"),
+        ];
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        for (id, src) in &cases {
+            insert_task_at_status(&conn, id, src);
+            fire_mark_drive_failed(&conn, id, "drive_failed", "")
+                .unwrap_or_else(|e| panic!("fire_mark_drive_failed from {src} failed: {e}"));
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM tasks WHERE display_id=?1",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(status, "blocked", "src state {src} did not flip to blocked");
+        }
+    }
+
+    /// AC1.4: a row at `in_review` rejects mark_drive_failed (no transition
+    /// declared from in_review via that verb).
+    #[test]
+    fn o_drive_failed_rejected_from_in_review() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_task_at_status(&conn, "T620", "in_review");
+        let err = fire_mark_drive_failed(&conn, "T620", "drive_failed", "").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mark_drive_failed") || msg.contains("no transition"),
+            "expected transition-rejection error; got: {msg}"
+        );
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T620'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_review", "row must remain at in_review");
     }
 }

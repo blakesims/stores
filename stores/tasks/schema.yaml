@@ -73,6 +73,8 @@ fields:
   - {name: claimed_by, type: text, actor: framework}
   - {name: claimed_at, type: timestamp, actor: framework}
   - {name: blocked_reason, type: text}
+  - {name: drive_pid, type: integer, required: false, actor: framework}
+  - {name: drive_started_at, type: timestamp, required: false, actor: framework}
   - name: wrap_log
     type: list_record
     fields:
@@ -117,6 +119,13 @@ lifecycle:
 
     # blocked → ready (resume)
     - {from: blocked, to: ready, verb: resume, actor: ai_with_human}
+
+    # {planning, plan_review, ready, executing, code_review} → blocked (framework, fired by auto-drive subscriber on drive failure)
+    - {from: planning, to: blocked, verb: mark_drive_failed, actor: framework}
+    - {from: plan_review, to: blocked, verb: mark_drive_failed, actor: framework}
+    - {from: ready, to: blocked, verb: mark_drive_failed, actor: framework}
+    - {from: executing, to: blocked, verb: mark_drive_failed, actor: framework}
+    - {from: code_review, to: blocked, verb: mark_drive_failed, actor: framework}
 
     # accepted → deploy_blocked (framework, fired by accept-merge agent on conflict)
     - {from: accepted, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework}

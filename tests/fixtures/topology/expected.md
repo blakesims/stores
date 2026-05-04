@@ -29,6 +29,11 @@ stateDiagram-v2
   code_review --> blocked :  A submit-review [REVISE]
   code_review --> blocked :  A submit-review [FAIL]
   blocked --> ready :  H+ resume
+  planning --> blocked :  F mark_drive_failed
+  plan_review --> blocked :  F mark_drive_failed
+  ready --> blocked :  F mark_drive_failed
+  executing --> blocked :  F mark_drive_failed
+  code_review --> blocked :  F mark_drive_failed
   accepted --> deploy_blocked :  F mark_deploy_blocked
   deploy_blocked --> ready :  H+ resume
   accepted --> cargo_installed :  F mark_cargo_installed
