@@ -1,0 +1,358 @@
+//! `builtin:auto-drive` — spawn `stores tasks drive <id>` as a detached
+//! subprocess when a task lands at `planning` with `workspace_path` set.
+//!
+//! Subscribes (via agents.yaml) to `tasks: ''→planning` with the predicate
+//! `workspace_path != ""`. Records the grandchild PID + start timestamp on
+//! the row so the watchdog (Phase 5) can reconcile drives that crash.
+//!
+//! Idempotency: if `drive_pid` is already set AND alive (kill -0), the call
+//! is a no-op `Ok(0)`. If a stored PID is dead and the row's status is not
+//! `in_review`, also a no-op — recovery belongs to the watchdog, not the
+//! spawn path. The concurrency cap (`drive.max_parallel`) is enforced
+//! pre-claim by `agents_run::poll_once`, not here.
+//!
+//! Test override: when `STORES_DRIVE_CMD` is set, the value is invoked via
+//! `sh -c "<cmd>" <display_id>` instead of the `stores` binary. This lets
+//! tests substitute a stub (`sleep 30`, etc.) without touching PATH.
+
+use std::path::PathBuf;
+
+use serde_json::Value;
+
+use crate::flow::builtins::{BuiltinResult, DispatchCtx};
+use crate::handlers::agents_run::{pid_is_alive, spawn_detached_drive};
+use crate::handlers::row::now_iso8601;
+
+pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
+    let display_id = row
+        .get("display_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if display_id.is_empty() {
+        eprintln!("[auto-drive] tasks row missing display_id; skipping");
+        return Ok(1);
+    }
+    let workspace_path = row
+        .get("workspace_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if workspace_path.is_empty() {
+        // Phase 2's predicate gate should have caught this; defend anyway.
+        eprintln!(
+            "[auto-drive] {}: workspace_path empty; skipping",
+            display_id
+        );
+        return Ok(1);
+    }
+    let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Idempotency: if a PID is recorded and alive, no-op.
+    if let Some(pid) = row.get("drive_pid").and_then(|v| v.as_i64()) {
+        if pid > 0 && pid_is_alive(pid as i32) {
+            eprintln!(
+                "[auto-drive] {}: drive already running pid={}; skipping",
+                display_id, pid
+            );
+            return Ok(0);
+        }
+        // Stored PID is dead. If the row hasn't moved past code_review (i.e.
+        // status != in_review), let the watchdog (Phase 5) reconcile rather
+        // than re-spawn here. Without a watchdog yet, we still no-op so we
+        // don't silently re-spawn drives mid-cycle.
+        if status != "in_review" {
+            eprintln!(
+                "[auto-drive] {}: stored drive_pid={} is dead; deferring to watchdog",
+                display_id, pid
+            );
+            return Ok(0);
+        }
+    }
+
+    // Build argv. Test override via STORES_DRIVE_CMD.
+    let argv: Vec<String> = if let Ok(cmd) = std::env::var("STORES_DRIVE_CMD") {
+        if cmd.is_empty() {
+            return Ok(0);
+        }
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("{} \"$@\"", cmd),
+            "auto-drive-stub".to_string(),
+            display_id.to_string(),
+        ]
+    } else {
+        let exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "stores".to_string());
+        vec![
+            exe,
+            "tasks".to_string(),
+            "drive".to_string(),
+            display_id.to_string(),
+            "--claude-code".to_string(),
+            "--invoker".to_string(),
+            "ai_autonomous".to_string(),
+        ]
+    };
+
+    let cwd = PathBuf::from(workspace_path);
+    let logs_dir = cwd.join(".stores").join("logs");
+    let ts = now_iso8601().replace(':', "-");
+    let log_path = logs_dir.join(format!("drive-{}-{}.log", display_id, ts));
+
+    let pid = match spawn_detached_drive(&argv, &cwd, &log_path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[auto-drive] {}: spawn failed: {:#}", display_id, e);
+            return Ok(1);
+        }
+    };
+
+    let now = now_iso8601();
+    if let Err(e) = ctx.conn.execute(
+        "UPDATE tasks SET drive_pid = ?1, drive_started_at = ?2, updated_at = ?3 \
+         WHERE display_id = ?4",
+        rusqlite::params![pid as i64, now, now, display_id],
+    ) {
+        eprintln!(
+            "[auto-drive] {}: UPDATE drive_pid={} failed: {}",
+            display_id, pid, e
+        );
+        return Ok(1);
+    }
+
+    eprintln!("[auto-drive] {}: spawned drive pid={}", display_id, pid);
+    Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::dynamic::BUNDLED_STORE_SCHEMAS;
+    use crate::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
+    use crate::flow::AgentsYaml;
+    use crate::schema::Schema;
+    use rusqlite::Connection;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static L: OnceLock<Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(()))
+    }
+
+    fn fresh_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .unwrap();
+        let schema = Schema::from_yaml(tasks_yaml).unwrap();
+        conn.execute_batch(&ddl_for(&schema)).unwrap();
+        conn
+    }
+
+    fn insert_planning_task(conn: &Connection, display_id: &str, workspace_path: &str) {
+        let now = "2026-05-03T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'planning', 'test', 'tslug', 'feat/tslug', ?2, ?3, ?4, ?4, 'ai_autonomous', 'ai_autonomous')",
+            rusqlite::params![display_id, workspace_path, contract, now],
+        ).unwrap();
+    }
+
+    fn task_row_json(conn: &Connection, display_id: &str) -> Value {
+        let mut stmt = conn
+            .prepare("SELECT * FROM tasks WHERE display_id = ?1")
+            .unwrap();
+        let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let mut rows = stmt.query(rusqlite::params![display_id]).unwrap();
+        let row = rows.next().unwrap().unwrap();
+        let mut obj = serde_json::Map::new();
+        for (i, name) in cols.iter().enumerate() {
+            let v: rusqlite::types::Value = row.get(i).unwrap();
+            let jv = match v {
+                rusqlite::types::Value::Null => Value::Null,
+                rusqlite::types::Value::Integer(n) => Value::from(n),
+                rusqlite::types::Value::Real(f) => {
+                    Value::from(serde_json::Number::from_f64(f).unwrap_or(0.into()))
+                }
+                rusqlite::types::Value::Text(s) => Value::String(s),
+                rusqlite::types::Value::Blob(b) => {
+                    Value::String(String::from_utf8_lossy(&b).to_string())
+                }
+            };
+            obj.insert(name.clone(), jv);
+        }
+        Value::Object(obj)
+    }
+
+    fn ctx_for<'a>(
+        conn: &'a Connection,
+        agents: &'a AgentsYaml,
+        cfg: &'a std::path::Path,
+    ) -> DispatchCtx<'a> {
+        DispatchCtx {
+            conn,
+            agents,
+            config_path: cfg,
+            policies_hash: "",
+        }
+    }
+
+    /// Make a cwd that exists (any tmp dir works for the spawn target).
+    fn temp_cwd() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    /// AC4.1 test (i): spawn happens, tasks.drive_pid > 0 is recorded.
+    #[test]
+    fn i_spawn_records_pid() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("STORES_DRIVE_CMD", "sleep 5 #");
+        let conn = fresh_db();
+        let tmp = temp_cwd();
+        insert_planning_task(&conn, "T700", tmp.path().to_str().unwrap());
+        let row = task_row_json(&conn, "T700");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0);
+
+        let (pid, started): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT drive_pid, drive_started_at FROM tasks WHERE display_id='T700'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(pid > 0, "drive_pid must be > 0; got {pid}");
+        assert!(started.is_some(), "drive_started_at must be set");
+        assert!(pid_is_alive(pid as i32), "spawned process must be alive");
+
+        // Reap: send SIGTERM so we don't leak the stub.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        std::env::remove_var("STORES_DRIVE_CMD");
+    }
+
+    /// AC4.1 test (ii): re-run with live PID is a no-op (no second spawn).
+    #[test]
+    fn ii_rerun_with_live_pid_is_noop() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db();
+        let tmp = temp_cwd();
+        insert_planning_task(&conn, "T701", tmp.path().to_str().unwrap());
+        // Inject our own pid (alive by definition).
+        let our_pid = std::process::id() as i64;
+        conn.execute(
+            "UPDATE tasks SET drive_pid = ?1 WHERE display_id='T701'",
+            rusqlite::params![our_pid],
+        )
+        .unwrap();
+        let row = task_row_json(&conn, "T701");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+
+        // Should NOT touch STORES_DRIVE_CMD because we never reach spawn.
+        std::env::remove_var("STORES_DRIVE_CMD");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0);
+
+        // drive_pid must remain == our_pid (no spawn, no overwrite).
+        let pid: i64 = conn
+            .query_row(
+                "SELECT drive_pid FROM tasks WHERE display_id='T701'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pid, our_pid, "drive_pid must not be re-written");
+    }
+
+    /// AC4.1 test (iii): re-run with dead PID + status != in_review does NOT
+    /// re-spawn (returns Ok(0); leaves drive_pid intact for the watchdog).
+    #[test]
+    fn iii_rerun_with_dead_pid_does_not_respawn() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("STORES_DRIVE_CMD");
+        let conn = fresh_db();
+        let tmp = temp_cwd();
+        insert_planning_task(&conn, "T702", tmp.path().to_str().unwrap());
+        // PID 0x7fffffff is overwhelmingly likely to be dead/unallocated.
+        let dead_pid: i64 = 0x7fff_fffe;
+        conn.execute(
+            "UPDATE tasks SET drive_pid = ?1 WHERE display_id='T702'",
+            rusqlite::params![dead_pid],
+        )
+        .unwrap();
+        let row = task_row_json(&conn, "T702");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0);
+
+        // drive_pid still the dead one (no overwrite, no spawn).
+        let pid: i64 = conn
+            .query_row(
+                "SELECT drive_pid FROM tasks WHERE display_id='T702'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pid, dead_pid, "drive_pid must be left for watchdog");
+    }
+
+    /// AC4.3: spawned grandchild is reparented to PID 1 (orphaned from
+    /// daemon). The stub writes its `getppid()` to a file; we poll for the
+    /// file then assert the value.
+    #[test]
+    fn spawn_orphans_grandchild_to_pid_one() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = temp_cwd();
+        let ppid_file = tmp.path().join("ppid.txt");
+        // Sleep briefly so the intermediate child has exited and we've been
+        // reparented to PID 1 before recording getppid.
+        // sh's own $PPID is the grandchild's parent. After our intermediate
+        // child has exited (sleep 0.2 wins), the grandchild has been
+        // reparented to PID 1.
+        let cmd = format!("sleep 0.2 && echo \"$PPID\" > {} #", ppid_file.display());
+        std::env::set_var("STORES_DRIVE_CMD", &cmd);
+
+        let conn = fresh_db();
+        insert_planning_task(&conn, "T703", tmp.path().to_str().unwrap());
+        let row = task_row_json(&conn, "T703");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0);
+
+        // Wait up to ~3s for the stub to finish.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline && !ppid_file.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::env::remove_var("STORES_DRIVE_CMD");
+        assert!(ppid_file.exists(), "stub must have written ppid.txt");
+        let s = std::fs::read_to_string(&ppid_file).unwrap();
+        let ppid: i32 = s.trim().parse().expect("ppid must parse");
+        assert_eq!(ppid, 1, "grandchild's parent must be PID 1; got {ppid}");
+    }
+
+    /// AC4.4: dispatch_builtin("auto-drive", ...) resolves to this module.
+    #[test]
+    fn dispatch_builtin_returns_some_for_auto_drive() {
+        let conn = fresh_db();
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let ctx = ctx_for(&conn, &agents, &cfg);
+        let row = serde_json::json!({"display_id": ""});
+        let res = crate::flow::builtins::dispatch_builtin("auto-drive", &row, &ctx);
+        assert!(res.is_some(), "auto-drive keyword must resolve");
+    }
+}
