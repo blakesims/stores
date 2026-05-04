@@ -367,6 +367,37 @@ agents:
         assert_eq!(scaffold.retry_policy.max_attempts, 1);
     }
 
+    /// T022 P6 / AC6.1: tests/fixtures/agents.yaml carries the auto-drive entry
+    /// with the `workspace_path != ""` predicate gate.
+    #[test]
+    fn fixture_yaml_includes_auto_drive() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agents.yaml");
+        let p = load_from_path(&path).expect("fixture must parse");
+        let drive = p
+            .agents
+            .iter()
+            .find(|a| a.name == "auto-drive")
+            .expect("fixture missing auto-drive entry");
+        assert_eq!(drive.command, "builtin:auto-drive");
+        assert_eq!(drive.retry_policy.max_attempts, 1);
+        let sub = &drive.subscribes_to[0];
+        assert_eq!(sub.store, "tasks");
+        assert_eq!(sub.transition.from, "");
+        assert_eq!(sub.transition.to, "planning");
+        let pred = sub
+            .predicate
+            .as_ref()
+            .expect("auto-drive subscription must carry a predicate");
+        match pred {
+            crate::flow::predicate::PredicateExpr::Neq { left, right } => {
+                assert_eq!(left.as_str(), Some("$workspace_path"));
+                assert_eq!(right.as_str(), Some(""));
+            }
+            other => panic!("expected Neq predicate, got {:?}", other),
+        }
+    }
+
     /// T022 P2 / AC2.1: a subscription bearing a `predicate` block round-trips
     /// through the parser and lands as a `PredicateExpr::Neq` (i.e. the
     /// declarative `workspace_path != ""` gate is preserved).

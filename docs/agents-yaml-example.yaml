@@ -59,6 +59,23 @@ agents:
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }
 
+  # T022 — auto-drive. Fires on the row-creation arrival edge ('' → planning)
+  # only when `workspace_path` is set on the row (the predicate gate skips
+  # rows scaffolded without an isolated worktree). The daemon spawns
+  # `stores tasks drive <id>` detached so the polling loop continues; concurrency
+  # is capped by `drive.max_parallel` in .stores/config.yaml below.
+  - name: auto-drive
+    subscribes_to:
+      - store: tasks
+        transition: { from: "", to: planning }
+        predicate:
+          op: "!="
+          left: "$workspace_path"
+          right: ""
+    command: "builtin:auto-drive"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
 deployment_specialist: user-escalation
 
 # ---------------------------------------------------------------------------

@@ -44,4 +44,19 @@ agents:
     retry_policy:
       max_attempts: 1
       backoff: linear
+  - name: auto-drive
+    subscribes_to:
+      - store: tasks
+        transition:
+          from: ""
+          to: planning
+        predicate:
+          op: "!="
+          left: "$workspace_path"
+          right: ""
+    command: "builtin:auto-drive"
+    claim_window_secs: 300
+    retry_policy:
+      max_attempts: 1
+      backoff: linear
 deployment_specialist: user-escalation
