@@ -286,8 +286,10 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     /// All builtin tests share the global notifier + STORES_NTFY_URL env;
-    /// serialize them so captured events stay scoped per test.
-    fn lock() -> &'static Mutex<()> {
+    /// serialize them so captured events stay scoped per test. Public so
+    /// sibling modules' tests (e.g. `auto_drive::tests`) can serialize
+    /// against the same lock when they install a mock notifier.
+    pub(crate) fn lock() -> &'static Mutex<()> {
         static L: OnceLock<Mutex<()>> = OnceLock::new();
         L.get_or_init(|| Mutex::new(()))
     }

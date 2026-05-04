@@ -256,6 +256,16 @@ pub fn poll_once(
             }
         }
     }
+    // T022 P5: drive watchdog sweep — reconcile dispatch_locks for `auto-drive`
+    // whose grandchild PID is no longer alive. Errors are logged, not fatal.
+    if let Err(e) = crate::flow::builtins::auto_drive::sweep_drive_watchdog(
+        conn,
+        agents,
+        config_path,
+        &policies.hash,
+    ) {
+        eprintln!("[daemon] drive watchdog sweep error: {}", e);
+    }
     Ok(dispatched)
 }
 
@@ -297,7 +307,7 @@ pub fn try_claim(
     }
 }
 
-fn mark_claim_finished(
+pub(crate) fn mark_claim_finished(
     conn: &Connection,
     store: &str,
     row_id: i64,

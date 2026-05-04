@@ -15,12 +15,17 @@
 //! `sh -c "<cmd>" <display_id>` instead of the `stores` binary. This lets
 //! tests substitute a stub (`sleep 30`, etc.) without touching PATH.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use anyhow::Result;
+use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::flow::builtins::{BuiltinResult, DispatchCtx};
-use crate::handlers::agents_run::{pid_is_alive, spawn_detached_drive};
+use crate::flow::builtins::{
+    dispatch_to_specialist, fire_mark_drive_failed, refresh_task_row, BuiltinResult, DispatchCtx,
+};
+use crate::flow::AgentsYaml;
+use crate::handlers::agents_run::{mark_claim_finished, pid_is_alive, spawn_detached_drive};
 use crate::handlers::row::now_iso8601;
 
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
@@ -123,6 +128,78 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
 
     eprintln!("[auto-drive] {}: spawned drive pid={}", display_id, pid);
     Ok(0)
+}
+
+/// Sweep open `dispatch_locks` for `agent_name='auto-drive'`. For each lock
+/// whose grandchild PID is no longer alive, reconcile based on the task row's
+/// status:
+///
+/// * `status == 'in_review'` — drive succeeded after wrap landed; just close
+///   the lock (`mark_claim_finished` with `ok`).
+/// * any other status — drive died mid-cycle. Fire `mark_drive_failed`
+///   (framework actor) with `blocked_reason='drive_failed'`, dispatch to the
+///   configured `deployment_specialist` (default `builtin:user-escalation`),
+///   and close the lock (`drive_failed`).
+///
+/// Returns the number of locks the sweep took action on (closed or flipped).
+/// Locks whose PID is still alive, or whose drive_pid is NULL (spawn UPDATE
+/// not yet committed), are left untouched and counted zero.
+pub fn sweep_drive_watchdog(
+    conn: &Connection,
+    agents: &AgentsYaml,
+    config_path: &Path,
+    policies_hash: &str,
+) -> Result<usize> {
+    let mut acted = 0usize;
+    let locks: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT row_id, display_id FROM dispatch_locks \
+             WHERE agent_name = 'auto-drive' AND finished_at IS NULL",
+        )?;
+        let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        it.filter_map(|r| r.ok()).collect()
+    };
+
+    for (row_id, display_id) in locks {
+        let row = match refresh_task_row(conn, &display_id) {
+            Some(r) => r,
+            None => continue,
+        };
+        let pid = row.get("drive_pid").and_then(|v| v.as_i64()).unwrap_or(0);
+        if pid <= 0 {
+            // Spawn UPDATE not yet committed; defer until next sweep.
+            continue;
+        }
+        if pid_is_alive(pid as i32) {
+            continue;
+        }
+        let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if status == "in_review" {
+            let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "ok");
+            acted += 1;
+            continue;
+        }
+        match fire_mark_drive_failed(conn, &display_id, "drive_failed", policies_hash) {
+            Ok(()) => {
+                let ctx = DispatchCtx {
+                    conn,
+                    agents,
+                    config_path,
+                    policies_hash,
+                };
+                dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog");
+                let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "drive_failed");
+                acted += 1;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[auto-drive-watchdog] {}: mark_drive_failed failed: {:#}",
+                    display_id, e
+                );
+            }
+        }
+    }
+    Ok(acted)
 }
 
 #[cfg(test)]
@@ -342,6 +419,259 @@ mod tests {
         let s = std::fs::read_to_string(&ppid_file).unwrap();
         let ppid: i32 = s.trim().parse().expect("ppid must parse");
         assert_eq!(ppid, 1, "grandchild's parent must be PID 1; got {ppid}");
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 5: drive watchdog sweep
+    // -----------------------------------------------------------------
+
+    /// Extended fresh-db: tasks + observations DDL, so user-escalation can
+    /// file an observation when the watchdog flips a row.
+    fn fresh_db_with_obs() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        for store in &["tasks", "observations"] {
+            let yaml = BUNDLED_STORE_SCHEMAS
+                .iter()
+                .find(|(n, _)| n == store)
+                .map(|(_, y)| *y)
+                .unwrap();
+            let schema = Schema::from_yaml(yaml).unwrap();
+            conn.execute_batch(&ddl_for(&schema)).unwrap();
+        }
+        conn
+    }
+
+    fn insert_lock(conn: &Connection, row_id: i64, display_id: &str) {
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by) \
+             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, '2026-05-03T00:00:00Z', 'test-claimer')",
+            rusqlite::params![row_id, display_id],
+        )
+        .unwrap();
+    }
+
+    fn insert_task_full(
+        conn: &Connection,
+        display_id: &str,
+        status: &str,
+        drive_pid: Option<i64>,
+    ) -> i64 {
+        let now = "2026-05-03T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, drive_pid, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, ?2, 'test', 't', 'feat/x', '/tmp/no-such', ?3, ?4, ?5, ?5, 'framework', 'framework')",
+            rusqlite::params![display_id, status, contract, drive_pid, now],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn dead_pid() -> i64 {
+        // Pick a high-numbered PID overwhelmingly likely to be unallocated.
+        0x7fff_fffe
+    }
+
+    /// AC5.1 (i): live PID + status='planning' → no flip, lock left open.
+    #[test]
+    fn watchdog_live_pid_no_flip() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let our_pid = std::process::id() as i64;
+        let row_id = insert_task_full(&conn, "T720", "planning", Some(our_pid));
+        insert_lock(&conn, row_id, "T720");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+        assert_eq!(acted, 0, "live PID must not be touched");
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T720'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "planning");
+        let finished: Option<String> = conn
+            .query_row(
+                "SELECT finished_at FROM dispatch_locks WHERE row_id=?1",
+                rusqlite::params![row_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(finished.is_none(), "lock must remain open");
+    }
+
+    /// AC5.1 (ii) + AC5.2 + AC5.3: dead PID + status='executing' → row flips
+    /// to blocked with blocked_reason='drive_failed'; one observation filed
+    /// (task_id back-pointer); MockNotifier captures one event whose
+    /// transition_attempted contains 'blocked'.
+    #[test]
+    fn watchdog_dead_pid_flips_blocked() {
+        // Share the builtins-tests mutex so we don't race with other tests
+        // that install_notifier on the global backend.
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Use a config-file path (immune to STORES_NTFY_URL env races across
+        // parallel tests).
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_file = tmp.path().join("config.yaml");
+        std::fs::write(&cfg_file, "ntfy:\n  url: https://test.local\n").unwrap();
+        let mock: &'static crate::flow::MockNotifier =
+            Box::leak(Box::new(crate::flow::MockNotifier::new()));
+        struct Shim {
+            inner: &'static crate::flow::MockNotifier,
+        }
+        impl crate::flow::NotifierBackend for Shim {
+            fn send(&self, url: &str, ev: &crate::flow::NotifyEvent) -> anyhow::Result<()> {
+                self.inner.send(url, ev)
+            }
+        }
+        crate::flow::install_notifier(Box::new(Shim { inner: mock }));
+
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T721", "executing", Some(dead_pid()));
+        insert_lock(&conn, row_id, "T721");
+
+        let agents = AgentsYaml::default_empty();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T721'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked");
+        assert_eq!(reason.as_deref(), Some("drive_failed"));
+
+        let (obs_count, obs_task_id): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(task_id), '') FROM observations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(obs_count, 1, "exactly one observation must be filed");
+        assert_eq!(obs_task_id, "T721");
+
+        let finished: Option<String> = conn
+            .query_row(
+                "SELECT finished_at FROM dispatch_locks WHERE row_id=?1",
+                rusqlite::params![row_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(finished.is_some(), "lock must be closed");
+
+        let evs = mock.events();
+        let blocked_evs: Vec<_> = evs
+            .iter()
+            .filter(|(_, e)| e.row_id == "T721" && e.transition_attempted.contains("blocked"))
+            .collect();
+        assert_eq!(
+            blocked_evs.len(),
+            1,
+            "exactly one ntfy event with 'blocked' for T721; got events: {:?}",
+            evs
+        );
+    }
+
+    /// AC5.1 (iii): dead PID + status='in_review' → drive succeeded; row not
+    /// flipped, lock marked finished='ok'.
+    #[test]
+    fn watchdog_dead_pid_in_review_marks_ok() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T722", "in_review", Some(dead_pid()));
+        insert_lock(&conn, row_id, "T722");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+        assert_eq!(acted, 1);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T722'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_review");
+
+        let last: String = conn
+            .query_row(
+                "SELECT last_status FROM dispatch_locks WHERE row_id=?1",
+                rusqlite::params![row_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(last, "ok");
+    }
+
+    /// AC5.4: daemon-restart simulation — set up state on disk, drop the
+    /// connection, reopen, and run sweep. The flip must still fire because
+    /// the persisted lock + drive_pid are the only inputs the sweep needs.
+    #[test]
+    fn watchdog_survives_daemon_restart() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("t.sqlite");
+
+        // ---- session 1: set up tables, insert task + lock ----
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(SUBSTRATE_DDL).unwrap();
+            for store in &["tasks", "observations"] {
+                let yaml = BUNDLED_STORE_SCHEMAS
+                    .iter()
+                    .find(|(n, _)| n == store)
+                    .map(|(_, y)| *y)
+                    .unwrap();
+                let schema = Schema::from_yaml(yaml).unwrap();
+                conn.execute_batch(&ddl_for(&schema)).unwrap();
+            }
+            let row_id = insert_task_full(&conn, "T723", "executing", Some(dead_pid()));
+            insert_lock(&conn, row_id, "T723");
+        }
+
+        // ---- session 2: fresh connection, run sweep ----
+        let conn2 = Connection::open(&db).unwrap();
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let _ = sweep_drive_watchdog(&conn2, &agents, &cfg, "").unwrap();
+
+        let status: String = conn2
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T723'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked", "watchdog must flip across restart");
+        let reason: Option<String> = conn2
+            .query_row(
+                "SELECT blocked_reason FROM tasks WHERE display_id='T723'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason.as_deref(), Some("drive_failed"));
+        let finished: Option<String> = conn2
+            .query_row(
+                "SELECT finished_at FROM dispatch_locks WHERE display_id='T723'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(finished.is_some(), "lock must be closed after sweep");
     }
 
     /// AC4.4: dispatch_builtin("auto-drive", ...) resolves to this module.
