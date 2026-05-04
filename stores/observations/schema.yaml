@@ -6,7 +6,7 @@ id_format: "L{:03d}"
 # resolved_at, priority_rank_at, locked_at, drafted_at, approved_at are all distinct.
 
 lifecycle:
-  states: [open, investigating, confirmed, needs_info, in_progress, resolved, wont_fix]
+  states: [open, investigating, confirmed, ready, needs_info, in_progress, resolved, wont_fix]
   initial_state: open
   transitions:
     # open → investigating: triage begins
@@ -41,6 +41,17 @@ lifecycle:
       to: confirmed
       verb: confirm
       actor: ai_with_human
+      guard: "intent_contract.contract_state == 'ready'"
+
+    # confirmed → ready: framework synchronously ratifies the contract immediately
+    # after a successful confirm (T020 P1 auto-promote upstream signal). The hook
+    # in src/handlers/transition.rs re-checks intent_contract.approved_by /
+    # approved_at != null in code (the guard parser does not support compound
+    # expressions). actor: framework — only the post-confirm hook fires this.
+    - from: confirmed
+      to: ready
+      verb: ratify
+      actor: framework
       guard: "intent_contract.contract_state == 'ready'"
 
     # investigating → needs_info: request more context

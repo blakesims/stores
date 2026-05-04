@@ -130,9 +130,13 @@ impl AgentsYaml {
                 if sub.store.is_empty() {
                     bail!("agents[{}].subscribes_to[{}].store: empty", i, j);
                 }
-                if sub.transition.from.is_empty() || sub.transition.to.is_empty() {
+                // `from` may be empty-string: that's the row-creation
+                // arrival convention (T020 Phase 2 writes a synthetic
+                // create-event with from_status=''). `to` must be non-empty
+                // — a subscription with no destination state is meaningless.
+                if sub.transition.to.is_empty() {
                     bail!(
-                        "agents[{}].subscribes_to[{}].transition: from/to must be non-empty",
+                        "agents[{}].subscribes_to[{}].transition.to: must be non-empty",
                         i,
                         j
                     );
@@ -289,6 +293,72 @@ agents:
             .as_sequence()
             .unwrap();
         assert_eq!(feats.len(), 2);
+    }
+
+    /// AC5.2: row-creation arrival convention — empty-string `from` is now
+    /// accepted by the validator (was previously rejected).
+    #[test]
+    fn empty_from_status_is_allowed() {
+        let yaml = r#"
+agents:
+  - name: auto-scaffold
+    subscribes_to:
+      - store: tasks
+        transition: { from: "", to: planning }
+    command: "builtin:auto-scaffold"
+"#;
+        let p = AgentsYaml::from_yaml(yaml).expect("empty-string from must parse");
+        assert_eq!(p.agents[0].subscribes_to[0].transition.from, "");
+        assert_eq!(p.agents[0].subscribes_to[0].transition.to, "planning");
+    }
+
+    /// AC5.3: empty `to` is still rejected — a subscription with no
+    /// destination state is meaningless.
+    #[test]
+    fn empty_to_status_still_rejected() {
+        let yaml = r#"
+agents:
+  - name: bad
+    subscribes_to:
+      - store: tasks
+        transition: { from: planning, to: "" }
+    command: "/bin/true"
+"#;
+        let err = AgentsYaml::from_yaml(yaml).unwrap_err().to_string();
+        assert!(err.contains("transition.to"), "got: {err}");
+    }
+
+    /// AC5.1: the bundled tests/fixtures/agents.yaml parses cleanly and
+    /// contains the two new T020 builtins (`auto-promote`, `auto-scaffold`)
+    /// with the expected subscription edges.
+    #[test]
+    fn fixture_yaml_includes_t020_builtins() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agents.yaml");
+        let p = load_from_path(&path).expect("fixture must parse");
+        let names: Vec<&str> = p.agents.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"auto-promote"),
+            "fixture missing auto-promote; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"auto-scaffold"),
+            "fixture missing auto-scaffold; got: {names:?}"
+        );
+
+        let promote = p.agents.iter().find(|a| a.name == "auto-promote").unwrap();
+        assert_eq!(promote.command, "builtin:auto-promote");
+        assert_eq!(promote.subscribes_to[0].store, "observations");
+        assert_eq!(promote.subscribes_to[0].transition.from, "confirmed");
+        assert_eq!(promote.subscribes_to[0].transition.to, "ready");
+        assert_eq!(promote.retry_policy.max_attempts, 1);
+
+        let scaffold = p.agents.iter().find(|a| a.name == "auto-scaffold").unwrap();
+        assert_eq!(scaffold.command, "builtin:auto-scaffold");
+        assert_eq!(scaffold.subscribes_to[0].store, "tasks");
+        assert_eq!(scaffold.subscribes_to[0].transition.from, "");
+        assert_eq!(scaffold.subscribes_to[0].transition.to, "planning");
+        assert_eq!(scaffold.retry_policy.max_attempts, 1);
     }
 
     #[test]

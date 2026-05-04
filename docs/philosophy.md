@@ -73,8 +73,13 @@ It's a bet that the durable assets in an AI-collaborative workflow are **not the
 
 The substrate is dogfooded by being used to build itself — but self-build alone pulls toward generalizations that fit only the self-build. (`cargo install` as the deploy verb is the canonical example: shipping it as a builtin made it look general, when it was only ever the self-build's deploy step.) The substrate stays honest by being driven by real client work in parallel, where the schema, the gates, and the deploy chain meet failure modes the self-build cannot surface — different deploy targets, different test gates, different gate categories, different lock-contention shapes. The dogfood doctrine ("use the substrate to build the substrate") is necessary; the realistic-pull doctrine ("AND use it on work where the substrate doesn't choose its environment") is what keeps it from collapsing inward. Generalizations that survive both pulls are durable; generalizations that survive only the self-build are leaks waiting to be discovered.
 
+## Upstream autonomy: row-creation arrival (T020)
+
+The autonomous-flow daemon subscribes to `transition_history` rows. By default a subscription names a non-empty `from` and `to` state, matching a lifecycle edge. The substrate also writes a synthetic create-event for every successful `add` (across all stores) with `from_status = ''` and `to_status = <initial-state>`. A subscription whose `transition.from` is the empty string therefore fires once per row creation, before any further state movement. This is the "planning-arrival" hook the upstream-autonomy chain stands on: `auto-promote` (`observations: confirmed → ready`) creates a tasks row at `planning`, and `auto-scaffold` (`tasks: '' → planning`) catches that creation event and provisions a worktree. The empty-string `from` is a convention, not a special case — the daemon's SQL match (`WHERE from_status = ?`) treats it like any other state token. The validator accepts empty `from`, but `to` must remain non-empty: a subscription with no destination state has nothing to match.
+
 ## Revision history
 
+- **v1.3** (2026-05-03) — upstream-autonomy section: row-creation arrival convention (`from_status=''`) and the auto-promote / auto-scaffold builtins (T020).
 - **v1.2** (2026-05-03) — substrate-vs-deployment-system distinction (subscribers are project-declared; cargo-install is one specialization, not the type); failure recovery as ordinary-task pattern; "Pull from real use" doctrine as complement to dogfood.
 - **v1.1** (2026-05-03) — added at-filing contract ratification (T013/L029); two-gate operational frame; autonomous-flow layer (T014/L018+L022+L026); daemon vs. wrapper boundary clarification.
 - **v1.0** — initial draft.

@@ -336,6 +336,113 @@ pub(crate) fn run_in_tx(
         "Transitioned {display_id}: {} → {}",
         transition.from, transition.to
     );
+
+    // T020 P1: post-confirm auto-ratify hook on observations. When a confirm
+    // succeeds and the row's intent_contract is fully approved, framework
+    // synchronously fires `ratify` (confirmed → ready) inside the same tx.
+    // The schema guard checks contract_state=='ready'; we re-check
+    // approved_by/approved_at != null here because the guard parser does not
+    // support compound expressions.
+    if schema.name == "observations" && verb == "confirm" {
+        maybe_auto_ratify_observation(
+            tx,
+            schema,
+            row_id,
+            display_id,
+            &merged,
+            pref.as_deref(),
+            phash.as_deref(),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// T020 P1: post-confirm hook. If the just-confirmed observation's
+/// `intent_contract` is `ready` AND has `approved_by` AND `approved_at`
+/// populated, fire framework `ratify` (confirmed → ready) atomically in the
+/// same caller-supplied transaction.
+pub(crate) fn maybe_auto_ratify_observation(
+    tx: &Transaction,
+    schema: &Schema,
+    row_id: i64,
+    display_id: &str,
+    merged: &crate::validate::EntryMap,
+    policy_ref: Option<&str>,
+    policies_hash: Option<&str>,
+) -> Result<()> {
+    let intent = match merged.get("intent_contract").and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return Ok(()),
+    };
+    let contract_ready = intent
+        .get("contract_state")
+        .and_then(|v| v.as_str())
+        == Some("ready");
+    let approved_by_set = intent
+        .get("approved_by")
+        .map(|v| match v {
+            Value::Null => false,
+            Value::String(s) => !s.is_empty(),
+            _ => true,
+        })
+        .unwrap_or(false);
+    let approved_at_set = intent
+        .get("approved_at")
+        .map(|v| match v {
+            Value::Null => false,
+            Value::String(s) => !s.is_empty(),
+            _ => true,
+        })
+        .unwrap_or(false);
+    if !(contract_ready && approved_by_set && approved_at_set) {
+        return Ok(());
+    }
+
+    // Build a no-op diff and resolve the ratify transition from current status
+    // (which is now 'confirmed' inside this tx).
+    let ratify_diff: crate::validate::EntryMap = std::collections::BTreeMap::new();
+    let from_status = "confirmed";
+    let transition = select_transition(
+        &schema.lifecycle.transitions,
+        from_status,
+        "ratify",
+        None,
+        merged,
+    )?;
+
+    validate::validate(
+        schema,
+        merged,
+        Op::Transition("ratify".to_string(), ratify_diff.clone()),
+        Actor::Framework.into(),
+    )
+    .map_err(|errs| {
+        anyhow::anyhow!(
+            "auto-ratify validation failed:\n{}",
+            validate::pretty_print(&errs)
+        )
+    })?;
+
+    execute_transition_write(
+        tx,
+        schema,
+        row_id,
+        display_id,
+        from_status,
+        &transition.to,
+        "ratify",
+        &ratify_diff,
+        merged,
+        Actor::Framework,
+        policy_ref,
+        policies_hash,
+    )?;
+
+    println!(
+        "Auto-ratified {display_id}: {} → {} (framework)",
+        from_status, transition.to
+    );
     Ok(())
 }
 
@@ -1618,5 +1725,208 @@ fields:
             .unwrap();
         assert_eq!(verb, "mark_cargo_installed");
         assert_eq!(invoker, "framework");
+    }
+
+    // ---- T020 P1: post-confirm auto-ratify (observations) ----
+
+    fn setup_bundled_observations() -> (Schema, Connection) {
+        let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "observations")
+            .map(|(_, y)| *y)
+            .unwrap();
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
+        (schema, conn)
+    }
+
+    /// Insert an observations row directly at `status=investigating` with the
+    /// supplied intent_contract JSON.  Bypasses validation so tests can craft
+    /// rows that drive the post-confirm hook deterministically.
+    fn insert_investigating_obs(conn: &Connection, display_id: &str, intent_contract: &str) {
+        let now = "2026-05-03T00:00:00Z";
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, summary, source, priority, captured_at, captured_week, intent_contract, \
+              created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'investigating', 'test obs', 'dev', 'normal', ?2, 'w18-d3', ?3, ?2, ?2, 'ai_with_human', 'ai_with_human')",
+            rusqlite::params![display_id, now, intent_contract],
+        )
+        .unwrap();
+    }
+
+    fn ready_approved_contract() -> String {
+        serde_json::json!({
+            "contract_state": "ready",
+            "drafted_by": "test",
+            "drafted_at": "2026-05-03T00:00:00Z",
+            "objective": "do the thing",
+            "type": "work",
+            "in_scope": ["x"],
+            "out_of_scope": ["y"],
+            "acceptance": ["z"],
+            "tier_hint": "T2",
+            "approved_by": "blake",
+            "approved_at": "2026-05-03T00:01:00Z",
+        })
+        .to_string()
+    }
+
+    fn ready_unapproved_contract() -> String {
+        // contract_state == ready but approved_at missing.
+        serde_json::json!({
+            "contract_state": "ready",
+            "drafted_by": "test",
+            "drafted_at": "2026-05-03T00:00:00Z",
+            "objective": "do the thing",
+            "type": "work",
+            "in_scope": ["x"],
+            "out_of_scope": ["y"],
+            "acceptance": ["z"],
+            "tier_hint": "T2",
+            "approved_by": "blake",
+        })
+        .to_string()
+    }
+
+    fn build_obs_cmd(schema: &Schema, verb: &'static str) -> clap::Command {
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd =
+            clap::Command::new(verb).arg(clap::Arg::new("display_id").required(true).index(1));
+        for leaf in &leaves {
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name.clone())
+                    .required(false),
+            );
+        }
+        cmd
+    }
+
+    /// AC1.3: confirm with a fully-approved contract auto-fires ratify and the
+    /// row lands at `ready` with two transition_history rows
+    /// (investigating→confirmed via confirm; confirmed→ready via ratify, framework).
+    #[test]
+    fn confirm_with_ready_contract_auto_ratifies() {
+        let (schema, conn) = setup_bundled_observations();
+        insert_investigating_obs(&conn, "L001", &ready_approved_contract());
+
+        let cmd = build_obs_cmd(&schema, "confirm");
+        let matches = cmd.get_matches_from(["confirm", "L001"]);
+        run(&schema, &conn, &matches, Actor::Human.into(), "confirm").unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM observations WHERE display_id='L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "ready", "row must auto-ratify to 'ready'");
+
+        let rows: Vec<(String, String, String, String)> = conn
+            .prepare(
+                "SELECT from_status, to_status, verb, invoker FROM transition_history \
+                 WHERE store='observations' AND display_id='L001' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2, "expected 2 transition_history rows; got {rows:?}");
+        assert_eq!(rows[0].0, "investigating");
+        assert_eq!(rows[0].1, "confirmed");
+        assert_eq!(rows[0].2, "confirm");
+        assert_eq!(rows[1].0, "confirmed");
+        assert_eq!(rows[1].1, "ready");
+        assert_eq!(rows[1].2, "ratify");
+        assert_eq!(rows[1].3, "framework");
+    }
+
+    /// AC1.4: confirm with contract.contract_state=='ready' but missing
+    /// approved_at must NOT auto-ratify.  In practice required_when forces
+    /// confirm itself to fail validation, so the row stays at 'investigating'
+    /// and no transition_history row is written for it.  Either way: no
+    /// auto-ratify fires.
+    #[test]
+    fn confirm_without_approval_does_not_auto_ratify() {
+        let (schema, conn) = setup_bundled_observations();
+        insert_investigating_obs(&conn, "L002", &ready_unapproved_contract());
+
+        let cmd = build_obs_cmd(&schema, "confirm");
+        let matches = cmd.get_matches_from(["confirm", "L002"]);
+        let result = run(&schema, &conn, &matches, Actor::Human.into(), "confirm");
+        // Confirm must fail because approved_at is required_when contract_state==ready.
+        assert!(
+            result.is_err(),
+            "confirm with missing approved_at must fail validation"
+        );
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM observations WHERE display_id='L002'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "investigating",
+            "row must stay at investigating when confirm fails"
+        );
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE store='observations' AND display_id='L002'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "no auto-ratify history when confirm itself failed");
+    }
+
+    /// AC1.4 (test c): direct ratify by a non-framework actor is rejected by
+    /// the transition's actor gate.
+    #[test]
+    fn ratify_rejected_for_non_framework_actor() {
+        let (schema, conn) = setup_bundled_observations();
+        // Insert a row already at 'confirmed' with a fully-approved contract.
+        let now = "2026-05-03T00:00:00Z";
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, summary, source, priority, captured_at, captured_week, intent_contract, \
+              created_at, updated_at, created_by, updated_by) \
+             VALUES ('L003', 'confirmed', 'test obs', 'dev', 'normal', ?1, 'w18-d3', ?2, ?1, ?1, 'human', 'human')",
+            rusqlite::params![now, ready_approved_contract()],
+        )
+        .unwrap();
+
+        let cmd = build_obs_cmd(&schema, "ratify");
+        let matches = cmd.get_matches_from(["ratify", "L003"]);
+        let err = run(&schema, &conn, &matches, Actor::Human.into(), "ratify").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("framework"),
+            "expected actor mismatch citing 'framework'; got: {msg}"
+        );
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM observations WHERE display_id='L003'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "confirmed",
+            "row must be unchanged after rejected ratify"
+        );
     }
 }

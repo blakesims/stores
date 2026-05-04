@@ -22,4 +22,26 @@ agents:
     retry_policy:
       max_attempts: 1
       backoff: linear
+  - name: auto-promote
+    subscribes_to:
+      - store: observations
+        transition:
+          from: confirmed
+          to: ready
+    command: "builtin:auto-promote"
+    claim_window_secs: 300
+    retry_policy:
+      max_attempts: 1
+      backoff: linear
+  - name: auto-scaffold
+    subscribes_to:
+      - store: tasks
+        transition:
+          from: ""
+          to: planning
+    command: "builtin:auto-scaffold"
+    claim_window_secs: 300
+    retry_policy:
+      max_attempts: 1
+      backoff: linear
 deployment_specialist: user-escalation
