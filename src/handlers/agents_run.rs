@@ -182,6 +182,24 @@ pub fn poll_once(
                     }
                 };
 
+                // Per-subscription predicate gate (T022 P2). Runs AFTER the
+                // policy decide() halt-check so existing halt+ntfy semantics
+                // are preserved; runs BEFORE try_claim so a false predicate
+                // costs no claim and no ntfy.
+                if let Some(pred) = &sub.predicate {
+                    match crate::flow::predicate::eval(pred, &row_json) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(e) => {
+                            eprintln!(
+                                "[daemon] predicate eval error for agent '{}' on {}/{}: {}",
+                                agent.name, sub.store, display_id, e
+                            );
+                            continue;
+                        }
+                    }
+                }
+
                 let claimed = try_claim(
                     conn,
                     &sub.store,
@@ -508,6 +526,7 @@ mod tests {
                     from: from.to_string(),
                     to: to.to_string(),
                 },
+                predicate: None,
             }],
             command: "/bin/true".to_string(),
             claim_window_secs: 300,
@@ -879,6 +898,87 @@ policies:
             );
             std::env::remove_var("STORES_NTFY_URL");
         }
+    }
+
+    /// T022 P2 / AC2.2: when a subscription's predicate evaluates false on
+    /// the row, poll_once skips the claim and dispatch entirely — no
+    /// dispatch_locks row, no ntfy event, no return-count bump.
+    #[test]
+    fn predicate_false_skips_claim() {
+        let conn = fresh_db();
+        // workspace_path column is what auto-drive will gate on; add it.
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN workspace_path TEXT")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, status, tier_hint, branch, workspace_path) \
+             VALUES (?1, ?2, 'planning', 'T2', 'feat/x', '')",
+            rusqlite::params![55, "T055"],
+        )
+        .unwrap();
+        insert_history(&conn, "tasks", 55, "T055", "", "planning");
+
+        let mut agent = noop_agent("auto-drive", "tasks", "", "planning");
+        agent.subscribes_to[0].predicate =
+            Some(crate::flow::predicate::PredicateExpr::Neq {
+                left: serde_json::json!("$workspace_path"),
+                right: serde_json::json!(""),
+            });
+        let agents = AgentsYaml {
+            agents: vec![agent],
+            deployment_specialist: None,
+        };
+        let policies = empty_policies();
+
+        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+        assert_eq!(n, 0, "predicate-false rows must not dispatch");
+
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE row_id = 55",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 0, "predicate-false rows must not be claimed");
+    }
+
+    /// T022 P2 / AC2.2: predicate-true → claim+dispatch fires exactly once.
+    #[test]
+    fn predicate_true_claims_and_dispatches() {
+        let conn = fresh_db();
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN workspace_path TEXT")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, status, tier_hint, branch, workspace_path) \
+             VALUES (?1, ?2, 'planning', 'T2', 'feat/x', '/tmp/wt')",
+            rusqlite::params![56, "T056"],
+        )
+        .unwrap();
+        insert_history(&conn, "tasks", 56, "T056", "", "planning");
+
+        let mut agent = noop_agent("auto-drive", "tasks", "", "planning");
+        agent.subscribes_to[0].predicate =
+            Some(crate::flow::predicate::PredicateExpr::Neq {
+                left: serde_json::json!("$workspace_path"),
+                right: serde_json::json!(""),
+            });
+        let agents = AgentsYaml {
+            agents: vec![agent],
+            deployment_specialist: None,
+        };
+        let policies = empty_policies();
+
+        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+        assert_eq!(n, 1, "predicate-true row must dispatch once");
+
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE row_id = 56 AND agent_name='auto-drive'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 1);
     }
 
     /// SHUTDOWN flag is observed by sleep_interruptible.
