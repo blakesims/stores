@@ -19,7 +19,42 @@ use std::collections::HashMap;
 use manifest::Manifest;
 use schema::Schema;
 
+/// T023 P2 — Pre-parse `--meta` from raw argv so the override is installed
+/// before manifest/schema loading. Returns `Some("")` for `--meta` without a
+/// value (sentinel: defer to STORES_META_PATH), `Some(val)` for `--meta val`
+/// or `--meta=val`, `None` if the flag is absent.
+fn parse_meta_from_argv() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--meta" {
+            // Bare `--meta` is the sentinel form: defer to STORES_META_PATH.
+            // Use `--meta=PATH` to pass an explicit value (avoids ambiguity
+            // with the following subcommand name).
+            return Some(String::new());
+        } else if let Some(rest) = a.strip_prefix("--meta=") {
+            return Some(rest.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
 fn main() -> Result<()> {
+    // T023 P2: --meta early-bind. If --meta is present on argv or
+    // STORES_META_PATH is set, resolve and install the stores-dir override
+    // BEFORE manifest/schema loading so every downstream consumer of
+    // `paths::stores_dir()` routes to the META substrate.
+    let meta_flag = parse_meta_from_argv();
+    let env_present = std::env::var("STORES_META_PATH")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if meta_flag.is_some() || env_present {
+        let meta_root = paths::resolve_meta_path(meta_flag.as_deref())?;
+        paths::set_stores_dir_override(meta_root.join(".stores"))?;
+    }
+
     // Determine whether a manifest exists (init must work without one)
     let manifest_exists = paths::manifest_path().map(|p| p.exists()).unwrap_or(false);
 
