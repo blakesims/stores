@@ -60,3 +60,21 @@ agents:
     retry_policy: { max_attempts: 1, backoff: linear }
 
 deployment_specialist: user-escalation
+
+# ---------------------------------------------------------------------------
+# .stores/config.yaml — supplemental
+# ---------------------------------------------------------------------------
+# These keys live in `.stores/config.yaml` (NOT this file). Documented here so
+# operators can find every project-tunable knob in one place.
+#
+# ntfy:
+#   url: https://ntfy.example/your-topic    # falls back to $STORES_NTFY_URL
+#
+# scaffold:
+#   command: "./dev scaffold {display_id}"  # auto-scaffold subscriber (T020)
+#
+# drive:
+#   max_parallel: 1   # auto-drive concurrency cap. Default: 1.
+#                     # Caps how many `tasks drive` subprocesses the daemon
+#                     # will spawn concurrently. Raise on multi-worktree setups
+#                     # where parallel drives are safe.

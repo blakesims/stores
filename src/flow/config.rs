@@ -13,6 +13,8 @@ pub struct StoresConfig {
     pub ntfy: Option<NtfyCfg>,
     #[serde(default)]
     pub scaffold: Option<ScaffoldCfg>,
+    #[serde(default)]
+    pub drive: Option<DriveCfg>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -23,6 +25,16 @@ pub struct NtfyCfg {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ScaffoldCfg {
     pub command: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DriveCfg {
+    #[serde(default = "default_drive_max_parallel")]
+    pub max_parallel: u32,
+}
+
+fn default_drive_max_parallel() -> u32 {
+    1
 }
 
 /// Default location: `<.stores>/config.yaml` resolved against the worktree's
@@ -59,6 +71,17 @@ pub fn resolve_ntfy_url(config_path: &Path) -> Option<String> {
     std::env::var("STORES_NTFY_URL")
         .ok()
         .filter(|s| !s.is_empty())
+}
+
+/// Resolve the auto-drive `max_parallel` cap. Returns the value from
+/// `drive.max_parallel` in `config.yaml` when present, otherwise 1.
+pub fn resolve_drive_max_parallel(config_path: &Path) -> u32 {
+    if let Ok(Some(cfg)) = load(config_path) {
+        if let Some(d) = cfg.drive {
+            return d.max_parallel;
+        }
+    }
+    1
 }
 
 #[cfg(test)]
@@ -131,6 +154,33 @@ mod tests {
             cfg.scaffold.unwrap().command,
             "./dev scaffold {display_id}"
         );
+    }
+
+    #[test]
+    fn parses_drive_max_parallel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(&path, "drive:\n  max_parallel: 3\n").unwrap();
+        let cfg = load(&path).unwrap().unwrap();
+        assert_eq!(cfg.drive, Some(DriveCfg { max_parallel: 3 }));
+        assert_eq!(resolve_drive_max_parallel(&path), 3);
+    }
+
+    #[test]
+    fn drive_max_parallel_defaults_to_one_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(&path, "ntfy:\n  url: https://x\n").unwrap();
+        let cfg = load(&path).unwrap().unwrap();
+        assert!(cfg.drive.is_none());
+        assert_eq!(resolve_drive_max_parallel(&path), 1);
+    }
+
+    #[test]
+    fn drive_max_parallel_defaults_to_one_when_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does-not-exist.yaml");
+        assert_eq!(resolve_drive_max_parallel(&path), 1);
     }
 
     #[test]
