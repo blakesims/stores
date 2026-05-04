@@ -1,11 +1,80 @@
 use anyhow::{bail, Result};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::schema::StoreScope;
 
+// ---------------------------------------------------------------------------
+// Process-wide stores-dir override (T023 P1)
+//
+// When set, all path lookups (`stores_dir`, `db_path`, `manifest_path`) point
+// at the override instead of `cwd/.stores`. Used by the `--meta` flag /
+// `STORES_META_PATH` env var to route a single CLI invocation at a META
+// substrate without touching the caller's CWD.
+// ---------------------------------------------------------------------------
+
+static STORES_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set the process-wide stores-dir override. Idempotent: a second call is a
+/// no-op (the first set wins). Returns Ok(()) regardless of whether the value
+/// was actually installed; callers that need to know can compare via
+/// `stores_dir()` afterwards.
+pub fn set_stores_dir_override(p: PathBuf) -> Result<()> {
+    let _ = STORES_DIR_OVERRIDE.set(p);
+    Ok(())
+}
+
 pub fn stores_dir() -> Result<PathBuf> {
+    if let Some(p) = STORES_DIR_OVERRIDE.get() {
+        return Ok(p.clone());
+    }
     let cwd = std::env::current_dir()?;
     Ok(cwd.join(".stores"))
+}
+
+/// Resolve the META target path from the parsed --meta flag value plus the
+/// `STORES_META_PATH` env var. Returns the META root (the directory
+/// containing `.stores/`, NOT `.stores/` itself).
+///
+/// Resolution order:
+/// - `flag = Some(path)` → use `path` (explicit override).
+/// - `flag = Some("")` → sentinel meaning "--meta given without value"; read
+///   `STORES_META_PATH`.
+/// - `flag = None` → no --meta on the command line. Read `STORES_META_PATH`
+///   if set; if unset, error.
+///
+/// Errors clean if:
+/// - both flag value and env var are absent/empty
+/// - the resolved path does not exist
+/// - the resolved path exists but `<path>/.stores/` is missing
+pub fn resolve_meta_path(flag: Option<&str>) -> Result<PathBuf> {
+    let raw: String = match flag {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => match std::env::var("STORES_META_PATH") {
+            Ok(v) if !v.is_empty() => v,
+            _ => bail!(
+                "STORES_META_PATH is not set and no --meta <PATH> provided; \
+                 set the env var or pass --meta <PATH> to route to a META substrate"
+            ),
+        },
+    };
+
+    let path = PathBuf::from(&raw);
+    if !path.exists() {
+        bail!(
+            "STORES_META_PATH target does not exist: {} (resolved from '{}')",
+            path.display(),
+            raw
+        );
+    }
+    let stores = path.join(".stores");
+    if !stores.exists() {
+        bail!(
+            "META path '{}' is missing a .stores/ directory; run `stores init` there first",
+            path.display()
+        );
+    }
+    Ok(path)
 }
 
 pub fn db_path() -> Result<PathBuf> {
@@ -214,6 +283,103 @@ mod tests {
         assert!(
             result.is_err(),
             "stores_dir_for(Repo) should error outside a git repo"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // T023 P1 — override + resolve_meta_path
+    //
+    // Tests for the override slot CANNOT mutate the global OnceLock from
+    // multiple #[test]s safely (OnceLock is set-once, process-wide). To
+    // exercise both the "override unset" and "override set" code paths
+    // without cross-test interference, we assert the two behaviours
+    // sequentially in a single test, guarded by `cwd_lock` so we are the
+    // sole CWD-toucher.
+    // -----------------------------------------------------------------
+    #[test]
+    fn override_changes_stores_db_and_manifest_paths() {
+        let _guard = cwd_lock().lock().unwrap();
+        // Before override (first observation in the process): cwd/.stores
+        let cwd = std::env::current_dir().unwrap();
+        let before = stores_dir().unwrap();
+        assert_eq!(before, cwd.join(".stores"));
+
+        // Install override
+        let tmp = tempfile::tempdir().expect("tempdir failed");
+        let override_dir = tmp.path().join(".stores");
+        let _ = set_stores_dir_override(override_dir.clone());
+
+        // After override
+        assert_eq!(stores_dir().unwrap(), override_dir);
+        assert_eq!(db_path().unwrap(), override_dir.join("db.sqlite"));
+        assert_eq!(manifest_path().unwrap(), override_dir.join("manifest.yaml"));
+    }
+
+    #[test]
+    fn resolve_meta_path_errors_when_env_unset_and_flag_none() {
+        // Save and clear env so we know it's unset.
+        let _guard = cwd_lock().lock().unwrap();
+        let saved = std::env::var("STORES_META_PATH").ok();
+        std::env::remove_var("STORES_META_PATH");
+
+        let result = resolve_meta_path(None);
+
+        // Restore env before asserting so failure does not pollute neighbours.
+        if let Some(v) = saved {
+            std::env::set_var("STORES_META_PATH", v);
+        }
+
+        let err = result.expect_err("must error when env unset and flag None");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("STORES_META_PATH"),
+            "error must mention env var name: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_meta_path_errors_when_env_points_to_nonexistent_dir() {
+        let _guard = cwd_lock().lock().unwrap();
+        let saved = std::env::var("STORES_META_PATH").ok();
+        let bogus = "/tmp/__stores_meta_does_not_exist_T023__";
+        std::env::set_var("STORES_META_PATH", bogus);
+
+        let result = resolve_meta_path(None);
+
+        match saved {
+            Some(v) => std::env::set_var("STORES_META_PATH", v),
+            None => std::env::remove_var("STORES_META_PATH"),
+        }
+
+        let err = result.expect_err("must error on non-existent path");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("STORES_META_PATH") || msg.contains("does not exist"),
+            "error must mention env var or non-existence: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_meta_path_errors_when_target_missing_dot_stores() {
+        let _guard = cwd_lock().lock().unwrap();
+        let saved = std::env::var("STORES_META_PATH").ok();
+
+        // tmp dir exists but has no `.stores/` child.
+        let tmp = tempfile::tempdir().expect("tempdir failed");
+        std::env::set_var("STORES_META_PATH", tmp.path());
+
+        let result = resolve_meta_path(None);
+
+        match saved {
+            Some(v) => std::env::set_var("STORES_META_PATH", v),
+            None => std::env::remove_var("STORES_META_PATH"),
+        }
+
+        let err = result.expect_err("must error when .stores/ missing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(".stores"),
+            "error must mention .stores: {msg}"
         );
     }
 
