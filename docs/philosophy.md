@@ -53,6 +53,20 @@ The three enforcement moments above collapse, in practice, to exactly two halts 
 - **Audit trail is mechanical.** The DB is the log. `main.md` is just a view. There is no "did the agent actually do X" — there's a row, with a timestamp, with the actor, with the diff.
 - **Autonomous flow is in-substrate.** A daemon (`stores agents run`) polls state transitions and dispatches subscribers declared in `agents.yaml` under a `policies.yaml` predicate layer. Default action: allow. NEVER policies are sacrosanct. Every automatic write records `policy_ref` and the policies-file hash on the row's `transition_history` audit trail. Builtin subscribers (`accept-merge`, `user-escalation`, and the post-accept ceremony chain stores' self-build uses to ship — `cargo-install`, `schema-migrate`) are one specialization of the subscriber primitive, not its definition; client projects declare their own deploy ceremonies in `agents.yaml` (e.g. `command: ./dev deploy prod`). The substrate is workflow primitives + lifecycle + per-field actor; it is not a deployment system. The engine consumes itself: it ships *inside* the substrate, not above it. Failure recovery follows the same shape — when a deploy ceremony fails, the substrate auto-promotes the failure into a fix task and drives it through the existing planner → executor → reviewer cycle. There is no specialized "blocker agent" role; the engine handles its own failures with its own primitives.
 
+## Primitives
+
+The substrate's typed primitives, composition rules, and known gaps are tracked in `docs/primitives.md` (working draft; see changelog there).
+
+## What the substrate is FOR (from the human's perspective)
+
+Stores exists to help the human make better decisions, quicker, and only where they need to. The scarce resource is human attention; the substrate's job is to protect it.
+
+Filing is cheap; refinement is the substrate's burden. The inlet accepts anything — a clear bug with file paths and line numbers, a vague idea, a half-formed observation that may or may not duplicate an existing row. The substrate cooks each input until it reaches the density needed to flow past the next gate. Some arrive near-ready; some need many rounds of distillation (router-led grill questions, dedup checks, scope clarification). Both cross the same threshold; the work to get there scales with the input's entropy, not with the human's time.
+
+When the substrate must ask the human something, it asks one thing at a time, with options the substrate generated, and the human's role is pruning by judgment — not validation of an LLM's draft. High-signal, low-noise.
+
+This frames every design move: does it protect human attention, or burn it? `Direction(pull)` protects. The two-gate frame protects. Refinement-as-substrate-burden protects. The grill-me pattern protects. A push-shaped 12-field contract draft does not.
+
 ## What's outside the substrate
 
 Worktree provisioning, project setup scripts, and observing wrappers — a Claude Code instance watching a long-running session, an outer orchestrator that spawned the whole thing — live outside the substrate. `stores` does not own these. They wrap `stores`; `stores` does not wrap them. This is not a gap to fill later; it is the correct boundary. The substrate's job is to enforce workflow structure. Everything above that layer is the caller's problem.
@@ -79,6 +93,8 @@ The autonomous-flow daemon subscribes to `transition_history` rows. By default a
 
 ## Revision history
 
+- **v1.5** (2026-05-04) — added "What the substrate is FOR (from the human's perspective)": operating principle (high-signal, low-noise; protect human attention) + the steam-engine inlet metaphor (filing is cheap, refinement is the substrate's burden; same inlet for clear bugs and vague ideas; refinement depth scales to input entropy).
+- **v1.4** (2026-05-04) — primitives extracted to `docs/primitives.md` (single source of truth, with changelog). Philosophy now references it in one line.
 - **v1.3** (2026-05-03) — upstream-autonomy section: row-creation arrival convention (`from_status=''`) and the auto-promote / auto-scaffold builtins (T020).
 - **v1.2** (2026-05-03) — substrate-vs-deployment-system distinction (subscribers are project-declared; cargo-install is one specialization, not the type); failure recovery as ordinary-task pattern; "Pull from real use" doctrine as complement to dogfood.
 - **v1.1** (2026-05-03) — added at-filing contract ratification (T013/L029); two-gate operational frame; autonomous-flow layer (T014/L018+L022+L026); daemon vs. wrapper boundary clarification.
