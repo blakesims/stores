@@ -14,13 +14,80 @@
 //! Decision Matrix Q5: scaffold failures surface via stderr only. The row is
 //! left at `planning`; recovery is out of scope per contract.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
 
 use crate::flow::builtins::{BuiltinResult, DispatchCtx};
 use crate::handlers::row::now_iso8601;
+
+/// Items to symlink from main `.stores/` into the provisioned worktree's `.stores/`.
+/// `logs/` stays worktree-local. `agents-daemon.pid` is omitted — only the main
+/// daemon owns its pid file; symlinking would let a worktree shadow it.
+const SYMLINK_ITEMS: &[&str] = &[
+    "db.sqlite",
+    "db.sqlite-shm",
+    "db.sqlite-wal",
+    "manifest.yaml",
+    "agents.yaml",
+    "config.yaml",
+    "policies.yaml",
+    "runs",
+];
+
+/// After a worktree is provisioned, link the substrate artifacts from the main
+/// `.stores/` so `stores` verbs work from inside the worktree (closes L032/L067).
+/// Idempotent: skips items already present in the worktree, and items missing
+/// from main (e.g. WAL/SHM, optional config files). Failures are logged and
+/// non-fatal — `workspace_path` is the primary deliverable.
+fn symlink_substrate_into_worktree(
+    worktree: &Path,
+    main_stores_dir: &Path,
+    display_id: &str,
+) {
+    let dst_dir = worktree.join(".stores");
+    if let Err(e) = std::fs::create_dir_all(&dst_dir) {
+        eprintln!(
+            "[auto-scaffold] {}: failed to create worktree .stores/ dir: {}",
+            display_id, e
+        );
+        return;
+    }
+
+    let main_canon = match main_stores_dir.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "[auto-scaffold] {}: failed to canonicalize main .stores/ ({}): {}",
+                display_id,
+                main_stores_dir.display(),
+                e
+            );
+            return;
+        }
+    };
+
+    for item in SYMLINK_ITEMS {
+        let src = main_canon.join(item);
+        let dst = dst_dir.join(item);
+        if !src.exists() {
+            continue;
+        }
+        if dst.exists() || dst.symlink_metadata().is_ok() {
+            continue;
+        }
+        if let Err(e) = std::os::unix::fs::symlink(&src, &dst) {
+            eprintln!(
+                "[auto-scaffold] {}: symlink {} -> {} failed: {}",
+                display_id,
+                dst.display(),
+                src.display(),
+                e
+            );
+        }
+    }
+}
 
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let display_id = row
@@ -139,11 +206,26 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         return Ok(1);
     }
 
+    if let Some(main_stores_dir) = ctx.config_path.parent() {
+        symlink_substrate_into_worktree(&canon, main_stores_dir, display_id);
+    }
+
+    let resolved_branch = resolve_branch_from_worktree(&canon).unwrap_or_else(|e| {
+        eprintln!(
+            "[auto-scaffold] {}: branch resolve failed: {}; leaving tasks.branch untouched",
+            display_id, e
+        );
+        String::new()
+    });
+
     let now = now_iso8601();
     let canon_str = canon.to_string_lossy().to_string();
     if let Err(e) = ctx.conn.execute(
-        "UPDATE tasks SET workspace_path = ?1, updated_at = ?2 WHERE display_id = ?3",
-        rusqlite::params![canon_str, now, display_id],
+        "UPDATE tasks SET workspace_path = ?1, \
+                          branch = COALESCE(NULLIF(?2, ''), branch), \
+                          updated_at = ?3 \
+         WHERE display_id = ?4",
+        rusqlite::params![canon_str, resolved_branch, now, display_id],
     ) {
         eprintln!(
             "[auto-scaffold] {}: UPDATE tasks.workspace_path failed: {}",
@@ -152,11 +234,39 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         return Ok(1);
     }
 
-    eprintln!(
-        "[auto-scaffold] {}: workspace_path = {}",
-        display_id, canon_str
-    );
+    if resolved_branch.is_empty() {
+        eprintln!(
+            "[auto-scaffold] {}: workspace_path = {} (branch unchanged — could not resolve from worktree HEAD)",
+            display_id, canon_str
+        );
+    } else {
+        eprintln!(
+            "[auto-scaffold] {}: workspace_path = {}, branch = {}",
+            display_id, canon_str, resolved_branch
+        );
+    }
     Ok(0)
+}
+
+/// Resolve the worktree's current branch via `git -C <wt> rev-parse --abbrev-ref HEAD`.
+/// Returns empty string on detached HEAD or git failures (caller decides whether
+/// to UPDATE; the COALESCE in the UPDATE means an empty string leaves the column
+/// untouched). Closes L080.
+fn resolve_branch_from_worktree(worktree: &Path) -> std::io::Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()?;
+    if !output.status.success() {
+        return Ok(String::new());
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name == "HEAD" || name.is_empty() {
+        // Detached HEAD or empty — no branch to record.
+        return Ok(String::new());
+    }
+    Ok(name)
 }
 
 #[cfg(test)]
@@ -365,6 +475,210 @@ mod tests {
             wp.as_deref().unwrap_or("").is_empty(),
             "workspace_path must remain unset on failure; got: {:?}",
             wp
+        );
+    }
+
+    #[test]
+    fn scaffold_symlinks_substrate_into_worktree() {
+        let conn = fresh_db();
+        insert_planning_task(&conn, "T104", None);
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Treat tmp.path() as the "main .stores/" dir — that's the parent of cfg_path.
+        let main_stores = tmp.path();
+        std::fs::write(main_stores.join("db.sqlite"), b"main-db").unwrap();
+        std::fs::write(main_stores.join("manifest.yaml"), b"main-manifest").unwrap();
+        std::fs::write(main_stores.join("agents.yaml"), b"main-agents").unwrap();
+        // Intentionally omit policies.yaml + WAL/SHM to confirm missing items are skipped.
+
+        let target = main_stores.join("worktree-T104");
+        let cfg_path = main_stores.join("config.yaml");
+        write_scaffold_cfg(
+            &cfg_path,
+            &format!("mkdir -p {} && echo {}", target.display(), target.display()),
+        );
+
+        let agents = AgentsYaml::default_empty();
+        let row = task_row_json(&conn, "T104");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg_path)).unwrap();
+        assert_eq!(res, 0);
+
+        let worktree_stores = target.join(".stores");
+        assert!(
+            worktree_stores.is_dir(),
+            "worktree .stores/ dir must exist after scaffold"
+        );
+
+        for must_exist in ["db.sqlite", "manifest.yaml", "agents.yaml"] {
+            let p = worktree_stores.join(must_exist);
+            let meta = p.symlink_metadata().unwrap_or_else(|_| {
+                panic!("expected symlink at {}", p.display())
+            });
+            assert!(
+                meta.file_type().is_symlink(),
+                "{} must be a symlink, got {:?}",
+                p.display(),
+                meta.file_type()
+            );
+            // Reading through the symlink yields the main file's content.
+            assert!(
+                std::fs::read(&p).unwrap().starts_with(b"main-"),
+                "symlink {} did not resolve to main-side content",
+                p.display()
+            );
+        }
+
+        // policies.yaml was missing in main → must NOT be created in worktree.
+        assert!(
+            !worktree_stores.join("policies.yaml").exists(),
+            "policies.yaml should have been skipped (missing in main)"
+        );
+
+        // logs/ is intentionally NOT in the symlink list (worktree-local).
+        // It also wasn't created in main, so it should be absent here too.
+        assert!(
+            !worktree_stores.join("logs").exists(),
+            "logs/ must not be symlinked"
+        );
+    }
+
+    #[test]
+    fn scaffold_symlink_is_idempotent_when_already_present() {
+        // If the worktree's .stores/ already has an entry (e.g. logs/ created
+        // by the scaffold command, or a prior auto-scaffold run), don't overwrite.
+        let conn = fresh_db();
+        insert_planning_task(&conn, "T105", None);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let main_stores = tmp.path();
+        std::fs::write(main_stores.join("db.sqlite"), b"main-db-v1").unwrap();
+
+        let target = main_stores.join("worktree-T105");
+        // Pre-create the worktree's .stores/db.sqlite as a regular file
+        // (simulating something the scaffold command put there).
+        std::fs::create_dir_all(target.join(".stores")).unwrap();
+        std::fs::write(target.join(".stores/db.sqlite"), b"pre-existing").unwrap();
+
+        let cfg_path = main_stores.join("config.yaml");
+        write_scaffold_cfg(
+            &cfg_path,
+            &format!("mkdir -p {} && echo {}", target.display(), target.display()),
+        );
+
+        let agents = AgentsYaml::default_empty();
+        let row = task_row_json(&conn, "T105");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg_path)).unwrap();
+        assert_eq!(res, 0);
+
+        // Pre-existing file must be preserved, not replaced by symlink.
+        let p = target.join(".stores/db.sqlite");
+        let meta = p.symlink_metadata().unwrap();
+        assert!(
+            !meta.file_type().is_symlink(),
+            "pre-existing regular file must not be replaced by a symlink"
+        );
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            b"pre-existing",
+            "pre-existing content must be preserved"
+        );
+    }
+
+    fn init_git_repo_on_branch(repo: &std::path::Path, branch: &str) {
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("git invocation");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        std::fs::create_dir_all(repo).unwrap();
+        // Some CI envs have init.defaultBranch = main; force the branch we want.
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["init", "-q", "-b", branch])
+            .output()
+            .expect("git init");
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "test"]);
+        run(&["commit", "--allow-empty", "-q", "-m", "init"]);
+    }
+
+    #[test]
+    fn scaffold_resolves_and_writes_branch_from_worktree_head() {
+        let conn = fresh_db();
+        // Insert with empty branch — auto-scaffold should resolve it from the worktree.
+        let now = "2026-05-03T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
+             VALUES ('T106', 'planning', 'test', 'tslug', '', NULL, ?1, ?2, ?2, 'ai_autonomous', 'ai_autonomous')",
+            rusqlite::params![contract, now],
+        ).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("worktree-T106");
+        init_git_repo_on_branch(&target, "feat/T106-resolved");
+
+        let cfg_path = tmp.path().join("config.yaml");
+        write_scaffold_cfg(&cfg_path, &format!("echo {}", target.display()));
+
+        let agents = AgentsYaml::default_empty();
+        let row = task_row_json(&conn, "T106");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg_path)).unwrap();
+        assert_eq!(res, 0);
+
+        let branch: String = conn
+            .query_row(
+                "SELECT branch FROM tasks WHERE display_id='T106'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(branch, "feat/T106-resolved");
+    }
+
+    #[test]
+    fn scaffold_branch_resolve_does_not_clobber_preset_value() {
+        // If branch was already set on the row (e.g. by tasks add), and the worktree
+        // happens not to be a git repo (or rev-parse fails), the existing value
+        // must be preserved by the COALESCE/NULLIF guard.
+        let conn = fresh_db();
+        // Existing branch value 'feat/tslug' from insert_planning_task helper.
+        insert_planning_task(&conn, "T107", None);
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Plain mkdir: NOT a git repo → resolve_branch returns empty.
+        let target = tmp.path().join("worktree-T107");
+        let cfg_path = tmp.path().join("config.yaml");
+        write_scaffold_cfg(
+            &cfg_path,
+            &format!("mkdir -p {} && echo {}", target.display(), target.display()),
+        );
+
+        let agents = AgentsYaml::default_empty();
+        let row = task_row_json(&conn, "T107");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg_path)).unwrap();
+        assert_eq!(res, 0);
+
+        let branch: String = conn
+            .query_row(
+                "SELECT branch FROM tasks WHERE display_id='T107'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            branch, "feat/tslug",
+            "preset branch value must be preserved when resolve fails"
         );
     }
 
