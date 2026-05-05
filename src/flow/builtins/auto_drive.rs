@@ -28,6 +28,26 @@ use crate::flow::AgentsYaml;
 use crate::handlers::agents_run::{mark_claim_finished, pid_is_alive, spawn_detached_drive};
 use crate::handlers::row::now_iso8601;
 
+/// Grace window (seconds) before the silent-zombie scan flips a row whose
+/// drive_pid is NULL (post-spawn UPDATE not yet committed). Without this
+/// window, a freshly-claimed auto-drive that has not yet run the
+/// `UPDATE tasks SET drive_pid` statement could be flipped on the very next
+/// 2s daemon poll. 10s is comfortably larger than the typical spawn→UPDATE
+/// gap (sub-second) but small enough that real silent zombies surface fast.
+pub(crate) const ZOMBIE_GRACE_SECS: i64 = 10;
+
+/// In-cycle statuses we monitor for silent zombies. A row in any of these
+/// states whose owning auto-drive subprocess has died (or never recorded its
+/// PID) past the grace window is a silent zombie that the watchdog must
+/// recover to `blocked`.
+const IN_CYCLE_STATUSES: &[&str] = &[
+    "planning",
+    "plan_review",
+    "ready",
+    "executing",
+    "code_review",
+];
+
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let display_id = row
         .get("display_id")
@@ -130,6 +150,183 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     Ok(0)
 }
 
+/// One row produced by `scan_zombie_tasks`: the row id (in `tasks`), the
+/// display_id, the current status, the recorded `drive_pid` (or 0 when
+/// NULL/missing), and the silent-zombie reason ("drive_pid_dead" or
+/// "pid_never_recorded").
+pub(crate) type ZombieRow = (i64, String, String, i64, &'static str);
+
+/// Scan the `tasks` table for rows stuck in an in-cycle status whose owning
+/// auto-drive subprocess is no longer alive (the L062 silent-zombie shape).
+///
+/// A row qualifies as a silent zombie when:
+///   * `status` is in {planning, plan_review, ready, executing, code_review}
+///   * an auto-drive `dispatch_locks` row exists for it (any state, including
+///     already-closed via `mark_claim_finished`), AND
+///   * either `drive_pid` is set but the PID is dead, OR `drive_pid` is NULL
+///     and the lock was claimed more than `ZOMBIE_GRACE_SECS` seconds ago
+///     (giving a freshly-spawned drive a window to commit its PID UPDATE).
+///
+/// The closed-lock case is the L062 shape: T022's spawn path closes the lock
+/// immediately after spawn (`mark_claim_finished("ok")`), so the existing
+/// open-lock sweep (`WHERE finished_at IS NULL`) cannot see it. This scan
+/// inspects the `tasks` table directly and does not filter on `finished_at`.
+pub(crate) fn scan_zombie_tasks(conn: &Connection) -> Vec<ZombieRow> {
+    // Cutoff timestamp string for grace-window comparison. Lexicographic
+    // comparison on ISO-8601 Z-strings matches chronological order.
+    let cutoff = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let cutoff_secs = now.saturating_sub(ZOMBIE_GRACE_SECS).max(0) as u64;
+        // Re-use the project's iso formatter via a temporary now string then
+        // recompute from secs to keep the format identical.
+        let (y, mo, d, h, mi, s) = unix_to_ymd_hms(cutoff_secs);
+        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+    };
+
+    // Placeholders for IN-clause.
+    let in_placeholders = (1..=IN_CYCLE_STATUSES.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let cutoff_idx = IN_CYCLE_STATUSES.len() + 1;
+
+    let sql = format!(
+        "SELECT t.id, t.display_id, t.status, COALESCE(t.drive_pid, 0), \
+                COALESCE(MIN(dl.claimed_at), ''), COALESCE(t.drive_started_at, '') \
+         FROM tasks t \
+         JOIN dispatch_locks dl ON dl.store = 'tasks' AND dl.row_id = t.id \
+                                  AND dl.agent_name = 'auto-drive' \
+         WHERE t.status IN ({in_placeholders}) \
+         GROUP BY t.id \
+         HAVING ( \
+                  COALESCE(t.drive_pid, 0) > 0 \
+                  AND COALESCE(t.drive_started_at, '') < ?{cutoff_idx} \
+                ) \
+             OR ( \
+                  COALESCE(t.drive_pid, 0) = 0 \
+                  AND COALESCE(MIN(dl.claimed_at), '') < ?{cutoff_idx} \
+                  AND COALESCE(MIN(dl.claimed_at), '') != '' \
+                )"
+    );
+
+    let mut params: Vec<rusqlite::types::Value> = IN_CYCLE_STATUSES
+        .iter()
+        .map(|s| rusqlite::types::Value::Text(s.to_string()))
+        .collect();
+    params.push(rusqlite::types::Value::Text(cutoff.clone()));
+
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[auto-drive-watchdog] scan_zombie_tasks prepare failed: {e}");
+            return Vec::new();
+        }
+    };
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, String>(5)?,
+        ))
+    });
+    let rows = match rows {
+        Ok(it) => it.filter_map(|r| r.ok()).collect::<Vec<_>>(),
+        Err(e) => {
+            eprintln!("[auto-drive-watchdog] scan_zombie_tasks query failed: {e}");
+            return Vec::new();
+        }
+    };
+
+    let mut out: Vec<ZombieRow> = Vec::new();
+    for (row_id, display_id, status, pid, _claimed_at, _started) in rows {
+        let reason: &'static str = if pid > 0 {
+            if pid_is_alive(pid as i32) {
+                continue;
+            }
+            "drive_pid_dead"
+        } else {
+            // PID NULL/zero — grace already enforced by the SQL HAVING; the
+            // claimed_at < cutoff predicate guarantees we only land here
+            // outside the grace window.
+            "pid_never_recorded"
+        };
+        out.push((row_id, display_id, status, pid, reason));
+    }
+    out
+}
+
+// Local mirror of unix_to_ymd_hms (private in handlers::row); used for the
+// grace-cutoff timestamp in scan_zombie_tasks. Matches now_iso8601's format.
+fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let s = secs % 60;
+    let total_min = secs / 60;
+    let mi = total_min % 60;
+    let total_hr = total_min / 60;
+    let h = total_hr % 24;
+    let days = total_hr / 24;
+    let (y, mo, d) = days_to_ymd(days);
+    (y, mo, d, h as u32, mi as u32, s as u32)
+}
+
+fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
+    let mut year = 1970u32;
+    loop {
+        let dy = days_in_year(year) as u64;
+        if days < dy {
+            break;
+        }
+        days -= dy;
+        year += 1;
+    }
+    let leap = is_leap(year);
+    let dim = [31u32, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 0u32;
+    let mut d = days as u32;
+    while month < 12 && d >= dim[month as usize] {
+        d -= dim[month as usize];
+        month += 1;
+    }
+    (year, month + 1, d + 1)
+}
+
+fn days_in_year(y: u32) -> u32 {
+    if is_leap(y) {
+        366
+    } else {
+        365
+    }
+}
+
+fn is_leap(y: u32) -> bool {
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
+}
+
+/// Annotate the most recent `mark_drive_failed` transition_history row for a
+/// display_id with a structured reason note (e.g. `drive_pid_dead`,
+/// `pid_never_recorded`). Best-effort; failures log but do not propagate.
+fn annotate_drive_failed_history(conn: &Connection, display_id: &str, note: &str) {
+    if let Err(e) = conn.execute(
+        "UPDATE transition_history SET actor_note = ?1 \
+         WHERE id = ( \
+             SELECT id FROM transition_history \
+             WHERE display_id = ?2 AND verb = 'mark_drive_failed' \
+             ORDER BY id DESC LIMIT 1 \
+         )",
+        rusqlite::params![note, display_id],
+    ) {
+        eprintln!(
+            "[auto-drive-watchdog] {}: actor_note annotate failed: {}",
+            display_id, e
+        );
+    }
+}
+
 /// Sweep open `dispatch_locks` for `agent_name='auto-drive'`. For each lock
 /// whose grandchild PID is no longer alive, reconcile based on the task row's
 /// status:
@@ -160,6 +357,8 @@ pub fn sweep_drive_watchdog(
         it.filter_map(|r| r.ok()).collect()
     };
 
+    let mut handled: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for (row_id, display_id) in locks {
         let row = match refresh_task_row(conn, &display_id) {
             Some(r) => r,
@@ -177,10 +376,12 @@ pub fn sweep_drive_watchdog(
         if status == "in_review" {
             let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "ok");
             acted += 1;
+            handled.insert(display_id.clone());
             continue;
         }
         match fire_mark_drive_failed(conn, &display_id, "drive_failed", policies_hash) {
             Ok(()) => {
+                annotate_drive_failed_history(conn, &display_id, "drive_pid_dead");
                 let ctx = DispatchCtx {
                     conn,
                     agents,
@@ -190,6 +391,7 @@ pub fn sweep_drive_watchdog(
                 dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog");
                 let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "drive_failed");
                 acted += 1;
+                handled.insert(display_id.clone());
             }
             Err(e) => {
                 eprintln!(
@@ -199,6 +401,50 @@ pub fn sweep_drive_watchdog(
             }
         }
     }
+
+    // Silent-zombie pass: scan the tasks table directly for in-cycle rows
+    // whose owning auto-drive subprocess is dead but whose dispatch_lock has
+    // already been closed (the L062 shape). The open-lock scan above can
+    // never see these because it filters on `finished_at IS NULL`.
+    let zombies = scan_zombie_tasks(conn);
+    for (row_id, display_id, _status, _pid, reason) in zombies {
+        if handled.contains(&display_id) {
+            // Already actioned by the open-lock pass this sweep.
+            continue;
+        }
+        let row = match refresh_task_row(conn, &display_id) {
+            Some(r) => r,
+            None => continue,
+        };
+        // Idempotency guard: row already blocked → nothing to do.
+        let cur_status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if cur_status == "blocked" {
+            continue;
+        }
+        match fire_mark_drive_failed(conn, &display_id, "drive_failed", policies_hash) {
+            Ok(()) => {
+                annotate_drive_failed_history(conn, &display_id, reason);
+                let ctx = DispatchCtx {
+                    conn,
+                    agents,
+                    config_path,
+                    policies_hash,
+                };
+                dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog-zombie");
+                // mark_claim_finished is idempotent: re-closing an already
+                // closed lock is a no-op UPDATE matching zero rows.
+                let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "drive_failed");
+                acted += 1;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[auto-drive-watchdog-zombie] {}: mark_drive_failed failed: {:#}",
+                    display_id, e
+                );
+            }
+        }
+    }
+
     Ok(acted)
 }
 
@@ -779,6 +1025,96 @@ mod tests {
             note.contains("pid_never_recorded"),
             "expected reason note 'pid_never_recorded' in last transition_history; got {:?}",
             note
+        );
+    }
+
+    /// AC2.2: a row with drive_pid=NULL whose lock was claimed within
+    /// `ZOMBIE_GRACE_SECS` of now is left untouched — protects freshly
+    /// spawned drives that have not yet committed their PID UPDATE.
+    #[test]
+    fn watchdog_skips_within_grace_window() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T732", "planning", None);
+        // Lock claimed_at = NOW (well within the grace window).
+        let now = crate::handlers::row::now_iso8601();
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, last_status, finished_at) \
+             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, ?3, 'test-claimer', 'ok', ?3)",
+            rusqlite::params![row_id, "T732", now],
+        )
+        .unwrap();
+
+        // Confirm the constant exists and is sane.
+        const { assert!(ZOMBIE_GRACE_SECS >= 1, "grace window must be positive") };
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T732'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "planning",
+            "row within grace window must not be flipped; got status={status}"
+        );
+    }
+
+    /// AC2.3: running sweep twice on the same zombie produces exactly one
+    /// transition_history entry (mark_drive_failed) and one observation —
+    /// the second sweep must be a no-op (idempotent guard).
+    #[test]
+    fn watchdog_idempotent_on_already_blocked() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // user-escalation reads a config_path; provide a tmp file so the
+        // observation insert path completes cleanly.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_file = tmp.path().join("config.yaml");
+        std::fs::write(&cfg_file, "ntfy:\n  url: https://test.local\n").unwrap();
+
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T733", "executing", Some(dead_pid()));
+        insert_lock_closed(&conn, row_id, "T733");
+
+        let agents = AgentsYaml::default_empty();
+        // Sweep #1 — flips row to blocked, files one observation.
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "").unwrap();
+        // Sweep #2 — must be a no-op.
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "").unwrap();
+
+        let th_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T733' AND verb='mark_drive_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            th_count, 1,
+            "exactly one mark_drive_failed transition for T733 across two sweeps; got {th_count}"
+        );
+
+        let obs_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM observations WHERE task_id='T733'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            obs_count, 1,
+            "exactly one observation for T733 across two sweeps; got {obs_count}"
         );
     }
 

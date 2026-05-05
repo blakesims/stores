@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS transition_history (
     invoker TEXT NOT NULL,
     policy_ref TEXT,
     policies_hash TEXT,
-    occurred_at TEXT NOT NULL
+    occurred_at TEXT NOT NULL,
+    actor_note TEXT
 );
 CREATE TABLE IF NOT EXISTS dispatch_locks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
