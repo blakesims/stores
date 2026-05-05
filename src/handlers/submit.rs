@@ -114,6 +114,68 @@ fn release_lock(tx: &Transaction, table: &str, display_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn table_has_column(tx: &Transaction, table: &str, column: &str) -> Result<bool> {
+    let qtable = quote_ident(table);
+    let mut stmt = tx.prepare(&format!("PRAGMA table_info({qtable})"))?;
+    let cols = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    for col in cols {
+        if col? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn table_exists(tx: &Transaction, table: &str) -> Result<bool> {
+    let exists: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        rusqlite::params![table],
+        |r| r.get(0),
+    )?;
+    Ok(exists > 0)
+}
+
+/// Clear stale auto-drive bookkeeping before a human resume. A task blocked by
+/// `mark_drive_failed` can retain the dead `drive_pid` and an old
+/// `dispatch_locks` row; if left in place, the watchdog can immediately flip
+/// the just-resumed row back to blocked.
+fn clear_auto_drive_bookkeeping_for_resume(
+    tx: &Transaction,
+    table: &str,
+    row_id: i64,
+    display_id: &str,
+) -> Result<()> {
+    let has_drive_pid = table_has_column(tx, table, "drive_pid")?;
+    let has_drive_started_at = table_has_column(tx, table, "drive_started_at")?;
+    if has_drive_pid || has_drive_started_at {
+        let qtable = quote_ident(table);
+        let assignments = match (has_drive_pid, has_drive_started_at) {
+            (true, true) => "drive_pid = NULL, drive_started_at = NULL",
+            (true, false) => "drive_pid = NULL",
+            (false, true) => "drive_started_at = NULL",
+            (false, false) => unreachable!(),
+        };
+        tx.execute(
+            &format!("UPDATE {qtable} SET {assignments} WHERE id = ?1"),
+            rusqlite::params![row_id],
+        )
+        .with_context(|| format!("resume: clear auto-drive pid fields for {display_id}"))?;
+    }
+
+    if table_exists(tx, "dispatch_locks")? {
+        tx.execute(
+            "DELETE FROM dispatch_locks \
+             WHERE store = ?1 AND row_id = ?2 AND display_id = ?3 AND agent_name = 'auto-drive'",
+            rusqlite::params![table, row_id, display_id],
+        )
+        .with_context(|| {
+            format!("resume: clear stale auto-drive dispatch_lock for {display_id}")
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Build an ISO-8601 timestamp for N seconds ago.
 fn iso_subtract_seconds(seconds: u64) -> String {
     let secs = std::time::SystemTime::now()
@@ -1440,6 +1502,8 @@ pub(crate) fn compute_resume(
             validate::pretty_print(&errs)
         )
     })?;
+
+    clear_auto_drive_bookkeeping_for_resume(&tx, &schema.name, row_id, display_id)?;
 
     // Step 7: compute post-action fields
     //   current_cycle reset to 1; current_phase UNCHANGED; blocked_reason cleared
@@ -2888,6 +2952,86 @@ fields:
             claimed_by.is_none() || claimed_by.as_deref() == Some(""),
             "lock must be released after resume: {:?}",
             claimed_by
+        );
+    }
+
+    #[test]
+    fn resume_clears_stale_auto_drive_bookkeeping_before_watchdog() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+
+        let now = "2026-05-03T00:00:00Z";
+        let contract = r#"{"done_when":"fixed","scope_in":"resume","scope_out":"none"}"#;
+        let plan = r#"{"phases":[{"name":"phase 1"}]}"#;
+        let dead_pid = 0x7fff_fffe_i64;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, current_phase, current_cycle, \
+             blocked_reason, drive_pid, drive_started_at) \
+             VALUES ('T900', 'blocked', ?1, ?1, 'framework', 'framework', \
+             'resume stale drive pid', 'resume-stale-drive-pid', 'feat/t900', '/tmp/no-such', 'T3', \
+             ?2, ?3, 1, 1, 'drive_failed:silent_zombie_pid_dead', ?4, ?1)",
+            rusqlite::params![now, contract, plan, dead_pid],
+        )
+        .unwrap();
+        let row_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, last_status, finished_at) \
+             VALUES ('tasks', ?1, 'T900', 'auto-drive', 1, ?2, 'auto-drive-watchdog', 'drive_failed', ?2)",
+            rusqlite::params![row_id, now],
+        )
+        .unwrap();
+
+        let out = compute_resume(&task_schema, &conn, "T900", Actor::AiWithHuman).unwrap();
+        assert_eq!(out.new_status, "executing");
+
+        let (status, reason, pid): (String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT status, blocked_reason, drive_pid FROM tasks WHERE display_id='T900'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "executing");
+        assert!(reason.unwrap_or_default().is_empty());
+        assert!(pid.is_none(), "resume must clear stale drive_pid");
+
+        let lock_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE store='tasks' AND row_id=?1 AND agent_name='auto-drive'",
+                rusqlite::params![row_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lock_count, 0, "resume must remove stale auto-drive lock");
+
+        let agents = crate::flow::AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted =
+            crate::flow::builtins::auto_drive::sweep_drive_watchdog(&conn, &agents, &cfg, "")
+                .unwrap();
+        assert_eq!(
+            acted, 0,
+            "watchdog must not re-block immediately after resume"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM tasks WHERE display_id='T900'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
+            "executing"
         );
     }
 
