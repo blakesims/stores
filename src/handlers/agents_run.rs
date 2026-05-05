@@ -86,6 +86,9 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
     let conn = crate::db::open(&db_path)?;
     let claimer = format!("daemon-{}", std::process::id());
 
+    let seeded = seed_starting_line(&conn, &agents).context("seeding starting-line dispatch_locks")?;
+    eprintln!("[daemon] seeded {} starting-line dispatch_locks", seeded);
+
     let mut iter = 0usize;
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
