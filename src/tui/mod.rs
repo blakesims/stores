@@ -1,23 +1,26 @@
 //! T028 P1: ratatui-based TUI for `stores watch`.
 //!
-//! Replaces the legacy ANSI POC behind the `--legacy` escape hatch. This
-//! phase stands up the binary path: alt-screen, section-grouped row list,
-//! status bar, idle 1 Hz repaint, q/Ctrl-C quit. Side-car spawn keys, sort,
-//! filter, search, and daemon liveness arrive in later phases.
+//! Replaces the legacy ANSI POC behind the `--legacy` escape hatch. Phase 2
+//! adds keyboard navigation, modal sort/filter/search, and virtualization.
 
 pub mod app;
 pub mod data;
+pub mod filter;
+pub mod input;
 pub mod render;
+pub mod search;
+pub mod sort;
 pub mod term;
 
 use anyhow::{bail, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event};
 use rusqlite::{Connection, OpenFlags};
 use std::time::{Duration, Instant};
 
 use crate::paths::db_path;
 
 pub use app::{App, TuiOpts};
+pub use input::{on_key, KeyOutcome};
 
 /// Run the TUI event loop. Blocks until the user quits.
 pub fn run(opts: TuiOpts) -> Result<()> {
@@ -56,17 +59,12 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut last_refresh = Instant::now();
 
     loop {
-        terminal.draw(|f| render::draw(f, &app))?;
+        terminal.draw(|f| render::draw(f, &mut app))?;
 
         if event::poll(poll_interval)? {
-            if let Event::Key(KeyEvent {
-                code, modifiers, ..
-            }) = event::read()?
-            {
-                match (code, modifiers) {
-                    (KeyCode::Char('q'), _) => return Ok(()),
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(()),
-                    _ => {}
+            if let Event::Key(ev) = event::read()? {
+                if matches!(on_key(&mut app, ev), KeyOutcome::Quit) {
+                    return Ok(());
                 }
             }
         }
