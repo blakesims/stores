@@ -876,11 +876,10 @@ mod tests {
         }
 
         /// All policy tests share the global notifier + STORES_NTFY_URL env.
-        /// Serialize them to keep the captured events scoped.
+        /// Use the process-wide notifier lock so cross-module tests that
+        /// install their own mocks don't clobber each other's captures.
         fn lock() -> &'static Mutex<()> {
-            use std::sync::OnceLock;
-            static L: OnceLock<Mutex<()>> = OnceLock::new();
-            L.get_or_init(|| Mutex::new(()))
+            crate::paths::test_notifier_lock()
         }
 
         /// AC5.1 case (d): integration — policy match drives daemon dispatch.
@@ -889,7 +888,7 @@ mod tests {
         /// default-allow.
         #[test]
         fn d_policy_match_drives_dispatch() {
-            let _g = lock().lock().unwrap();
+            let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
             let yaml = r#"
 policies:
   - id: allow-T2-fast-path
@@ -908,7 +907,7 @@ policies:
         /// AC5.1 case (e): default-allow — no rule matches, row still flows.
         #[test]
         fn e_default_allow_when_no_rule_matches() {
-            let _g = lock().lock().unwrap();
+            let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
             let (conn, agents, policies) = fixture("");
             insert_task_row(&conn, 21, "T021", "in_review", "T2", "feat/x");
             insert_history(&conn, "tasks", 21, "T021", "ready", "in_review");
@@ -920,7 +919,7 @@ policies:
         /// AC5.1 case (f) + AC5.2: NEVER overrides Allow → halt + ntfy fired.
         #[test]
         fn f_never_overrides_allow_and_skips_dispatch() {
-            let _g = lock().lock().unwrap();
+            let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
             std::env::set_var("STORES_NTFY_URL", "https://test.local");
             let mock = install_mock();
             let yaml = r#"
@@ -965,7 +964,7 @@ policies:
         /// (no env) record NULL.
         #[test]
         fn g_policy_ref_recording_on_auto_path_and_null_on_manual() {
-            let _g = lock().lock().unwrap();
+            let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
             // Auto path: env vars set → write into transition_history.
             std::env::set_var("STORES_POLICY_REF", "allow-T1-fast-path");
             std::env::set_var("STORES_POLICIES_HASH", "deadbeef");
@@ -1070,7 +1069,7 @@ fields:
         /// and the halting policy id.
         #[test]
         fn h_ntfy_halt_event_body() {
-            let _g = lock().lock().unwrap();
+            let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
             std::env::set_var("STORES_NTFY_URL", "https://test.local");
             let mock = install_mock();
             let yaml = r#"

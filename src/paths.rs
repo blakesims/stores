@@ -197,6 +197,23 @@ pub(crate) fn test_cwd_lock() -> &'static std::sync::Mutex<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Process-wide notifier lock for tests
+//
+// The global ntfy backend (installed via `flow::install_notifier`) is shared
+// across the whole process. Any test that installs a mock notifier and
+// asserts on captured events must hold this lock for the duration of the
+// install→exercise→assert sequence so concurrent tests don't clobber the
+// global with a fresh mock between install and assertion.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub(crate) fn test_notifier_lock() -> &'static std::sync::Mutex<()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+// ---------------------------------------------------------------------------
 // Tests  (Task 1.6 — AC1.6)
 // ---------------------------------------------------------------------------
 
