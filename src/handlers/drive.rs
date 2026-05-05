@@ -424,7 +424,11 @@ pub(crate) fn compute_git_diff_summary(
 
 /// Core loop.  Extracted so tests can drive it directly without going through
 /// clap or `run_drive`.
-pub(crate) fn drive_loop(
+///
+/// Public so integration tests in `tests/` (e.g. `workflow_tier_t1.rs`) can
+/// exercise the loop with a `MockRunner` injected directly. T027 P5 widens
+/// from `pub(crate)` to `pub` for the tier-shape integration tests.
+pub fn drive_loop(
     schema: &Schema,
     conn: &Connection,
     display_id: &str,

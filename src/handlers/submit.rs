@@ -312,7 +312,7 @@ pub(crate) fn find_transition<'a>(
 /// If on_state[state] contains TransitionTo(target), transitions the row to
 /// target inside the same tx.  Recurses if target also has on-entry follow-ons.
 /// All writes use Actor::Framework as invoker.
-pub(crate) fn fire_on_entry_follow_ons(
+pub fn fire_on_entry_follow_ons(
     tx: &Transaction,
     schema: &Schema,
     display_id: &str,
