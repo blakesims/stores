@@ -77,8 +77,24 @@ The substrate is dogfooded by being used to build itself — but self-build alon
 
 The autonomous-flow daemon subscribes to `transition_history` rows. By default a subscription names a non-empty `from` and `to` state, matching a lifecycle edge. The substrate also writes a synthetic create-event for every successful `add` (across all stores) with `from_status = ''` and `to_status = <initial-state>`. A subscription whose `transition.from` is the empty string therefore fires once per row creation, before any further state movement. This is the "planning-arrival" hook the upstream-autonomy chain stands on: `auto-promote` (`observations: confirmed → ready`) creates a tasks row at `planning`, and `auto-scaffold` (`tasks: '' → planning`) catches that creation event and provisions a worktree. The empty-string `from` is a convention, not a special case — the daemon's SQL match (`WHERE from_status = ?`) treats it like any other state token. The validator accepts empty `from`, but `to` must remain non-empty: a subscription with no destination state has nothing to match.
 
+## Tier-structural drive cycle (T027)
+
+Tasks are not all the same shape, and the drive cycle should not pretend they are. The substrate carries a `tier_hint` (`T0` / `T1` / `T2` / `T3`) on every task, and the lifecycle bends to it — not via runtime branching in agent code, but via schema-declared `when:` predicates on `StateAction`s. The same predicate language that guards transitions also gates whether a state-entry action fires. Tier shape is therefore a structural property of the workflow, visible in `schema.yaml`, audited in `transition_history`, and impossible to bypass.
+
+The four tiers, by cycle shape:
+
+- **T0 — doctrinal.** Lives in `CLAUDE.md` only; never filed as a row. T0 is a class of "pure-doctrine" change too small or too implicit to deserve a substrate task. Edit the doc directly. The substrate has no T0 row, so there is no cycle to skip.
+- **T1 — contract-is-plan.** The ratified `intent_contract` already names objective, acceptance, scope. Re-running planner + plan_reviewer to "produce a plan" would just rephrase the contract. T1 tasks therefore skip both stages: the framework fires a `skip-plan` verb on the `planning → ready` edge, gated by a `when: tier_hint == 'T1'` predicate on the planning-state action. `transition_history` records the skip with `verb=skip-plan` and zero planner / plan_reviewer subagent spawns.
+- **T2 — schema-constrained one-phase plan.** A T2 task gets a planner + plan_reviewer cycle, but the plan must be exactly one phase. `submit-plan` carries a `when: tier_hint == 'T2' && phases.length != 1` predicate that rejects multi-phase submissions at the schema gate. The plan-shape constraint is enforced by the substrate, not by reviewer judgment.
+- **T3 — full cycle.** Multi-phase plans, full planner → plan_reviewer → executor → code_reviewer → wrap loop per phase. No tier predicate fires; the cycle runs as it always has.
+
+The mechanism is the optional `when:` field on `StateAction` (an extension of the existing transition-guard predicate language). Tier shape is therefore declared in the same place the rest of the lifecycle is declared, and the engine honours it through the same evaluator. There is no tier-aware Rust branching anywhere in `tasks/drive`; the substrate evaluates predicates, the cycle bends.
+
+This closes L030 (the tier-aware-cycle observation): the durable surface is the `when:` predicate, not a tier-aware Runner trait or a tier-keyed dispatch map.
+
 ## Revision history
 
+- **v1.4** (2026-05-05) — tier-structural drive cycle (T027): T0 / T1 / T2 / T3 cycle shapes via `when:` predicates on `StateAction`. T1 skips planner+plan_reviewer; T2 plans constrained to one phase; T3 unchanged. L030 superseded.
 - **v1.3** (2026-05-03) — upstream-autonomy section: row-creation arrival convention (`from_status=''`) and the auto-promote / auto-scaffold builtins (T020).
 - **v1.2** (2026-05-03) — substrate-vs-deployment-system distinction (subscribers are project-declared; cargo-install is one specialization, not the type); failure recovery as ordinary-task pattern; "Pull from real use" doctrine as complement to dogfood.
 - **v1.1** (2026-05-03) — added at-filing contract ratification (T013/L029); two-gate operational frame; autonomous-flow layer (T014/L018+L022+L026); daemon vs. wrapper boundary clarification.

@@ -81,9 +81,17 @@ stores observations add --invoker ai_autonomous \
 
 Observations get `L{:03d}` IDs (`L001`, `L002`, …) — distinct from tasks' `T###`. The `task_id` field is a soft-FK (plain text, no referential guard) — set it to the display id of the task that surfaced the friction.
 
-**Observations carry their own triage tier** via their `intent_contract.tier_hint` (T1 / T2 / T3):
+**Observations carry their own triage tier** via their `intent_contract.tier_hint` (T0 / T1 / T2 / T3):
+- **T0** — doctrinal-only. **Do not file.** Edit `CLAUDE.md` (or the relevant doc) directly. T0 is the class of change too small or too implicit to deserve a substrate row; there is no observation, no task, no cycle.
 - **T1 / T2** — handled inside the observation lifecycle (`investigate` → draft contract → `confirm` (U-moment) → `claim` → `resolve`). No separate task row.
 - **T3** — promoted to a full task: `stores tasks add --invoker ai_with_human --linked-observations L00X ...`. The observation gets `resolved` with `resolution` referencing the task once the task ships.
+
+**Per-tier drive-cycle shape (T027):** when an observation does promote to a task, the cycle bends to its tier — schema-enforced via `when:` predicates on `StateAction`s, not runtime branching:
+- **T1 — contract-is-plan.** Skips planner + plan_reviewer entirely. The framework fires `skip-plan` on the `planning → ready` edge; zero plan-stage subagent spawns.
+- **T2 — one-phase plan.** Planner + plan_reviewer run, but `submit-plan` rejects any plan whose `phases.length != 1`. Plan shape is schema-enforced.
+- **T3 — full cycle.** Multi-phase planner → plan_reviewer → executor → code_reviewer → wrap, unchanged.
+
+See `docs/philosophy.md` § *Tier-structural drive cycle (T027)*.
 
 If the substrate is so broken you cannot even file an observation: write a worklog note (`docs/worklog/<date>/NN-substrate-down-<slug>.md`) describing what broke and what you hand-edited, then open a fresh task (or observation, when substrate recovers) to address it. The worklog note IS the audit trail for the substrate-down period — git-tracked, timestamped, discoverable.
 
