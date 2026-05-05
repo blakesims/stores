@@ -4,8 +4,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{App, Mode};
+use super::data::Row;
 use super::filter::FilterPalette;
 use super::search::SearchState;
+use super::sidecar::SidecarScope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyOutcome {
@@ -18,7 +20,19 @@ pub fn on_key(app: &mut App, ev: KeyEvent) -> KeyOutcome {
         Mode::Normal => normal(app, ev),
         Mode::Filter => filter_mode(app, ev),
         Mode::Search => search_mode(app, ev),
+        Mode::ObsDraftConfirm => obs_draft_confirm_mode(app, ev),
     }
+}
+
+/// Display id of the row currently under the cursor (or None).
+fn current_display_id(app: &App) -> Option<String> {
+    let flat = app.flat_rows();
+    let cursor = app.current_flat()?;
+    let fr = flat.get(cursor)?;
+    Some(match &app.rows[fr.abs] {
+        Row::Task(t) => t.display_id.clone(),
+        Row::Obs(o) => o.display_id.clone(),
+    })
 }
 
 fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
@@ -110,6 +124,63 @@ fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
             KeyOutcome::Continue
         }
 
+        // Side-car spawn keys.
+        (KeyCode::Char('s'), _) => {
+            if let Some(id) = current_display_id(app) {
+                app.pending_spawn = Some(SidecarScope::PerRow {
+                    display_id: id,
+                    fresh: false,
+                });
+            } else {
+                app.status_bar.message = "no row selected".to_string();
+            }
+            KeyOutcome::Continue
+        }
+        (KeyCode::Char('S'), _) => {
+            if let Some(id) = current_display_id(app) {
+                app.pending_spawn = Some(SidecarScope::PerRow {
+                    display_id: id,
+                    fresh: true,
+                });
+            } else {
+                app.status_bar.message = "no row selected".to_string();
+            }
+            KeyOutcome::Continue
+        }
+        (KeyCode::Char('g'), _) => {
+            app.pending_spawn = Some(SidecarScope::General);
+            KeyOutcome::Continue
+        }
+        (KeyCode::Char('o'), _) => {
+            app.pending_spawn = Some(SidecarScope::ObsDraft);
+            KeyOutcome::Continue
+        }
+
+        _ => KeyOutcome::Continue,
+    }
+}
+
+/// Confirm popup after an obs-drafting side-car returned with a draft on
+/// disk. `y` files via `stores observations add`; `n` discards; `Esc`
+/// also discards.
+fn obs_draft_confirm_mode(app: &mut App, ev: KeyEvent) -> KeyOutcome {
+    match ev.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(draft) = app.obs_draft_pending.take() {
+                app.obs_draft_filing_request = Some(draft);
+                app.last_obs_draft_action = Some("file".to_string());
+            }
+            app.mode = Mode::Normal;
+            KeyOutcome::Continue
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            if let Some(draft) = app.obs_draft_pending.take() {
+                let _ = std::fs::remove_file(&draft.draft_path);
+                app.last_obs_draft_action = Some("discard".to_string());
+            }
+            app.mode = Mode::Normal;
+            KeyOutcome::Continue
+        }
         _ => KeyOutcome::Continue,
     }
 }

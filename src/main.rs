@@ -171,6 +171,7 @@ fn main() -> Result<()> {
                     tier_filter: sub.get_one::<String>("tier").cloned(),
                     since_filter: sub.get_one::<String>("since").cloned(),
                     legacy: false,
+                    claude_bin: None,
                 };
                 stores::tui::run(opts)?;
             }

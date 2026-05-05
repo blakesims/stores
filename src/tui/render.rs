@@ -46,9 +46,32 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.mode == Mode::Filter {
         draw_filter_palette(f, app);
     }
+    if app.mode == Mode::ObsDraftConfirm {
+        draw_obs_draft_popup(f, app);
+    }
     if app.show_help {
         super::help::render_popup(f, app);
     }
+}
+
+fn draw_obs_draft_popup(f: &mut Frame, app: &App) {
+    let draft = match &app.obs_draft_pending {
+        Some(d) => d,
+        None => return,
+    };
+    let area = centered_rect(70, 10, f.area());
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" obs-draft (y to file, n/Esc to discard) ")
+        .style(Style::default().fg(Color::Yellow));
+    let body = Paragraph::new(vec![
+        Line::from(format!("summary: {}", draft.summary)),
+        Line::from(""),
+        Line::from(truncate(&draft.body, 200)),
+    ])
+    .block(block);
+    f.render_widget(body, area);
 }
 
 /// Slice the flat-row list to the current viewport window.

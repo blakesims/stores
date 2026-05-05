@@ -50,6 +50,7 @@ pub fn hint_for(mode: Mode) -> &'static str {
         Mode::Normal => "j/k nav  , sort  f filter  / search  D daemon  s/S/g/o sidecar  ? help  q quit",
         Mode::Filter => "type k=v (state= priority= tier= since=)  Enter apply  Esc cancel",
         Mode::Search => "type to search  Enter accept  Esc cancel  n/N next/prev",
+        Mode::ObsDraftConfirm => "y file obs  n discard  Esc discard",
     }
 }
 

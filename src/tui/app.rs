@@ -3,12 +3,14 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use super::daemon::Liveness;
 use std::time::{SystemTime, UNIX_EPOCH};
 use super::data::{classify, Row, Section};
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
+use super::sidecar::SidecarScope;
 use super::sort::{sort_indices, Sort};
 
 /// Options threaded from the CLI into the TUI.
@@ -20,6 +22,9 @@ pub struct TuiOpts {
     pub tier_filter: Option<String>,
     pub since_filter: Option<String>,
     pub legacy: bool,
+    /// Override for the `claude` executable used by side-car hand-off.
+    /// `None` → resolves "claude" from `$PATH` at spawn time.
+    pub claude_bin: Option<PathBuf>,
 }
 
 /// Selection cursor: which (section_idx, row_idx_within_section) is highlighted.
@@ -36,6 +41,29 @@ pub enum Mode {
     Normal,
     Filter,
     Search,
+    /// Confirm popup after an obs-drafting side-car returned with a draft.
+    ObsDraftConfirm,
+}
+
+/// Pending obs-drafting decision: the side-car wrote a draft to disk and
+/// the operator must press y (file) or n (discard) before normal mode
+/// resumes.
+#[derive(Debug, Clone)]
+pub struct ObsDraftConfirm {
+    pub draft_path: std::path::PathBuf,
+    pub summary: String,
+    pub body: String,
+}
+
+/// Snapshot of the user-visible view state, captured before a side-car
+/// hand-off and restored on return.
+#[derive(Debug, Clone, Default)]
+pub struct PreservedView {
+    pub selection: Selection,
+    pub sort: Sort,
+    pub filter: FilterPredicate,
+    pub collapsed: HashSet<Section>,
+    pub scroll_offset: usize,
 }
 
 /// Status-bar payload (daemon liveness, db path, clock, cap, message).
@@ -86,15 +114,64 @@ pub struct App {
     pub sidecars_today: u32,
     /// Whether the `?` cheat-sheet popup is currently visible.
     pub show_help: bool,
+    /// Side-car spawn requested by the input dispatcher; the event loop
+    /// drains this each tick.
+    pub pending_spawn: Option<SidecarScope>,
+    /// Side-car path to the `claude` binary. Defaults to `claude`
+    /// (resolved via `$PATH`) — tests override via `with_bin`.
+    pub claude_bin: PathBuf,
+    /// Pending obs-draft confirm popup (after `o` returned with a draft).
+    pub obs_draft_pending: Option<ObsDraftConfirm>,
+    /// When the operator pressed `y` on the popup, the draft moves here for
+    /// the event loop to pick up and shell out to `stores observations add`.
+    pub obs_draft_filing_request: Option<ObsDraftConfirm>,
+    /// Trace of the last obs-draft confirm action ("file" or "discard").
+    /// Tests assert against it; production ignores.
+    pub last_obs_draft_action: Option<String>,
 }
 
 impl App {
     pub fn new(opts: TuiOpts) -> Self {
+        let claude_bin = opts
+            .claude_bin
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("claude"));
         Self {
             opts,
             viewport_height: 20,
+            claude_bin,
             ..Default::default()
         }
+    }
+
+    /// Test-only override of the claude binary path. Mirrors
+    /// `ClaudeCodeRunner::with_bin`.
+    pub fn with_bin(mut self, p: PathBuf) -> Self {
+        self.claude_bin = p;
+        self
+    }
+
+    /// Capture the user-visible view state for restore after a side-car.
+    pub fn snapshot_view(&self) -> PreservedView {
+        PreservedView {
+            selection: self.selection,
+            sort: self.sort,
+            filter: self.filter.clone(),
+            collapsed: self.collapsed.clone(),
+            scroll_offset: self.scroll_offset,
+        }
+    }
+
+    /// Restore a view snapshot post-hand-off. Re-applies the sort against
+    /// possibly-refreshed `rows`.
+    pub fn restore_view(&mut self, snap: PreservedView) {
+        self.selection = snap.selection;
+        self.sort = snap.sort;
+        self.filter = snap.filter;
+        self.collapsed = snap.collapsed;
+        self.scroll_offset = snap.scroll_offset;
+        self.apply_sort();
+        self.clamp_selection();
     }
 
     /// Reload rows and rebuild sections (then re-apply current sort).

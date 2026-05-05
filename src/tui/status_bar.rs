@@ -44,6 +44,7 @@ pub fn render_text(app: &App) -> String {
         Mode::Normal => "NORMAL",
         Mode::Filter => "FILTER",
         Mode::Search => "SEARCH",
+        Mode::ObsDraftConfirm => "OBS-CONFIRM",
     };
     format!(
         "db={db}  clock={clock}  cap {free}/{total} (active {active})  {daemon}  sidecars:{sc}  [{mode}]",

@@ -4,7 +4,9 @@
 //! system-prompt assembler, and on-disk session store. The actual spawn
 //! logic (terminal hand-off via PTY) lives in P5.
 
+pub mod obs_draft;
 pub mod session;
+pub mod spawn;
 pub mod system_prompt;
 
 /// Which side-car flavor was launched.
