@@ -2,11 +2,11 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-05 — after the first sustained dogfood-throughput session post-T022 (auto-drive). 4 engine fixes shipped (T024/T025/T026/T027); 5 new high-priority bugs filed via real use (L067/L068/L071/L072 + the L063 found pre-T027).
+**Last updated:** 2026-05-05 (second pass) — same-day refresh after the worktree-discovery hole closed. T032 shipped (L032/L067/L080 ✅). Four tasks ratified + scaffolded today (T029 L071, T030 L062, T031 L060, T033 L038); awaiting sequential drive. Two new self-demonstrations filed (L087 auto-promote silent-fail; L092 no out-of-band close-out).
 
 ## The picture in one sentence
 
-**The engine can ratify and drive, but it can't yet (1) reliably restart, (2) reliably deploy, or (3) reliably refill its own input queue.** Layer 1 (runtime) and Layer 4 (deploy) are the brittlest surfaces; Layer 8's auto-investigator gap is the strategic ceiling on dogfood velocity.
+**The engine ratifies, drives, and now provisions worktrees that work, but it still can't (1) reliably catch silent-zombie failures, (2) reliably deploy schema across daemon-restart, or (3) reliably refill its own input queue.** Layer 1's silent-zombie watchdog (L062, queued) and Layer 4's schema-migrate-from-new-binary (L060, queued) are the next two anchor fixes; once they ship, Layer 8's auto-investigator GAP becomes the dominant strategic ceiling. Auto-promote's own ~0% reliability today (L087) is the most surprising signal — the substrate's input pipeline is bottlenecked by the same silent-zombie shape its runtime fix is trying to close.
 
 ## Status legend
 
@@ -29,10 +29,11 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 |---|---|---|
 | L045 | ✅ T024 | accept-merge tolerates already-merged + stale workspace |
 | L055 | ✅ T026 | daemon seeds starting-line-marker locks at startup (no retroactive fires) |
-| L062 | ⚪ T2 | watchdog can't catch post-spawn failures |
-| L071 | ⚪ T2 | drive aborts gracefully on runner exit=1 (rate limit) but doesn't notify substrate; row stuck at executing |
+| L067 | ✅ T032 | auto-drive into worktree now finds `.stores/` (substrate-side symlink in auto-scaffold) |
+| L062 | 🟡 T030 | watchdog can't catch post-spawn failures (ratified; awaiting drive) |
+| L071 | 🟡 T029 | drive aborts on runner exit=1 (rate limit) but doesn't notify substrate (ratified; awaiting drive; downgraded T1) |
+| L087 | ⚪ — | **auto-promote silent-fails ~0% success on rapid sequential ratifies** — same dispatch-lock-marks-ok-but-no-task pattern as L062, on a different code path; suggests L062's fix may need to widen scope to the dispatch_lock primitive |
 | L039 | ⚪ T2 | daemon retry-on-failure unimplemented; transient flakes strand rows |
-| L067 | ⚪ — | auto-drive spawns from worktree without `.stores/`; subcommand discovery fails |
 | L068 | ⚪ — | cross-project daemon SIGTERM (other-repo `pkill 'stores agents run'` kills mine) |
 | GAP | — | per-project daemon PID file + `stores agents status / stop` verbs |
 
@@ -41,7 +42,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | obs | state | what hurts |
 |---|---|---|
 | L063 | ✅ T025 | auto-promote uses `linked_observations` (not surfacing-task `task_id`) for idempotency |
-| L038 | 🟠 T1 | `depends_on` field exists but unenforced (no chain auto-firing) |
+| L038 | 🟡 T033 | `depends_on` pre-flight guard (ratified; awaiting drive; T1) |
 | L011 | ⚪ T2 | rows don't record `stores` binary version |
 | L053 | ⚪ — | tier-A actor check bypassable via `--invoker human` from `$CLAUDECODE`-detected processes |
 
@@ -59,7 +60,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 | obs | state | what hurts |
 |---|---|---|
-| L060 | ⚪ T2 | post-accept schema-migrate runs from OLD daemon binary; new schema silently no-ops |
+| L060 | 🟡 T031 | post-accept schema-migrate runs from OLD daemon binary; new schema silently no-ops (ratified; awaiting drive) |
+| L080 | ✅ T032 | auto-scaffold writes `tasks.branch` from worktree HEAD (closes 10.06's accept-merge punt) |
 | L061 | ⚪ T2 | no pre-promotion acceptance precheck; tasks ship before discovering already-met |
 | L020 | ⚪ T1 | render leaves empty dirs across state transitions |
 | L069 | ⚪ — | `compute_resume` rejects `deploy_blocked` rows; recovery requires SQL hand-touch |
@@ -71,9 +73,9 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 | obs | state | what hurts |
 |---|---|---|
-| L032 | ⚪ T2 | worktree lacks `.stores/` (parent of L067; symlink workaround in use) |
+| L032 | ✅ T032 | auto-scaffold symlinks `.stores/` artifacts into provisioned worktrees (closes L067 transitively) |
+| L057 | ⚪ T2 | no per-agent-invocation metadata on rows (model / tokens / duration / transcript-ref) — usage analytics gap; data exists in `.stores/runs/*.jsonl` but not aggregated |
 | L054 | ⚪ — | no structured-read verbs for task review (orchestrator falls back to grep) |
-| L057 | ⚪ T2 | no per-agent-invocation metadata on rows (model / tokens / duration / transcript-ref) |
 | L058 | ⚪ T2 | no read surface for per-edge throughput / fleet metrics |
 | L059 | ⚪ T1 | `.stores/runs/<task>/<role>.json` transcripts have no index, no row→transcript link |
 | L012 | ⚪ T3 | no inspector for agent context (full graph view: aggregate, post-run, edit) |
@@ -110,14 +112,20 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L006 | ⚪ T2 | observations runner asymmetry (no drive cycle for obs) |
 | L021 | ⚪ T1 | render template doesn't pull `wrap_log` into Completion section |
 | L034 | ⚪ T1 | wrap misattributes main-ahead commits as 'rides on this branch' |
+| L092 | ⚪ T2 | no out-of-band task close-out path — hand-cranked work that's already merged + installed has no clean substrate verb to walk planning → accepted; T032 itself surfaced this on its own ship |
 | GAP | — | **NO `open → investigating` subscriber** — pipeline is one-sided; engine cannot drain its own queue |
 
 ## Highest-leverage next picks (after current batch lands)
 
-1. **L062 + L071** (paired) — close the silent-zombie failure mode for both kinds of drive failure. L071's "drive aborts and tells substrate" + L062's "watchdog catches drives that crash silently" are complementary.
-2. **L060** — schema-migrate from new binary. Unblocks deploy ceremony for any future task that adds schema. Also opens the door to safer daemon restarts.
-3. **L038** — `depends_on` enforcement. Already 🟠 ready. Lets us declare task chains without manual sequencing.
-4. **Auto-investigator subscriber (GAP)** — the single biggest strategic move. Flips the substrate from human-pulls to engine-pulls on contract drafting. File this, then ratify.
+Four tasks are scaffolded and awaiting drive (T029/T030/T031/T033). Geodesic order:
+
+1. **T031 (L060)** — schema-migrate from new binary. **Drive first.** Without this, T030's and T029's eventual accept ceremonies might silently no-op any schema additions they include. Layer 4 unblock.
+2. **T030 (L062)** — silent-zombie watchdog. Top Layer 1 pain; demonstrated 4× today (T023, plus auto-promote silent-failing L062/L060/L038 ratifications). Drive after T031.
+3. **T029 (L071)** — drive aborts on rate-limit notify substrate. Pairs with T030 to make Layer 1 substantially less brittle. Now T1 (downgraded from T2) — single function tweak in drive wrapper, ~half the spawn cost. Drive after T030.
+4. **T033 (L038)** — `depends_on` pre-flight guard. T1, cheap. Drive any time; not blocking anything.
+5. **Auto-investigator subscriber (GAP)** — strategic ceiling. Flips substrate from human-pulls to engine-pulls on contract drafting. **File this AFTER L087 investigation completes** — the auto-promote silent-fail (L087) is the same dispatch_lock-shape gap that an auto-investigator would hit on its own subscription, so investigating L087 + designing the auto-investigator are tightly coupled.
+
+After this batch lands, the one-sentence summary changes again — "ratify, drive, restart, deploy, watchdog" all reliable; auto-investigator becomes the dominant remaining gap.
 
 ## Recently shipped
 
@@ -127,6 +135,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | 2026-05-05 | T025 | L063 | auto-promote idempotency uses `linked_observations` |
 | 2026-05-05 | T026 | L055 | daemon seeds starting-line-marker locks at startup |
 | 2026-05-05 | T027 | L066 | tier-structural drive cycle (T1 skip / T2 single-phase / T3 unchanged) |
+| 2026-05-05 | T032 | L032 / L067 / L080 | auto-scaffold symlinks `.stores/` artifacts into provisioned worktrees + writes `tasks.branch` from worktree HEAD; closes the worktree-discovery hole that was killing every auto-driven task and the branch-writeback gap blocking 10.06's accept-merge. Hand-cranked (the bug it fixes was blocking its own drive); shipped via cargo install + daemon restart |
 | 2026-05-05 | T028 | L075 | `stores watch` upgraded to ratatui TUI (section-grouped rows, sort/filter/search, daemon liveness, side-car spawn keys s/S/g/o); legacy ANSI POC behind `--legacy` |
 | 2026-05-04 | T022 | L048 | auto-drive subscriber |
 | 2026-05-03 | T021 | L050 | topology snapshot includes T019 states |
