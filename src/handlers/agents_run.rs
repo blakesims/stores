@@ -269,6 +269,42 @@ pub fn poll_once(
     Ok(dispatched)
 }
 
+/// Starting-line seeder (T026 P1). For each subscription declared in
+/// `agents.yaml`, insert a `dispatch_locks` row marked
+/// `claimed_by='starting-line-marker'` / `last_status='skip-historical'` for
+/// every existing `transition_history` row that matches the subscription's
+/// `(store, from, to)` edge. Uses `INSERT OR IGNORE` so any pre-existing real
+/// claim is left untouched (the UNIQUE(store, row_id, agent_name) constraint
+/// is what gives us the silent skip).
+///
+/// Returns the count of newly-inserted skip-historical rows.
+pub fn seed_starting_line(conn: &Connection, agents: &AgentsYaml) -> Result<usize> {
+    let now = crate::handlers::row::now_iso8601();
+    let mut total = 0usize;
+    for agent in &agents.agents {
+        for sub in &agent.subscribes_to {
+            let n = conn.execute(
+                "INSERT OR IGNORE INTO dispatch_locks \
+                 (store, row_id, display_id, agent_name, transition_id, \
+                  claimed_at, claimed_by, last_status, finished_at) \
+                 SELECT th.store, th.row_id, th.display_id, ?1, th.id, ?2, \
+                        'starting-line-marker', 'skip-historical', ?2 \
+                 FROM transition_history th \
+                 WHERE th.store = ?3 AND th.from_status = ?4 AND th.to_status = ?5",
+                rusqlite::params![
+                    &agent.name,
+                    &now,
+                    &sub.store,
+                    &sub.transition.from,
+                    &sub.transition.to,
+                ],
+            )?;
+            total += n;
+        }
+    }
+    Ok(total)
+}
+
 /// Atomically claim `(store, row_id, agent_name)` by inserting a
 /// `dispatch_locks` row. Returns `Ok(true)` if we won the claim,
 /// `Ok(false)` if another claimer won (UNIQUE conflict).
@@ -1191,6 +1227,138 @@ policies:
             )
             .unwrap();
         assert_eq!(cnt, 0, "no claim must be taken when cap is full");
+    }
+
+    // ---- T026 P1: starting-line seeder tests ----
+
+    /// Seeder inserts exactly one starting-line row per matching
+    /// transition_history row across all subscriptions.
+    #[test]
+    fn seed_starting_line_inserts_one_per_history_row() {
+        let conn = fresh_db();
+        // Need an observations table for the second subscription's history rows.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_id TEXT UNIQUE NOT NULL,
+                status TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+
+        // 3 tasks ready→in_review, 2 observations confirmed→ready.
+        insert_history(&conn, "tasks", 1, "T001", "ready", "in_review");
+        insert_history(&conn, "tasks", 2, "T002", "ready", "in_review");
+        insert_history(&conn, "tasks", 3, "T003", "ready", "in_review");
+        insert_history(&conn, "observations", 1, "L001", "confirmed", "ready");
+        insert_history(&conn, "observations", 2, "L002", "confirmed", "ready");
+
+        let agents = AgentsYaml {
+            agents: vec![
+                noop_agent("task-watcher", "tasks", "ready", "in_review"),
+                noop_agent("obs-watcher", "observations", "confirmed", "ready"),
+            ],
+            deployment_specialist: None,
+        };
+
+        let n = seed_starting_line(&conn, &agents).unwrap();
+        assert_eq!(n, 5, "should insert one row per matching history row");
+
+        // Every newly-inserted row must carry the starting-line marker.
+        let bad: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks \
+                 WHERE NOT (claimed_by = 'starting-line-marker' \
+                            AND last_status = 'skip-historical' \
+                            AND finished_at IS NOT NULL)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, 0, "every inserted row must be a starting-line marker");
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dispatch_locks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 5);
+    }
+
+    /// Re-running the seeder is a no-op: UNIQUE(store, row_id, agent_name)
+    /// gives us idempotency via INSERT OR IGNORE.
+    #[test]
+    fn seed_starting_line_is_idempotent() {
+        let conn = fresh_db();
+        insert_history(&conn, "tasks", 1, "T001", "ready", "in_review");
+        insert_history(&conn, "tasks", 2, "T002", "ready", "in_review");
+        let agents = AgentsYaml {
+            agents: vec![noop_agent("noop", "tasks", "ready", "in_review")],
+            deployment_specialist: None,
+        };
+
+        let n1 = seed_starting_line(&conn, &agents).unwrap();
+        assert_eq!(n1, 2);
+        let count1: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dispatch_locks", [], |r| r.get(0))
+            .unwrap();
+
+        let n2 = seed_starting_line(&conn, &agents).unwrap();
+        assert_eq!(n2, 0, "second run inserts zero rows");
+        let count2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dispatch_locks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count1, count2, "dispatch_locks count unchanged");
+    }
+
+    /// Pre-existing real locks are NEVER overwritten by the seeder.
+    #[test]
+    fn seed_starting_line_never_overwrites_real_locks() {
+        let conn = fresh_db();
+        insert_history(&conn, "tasks", 7, "T007", "ready", "in_review");
+        // Pre-insert a real claim for (tasks, row 7, 'noop').
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, \
+              claimed_at, claimed_by, last_status, finished_at) \
+             VALUES ('tasks', 7, 'T007', 'noop', 1, '2026-01-01T00:00:00Z', \
+                     'daemon-1', 'ok', '2026-01-01T00:00:01Z')",
+            [],
+        )
+        .unwrap();
+
+        let agents = AgentsYaml {
+            agents: vec![noop_agent("noop", "tasks", "ready", "in_review")],
+            deployment_specialist: None,
+        };
+
+        let n = seed_starting_line(&conn, &agents).unwrap();
+        assert_eq!(n, 0, "INSERT OR IGNORE skips conflicting row");
+
+        let (claimed_by, last_status): (String, String) = conn
+            .query_row(
+                "SELECT claimed_by, last_status FROM dispatch_locks \
+                 WHERE store='tasks' AND row_id=7 AND agent_name='noop'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(claimed_by, "daemon-1", "real lock untouched");
+        assert_eq!(last_status, "ok", "real lock untouched");
+    }
+
+    /// Empty transition_history with subscribers configured → 0 rows inserted.
+    #[test]
+    fn seed_starting_line_no_history_no_op() {
+        let conn = fresh_db();
+        let agents = AgentsYaml {
+            agents: vec![noop_agent("noop", "tasks", "ready", "in_review")],
+            deployment_specialist: None,
+        };
+        let n = seed_starting_line(&conn, &agents).unwrap();
+        assert_eq!(n, 0);
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dispatch_locks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 0);
     }
 
     /// SHUTDOWN flag is observed by sleep_interruptible.
