@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 
 use crate::schema::{
     actor::InvokerCtx,
-    workflow::{StateAction, Workflow},
+    workflow::{StateActionKind, Workflow},
     Schema,
 };
 
@@ -59,7 +59,7 @@ pub fn find_next_agent(workflow: &Workflow, status: &str) -> Option<String> {
     }
     workflow.on_state.get(status).and_then(|actions| {
         actions.iter().find_map(|a| {
-            if let StateAction::DispatchAgent(role) = a {
+            if let StateActionKind::DispatchAgent(role) = &a.kind {
                 Some(role.clone())
             } else {
                 None

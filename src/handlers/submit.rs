@@ -330,7 +330,7 @@ pub(crate) fn fire_on_entry_follow_ons(
     };
 
     for action in actions {
-        if let crate::schema::workflow::StateAction::TransitionTo(target_state) = action {
+        if let crate::schema::workflow::StateActionKind::TransitionTo(target_state) = &action.kind {
             // Re-read to get fresh row state for guard evaluation and framework field computation
             let (_, current_entry) = read_row(schema, tx, display_id)?;
 

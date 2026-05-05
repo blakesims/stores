@@ -10,7 +10,7 @@ pub mod workflow;
 pub use actor::Actor;
 pub use lifecycle::{Lifecycle, Transition};
 pub use required_when::Expr as RequiredWhenExpr;
-pub use workflow::{FieldShape, StateAction, Workflow, WorkflowResolved};
+pub use workflow::{FieldShape, StateAction, StateActionKind, Workflow, WorkflowResolved};
 
 use serde::{Deserialize, Deserializer};
 

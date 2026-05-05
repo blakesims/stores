@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use crate::manifest::Manifest;
 use crate::schema::actor::Actor;
 use crate::schema::Schema;
-use crate::schema::{FieldType, StateAction};
+use crate::schema::{FieldType, StateActionKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -287,8 +287,8 @@ fn write_z2_body(
             "{indent}\"z2_{store_name}__{state}\" [label=\"{state}\"];"
         );
         for (idx, action) in actions.iter().enumerate() {
-            match action {
-                StateAction::DispatchAgent(role) => {
+            match &action.kind {
+                StateActionKind::DispatchAgent(role) => {
                     let style =
                         actor_style(Some(Actor::AiAutonomous), opts.no_icons, color_disabled);
                     let role_node = format!("z2_{store_name}__{state}__role_{idx}_{role}");
@@ -306,7 +306,7 @@ fn write_z2_body(
                         "{indent}\"z2_{store_name}__{state}\" -> \"{role_node}\" [label=\"\u{2192} {role}\"{color_attr}];"
                     );
                 }
-                StateAction::TransitionTo(to_state) => {
+                StateActionKind::TransitionTo(to_state) => {
                     let style = actor_style(Some(Actor::Framework), opts.no_icons, color_disabled);
                     let color_attr = if style.dot_color.is_empty() {
                         String::new()
@@ -322,7 +322,7 @@ fn write_z2_body(
                         "{indent}\"z2_{store_name}__{state}\" -> \"z2_{store_name}__{to_state}\" [label=\"\u{21d2} auto\"{color_attr}];"
                     );
                 }
-                StateAction::Increment(_) => {
+                StateActionKind::Increment(_) => {
                     // Increments are bookkeeping; not graphed in firing-order view.
                 }
             }
@@ -471,8 +471,8 @@ pub fn emit_mermaid(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts
                 continue;
             }
             for (idx, action) in actions.iter().enumerate() {
-                match action {
-                    StateAction::DispatchAgent(role) => {
+                match &action.kind {
+                    StateActionKind::DispatchAgent(role) => {
                         let style = actor_style(Some(Actor::AiAutonomous), opts.no_icons, true);
                         let _ = writeln!(out, "  state \"{role}\" as {state}_role_{idx}_{role}");
                         let _ = writeln!(
@@ -481,7 +481,7 @@ pub fn emit_mermaid(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts
                             style.label_prefix
                         );
                     }
-                    StateAction::TransitionTo(to_state) => {
+                    StateActionKind::TransitionTo(to_state) => {
                         let style = actor_style(Some(Actor::Framework), opts.no_icons, true);
                         let _ = writeln!(
                             out,
@@ -489,7 +489,7 @@ pub fn emit_mermaid(manifest: &Manifest, schemas: &HashMap<String, Schema>, opts
                             style.label_prefix
                         );
                     }
-                    StateAction::Increment(_) => {}
+                    StateActionKind::Increment(_) => {}
                 }
             }
         }
