@@ -133,6 +133,7 @@ Commit docs as soon as you write them — uncommitted files in main block accept
 - `tasks/CLAUDE.md` — task lifecycle protocol (status state machine, section ownership, orchestrator rules). Still applies — the DB is just the new source of truth.
 - `docs/philosophy.md` — the substrate's design principles. § *What's outside the substrate* is the doctrine that grounds `--invoker` enforcement and the wrapper boundary.
 - `docs/primitives.md` — the typed primitives the substrate composes from (working draft, with changelog). Read here before proposing schema-shape moves.
+- `docs/engine-health.md` — long-standing snapshot of where the engine bleeds, what's filed against each weakness, and what's already shipped. **Keep this up to date** at inflection points: when a batch of fixes lands (move obs to ✅), when a new high-priority bug surfaces (add a row), or when a bug class is named that wasn't previously visible (add a Layer or GAP). The doc has a self-update section at the bottom; follow it. The worklog under `docs/worklog/<date>/` carries session detail; promote insights to engine-health when they become long-standing.
 - `docs/worklog/2026-05-02/01-real-world-workflow-takeover-analysis.md` — the design discussion behind the dogfood decision.
 - `docs/worklog/2026-05-02/03-t012-workspace-path-and-next-id.md` — the substrate hooks (`workspace_path`, `next-id`) shipped in T012 to make multi-worktree dogfooding safe.
 
