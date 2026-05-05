@@ -249,7 +249,7 @@ pub(crate) fn scan_zombie_tasks(conn: &Connection) -> Vec<ZombieRow> {
             if pid_is_alive(pid as i32) {
                 continue;
             }
-            "drive_pid_dead"
+            "silent_zombie_pid_dead"
         } else {
             // PID NULL/zero — grace already enforced by the SQL HAVING; the
             // claimed_at < cutoff predicate guarantees we only land here
@@ -379,7 +379,7 @@ pub fn sweep_drive_watchdog(
             handled.insert(display_id.clone());
             continue;
         }
-        match fire_mark_drive_failed(conn, &display_id, "drive_failed", policies_hash) {
+        match fire_mark_drive_failed(conn, &display_id, "drive_failed", policies_hash, None) {
             Ok(()) => {
                 annotate_drive_failed_history(conn, &display_id, "drive_pid_dead");
                 let ctx = DispatchCtx {
@@ -421,7 +421,13 @@ pub fn sweep_drive_watchdog(
         if cur_status == "blocked" {
             continue;
         }
-        match fire_mark_drive_failed(conn, &display_id, "drive_failed", policies_hash) {
+        match fire_mark_drive_failed(
+            conn,
+            &display_id,
+            "drive_failed",
+            policies_hash,
+            Some(reason),
+        ) {
             Ok(()) => {
                 annotate_drive_failed_history(conn, &display_id, reason);
                 let ctx = DispatchCtx {
@@ -969,7 +975,7 @@ mod tests {
             "L062 silent zombie: row stays '{}' instead of flipping to 'blocked' (closed-lock path)",
             status
         );
-        assert_eq!(reason.as_deref(), Some("drive_failed"));
+        assert_eq!(reason.as_deref(), Some("drive_failed:silent_zombie_pid_dead"));
     }
 
     /// L062 silent-zombie shape #2: drive subprocess died before recording
@@ -1009,7 +1015,7 @@ mod tests {
             "L062 silent zombie: row stays '{}' instead of flipping to 'blocked' (pid_never_recorded path)",
             status
         );
-        assert_eq!(reason.as_deref(), Some("drive_failed"));
+        assert_eq!(reason.as_deref(), Some("drive_failed:pid_never_recorded"));
 
         // The reason note `pid_never_recorded` must appear in the most
         // recent transition_history row's annotation/details for T731.
@@ -1116,6 +1122,72 @@ mod tests {
             obs_count, 1,
             "exactly one observation for T733 across two sweeps; got {obs_count}"
         );
+    }
+
+    /// AC3.1 / AC3.2: the silent-zombie watchdog flip writes a suffix-tagged
+    /// `blocked_reason` in `tasks` matching the audit regex
+    /// `^drive_failed:(silent_zombie_pid_dead|pid_never_recorded)$`, and the
+    /// corresponding `transition_history` row is mechanically distinguishable
+    /// from a generic `drive_failed` flip (its `actor_note` carries the bare
+    /// detection variant).
+    #[test]
+    fn transition_history_records_silent_zombie_reason() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+
+        // Case A: dead-PID closed-lock zombie → drive_failed:silent_zombie_pid_dead
+        let row_a = insert_task_full(&conn, "T740", "executing", Some(dead_pid()));
+        insert_lock_closed(&conn, row_a, "T740");
+
+        // Case B: pid-never-recorded closed-lock zombie → drive_failed:pid_never_recorded
+        let row_b = insert_task_full(&conn, "T741", "planning", None);
+        insert_lock_closed(&conn, row_b, "T741");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+
+        let zombie_re = regex::Regex::new(
+            r"^drive_failed:(silent_zombie_pid_dead|pid_never_recorded)$",
+        )
+        .unwrap();
+
+        for (id, want_suffix) in [
+            ("T740", "silent_zombie_pid_dead"),
+            ("T741", "pid_never_recorded"),
+        ] {
+            let reason: String = conn
+                .query_row(
+                    "SELECT COALESCE(blocked_reason, '') FROM tasks WHERE display_id=?1",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                zombie_re.is_match(&reason),
+                "{id}: blocked_reason {reason:?} must match silent-zombie audit regex",
+            );
+            assert_eq!(
+                reason,
+                format!("drive_failed:{want_suffix}"),
+                "{id}: expected suffix {want_suffix}",
+            );
+
+            // transition_history mark_drive_failed row exists and carries the
+            // bare detection variant in actor_note.
+            let (verb, note): (String, String) = conn
+                .query_row(
+                    "SELECT verb, COALESCE(actor_note, '') FROM transition_history \
+                     WHERE display_id=?1 ORDER BY id DESC LIMIT 1",
+                    rusqlite::params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(verb, "mark_drive_failed");
+            assert_eq!(note, want_suffix, "{id}: actor_note must match bare variant");
+        }
     }
 
     /// AC4.4: dispatch_builtin("auto-drive", ...) resolves to this module.

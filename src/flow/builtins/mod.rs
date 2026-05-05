@@ -209,17 +209,24 @@ pub(crate) fn fire_mark_deploy_blocked(
 /// Convenience: fire `mark_drive_failed` with `blocked_reason` populated.
 /// Used by the auto-drive subscriber when the drive subprocess exits non-zero
 /// or the wrap envelope never lands. Mirrors `fire_mark_deploy_blocked`.
+///
+/// `detection_reason`, when `Some`, suffix-tags the stored `blocked_reason`
+/// as `<base>:<detection_reason>` (e.g. `drive_failed:silent_zombie_pid_dead`),
+/// making silent-zombie watchdog flips mechanically distinguishable from
+/// generic drive failures in `tasks.blocked_reason` and downstream audits.
 pub(crate) fn fire_mark_drive_failed(
     conn: &Connection,
     display_id: &str,
     blocked_reason: &str,
     policies_hash: &str,
+    detection_reason: Option<&str>,
 ) -> Result<()> {
     let mut diff: EntryMap = std::collections::BTreeMap::new();
-    diff.insert(
-        "blocked_reason".to_string(),
-        Value::String(blocked_reason.to_string()),
-    );
+    let value = match detection_reason {
+        Some(suffix) if !suffix.is_empty() => format!("{}:{}", blocked_reason, suffix),
+        _ => blocked_reason.to_string(),
+    };
+    diff.insert("blocked_reason".to_string(), Value::String(value));
     fire_framework_transition(conn, display_id, "mark_drive_failed", diff, policies_hash)
 }
 
@@ -1102,7 +1109,7 @@ mod tests {
         let (conn, _t, _o) = fresh_db_with_tasks();
         insert_task_at_status(&conn, "T600", "planning");
 
-        fire_mark_drive_failed(&conn, "T600", "drive_failed", "").unwrap();
+        fire_mark_drive_failed(&conn, "T600", "drive_failed", "", None).unwrap();
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(
@@ -1140,7 +1147,7 @@ mod tests {
         let (conn, _t, _o) = fresh_db_with_tasks();
         for (id, src) in &cases {
             insert_task_at_status(&conn, id, src);
-            fire_mark_drive_failed(&conn, id, "drive_failed", "")
+            fire_mark_drive_failed(&conn, id, "drive_failed", "", None)
                 .unwrap_or_else(|e| panic!("fire_mark_drive_failed from {src} failed: {e}"));
             let status: String = conn
                 .query_row(
@@ -1234,7 +1241,7 @@ mod tests {
         let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
         let (conn, _t, _o) = fresh_db_with_tasks();
         insert_task_at_status(&conn, "T620", "in_review");
-        let err = fire_mark_drive_failed(&conn, "T620", "drive_failed", "").unwrap_err();
+        let err = fire_mark_drive_failed(&conn, "T620", "drive_failed", "", None).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("mark_drive_failed") || msg.contains("no transition"),
