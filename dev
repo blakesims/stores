@@ -2,9 +2,10 @@
 # dev — substrate task scaffolding helper (T003)
 #
 # Subcommands:
-#   new   — scaffold a new task: resolve T###, create worktree, add substrate row
-#   done  — tear down a worktree once the task is accepted/rejected
-#   help  — print usage
+#   new       — scaffold a new task: resolve T###, create worktree, add substrate row
+#   scaffold  — provision a worktree for an EXISTING tasks row (auto-scaffold target)
+#   done      — tear down a worktree once the task is accepted/rejected
+#   help      — print usage
 
 set -euo pipefail
 
@@ -26,6 +27,16 @@ Verbs:
             --scope-out <text>     contract: out-of-scope
             --assumptions <text>   contract: assumptions (optional)
             --base <branch>        base branch (default: current branch)
+
+  scaffold <T###>   Provision a worktree for an EXISTING substrate row
+                    (the auto-scaffold builtin's invocation target).
+                    Looks up slug from the row, creates worktree at
+                    <repo_root>/../stores-<id>-<slug> on branch
+                    feat/<id>-<slug>, sets `branch` on the row, prints
+                    the absolute worktree path on stdout.
+                    Idempotent: existing worktree → print path and exit 0.
+          Flags:
+            --base <branch>        base branch (default: main)
 
   done <T###>   Remove the worktree for a finished task.
           Flags:
@@ -220,6 +231,130 @@ cmd_new() {
     printf '%s\n' "$abs_worktree"
 }
 
+cmd_scaffold() {
+    local task_id="" base=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --base)   base="${2:-}";        shift 2 ;;
+            --base=*) base="${1#--base=}";  shift   ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --*)
+                printf 'error: unknown flag: %s\n\n' "$1" >&2
+                usage >&2
+                exit 2
+                ;;
+            *)
+                if [[ -n "$task_id" ]]; then
+                    printf 'error: unexpected positional arg: %s\n\n' "$1" >&2
+                    usage >&2
+                    exit 2
+                fi
+                task_id="$1"; shift
+                ;;
+        esac
+    done
+
+    if [[ -z "$task_id" ]]; then
+        printf 'error: missing required positional <T###>\n\n' >&2
+        usage >&2
+        exit 2
+    fi
+    if [[ ! "$task_id" =~ ^T[0-9]{3}$ ]]; then
+        die "invalid task id: '$task_id' (must match ^T[0-9]{3}\$)"
+    fi
+    [[ -z "$base" ]] && base="main"
+
+    local json_parser=""
+    if command -v python3 >/dev/null 2>&1; then
+        json_parser="python3"
+    elif command -v jq >/dev/null 2>&1; then
+        json_parser="jq"
+    else
+        die "neither python3 nor jq found on PATH; cannot parse stores JSON"
+    fi
+
+    local root stores_bin
+    root=$(repo_root)
+    stores_bin=$(locate_stores)
+
+    # Fetch row JSON.
+    local show_json
+    if ! show_json=$( cd "$root" && "$stores_bin" tasks show "$task_id" --json 2>&1 ); then
+        printf '%s\n' "$show_json" >&2
+        die "stores tasks show $task_id failed"
+    fi
+
+    local slug existing_branch existing_workspace
+    if [[ "$json_parser" == "python3" ]]; then
+        slug=$(printf '%s' "$show_json" \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("slug") or "")') \
+            || die "failed to parse slug from JSON"
+        existing_branch=$(printf '%s' "$show_json" \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("branch") or "")') \
+            || die "failed to parse branch from JSON"
+        existing_workspace=$(printf '%s' "$show_json" \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("workspace_path") or "")') \
+            || die "failed to parse workspace_path from JSON"
+    else
+        slug=$(printf '%s' "$show_json" | jq -r '.slug // ""') \
+            || die "failed to parse slug from JSON"
+        existing_branch=$(printf '%s' "$show_json" | jq -r '.branch // ""') \
+            || die "failed to parse branch from JSON"
+        existing_workspace=$(printf '%s' "$show_json" | jq -r '.workspace_path // ""') \
+            || die "failed to parse workspace_path from JSON"
+    fi
+
+    [[ -n "$slug" ]] || die "$task_id has no slug; cannot scaffold"
+    validate_slug "$slug"
+
+    # Idempotency: row already points at a real directory → just print and exit.
+    if [[ -n "$existing_workspace" ]] && [[ -d "$existing_workspace" ]]; then
+        printf '%s\n' "$existing_workspace"
+        return 0
+    fi
+
+    local branch="$existing_branch"
+    [[ -z "$branch" ]] && branch="feat/${task_id}-${slug}"
+    local worktree_path="$root/../stores-${task_id}-${slug}"
+
+    # Recovery path: directory exists on disk but row is unset → reuse, just
+    # set branch on the row. (workspace_path is written by the auto-scaffold
+    # builtin from this script's stdout.)
+    if [[ -d "$worktree_path" ]]; then
+        local abs
+        abs=$(canonical_path "$worktree_path")
+        if ! ( cd "$root" && "$stores_bin" tasks update "$task_id" \
+                --branch "$branch" \
+                --invoker ai_autonomous >/dev/null ); then
+            die "stores tasks update --branch failed (worktree exists at $worktree_path)"
+        fi
+        printf '%s\n' "$abs"
+        return 0
+    fi
+
+    # Create the worktree.
+    if ! ( cd "$root" && git worktree add -b "$branch" "$worktree_path" "$base" ) >&2; then
+        die "git worktree add failed"
+    fi
+
+    local abs
+    abs=$(canonical_path "$worktree_path")
+
+    # Stamp branch on the row. (workspace_path is set by the auto-scaffold
+    # builtin after we print the canonical path below.)
+    if ! ( cd "$root" && "$stores_bin" tasks update "$task_id" \
+            --branch "$branch" \
+            --invoker ai_autonomous >/dev/null ); then
+        ( cd "$root" && git worktree remove --force "$worktree_path" ) >&2 || true
+        die "stores tasks update --branch failed (worktree rolled back)"
+    fi
+
+    printf '%s\n' "$abs"
+}
+
 cmd_done() {
     local task_id="" force=0
     while [[ $# -gt 0 ]]; do
@@ -328,6 +463,7 @@ main() {
     local verb="$1"; shift
     case "$verb" in
         new)            cmd_new "$@" ;;
+        scaffold)       cmd_scaffold "$@" ;;
         done)           cmd_done "$@" ;;
         help|-h|--help) usage ;;
         *)
