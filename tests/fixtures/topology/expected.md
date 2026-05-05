@@ -17,6 +17,7 @@ stateDiagram-v2
 stateDiagram-v2
   [*] --> planning
   planning --> plan_review :  A submit-plan
+  planning --> ready :  F skip-plan
   plan_review --> ready :  A submit-plan-review [READY]
   plan_review --> planning :  A submit-plan-review [NEEDS_WORK]
   plan_review --> blocked :  A submit-plan-review [NEEDS_WORK]
@@ -88,6 +89,7 @@ stateDiagram-v2
 stateDiagram-v2
   state "planner" as planning_role_0_planner
   planning --> planning_role_0_planner :  A → planner
+  planning --> ready :  F ⇒ auto
   state "plan_reviewer" as plan_review_role_0_plan_reviewer
   plan_review --> plan_review_role_0_plan_reviewer :  A → plan_reviewer
   ready --> executing :  F ⇒ auto

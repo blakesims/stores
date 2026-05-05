@@ -83,7 +83,7 @@ pub(crate) fn compute(
             .unwrap_or("")
             .to_string();
 
-        match find_next_agent(workflow, &status) {
+        match find_next_agent(workflow, &status, &entry) {
             Some(role) => role,
             None => bail!(
                 "cannot determine default agent for entry '{}' in status '{}'; \
@@ -589,13 +589,14 @@ fields:
         let schema = Schema::from_yaml(&yaml).unwrap();
         let workflow = schema.workflow.as_ref().unwrap();
 
-        let agent = find_next_agent(workflow, "planning");
+        let entry = std::collections::BTreeMap::new();
+        let agent = find_next_agent(workflow, "planning", &entry);
         assert_eq!(agent, Some("planner".to_string()));
 
-        let agent2 = find_next_agent(workflow, "executing");
+        let agent2 = find_next_agent(workflow, "executing", &entry);
         assert_eq!(agent2, Some("executor".to_string()));
 
-        let agent3 = find_next_agent(workflow, "blocked");
+        let agent3 = find_next_agent(workflow, "blocked", &entry);
         assert_eq!(agent3, None);
     }
 }

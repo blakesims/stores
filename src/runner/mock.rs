@@ -33,6 +33,7 @@ use super::{Runner, RunnerOutput};
 pub struct MockRunner {
     queue: RefCell<Vec<RunnerOutput>>,
     workspace_paths_seen: RefCell<Vec<Option<String>>>,
+    roles_seen: RefCell<Vec<String>>,
 }
 
 impl MockRunner {
@@ -47,7 +48,15 @@ impl MockRunner {
         Self {
             queue: RefCell::new(q),
             workspace_paths_seen: RefCell::new(Vec::new()),
+            roles_seen: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Return the `role` arguments recorded across all `spawn` calls, in order.
+    /// T027 P5: lets integration tests assert which agents were dispatched
+    /// (e.g. T1 must dispatch zero planner/plan_reviewer).
+    pub fn roles_seen(&self) -> Vec<String> {
+        self.roles_seen.borrow().clone()
     }
 
     /// Return the number of responses remaining in the queue.
@@ -83,6 +92,7 @@ impl Runner for MockRunner {
         self.workspace_paths_seen
             .borrow_mut()
             .push(workspace_path.map(|s| s.to_string()));
+        self.roles_seen.borrow_mut().push(role.to_string());
         let mut queue = self.queue.borrow_mut();
         match queue.pop() {
             Some(output) => Ok(output),

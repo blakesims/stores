@@ -22,20 +22,42 @@ pub struct AgentRole {
 // StateAction
 // ---------------------------------------------------------------------------
 
-/// An action in the `on_state` list for a given state.
+/// The kind of action in the `on_state` list for a given state.
 ///
 /// The YAML representation uses tagged strings:
 ///   - `dispatch_agent: planner`   → `DispatchAgent("planner")`
 ///   - `increment: current_cycle`  → `Increment("current_cycle")`
 ///   - `transition_to: executing`  → `TransitionTo("executing")`
 #[derive(Debug, Clone, PartialEq)]
-pub enum StateAction {
+pub enum StateActionKind {
     /// Dispatch the named agent role when entering this state.
     DispatchAgent(String),
     /// Auto-increment the named field when entering this state.
     Increment(String),
     /// Automatically transition to the named state when entering this state.
     TransitionTo(String),
+}
+
+/// An action in the `on_state` list for a given state, with an optional
+/// guard expression that gates whether the action fires for a given row.
+///
+/// The YAML representation accepts an optional sibling `when:` key alongside
+/// the action key:
+///   - `{dispatch_agent: planner, when: "tier_hint != 'T1'"}`
+///
+/// When `when` is `None` the action always fires (T027 P1: parsing only —
+/// execution paths do not yet consult the predicate).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateAction {
+    pub kind: StateActionKind,
+    pub when: Option<crate::schema::expr::Expr>,
+}
+
+impl StateAction {
+    /// Convenience constructor: an unguarded action.
+    pub fn new(kind: StateActionKind) -> Self {
+        Self { kind, when: None }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,26 +135,74 @@ impl<'de> Deserialize<'de> for RawStateAction {
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(
                     f,
-                    "a state action map (dispatch_agent/increment/transition_to)"
+                    "a state action map (dispatch_agent/increment/transition_to) with optional `when:` guard"
                 )
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let key: String = map
-                    .next_key()?
-                    .ok_or_else(|| de::Error::custom("empty state action map"))?;
-                let value: String = map.next_value()?;
-                let action = match key.as_str() {
-                    "dispatch_agent" => StateAction::DispatchAgent(value),
-                    "increment" => StateAction::Increment(value),
-                    "transition_to" => StateAction::TransitionTo(value),
-                    other => {
-                        return Err(de::Error::custom(format!(
-                            "unknown state action key '{other}'; \
-                             expected dispatch_agent, increment, or transition_to"
-                        )))
+                let mut kind: Option<StateActionKind> = None;
+                let mut when_str: Option<String> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "dispatch_agent" => {
+                            let v: String = map.next_value()?;
+                            if kind.is_some() {
+                                return Err(de::Error::custom(
+                                    "state action map has multiple action keys; \
+                                     expected exactly one of dispatch_agent / increment / transition_to",
+                                ));
+                            }
+                            kind = Some(StateActionKind::DispatchAgent(v));
+                        }
+                        "increment" => {
+                            let v: String = map.next_value()?;
+                            if kind.is_some() {
+                                return Err(de::Error::custom(
+                                    "state action map has multiple action keys; \
+                                     expected exactly one of dispatch_agent / increment / transition_to",
+                                ));
+                            }
+                            kind = Some(StateActionKind::Increment(v));
+                        }
+                        "transition_to" => {
+                            let v: String = map.next_value()?;
+                            if kind.is_some() {
+                                return Err(de::Error::custom(
+                                    "state action map has multiple action keys; \
+                                     expected exactly one of dispatch_agent / increment / transition_to",
+                                ));
+                            }
+                            kind = Some(StateActionKind::TransitionTo(v));
+                        }
+                        "when" => {
+                            let v: String = map.next_value()?;
+                            when_str = Some(v);
+                        }
+                        other => {
+                            return Err(de::Error::custom(format!(
+                                "unknown state action key '{other}'; \
+                                 expected dispatch_agent, increment, transition_to, or when"
+                            )));
+                        }
                     }
+                }
+
+                let kind = kind.ok_or_else(|| {
+                    de::Error::custom(
+                        "empty or guard-only state action map; \
+                         expected one of dispatch_agent / increment / transition_to",
+                    )
+                })?;
+                let when = match when_str {
+                    Some(s) => Some(crate::schema::expr::parse_guard(&s).map_err(|e| {
+                        de::Error::custom(format!(
+                            "invalid `when:` guard expression {:?}: {}",
+                            s, e
+                        ))
+                    })?),
+                    None => None,
                 };
-                Ok(RawStateAction(action))
+                Ok(RawStateAction(StateAction { kind, when }))
             }
         }
 
@@ -341,7 +411,7 @@ impl Workflow {
         // 3. Every DispatchAgent(role) must reference an existing agent_roles key.
         for (state, actions) in &self.on_state {
             for action in actions {
-                if let StateAction::DispatchAgent(role) = action {
+                if let StateActionKind::DispatchAgent(role) = &action.kind {
                     if !self.agent_roles.contains_key(role.as_str()) {
                         anyhow::bail!(
                             "workflow: on_state['{}'] references unknown agent role '{}' \
@@ -475,11 +545,11 @@ max_revise_cycles: 3
         assert_eq!(executing.len(), 2);
         assert_eq!(
             executing[0],
-            StateAction::DispatchAgent("executor".to_string())
+            StateAction::new(StateActionKind::DispatchAgent("executor".to_string()))
         );
         assert_eq!(
             executing[1],
-            StateAction::Increment("current_cycle".to_string())
+            StateAction::new(StateActionKind::Increment("current_cycle".to_string()))
         );
     }
 
@@ -660,7 +730,7 @@ on_state:
         let actions = w.on_state.get("planning").unwrap();
         assert_eq!(
             actions[0],
-            StateAction::TransitionTo("executing".to_string())
+            StateAction::new(StateActionKind::TransitionTo("executing".to_string()))
         );
     }
 
@@ -710,6 +780,105 @@ on_state: {}
         let resolved = wf.resolve_from_strings(BTreeMap::new(), None);
         // default when max_revise_cycles is None
         assert_eq!(resolved.max_revise_cycles, 3);
+    }
+
+    // ---- T027 P1: optional `when:` guard on state actions ----
+
+    #[test]
+    fn state_action_when_guard_parses() {
+        let yaml = r#"
+agent_roles:
+  planner: {}
+briefing_templates:
+  planner: templates/p.md.tpl
+on_state:
+  planning:
+    - dispatch_agent: planner
+      when: "tier_hint != 'T1'"
+"#;
+        let w: Workflow = serde_yaml::from_str(yaml).unwrap();
+        let actions = w.on_state.get("planning").unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].kind,
+            StateActionKind::DispatchAgent("planner".to_string())
+        );
+        let guard = actions[0].when.as_ref().expect("when must be Some");
+        // Round-trip via parse_guard so we don't depend on the AST internals here.
+        let expected = crate::schema::expr::parse_guard("tier_hint != 'T1'").unwrap();
+        assert_eq!(guard, &expected);
+    }
+
+    #[test]
+    fn state_action_without_when_is_none() {
+        let yaml = r#"
+agent_roles:
+  planner: {}
+briefing_templates:
+  planner: templates/p.md.tpl
+on_state:
+  planning:
+    - dispatch_agent: planner
+"#;
+        let w: Workflow = serde_yaml::from_str(yaml).unwrap();
+        let actions = w.on_state.get("planning").unwrap();
+        assert!(actions[0].when.is_none());
+    }
+
+    #[test]
+    fn state_action_invalid_when_errors() {
+        let yaml = r#"
+agent_roles:
+  planner: {}
+briefing_templates:
+  planner: templates/p.md.tpl
+on_state:
+  planning:
+    - dispatch_agent: planner
+      when: "tier_hint && other"
+"#;
+        let err = serde_yaml::from_str::<Workflow>(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid `when:` guard expression"),
+            "err: {msg}"
+        );
+    }
+
+    #[test]
+    fn state_action_unknown_sibling_key_errors() {
+        let yaml = r#"
+agent_roles:
+  planner: {}
+briefing_templates:
+  planner: templates/p.md.tpl
+on_state:
+  planning:
+    - dispatch_agent: planner
+      bogus: "x"
+"#;
+        let err = serde_yaml::from_str::<Workflow>(yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown state action key 'bogus'"), "err: {msg}");
+    }
+
+    #[test]
+    fn state_action_when_round_trips_with_transition_to() {
+        let yaml = r#"
+agent_roles: {}
+briefing_templates: {}
+on_state:
+  planning:
+    - transition_to: ready
+      when: "tier_hint == 'T1'"
+"#;
+        let w: Workflow = serde_yaml::from_str(yaml).unwrap();
+        let actions = w.on_state.get("planning").unwrap();
+        assert_eq!(
+            actions[0].kind,
+            StateActionKind::TransitionTo("ready".to_string())
+        );
+        assert!(actions[0].when.is_some());
     }
 
     #[test]

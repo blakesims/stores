@@ -312,7 +312,7 @@ pub(crate) fn find_transition<'a>(
 /// If on_state[state] contains TransitionTo(target), transitions the row to
 /// target inside the same tx.  Recurses if target also has on-entry follow-ons.
 /// All writes use Actor::Framework as invoker.
-pub(crate) fn fire_on_entry_follow_ons(
+pub fn fire_on_entry_follow_ons(
     tx: &Transaction,
     schema: &Schema,
     display_id: &str,
@@ -330,9 +330,19 @@ pub(crate) fn fire_on_entry_follow_ons(
     };
 
     for action in actions {
-        if let crate::schema::workflow::StateAction::TransitionTo(target_state) = action {
+        if let crate::schema::workflow::StateActionKind::TransitionTo(target_state) = &action.kind {
             // Re-read to get fresh row state for guard evaluation and framework field computation
             let (_, current_entry) = read_row(schema, tx, display_id)?;
+
+            // T027 P2: per-action `when:` predicate gates whether the
+            // follow-on fires for this row.  Absent `when:` is always-true.
+            // (Distinct from the transition-level `guard:` evaluated below,
+            // which is a schema-author invariant on the chosen transition.)
+            if let Some(expr) = &action.when {
+                if !eval(expr, &current_entry) {
+                    continue;
+                }
+            }
 
             // Find the framework-actor transition from state → target_state
             let follow_on_t = schema
@@ -503,6 +513,22 @@ pub(crate) fn compute_submit_plan(
     // Deep-merge for validation
     let mut merged = existing.clone();
     merged.insert(plan_field.to_string(), plan_json.clone());
+
+    // T027 P4: tier-T2 phase-count gate. T2 plans must contain exactly one
+    // phase (the contract IS that single phase). T1 never reaches submit-plan
+    // (planner is skipped); T3 unconstrained.
+    if merged.get("tier_hint").and_then(|v| v.as_str()) == Some("T2") {
+        let n = plan_json
+            .get("phases")
+            .and_then(|p| p.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if n != 1 {
+            bail!(
+                "submit-plan: tier T2 requires phases.length == 1, got {n}"
+            );
+        }
+    }
 
     // Step 6: validator pass
     validate::validate(schema, &merged, Op::SubmitPlan(diff), invoker.into()).map_err(|errs| {
@@ -1593,6 +1619,8 @@ fields:
     required: true
   - name: description
     type: text
+  - name: tier_hint
+    type: text
   - name: current_phase
     type: integer
     actor: framework
@@ -2384,6 +2412,77 @@ workflow:
         // Lock released
         let claimed_by = read_text(&conn, "claimed_by");
         assert!(claimed_by.is_none() || claimed_by.as_deref() == Some(""));
+    }
+
+    // ---------------------------------------------------------------------------
+    // T027 P4 (Task 4.3): tier-T2 phase-count gate in submit-plan
+    // ---------------------------------------------------------------------------
+
+    fn set_tier_hint(conn: &Connection, tier: &str) {
+        conn.execute(
+            "UPDATE wf_tasks SET tier_hint = ?1 WHERE display_id = 'WF001'",
+            rusqlite::params![tier],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn t027_p4_t2_two_phases_rejected() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+        set_tier_hint(&conn, "T2");
+
+        let plan = json!({
+            "summary": "two-phase plan",
+            "phases": [{"name": "p1"}, {"name": "p2"}]
+        });
+
+        let err = compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tier T2 requires phases.length == 1"),
+            "expected T2 phase-count error, got: {msg}"
+        );
+        // Status unchanged
+        assert_eq!(read_status(&conn), "planning");
+    }
+
+    #[test]
+    fn t027_p4_t2_single_phase_accepted() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+        set_tier_hint(&conn, "T2");
+
+        let plan = json!({
+            "summary": "single-phase plan",
+            "phases": [{"name": "only"}]
+        });
+
+        let out = compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap();
+        assert_eq!(out.new_status, "plan_review");
+        assert_eq!(read_status(&conn), "plan_review");
+    }
+
+    #[test]
+    fn t027_p4_t3_many_phases_accepted() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+        set_tier_hint(&conn, "T3");
+
+        let plan = json!({
+            "summary": "five-phase plan",
+            "phases": [
+                {"name": "p1"},
+                {"name": "p2"},
+                {"name": "p3"},
+                {"name": "p4"},
+                {"name": "p5"}
+            ]
+        });
+
+        let out = compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap();
+        assert_eq!(out.new_status, "plan_review");
     }
 
     // ---------------------------------------------------------------------------
@@ -3821,6 +3920,124 @@ workflow:
         assert!(
             at.starts_with("202"),
             "handler-set `at` must be a recent timestamp, got: {at}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T027 P2 (Task 2.5): fire_on_entry_follow_ons honours `when:` predicate
+    // ---------------------------------------------------------------------------
+    //
+    // When on_state declares both a dispatch_agent (when=T1-false) and a
+    // transition_to (when=T1-true) for a row whose tier_hint='T1', the
+    // follow-on must transition to the target and the dispatch (which is
+    // never fired by this function for any kind, but is also predicate-
+    // skipped) is left alone.
+    #[test]
+    fn fire_on_entry_follow_ons_when_predicate_routes_t1_to_ready() {
+        let yaml = r#"
+name: wf_when
+id_format: "W{:03d}"
+lifecycle:
+  states: [planning, ready, executing, done]
+  transitions:
+    - from: planning
+      to: ready
+      verb: skip-plan
+      actor: framework
+fields:
+  - name: title
+    type: text
+  - name: tier_hint
+    type: text
+  - name: current_phase
+    type: integer
+    actor: framework
+  - name: current_cycle
+    type: integer
+    actor: framework
+workflow:
+  agent_roles:
+    planner:
+      description: "plans"
+  briefing_templates:
+    planner: templates/planner-brief.md.tpl
+  on_state:
+    planning:
+      - dispatch_agent: planner
+        when: "tier_hint != 'T1'"
+      - transition_to: ready
+        when: "tier_hint == 'T1'"
+  submit_targets: {}
+  max_revise_cycles: 3
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+
+        // Insert a T1 row at planning.
+        let now = now_iso8601();
+        conn.execute(
+            "INSERT INTO wf_when (display_id, status, created_at, updated_at, \
+             created_by, updated_by, title, tier_hint, current_phase, current_cycle) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params!["W001", "planning", now, now, "human", "human", "t", "T1", 0, 0],
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let row_id: i64 = tx
+            .query_row(
+                "SELECT id FROM wf_when WHERE display_id = 'W001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        fire_on_entry_follow_ons(&tx, &schema, "W001", row_id, "planning").unwrap();
+        tx.commit().unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM wf_when WHERE display_id = 'W001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "ready",
+            "T1 row must follow when=T1-true transition_to ready"
+        );
+
+        // Inverse: a T3 row stays at planning (when=T1-true is false; there
+        // is no transition_to for the T3 path here).
+        conn.execute(
+            "INSERT INTO wf_when (display_id, status, created_at, updated_at, \
+             created_by, updated_by, title, tier_hint, current_phase, current_cycle) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params!["W002", "planning", now, now, "human", "human", "t", "T3", 0, 0],
+        )
+        .unwrap();
+        let tx2 = conn.unchecked_transaction().unwrap();
+        let row_id2: i64 = tx2
+            .query_row(
+                "SELECT id FROM wf_when WHERE display_id = 'W002'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        fire_on_entry_follow_ons(&tx2, &schema, "W002", row_id2, "planning").unwrap();
+        tx2.commit().unwrap();
+
+        let status2: String = conn
+            .query_row(
+                "SELECT status FROM wf_when WHERE display_id = 'W002'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status2, "planning",
+            "T3 row must NOT take when=T1-true follow-on; status stays at planning"
         );
     }
 }
