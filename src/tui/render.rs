@@ -20,6 +20,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Constraint::Min(1),                // rows pane
             Constraint::Length(1),             // selected-row footer
             Constraint::Length(search_bar),    // search input
+            Constraint::Length(1),             // hint line
             Constraint::Length(1),             // status bar
         ])
         .split(f.area());
@@ -41,7 +42,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_search_bar(f, app, chunks[2]);
     }
 
-    super::status_bar::render(f, app, chunks[3]);
+    let hint = super::help::hint_for(app.mode);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(Color::DarkGray),
+        ))),
+        chunks[3],
+    );
+
+    super::status_bar::render(f, app, chunks[4]);
 
     if app.mode == Mode::Filter {
         draw_filter_palette(f, app);

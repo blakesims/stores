@@ -46,10 +46,15 @@ pub fn render_text(app: &App) -> String {
         Mode::Search => "SEARCH",
         Mode::ObsDraftConfirm => "OBS-CONFIRM",
     };
-    format!(
+    let base = format!(
         "db={db}  clock={clock}  cap {free}/{total} (active {active})  {daemon}  sidecars:{sc}  [{mode}]",
         sc = app.sidecars_today,
-    )
+    );
+    if app.status_bar.message.is_empty() {
+        base
+    } else {
+        format!("{base}  · {}", app.status_bar.message)
+    }
 }
 
 #[cfg(test)]
@@ -75,6 +80,21 @@ mod tests {
             text,
             "db=.stores/db.sqlite  clock=12:00:00 UTC  cap 9/12 (active 3)  daemon:LIVE pid=4242  sidecars:2  [NORMAL]"
         );
+    }
+
+    #[test]
+    fn snapshot_with_message() {
+        let mut app = App::new(TuiOpts::default());
+        app.status_bar = StatusBar {
+            db_path: Some(".stores/db.sqlite".to_string()),
+            clock: "12:00:00 UTC".to_string(),
+            cap: (0, 0),
+            daemon_liveness: Liveness::Live { pid: 1 },
+            message: "sidecar spawn failed: STORES_APPROVE_TOKEN unset".to_string(),
+            ..Default::default()
+        };
+        let text = render_text(&app);
+        assert!(text.ends_with("· sidecar spawn failed: STORES_APPROVE_TOKEN unset"));
     }
 
     #[test]

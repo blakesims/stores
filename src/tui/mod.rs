@@ -51,7 +51,8 @@ pub fn run(opts: TuiOpts) -> Result<()> {
     let mut terminal = term::setup()?;
     term::install_panic_hook();
 
-    let res = event_loop(&mut terminal, &conn, &opts);
+    let db_display = db.display().to_string();
+    let res = event_loop(&mut terminal, &conn, &opts, &db_display);
 
     term::teardown(&mut terminal)?;
     res
@@ -61,8 +62,10 @@ fn event_loop<B: ratatui::backend::Backend>(
     terminal: &mut ratatui::Terminal<B>,
     conn: &Connection,
     opts: &TuiOpts,
+    db_display: &str,
 ) -> Result<()> {
     let mut app = App::new(opts.clone());
+    app.status_bar.db_path = Some(db_display.to_string());
     app.refresh(conn)?;
 
     let refresh_interval = Duration::from_millis(opts.interval_ms);

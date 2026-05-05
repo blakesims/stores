@@ -17,7 +17,7 @@ const HELP_LINES: &[&str] = &[
     "  ,                 cycle sort key",
     "  f / F             open filter palette / clear filter",
     "  / n N             search · next · prev",
-    "  1 2 3             saved-view presets",
+    "  1 2 3             preset views (ratifiable / in-flight / deploy-blocked)",
     "  D                 start agents daemon (detached)",
     "  s / S             spawn per-row sidecar (resume / fresh)",
     "  g / o             general / obs-drafting sidecar",
