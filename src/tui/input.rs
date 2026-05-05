@@ -80,8 +80,27 @@ fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
             KeyOutcome::Continue
         }
 
-        // Help — no-op stub for now (Phase 2 only routes the key).
-        (KeyCode::Char('?'), _) => KeyOutcome::Continue,
+        // Help — toggle modal cheat-sheet.
+        (KeyCode::Char('?'), _) => {
+            app.toggle_help();
+            KeyOutcome::Continue
+        }
+
+        // Daemon start.
+        (KeyCode::Char('D'), _) => {
+            match super::daemon::start_detached() {
+                Ok(pid) => {
+                    app.status_bar.daemon_pid = Some(pid);
+                    app.status_bar.daemon_liveness =
+                        super::daemon::Liveness::Live { pid };
+                    app.status_bar.message = format!("daemon started (pid {pid})");
+                }
+                Err(e) => {
+                    app.status_bar.message = format!("daemon start failed: {e}");
+                }
+            }
+            KeyOutcome::Continue
+        }
 
         // Saved-view shortcuts.
         (KeyCode::Char(c @ '1'), _)
@@ -162,6 +181,7 @@ mod tests {
                 title: "needs review".to_string(),
                 claimed_by: None,
                 updated_at: "2026-05-05".to_string(),
+                ..Default::default()
             }),
             Row::Task(TaskRow {
                 display_id: "T002".to_string(),
@@ -169,6 +189,7 @@ mod tests {
                 title: "in flight".to_string(),
                 claimed_by: None,
                 updated_at: "2026-05-04".to_string(),
+                ..Default::default()
             }),
             Row::Task(TaskRow {
                 display_id: "T003".to_string(),
@@ -176,6 +197,7 @@ mod tests {
                 title: "blocked".to_string(),
                 claimed_by: None,
                 updated_at: "2026-05-03".to_string(),
+                ..Default::default()
             }),
             Row::Obs(ObsRow {
                 display_id: "L001".to_string(),
@@ -184,6 +206,7 @@ mod tests {
                 summary: "ratifiable".to_string(),
                 updated_at: "2026-05-02".to_string(),
                 contract_state: Some("ready".to_string()),
+                ..Default::default()
             }),
         ]
     }

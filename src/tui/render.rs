@@ -35,16 +35,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     clamp_scroll(app, flat.len());
 
     draw_rows(f, app, &flat, rows_area);
-    draw_selected_footer(f, app, &flat, chunks[1]);
+    super::footer::render(f, app, chunks[1]);
 
     if app.mode == Mode::Search {
         draw_search_bar(f, app, chunks[2]);
     }
 
-    draw_status_bar(f, app, chunks[3]);
+    super::status_bar::render(f, app, chunks[3]);
 
     if app.mode == Mode::Filter {
         draw_filter_palette(f, app);
+    }
+    if app.show_help {
+        super::help::render_popup(f, app);
     }
 }
 
@@ -147,35 +150,6 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
     }
 }
 
-fn draw_selected_footer(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
-    let cursor = app.current_flat();
-    let text = if flat.is_empty() {
-        "no rows".to_string()
-    } else if let Some(idx) = cursor {
-        let fr = flat[idx];
-        let row = &app.rows[fr.abs];
-        format!(
-            "[{}/{}] sort:{} {}{} {}",
-            idx + 1,
-            flat.len(),
-            app.sort.label(),
-            if app.filter.is_empty() {
-                String::new()
-            } else {
-                "filter:on  ".to_string()
-            },
-            row.display_id(),
-            row.title_or_summary(),
-        )
-    } else {
-        format!("{} row(s) loaded", flat.len())
-    };
-    f.render_widget(
-        Paragraph::new(text).style(Style::default().fg(Color::DarkGray)),
-        area,
-    );
-}
-
 fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
         Span::styled("/", Style::default().fg(Color::Yellow)),
@@ -186,37 +160,6 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
                 "{} hit(s)",
                 app.search.hits.len()
             ),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
-}
-
-fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let daemon = match app.status_bar.daemon_pid {
-        Some(pid) => format!("daemon: pid {pid}"),
-        None => "daemon: ?".to_string(),
-    };
-    let mode = match app.mode {
-        Mode::Normal => "NORMAL",
-        Mode::Filter => "FILTER",
-        Mode::Search => "SEARCH",
-    };
-    let line = Line::from(vec![
-        Span::styled(
-            " stores watch ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(format!("[{mode}]"), Style::default().fg(Color::Green)),
-        Span::raw("  "),
-        Span::styled(daemon, Style::default().fg(Color::DarkGray)),
-        Span::raw("  "),
-        Span::styled(
-            "[j/k nav  , sort  f filter  / search  Tab fold  q quit]",
             Style::default().fg(Color::DarkGray),
         ),
     ]);
@@ -283,6 +226,7 @@ mod tests {
                     title: format!("synthetic task {i}"),
                     claimed_by: None,
                     updated_at: format!("2026-05-{:02}", (i % 28) + 1),
+                    ..Default::default()
                 })
             })
             .collect()

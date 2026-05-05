@@ -26,6 +26,7 @@ fn task(id: &str, status: &str, updated: &str) -> Row {
         title: format!("{id} title"),
         claimed_by: None,
         updated_at: updated.to_string(),
+        ..Default::default()
     })
 }
 
@@ -37,6 +38,7 @@ fn obs(id: &str, contract: Option<&str>) -> Row {
         summary: format!("{id} summary"),
         updated_at: "2026-05-01".to_string(),
         contract_state: contract.map(str::to_string),
+        ..Default::default()
     })
 }
 

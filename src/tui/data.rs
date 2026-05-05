@@ -50,16 +50,18 @@ pub enum Row {
     Obs(ObsRow),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TaskRow {
     pub display_id: String,
     pub status: String,
     pub title: String,
     pub claimed_by: Option<String>,
     pub updated_at: String,
+    pub tier_hint: Option<String>,
+    pub linked_observations: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ObsRow {
     pub display_id: String,
     pub status: String,
@@ -68,6 +70,7 @@ pub struct ObsRow {
     pub updated_at: String,
     /// `intent_contract.contract_state`, when present.
     pub contract_state: Option<String>,
+    pub tier_hint: Option<String>,
 }
 
 impl Row {
@@ -92,16 +95,20 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
 
     let mut stmt = conn.prepare(
-        "SELECT display_id, status, COALESCE(title, ''), claimed_by, COALESCE(updated_at, '')
+        "SELECT display_id, status, COALESCE(title, ''), claimed_by, COALESCE(updated_at, ''),
+                tier_hint, COALESCE(linked_observations, '[]')
          FROM tasks",
     )?;
     let task_iter = stmt.query_map([], |r| {
+        let linked_raw: String = r.get(6)?;
         Ok(TaskRow {
             display_id: r.get(0)?,
             status: r.get(1)?,
             title: r.get(2)?,
             claimed_by: r.get(3)?,
             updated_at: r.get(4)?,
+            tier_hint: r.get(5).ok(),
+            linked_observations: serde_json::from_str(&linked_raw).unwrap_or_default(),
         })
     })?;
     for r in task_iter.flatten() {
@@ -111,7 +118,8 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
     let mut stmt = conn.prepare(
         "SELECT display_id, status, COALESCE(priority, ''), COALESCE(summary, ''),
                 COALESCE(updated_at, ''),
-                json_extract(intent_contract, '$.contract_state')
+                json_extract(intent_contract, '$.contract_state'),
+                json_extract(intent_contract, '$.tier_hint')
          FROM observations",
     )?;
     let obs_iter = stmt.query_map([], |r| {
@@ -122,6 +130,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             summary: r.get(3)?,
             updated_at: r.get(4)?,
             contract_state: r.get(5).ok(),
+            tier_hint: r.get(6).ok(),
         })
     })?;
     for r in obs_iter.flatten() {
@@ -187,6 +196,8 @@ mod tests {
             title: "t".to_string(),
             claimed_by: None,
             updated_at: String::new(),
+            tier_hint: None,
+            linked_observations: Vec::new(),
         })
     }
 
@@ -198,6 +209,7 @@ mod tests {
             summary: "s".to_string(),
             updated_at: String::new(),
             contract_state: contract.map(str::to_string),
+            tier_hint: None,
         })
     }
 

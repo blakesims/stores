@@ -145,6 +145,7 @@ mod tests {
             title: "t".to_string(),
             claimed_by: None,
             updated_at: String::new(),
+            ..Default::default()
         })
     }
 
@@ -156,6 +157,7 @@ mod tests {
             summary: "s".to_string(),
             updated_at: String::new(),
             contract_state: None,
+            ..Default::default()
         })
     }
 

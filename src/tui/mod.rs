@@ -4,12 +4,16 @@
 //! adds keyboard navigation, modal sort/filter/search, and virtualization.
 
 pub mod app;
+pub mod daemon;
 pub mod data;
 pub mod filter;
+pub mod footer;
+pub mod help;
 pub mod input;
 pub mod render;
 pub mod search;
 pub mod sort;
+pub mod status_bar;
 pub mod term;
 
 use anyhow::{bail, Result};

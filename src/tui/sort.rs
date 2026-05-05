@@ -86,6 +86,7 @@ mod tests {
             title: "t".to_string(),
             claimed_by: None,
             updated_at: updated.to_string(),
+            ..Default::default()
         })
     }
 
@@ -97,6 +98,7 @@ mod tests {
             summary: "s".to_string(),
             updated_at: updated.to_string(),
             contract_state: None,
+            ..Default::default()
         })
     }
 

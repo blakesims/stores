@@ -4,6 +4,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::HashSet;
 
+use super::daemon::Liveness;
+use std::time::{SystemTime, UNIX_EPOCH};
 use super::data::{classify, Row, Section};
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
@@ -36,10 +38,15 @@ pub enum Mode {
     Search,
 }
 
-/// Status-bar payload (daemon liveness etc.). Phase 1 stub.
+/// Status-bar payload (daemon liveness, db path, clock, cap, message).
 #[derive(Debug, Clone, Default)]
 pub struct StatusBar {
     pub daemon_pid: Option<u32>,
+    pub daemon_liveness: Liveness,
+    pub db_path: Option<String>,
+    pub clock: String,
+    /// `(active, total)` task counts driving the cap free/total readout.
+    pub cap: (usize, usize),
     pub message: String,
 }
 
@@ -75,6 +82,10 @@ pub struct App {
     pub viewport_height: usize,
     /// First flat-row index currently rendered.
     pub scroll_offset: usize,
+    /// Number of side-car spawns this session (status-bar counter).
+    pub sidecars_today: u32,
+    /// Whether the `?` cheat-sheet popup is currently visible.
+    pub show_help: bool,
 }
 
 impl App {
@@ -91,7 +102,37 @@ impl App {
         self.rows = super::data::load_rows(conn)?;
         self.sections = classify(&self.rows);
         self.apply_sort();
+        self.recompute_status_bar();
         Ok(())
+    }
+
+    /// Refresh the status-bar derived fields (cap counts, daemon liveness,
+    /// clock). Caller-provided `db_path` and pidfile path stay sticky between
+    /// refreshes.
+    pub fn recompute_status_bar(&mut self) {
+        let total = self
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Row::Task(_)))
+            .count();
+        let active = self
+            .rows
+            .iter()
+            .filter(|r| match r {
+                Row::Task(t) => !is_terminal_task_status(&t.status),
+                _ => false,
+            })
+            .count();
+        self.status_bar.cap = (active, total);
+        self.status_bar.clock = local_clock_string();
+        if let Ok(p) = super::daemon::pidfile_path() {
+            let live = super::daemon::liveness(&p);
+            self.status_bar.daemon_liveness = live.clone();
+            self.status_bar.daemon_pid = match live {
+                Liveness::Live { pid } => Some(pid),
+                Liveness::Dead => None,
+            };
+        }
     }
 
     /// Apply the active sort to every section bucket.
@@ -176,6 +217,11 @@ impl App {
         self.set_selection_to_flat(clamped, &flat);
     }
 
+    /// Increment the per-session sidecar counter (status-bar readout).
+    pub fn record_sidecar_spawn(&mut self) {
+        self.sidecars_today = self.sidecars_today.saturating_add(1);
+    }
+
     fn set_selection_to_flat(&mut self, idx: usize, flat: &[FlatRow]) {
         if let Some(target) = flat.get(idx) {
             self.selection = Selection {
@@ -243,8 +289,15 @@ impl App {
         }
     }
 
+    // ----------------------------------------------------------------------
+
     /// If filter/collapse made the current selection invalid, snap back to
     /// the first visible row.
+    /// Toggle the `?` cheat-sheet popup.
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
+
     fn clamp_selection(&mut self) {
         if self.current_flat().is_none() {
             let flat = self.flat_rows();
@@ -257,3 +310,22 @@ impl App {
         }
     }
 }
+
+fn is_terminal_task_status(s: &str) -> bool {
+    matches!(
+        s,
+        "accepted" | "complete" | "cargo_installed" | "schema_migrated"
+    )
+}
+
+fn local_clock_string() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02} UTC")
+}
+
