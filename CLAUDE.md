@@ -103,6 +103,10 @@ The L043 investigator subagent (filed; awaiting promotion) closes the substrate 
 
 Tasks `fs/T001`–`fs/T012` lived only in the filesystem (`tasks/completed/`). The substrate database starts empty and counts up from `T001` again. Substrate-`T001` is "the first task done the new way" — it is not the same as `fs/T001`. **Don't try to reconcile.** Don't backfill placeholder rows. If you need to reference a pre-substrate task in writing, prefix it `fs/` (e.g. `fs/T012`) to disambiguate. The filesystem T001–T012 are the historical record; the substrate is the source of truth from substrate-`T001` onward.
 
+### Workspace hygiene
+
+Commit docs as soon as you write them — uncommitted files in main block accept-merge (one dirty `CLAUDE.md` line stalled T023's deploy).
+
 ### What NOT to do
 
 - Don't retreat to hand-editing markdown when the substrate hurts. The pain is the data.
@@ -116,6 +120,7 @@ Tasks `fs/T001`–`fs/T012` lived only in the filesystem (`tasks/completed/`). T
 
 - `tasks/CLAUDE.md` — task lifecycle protocol (status state machine, section ownership, orchestrator rules). Still applies — the DB is just the new source of truth.
 - `docs/philosophy.md` — the substrate's design principles. § *What's outside the substrate* is the doctrine that grounds `--invoker` enforcement and the wrapper boundary.
+- `docs/primitives.md` — the typed primitives the substrate composes from (working draft, with changelog). Read here before proposing schema-shape moves.
 - `docs/worklog/2026-05-02/01-real-world-workflow-takeover-analysis.md` — the design discussion behind the dogfood decision.
 - `docs/worklog/2026-05-02/03-t012-workspace-path-and-next-id.md` — the substrate hooks (`workspace_path`, `next-id`) shipped in T012 to make multi-worktree dogfooding safe.
 
