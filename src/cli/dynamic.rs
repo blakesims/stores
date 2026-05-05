@@ -1,4 +1,4 @@
-use clap::{Arg, ArgAction, Command};
+use clap::{Arg, ArgAction, Command, ValueHint};
 use std::collections::HashMap;
 
 use crate::manifest::Manifest;
@@ -74,6 +74,21 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .long("invoker")
                 .global(true)
                 .help("Override actor detection: human | ai_autonomous | ai_with_human"),
+        )
+        .arg(
+            Arg::new("meta")
+                .long("meta")
+                .global(true)
+                .num_args(0..=1)
+                .default_missing_value("")
+                .require_equals(true)
+                .value_hint(ValueHint::DirPath)
+                .help(
+                    "Route this invocation at the META substrate (the substrate's \
+                     own substrate). With a value: --meta=<PATH> uses <PATH>. \
+                     Without a value: reads STORES_META_PATH. Errors clean if \
+                     neither resolves to a directory containing .stores/.",
+                ),
         )
         .arg(
             Arg::new("approve-token")
