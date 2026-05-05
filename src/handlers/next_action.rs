@@ -32,6 +32,7 @@ use crate::schema::{
     workflow::{StateActionKind, Workflow},
     Schema,
 };
+use crate::validate::{expr_eval, EntryMap};
 
 use super::row::read_row;
 
@@ -50,16 +51,24 @@ pub struct NextActionOutput {
 }
 
 /// Find the first `DispatchAgent` role for the given status in the workflow's
-/// `on_state` map.  Returns `None` for unknown states, blocked, or states with
-/// no `DispatchAgent` action.  Engine-fired actions (`Increment`, `TransitionTo`)
-/// are never returned.
-pub fn find_next_agent(workflow: &Workflow, status: &str) -> Option<String> {
+/// `on_state` map, honouring per-action `when:` predicates.
+///
+/// Returns `None` for unknown states, blocked, or states with no
+/// `DispatchAgent` action whose `when:` evaluates to true against `entry`
+/// (an absent `when:` is treated as always-true).  Engine-fired actions
+/// (`Increment`, `TransitionTo`) are never returned.
+pub fn find_next_agent(workflow: &Workflow, status: &str, entry: &EntryMap) -> Option<String> {
     if status == "blocked" {
         return None;
     }
     workflow.on_state.get(status).and_then(|actions| {
         actions.iter().find_map(|a| {
             if let StateActionKind::DispatchAgent(role) = &a.kind {
+                if let Some(expr) = &a.when {
+                    if !expr_eval::eval(expr, entry) {
+                        return None;
+                    }
+                }
                 Some(role.clone())
             } else {
                 None
@@ -102,7 +111,7 @@ pub(crate) fn compute(
     let next_agent = if is_blocked {
         None
     } else {
-        find_next_agent(workflow, &status)
+        find_next_agent(workflow, &status, &entry)
     };
 
     Ok(NextActionOutput {
@@ -439,6 +448,54 @@ workflow:
                 out.blocked
             );
         }
+    }
+
+    // T027 P2 (Task 2.4): when: predicate gates DispatchAgent selection.
+    //
+    // A schema with `dispatch_agent: planner, when: tier_hint != 'T1'` should
+    // return next_agent=None for tier_hint=T1 rows and Some("planner") for
+    // tier_hint=T3 rows.
+    #[test]
+    fn find_next_agent_filters_by_when_predicate() {
+        let yaml = r#"
+name: wft
+id_format: "W{:03d}"
+lifecycle:
+  states: [planning, executing, done]
+  transitions: []
+fields:
+  - name: title
+    type: text
+  - name: tier_hint
+    type: text
+workflow:
+  agent_roles:
+    planner:
+      description: "plans"
+  briefing_templates:
+    planner: templates/planner-brief.md.tpl
+  on_state:
+    planning:
+      - dispatch_agent: planner
+        when: "tier_hint != 'T1'"
+  submit_targets: {}
+  max_revise_cycles: 3
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let workflow = schema.workflow.as_ref().unwrap();
+
+        // tier_hint=T1 → when evaluates false → no agent dispatched
+        let mut entry_t1: EntryMap = std::collections::BTreeMap::new();
+        entry_t1.insert("tier_hint".into(), json!("T1"));
+        assert_eq!(find_next_agent(workflow, "planning", &entry_t1), None);
+
+        // tier_hint=T3 → when evaluates true → planner dispatched
+        let mut entry_t3: EntryMap = std::collections::BTreeMap::new();
+        entry_t3.insert("tier_hint".into(), json!("T3"));
+        assert_eq!(
+            find_next_agent(workflow, "planning", &entry_t3),
+            Some("planner".to_string())
+        );
     }
 
     // AC4.7: non-workflow schema → compute returns error naming the store

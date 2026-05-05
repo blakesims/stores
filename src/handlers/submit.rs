@@ -334,6 +334,16 @@ pub(crate) fn fire_on_entry_follow_ons(
             // Re-read to get fresh row state for guard evaluation and framework field computation
             let (_, current_entry) = read_row(schema, tx, display_id)?;
 
+            // T027 P2: per-action `when:` predicate gates whether the
+            // follow-on fires for this row.  Absent `when:` is always-true.
+            // (Distinct from the transition-level `guard:` evaluated below,
+            // which is a schema-author invariant on the chosen transition.)
+            if let Some(expr) = &action.when {
+                if !eval(expr, &current_entry) {
+                    continue;
+                }
+            }
+
             // Find the framework-actor transition from state → target_state
             let follow_on_t = schema
                 .lifecycle
@@ -3821,6 +3831,124 @@ workflow:
         assert!(
             at.starts_with("202"),
             "handler-set `at` must be a recent timestamp, got: {at}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T027 P2 (Task 2.5): fire_on_entry_follow_ons honours `when:` predicate
+    // ---------------------------------------------------------------------------
+    //
+    // When on_state declares both a dispatch_agent (when=T1-false) and a
+    // transition_to (when=T1-true) for a row whose tier_hint='T1', the
+    // follow-on must transition to the target and the dispatch (which is
+    // never fired by this function for any kind, but is also predicate-
+    // skipped) is left alone.
+    #[test]
+    fn fire_on_entry_follow_ons_when_predicate_routes_t1_to_ready() {
+        let yaml = r#"
+name: wf_when
+id_format: "W{:03d}"
+lifecycle:
+  states: [planning, ready, executing, done]
+  transitions:
+    - from: planning
+      to: ready
+      verb: skip-plan
+      actor: framework
+fields:
+  - name: title
+    type: text
+  - name: tier_hint
+    type: text
+  - name: current_phase
+    type: integer
+    actor: framework
+  - name: current_cycle
+    type: integer
+    actor: framework
+workflow:
+  agent_roles:
+    planner:
+      description: "plans"
+  briefing_templates:
+    planner: templates/planner-brief.md.tpl
+  on_state:
+    planning:
+      - dispatch_agent: planner
+        when: "tier_hint != 'T1'"
+      - transition_to: ready
+        when: "tier_hint == 'T1'"
+  submit_targets: {}
+  max_revise_cycles: 3
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+
+        // Insert a T1 row at planning.
+        let now = now_iso8601();
+        conn.execute(
+            "INSERT INTO wf_when (display_id, status, created_at, updated_at, \
+             created_by, updated_by, title, tier_hint, current_phase, current_cycle) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params!["W001", "planning", now, now, "human", "human", "t", "T1", 0, 0],
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let row_id: i64 = tx
+            .query_row(
+                "SELECT id FROM wf_when WHERE display_id = 'W001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        fire_on_entry_follow_ons(&tx, &schema, "W001", row_id, "planning").unwrap();
+        tx.commit().unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM wf_when WHERE display_id = 'W001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "ready",
+            "T1 row must follow when=T1-true transition_to ready"
+        );
+
+        // Inverse: a T3 row stays at planning (when=T1-true is false; there
+        // is no transition_to for the T3 path here).
+        conn.execute(
+            "INSERT INTO wf_when (display_id, status, created_at, updated_at, \
+             created_by, updated_by, title, tier_hint, current_phase, current_cycle) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params!["W002", "planning", now, now, "human", "human", "t", "T3", 0, 0],
+        )
+        .unwrap();
+        let tx2 = conn.unchecked_transaction().unwrap();
+        let row_id2: i64 = tx2
+            .query_row(
+                "SELECT id FROM wf_when WHERE display_id = 'W002'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        fire_on_entry_follow_ons(&tx2, &schema, "W002", row_id2, "planning").unwrap();
+        tx2.commit().unwrap();
+
+        let status2: String = conn
+            .query_row(
+                "SELECT status FROM wf_when WHERE display_id = 'W002'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status2, "planning",
+            "T3 row must NOT take when=T1-true follow-on; status stays at planning"
         );
     }
 }

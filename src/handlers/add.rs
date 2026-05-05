@@ -12,6 +12,7 @@ use crate::schema::{
 use crate::validate::{self, Op};
 
 use super::row::{build_entry_map, now_iso8601};
+use super::submit::fire_on_entry_follow_ons;
 
 pub fn run(
     schema: &Schema,
@@ -415,6 +416,14 @@ pub fn run(
             None,
             None,
         )?;
+    }
+
+    // T027 P2 (Task 2.3): fire on-entry follow-ons for the initial state of a
+    // workflow-shaped row.  Without this, on_state actions on the initial
+    // state (e.g. `transition_to: ready` gated by `when: tier_hint == 'T1'`)
+    // never fire because no submit-* verb runs before the row is observed.
+    if schema.workflow.is_some() {
+        fire_on_entry_follow_ons(&tx, schema, &display_id, rowid, &effective_initial_status)?;
     }
 
     tx.commit()?;
@@ -1866,5 +1875,86 @@ fields:
         assert_eq!(rows[1], ("open".to_string(), "investigating".to_string(), "investigate".to_string(), "framework".to_string()));
         assert_eq!(rows[2], ("investigating".to_string(), "confirmed".to_string(), "confirm".to_string(), "human".to_string()));
         assert_eq!(rows[3], ("confirmed".to_string(), "ready".to_string(), "ratify".to_string(), "framework".to_string()));
+    }
+
+    // T027 P2 (Task 2.3 / AC2.4): a T1 row scaffolded via add is observable as
+    // status=ready immediately afterward, because fire_on_entry_follow_ons fires
+    // on the initial state and the on_state.planning TransitionTo with
+    // when=T1-true fires.
+    #[test]
+    fn add_t1_row_lands_at_ready_via_initial_on_entry_follow_on() {
+        let yaml = r#"
+name: wf_add_when
+id_format: "W{:03d}"
+lifecycle:
+  states: [planning, ready, executing, done]
+  transitions:
+    - from: planning
+      to: ready
+      verb: skip-plan
+      actor: framework
+fields:
+  - name: title
+    type: text
+    required: true
+  - name: tier_hint
+    type: text
+  - name: current_phase
+    type: integer
+    actor: framework
+  - name: current_cycle
+    type: integer
+    actor: framework
+workflow:
+  agent_roles:
+    planner:
+      description: "plans"
+  briefing_templates:
+    planner: templates/planner-brief.md.tpl
+  on_state:
+    planning:
+      - dispatch_agent: planner
+        when: "tier_hint != 'T1'"
+      - transition_to: ready
+        when: "tier_hint == 'T1'"
+  submit_targets: {}
+  max_revise_cycles: 3
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+
+        let matches = build_test_add_cmd(&schema)
+            .get_matches_from(["add", "--title", "t1 task", "--tier-hint", "T1"]);
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM wf_add_when WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "ready",
+            "T1 row added via run must land at status=ready (initial on-entry follow-on fired)"
+        );
+
+        // Inverse: a T3 row stays at planning.
+        let matches3 = build_test_add_cmd(&schema)
+            .get_matches_from(["add", "--title", "t3 task", "--tier-hint", "T3"]);
+        run(&schema, &conn, &matches3, Actor::Human.into()).unwrap();
+        let status3: String = conn
+            .query_row(
+                "SELECT status FROM wf_add_when WHERE id = 2",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status3, "planning",
+            "T3 row stays at planning (no when=T1-true follow-on fires)"
+        );
     }
 }
