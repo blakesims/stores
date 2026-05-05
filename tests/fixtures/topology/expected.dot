@@ -27,6 +27,7 @@ digraph stores_topology {
     "z1_tasks__cargo_installed" [label="cargo_installed"];
     "z1_tasks__schema_migrated" [label="schema_migrated"];
     "z1_tasks__planning" -> "z1_tasks__plan_review" [label=" A\nsubmit-plan", color=green, fontcolor=green];
+    "z1_tasks__planning" -> "z1_tasks__ready" [label=" F\nskip-plan", color=gray, fontcolor=gray];
     "z1_tasks__plan_review" -> "z1_tasks__ready" [label=" A\nsubmit-plan-review\n[READY]", color=green, fontcolor=green];
     "z1_tasks__plan_review" -> "z1_tasks__planning" [label=" A\nsubmit-plan-review\n[NEEDS_WORK]", color=green, fontcolor=green];
     "z1_tasks__plan_review" -> "z1_tasks__blocked" [label=" A\nsubmit-plan-review\n[NEEDS_WORK]", color=green, fontcolor=green];
@@ -97,6 +98,8 @@ digraph stores_topology {
     "z2_tasks__planning" [label="planning"];
     "z2_tasks__planning__role_0_planner" [shape=ellipse, label="planner"];
     "z2_tasks__planning" -> "z2_tasks__planning__role_0_planner" [label="→ planner", color=green, fontcolor=green];
+    "z2_tasks__ready" [label="ready"];
+    "z2_tasks__planning" -> "z2_tasks__ready" [label="⇒ auto", color=gray, fontcolor=gray];
     "z2_tasks__plan_review" [label="plan_review"];
     "z2_tasks__plan_review__role_0_plan_reviewer" [shape=ellipse, label="plan_reviewer"];
     "z2_tasks__plan_review" -> "z2_tasks__plan_review__role_0_plan_reviewer" [label="→ plan_reviewer", color=green, fontcolor=green];

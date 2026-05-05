@@ -1160,9 +1160,9 @@ mod tests {
         conn.execute(
             &format!(
                 "INSERT INTO {name} (display_id, status, created_at, updated_at, \
-                 created_by, updated_by, title, slug, current_phase, current_cycle, \
+                 created_by, updated_by, title, slug, tier_hint, current_phase, current_cycle, \
                  plan, contract, cycles, plan_review_log, claimed_by, claimed_at) \
-                 VALUES (?1,?2,?3,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                 VALUES (?1,?2,?3,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 name = quote_ident(&schema.name)
             ),
             rusqlite::params![
@@ -1172,6 +1172,7 @@ mod tests {
                 "human",
                 "Test Task",
                 "test-task",
+                "T3",
                 current_phase,
                 current_cycle,
                 plan_json,

@@ -92,6 +92,9 @@ lifecycle:
     # planning → plan_review (submit-plan)
     - {from: planning, to: plan_review, verb: submit-plan, actor: ai_autonomous}
 
+    # planning → ready (skip-plan: T1 tasks bypass planner+plan_review; contract IS the plan)
+    - {from: planning, to: ready, verb: skip-plan, actor: framework, guard: "tier_hint == 'T1'"}
+
     # plan_review → ready / planning / blocked (gate-keyed by submit-plan-review)
     - {from: plan_review, to: ready, verb: submit-plan-review, actor: ai_autonomous, requires_gate: READY}
     - {from: plan_review, to: planning, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NEEDS_WORK, guard: "plan_review_log.length < 3"}
@@ -176,7 +179,8 @@ workflow:
     submit-wrap: wrap_log
   on_state:
     planning:
-      - dispatch_agent: planner
+      - {dispatch_agent: planner, when: "tier_hint != 'T1'"}
+      - {transition_to: ready, when: "tier_hint == 'T1'"}
     plan_review:
       - dispatch_agent: plan_reviewer
     ready:
