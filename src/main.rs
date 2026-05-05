@@ -210,7 +210,11 @@ fn main() -> Result<()> {
                     rsub.get_one::<f64>("poll-interval").copied().unwrap_or(5.0);
                 let detach = *rsub.get_one::<bool>("detach").unwrap_or(&false);
                 let log_file = rsub.get_one::<String>("log-file").cloned();
-                let max_iters = rsub.get_one::<usize>("max-iters").copied();
+                let once = *rsub.get_one::<bool>("once").unwrap_or(&false);
+                let max_iters = rsub
+                    .get_one::<usize>("max-iters")
+                    .copied()
+                    .or(if once { Some(1) } else { None });
                 let args = handlers::agents_run::RunArgs {
                     poll_interval_ms: (poll_interval_secs * 1000.0).max(50.0) as u64,
                     detach,

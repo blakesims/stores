@@ -343,6 +343,12 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .value_parser(clap::value_parser!(usize))
                                 .hide(true)
                                 .required(false),
+                        )
+                        .arg(
+                            Arg::new("once")
+                                .long("once")
+                                .action(ArgAction::SetTrue)
+                                .help("Run a single poll iteration (no daemonize, no loop) and exit"),
                         ),
                 )
                 // Phase 4: backfill placeholder (impl in Phase 7)

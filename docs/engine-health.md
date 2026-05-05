@@ -30,9 +30,9 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L045 | ✅ T024 | accept-merge tolerates already-merged + stale workspace |
 | L055 | ✅ T026 | daemon seeds starting-line-marker locks at startup (no retroactive fires) |
 | L067 | ✅ T032 | auto-drive into worktree now finds `.stores/` (substrate-side symlink in auto-scaffold) |
-| L062 | 🟢 T030 | watchdog can't catch post-spawn failures (driving now — re-tier'd to T3 to dodge L093) |
+| L062 | ✅ T030 | watchdog catches post-spawn silent zombies via tasks-table scan + grace window (`tests/drive_silent_zombie_e2e.rs`) |
 | L071 | 🟡 T029 | drive aborts on runner exit=1 (rate limit) but doesn't notify substrate (ratified; awaiting drive; downgraded T1) |
-| L087 | ⚪ — | **auto-promote silent-fails ~0% success on rapid sequential ratifies** — same dispatch-lock-marks-ok-but-no-task pattern as L062, on a different code path; suggests L062's fix may need to widen scope to the dispatch_lock primitive |
+| L087 | ⚪ — | **auto-promote silent-fails ~0% success on rapid sequential ratifies** — same dispatch-lock-marks-ok-but-no-task pattern as L062, on a different code path; T030's watchdog catches the runtime-side; auto-promote's spawn-without-task gap remains |
 | L039 | ⚪ T2 | daemon retry-on-failure unimplemented; transient flakes strand rows |
 | L068 | ⚪ — | cross-project daemon SIGTERM (other-repo `pkill 'stores agents run'` kills mine) |
 | GAP | — | per-project daemon PID file + `stores agents status / stop` verbs |
@@ -118,22 +118,24 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Highest-leverage next picks
 
-T031 ✅ landed and shipped through full ceremony. T030 driving now. Remaining:
+T031 ✅ + T030 ✅ landed today. Remaining:
 
-1. **T030 (L062)** — silent-zombie watchdog. **Driving as of this snapshot.** Top Layer 1 pain. Closes the failure mode demonstrated 5× today (T023 stuck, plus auto-promote silent-failing L062/L060/L038 ratifications, plus T031's first-attempt planner discarded).
-2. **T029 (L071)** — drive aborts on rate-limit notify substrate. Pairs with T030 to make Layer 1 substantially less brittle. T1 — single function tweak in drive wrapper, ~half the spawn cost.
-3. **T033 (L038)** — `depends_on` pre-flight guard. T1, cheap.
-4. **L093 (planner brief tier-aware)** — T1 template change. Cheap. Stops T2 planners from over-decomposing and getting their plans schema-rejected. **Should ship before next T2 task drives.**
-5. **L087 investigation** — same shape as L062 on the auto-promote code path. Likely closes via L062's fix scope-widening rather than as separate work; reviewer judgment when T030 wraps.
-6. **Auto-investigator subscriber (GAP)** — strategic ceiling. Flips substrate from human-pulls to engine-pulls on contract drafting. Should be designed alongside L087 / L062 since they touch the same dispatch_lock primitive.
-7. **L092** (out-of-band close-out) — T2, modest. Lets hand-cranked tasks close cleanly through the substrate.
+1. **T029 (L071)** — drive aborts on rate-limit notify substrate. Pairs with T030's watchdog to make Layer 1 substantially less brittle (cooperative-abort path; T030 covers the silent crash). T1 — single function tweak in drive wrapper.
+2. **T033 (L038)** — `depends_on` pre-flight guard. T1, cheap.
+3. **L093 (planner brief tier-aware)** — T1 template change. Saves ~$1-2 per T2 drive by stopping the over-decompose-then-reject cycle. Cheapest engine-economy improvement.
+4. **L087 investigation** — auto-promote's spawn-without-task gap on rapid ratifies. T030's watchdog catches runtime-side; the auto-promote subscriber path needs its own fix (or scope-widen of T030's pattern to dispatch_locks generally).
+5. **Auto-investigator subscriber (GAP)** — strategic ceiling. Flips substrate from human-pulls to engine-pulls on contract drafting. Should be designed alongside L087 since both touch the dispatch_lock primitive.
+6. **L092** (out-of-band close-out) — T2, modest. Lets hand-cranked tasks close cleanly through the substrate.
+7. **L070 / merge-conflict accept-merge** — T030's own ceremony surfaced this: docs/engine-health.md edited on main during a drive caused accept-merge conflict → deploy_blocked; the ceremony chain dropped cargo-install + schema-migrate. L070 already names this; T030 reproduces it live.
 
-After T030 + T029 land, the one-sentence summary changes meaningfully: "ratify, drive, deploy, watchdog, rate-limit-handling" all reliable; auto-investigator becomes the dominant remaining gap. **L093 is the cheapest engine-economy improvement** — a template change saves ~$1-2 per T2 drive by avoiding the over-decomposition rejection.
+After T029 lands, the one-sentence summary changes again: rate-limit handling reliable; auto-investigator becomes the dominant remaining gap.
+
 
 ## Recently shipped
 
 | date | task | obs | what changed |
 |---|---|---|---|
+| 2026-05-05 | T030 | L062 | daemon detects post-spawn silent zombies (tasks-table scan + grace window; structured `drive_failed:silent_zombie_pid_dead` / `:pid_never_recorded` reasons) |
 | 2026-05-05 | T024 | L045 | accept-merge tolerates already-merged + stale workspace |
 | 2026-05-05 | T025 | L063 | auto-promote idempotency uses `linked_observations` |
 | 2026-05-05 | T026 | L055 | daemon seeds starting-line-marker locks at startup |
