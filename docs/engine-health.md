@@ -29,7 +29,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 |---|---|---|
 | L045 | ✅ T024 | accept-merge tolerates already-merged + stale workspace |
 | L055 | ✅ T026 | daemon seeds starting-line-marker locks at startup (no retroactive fires) |
-| L062 | ⚪ T2 | watchdog can't catch post-spawn failures |
+| L062 | ✅ T030 | watchdog catches post-spawn silent zombies via tasks-table scan + grace window (`tests/drive_silent_zombie_e2e.rs`) |
 | L071 | ⚪ T2 | drive aborts gracefully on runner exit=1 (rate limit) but doesn't notify substrate; row stuck at executing |
 | L039 | ⚪ T2 | daemon retry-on-failure unimplemented; transient flakes strand rows |
 | L067 | ⚪ — | auto-drive spawns from worktree without `.stores/`; subcommand discovery fails |
@@ -114,7 +114,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Highest-leverage next picks (after current batch lands)
 
-1. **L062 + L071** (paired) — close the silent-zombie failure mode for both kinds of drive failure. L071's "drive aborts and tells substrate" + L062's "watchdog catches drives that crash silently" are complementary.
+1. **L071** — close the remaining silent-zombie failure mode: drive aborts gracefully on runner exit=1 (rate limit) but doesn't notify substrate. L062's watchdog (T030) now catches drives that crash silently; L071 covers the cooperative-abort path.
 2. **L060** — schema-migrate from new binary. Unblocks deploy ceremony for any future task that adds schema. Also opens the door to safer daemon restarts.
 3. **L038** — `depends_on` enforcement. Already 🟠 ready. Lets us declare task chains without manual sequencing.
 4. **Auto-investigator subscriber (GAP)** — the single biggest strategic move. Flips the substrate from human-pulls to engine-pulls on contract drafting. File this, then ratify.
@@ -123,6 +123,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 | date | task | obs | what changed |
 |---|---|---|---|
+| 2026-05-05 | T030 | L062 | daemon detects post-spawn silent zombies (tasks-table scan + grace window; structured `drive_failed:silent_zombie_pid_dead` / `:pid_never_recorded` reasons) |
 | 2026-05-05 | T024 | L045 | accept-merge tolerates already-merged + stale workspace |
 | 2026-05-05 | T025 | L063 | auto-promote idempotency uses `linked_observations` |
 | 2026-05-05 | T026 | L055 | daemon seeds starting-line-marker locks at startup |
