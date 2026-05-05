@@ -2,11 +2,11 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-05 (third pass) — T031 (L060 schema-migrate subprocess) shipped via full drive cycle + accept ceremony. T030 (L062 silent-zombie watchdog) driving now. T029/T033 still queued. New obs filed today: L087 (auto-promote silent-fail), L092 (out-of-band close-out gap), L093 (planner brief lacks tier_hint awareness — demonstrated live on T031's first attempt). Six obs closed today: L032/L045/L055/L060/L063/L066/L067/L080.
+**Last updated:** 2026-05-05 (fourth pass) — T030 (L062 silent-zombie watchdog) + T031 (L060 schema-migrate subprocess) both shipped today via full drive + accept ceremony (T030 hand-recovered through merge conflict + manual ALTER TABLE for substrate-internal DDL gap). Watchdog now LIVE in the daemon. T029/T033 push attempted; surfaced three new engine bugs (L107/L108/L109) — see below. Eight obs closed today: L032/L045/L055/L060/L062/L063/L066/L067/L080.
 
 ## The picture in one sentence
 
-**The engine ratifies, drives, deploys schema cleanly across daemon-restart, and provisions worktrees that work — but it still can't (1) reliably catch silent-zombie subagent failures, (2) refill its own input queue, or (3) carry tier_hint awareness into agent briefs.** Layer 1's silent-zombie watchdog (L062, driving) is the next anchor fix; once it lands, Layer 8's auto-investigator GAP becomes the dominant strategic ceiling. Auto-promote's ~0% reliability today (L087) and the planner-brief tier-blindness (L093) are both same-shape gaps — the substrate's autonomous machinery doesn't carry enough metadata onto the work it spawns.
+**The engine ratifies, drives, deploys schema cleanly across daemon-restart, provisions worktrees that work, AND now catches silent-zombie subagent failures — but it can't (1) reliably differentiate stale dead-pids from real zombies (L107 watchdog scope/epoch), (2) reliably handle T1 task drives (L109 — never end-to-end-pulled before today), (3) propagate retroactive metadata changes (L108 on-entry actions; L093 planner brief), or (4) refill its own input queue.** The T1-drive gap (L109) is genuinely new information — it took a *realistic-pull* (T029) to surface. Layer 1's autonomous machinery is now substantially better at runtime correctness; the remaining brittleness is in the metadata-flow surfaces around it.
 
 ## Status legend
 
@@ -32,7 +32,9 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L067 | ✅ T032 | auto-drive into worktree now finds `.stores/` (substrate-side symlink in auto-scaffold) |
 | L062 | ✅ T030 | watchdog catches post-spawn silent zombies via tasks-table scan + grace window (`tests/drive_silent_zombie_e2e.rs`) |
 | L071 | 🟡 T029 | drive aborts on runner exit=1 (rate limit) but doesn't notify substrate (ratified; awaiting drive; downgraded T1) |
-| L087 | ⚪ — | **auto-promote silent-fails ~0% success on rapid sequential ratifies** — same dispatch-lock-marks-ok-but-no-task pattern as L062, on a different code path; suggests L062's fix may need to widen scope to the dispatch_lock primitive |
+| L087 | ⚪ — | **auto-promote silent-fails ~0% success on rapid sequential ratifies** — same dispatch-lock-marks-ok-but-no-task pattern as L062, on a different code path; T030's watchdog catches the runtime-side; auto-promote's spawn-without-task gap remains |
+| L107 | ⚪ T2 | **T030 watchdog reaps pre-existing dead drive_pids on first post-deploy sweep** — false positives from prior daemon lifetime + drive-startup race window; needs lock-recency / daemon-epoch / parent-pid-liveness check |
+| L109 | ⚪ T2 | **drive's next-action returns null for T1+ready+no-plan** — T1 path schema-ratified by T027 but never end-to-end-pulled; surfaced by T029 (first real T1 drive). Drive code likely missing the no-plan-executor-from-contract path |
 | L039 | ⚪ T2 | daemon retry-on-failure unimplemented; transient flakes strand rows |
 | L068 | ⚪ — | cross-project daemon SIGTERM (other-repo `pkill 'stores agents run'` kills mine) |
 | GAP | — | per-project daemon PID file + `stores agents status / stop` verbs |
@@ -42,7 +44,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | obs | state | what hurts |
 |---|---|---|
 | L063 | ✅ T025 | auto-promote uses `linked_observations` (not surfacing-task `task_id`) for idempotency |
-| L038 | 🟡 T033 | `depends_on` pre-flight guard (ratified; awaiting drive; T1) |
+| L038 | 🟡 T033 | `depends_on` pre-flight guard (ratified; awaiting drive; T1 — currently blocked on L109 T1-drive gap) |
+| L108 | ⚪ T2 | `fire_on_entry_follow_ons` fires only at add(); retroactive tier_hint update from T2→T1 doesn't re-trigger skip-plan; T029 hit this when downgraded mid-flight |
 | L011 | ⚪ T2 | rows don't record `stores` binary version |
 | L053 | ⚪ — | tier-A actor check bypassable via `--invoker human` from `$CLAUDECODE`-detected processes |
 
@@ -118,10 +121,20 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Highest-leverage next picks
 
-1. **L071** — close the remaining silent-zombie failure mode: drive aborts gracefully on runner exit=1 (rate limit) but doesn't notify substrate. L062's watchdog (T030) now catches drives that crash silently; L071 covers the cooperative-abort path.
-2. **L060** — schema-migrate from new binary. Unblocks deploy ceremony for any future task that adds schema. Also opens the door to safer daemon restarts.
-3. **L038** — `depends_on` enforcement. Already 🟠 ready. Lets us declare task chains without manual sequencing.
-4. **Auto-investigator subscriber (GAP)** — the single biggest strategic move. Flips the substrate from human-pulls to engine-pulls on contract drafting. File this, then ratify.
+T030 ✅ + T031 ✅ landed today. T029/T033 push surfaced three new engine bugs (L107/L108/L109). Remaining picks (re-ranked given the new surface):
+
+1. **L109 (T1-drive gap)** — T1 task drive path missing or broken. **Blocks T029 + T033.** Should investigate / fix before pushing more T1 work. T2 estimate.
+2. **L107 (watchdog scope)** — false positives at deploy-time + drive-startup race. T030's watchdog is currently slightly trigger-happy; doesn't break correctness but makes recovery from any stale state painful. T2 estimate.
+3. **L108 (on-entry retroactive trigger)** — fix tier_hint mid-flight without losing skip-plan. T2 estimate. Compounds with L109 fix; both about T1 metadata-flow.
+4. **L093 (planner brief tier-aware)** — T1 template change. Cheapest engine-economy improvement; saves ~$1-2 per T2 drive.
+5. **T029 (L071)** — once L109 fixed, this becomes a T1 drive (~5 min, ~$1-2).
+6. **T033 (L038)** — same as T029 once L109 fixed.
+7. **L087 investigation** — auto-promote's spawn-without-task gap on rapid ratifies. Same dispatch-lock-shape as the watchdog issues; ideally folded into a single dispatch_lock-primitive refactor.
+8. **Auto-investigator subscriber (GAP)** — strategic ceiling. Flips substrate from human-pulls to engine-pulls. Should be designed alongside L087 / L107 since they touch the same dispatch_lock primitive.
+9. **L092** (out-of-band close-out) — T2 modest. Lets hand-cranked tasks close cleanly through the substrate.
+10. **Substrate-internal DDL migration gap** (newly surfaced today during T030 ship — `actor_note` column added to `SUBSTRATE_DDL` but no migration path for existing DBs; required manual ALTER TABLE). Worth filing as fresh obs; not yet captured.
+
+The geodesic shifted: instead of "drive remaining tasks → engine fixed," the realistic-pull on T029 surfaced that **the T1 cycle has never been pulled end-to-end before**. Fix L109 first; T029/T033/future T1 work all unblock together.
 
 ## Recently shipped
 
