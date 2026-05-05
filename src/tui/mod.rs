@@ -157,11 +157,14 @@ fn handle_handoff<B: ratatui::backend::Backend>(
             }
         }
         Ok(outcome) => {
-            app.status_bar.message =
-                format!("sidecar exited non-zero: {}", outcome.status);
+            app.status_bar.message = format!(
+                "sidecar exit {} — q to leave alt-screen and read scrollback, or runs/sidecar/_last-spawn.log",
+                outcome.status,
+            );
         }
         Err(e) => {
-            app.status_bar.message = format!("sidecar spawn failed: {e}");
+            app.status_bar.message =
+                format!("sidecar spawn failed: {e} — see runs/sidecar/_last-spawn.log");
         }
     }
 

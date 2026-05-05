@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::NamedTempFile;
 
-use super::session::{find_resumable_in, mint_session_id};
+use super::session::mint_session_id;
 use super::{SessionId, SidecarScope};
 use crate::tui::priming::{build as build_priming, Priming};
 
@@ -29,32 +29,31 @@ pub struct HandoffPlan {
     pub is_resume: bool,
 }
 
-/// Decide the session id for `scope`: try `find_resumable_in` first; if it
-/// returns Some (and the scope wants resume), reuse; otherwise mint fresh.
+/// Plan a side-car handoff. `is_resume` is set from `try_resume` directly —
+/// the substrate doesn't track per-row claude sessions (claude owns its own
+/// session store). When `try_resume` is true the argv adds `--continue`,
+/// which resumes claude's most recent conversation in the cwd. Limitation:
+/// `--continue` is per-cwd, not per-row.
 ///
-/// `try_resume = false` short-circuits and always mints — used for `S`,
-/// `g`, `o` in the spawn key matrix.
+/// `session_id` is minted as a per-spawn correlation id used internally for
+/// keying obs-draft drop paths (`runs/sidecar/obs-draft-<id>.json`); it is
+/// never passed to claude.
+///
+/// `runs_dir` is unused now that the touch-on-spawn graveyard is gone, kept
+/// in the signature so call sites and tests don't need to be re-plumbed.
 pub fn plan_handoff(
     scope: SidecarScope,
-    runs_dir: &Path,
+    _runs_dir: &Path,
     priming_file_path: PathBuf,
     initial_message: String,
     try_resume: bool,
 ) -> HandoffPlan {
-    let (session_id, is_resume) = if try_resume {
-        match find_resumable_in(runs_dir, &scope) {
-            Some(id) => (id, true),
-            None => (mint_session_id(), false),
-        }
-    } else {
-        (mint_session_id(), false)
-    };
     HandoffPlan {
         scope,
-        session_id,
+        session_id: mint_session_id(),
         priming_file_path,
         initial_message,
-        is_resume,
+        is_resume: try_resume,
     }
 }
 
@@ -62,21 +61,17 @@ pub fn plan_handoff(
 /// production exec.
 ///
 /// Real claude (verified against 2.1.128): `--append-system-prompt-file
-/// <path>` reads the priming file, `--resume <session-id>` resumes (with the
-/// id as its value, not as a separate `--session-id` flag), `--session-id
-/// <uuid>` selects the id for a fresh session, and the prompt itself is a
-/// positional argument (last). There is no `--message` flag and no
-/// `@<file>` expansion on `--append-system-prompt`.
+/// <path>` reads the priming file, `--continue` resumes the most recent
+/// conversation in the cwd, and the prompt itself is a positional argument
+/// (last). The substrate does not pass `--session-id` (claude mints its own
+/// id for fresh sessions) and does not pass `--resume <uuid>` (the substrate
+/// doesn't track claude's session ids).
 pub fn build_argv(claude_bin: &Path, plan: &HandoffPlan) -> Vec<String> {
     let mut v = vec![claude_bin.to_string_lossy().into_owned()];
     v.push("--append-system-prompt-file".to_string());
     v.push(plan.priming_file_path.display().to_string());
     if plan.is_resume {
-        v.push("--resume".to_string());
-        v.push(plan.session_id.0.clone());
-    } else {
-        v.push("--session-id".to_string());
-        v.push(plan.session_id.0.clone());
+        v.push("--continue".to_string());
     }
     v.push(plan.initial_message.clone());
     v
@@ -134,12 +129,6 @@ pub fn handoff_inner(
         should_try_resume(&scope),
     );
 
-    // Touch the JSONL session file so future `find_resumable_in` calls
-    // pick it up. The shim / real claude can append to this path.
-    let session_path =
-        super::session::session_path_in(runs_dir, &plan.scope, &plan.session_id);
-    super::session::touch(&session_path).ok();
-
     let argv = build_argv(claude_bin, &plan);
     let status = exec_claude(claude_bin, &plan)?;
 
@@ -186,7 +175,6 @@ fn write_priming_tempfile(p: &Priming) -> Result<NamedTempFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::sidecar::session::{session_path_in, touch};
 
     fn make_plan(scope: SidecarScope, session_id: &str, is_resume: bool) -> HandoffPlan {
         HandoffPlan {
@@ -217,15 +205,21 @@ mod tests {
             assert_eq!(argv[0], "/usr/bin/claude");
             assert_eq!(argv[1], "--append-system-prompt-file");
             assert_eq!(argv[2], "/tmp/priming.md");
-            assert_eq!(argv[3], "--resume");
-            assert_eq!(argv[4], "sess-warm-uuid");
+            assert_eq!(argv[3], "--continue");
             // Initial message rides as a positional argument (last).
-            assert!(argv[5].contains("TOK=abc"));
-            assert_eq!(argv.len(), 6);
-            assert!(
-                !argv.iter().any(|a| a == "--message"),
-                "regression guard: claude has no --message flag"
-            );
+            assert!(argv[4].contains("TOK=abc"));
+            assert_eq!(argv.len(), 5);
+            for guard in [
+                "--message",
+                "--session-id",
+                "--resume",
+            ] {
+                assert!(
+                    !argv.iter().any(|a| a == guard),
+                    "regression guard: argv must not contain {guard} (substrate does \
+                     not mint or pass claude session ids)"
+                );
+            }
             assert!(
                 !argv.iter().any(|a| a.starts_with('@')),
                 "regression guard: claude has no @<file> expansion"
@@ -233,7 +227,7 @@ mod tests {
         }
 
         #[test]
-        fn capital_s_per_row_fresh_no_resume_flag() {
+        fn capital_s_per_row_fresh_no_continue() {
             let plan = make_plan(
                 SidecarScope::PerRow {
                     display_id: "T123".to_string(),
@@ -243,25 +237,25 @@ mod tests {
                 false,
             );
             let argv = build_argv(Path::new("claude"), &plan);
+            assert!(!argv.contains(&"--continue".to_string()));
+            assert!(!argv.contains(&"--session-id".to_string()));
             assert!(!argv.contains(&"--resume".to_string()));
-            assert!(argv.contains(&"--session-id".to_string()));
-            // Session id sits next to its flag, not split.
-            let idx = argv.iter().position(|a| a == "--session-id").unwrap();
-            assert_eq!(argv[idx + 1], "sess-fresh");
         }
 
         #[test]
-        fn general_no_resume() {
+        fn general_no_continue() {
             let plan = make_plan(SidecarScope::General, "sess-g", false);
             let argv = build_argv(Path::new("claude"), &plan);
-            assert!(!argv.contains(&"--resume".to_string()));
+            assert!(!argv.contains(&"--continue".to_string()));
+            assert!(!argv.contains(&"--session-id".to_string()));
         }
 
         #[test]
-        fn obs_draft_no_resume() {
+        fn obs_draft_no_continue() {
             let plan = make_plan(SidecarScope::ObsDraft, "sess-o", false);
             let argv = build_argv(Path::new("claude"), &plan);
-            assert!(!argv.contains(&"--resume".to_string()));
+            assert!(!argv.contains(&"--continue".to_string()));
+            assert!(!argv.contains(&"--session-id".to_string()));
         }
     }
 
@@ -271,16 +265,18 @@ mod tests {
         use super::*;
 
         #[test]
-        fn resume_within_ttl() {
+        fn try_resume_drives_is_resume_directly() {
+            // After dropping substrate-side session-id minting, plan_handoff
+            // sets is_resume = try_resume directly. The session_id field is
+            // now a per-spawn correlation id (used only for obs-draft path
+            // keying); plan_handoff mints a fresh one every call and never
+            // reads runs_dir.
             let tmp = tempfile::tempdir().unwrap();
             let scope = SidecarScope::PerRow {
                 display_id: "T999".to_string(),
                 fresh: false,
             };
-            let warm_id = SessionId("warm-uuid-xyz".to_string());
-            touch(&session_path_in(tmp.path(), &scope, &warm_id)).unwrap();
 
-            // First press of `s`: try_resume=true → reuses warm id.
             let plan_s1 = plan_handoff(
                 scope.clone(),
                 tmp.path(),
@@ -288,10 +284,8 @@ mod tests {
                 "msg".to_string(),
                 true,
             );
-            assert_eq!(plan_s1.session_id, warm_id);
-            assert!(plan_s1.is_resume);
+            assert!(plan_s1.is_resume, "try_resume=true → is_resume=true");
 
-            // Second press of `s`: still resumes.
             let plan_s2 = plan_handoff(
                 scope.clone(),
                 tmp.path(),
@@ -299,9 +293,11 @@ mod tests {
                 "msg".to_string(),
                 true,
             );
-            assert_eq!(plan_s2.session_id, warm_id);
+            assert_ne!(
+                plan_s1.session_id, plan_s2.session_id,
+                "every plan_handoff mints a fresh correlation id — never reuses"
+            );
 
-            // `S` (try_resume=false) mints fresh.
             let plan_capital = plan_handoff(
                 SidecarScope::PerRow {
                     display_id: "T999".to_string(),
@@ -312,7 +308,6 @@ mod tests {
                 "msg".to_string(),
                 false,
             );
-            assert_ne!(plan_capital.session_id, warm_id);
             assert!(!plan_capital.is_resume);
         }
 
