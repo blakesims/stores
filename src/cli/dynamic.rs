@@ -211,16 +211,46 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .about("Decrypt and print the approval token (prompts for passphrase / hardware tap)"),
                 ),
         )
-        // Watch subcommand — POC live dashboard
+        // Watch subcommand — ratatui TUI (T028); --legacy falls back to ANSI POC
         .subcommand(
             Command::new("watch")
-                .about("Live-tail the substrate: tasks + observations, refreshing in place (POC)")
+                .about("Live-tail the substrate: tasks + observations, refreshing in place")
                 .arg(
                     Arg::new("interval")
                         .long("interval")
                         .help("Refresh interval in seconds (default 1.0)")
                         .value_parser(clap::value_parser!(f64))
                         .required(false),
+                )
+                .arg(
+                    Arg::new("state")
+                        .long("state")
+                        .help("Filter rows by state (e.g. executing, plan_review)")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("priority")
+                        .long("priority")
+                        .help("Filter rows by priority (high|normal|low)")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("tier")
+                        .long("tier")
+                        .help("Filter rows by tier hint (T0|T1|T2|T3)")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("since")
+                        .long("since")
+                        .help("Filter rows updated since (ISO timestamp or duration like 1h)")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("legacy")
+                        .long("legacy")
+                        .action(ArgAction::SetTrue)
+                        .help("Use the legacy ANSI POC instead of the ratatui TUI"),
                 ),
         )
         // Topology subcommand — static schematic of stores, state machines, and workflow firing order

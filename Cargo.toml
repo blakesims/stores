@@ -24,6 +24,8 @@ subtle = "2"
 getrandom = "0.2"
 hex = "0.4"
 jsonschema = { version = "0.18", optional = true }
+ratatui = "0.28"
+crossterm = "0.28"
 
 [features]
 default = ["runner-claude-code"]

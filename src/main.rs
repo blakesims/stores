@@ -160,7 +160,20 @@ fn main() -> Result<()> {
         Some(("watch", sub)) => {
             let interval_secs = sub.get_one::<f64>("interval").copied().unwrap_or(1.0);
             let interval_ms = (interval_secs * 1000.0).max(100.0) as u64;
-            cli::watch::run(interval_ms)?;
+            let legacy = *sub.get_one::<bool>("legacy").unwrap_or(&false);
+            if legacy {
+                cli::watch::run(interval_ms)?;
+            } else {
+                let opts = stores::tui::TuiOpts {
+                    interval_ms,
+                    state_filter: sub.get_one::<String>("state").cloned(),
+                    priority_filter: sub.get_one::<String>("priority").cloned(),
+                    tier_filter: sub.get_one::<String>("tier").cloned(),
+                    since_filter: sub.get_one::<String>("since").cloned(),
+                    legacy: false,
+                };
+                stores::tui::run(opts)?;
+            }
         }
         Some(("skills", sub)) => {
             use cli::skills::{run as skills_run, SkillsCmd};
