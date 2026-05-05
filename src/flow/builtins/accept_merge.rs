@@ -9,11 +9,13 @@
 
 use anyhow::Context;
 use serde_json::Value;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::flow::builtins::{
-    dispatch_to_specialist, fire_mark_deploy_blocked, resolve_main_repo, BuiltinResult, DispatchCtx,
+    dispatch_to_specialist, fire_framework_transition, fire_mark_deploy_blocked,
+    resolve_main_repo, BuiltinResult, DispatchCtx,
 };
 use crate::flow::NotifyEvent;
 
@@ -38,6 +40,34 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             display_id
         );
         return Ok(1);
+    }
+
+    // Already-merged short-circuit: when the worktree at workspace_path has
+    // been cleaned up post-merge, resolve_main_repo() returns None and the
+    // legacy code path falls into a no-op Ok(1). Probe via a usable main-repo
+    // path (workspace_path if still live, else daemon cwd) and, if the branch
+    // is already merged into main, fire mark_cargo_installed and return Ok(0).
+    if let Some(main_repo_for_check) = resolve_main_repo_for_check(workspace_path) {
+        if is_branch_merged_into_main(&main_repo_for_check, branch) {
+            eprintln!(
+                "[accept-merge] {}: branch '{}' already merged into main; firing mark_cargo_installed (noop-merge)",
+                display_id, branch
+            );
+            fire_framework_transition(
+                ctx.conn,
+                display_id,
+                "mark_cargo_installed",
+                BTreeMap::new(),
+                ctx.policies_hash,
+            )
+            .with_context(|| {
+                format!(
+                    "firing mark_cargo_installed for already-merged {}",
+                    display_id
+                )
+            })?;
+            return Ok(0);
+        }
     }
 
     let main_repo = match resolve_main_repo(workspace_path) {
@@ -111,6 +141,48 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     dispatch_to_specialist(row, ctx, display_id, "accept-merge");
 
     Ok(0)
+}
+
+/// Best-effort: returns true iff `branch` is an ancestor of `main` in
+/// `main_repo`. The CLI form in scope_in (`git branch --merged main | grep
+/// <branch>`) is an English description; `merge-base --is-ancestor` is the
+/// robust mechanical equivalent (exit 0 = ancestor/merged, non-zero = not).
+fn is_branch_merged_into_main(main_repo: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args([
+            "-C",
+            main_repo.to_str().unwrap_or("."),
+            "merge-base",
+            "--is-ancestor",
+            branch,
+            "main",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Resolve a usable main-repo path for the already-merged probe. Tries the
+/// row's `workspace_path` first; if the worktree has been cleaned, falls
+/// back to the daemon's cwd (which is the substrate's main repo).
+fn resolve_main_repo_for_check(workspace_path: &str) -> Option<PathBuf> {
+    if let Some(p) = resolve_main_repo(workspace_path) {
+        return Some(p);
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let out = Command::new("git")
+        .args([
+            "-C",
+            cwd.to_str().unwrap_or("."),
+            "rev-parse",
+            "--git-common-dir",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(cwd)
 }
 
 fn list_conflict_files(main_repo: &Path) -> Vec<String> {

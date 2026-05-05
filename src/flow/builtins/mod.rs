@@ -1153,6 +1153,80 @@ mod tests {
         }
     }
 
+    /// T024 P1: accept-merge short-circuits to mark_cargo_installed when the
+    /// branch is already merged into main and the worktree at workspace_path
+    /// has been cleaned (resolve_main_repo returns None). The probe falls
+    /// back to the daemon cwd, sees the merge-base, fires the transition,
+    /// and returns Ok(0) without attempting fetch/merge on the stale path.
+    #[test]
+    fn m_accept_merge_noop_when_branch_already_merged_and_workspace_gone() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_g = crate::paths::test_cwd_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let (tmp, repo) = init_repo();
+        // Build a fast-forwarded branch then merge it into main. After this
+        // `merge-base --is-ancestor feat/already-merged main` is true.
+        git(&repo, &["checkout", "-b", "feat/already-merged"]);
+        std::fs::write(repo.join("ff.txt"), "ff\n").unwrap();
+        git(&repo, &["add", "ff.txt"]);
+        git(&repo, &["commit", "-m", "ff change"]);
+        git(&repo, &["checkout", "main"]);
+        let m = git(&repo, &["merge", "--no-ff", "--no-edit", "feat/already-merged"]);
+        assert!(m.status.success(), "pre-merge into main failed: {:?}", m);
+
+        // Move daemon cwd into the live main repo BEFORE accept_merge::run.
+        let old_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&repo).expect("set_current_dir failed");
+
+        // Stale workspace_path: worktree was cleaned up after the merge.
+        let gone = tmp.path().join("worktrees/T999-gone");
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_accepted_task(
+            &conn,
+            "T999",
+            "feat/already-merged",
+            gone.to_str().unwrap(),
+        );
+        let row = task_row_json(&conn, "T999");
+        let agents = empty_agents_yaml();
+        let cfg = cfg_path();
+        let ctx = DispatchCtx {
+            conn: &conn,
+            agents: &agents,
+            config_path: &cfg,
+            policies_hash: "",
+        };
+
+        let res = accept_merge::run(&row, &ctx);
+
+        // Restore cwd before any panic from assertions below.
+        std::env::set_current_dir(&old_cwd).expect("restore cwd failed");
+
+        assert_eq!(res.unwrap(), 0);
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T999'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "cargo_installed");
+
+        let (verb, invoker): (String, String) = conn
+            .query_row(
+                "SELECT verb, invoker FROM transition_history \
+                 WHERE store='tasks' AND display_id='T999' AND verb='mark_cargo_installed'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(verb, "mark_cargo_installed");
+        assert_eq!(invoker, "framework");
+    }
+
     /// AC1.4: a row at `in_review` rejects mark_drive_failed (no transition
     /// declared from in_review via that verb).
     #[test]
