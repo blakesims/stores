@@ -286,12 +286,11 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     /// All builtin tests share the global notifier + STORES_NTFY_URL env;
-    /// serialize them so captured events stay scoped per test. Public so
-    /// sibling modules' tests (e.g. `auto_drive::tests`) can serialize
-    /// against the same lock when they install a mock notifier.
+    /// serialize them via the process-wide notifier lock so cross-module
+    /// tests (e.g. `handlers::agents_run::tests::policy`) that also install
+    /// mocks don't clobber each other's captured events.
     pub(crate) fn lock() -> &'static Mutex<()> {
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(()))
+        crate::paths::test_notifier_lock()
     }
 
     struct Shim {
@@ -817,33 +816,16 @@ mod tests {
 
     // -----------------------------------------------------------------
     // Phase 3: builtin:schema-migrate
+    //
+    // The success-path no-op and applies-new-columns scenarios are covered
+    // end-to-end in `tests/schema_migrate_post_accept_e2e.rs` (T031 P2).
+    // Subprocess-driven migration cannot be unit-tested here because
+    // `env!("CARGO_BIN_EXE_stores")` is only set for integration test
+    // crates — lib unit tests have no path to the freshly-built binary.
+    // The failure path (subprocess error → deploy_blocked) remains testable
+    // here via a deliberately-bad manifest, since the failure surfaces
+    // before the subprocess succeeds.
     // -----------------------------------------------------------------
-
-    /// Set up a workspace at `root/.stores/manifest.yaml` referencing the
-    /// three bundled stores via `bundled:<name>`. Tasks rows on `conn` use
-    /// this `root` as their `workspace_path` so `apply_at` can load it.
-    fn write_bundled_manifest(root: &Path) {
-        let stores_dir = root.join(".stores");
-        std::fs::create_dir_all(&stores_dir).unwrap();
-        let yaml = r#"stores:
-  - name: tasks
-    schema_path: bundled:tasks
-    installed_at: 2026-05-03T00:00:00Z
-    table_name: tasks
-    scope: worktree
-  - name: observations
-    schema_path: bundled:observations
-    installed_at: 2026-05-03T00:00:00Z
-    table_name: observations
-    scope: worktree
-  - name: gate
-    schema_path: bundled:gate
-    installed_at: 2026-05-03T00:00:00Z
-    table_name: gate
-    scope: worktree
-"#;
-        std::fs::write(stores_dir.join("manifest.yaml"), yaml).unwrap();
-    }
 
     /// Insert a task already in `cargo_installed` status (the precondition
     /// for the schema-migrate subscriber).
@@ -860,144 +842,6 @@ mod tests {
             rusqlite::params![display_id, workspace_path, contract, now],
         ).unwrap();
         conn.last_insert_rowid()
-    }
-
-    /// AC3.2 / test (c): in-sync DB → no-op, no deploy_blocked flip,
-    /// `mark_schema_migrated` recorded in transition_history.
-    #[test]
-    fn c_schema_migrate_no_op_in_sync() {
-        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        write_bundled_manifest(root);
-
-        // Install gate too — manifest references all three stores; the
-        // tasks/observations tables come from fresh_db_with_tasks().
-        let (conn, _t, _o) = fresh_db_with_tasks();
-        let gate_yaml = BUNDLED_STORE_SCHEMAS
-            .iter()
-            .find(|(n, _)| *n == "gate")
-            .map(|(_, y)| *y)
-            .unwrap();
-        let gate = Schema::from_yaml(gate_yaml).unwrap();
-        conn.execute_batch(&ddl_for(&gate)).unwrap();
-
-        insert_cargo_installed_task(&conn, "T500", root.to_str().unwrap());
-        let row = task_row_json(&conn, "T500");
-        let agents = empty_agents_yaml();
-        let cfg = cfg_path();
-        let ctx = DispatchCtx {
-            conn: &conn,
-            agents: &agents,
-            config_path: &cfg,
-            policies_hash: "",
-        };
-
-        let res = schema_migrate::run(&row, &ctx).unwrap();
-        assert_eq!(res, 0);
-
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM tasks WHERE display_id='T500'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "schema_migrated");
-
-        let n_blocked: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM transition_history \
-                 WHERE store='tasks' AND display_id='T500' AND verb='mark_deploy_blocked'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(n_blocked, 0, "no deploy_blocked flip on no-op");
-
-        let (verb, invoker): (String, String) = conn
-            .query_row(
-                "SELECT verb, invoker FROM transition_history \
-                 WHERE store='tasks' AND display_id='T500' AND verb='mark_schema_migrated'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(verb, "mark_schema_migrated");
-        assert_eq!(invoker, "framework");
-    }
-
-    /// AC3.3 / test (d): drift — drop a non-reserved column from a substrate
-    /// table; schema-migrate re-adds it and fires `mark_schema_migrated`.
-    #[test]
-    fn d_schema_migrate_applies_new_columns() {
-        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        write_bundled_manifest(root);
-
-        let (conn, _t, _o) = fresh_db_with_tasks();
-        let gate_yaml = BUNDLED_STORE_SCHEMAS
-            .iter()
-            .find(|(n, _)| *n == "gate")
-            .map(|(_, y)| *y)
-            .unwrap();
-        let gate = Schema::from_yaml(gate_yaml).unwrap();
-        conn.execute_batch(&ddl_for(&gate)).unwrap();
-
-        // Pick a non-reserved TEXT column from observations and drop it.
-        let obs_yaml = BUNDLED_STORE_SCHEMAS
-            .iter()
-            .find(|(n, _)| *n == "observations")
-            .map(|(_, y)| *y)
-            .unwrap();
-        let obs = Schema::from_yaml(obs_yaml).unwrap();
-        let target = crate::codegen::ddl::expected_columns(&obs)
-            .into_iter()
-            .find(|c| !c.is_reserved && c.sql_type == "TEXT")
-            .expect("observations must have a TEXT field");
-        conn.execute_batch(&format!(
-            "ALTER TABLE \"observations\" DROP COLUMN \"{}\";",
-            target.name
-        ))
-        .unwrap();
-
-        insert_cargo_installed_task(&conn, "T501", root.to_str().unwrap());
-        let row = task_row_json(&conn, "T501");
-        let agents = empty_agents_yaml();
-        let cfg = cfg_path();
-        let ctx = DispatchCtx {
-            conn: &conn,
-            agents: &agents,
-            config_path: &cfg,
-            policies_hash: "",
-        };
-
-        schema_migrate::run(&row, &ctx).unwrap();
-
-        // Column re-added.
-        let cols: Vec<String> = conn
-            .prepare("PRAGMA table_info(\"observations\")")
-            .unwrap()
-            .query_map([], |r| r.get::<_, String>(1))
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect();
-        assert!(
-            cols.contains(&target.name),
-            "expected '{}' to be re-added; got cols: {:?}",
-            target.name,
-            cols
-        );
-
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM tasks WHERE display_id='T501'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "schema_migrated");
     }
 
     /// AC3.4 / test (e): migrate failure — manifest references a missing

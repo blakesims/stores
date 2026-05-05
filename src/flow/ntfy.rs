@@ -227,8 +227,13 @@ mod tests {
     fn install_notifier_replaces_global() {
         // Smoke test: install a mock and round-trip via notify_with_path.
         // We use a unique config path so the env-fallback test above isn't
-        // affected by leakage.
-        let _g = env_lock().lock().unwrap();
+        // affected by leakage. Hold the process-wide notifier lock so we
+        // don't race with other modules' tests that also install global
+        // mocks (flow::builtins::tests, handlers::agents_run::tests).
+        let _g = crate::paths::test_notifier_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _e = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
         std::fs::write(&path, "ntfy:\n  url: https://global-test\n").unwrap();

@@ -98,27 +98,29 @@ fn setup_conflict_repo(branch: &str) -> (tempfile::TempDir, PathBuf) {
     (tmp, repo)
 }
 
+/// Initialize the workspace's on-disk substrate so the schema-migrate
+/// subprocess (T031 P1) finds a real `.stores/db.sqlite` to operate on.
+/// Walks `init::run()` + `install::run(<name>)` for each bundled store under
+/// `root` as CWD, then restores the original CWD. Holds a process-wide
+/// mutex because `set_current_dir` is global.
 fn write_bundled_manifest(root: &Path) {
-    let stores_dir = root.join(".stores");
-    std::fs::create_dir_all(&stores_dir).unwrap();
-    let yaml = r#"stores:
-  - name: tasks
-    schema_path: bundled:tasks
-    installed_at: 2026-05-03T00:00:00Z
-    table_name: tasks
-    scope: worktree
-  - name: observations
-    schema_path: bundled:observations
-    installed_at: 2026-05-03T00:00:00Z
-    table_name: observations
-    scope: worktree
-  - name: gate
-    schema_path: bundled:gate
-    installed_at: 2026-05-03T00:00:00Z
-    table_name: gate
-    scope: worktree
-"#;
-    std::fs::write(stores_dir.join("manifest.yaml"), yaml).unwrap();
+    let _g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let old_cwd = std::env::current_dir().expect("get cwd");
+    std::env::set_current_dir(root).expect("cd workspace");
+    stores::cli::init::run().expect("stores init");
+    for &name in stores::cli::dynamic::BUNDLED_STORE_NAMES {
+        stores::install::run(&PathBuf::from(name))
+            .unwrap_or_else(|e| panic!("install {name} failed: {e}"));
+    }
+    std::env::set_current_dir(&old_cwd).expect("restore cwd");
+}
+
+/// Process-wide CWD lock for this test binary — `setup_chain_repo` /
+/// `setup_conflict_repo` chdir into each fresh tempdir during init+install.
+fn cwd_lock() -> &'static std::sync::Mutex<()> {
+    use std::sync::{Mutex, OnceLock};
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
 }
 
 fn fresh_db_with_substrate() -> Connection {
@@ -230,6 +232,9 @@ fn ac4_1_chain_isolation_failure_does_not_block_peer() {
     let target_dir = tempfile::tempdir().unwrap();
     std::env::set_var("CARGO_HOME", cargo_home.path());
     std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    // T031 P1: schema-migrate now spawns a subprocess. Point it at the
+    // test-built binary so it picks up this branch's bundled schemas.
+    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
 
     let (_t100_tmp, t100_repo) = setup_chain_repo("feat/t100", "t100-only");
     let (_t101_tmp, t101_repo) = setup_conflict_repo("feat/t101");
