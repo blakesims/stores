@@ -60,17 +60,25 @@ pub fn plan_handoff(
 
 /// Assemble the argv vector for Claude Code. Pure — used by tests +
 /// production exec.
+///
+/// Real claude (verified against 2.1.128): `--append-system-prompt-file
+/// <path>` reads the priming file, `--resume <session-id>` resumes (with the
+/// id as its value, not as a separate `--session-id` flag), `--session-id
+/// <uuid>` selects the id for a fresh session, and the prompt itself is a
+/// positional argument (last). There is no `--message` flag and no
+/// `@<file>` expansion on `--append-system-prompt`.
 pub fn build_argv(claude_bin: &Path, plan: &HandoffPlan) -> Vec<String> {
     let mut v = vec![claude_bin.to_string_lossy().into_owned()];
-    v.push("--append-system-prompt".to_string());
-    v.push(format!("@{}", plan.priming_file_path.display()));
-    v.push("--message".to_string());
-    v.push(plan.initial_message.clone());
-    v.push("--session-id".to_string());
-    v.push(plan.session_id.0.clone());
+    v.push("--append-system-prompt-file".to_string());
+    v.push(plan.priming_file_path.display().to_string());
     if plan.is_resume {
         v.push("--resume".to_string());
+        v.push(plan.session_id.0.clone());
+    } else {
+        v.push("--session-id".to_string());
+        v.push(plan.session_id.0.clone());
     }
+    v.push(plan.initial_message.clone());
     v
 }
 
@@ -132,7 +140,19 @@ pub fn handoff_inner(
         super::session::session_path_in(runs_dir, &plan.scope, &plan.session_id);
     super::session::touch(&session_path).ok();
 
+    let argv = build_argv(claude_bin, &plan);
     let status = exec_claude(claude_bin, &plan)?;
+
+    // Postmortem trail — the TUI suspends raw mode + alt-screen during exec,
+    // so any stderr from a failed claude invocation is wiped on restore.
+    // This file is the only artifact that survives a quick failure.
+    let _ = std::fs::write(
+        runs_dir.join("_last-spawn.log"),
+        format!(
+            "scope: {:?}\nsession_id: {}\nis_resume: {}\nargv: {:?}\nstatus: {:?}\n",
+            plan.scope, plan.session_id.0, plan.is_resume, argv, status,
+        ),
+    );
 
     let (obs_draft_body, obs_draft_path) = if matches!(scope, SidecarScope::ObsDraft) {
         let p = obs_draft_path_for(runs_dir, &plan.session_id);
@@ -195,14 +215,21 @@ mod tests {
             );
             let argv = build_argv(Path::new("/usr/bin/claude"), &plan);
             assert_eq!(argv[0], "/usr/bin/claude");
-            assert_eq!(argv[1], "--append-system-prompt");
-            assert_eq!(argv[2], "@/tmp/priming.md");
-            assert_eq!(argv[3], "--message");
-            assert!(argv[4].contains("TOK=abc"));
-            assert_eq!(argv[5], "--session-id");
-            assert_eq!(argv[6], "sess-warm-uuid");
-            assert_eq!(argv[7], "--resume");
-            assert_eq!(argv.len(), 8);
+            assert_eq!(argv[1], "--append-system-prompt-file");
+            assert_eq!(argv[2], "/tmp/priming.md");
+            assert_eq!(argv[3], "--resume");
+            assert_eq!(argv[4], "sess-warm-uuid");
+            // Initial message rides as a positional argument (last).
+            assert!(argv[5].contains("TOK=abc"));
+            assert_eq!(argv.len(), 6);
+            assert!(
+                !argv.iter().any(|a| a == "--message"),
+                "regression guard: claude has no --message flag"
+            );
+            assert!(
+                !argv.iter().any(|a| a.starts_with('@')),
+                "regression guard: claude has no @<file> expansion"
+            );
         }
 
         #[test]
@@ -218,6 +245,9 @@ mod tests {
             let argv = build_argv(Path::new("claude"), &plan);
             assert!(!argv.contains(&"--resume".to_string()));
             assert!(argv.contains(&"--session-id".to_string()));
+            // Session id sits next to its flag, not split.
+            let idx = argv.iter().position(|a| a == "--session-id").unwrap();
+            assert_eq!(argv[idx + 1], "sess-fresh");
         }
 
         #[test]
