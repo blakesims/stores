@@ -113,7 +113,7 @@ impl FilterPalette {
 
     fn reparse(&mut self) {
         let mut p = FilterPredicate::default();
-        for part in self.buffer.split(|c: char| c == ' ' || c == ',') {
+        for part in self.buffer.split([' ', ',']) {
             let part = part.trim();
             if part.is_empty() {
                 continue;

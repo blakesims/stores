@@ -129,8 +129,8 @@ fn month_lengths(y: i32) -> [u32; 12] {
 fn iso_week_of(y: i32, mo: u32, d: u32) -> u32 {
     let lengths = month_lengths(y);
     let mut ordinal: u32 = d;
-    for m in 0..(mo as usize - 1) {
-        ordinal += lengths[m];
+    for len in lengths.iter().take((mo as usize).saturating_sub(1)) {
+        ordinal += len;
     }
     ((ordinal - 1) / 7) + 1
 }

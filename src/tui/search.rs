@@ -58,6 +58,7 @@ impl SearchState {
     }
 
     /// Move to the next hit (`n`); returns the new flat index, if any.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<usize> {
         if self.hits.is_empty() {
             return None;
@@ -110,7 +111,7 @@ mod tests {
 
     #[test]
     fn search_t01_matches_first_task() {
-        let rows = vec![
+        let rows = [
             task("T010", "tenth"),
             task("T002", "second"),
             task("T011", "eleventh"),
@@ -133,7 +134,7 @@ mod tests {
 
     #[test]
     fn search_summary_fragment_case_insensitive() {
-        let rows = vec![
+        let rows = [
             obs("L001", "Daemon liveness wedged"),
             obs("L002", "Approval token broken"),
         ];
@@ -149,7 +150,7 @@ mod tests {
 
     #[test]
     fn empty_query_returns_no_hits() {
-        let rows = vec![task("T001", "x")];
+        let rows = [task("T001", "x")];
         let flat: Vec<&Row> = rows.iter().collect();
         let mut s = SearchState::open();
         assert_eq!(s.recompute(&flat), None);

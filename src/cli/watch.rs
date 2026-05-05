@@ -467,6 +467,21 @@ fn clock_suffix(ts: &str) -> String {
     }
 }
 
+fn local_clock_string() -> String {
+    // Cheap clock without chrono: SystemTime → epoch secs → HH:MM:SS local-ish.
+    // We approximate "local" by reading the TZ offset via libc's localtime_r
+    // is overkill; for a POC, print UTC HH:MM:SS — clearly labelled.
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02} UTC")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,19 +694,4 @@ mod tests {
             );
         }
     }
-}
-
-fn local_clock_string() -> String {
-    // Cheap clock without chrono: SystemTime → epoch secs → HH:MM:SS local-ish.
-    // We approximate "local" by reading the TZ offset via libc's localtime_r
-    // is overkill; for a POC, print UTC HH:MM:SS — clearly labelled.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{h:02}:{m:02}:{s:02} UTC")
 }

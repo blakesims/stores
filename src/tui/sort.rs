@@ -35,7 +35,7 @@ impl Sort {
 }
 
 /// Sort an index list (into `rows`) in-place per the active key.
-pub fn sort_indices(sort: Sort, rows: &[Row], indices: &mut Vec<usize>) {
+pub fn sort_indices(sort: Sort, rows: &[Row], indices: &mut [usize]) {
     match sort {
         Sort::UpdatedDesc => indices.sort_by(|&a, &b| updated(&rows[b]).cmp(updated(&rows[a]))),
         Sort::UpdatedAsc => indices.sort_by(|&a, &b| updated(&rows[a]).cmp(updated(&rows[b]))),
