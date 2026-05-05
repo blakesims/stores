@@ -674,6 +674,114 @@ mod tests {
         assert!(finished.is_some(), "lock must be closed after sweep");
     }
 
+    // -----------------------------------------------------------------
+    // T030 Phase 1: silent-zombie reproductions (these MUST FAIL on main)
+    // -----------------------------------------------------------------
+
+    /// Insert a closed lock — `finished_at` is SET, simulating
+    /// `mark_claim_finished` already ran post-spawn (the L062 shape).
+    fn insert_lock_closed(conn: &Connection, row_id: i64, display_id: &str) {
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, last_status, finished_at) \
+             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, '2026-05-03T00:00:00Z', 'test-claimer', 'ok', '2026-05-03T00:00:01Z')",
+            rusqlite::params![row_id, display_id],
+        )
+        .unwrap();
+    }
+
+    /// L062 silent-zombie shape #1: row stuck at `executing` with a dead
+    /// `drive_pid`, but the dispatch_lock has already been closed by the
+    /// post-spawn `mark_claim_finished` (so the current sweep's
+    /// `WHERE finished_at IS NULL` filter skips it). Watchdog must still
+    /// detect the zombie and flip the row to `blocked`.
+    ///
+    /// MUST FAIL on current main: sweep_drive_watchdog only inspects locks
+    /// with `finished_at IS NULL`, so the row is left in `executing`.
+    #[test]
+    fn watchdog_silent_zombie_lock_already_closed() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T730", "executing", Some(dead_pid()));
+        insert_lock_closed(&conn, row_id, "T730");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T730'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "blocked",
+            "L062 silent zombie: row stays '{}' instead of flipping to 'blocked' (closed-lock path)",
+            status
+        );
+        assert_eq!(reason.as_deref(), Some("drive_failed"));
+    }
+
+    /// L062 silent-zombie shape #2: drive subprocess died before recording
+    /// its PID (the `UPDATE tasks SET drive_pid = ?` after spawn never
+    /// committed). Row is stuck at `planning` with `drive_pid` NULL; the
+    /// lock has been closed; the row's `updated_at` is far past the grace
+    /// window. Watchdog must detect and flip to `blocked` with a
+    /// `pid_never_recorded` annotation.
+    ///
+    /// MUST FAIL on current main: sweep_drive_watchdog skips locks with
+    /// `finished_at IS NOT NULL` AND skips rows with `drive_pid <= 0`.
+    #[test]
+    fn watchdog_silent_zombie_pid_not_yet_recorded() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        // drive_pid=NULL ⇒ post-spawn UPDATE never landed.
+        let row_id = insert_task_full(&conn, "T731", "planning", None);
+        // updated_at on the row is hard-coded "2026-05-03T00:00:00Z" by
+        // insert_task_full — > grace_window seconds ago for any sane window.
+        insert_lock_closed(&conn, row_id, "T731");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T731'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "blocked",
+            "L062 silent zombie: row stays '{}' instead of flipping to 'blocked' (pid_never_recorded path)",
+            status
+        );
+        assert_eq!(reason.as_deref(), Some("drive_failed"));
+
+        // The reason note `pid_never_recorded` must appear in the most
+        // recent transition_history row's annotation/details for T731.
+        let note: String = conn
+            .query_row(
+                "SELECT COALESCE(actor_note, '') FROM transition_history \
+                 WHERE display_id='T731' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        assert!(
+            note.contains("pid_never_recorded"),
+            "expected reason note 'pid_never_recorded' in last transition_history; got {:?}",
+            note
+        );
+    }
+
     /// AC4.4: dispatch_builtin("auto-drive", ...) resolves to this module.
     #[test]
     fn dispatch_builtin_returns_some_for_auto_drive() {
