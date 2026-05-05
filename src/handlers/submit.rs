@@ -514,6 +514,22 @@ pub(crate) fn compute_submit_plan(
     let mut merged = existing.clone();
     merged.insert(plan_field.to_string(), plan_json.clone());
 
+    // T027 P4: tier-T2 phase-count gate. T2 plans must contain exactly one
+    // phase (the contract IS that single phase). T1 never reaches submit-plan
+    // (planner is skipped); T3 unconstrained.
+    if merged.get("tier_hint").and_then(|v| v.as_str()) == Some("T2") {
+        let n = plan_json
+            .get("phases")
+            .and_then(|p| p.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if n != 1 {
+            bail!(
+                "submit-plan: tier T2 requires phases.length == 1, got {n}"
+            );
+        }
+    }
+
     // Step 6: validator pass
     validate::validate(schema, &merged, Op::SubmitPlan(diff), invoker.into()).map_err(|errs| {
         anyhow::anyhow!(
@@ -1603,6 +1619,8 @@ fields:
     required: true
   - name: description
     type: text
+  - name: tier_hint
+    type: text
   - name: current_phase
     type: integer
     actor: framework
@@ -2394,6 +2412,77 @@ workflow:
         // Lock released
         let claimed_by = read_text(&conn, "claimed_by");
         assert!(claimed_by.is_none() || claimed_by.as_deref() == Some(""));
+    }
+
+    // ---------------------------------------------------------------------------
+    // T027 P4 (Task 4.3): tier-T2 phase-count gate in submit-plan
+    // ---------------------------------------------------------------------------
+
+    fn set_tier_hint(conn: &Connection, tier: &str) {
+        conn.execute(
+            "UPDATE wf_tasks SET tier_hint = ?1 WHERE display_id = 'WF001'",
+            rusqlite::params![tier],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn t027_p4_t2_two_phases_rejected() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+        set_tier_hint(&conn, "T2");
+
+        let plan = json!({
+            "summary": "two-phase plan",
+            "phases": [{"name": "p1"}, {"name": "p2"}]
+        });
+
+        let err = compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tier T2 requires phases.length == 1"),
+            "expected T2 phase-count error, got: {msg}"
+        );
+        // Status unchanged
+        assert_eq!(read_status(&conn), "planning");
+    }
+
+    #[test]
+    fn t027_p4_t2_single_phase_accepted() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+        set_tier_hint(&conn, "T2");
+
+        let plan = json!({
+            "summary": "single-phase plan",
+            "phases": [{"name": "only"}]
+        });
+
+        let out = compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap();
+        assert_eq!(out.new_status, "plan_review");
+        assert_eq!(read_status(&conn), "plan_review");
+    }
+
+    #[test]
+    fn t027_p4_t3_many_phases_accepted() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+        set_tier_hint(&conn, "T3");
+
+        let plan = json!({
+            "summary": "five-phase plan",
+            "phases": [
+                {"name": "p1"},
+                {"name": "p2"},
+                {"name": "p3"},
+                {"name": "p4"},
+                {"name": "p5"}
+            ]
+        });
+
+        let out = compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap();
+        assert_eq!(out.new_status, "plan_review");
     }
 
     // ---------------------------------------------------------------------------
