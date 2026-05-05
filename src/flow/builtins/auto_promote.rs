@@ -7,8 +7,8 @@
 //! mapped from the observation's contract, then back-links
 //! `observation.task_id` to the new task.
 //!
-//! Idempotent: if `observation.task_id` is already set to an existing
-//! tasks row, the run is a no-op.
+//! Idempotent: if any tasks row already lists this obs in
+//! `linked_observations`, the run is a no-op.
 //!
 //! Invoker for the tasks insert is `ai_autonomous` — the U-moment that
 //! grounds the row was the human's ratify (Phase 1); auto-promote is
@@ -32,25 +32,23 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         return Ok(1);
     }
 
-    // Idempotency guard: if task_id is already set AND that task exists, skip.
-    if let Some(existing) = row.get("task_id").and_then(|v| v.as_str()) {
-        if !existing.is_empty() {
-            let exists: bool = ctx
-                .conn
-                .query_row(
-                    "SELECT 1 FROM tasks WHERE display_id = ?1",
-                    rusqlite::params![existing],
-                    |_| Ok(true),
-                )
-                .unwrap_or(false);
-            if exists {
-                eprintln!(
-                    "[auto-promote] {}: already promoted to {}; skipping",
-                    obs_display_id, existing
-                );
-                return Ok(0);
-            }
-        }
+    // Idempotency guard: if any tasks row already lists this obs in
+    // linked_observations, treat as already promoted.
+    let already_promoted: bool = ctx
+        .conn
+        .query_row(
+            "SELECT 1 FROM tasks, json_each(tasks.linked_observations) je \
+             WHERE je.value = ?1 LIMIT 1",
+            rusqlite::params![obs_display_id],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if already_promoted {
+        eprintln!(
+            "[auto-promote] {}: already promoted (linked_observations match); skipping",
+            obs_display_id
+        );
+        return Ok(0);
     }
 
     // Parse intent_contract (stored as JSON text in the observations row).
@@ -401,7 +399,16 @@ mod tests {
             .unwrap();
         assert_eq!(n1, 1);
 
-        // Second run — observation now has task_id back-linked.
+        // NULL out observations.task_id to prove the second-run skip is
+        // driven by linked_observations match, not by the back-link.
+        conn.execute(
+            "UPDATE observations SET task_id = NULL WHERE display_id = 'L001'",
+            [],
+        )
+        .unwrap();
+
+        // Second run — observation no longer has task_id, but the tasks row's
+        // linked_observations still contains 'L001'.
         let row2 = obs_row_json(&conn, "L001");
         let res = run(&row2, &ctx_for(&conn, &agents, &cfg)).unwrap();
         assert_eq!(res, 0);
@@ -410,6 +417,96 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n2, 1, "second run must not create a duplicate tasks row");
+    }
+
+    #[test]
+    fn promote_skips_surfacing_task_id_pattern_is_actually_promoted() {
+        // Regression for L063: an obs filed with --task-id <surfacing-task>
+        // (a pre-existing task that does NOT list the obs in its
+        // linked_observations) must still be promoted, not skipped.
+        let conn = fresh_db();
+
+        // Pre-existing surfacing task T-foo, with EMPTY linked_observations.
+        conn.execute(
+            "INSERT INTO tasks \
+             (display_id, status, title, slug, contract, linked_observations, \
+              created_at, updated_at, created_by, updated_by) \
+             VALUES ('T-foo', 'planning', 'pre-existing', 'pre-existing', '{}', '[]', \
+                     ?1, ?1, 'ai_autonomous', 'ai_autonomous')",
+            rusqlite::params!["2026-05-03T00:00:00Z"],
+        )
+        .unwrap();
+
+        // Obs L010 filed with task_id pointing at T-foo (the surfacing task).
+        insert_ready_obs(&conn, "L010");
+        conn.execute(
+            "UPDATE observations SET task_id = 'T-foo' WHERE display_id = 'L010'",
+            [],
+        )
+        .unwrap();
+
+        let row = obs_row_json(&conn, "L010");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0, "auto-promote must succeed");
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "a NEW tasks row must be created (T-foo + the new one)");
+
+        let (new_task_id, linked_str): (String, String) = conn
+            .query_row(
+                "SELECT display_id, linked_observations FROM tasks \
+                 WHERE display_id != 'T-foo' LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let linked: Value = serde_json::from_str(&linked_str).unwrap();
+        assert_eq!(linked, serde_json::json!(["L010"]));
+
+        let obs_task_id: String = conn
+            .query_row(
+                "SELECT task_id FROM observations WHERE display_id='L010'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            obs_task_id, new_task_id,
+            "obs.task_id rewritten from T-foo to the new T-id"
+        );
+    }
+
+    #[test]
+    fn promote_is_idempotent_via_linked_observations_only() {
+        // Proves the idempotency check no longer depends on
+        // observations.task_id being present.
+        let conn = fresh_db();
+        insert_ready_obs(&conn, "L020");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+
+        let row1 = obs_row_json(&conn, "L020");
+        run(&row1, &ctx_for(&conn, &agents, &cfg)).unwrap();
+
+        // NULL out observations.task_id between runs.
+        conn.execute(
+            "UPDATE observations SET task_id = NULL WHERE display_id = 'L020'",
+            [],
+        )
+        .unwrap();
+
+        let row2 = obs_row_json(&conn, "L020");
+        let res = run(&row2, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0);
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "exactly one tasks row even without task_id back-link");
     }
 
     #[test]
