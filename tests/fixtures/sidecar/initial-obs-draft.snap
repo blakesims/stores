@@ -1,0 +1,5 @@
+You are drafting a new observation. The priming file lists live rows plus the observations schema. Ask me one or two clarifying questions, draft the obs, then propose `stores observations add ...` and await my assent.
+
+APPROVE_TOKEN=test-token-deadbeef
+
+(Token is for tier-A writes only — never echo, never log.)

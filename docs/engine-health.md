@@ -127,6 +127,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | 2026-05-05 | T025 | L063 | auto-promote idempotency uses `linked_observations` |
 | 2026-05-05 | T026 | L055 | daemon seeds starting-line-marker locks at startup |
 | 2026-05-05 | T027 | L066 | tier-structural drive cycle (T1 skip / T2 single-phase / T3 unchanged) |
+| 2026-05-05 | T028 | L075 | `stores watch` upgraded to ratatui TUI (section-grouped rows, sort/filter/search, daemon liveness, side-car spawn keys s/S/g/o); legacy ANSI POC behind `--legacy` |
 | 2026-05-04 | T022 | L048 | auto-drive subscriber |
 | 2026-05-03 | T021 | L050 | topology snapshot includes T019 states |
 | 2026-05-03 | T020 | L046/L047 | auto-promote + auto-scaffold builtins |

@@ -78,6 +78,8 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
 
     if args.detach {
         detach_process(&args.log_file)?;
+        let pidfile = stores_dir.join("agents-daemon.pid");
+        let _ = std::fs::write(&pidfile, std::process::id().to_string());
     }
 
     install_sigterm_handler();

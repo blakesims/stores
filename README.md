@@ -106,6 +106,40 @@ for the full schema reference and runbook.
 
 ## Usage
 
+### Watch (TUI)
+
+`stores watch` opens a btop+lazygit-style ratatui TUI over the substrate: section-grouped rows (tasks by status, observations), keyboard nav, sort/filter/search, a status bar with daemon liveness, and four side-car spawn keys that hand the terminal off to a fully-primed Claude Code session. Pass `--legacy` for the old ANSI POC.
+
+```bash
+stores watch                            # default: ratatui TUI
+stores watch --legacy                   # legacy ANSI POC (pre-T028 watch)
+stores watch --state executing          # filter rows by state
+stores watch --priority high            # filter by priority
+stores watch --tier T3                  # filter by tier hint
+stores watch --since 1h                 # filter rows updated in last 1h
+```
+
+Key cheat-sheet:
+
+| Key | Action |
+|---|---|
+| `j` / `k` / `↓` / `↑` | Move selection down / up |
+| `Tab` | Jump to next section |
+| `PgUp` / `PgDn` | Page through rows |
+| `,` | Cycle sort (updated → priority → id → status) |
+| `f` | Open filter palette |
+| `/` | Search by id or summary fragment; `n` / `N` advance/retreat |
+| `1` / `2` / `3` | Apply saved view preset |
+| `D` | Start the agents daemon if dead |
+| `?` | Help overlay |
+| `s` | Spawn per-row side-car (resumes within 1h TTL if a session exists) |
+| `S` | Spawn per-row side-car, always fresh |
+| `g` | Spawn general orchestrator-mode side-car (no row focus) |
+| `o` | Spawn obs-drafting side-car (drafts an observation, awaits confirm) |
+| `q` / `Ctrl-C` | Quit |
+
+Side-cars are terminal hand-offs (lazygit/EDITOR pattern): the watcher suspends the TUI, exec-substitutes into a primed `claude` session, and resumes its prior state (selection + sort + filter + expand) after `/quit`. Each side-car inherits the operator's approval token and follows propose-one-action-await-assent discipline before invoking any `submit-*` or grounding verb.
+
 ### Topology
 
 `stores topology` prints a static schematic of the installed stores: cross-store soft-FK edges (Z0), per-store state machines (Z1), and the tasks workflow firing order (Z2). Default `--format auto` shells out to `graph-easy --as=boxart` (Debian/Ubuntu pkg `libgraph-easy-perl`) for an in-terminal ASCII render, falling back to raw dot source with a one-line install hint when graph-easy is missing.
