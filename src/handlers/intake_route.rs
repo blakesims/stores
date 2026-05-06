@@ -21,6 +21,21 @@ use serde_json::{json, Value};
 use crate::validate::EntryMap;
 
 // ---------------------------------------------------------------------------
+// Absence helper
+// ---------------------------------------------------------------------------
+
+/// True iff `merged` has no entry for `key` OR the entry is JSON null.
+///
+/// `read_row` materialises NULL DB columns into the `EntryMap` as
+/// `Some(Value::Null)`, so a plain `.is_none()` check would miss them and
+/// the hook would skip its work for rows that came back through `read_row`
+/// (the production path; manually-built test maps go straight to None).
+/// Identified by Sonnet's executor session for T053 P3 before runner exit.
+fn is_absent(merged: &EntryMap, key: &str) -> bool {
+    matches!(merged.get(key), None | Some(Value::Null))
+}
+
+// ---------------------------------------------------------------------------
 // Public hook 1: pre-validation field injection
 // ---------------------------------------------------------------------------
 
@@ -54,7 +69,7 @@ pub(crate) fn inject_pre_validation_fields(
             if let Some(dup_of) = merged.get("duplicate_of").and_then(|v| v.as_str()) {
                 let dup_of = dup_of.to_string();
                 if let Some(ck) = lookup_cluster_key(tx, &dup_of)? {
-                    if merged.get("cluster_key").is_none() {
+                    if is_absent(merged, "cluster_key") {
                         diff.insert("cluster_key".to_string(), Value::String(ck.clone()));
                         merged.insert("cluster_key".to_string(), Value::String(ck));
                     }
@@ -64,7 +79,7 @@ pub(crate) fn inject_pre_validation_fields(
 
         "needs_info" => {
             // Extract missing_info_question from gatekeeper payload into its own column.
-            if merged.get("missing_info_question").is_none() {
+            if is_absent(merged, "missing_info_question") {
                 if let Some(gdj) = merged
                     .get("gatekeeper_decision_json")
                     .and_then(|v| v.as_object())
@@ -80,7 +95,7 @@ pub(crate) fn inject_pre_validation_fields(
 
         "fast_track" => {
             // Only auto-create if routed_to_observation not already supplied by caller.
-            if merged.get("routed_to_observation").is_none() {
+            if is_absent(merged, "routed_to_observation") {
                 let summary = merged
                     .get("summary")
                     .and_then(|v| v.as_str())
@@ -124,7 +139,7 @@ pub(crate) fn inject_pre_validation_fields(
 
         "normal_observation" => {
             // Only auto-create if routed_to_observation not already supplied by caller.
-            if merged.get("routed_to_observation").is_none() {
+            if is_absent(merged, "routed_to_observation") {
                 let summary = merged
                     .get("summary")
                     .and_then(|v| v.as_str())
@@ -173,7 +188,7 @@ pub(crate) fn inject_pre_validation_fields(
 
         "arch_review_candidate" => {
             // Only auto-create if routed_to_arch_review not already supplied.
-            if merged.get("routed_to_arch_review").is_none() {
+            if is_absent(merged, "routed_to_arch_review") {
                 let summary = merged
                     .get("summary")
                     .and_then(|v| v.as_str())

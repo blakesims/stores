@@ -491,3 +491,60 @@ fn route_without_gatekeeper_decision_json_allowed() {
         .unwrap();
     assert_eq!(status, "dropped");
 }
+
+// T053 P3 integration test: full transition::run flow without pre-supplied routed_to_observation
+#[test]
+fn p3_normal_observation_auto_create_integration() {
+    let intake_schema = intake_schema();
+    let obs_yaml = stores::cli::dynamic::BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "observations")
+        .map(|(_, y)| *y)
+        .expect("observations schema");
+    let obs_schema = stores::schema::Schema::from_yaml(obs_yaml).expect("parse obs schema");
+
+    let conn = fresh_db(&intake_schema);
+    conn.execute_batch(&stores::codegen::ddl::ddl_for(&obs_schema)).unwrap();
+
+    insert_triaging_row(&conn, "I001");
+
+    let leaves = stores::schema::flatten::leaf_args(&intake_schema).unwrap();
+    let mut cmd = clap::Command::new("route")
+        .arg(clap::Arg::new("display_id").required(true).index(1));
+    for leaf in &leaves {
+        cmd = cmd.arg(
+            clap::Arg::new(leaf.cli_name.clone())
+                .long(leaf.cli_name.clone())
+                .required(false),
+        );
+    }
+
+    let decision_json = serde_json::json!({
+        "decision": "normal_observation",
+        "confidence": "medium",
+        "rationale": "Test route without pre-supplied routed_to_observation.",
+        "tier_hint": "T2",
+        "risk_flags": ["small_local_fix"],
+        "cluster_key": "dispatch-lifecycle"
+    }).to_string();
+
+    let matches = cmd.get_matches_from([
+        "route",
+        "I001",
+        "--decision",
+        "normal_observation",
+        "--gatekeeper-decision-json",
+        &decision_json,
+        // Note: NO --routed-to-observation: hook should auto-create it
+    ]);
+
+    let result = stores::handlers::transition::run(
+        &intake_schema, &conn, &matches, Actor::AiAutonomous.into(), "route"
+    );
+    assert!(result.is_ok(), "route should succeed with auto-created observation: {:?}", result);
+
+    let obs_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(obs_count, 1, "one observation must have been auto-created");
+}
