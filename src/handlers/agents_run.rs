@@ -114,6 +114,24 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
         seeded, max_th_id
     );
 
+    // T048: startup-sweep — backfill auto_resolve for historically-shipped tasks
+    // (status='schema_migrated' with non-empty linked_observations) whose linked
+    // obs are still un-resolved. Idempotent; logs `[startup-sweep] resolved N
+    // linked obs` before the first poll iteration.
+    {
+        let sweep_ctx = crate::flow::builtins::DispatchCtx {
+            conn: &conn,
+            agents: &agents,
+            config_path: &config_path,
+            policies_hash: &policies.hash,
+        };
+        if let Err(e) =
+            crate::flow::builtins::auto_resolve_observation::startup_sweep(&sweep_ctx)
+        {
+            eprintln!("[startup-sweep] error: {:#}", e);
+        }
+    }
+
     let mut iter = 0usize;
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {

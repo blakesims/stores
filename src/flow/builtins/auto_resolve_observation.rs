@@ -194,6 +194,65 @@ fn warn_orphan(ctx: &DispatchCtx, task_id: &str, obs_id: &str) {
 
 use rusqlite::OptionalExtension;
 
+/// Startup-sweep: replay `auto_resolve` for every `tasks.status='schema_migrated'`
+/// row that still has unresolved entries in `linked_observations`. Idempotent —
+/// already-resolved obs are skipped via `ResolveOutcome::AlreadyResolved`.
+/// Always emits `[startup-sweep] resolved N linked obs` (N>=0). Errors per-task
+/// are logged and swallowed so the daemon proceeds to its first poll iteration.
+pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
+    let mut stmt = ctx.conn.prepare(
+        "SELECT t.display_id FROM tasks t \
+         WHERE t.status = 'schema_migrated' \
+         AND t.linked_observations IS NOT NULL \
+         AND t.linked_observations != '' \
+         AND t.linked_observations != 'null' \
+         AND t.linked_observations != '[]' \
+         AND EXISTS ( \
+            SELECT 1 FROM json_each(t.linked_observations) je \
+            JOIN observations o ON o.display_id = je.value \
+            WHERE o.status != 'resolved' \
+         )",
+    )?;
+    let task_ids: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    let mut total_resolved = 0usize;
+    for task_id in &task_ids {
+        let before = count_resolved_linked(ctx.conn, task_id);
+        let Some(row) = crate::flow::builtins::refresh_task_row(ctx.conn, task_id) else {
+            eprintln!(
+                "[startup-sweep] {}: task row vanished mid-sweep; skipping",
+                task_id
+            );
+            continue;
+        };
+        if let Err(e) = run(&row, ctx) {
+            eprintln!("[startup-sweep] {}: subscriber errored: {:#}", task_id, e);
+            continue;
+        }
+        let after = count_resolved_linked(ctx.conn, task_id);
+        total_resolved += after.saturating_sub(before);
+    }
+
+    eprintln!("[startup-sweep] resolved {} linked obs", total_resolved);
+    Ok(total_resolved)
+}
+
+fn count_resolved_linked(conn: &rusqlite::Connection, task_display_id: &str) -> usize {
+    conn.query_row(
+        "SELECT COUNT(*) FROM tasks t, json_each(t.linked_observations) je \
+         JOIN observations o ON o.display_id = je.value \
+         WHERE t.display_id = ?1 AND o.status = 'resolved'",
+        rusqlite::params![task_display_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n as usize)
+    .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +486,81 @@ mod tests {
         assert_eq!(from_status, "ready");
         assert_eq!(to_status, "resolved");
         assert_eq!(invoker, "framework");
+    }
+
+    fn insert_shipped_task(
+        conn: &Connection,
+        display_id: &str,
+        commit: &str,
+        linked: &str,
+    ) {
+        let now = "2026-05-03T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        let cycles = format!(r#"[{{"executor":{{"commit":"{}"}}}}]"#, commit);
+        conn.execute(
+            "INSERT INTO tasks \
+             (display_id, status, title, slug, branch, workspace_path, contract, \
+              linked_observations, cycles, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'schema_migrated', 't', 'ts', 'feat/ts', '/tmp/ws', ?2, ?3, ?4, ?5, ?5, 'ai_autonomous', 'ai_autonomous')",
+            rusqlite::params![display_id, contract, linked, cycles, now],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn startup_sweep_resolves_three_historically_shipped_tasks() {
+        let conn = fresh_db();
+        // Three schema_migrated tasks each linking one stale-ready observation.
+        insert_obs(&conn, "L101", "ready", None);
+        insert_obs(&conn, "L102", "ready", None);
+        insert_obs(&conn, "L103", "ready", None);
+        insert_shipped_task(&conn, "T101", "sha101", r#"["L101"]"#);
+        insert_shipped_task(&conn, "T102", "sha102", r#"["L102"]"#);
+        insert_shipped_task(&conn, "T103", "sha103", r#"["L103"]"#);
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
+        let dctx = ctx(&conn, &agents, &cfg);
+
+        let n = startup_sweep(&dctx).unwrap();
+        assert_eq!(n, 3, "sweep must resolve all three stale linked obs");
+
+        for (obs, expected_sha) in [("L101", "sha101"), ("L102", "sha102"), ("L103", "sha103")] {
+            let (status, resolution): (String, String) = conn
+                .query_row(
+                    "SELECT status, resolution FROM observations WHERE display_id = ?1",
+                    rusqlite::params![obs],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "resolved", "{} must be resolved", obs);
+            assert_eq!(resolution, expected_sha);
+        }
+
+        // Idempotent: re-running on already-resolved obs is a no-op.
+        let n2 = startup_sweep(&dctx).unwrap();
+        assert_eq!(n2, 0, "second sweep finds no work");
+    }
+
+    #[test]
+    fn startup_sweep_skips_tasks_with_already_resolved_linked_obs() {
+        let conn = fresh_db();
+        insert_obs(&conn, "L200", "resolved", Some("oldsha"));
+        insert_shipped_task(&conn, "T200", "newsha", r#"["L200"]"#);
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
+        let n = startup_sweep(&ctx(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(n, 0);
+
+        let resolution: String = conn
+            .query_row(
+                "SELECT resolution FROM observations WHERE display_id = 'L200'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(resolution, "oldsha", "already-resolved obs not overwritten");
     }
 
     #[test]
