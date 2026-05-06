@@ -812,18 +812,38 @@ fn claim_for_retry(
     c: &RetryCandidate,
     agent_name: &str,
 ) -> Result<bool> {
-    let n = conn.execute(
-        "UPDATE dispatch_locks SET last_status = 'retrying' \
-         WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
-               AND attempts = ?4 AND last_status = ?5",
-        rusqlite::params![
-            &c.store,
-            c.row_id,
-            agent_name,
-            c.attempts,
-            &c.last_status_snapshot
-        ],
-    )?;
+    // T049: auto-drive locks are closed by the drive subprocess on first
+    // successful submit (lock-stays-open semantics). Reset finished_at on
+    // retry-claim so T040's open-lock+dead-pid filter catches a retry-spawned
+    // drive that dies before its first submit. Other agents keep the existing
+    // retry-claim behavior (last_status='retrying'; finished_at preserved).
+    let n = if agent_name == "auto-drive" {
+        conn.execute(
+            "UPDATE dispatch_locks SET last_status = 'retrying', finished_at = NULL \
+             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
+                   AND attempts = ?4 AND last_status = ?5",
+            rusqlite::params![
+                &c.store,
+                c.row_id,
+                agent_name,
+                c.attempts,
+                &c.last_status_snapshot
+            ],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE dispatch_locks SET last_status = 'retrying' \
+             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
+                   AND attempts = ?4 AND last_status = ?5",
+            rusqlite::params![
+                &c.store,
+                c.row_id,
+                agent_name,
+                c.attempts,
+                &c.last_status_snapshot
+            ],
+        )?
+    };
     Ok(n == 1)
 }
 
@@ -867,7 +887,8 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
                AND dl.attempts < ?2 \
                AND dl.finished_at IS NOT NULL \
                AND ( (dl.last_status LIKE 'exit=%' AND dl.last_status != 'exit=0') \
-                     OR dl.last_status LIKE 'error:%' )",
+                     OR dl.last_status LIKE 'error:%' \
+                     OR dl.last_status LIKE 'drive_failed:%' )",
     )?;
     let rows = stmt.query_map(rusqlite::params![&agent.name, max], |r| {
         Ok((

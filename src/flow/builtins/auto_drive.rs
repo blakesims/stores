@@ -449,7 +449,13 @@ pub fn sweep_drive_watchdog(
                     policies_hash,
                 };
                 dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog");
-                let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "drive_failed");
+                let _ = mark_claim_finished(
+                    conn,
+                    "tasks",
+                    row_id,
+                    "auto-drive",
+                    "drive_failed:silent_zombie_pid_dead",
+                );
                 acted += 1;
                 handled.insert(display_id.clone());
             }
