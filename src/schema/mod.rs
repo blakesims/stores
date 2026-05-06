@@ -380,6 +380,8 @@ struct RawSchema {
 
 impl Schema {
     pub fn from_yaml(yaml: &str) -> anyhow::Result<Schema> {
+        validate_transition_guard_order(yaml)?;
+
         let raw: RawSchema =
             serde_yaml::from_str(yaml).map_err(|e| anyhow::anyhow!("YAML parse error: {}", e))?;
 
@@ -418,6 +420,133 @@ impl Schema {
             workflow: raw.workflow,
         })
     }
+}
+
+#[derive(Default)]
+struct RawTransitionOrder {
+    line: usize,
+    from: Option<String>,
+    verb: Option<String>,
+    requires_gate: Option<String>,
+    has_guard: bool,
+}
+
+/// Validate YAML transition order before serde drops source locations.
+/// For each runtime selector bucket `(from, verb, requires_gate)`, guarded
+/// variants must precede the unguarded fallback. An earlier unguarded fallback
+/// shadows later guards because runtime selection returns the first fallback
+/// after no guard evaluates true.
+fn validate_transition_guard_order(yaml: &str) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+
+    let mut in_transitions = false;
+    let mut transitions_indent = 0usize;
+    let mut current: Option<RawTransitionOrder> = None;
+    let mut transitions: Vec<RawTransitionOrder> = Vec::new();
+
+    fn indent_of(line: &str) -> usize {
+        line.len() - line.trim_start().len()
+    }
+
+    fn strip_comment(line: &str) -> &str {
+        line.split_once('#').map(|(left, _)| left).unwrap_or(line)
+    }
+
+    fn clean_value(raw: &str) -> String {
+        raw.trim()
+            .trim_end_matches(',')
+            .trim_matches('}')
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string()
+    }
+
+    fn apply_kv(t: &mut RawTransitionOrder, key: &str, value: &str) {
+        match key.trim() {
+            "from" => t.from = Some(clean_value(value)),
+            "verb" => t.verb = Some(clean_value(value)),
+            "requires_gate" => t.requires_gate = Some(clean_value(value)),
+            "guard" | "when" => t.has_guard = true,
+            _ => {}
+        }
+    }
+
+    fn parse_pairs_into(t: &mut RawTransitionOrder, text: &str) {
+        let s = text.trim().trim_start_matches('{').trim_end_matches('}');
+        for part in s.split(',') {
+            if let Some((key, value)) = part.split_once(':') {
+                apply_kv(t, key, value);
+            }
+        }
+    }
+
+    for (idx, raw_line) in yaml.lines().enumerate() {
+        let line_no = idx + 1;
+        let uncommented = strip_comment(raw_line);
+        let trimmed = uncommented.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let indent = indent_of(uncommented);
+
+        if !in_transitions {
+            if trimmed == "transitions:" {
+                in_transitions = true;
+                transitions_indent = indent;
+            }
+            continue;
+        }
+
+        if indent <= transitions_indent && !trimmed.starts_with('-') {
+            if let Some(t) = current.take() {
+                transitions.push(t);
+            }
+            break;
+        }
+
+        if trimmed.starts_with("-") {
+            if let Some(t) = current.take() {
+                transitions.push(t);
+            }
+            let mut t = RawTransitionOrder {
+                line: line_no,
+                ..Default::default()
+            };
+            parse_pairs_into(&mut t, trimmed.trim_start_matches('-').trim());
+            current = Some(t);
+        } else if let Some(t) = current.as_mut() {
+            parse_pairs_into(t, trimmed);
+        }
+    }
+
+    if let Some(t) = current.take() {
+        transitions.push(t);
+    }
+
+    let mut first_unguarded: HashMap<(String, String, Option<String>), usize> = HashMap::new();
+    for t in transitions {
+        let (Some(from), Some(verb)) = (t.from, t.verb) else {
+            continue;
+        };
+        let key = (from, verb, t.requires_gate);
+        if t.has_guard {
+            if let Some(line) = first_unguarded.get(&key) {
+                let gate = key.2.as_deref().unwrap_or("<none>");
+                anyhow::bail!(
+                    "transition guard order violation: unguarded transition at line {} shadows later guarded transition for (from='{}', verb='{}', requires_gate={}); place guarded transitions before the unguarded fallback",
+                    line,
+                    key.0,
+                    key.1,
+                    gate
+                );
+            }
+        } else {
+            first_unguarded.entry(key).or_insert(t.line);
+        }
+    }
+
+    Ok(())
 }
 
 /// Validate auto_increment / auto_increment_within constraints (Task 1.2).
@@ -1358,6 +1487,81 @@ fields:
             Some(Actor::Framework),
             "current_cycle must have actor: framework"
         );
+    }
+
+    fn minimal_schema(transitions: &str) -> String {
+        format!(
+            r#"name: guard_order
+id_format: "G{{:03d}}"
+lifecycle:
+  states: [open, review, blocked, done]
+  transitions:
+{}
+fields:
+  - name: title
+    type: text
+"#,
+            transitions
+        )
+    }
+
+    #[test]
+    fn unguarded_before_guarded_same_selector_errors_with_shadow_line() {
+        let yaml = minimal_schema(
+            r#"    - from: open
+      to: blocked
+      verb: close
+    - from: open
+      to: done
+      verb: close
+      when: "title == 'ok'""#,
+        );
+        let err = Schema::from_yaml(&yaml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("transition guard order violation"),
+            "msg: {msg}"
+        );
+        assert!(
+            msg.contains("line 6"),
+            "msg should point at fallback line: {msg}"
+        );
+        assert!(msg.contains("from='open'"), "msg: {msg}");
+        assert!(msg.contains("verb='close'"), "msg: {msg}");
+    }
+
+    #[test]
+    fn guarded_before_unguarded_fallback_is_accepted() {
+        let yaml = minimal_schema(
+            r#"    - {from: open, to: done, verb: close, guard: "title == 'ok'"}
+    - {from: open, to: blocked, verb: close}"#,
+        );
+        Schema::from_yaml(&yaml).unwrap();
+    }
+
+    #[test]
+    fn single_guarded_transition_is_accepted() {
+        let yaml =
+            minimal_schema(r#"    - {from: open, to: done, verb: close, guard: "title == 'ok'"}"#);
+        Schema::from_yaml(&yaml).unwrap();
+    }
+
+    #[test]
+    fn multiple_guards_no_fallback_is_accepted() {
+        let yaml = minimal_schema(
+            r#"    - {from: open, to: review, verb: close, guard: "title == 'maybe'"}
+    - {from: open, to: done, verb: close, guard: "title == 'ok'"}"#,
+        );
+        Schema::from_yaml(&yaml).unwrap();
+    }
+
+    #[test]
+    fn only_unguarded_transitions_with_distinct_selectors_are_accepted() {
+        let yaml = minimal_schema(
+            r#"    - {from: open, to: done, verb: close}
+    - {from: review, to: done, verb: close}"#,
+        );
+        Schema::from_yaml(&yaml).unwrap();
     }
 
     /// T013 P1 AC1.4: tasks schema declares a top-level `tier_hint` field as
