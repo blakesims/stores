@@ -514,6 +514,94 @@ mod tests {
         );
     }
 
+    // ---- T052 P1: defaults backfill on migration ----
+
+    /// AC1.3 / Task 1.6 (b): apply_with backfills risk_class='normal',
+    /// approval_policy='human', risk_flags='[]', cluster_key IS NULL on
+    /// existing rows when the four columns were absent before migration.
+    #[test]
+    fn t052_p1_migrate_backfills_risk_taxonomy_defaults_on_existing_rows() {
+        let (schemas, manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        install_all(&conn, &schemas);
+
+        // Drop the four T052 columns so the live DB is shaped like a pre-T052
+        // observations table.
+        for col in ["risk_class", "approval_policy", "risk_flags", "cluster_key"] {
+            conn.execute_batch(&format!(
+                "ALTER TABLE \"observations\" DROP COLUMN \"{col}\";"
+            ))
+            .unwrap();
+        }
+
+        // Insert an existing row that pre-dates the migration.
+        conn.execute(
+            "INSERT INTO observations (display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "L001", "open", "2026-05-01T00:00:00Z", "2026-05-01T00:00:00Z",
+                "ai_autonomous", "ai_autonomous",
+                "pre-existing observation", "dev", "normal",
+                "2026-05-01T00:00:00Z", "w18-d1"
+            ],
+        ).unwrap();
+
+        // Run additive migration: should ALTER ADD COLUMN the four columns
+        // and backfill defaults on the existing row.
+        let report = apply_with(&conn, &schemas, &manifest).expect("apply_with ok");
+        let added: Vec<&str> = report
+            .applied_columns
+            .iter()
+            .filter(|(s, _)| s == "observations")
+            .map(|(_, c)| c.as_str())
+            .collect();
+        for expected in ["risk_class", "approval_policy", "risk_flags", "cluster_key"] {
+            assert!(
+                added.contains(&expected),
+                "expected '{expected}' in applied_columns: {added:?}"
+            );
+        }
+
+        // Read the pre-existing row and assert backfilled defaults.
+        let (risk_class, approval_policy, risk_flags, cluster_key): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT risk_class, approval_policy, risk_flags, cluster_key FROM observations WHERE display_id = ?1",
+                rusqlite::params!["L001"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(risk_class.as_deref(), Some("normal"));
+        assert_eq!(approval_policy.as_deref(), Some("human"));
+        assert_eq!(risk_flags.as_deref(), Some("[]"));
+        assert_eq!(cluster_key, None, "cluster_key must remain NULL");
+    }
+
+    /// AC1.5: PRAGMA table_info reports the four columns with the expected
+    /// SQL types after install. CHECK constraints are exercised by the
+    /// integration test below; PRAGMA only reports the bare type.
+    #[test]
+    fn t052_p1_observations_pragma_table_info_reports_taxonomy_columns() {
+        let (schemas, _manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        install_all(&conn, &schemas);
+        let live = read_table_info(&conn, "observations").unwrap();
+        for col in ["risk_class", "approval_policy", "risk_flags", "cluster_key"] {
+            assert!(
+                live.contains_key(col),
+                "column '{col}' missing from observations PRAGMA table_info: {live:?}"
+            );
+        }
+        assert_eq!(live.get("risk_class").map(|s| s.as_str()), Some("TEXT"));
+        assert_eq!(live.get("approval_policy").map(|s| s.as_str()), Some("TEXT"));
+        assert_eq!(live.get("risk_flags").map(|s| s.as_str()), Some("TEXT"));
+        assert_eq!(live.get("cluster_key").map(|s| s.as_str()), Some("TEXT"));
+    }
+
     /// Type comparison is case-insensitive on the bare token.
     #[test]
     fn type_eq_is_case_insensitive() {
