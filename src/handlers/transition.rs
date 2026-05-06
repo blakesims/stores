@@ -201,6 +201,7 @@ pub fn run_close_as_addressed(
         invoker.actor,
         pref.as_deref(),
         phash.as_deref(),
+        None,
     )?;
 
     tx.commit().context("close_as_addressed: commit tx")?;
@@ -464,6 +465,7 @@ pub(crate) fn run_in_tx(
         invoker.actor,
         pref.as_deref(),
         phash.as_deref(),
+        None,
     )?;
 
     println!(
@@ -571,6 +573,7 @@ pub(crate) fn maybe_auto_ratify_observation(
         Actor::Framework,
         policy_ref,
         policies_hash,
+        None,
     )?;
 
     println!(
@@ -597,6 +600,7 @@ pub(crate) fn execute_transition_write(
     invoker: Actor,
     policy_ref: Option<&str>,
     policies_hash: Option<&str>,
+    actor_note: Option<&str>,
 ) -> Result<()> {
     let now = now_iso8601();
     let invoker_str = invoker.to_string();
@@ -678,7 +682,7 @@ pub(crate) fn execute_transition_write(
     tx.execute(&sql, rusqlite::params_from_iter(sql_values.iter()))
         .context("transition update row")?;
 
-    crate::db::insert_transition_history(
+    crate::db::insert_transition_history_with_note(
         tx,
         &schema.name,
         row_id,
@@ -689,6 +693,7 @@ pub(crate) fn execute_transition_write(
         &invoker_str,
         policy_ref,
         policies_hash,
+        actor_note,
     )?;
 
     Ok(())

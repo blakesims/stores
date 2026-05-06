@@ -280,7 +280,16 @@ pub fn poll_once(
                     Err(e) => (format!("error: {}", e), -1),
                 };
                 let _ = mark_claim_finished(conn, &sub.store, row_id, &agent.name, &status_str);
-                let _ = code;
+                if code != 0 {
+                    route_failure_to_deploy_blocked(
+                        conn,
+                        &sub.store,
+                        &display_id,
+                        &agent.name,
+                        &status_str,
+                        &policies.hash,
+                    );
+                }
                 dispatched += 1;
             }
         }
@@ -390,17 +399,28 @@ pub fn poll_once(
                 &policies.hash,
                 &row_json,
             );
-            let status_str = match exit_code {
-                Ok(code) => {
+            let (status_str, code) = match exit_code {
+                Ok(code) => (
                     if code == 0 {
                         "ok".to_string()
                     } else {
                         format!("exit={}", code)
-                    }
-                }
-                Err(e) => format!("error: {}", e),
+                    },
+                    code,
+                ),
+                Err(e) => (format!("error: {}", e), -1),
             };
             let _ = mark_claim_finished(conn, &c.store, c.row_id, &agent.name, &status_str);
+            if code != 0 {
+                route_failure_to_deploy_blocked(
+                    conn,
+                    &c.store,
+                    &c.display_id,
+                    &agent.name,
+                    &status_str,
+                    &policies.hash,
+                );
+            }
             let _ = c.attempts;
             let _ = c.transition_id;
             dispatched += 1;
@@ -554,6 +574,80 @@ pub fn try_claim(
             Ok(false)
         }
         Err(e) => Err(anyhow!("try_claim insert failed: {}", e)),
+    }
+}
+
+/// T046: route a non-zero subscriber exit to a framework-fired
+/// `mark_deploy_blocked` when the schema declares such a transition out of
+/// the row's current state. Today only `tasks: accepted → deploy_blocked`
+/// qualifies (subscribed by `accept-merge`); the routing is schema-driven
+/// rather than agent-name-keyed so any future store/edge with the same
+/// shape inherits it. No-op when the schema doesn't declare the edge.
+///
+/// `last_status` is the dispatch_locks status string (e.g. `"exit=11"` /
+/// `"error: <e>"`). The helper records `actor_note` on the
+/// `transition_history` row as `agent=<name> status=<last_status>` so the
+/// audit row carries the exit code.
+pub(crate) fn route_failure_to_deploy_blocked(
+    conn: &Connection,
+    store: &str,
+    display_id: &str,
+    agent_name: &str,
+    last_status: &str,
+    policies_hash: &str,
+) {
+    // Only the `tasks` store declares `mark_deploy_blocked` today. Avoid the
+    // schema-load cost (and a spurious bundled-schema-not-found error) for
+    // other stores until generalization is in scope (out-of-scope per T046).
+    if store != "tasks" {
+        return;
+    }
+    let schema = match crate::flow::builtins::load_tasks_schema() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "[daemon] route_failure_to_deploy_blocked: load schema: {}",
+                e
+            );
+            return;
+        }
+    };
+    let qtable = quote_ident(&schema.name);
+    let current_status: Option<String> = conn
+        .query_row(
+            &format!("SELECT status FROM {} WHERE display_id = ?1", qtable),
+            rusqlite::params![display_id],
+            |r| r.get(0),
+        )
+        .ok();
+    let current_status = match current_status {
+        Some(s) => s,
+        None => return,
+    };
+    let has_edge = schema.lifecycle.transitions.iter().any(|t| {
+        t.from == current_status
+            && t.verb == "mark_deploy_blocked"
+            && t.actor == Some(crate::schema::actor::Actor::Framework)
+    });
+    if !has_edge {
+        return;
+    }
+    let blocked_reason = format!(
+        "subscriber '{}' failed: {}",
+        agent_name, last_status
+    );
+    let actor_note = format!("agent={} status={}", agent_name, last_status);
+    if let Err(e) = crate::flow::builtins::fire_mark_deploy_blocked_with_note(
+        conn,
+        display_id,
+        &blocked_reason,
+        policies_hash,
+        Some(&actor_note),
+    ) {
+        eprintln!(
+            "[daemon] route_failure_to_deploy_blocked: fire mark_deploy_blocked for {}: {}",
+            display_id, e
+        );
     }
 }
 
