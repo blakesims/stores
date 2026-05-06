@@ -268,6 +268,126 @@ The recon agent fires on every `needs_info` decision. Its brief is deliberately 
 
 This split keeps investigation inside substrate-visible flow (consistent with the L043 triage-routing rule) without letting the recon agent drift into design.
 
+## Architecture-review triggers
+
+The architecture-review agent is the coherence gate. It does not fire on every routed row; it fires when the gatekeeper's classification or the cluster state crosses a named trigger. Each trigger class below is decidable from substrate-visible state — no human prompting, no out-of-band signal — so that "did review fire when it should have?" is auditable after the fact.
+
+### Trigger 1: `risk-flag` (per-row, immediate)
+**Fires when:** the gatekeeper's `gatekeeper_decision_json.risk_flags` includes any of `touches_actor_authority`, `touches_lifecycle`, `touches_subscriber_semantics`, `touches_runner_boundary`, `touches_schema_core`, `introduces_new_primitive`, `changes_boundary`, `security_sensitive`, or `authority_surface_drift`.
+**Threshold:** 1 (any single flag is sufficient).
+**Latency budget:** review must be requested within the same triage transaction; routing to `escalated` without firing review is a schema violation.
+
+### Trigger 2: `cluster-threshold` (cross-row, count-based)
+**Fires when:** the count of `routed` + `escalated` `intake_items` rows sharing a single `cluster_key` (within a rolling 30-day window) crosses the configured threshold.
+**Threshold:** default `≥ 3` for general clusters; default `≥ 2` for clusters whose registry entry carries `architectural_priors = true` (e.g., `dispatch-lifecycle`, `sidecar-token`, `t1-null-plan`); per-cluster override allowed in the cluster-key registry.
+**Effect:** the *triggering* row routes to `arch_review_candidate`; earlier rows in the cluster are *not* retro-escalated by this trigger (see Open Question 6) — but Trigger 5 below sweeps them.
+
+### Trigger 3: `pre-ratification` (per-observation, gating)
+**Fires when:** an observation row created by the gatekeeper carries `pending_architecture_review = true` and a U1 ratification (`observations update --contract-state ready`) is attempted.
+**Threshold:** 1 (the flag itself is the trigger).
+**Effect:** the ratification verb is rejected fail-loud until architecture review returns one of `allow_local_fix`, `reframe_contract`, `merge_with_cluster`, or `propose_doctrine_update`. This is the hard gate that prevents locally-correct fixes from accumulating before coherence has been checked.
+
+### Trigger 4: `periodic-sweep` (scheduled, cluster-wide)
+**Fires when:** a scheduled job runs (default cadence: weekly) over the open `intake_items` and `observations` populations and identifies clusters whose count is `≥ 5` over the trailing 90 days but which have *no* `architecture_reviews` row.
+**Threshold:** count `≥ 5` per cluster_key over 90 days AND `architecture_reviews.count_for(cluster_key) == 0`.
+**Effect:** a `periodic-sweep` review row is created for each unreviewed cluster; the sweep is the safety net for clusters that crept past Trigger 2 because no single triage saw the threshold cross (e.g., the registry threshold was raised after some rows already routed).
+
+### Trigger 5: `post-accept-batch` (retrospective, post-merge)
+**Fires when:** a batch of `≥ 3` `tasks` rows reaches `accepted` state within a 14-day window AND the union of their `linked_observations`' `cluster_key` values overlaps in `≥ 2` distinct clusters.
+**Threshold:** task count `≥ 3` in 14 days; cluster overlap `≥ 2`.
+**Effect:** an architecture-review row is created with `kind = retrospective` and `evidence = list of accepted task display_ids`. Retrospectives can return `propose_doctrine_update` or `create_primitive_task`; they cannot block already-accepted tasks (those are terminal), but they can ratify a doctrine entry or seed a primitive task that prevents the next round of drift.
+
+## Architecture-review outputs
+
+Each architecture-review invocation returns exactly one outcome. Outcomes are typed enums (mirroring the gatekeeper-decision schema) so downstream consumers do not parse prose. Every outcome carries a `rationale` (`max_length: 1200`) and, where applicable, a typed payload (a target row id, a doctrine path, a proposed primitive name).
+
+### 1. `allow_local_fix`
+The reviewer agrees the cluster does not require architectural change; the local observation may proceed to U1 ratification on its own contract. The pending-review flag on the observation is cleared. Rationale must explicitly name the architectural shape the reviewer considered and rejected — not "looks fine," but "considered whether this widens authority surface; it does not, because X." This output is the most common; it is also the most dangerous if the reviewer becomes a rubber stamp, so the audit trail is mandatory.
+
+### 2. `reframe_contract`
+The local fix is allowed *only after* the observation's `intent_contract.shape_change` is rewritten in line with reviewer-supplied guidance. The reviewer attaches a `reframe_directive` blob (`max_length: 2000`) describing what the contract must say differently. Until the observation's contract is updated to match (and `pending_architecture_review` re-evaluated), U1 ratification stays blocked.
+
+### 3. `merge_with_cluster`
+The row is duplicative of an already-routed cluster at the architectural level even when the surface symptom appeared distinct. The output names a `merge_target_id` (an `architecture_reviews` row or a parent `cluster_key`) and the row's downstream observation (if any) is dropped or pointed at the merged cluster's outcome. Distinct from the gatekeeper's `duplicate` decision because merge is *architectural* equivalence, not surface duplication.
+
+### 4. `create_primitive_task`
+The cluster's resolution is not a local fix at all; it is a new typed primitive (a new store, a new state, a new subscriber, a new CLI verb class). The output names a `proposed_primitive` label and authorizes a downstream `tasks add --invoker ai_with_human` for a primitive-introduction task. The local observations remain `open` until the primitive task accepts; they are then closed with `resolved_by = T###`.
+
+### 5. `block_pending_fixes`
+The cluster is currently incoherent enough that *no* further local fixes in the area should accept-merge until a sequencing decision is made. The output names a `block_scope` (a list of cluster_keys, paths, or risk_flags) and a `block_until` predicate (e.g., "until `tasks/T0NN` accepts"). Tasks whose `linked_observations` intersect the block scope are held at `in_review` (cannot transition to `accepted`) until the block lifts. This is the heaviest hammer and is reserved for the cases the doctrine in `docs/architecture-coherence.md` explicitly anticipates.
+
+### 6. `propose_doctrine_update`
+The cluster surfaces a doctrinal gap rather than a code change: `CLAUDE.md`, `docs/philosophy.md`, `docs/architecture-coherence.md`, or another doctrine doc lacks the rule that would have caught this class. The output names the target doc and a `proposed_paragraph` (`max_length: 4000`). A separate `tasks add` for the doctrine update is authorized; the cluster's observations close with `resolved_by = doctrine`.
+
+### 7. `request_human_arch_decision`
+The reviewer cannot decide between two architectural shapes within the substrate's autonomous-decision surface — the choice itself is a U-moment. The output names the two (or more) candidate shapes with one-paragraph trade-off summaries and halts the cluster pending human decision. The downstream observation's contract stays unratified; tasks stay un-promoted; the human is the only path forward. This output is rare and is the architecture-review analog of the gatekeeper's `needs_info` — except the gap is judgment, not evidence.
+
+## Fast-track policy
+
+Fast-track is the gatekeeper's mechanism for moving locally-trivial filings through with reduced ceremony. It is power that, mishandled, becomes the exact drift this whole layer exists to prevent. The policy below defines its boundary in two parts: an explicit ALLOW list (the only conditions under which fast-track is permitted) and an explicit PROHIBIT list (surfaces on which fast-track is structurally forbidden, regardless of how locally-trivial the change appears).
+
+### ALLOW list (fast-track is permitted only when ALL conditions hold)
+
+1. `tier_hint ∈ {T0, T1}` AND
+2. `risk_flags ⊆ {docs_only, small_local_fix, duplicate_symptom}` AND
+3. `risk_flags ∩ {touches_actor_authority, touches_lifecycle, touches_subscriber_semantics, touches_runner_boundary, touches_schema_core, introduces_new_primitive, changes_boundary, security_sensitive, authority_surface_drift, contradicts_prior_decision} = ∅` AND
+4. `confidence == high` AND
+5. The cluster_key (if any) has not crossed the `cluster-threshold` trigger (Trigger 2) — even one fast-track-eligible row gets re-routed to `normal_observation` once the cluster is in arch-review territory AND
+6. The change is mechanically verifiable: there exists a deterministic check (test, lint, typecheck, doc render) whose pass/fail outcome is the entire acceptance criterion.
+
+### PROHIBIT list (fast-track is forbidden, no exceptions)
+
+The following surfaces may NEVER be fast-tracked, regardless of how trivial any individual filing on them looks. This list is verbatim from the task's `scope_out`:
+
+1. **authority** — actor-class assignments on any field or transition; `--invoker` discipline; the `human` / `ai_with_human` / `ai_autonomous` boundary.
+2. **lifecycle** — state-machine shape on any typed store; transition guards; on-entry / on-exit hooks.
+3. **schema** — `schema.yaml` itself; transition-history machinery; validators; the rendered-projection contract.
+4. **subscriber** — auto-promote (L046), any future fire-on-event subscriber, the conditions under which subscribers fire and their side-effect surface.
+5. **runner** — Mac / Pi runner protocols; sidecar handshakes; dispatch-lock semantics; cross-host claim mechanics.
+6. **deploy** — release pipelines; container orchestration; the carry-forward-secrets pattern; broker / sidecar deployment shape.
+7. **security** — secrets handling, sandbox boundaries, the threat model surface broadly.
+8. **approval-token** — token generation, encryption-at-rest, decryption flow, verification path, anywhere the token could be widened, persisted, or pre-fetched.
+
+A filing that touches any PROHIBIT surface MUST route to `normal_observation` at minimum and to `arch_review_candidate` if any of the corresponding `touches_*` or `*_drift` flags fire (which they will by construction). The gatekeeper output schema enforces this: the `fast_track` decision is rejected fail-loud when any PROHIBIT-surface flag is present.
+
+### Required audit trail for every fast-track
+
+Every fast-tracked row produces, in the same transaction, three artifacts:
+
+1. **Gatekeeper decision row** — the full `gatekeeper_decision_json` payload on `intake_items.gatekeeper_decision_json`, including the `rationale` field naming why fast-track was permitted (which ALLOW conditions held).
+2. **Deterministic check record** — a `fast_track_record` (or, until that store ships, a structured note appended to the observation's `body`) naming the verifying check, its command line, and its captured exit code / output. Without a deterministic-check record, the fast-track is not auditable and the gatekeeper output schema rejects the decision.
+3. **Terminal closure** — the resulting observation row is created in a pre-resolved state (or a fast-track-eligible state) with `resolved_by = fast_track:I###` pointing back at the intake item. The observation is not eligible for re-opening except via `intake reopen` followed by a fresh triage.
+
+These three artifacts together form the fast-track audit trail. Any one missing turns the row's `routed` state into a schema-rejection condition.
+
+## Failure modes / abuse cases
+
+The gatekeeper itself can drift. The cases below name three concrete drift modes plus their counter-measures, so a future reviewer can check whether the layer is still doing its job or has begun rubber-stamping. None of these counter-measures are policed by the gatekeeper agent itself — that would be the fox guarding the henhouse — they are external-to-the-agent surfaces (dashboards, schema validators, periodic reviews) the substrate maintains.
+
+### Abuse case 1: Risk-flag underuse
+**Drift shape:** the gatekeeper, optimizing for throughput, omits `touches_*` flags on rows that genuinely touch those surfaces — classifying schema-touching changes as `small_local_fix` because the diff is short, or marking subscriber-semantics changes as `docs_only` because they ship as a comment edit. Local-fix routing accelerates; arch-review traffic dwindles; cluster-threshold (Trigger 2) never fires because rows never enter the relevant `cluster_key`.
+**Counter-measures:**
+1. **Risk-flag rate dashboard.** A computed view tracks the moving rate of each `touches_*` flag per 100 triaged rows. A drop of `> 50%` from the trailing 90-day baseline (without a corresponding drop in PR-touch rate on the same surfaces, measurable from `git log --stat` against schema/subscriber/runner paths) triggers a periodic-sweep review of recent classifications.
+2. **Spot-check sampling.** Periodic-sweep (Trigger 4) randomly re-classifies `5%` of `routed` rows in the trailing window using a fresh gatekeeper invocation; disagreements above a tolerance cross-trigger an architecture-review of *the gatekeeper's own behavior*, not the underlying rows.
+3. **Schema-side pattern matching.** A validator scans the row's `evidence` and `body` for token patterns indicating `touches_*` surfaces (e.g., `schema.yaml`, `actor:`, `subscribers/`, `dispatch_locks`, `approve_token`); if any pattern matches and no corresponding `touches_*` flag is set, the row is held in `triaging` for re-review rather than allowed to route.
+
+### Abuse case 2: Cluster-key collision (over-coalescing or under-coalescing)
+**Drift shape (over-coalescing):** the gatekeeper coins overly broad `cluster_key`s (`runner-stuff`, `lifecycle-thing`) under which many architecturally-distinct shapes pile, suppressing the cluster-threshold trigger for any one shape because the bucket is permanently above threshold and no single sub-shape is differentiable.
+**Drift shape (under-coalescing):** the gatekeeper coins overly narrow `cluster_key`s (`runner-stuck-on-tuesday`, `dispatch-lock-near-bedtime`) so each filing lands in its own singleton bucket and Trigger 2 never fires.
+**Counter-measures:**
+1. **Curated registry promotion.** Cluster keys appearing `≥ 3` times promote into a curated registry (Open Question 1's expected resolution); free-form coining is permitted only outside the registry. Registry entries carry a one-paragraph definition; the gatekeeper must select an existing entry when its proposed key would be a near-synonym (Levenshtein-distance check at write-time).
+2. **Cluster-cardinality guardrails.** Any cluster_key whose count `> 25` over a 30-day window AND whose underlying observations span `> 4` distinct file roots fires a forced architecture-review of *the cluster definition itself* — the suspicion is over-coalescing.
+3. **Singleton-rate dashboard.** The proportion of `cluster_key`s with count `== 1` over the trailing 90 days is tracked; sustained values above `80%` indicate under-coalescing and trigger a registry-curation pass.
+
+### Abuse case 3: Fast-track creep
+**Drift shape:** the fast-track ALLOW list is honored letter-by-letter, but the gatekeeper begins classifying a wider population as `T0/T1 + small_local_fix` to qualify them. The PROHIBIT list still holds at the surface boundary, but borderline cases (a "small" lifecycle-adjacent change reframed as a "doc clarification") slip through. Over months, the local-fix queue grows, arch-review queue shrinks, and architectural pressure becomes invisible.
+**Counter-measures:**
+1. **Fast-track ratio cap.** The ratio of `decision == fast_track` to total triaged rows is tracked over a 30-day window; a hard cap of `35%` (configurable, but not by the gatekeeper) holds. When the cap is reached, further `fast_track` decisions are rejected fail-loud and the gatekeeper must pick `normal_observation` or escalate.
+2. **Deterministic-check audit.** The `fast_track_record`'s named check is sampled (`10%` of fast-tracks) and re-run by a separate verifier role; mismatches between recorded and re-run outcomes block the fast-track surface for the gatekeeper instance pending review.
+3. **PROHIBIT-surface diff scan.** Every fast-tracked observation's referenced files are matched against a maintained list of PROHIBIT-surface paths (`schema.yaml`, `subscribers/**`, `dispatch_*`, `auth/**`, deploy / runner roots). Any match — even via `body` mention — auto-escalates the row to architecture-review and flags the fast-track for retrospective audit.
+
+These three abuse cases are not exhaustive — they are the classes most directly anticipated by the doctrine in `docs/architecture-coherence.md`. Additional drift modes (recon-loop abuse, decision-blob inflation, dropped-rate inflation) are listed under § *Open questions* with deferred counter-measures.
+
 ## Open questions
 
 These are explicitly deferred; they do not block ratification of the design but should be resolved before the implementation task in phase 5.
