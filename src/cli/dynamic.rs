@@ -432,6 +432,13 @@ fn build_store_command(schema: &Schema) -> Command {
         store_cmd = store_cmd.subcommand(build_guide_cmd());
     }
 
+    // override-risk and override-policy are observations-only.
+    if schema.name == "observations" {
+        store_cmd = store_cmd
+            .subcommand(build_override_risk_cmd())
+            .subcommand(build_override_policy_cmd());
+    }
+
     // Register one subcommand per transition verb (de-duplicated against base/workflow verbs)
     let mut registered_verbs: std::collections::HashSet<String> = std::collections::HashSet::new();
     for transition in &schema.lifecycle.transitions {
@@ -1146,6 +1153,71 @@ fn build_list_cmd(schema: &Schema) -> Command {
 /// Build the `schema` command.
 fn build_schema_cmd() -> Command {
     Command::new("schema").about("Print the schema for this store")
+}
+
+/// Build `override-risk` command (observations only).
+/// Accepts --risk-class, --risk-flags, --cluster-key, --reason (required).
+fn build_override_risk_cmd() -> Command {
+    Command::new("override-risk")
+        .about("Override risk metadata (risk_class, risk_flags, cluster_key) on an observation. Tier-B: requires ai_with_human.")
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the observation")
+                .required(true),
+        )
+        .arg(
+            Arg::new("reason")
+                .long("reason")
+                .help("Required reason for the override (recorded in transition_history.actor_note)")
+                .required(true),
+        )
+        .arg(
+            Arg::new("risk-class")
+                .long("risk-class")
+                .help("New risk_class value (low|normal|architecture|security|authority)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("risk-flags")
+                .long("risk-flags")
+                .action(ArgAction::Append)
+                .help("Risk flag to add (repeat for multiple; canonical values from docs/risk-and-cluster-taxonomy.md)")
+                .required(false),
+        )
+        .arg(
+            Arg::new("cluster-key")
+                .long("cluster-key")
+                .help("New cluster_key value")
+                .required(false),
+        )
+}
+
+/// Build `override-policy` command (observations only).
+/// Accepts --approval-policy, --reason (required).
+fn build_override_policy_cmd() -> Command {
+    Command::new("override-policy")
+        .about(
+            "Override approval_policy on an observation. Relaxation requires effective human \
+             (--invoker human or --invoker ai_with_human --approve-token <T>). \
+             Escalation requires ai_with_human.",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the observation")
+                .required(true),
+        )
+        .arg(
+            Arg::new("reason")
+                .long("reason")
+                .help("Required reason for the override (recorded in transition_history.actor_note)")
+                .required(true),
+        )
+        .arg(
+            Arg::new("approval-policy")
+                .long("approval-policy")
+                .help("New approval_policy value (auto|human|architecture)")
+                .required(true),
+        )
 }
 
 /// Names that collide with our reserved layer or clap builtins.
