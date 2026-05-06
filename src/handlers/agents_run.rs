@@ -398,6 +398,20 @@ pub fn poll_once(
                     }
                 }
             }
+            // T049: only NOW clear finished_at for auto-drive, after all retry
+            // gates (decision halt, predicate match) have passed. This keeps
+            // the lock open during the spawn-to-first-submit window so T040
+            // watchdog catches a retry-spawned drive that dies pre-submit; a
+            // gated-out retry leaves the lock with finished_at intact (no
+            // orphan).
+            if agent.name == "auto-drive" {
+                if let Err(e) = open_auto_drive_retry_lock(conn, &c) {
+                    eprintln!(
+                        "[daemon] open_auto_drive_retry_lock failed for '{}'/{}: {}",
+                        agent.name, c.display_id, e
+                    );
+                }
+            }
             let exit_code = run_dispatch(
                 conn,
                 agents,
@@ -812,39 +826,38 @@ fn claim_for_retry(
     c: &RetryCandidate,
     agent_name: &str,
 ) -> Result<bool> {
-    // T049: auto-drive locks are closed by the drive subprocess on first
-    // successful submit (lock-stays-open semantics). Reset finished_at on
-    // retry-claim so T040's open-lock+dead-pid filter catches a retry-spawned
-    // drive that dies before its first submit. Other agents keep the existing
-    // retry-claim behavior (last_status='retrying'; finished_at preserved).
-    let n = if agent_name == "auto-drive" {
-        conn.execute(
-            "UPDATE dispatch_locks SET last_status = 'retrying', finished_at = NULL \
-             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
-                   AND attempts = ?4 AND last_status = ?5",
-            rusqlite::params![
-                &c.store,
-                c.row_id,
-                agent_name,
-                c.attempts,
-                &c.last_status_snapshot
-            ],
-        )?
-    } else {
-        conn.execute(
-            "UPDATE dispatch_locks SET last_status = 'retrying' \
-             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
-                   AND attempts = ?4 AND last_status = ?5",
-            rusqlite::params![
-                &c.store,
-                c.row_id,
-                agent_name,
-                c.attempts,
-                &c.last_status_snapshot
-            ],
-        )?
-    };
+    let n = conn.execute(
+        "UPDATE dispatch_locks SET last_status = 'retrying' \
+         WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
+               AND attempts = ?4 AND last_status = ?5",
+        rusqlite::params![
+            &c.store,
+            c.row_id,
+            agent_name,
+            c.attempts,
+            &c.last_status_snapshot
+        ],
+    )?;
     Ok(n == 1)
+}
+
+/// T049: open the auto-drive retry-claimed lock by clearing `finished_at`
+/// IMMEDIATELY before `run_dispatch` actually spawns the retry drive. This
+/// must run after all retry gates (decision halt, predicate match) so a
+/// gated-out retry leaves the lock with `finished_at` intact (no orphan).
+/// Auto-drive's lock-stays-open semantics require finished_at IS NULL during
+/// the spawn-to-first-submit window so T040's watchdog catches a dead PID.
+fn open_auto_drive_retry_lock(
+    conn: &Connection,
+    c: &RetryCandidate,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE dispatch_locks SET finished_at = NULL \
+         WHERE store = ?1 AND row_id = ?2 AND agent_name = 'auto-drive' \
+               AND last_status = 'retrying'",
+        rusqlite::params![&c.store, c.row_id],
+    )?;
+    Ok(())
 }
 
 /// Mark a retry-claimed row as halted by policy. last_status carries the
