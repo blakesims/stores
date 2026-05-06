@@ -2,15 +2,49 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, Transaction};
 use std::path::Path;
 
-use crate::codegen::ddl::SUBSTRATE_DDL;
+use crate::codegen::ddl::{validate_framework_ddl, SUBSTRATE_DDL};
+use crate::handlers::framework_migrate::apply_framework_drift;
 
-pub fn open(path: &Path) -> Result<Connection> {
+/// Env var: when set to "1", `db::open` validates SUBSTRATE_DDL but skips
+/// the framework-drift auto-apply pass. Used by operators who want explicit
+/// control over `stores migrate` runs.
+const DISABLE_AUTOAPPLY_ENV: &str = "STORES_DISABLE_FRAMEWORK_AUTOAPPLY";
+
+fn open_inner(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // Boot-time invariant check on the compiled-in SUBSTRATE_DDL: refuse to
+    // start if any additive framework column would fail an ALTER on an
+    // existing non-empty DB.
+    validate_framework_ddl().context("framework DDL invariant check")?;
     // Substrate-level tables (store-agnostic). Idempotent (CREATE IF NOT EXISTS).
     conn.execute_batch(SUBSTRATE_DDL)
         .context("apply substrate DDL")?;
     Ok(conn)
+}
+
+/// Open the substrate DB and (unless `STORES_DISABLE_FRAMEWORK_AUTOAPPLY=1`)
+/// auto-apply any framework-DDL drift on existing tables.
+///
+/// Boot path is silent: the apply report is discarded. Operators who want to
+/// see what was applied should run `stores migrate` (which uses
+/// `open_no_autoapply` so it can compute the diff before any mutation).
+pub fn open(path: &Path) -> Result<Connection> {
+    let conn = open_inner(path)?;
+    let disabled = std::env::var(DISABLE_AUTOAPPLY_ENV)
+        .ok()
+        .filter(|v| v == "1")
+        .is_some();
+    if !disabled {
+        apply_framework_drift(&conn).context("auto-apply framework DDL drift on boot")?;
+    }
+    Ok(conn)
+}
+
+/// Open the DB without running framework-DDL auto-apply. Used by
+/// `stores migrate` so it can observe drift before applying it.
+pub fn open_no_autoapply(path: &Path) -> Result<Connection> {
+    open_inner(path)
 }
 
 /// Insert a row into `transition_history`. Called by every successful
