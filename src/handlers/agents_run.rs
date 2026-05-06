@@ -15,6 +15,120 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+pub const STALE_DAEMON_MESSAGE: &str = "daemon binary stale after cargo install; restart required";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinaryIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+pub trait BinaryIdentityProvider {
+    fn identity(&self, path: &Path) -> Result<BinaryIdentity>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FsBinaryIdentityProvider;
+
+impl BinaryIdentityProvider for FsBinaryIdentityProvider {
+    fn identity(&self, path: &Path) -> Result<BinaryIdentity> {
+        use std::os::unix::fs::MetadataExt;
+        let md = std::fs::metadata(path)
+            .with_context(|| format!("stat executable {}", path.display()))?;
+        Ok(BinaryIdentity {
+            dev: md.dev(),
+            ino: md.ino(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonExeStatus {
+    Fresh,
+    Stale { message: &'static str },
+}
+
+pub struct DaemonExeGuard<P: BinaryIdentityProvider> {
+    startup_identity: BinaryIdentity,
+    launch_path: PathBuf,
+    provider: P,
+}
+
+impl<P: BinaryIdentityProvider> DaemonExeGuard<P> {
+    pub fn new(startup_identity: BinaryIdentity, launch_path: PathBuf, provider: P) -> Self {
+        Self {
+            startup_identity,
+            launch_path,
+            provider,
+        }
+    }
+
+    pub fn startup_identity(&self) -> BinaryIdentity {
+        self.startup_identity
+    }
+
+    pub fn launch_path(&self) -> &Path {
+        &self.launch_path
+    }
+
+    pub fn current_status(&self) -> Result<DaemonExeStatus> {
+        let current = self.provider.identity(&self.launch_path)?;
+        if current == self.startup_identity {
+            Ok(DaemonExeStatus::Fresh)
+        } else {
+            Ok(DaemonExeStatus::Stale {
+                message: STALE_DAEMON_MESSAGE,
+            })
+        }
+    }
+
+    pub fn check_stale(&self) -> Result<Option<&'static str>> {
+        match self.current_status()? {
+            DaemonExeStatus::Fresh => Ok(None),
+            DaemonExeStatus::Stale { message } => Ok(Some(message)),
+        }
+    }
+}
+
+impl DaemonExeGuard<FsBinaryIdentityProvider> {
+    pub fn from_process() -> Result<Self> {
+        let provider = FsBinaryIdentityProvider;
+        let current_exe = std::env::current_exe().context("resolving current_exe")?;
+        let mut startup_identity = provider.identity(&current_exe)?;
+        let launch_path = resolve_launch_path_from_env()?;
+        #[cfg(debug_assertions)]
+        if std::env::var_os("STORES_TEST_DAEMON_FORCE_STALE").is_some() {
+            let launch_identity = provider.identity(&launch_path)?;
+            startup_identity = BinaryIdentity {
+                dev: launch_identity.dev,
+                ino: launch_identity.ino.saturating_add(1),
+            };
+        }
+        Ok(Self::new(startup_identity, launch_path, provider))
+    }
+}
+
+pub fn resolve_launch_path_from_env() -> Result<PathBuf> {
+    let argv0 = std::env::args()
+        .next()
+        .ok_or_else(|| anyhow!("argv[0] missing; cannot resolve daemon launch path"))?;
+    resolve_launch_path(&argv0)
+}
+
+pub fn resolve_launch_path(argv0: &str) -> Result<PathBuf> {
+    if argv0.contains('/') {
+        return Ok(PathBuf::from(argv0));
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(argv0);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Ok(PathBuf::from(argv0))
+}
+
 use crate::codegen::ddl::quote_ident;
 use crate::flow::{
     decide, AgentEntry, AgentsYaml, BackoffKind, Decision, NotifyEvent, PoliciesYaml,
@@ -36,6 +150,11 @@ pub struct RunArgs {
 /// Process-wide shutdown flag; flipped by the SIGTERM handler. Public so
 /// tests can flip it directly without sending a signal.
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Process-wide stale-binary flag. Set by the first stale detection inside
+/// `poll_once_with_guard` so the fail-loud message fires exactly once even
+/// when multiple auto-drive candidates are eligible in the same poll iteration.
+pub static STALE_HALTED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn handle_sigterm(_: libc::c_int) {
     SHUTDOWN.store(true, Ordering::SeqCst);
@@ -87,6 +206,9 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
         let pidfile = stores_dir.join("agents-daemon.pid");
         let _ = std::fs::write(&pidfile, std::process::id().to_string());
     }
+
+    let exe_guard =
+        DaemonExeGuard::from_process().context("constructing daemon executable guard")?;
 
     install_sigterm_handler();
 
@@ -148,17 +270,29 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
             );
             break;
         }
-        match poll_once(
+        if let Some(message) = exe_guard.check_stale()? {
+            bail!(message);
+        }
+        match poll_once_with_guard(
             &conn,
             &agents,
             &policies,
             &config_path,
             &claimer,
             &daemon_epoch,
+            Some(&exe_guard),
         ) {
             Ok(n) if n > 0 => eprintln!("[daemon] dispatched {} job(s) in iteration {}", n, iter),
             Ok(_) => {}
-            Err(e) => eprintln!("[daemon] poll error: {}", e),
+            Err(e) => {
+                // Stale-binary errors are emitted inside poll_once_with_guard
+                // (exactly once via STALE_HALTED); propagate as a hard bail so
+                // the daemon exits rather than looping on a stale binary.
+                if e.to_string() == STALE_DAEMON_MESSAGE {
+                    bail!(e);
+                }
+                eprintln!("[daemon] poll error: {}", e);
+            }
         }
         iter += 1;
         if let Some(max) = args.max_iters {
@@ -192,6 +326,26 @@ pub fn poll_once(
     config_path: &Path,
     claimer: &str,
     daemon_epoch: &str,
+) -> Result<usize> {
+    poll_once_with_guard::<FsBinaryIdentityProvider>(
+        conn,
+        agents,
+        policies,
+        config_path,
+        claimer,
+        daemon_epoch,
+        None,
+    )
+}
+
+pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
+    conn: &Connection,
+    agents: &AgentsYaml,
+    policies: &PoliciesYaml,
+    config_path: &Path,
+    claimer: &str,
+    daemon_epoch: &str,
+    exe_guard: Option<&DaemonExeGuard<P>>,
 ) -> Result<usize> {
     let mut dispatched = 0;
     for agent in &agents.agents {
@@ -266,7 +420,21 @@ pub fn poll_once(
                 // drives BEFORE we burn a claim; otherwise a row would be
                 // claimed-and-skipped, which would prevent retry on the next
                 // poll. Only the auto-drive builtin is special-cased.
+                //
+                // The stale check here is an early-out optimization (avoids
+                // burning a claim on a stale binary). The load-bearing check
+                // is the tight pre-spawn guard below (MAJOR 1 fix). Dedup via
+                // STALE_HALTED ensures only one log line fires even when
+                // multiple candidates match in the same poll.
                 if agent.command == "builtin:auto-drive" {
+                    if let Some(guard) = exe_guard {
+                        if guard.check_stale()?.is_some() {
+                            if !STALE_HALTED.swap(true, Ordering::SeqCst) {
+                                eprintln!("{}", STALE_DAEMON_MESSAGE);
+                            }
+                            return Err(anyhow!(STALE_DAEMON_MESSAGE));
+                        }
+                    }
                     let cap = crate::flow::config::resolve_drive_max_parallel(config_path);
                     let live = count_live_drive_pids(conn).unwrap_or(0);
                     if live >= cap as usize {
@@ -295,6 +463,20 @@ pub fn poll_once(
                 )?;
                 if !claimed {
                     continue;
+                }
+                // Tight pre-spawn stale guard (MAJOR 1 / MAJOR 2 fix): check
+                // immediately before run_dispatch so no work (claim, postcond
+                // computation) can slip in between the guard and the spawn.
+                // STALE_HALTED deduplicates the log line across candidates.
+                if agent.command == "builtin:auto-drive" {
+                    if let Some(guard) = exe_guard {
+                        if guard.check_stale()?.is_some() {
+                            if !STALE_HALTED.swap(true, Ordering::SeqCst) {
+                                eprintln!("{}", STALE_DAEMON_MESSAGE);
+                            }
+                            return Err(anyhow!(STALE_DAEMON_MESSAGE));
+                        }
+                    }
                 }
                 let exit_code = run_dispatch(
                     conn,
@@ -432,6 +614,18 @@ pub fn poll_once(
                         "[daemon] open_auto_drive_retry_lock failed for '{}'/{}: {}",
                         agent.name, c.display_id, e
                     );
+                }
+            }
+            // Tight pre-spawn stale guard (retry path) — same pattern as
+            // the forward-dispatch path above. STALE_HALTED deduplicates.
+            if agent.command == "builtin:auto-drive" {
+                if let Some(guard) = exe_guard {
+                    if guard.check_stale()?.is_some() {
+                        if !STALE_HALTED.swap(true, Ordering::SeqCst) {
+                            eprintln!("{}", STALE_DAEMON_MESSAGE);
+                        }
+                        return Err(anyhow!(STALE_DAEMON_MESSAGE));
+                    }
                 }
             }
             let exit_code = run_dispatch(
@@ -1221,10 +1415,7 @@ fn claim_for_retry(conn: &Connection, c: &RetryCandidate, agent_name: &str) -> R
 /// gated-out retry leaves the lock with `finished_at` intact (no orphan).
 /// Auto-drive's lock-stays-open semantics require finished_at IS NULL during
 /// the spawn-to-first-submit window so T040's watchdog catches a dead PID.
-fn open_auto_drive_retry_lock(
-    conn: &Connection,
-    c: &RetryCandidate,
-) -> Result<()> {
+fn open_auto_drive_retry_lock(conn: &Connection, c: &RetryCandidate) -> Result<()> {
     conn.execute(
         "UPDATE dispatch_locks SET finished_at = NULL \
          WHERE store = ?1 AND row_id = ?2 AND agent_name = 'auto-drive' \
@@ -1609,6 +1800,34 @@ mod tests {
     use crate::codegen::ddl::SUBSTRATE_DDL;
     use crate::flow::agents_yaml::TransitionEdge;
     use crate::flow::{AgentEntry, BackoffKind, RetryPolicy, Subscription};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone)]
+    struct MockIdentityProvider {
+        identities: HashMap<PathBuf, BinaryIdentity>,
+    }
+
+    impl BinaryIdentityProvider for MockIdentityProvider {
+        fn identity(&self, path: &Path) -> Result<BinaryIdentity> {
+            self.identities
+                .get(path)
+                .copied()
+                .ok_or_else(|| anyhow!("missing mock identity for {}", path.display()))
+        }
+    }
+
+    fn mock_guard(
+        startup: BinaryIdentity,
+        launch_path: PathBuf,
+        current: BinaryIdentity,
+    ) -> DaemonExeGuard<MockIdentityProvider> {
+        let mut identities = HashMap::new();
+        identities.insert(launch_path.clone(), current);
+        DaemonExeGuard::new(startup, launch_path, MockIdentityProvider { identities })
+    }
 
     fn fresh_db() -> Connection {
         let c = Connection::open_in_memory().unwrap();
@@ -1693,6 +1912,169 @@ mod tests {
             },
             command_args: None,
         }
+    }
+
+    fn add_auto_drive_columns(conn: &Connection) {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN workspace_path TEXT;
+             ALTER TABLE tasks ADD COLUMN drive_pid INTEGER;
+             ALTER TABLE tasks ADD COLUMN drive_started_at TEXT;
+             ALTER TABLE tasks ADD COLUMN updated_at TEXT;",
+        )
+        .unwrap();
+    }
+
+    fn auto_drive_agent() -> AgentEntry {
+        let mut agent = noop_agent("auto-drive", "tasks", "", "planning");
+        agent.command = "builtin:auto-drive".to_string();
+        agent.subscribes_to[0].predicate = Some(crate::flow::predicate::PredicateExpr::Neq {
+            left: serde_json::json!("$workspace_path"),
+            right: serde_json::json!(""),
+        });
+        agent
+    }
+
+    #[test]
+    fn daemon_exe_identity_fresh_identity_stays_fresh() {
+        let ident = BinaryIdentity { dev: 1, ino: 2 };
+        let guard = mock_guard(ident, PathBuf::from("/tmp/stores"), ident);
+        assert_eq!(guard.current_status().unwrap(), DaemonExeStatus::Fresh);
+        assert_eq!(guard.check_stale().unwrap(), None);
+    }
+
+    #[test]
+    fn daemon_exe_identity_detects_stale_launch_path_identity() {
+        let guard = mock_guard(
+            BinaryIdentity { dev: 1, ino: 2 },
+            PathBuf::from("/tmp/stores"),
+            BinaryIdentity { dev: 1, ino: 3 },
+        );
+        assert_eq!(
+            guard.current_status().unwrap(),
+            DaemonExeStatus::Stale {
+                message: STALE_DAEMON_MESSAGE
+            }
+        );
+        assert_eq!(guard.check_stale().unwrap(), Some(STALE_DAEMON_MESSAGE));
+    }
+
+    #[test]
+    fn stale_auto_drive_guard_refuses_before_claim_or_spawn_side_effect() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Reset process-local dedup flag so test order doesn't matter.
+        STALE_HALTED.store(false, Ordering::SeqCst);
+        std::env::remove_var("STORES_DRIVE_CMD");
+        let conn = fresh_db();
+        add_auto_drive_columns(&conn);
+        let tmp = tempfile::tempdir().unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, status, tier_hint, branch, workspace_path) \
+             VALUES (91, 'T091', 'planning', 'T2', 'feat/stale', ?1)",
+            rusqlite::params![tmp.path().to_string_lossy()],
+        )
+        .unwrap();
+        insert_history(&conn, "tasks", 91, "T091", "", "planning");
+        let agents = AgentsYaml {
+            agents: vec![auto_drive_agent()],
+            deployment_specialist: None,
+        };
+        let guard = mock_guard(
+            BinaryIdentity { dev: 7, ino: 8 },
+            PathBuf::from("/tmp/stores"),
+            BinaryIdentity { dev: 7, ino: 9 },
+        );
+
+        // With the MAJOR 1 fix, poll_once_with_guard returns Err (not Ok(0))
+        // when stale so that run_daemon's outer loop bails rather than
+        // continuing to poll a stale binary.
+        let result = poll_once_with_guard(
+            &conn,
+            &agents,
+            &empty_policies(),
+            &cfg_path(),
+            "test-claimer",
+            "epoch",
+            Some(&guard),
+        );
+        assert!(
+            result.is_err(),
+            "stale binary must cause poll_once_with_guard to return Err"
+        );
+        assert_eq!(result.unwrap_err().to_string(), STALE_DAEMON_MESSAGE);
+        let (claims, drive_pid): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM dispatch_locks WHERE agent_name='auto-drive'), drive_pid \
+                 FROM tasks WHERE display_id='T091'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(claims, 0, "stale guard must refuse before try_claim");
+        assert!(drive_pid.is_none(), "stale guard must refuse before spawn");
+    }
+
+    #[test]
+    fn fresh_auto_drive_guard_records_positive_drive_pid() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        STALE_HALTED.store(false, Ordering::SeqCst);
+        let conn = fresh_db();
+        add_auto_drive_columns(&conn);
+        let tmp = tempfile::tempdir().unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, status, tier_hint, branch, workspace_path) \
+             VALUES (92, 'T092', 'planning', 'T2', 'feat/fresh', ?1)",
+            rusqlite::params![tmp.path().to_string_lossy()],
+        )
+        .unwrap();
+        insert_history(&conn, "tasks", 92, "T092", "", "planning");
+        let agents = AgentsYaml {
+            agents: vec![auto_drive_agent()],
+            deployment_specialist: None,
+        };
+        let ident = BinaryIdentity { dev: 7, ino: 8 };
+        let guard = mock_guard(ident, PathBuf::from("/tmp/stores"), ident);
+        std::env::set_var("STORES_DRIVE_CMD", "sleep 2 #");
+
+        let n = poll_once_with_guard(
+            &conn,
+            &agents,
+            &empty_policies(),
+            &cfg_path(),
+            "test-claimer",
+            "epoch",
+            Some(&guard),
+        )
+        .unwrap();
+        std::env::remove_var("STORES_DRIVE_CMD");
+        assert_eq!(n, 1);
+        let drive_pid: i64 = conn
+            .query_row(
+                "SELECT drive_pid FROM tasks WHERE display_id='T092'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            drive_pid > 0,
+            "fresh guard must allow spawn; got {drive_pid}"
+        );
+        unsafe {
+            libc::kill(drive_pid as i32, libc::SIGTERM);
+        }
+    }
+
+    #[test]
+    fn daemon_stale_message_is_exact_fail_loud_line() {
+        let guard = mock_guard(
+            BinaryIdentity { dev: 1, ino: 2 },
+            PathBuf::from("/tmp/stores"),
+            BinaryIdentity { dev: 3, ino: 4 },
+        );
+        let message = guard.check_stale().unwrap().unwrap();
+        assert_eq!(
+            message,
+            "daemon binary stale after cargo install; restart required"
+        );
     }
 
     /// AC4.2 test (b): a tasks row freshly transitioned to in_review is
@@ -2742,7 +3124,11 @@ policies:
 
         let agent = retry_agent("typed-cas", "exit 1", 3);
         let candidates = find_retryable_locks(&conn, &agent).unwrap();
-        assert_eq!(candidates.len(), 1, "elapsed typed failure must be retryable");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "elapsed typed failure must be retryable"
+        );
 
         assert!(claim_for_retry(&conn, &candidates[0], "typed-cas").unwrap());
         assert!(
