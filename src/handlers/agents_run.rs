@@ -553,9 +553,11 @@ pub fn seed_starting_line(
             let n = conn.execute(
                 "INSERT OR IGNORE INTO dispatch_locks \
                  (store, row_id, display_id, agent_name, transition_id, \
-                  claimed_at, claimed_by, last_status, finished_at) \
+                  claimed_at, claimed_by, last_status, finished_at, \
+                  daemon_epoch, claim_source, attempt, terminal_reason, next_retry_at) \
                  SELECT th.store, th.row_id, th.display_id, ?1, th.id, ?2, \
-                        'starting-line-marker', 'skip-historical', ?2 \
+                        'starting-line-marker', 'skip-historical', ?2, \
+                        '', 'legacy', 0, 'legacy_unknown', NULL \
                  FROM transition_history th \
                  WHERE th.store = ?3 AND th.from_status = ?4 AND th.to_status = ?5 \
                        AND th.id <= ?6",
