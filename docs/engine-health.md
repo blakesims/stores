@@ -72,7 +72,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | GAP | — | tier-aware code-reviewer brief modulation (L030's deferred remainder) |
 
 ### Layer 4 — Deploy ceremony / release
-*Substantially solid post-batch. Daemon merges-cargo-installs-schema-migrates cleanly when it runs (T046's exit-code routing made silent-zombies impossible). Remaining drag: framework-DDL drift on bootstrap (L144), resume-from-deploy_blocked semantics (L145), and the merge-conflict recovery dance still requires manual close-out-of-band (T044's verb).*
+*Substantially solid post-batch. Daemon merges-cargo-installs-schema-migrates cleanly when it runs (T046's exit-code routing made silent-zombies impossible). L145/T061 added retry-deploy + cargo-install cwd fallback so deploy_blocked recovery is operator-visible and complete. Remaining drag: accept-merge conflict-path side-effect drop (L070), and the merge-conflict recovery dance still uses manual close-out-of-band (T044's verb).*
 
 | obs | state | what hurts |
 |---|---|---|
@@ -84,10 +84,10 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L138 | ✅ T045 | gatekeeper design doc + risk/cluster taxonomy ratified (docs-only; impl seeds in L142/L143) |
 | L143 | ✅ T052 | observation risk metadata + approval_policy shipped; generic update cannot bypass direction-aware override-policy gate |
 | L061 | ⚪ T2 | no pre-promotion acceptance precheck; tasks ship before discovering already-met |
-| L069 | ⚪ — | `compute_resume` rejects `deploy_blocked` rows (related: L145, schema/handler drift on resume verb) |
+| L069 | ✅ T061 | `compute_resume` now scopes exactly to 'blocked' with helpful guidance for deploy_blocked → use retry-deploy or close-out-of-band (closed transitively via L145/T061) |
 | L070 | ⚪ — | accept-merge conflict path drops cargo-install + schema-migrate side effects |
 | L144 | ✅ T051 | framework-DDL drift detection/audit shipped; existing DBs learn newer SUBSTRATE_DDL columns without manual ALTER |
-| L145 | ⚪ T2 | resume handler hardcodes 'blocked' source; schema permits deploy_blocked→ready via resume but handler rejects pre-validator. Also semantic ambiguity: should resume from deploy_blocked re-cycle or just retry-deploy? |
+| L145 | ✅ T061 | retry-deploy verb shipped: deploy_blocked → accepted re-fires accept-merge → cargo-install → schema-migrate without re-cycling work; accept_merge peer-detection guard preserves L045 solo-recovery; cargo_install cwd fallback validates stores Cargo crate (fails LOUDLY otherwise) |
 | L149 | ⚪ T2 | **daemon's auto-drive spawn breaks silently after `cargo install` replaces `/home/blake/.cargo/bin/stores`** — current_exe()-based execvp loads new binary, but the daemon's in-memory image stays out of sync; spawn argv subtly mismatches new binary's CLI parsing → drive subprocess dies <5s with empty log. Workaround: restart daemon after each cargo-install. Surfaced today during pipe-fill (T048/T049 both died until daemon restart). Compounds with L011 (binary-version recording) — daemon should detect inode-replacement of own exe and self-restart. |
 | L150 | ⚪ T2 | halt/deploy-blocked subscriber files merge-conflict-shaped observations for rows that are merely `blocked` by drive failure (e.g. T034 silent-zombie / Pi-smoke failures). Needs typed event/terminal reason before templating operator-facing halt observations. |
 | GAP | — | acceptance-time precheck for "task touches files with uncommitted main-side changes → accept-merge will fail" |
@@ -152,17 +152,16 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Highest-leverage next picks
 
-Layers 1–4 are substantially solid after the batch. L142/T053 gatekeeper Router seam shipped. Re-ranked picks (pi msg_b9604036, post-T053):
+Layers 1–4 are substantially solid after the batch. L142/T053 gatekeeper Router seam + L145/T061 retry-deploy both shipped. Re-ranked picks (pi msg_b9604036, post-T061):
 
-1. **L145 (resume-from-deploy_blocked semantics)** — next operator-trust/recovery sharp edge. Design question first: does resume retry deploy ceremony or re-cycle execution? Affects watch/status clarity. **Pi guidance: design/contract before implementation.**
-2. **L124 + L002 (retirement/admin cleanup)** — watch is better after L165, but stale/rejected/duplicate/deploy-blocked rows still need a real lifecycle/admin path so the dashboard doesn't rely only on filtering.
-3. **L135 (Check primitive)** — unifies deterministic pre/post-condition gates; pairs naturally with L134 postconditions and future L172 fast-track audit.
-4. **L151 / GAP (auto-investigator subscriber / queue drain)** — strategic throughput improvement once lifecycle/status surfaces are less confusing.
-5. **L149 / L011 (daemon binary/version visibility)** — stale-exe restarts remain operational friction; becomes urgent if it continues to bite during normal daemon-driven work.
-6. **L057/L058/L059 (run/edge observability)** — aggregate transcript refs, per-edge throughput, and invocation metadata. After status/recovery cleanup.
-7. **L108 (on-entry retroactive trigger)** — rare but real metadata-flow gap.
-8. **L171/L172/L173 (gatekeeper P3-P5)** — deferred post-T053 follow-ups; surface after the operator-trust layer is solid (gatekeeper P1 needs real-world drive shaping before ratifying P3).
-9. **I001 (schema required_when OR/IN expressiveness)** — small substrate primitive task; T1; not blocking.
+1. **L124 + L002 (retirement/admin cleanup)** — now the most operator-visible gap: watch is better after L165 but stale/rejected/duplicate/deploy-blocked rows still need a real lifecycle/admin path so the dashboard doesn't rely only on filtering.
+2. **L135 (Check primitive)** — unifies deterministic pre/post-condition gates; pairs naturally with L134 postconditions and future L172 fast-track audit.
+3. **L151 / GAP (auto-investigator subscriber / queue drain)** — strategic throughput improvement once lifecycle/status surfaces are less confusing.
+4. **L149 / L011 (daemon binary/version visibility)** — stale-exe restarts remain operational friction; becomes urgent if it continues to bite during normal daemon-driven work. Bit twice today (T053 + T061 ceremonies).
+5. **L057/L058/L059 (run/edge observability)** — aggregate transcript refs, per-edge throughput, and invocation metadata. After status/recovery cleanup.
+6. **L108 (on-entry retroactive trigger)** — rare but real metadata-flow gap.
+7. **L171/L172/L173 (gatekeeper P3-P5)** — deferred post-T053 follow-ups; surface after the operator-trust layer is solid (gatekeeper P1 needs real-world drive shaping before ratifying P3).
+8. **I001 (schema required_when OR/IN expressiveness)** — small substrate primitive task; T1; not blocking.
 
 Current picture: propulsion + the architectural router both work end-to-end. Operator-trust gaps are the dominant remaining pressure: recovery semantics, retirement/admin lifecycle, and daemon stale-exe operational annoyance. Next work should make stale/recovered/blocked rows feel boring rather than mysterious.
 
@@ -171,6 +170,7 @@ Current picture: propulsion + the architectural router both work end-to-end. Ope
 
 | date | task | obs | what changed |
 |---|---|---|---|
+| 2026-05-07 | T061 | L145 | retry-deploy recovery edge for `deploy_blocked` shipped: new `tasks retry-deploy <id>` verb (deploy_blocked → accepted) re-fires accept-merge → cargo-install → schema-migrate without re-cycling planner/executor/code-reviewer. accept_merge gained a peer-detection guard (skips firing `mark_cargo_installed` when a cargo-install peer is on the same edge — preserves L045 solo-recovery contract via no-peer fallback). cargo_install gained an L045-symmetric stale-workspace cwd fallback that fails LOUDLY if cwd isn't the stores Cargo crate (Cargo.toml package-name validation). compute_resume now rejects deploy_blocked rows with operator guidance. Codex (5 rounds) caught: subscriber-chain ordering bug → resilience completion gap → cwd-validation laxness → TOML parser inline-comment intolerance. All four findings landed via subagent revise + one direct parser tweak. Merge `d41b6fd`. |
 | 2026-05-07 | T053 | L142 | gatekeeper Router seam P1 shipped: `intake_items` typed store with five-state lifecycle (draft/triaging/needs_info/routed/dropped); single `route` verb covering all six decisions (duplicate/needs_info/fast_track/normal_observation/arch_review_candidate/reject_noise) with same-tx side effects; structured gatekeeper_decision_json validator; `arch_review_candidate` produces a tagged-observation stand-in (no dedicated `architecture_reviews` store); `SideEffectAuthority::GatekeeperRoute` typed enum for narrow per-callsite framework authority on observation L143 fields; direct `observations add` escape hatch preserved; recon-return ≤2-cap. Codex (3 rounds) caught 2 critical (escalated lifecycle violation + missing route-validation), 2 major (CLI/JSON decision equality + side-effect actor discipline), then doc-stragglers + cosmetic typo. Drive economy: 4 cycles all-Pi from blank slate failed (commit='none'); switched to Sonnet executor, landed phases 1-2 + most of 3 before rate limit; resumed all-Pi from concrete 812-LOC scaffold and completed 3-5 in 5 cycles; codex-revise 4 substantive fixes via subagent. Merge `ebfaaf2`. First real intake row: `I001` (FIX 5 follow-up). |
 | 2026-05-06 | T060 | L169 | tier-aware executor/code-reviewer briefs skip phase decomposition for T1 |
 | 2026-05-06 | T059 | L165 | `stores watch` rebuckets rows for actionable defaults; terminal/recovered/rejected exhaust no longer appears as in-flight by default; blocked reason parsing improved |
