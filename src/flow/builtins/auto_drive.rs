@@ -1598,17 +1598,22 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // T049: post-spawn auto-drive lock is left OPEN. Drive subprocess
-    // closes it on first successful submit; watchdog catches drives that
-    // die before then.
+    // L141 -> L134: auto-drive's post-spawn lock-close is now gated by the
+    // typed `drive_pid_recorded_or_terminal` postcondition. T049 originally
+    // detected pre-submit zombies by leaving the lock OPEN and relying on a
+    // watchdog grace window; T050's typed lifecycle replaces that with a
+    // postcondition check inside `mark_claim_finished_typed`. On a healthy
+    // spawn (drive_pid recorded on the tasks row) the lock closes typed-clean
+    // (terminal_reason='ok'); on a pre-record death the postcondition fails
+    // and the lock closes with terminal_reason='error', retry-eligible.
     // -----------------------------------------------------------------
 
     /// poll_once-driven test: after auto-drive successfully spawns its drive
-    /// subprocess, the dispatch_lock must remain OPEN (finished_at IS NULL,
-    /// last_status IS NULL). Pre-T049 the lock was closed with last_status='ok'
-    /// immediately, which orphaned drives that died before first submit.
+    /// subprocess and the `drive_pid_recorded_or_terminal` postcondition
+    /// passes, the dispatch_lock closes cleanly (finished_at set, terminal
+    /// reason 'ok', postcondition_id stamped on the row).
     #[test]
-    fn auto_drive_run_leaves_lock_open() {
+    fn auto_drive_run_closes_lock_after_drive_pid_postcondition_passes() {
         use crate::flow::agents_yaml::TransitionEdge;
         use crate::flow::policies_yaml::PoliciesYaml;
         use crate::flow::{AgentEntry, BackoffKind, RetryPolicy, Subscription};
@@ -1671,29 +1676,43 @@ mod tests {
             .expect("poll_once must succeed");
         assert_eq!(n, 1, "exactly one auto-drive dispatch must fire");
 
-        // T049 invariant: the lock is left OPEN post-spawn.
-        let (finished_at, last_status, drive_pid): (
+        // L141 -> L134 invariant: the lock CLOSES typed-clean because the
+        // drive_pid_recorded_or_terminal postcondition passed (drive_pid is
+        // recorded on the tasks row by the spawn).
+        let (finished_at, last_status, terminal_reason, postcondition_id, drive_pid): (
+            Option<String>,
+            Option<String>,
             Option<String>,
             Option<String>,
             Option<i64>,
         ) = conn
             .query_row(
-                "SELECT dl.finished_at, dl.last_status, t.drive_pid \
+                "SELECT dl.finished_at, dl.last_status, dl.terminal_reason, dl.postcondition_id, t.drive_pid \
                  FROM dispatch_locks dl JOIN tasks t ON t.id = dl.row_id \
                  WHERE t.display_id='T780' AND dl.agent_name='auto-drive'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
         assert!(
-            finished_at.is_none(),
-            "T049: auto-drive lock must remain OPEN post-spawn (got finished_at={:?})",
+            finished_at.is_some(),
+            "L134: auto-drive lock must close once postcondition passes (got finished_at={:?})",
             finished_at
         );
-        assert!(
-            last_status.is_none(),
-            "T049: last_status must be NULL on an open lock (got {:?})",
-            last_status
+        assert_eq!(
+            last_status.as_deref(),
+            Some("ok"),
+            "L134: last_status='ok' on a typed-clean close",
+        );
+        assert_eq!(
+            terminal_reason.as_deref(),
+            Some("ok"),
+            "L134: terminal_reason='ok' when drive_pid_recorded_or_terminal passes",
+        );
+        assert_eq!(
+            postcondition_id.as_deref(),
+            Some("drive_pid_recorded_or_terminal"),
+            "L134: postcondition_id stamped on the lock row",
         );
 
         // Reap the stub.

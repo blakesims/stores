@@ -311,25 +311,15 @@ pub fn poll_once(
                     &row_json,
                 );
                 let (terminal_reason, status_str, code) = terminal_from_dispatch_result(exit_code);
-                // T049: auto-drive's lock close is shifted into the spawned
-                // drive subprocess (closes on first successful submit). On a
-                // healthy spawn (exit 0), leave the lock open here so a drive
-                // that dies between spawn and first submit remains visible to
-                // the watchdog. On non-zero exit / spawn error, keep the
-                // existing close so T041's retry-rescheduler sees the row.
-                let skip_close_for_auto_drive =
-                    agent.name == "auto-drive" && code == 0;
-                if !skip_close_for_auto_drive {
-                    let _ = mark_claim_finished_typed(
-                        conn,
-                        &sub.store,
-                        row_id,
-                        &display_id,
-                        agent,
-                        &terminal_reason,
-                        &status_str,
-                    );
-                }
+                let _ = mark_claim_finished_typed(
+                    conn,
+                    &sub.store,
+                    row_id,
+                    &display_id,
+                    agent,
+                    &terminal_reason,
+                    &status_str,
+                );
                 if code != 0 {
                     route_failure_to_deploy_blocked(
                         conn,
@@ -459,21 +449,15 @@ pub fn poll_once(
                 &row_json,
             );
             let (terminal_reason, status_str, code) = terminal_from_dispatch_result(exit_code);
-            // T049: mirror the dispatch path — leave auto-drive locks open on
-            // a healthy retry spawn so the drive subprocess closes them on
-            // first successful submit; close on non-zero so retry path sees it.
-            let skip_close_for_auto_drive = agent.name == "auto-drive" && code == 0;
-            if !skip_close_for_auto_drive {
-                let _ = mark_claim_finished_typed(
-                    conn,
-                    &c.store,
-                    c.row_id,
-                    &c.display_id,
-                    agent,
-                    &terminal_reason,
-                    &status_str,
-                );
-            }
+            let _ = mark_claim_finished_typed(
+                conn,
+                &c.store,
+                c.row_id,
+                &c.display_id,
+                agent,
+                &terminal_reason,
+                &status_str,
+            );
             if code != 0 {
                 route_failure_to_deploy_blocked(
                     conn,

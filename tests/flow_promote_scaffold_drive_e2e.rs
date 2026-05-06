@@ -209,11 +209,11 @@ fn write_happy_drive_stub(dir: &Path, db_path: &Path) -> PathBuf {
          set -x\n\
          DISPLAY_ID=\"$1\"\n\
          echo \"stub invoked for $DISPLAY_ID at $(date -Iseconds)\"\n\
-         # T049: drive_loop closes the auto-drive dispatch_lock on first\n\
-         # successful submit. The stub stands in for drive_loop, so close\n\
-         # the lock BEFORE flipping status so the test's status-based\n\
-         # predicate can rely on the lock-closed invariant once it sees\n\
-         # status='in_review'.\n\
+         # L141 -> L134: under the typed lifecycle the lock closes on first\n\
+         # successful submit (mark_claim_finished_typed). The stub stands in\n\
+         # for drive_loop, so close the lock BEFORE flipping status so the\n\
+         # test's status-based predicate can rely on the lock-closed invariant\n\
+         # once it sees status='in_review'.\n\
          sqlite3 -cmd \".timeout 10000\" {db} \"UPDATE dispatch_locks \
            SET last_status='ok', finished_at='2026-05-04T00:00:01Z', \
                attempts=attempts+1 \
@@ -567,7 +567,7 @@ fn drive_failure_watchdog_flips_blocked() {
     assert_eq!(
         reason.as_deref(),
         Some("drive_failed:silent_zombie_pid_dead"),
-        "AC7.3 (T049): blocked_reason carries silent-zombie suffix"
+        "AC7.3 (L141 -> L134): blocked_reason carries silent-zombie suffix"
     );
 
     // Observation filed with task_id back-link to T900.

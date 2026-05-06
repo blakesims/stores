@@ -66,6 +66,19 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
             FrameworkColumn { name: "attempts", sql_type: "INTEGER", nullable: false, default_sql: Some("1"), full_def: "attempts INTEGER NOT NULL DEFAULT 1", additive: true },
             FrameworkColumn { name: "last_status", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "last_status TEXT", additive: false },
             FrameworkColumn { name: "finished_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "finished_at TEXT", additive: false },
+            // L134 / T050: typed lifecycle columns. Additive (added post-baseline).
+            // L134 migration in `ensure_dispatch_locks_typed` runs at db::open
+            // before `apply_framework_drift`, so on existing DBs these are
+            // already present when drift detection sees them.
+            FrameworkColumn { name: "daemon_epoch", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "daemon_epoch TEXT", additive: true },
+            FrameworkColumn { name: "claim_source", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "claim_source TEXT CHECK(claim_source IN ('try_claim','retry_claim','manual','legacy'))", additive: true },
+            FrameworkColumn { name: "attempt", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "attempt INTEGER", additive: true },
+            FrameworkColumn { name: "pid", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "pid INTEGER", additive: true },
+            FrameworkColumn { name: "heartbeat_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "heartbeat_at TEXT", additive: true },
+            FrameworkColumn { name: "postcondition_id", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "postcondition_id TEXT", additive: true },
+            FrameworkColumn { name: "postcondition_args", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "postcondition_args TEXT", additive: true },
+            FrameworkColumn { name: "terminal_reason", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown'))", additive: true },
+            FrameworkColumn { name: "next_retry_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "next_retry_at TEXT", additive: true },
         ],
     },
     FrameworkTable {
@@ -77,6 +90,14 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
             FrameworkColumn { name: "table_name", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "table_name TEXT NOT NULL", additive: false },
             FrameworkColumn { name: "column_name", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "column_name TEXT NOT NULL", additive: false },
             FrameworkColumn { name: "ddl_applied", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "ddl_applied TEXT NOT NULL", additive: false },
+        ],
+    },
+    FrameworkTable {
+        name: "framework_migrations",
+        columns: &[
+            FrameworkColumn { name: "id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "id TEXT PRIMARY KEY", additive: false },
+            FrameworkColumn { name: "applied_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "applied_at TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "note", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "note TEXT", additive: false },
         ],
     },
 ];
