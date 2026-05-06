@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::manifest::Manifest;
-use crate::render::path::{find_existing_task_dir, maybe_move_dir, resolve_render_path};
+use crate::render::path::{
+    cleanup_stale_task_dirs, find_existing_task_dir, maybe_move_dir, resolve_render_path,
+};
 use crate::render::{build_context, render_template};
 use crate::schema::{
     actor::{Actor, InvokerCtx},
@@ -223,6 +225,14 @@ pub(crate) fn run_render_in(
         .map_err(|e| anyhow::anyhow!("cannot write '{}': {}", tmp_path.display(), e))?;
     std::fs::rename(&tmp_path, &output.path)
         .map_err(|e| anyhow::anyhow!("cannot rename '{}': {}", tmp_path.display(), e))?;
+
+    // Canonicalize state directories: remove any stale shells of this row
+    // accumulated under previous-state subdirs (T036).
+    if let Some(target_dir) = output.path.parent() {
+        if let Err(e) = cleanup_stale_task_dirs(repo_root, display_id, target_dir) {
+            eprintln!("warning: stale-dir cleanup failed: {}", e);
+        }
+    }
 
     eprintln!("rendered: {}", output.path.display());
     Ok(())
@@ -569,6 +579,110 @@ mod tests {
             entry_before, entry_after,
             "render must not modify any DB row"
         );
+    }
+
+    // T036: render walked through 3 states ends with exactly one dir.
+    #[test]
+    fn render_canonicalizes_state_dirs_across_transitions() {
+        let (tmp, conn, schema) = setup_fixture_env("planning", "multi-state", "WF001");
+        let tmp_path = tmp.path().to_path_buf();
+
+        // 1) planning → tasks/planning/WF001-multi-state/
+        run_render_in(
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
+
+        // 2) executing → should move to tasks/active/
+        conn.execute(
+            "UPDATE wf_tasks SET status = 'executing' WHERE display_id = 'WF001'",
+            [],
+        )
+        .unwrap();
+        run_render_in(
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
+
+        // 3) accepted → should move to tasks/completed/
+        conn.execute(
+            "UPDATE wf_tasks SET status = 'accepted' WHERE display_id = 'WF001'",
+            [],
+        )
+        .unwrap();
+        run_render_in(
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
+
+        // After 3 transitions, exactly one dir should remain.
+        use crate::render::path::find_all_task_dirs;
+        let dirs = find_all_task_dirs(&tmp_path, "WF001");
+        assert_eq!(
+            dirs.len(),
+            1,
+            "exactly one task dir should exist after 3 state transitions; got {:?}",
+            dirs
+        );
+        assert_eq!(
+            dirs[0],
+            tmp_path.join("tasks/completed/WF001-multi-state"),
+            "remaining dir should be in completed/"
+        );
+    }
+
+    // T036: orphan-cleanup — pre-existing accumulated shells get consolidated.
+    #[test]
+    fn render_removes_pre_existing_stale_shells() {
+        let (tmp, conn, schema) = setup_fixture_env("executing", "orphan-test", "WF001");
+        let tmp_path = tmp.path().to_path_buf();
+
+        // Simulate prior accumulation: shells in planning/ and completed/.
+        let stale_planning = tmp_path.join("tasks/planning/WF001-orphan-test");
+        let stale_completed = tmp_path.join("tasks/completed/WF001-orphan-test");
+        std::fs::create_dir_all(&stale_planning).unwrap();
+        std::fs::create_dir_all(&stale_completed).unwrap();
+        std::fs::write(stale_planning.join("main.md"), "old planning").unwrap();
+        std::fs::write(stale_completed.join("main.md"), "old completed").unwrap();
+
+        run_render_in(
+            &schema,
+            &conn,
+            "WF001",
+            false,
+            Actor::Human,
+            &tmp_path,
+            &tmp_path,
+        )
+        .unwrap();
+
+        use crate::render::path::find_all_task_dirs;
+        let dirs = find_all_task_dirs(&tmp_path, "WF001");
+        assert_eq!(
+            dirs.len(),
+            1,
+            "stale shells should be removed; got {:?}",
+            dirs
+        );
+        assert_eq!(dirs[0], tmp_path.join("tasks/active/WF001-orphan-test"));
     }
 
     // AC6.2: dry-run returns content without writing to disk.
