@@ -1,6 +1,6 @@
 # intake_items store
 
-**Purpose:** Typed intake buffer for the gatekeeper layer. Local agents file friction here; the gatekeeper router agent classifies, deduplicates, fast-tracks, and escalates before creating observations.
+**Purpose:** Typed intake buffer for the gatekeeper layer. Local agents file friction here; the gatekeeper router agent classifies, deduplicates, fast-tracks, and tags arch-review candidates before creating observations.
 
 **Design doc:** `docs/gatekeeper-design.md`
 
@@ -27,17 +27,17 @@ draft ──claim-triage──> triaging ──route (needs_info)──> needs_i
                           │                                    │
                           │◄───────────────────────────────────┘
                           │
-                          ├──route (duplicate/fast_track/normal_observation)──> routed
-                          ├──route (reject_noise)──> dropped ──reopen (ai_with_human)──> draft
-                          └──escalate-arch-review──> escalated
+                          ├──route (duplicate/fast_track/normal_observation/arch_review_candidate)──> routed
+                          └──route (reject_noise)──> dropped ──reopen (ai_with_human)──> draft
 ```
 
 - **draft** — filed by a local agent; not yet seen by the gatekeeper
 - **triaging** — gatekeeper has claimed the row; structured decision in progress
 - **needs_info** — gatekeeper needs recon before deciding; row held pending `recon-return`
-- **routed** — terminal-success; points at one downstream artifact (observation, duplicate target, fast-track record)
-- **escalated** — arch_review_candidate; routed to architecture review instead of observation
+- **routed** — terminal-success; points at one downstream artifact (observation, duplicate target, fast-track record, or arch-review-tagged observation)
 - **dropped** — terminal-noise; preserved for audit; only `reopen` (ai_with_human) recovers it
+
+P1 (T053/L142) intentionally does NOT add an `escalated` state or a dedicated `architecture_reviews` store. `arch_review_candidate` decisions route through the standard `route` verb and produce a tagged observation (tag `arch-review-candidate`) stored in `routed_to_observation`. The dedicated architecture-review store + `escalated` state are deferred to L171 (post-P1 follow-up).
 
 ## Required fields
 
@@ -48,7 +48,7 @@ draft ──claim-triage──> triaging ──route (needs_info)──> needs_i
 | `captured_at` | always | ISO timestamp |
 | `captured_week` | always | Week label (e.g. w18-d3) |
 | `duplicate_of` | when `decision == duplicate` | Soft-FK to I### |
-| `routed_to_observation` | when `decision == normal_observation` | Soft-FK to L### |
+| `routed_to_observation` | when `decision == normal_observation` (also auto-populated for `arch_review_candidate`) | Soft-FK to L### |
 
 ## Filing an intake item
 
@@ -70,7 +70,7 @@ The gatekeeper emits one of six decisions via `stores intake route I001 --decisi
 2. **needs_info** — defers to a recon agent; resumes via `recon-return`
 3. **fast_track** — T0/T1 trivia; creates fast-track-eligible observation (classification only in P1)
 4. **normal_observation** — standard path; creates observation; requires `--routed-to-observation L###`
-5. **arch_review_candidate** — high-risk; routes to escalated via `escalate-arch-review`
+5. **arch_review_candidate** — high-risk; routes to `routed` via the standard `route` verb and creates a tagged observation (tag `arch-review-candidate`) stored in `routed_to_observation`. The dedicated `architecture_reviews` store / `escalated` lifecycle is deferred to L171 (P1 ships the tagged-observation stand-in).
 6. **reject_noise** — terminal drop; `reopen` (ai_with_human) is the only recovery
 
 ## Invoker discipline

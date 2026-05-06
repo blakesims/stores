@@ -28,8 +28,7 @@ Required: `summary`, `source_agent`, `captured_at`, `captured_week`.
 All transitions except `reopen` are `ai_autonomous`:
 
 - `claim-triage` — gatekeeper picks up the item (draft → triaging)
-- `route --decision <D>` — gatekeeper routes; D ∈ {duplicate, needs_info, fast_track, normal_observation, reject_noise}
-- `escalate-arch-review` — gatekeeper escalates (triaging → escalated)
+- `route --decision <D>` — gatekeeper routes; D ∈ {duplicate, needs_info, fast_track, normal_observation, arch_review_candidate, reject_noise}. `arch_review_candidate` routes to `routed` and creates a tagged observation (tag `arch-review-candidate`); the dedicated `architecture_reviews` store / `escalated` lifecycle is a P3 follow-up (L171), not present in P1.
 - `recon-return` — recon agent returns evidence (needs_info → triaging)
 
 `reopen` is `ai_with_human` — reversing a `reject_noise` decision requires human presence (the human is overriding a machine judgment).

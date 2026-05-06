@@ -1,7 +1,7 @@
 # Gatekeeper Design
 
 **Path:** `docs/gatekeeper-design.md`
-**Status:** design doc (T045 phase 2). Pre-implementation; an executor should be able to schema-codify from this.
+**Status:** design doc (T045 phase 2) describing the FULL gatekeeper vision (P1–P5). Sections referencing `escalated`, `escalate-arch-review`, `routed_to_arch_review`, or a dedicated `architecture_reviews` typed store describe the post-P1 design (L171/L172/L173 follow-ups), NOT the current executable contract. **What ships in P1 (T053/L142):** the five-state lifecycle (`draft`/`triaging`/`needs_info`/`routed`/`dropped`) plus the single `route` verb covering all six decisions, with `arch_review_candidate` producing a tagged-observation stand-in (tag `arch-review-candidate`) stored in `routed_to_observation`. The `escalated` state, `escalate-arch-review` verb, `routed_to_arch_review` field, and `architecture_reviews` store are deferred — read those sections as design intent for L171, not as P1 contract.
 **Companion doctrine:** `docs/architecture-coherence.md` (T045 phase 1).
 **Companion taxonomy:** `docs/risk-and-cluster-taxonomy.md` (T045 phase 3) — canonical definitions for `risk_flags`, `cluster_key` conventions, and the orthogonal (size_tier, risk_class, approval_policy) triple referenced throughout this doc.
 **Brainstorm seed:** `docs/worklog/2026-05-06/06-gatekeeper-architecture-observability.md`.
