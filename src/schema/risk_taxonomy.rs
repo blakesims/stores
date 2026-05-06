@@ -22,7 +22,9 @@ pub fn derive_risk_class(risk_flags: &[&str]) -> &'static str {
         return "architecture";
     }
     let low_flags: &[&str] = &["docs_only", "small_local_fix", "duplicate_symptom"];
-    if risk_flags.iter().all(|f| low_flags.contains(f)) {
+    // Require at least one explicit low-risk flag; empty set falls through to "normal"
+    // per docs/risk-and-cluster-taxonomy.md worked example row 6.
+    if !risk_flags.is_empty() && risk_flags.iter().all(|f| low_flags.contains(f)) {
         return "low";
     }
     "normal"
@@ -118,8 +120,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_flags_maps_to_low() {
-        assert_eq!(derive_risk_class(&[]), "low");
+    fn empty_flags_maps_to_normal() {
+        // No explicit risk flags → normal per docs worked example row 6 (ordinary substrate work).
+        assert_eq!(derive_risk_class(&[]), "normal");
     }
 
     #[test]

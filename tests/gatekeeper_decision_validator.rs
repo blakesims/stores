@@ -284,8 +284,8 @@ fn ac2_4_derive_risk_class_six_representative_vectors() {
         "architecture"
     );
 
-    // Row 6: no flags (normal substrate work) → low (empty set ⊆ {docs_only, small_local_fix, dup})
-    assert_eq!(risk_taxonomy::derive_risk_class(&[]), "low");
+    // Row 6: no flags (ordinary substrate work) → normal per worked example row 6 in docs
+    assert_eq!(risk_taxonomy::derive_risk_class(&[]), "normal");
 }
 
 #[test]
