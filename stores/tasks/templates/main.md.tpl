@@ -36,7 +36,8 @@
 
 {{/if}}### Phases
 
-{{#each plan.phases}}
+{{#if (eq plan_source "contract_synthesized")}}_Plan synthesized from contract; planner was skipped._
+{{/if}}{{#each plan.phases}}
 #### Phase {{add @index 1}}: {{this.name}}
 - **Objective:** {{this.objective}}
 - **Tasks:**
@@ -50,8 +51,7 @@
 {{#if this.files}}- **Files:** {{#each this.files}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}}
 {{/if}}{{#if this.dependencies}}- **Dependencies:** {{#each this.dependencies}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
 {{/if}}
-{{/each}}{{#unless plan.phases}}_Plan not yet submitted._
-{{/unless}}
+{{/each}}
 
 ---
 
