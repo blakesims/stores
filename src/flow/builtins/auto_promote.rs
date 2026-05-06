@@ -244,6 +244,23 @@ fn promote(
     )
     .context("UPDATE observations.task_id (auto-promote back-link)")?;
 
+    // Fire on-entry follow-ons for the planning state (L117). Without this,
+    // tier-conditional actions declared on tasks.workflow.on_state.planning
+    // never evaluate — most visibly, T1 rows stay at planning and `tasks
+    // drive` errors with `next-action returned no agent for status 'planning'`
+    // because the schema's `{transition_to: ready, when: tier_hint == 'T1'}`
+    // never fires. submit handlers all call this; auto-promote was the gap.
+    let tasks_schema = crate::flow::builtins::load_tasks_schema()
+        .context("auto-promote: load tasks schema for on-entry hooks")?;
+    crate::handlers::submit::fire_on_entry_follow_ons(
+        &tx,
+        &tasks_schema,
+        &new_display_id,
+        rowid,
+        "planning",
+    )
+    .context("auto-promote: fire on-entry hooks for planning state")?;
+
     tx.commit().context("commit auto-promote")?;
     Ok(new_display_id)
 }
@@ -536,6 +553,98 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "no tasks row when contract is not ready");
+    }
+
+    /// Regression for L117: a T1 observation must land its promoted task at
+    /// `executing`, not `planning`, because the planning state's on-entry
+    /// action `{transition_to: ready, when: tier_hint == 'T1'}` cascades
+    /// through `ready → executing` (ready's on-entry is unconditional
+    /// `transition_to: executing`). Without firing on-entry, drive errors
+    /// with `next-action returned no agent for status 'planning'`.
+    #[test]
+    fn t1_promotion_cascades_planning_to_executing_via_skip_plan() {
+        let conn = fresh_db();
+        let ic = serde_json::json!({
+            "contract_state": "ready",
+            "objective": "fix T1 thing",
+            "type": "work",
+            "in_scope": ["edit module A"],
+            "out_of_scope": [],
+            "acceptance": ["test passes"],
+            "tier_hint": "T1",
+            "approved_by": "blake",
+            "approved_at": "2026-05-06T00:00:00Z",
+        });
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, summary, source, priority, captured_at, captured_week, \
+              intent_contract, created_at, updated_at, created_by, updated_by) \
+             VALUES ('L117', 'ready', 't1 candidate', 'dev', 'normal', ?1, 'w-test', ?2, ?1, ?1, 'human', 'human')",
+            rusqlite::params!["2026-05-06T00:00:00Z", serde_json::to_string(&ic).unwrap()],
+        )
+        .unwrap();
+
+        let row = obs_row_json(&conn, "L117");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0);
+
+        let (status, tier): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, tier_hint FROM tasks LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(tier.as_deref(), Some("T1"));
+        assert_eq!(
+            status, "executing",
+            "T1 task must cascade planning → ready → executing via on-entry follow-ons (L117)"
+        );
+    }
+
+    /// Companion to the L117 regression: a T2 promotion MUST stay at planning
+    /// (the on-entry action for planning is `dispatch_agent: planner` when
+    /// tier_hint != T1; that action does not change status).
+    #[test]
+    fn t2_promotion_stays_at_planning_for_planner_dispatch() {
+        let conn = fresh_db();
+        let ic = serde_json::json!({
+            "contract_state": "ready",
+            "objective": "fix T2 thing",
+            "type": "work",
+            "in_scope": ["edit module A"],
+            "out_of_scope": [],
+            "acceptance": ["test passes"],
+            "tier_hint": "T2",
+            "approved_by": "blake",
+            "approved_at": "2026-05-06T00:00:00Z",
+        });
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, summary, source, priority, captured_at, captured_week, \
+              intent_contract, created_at, updated_at, created_by, updated_by) \
+             VALUES ('L118', 'ready', 't2 candidate', 'dev', 'normal', ?1, 'w-test', ?2, ?1, ?1, 'human', 'human')",
+            rusqlite::params!["2026-05-06T00:00:00Z", serde_json::to_string(&ic).unwrap()],
+        )
+        .unwrap();
+
+        let row = obs_row_json(&conn, "L118");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0);
+
+        let (status, tier): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, tier_hint FROM tasks LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(tier.as_deref(), Some("T2"));
+        assert_eq!(status, "planning", "T2 task must stay at planning (planner dispatches there)");
     }
 
     #[test]
