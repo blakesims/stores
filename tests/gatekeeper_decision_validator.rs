@@ -486,6 +486,49 @@ fn route_without_gatekeeper_decision_json_rejected() {
     );
 }
 
+#[test]
+fn route_malformed_gatekeeper_decision_json_rejected_via_check_registry() {
+    let schema = intake_schema();
+    let conn = fresh_db(&schema);
+    insert_triaging_row(&conn, "I001");
+
+    let leaves = stores::schema::flatten::leaf_args(&schema).unwrap();
+    let mut cmd = clap::Command::new("route")
+        .arg(clap::Arg::new("display_id").required(true).index(1));
+    for leaf in &leaves {
+        cmd = cmd.arg(
+            clap::Arg::new(leaf.cli_name.clone())
+                .long(leaf.cli_name.clone())
+                .required(false),
+        );
+    }
+
+    let decision_json = serde_json::json!({"confidence":"certain"}).to_string();
+    let matches = cmd.get_matches_from([
+        "route",
+        "I001",
+        "--decision",
+        "reject_noise",
+        "--gatekeeper-decision-json",
+        &decision_json,
+    ]);
+
+    let result = transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route");
+    assert!(result.is_err(), "malformed gatekeeper_decision_json must be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("gatekeeper_decision_json validation failed")
+            && (err.contains("decision is required") || err.contains("confidence")),
+        "error must preserve validator diagnostics through Check registry; got: {err}"
+    );
+    // MAJOR fix (codex): structured CheckResult must appear in the error so audit consumers
+    // can parse check_id, args, observed_at, and reason without string-scraping.
+    assert!(
+        err.contains("[check]") && err.contains("gatekeeper-decision-valid"),
+        "error must include serialized CheckResult with check_id; got: {err}"
+    );
+}
+
 // ---- FIX 3: --decision must match gatekeeper_decision_json.decision ----
 
 #[test]

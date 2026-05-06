@@ -858,14 +858,17 @@ pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
         return Ok(());
     }
 
-    // Validate the gatekeeper decision payload
-    crate::validate::gatekeeper_decision::validate_gatekeeper_decision(&decision_json_val)
-        .map_err(|errs| {
-            anyhow::anyhow!(
-                "gatekeeper_decision_json validation failed:\n- {}",
-                errs.join("\n- ")
-            )
-        })?;
+    // Validate the gatekeeper decision payload through the code-level Check registry.
+    let check_args = serde_json::json!({"gatekeeper_decision_json": decision_json_val.clone()});
+    let check_result = crate::flow::checks::lookup(crate::flow::checks::GATEKEEPER_DECISION_VALID)
+        .ok_or_else(|| anyhow::anyhow!("missing Check: gatekeeper-decision-valid"))?
+        .evaluate(crate::flow::checks::CheckCtx::without_conn(), &check_args)?;
+    if !check_result.is_pass() {
+        anyhow::bail!(
+            "{}",
+            crate::flow::checks::format_check_failure(&check_result)
+        );
+    }
 
     // FIX 3: enforce --decision matches gatekeeper_decision_json.decision (exact equality).
     // Reject fail-loud if they differ to prevent mismatched state transitions.

@@ -253,5 +253,11 @@ fn l141_auto_drive_ok_only_after_drive_pid_postcondition_passes() {
     assert_eq!(postcondition_id, "drive_pid_recorded_or_terminal");
     assert_eq!(drive_pid, None);
     assert_eq!(terminal_reason, "error");
-    assert!(last_status.contains("postcondition drive_pid_recorded_or_terminal failed"));
+    assert!(last_status.starts_with("error: check failed: "));
+    let payload = last_status.strip_prefix("error: check failed: ").unwrap();
+    let check: stores::flow::checks::CheckResult = serde_json::from_str(payload).unwrap();
+    assert_eq!(check.check_id, "drive_pid_recorded_or_terminal");
+    assert_eq!(check.args.get("display_id").and_then(|v| v.as_str()), Some("T141"));
+    assert!(!check.observed_at.is_empty());
+    assert!(check.reason.is_some());
 }
