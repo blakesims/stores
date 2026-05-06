@@ -46,6 +46,7 @@ use crate::cli::agents::{BUNDLED_AGENTS, BUNDLED_AGENT_SCHEMAS};
 use crate::cli::dynamic::BUNDLED_STORE_TEMPLATES;
 use crate::codegen::ddl::quote_ident;
 use crate::db;
+use crate::flow::builtins::fire_mark_drive_failed;
 use crate::handlers::next_action::compute as compute_next_action;
 use crate::handlers::render::compute_render_in;
 use crate::handlers::row::read_row;
@@ -64,6 +65,69 @@ use crate::schema::{actor::Actor, Schema};
 /// Seconds within which a `claimed_at` timestamp is considered a live claim.
 /// Matches the 5-minute window used by `submit.rs`'s `acquire_lock`.
 const LOCK_WINDOW_SECS: u64 = 300;
+
+// ---------------------------------------------------------------------------
+// Runner-exit classification (T029)
+// ---------------------------------------------------------------------------
+
+/// Classify a non-zero runner exit into a structured `blocked_reason` payload.
+///
+/// Returned string is JSON-encoded so the existing `text` `blocked_reason`
+/// column captures exit_code and (for rate-limit) the upstream reset epoch
+/// without a schema migration. Shape:
+///
+/// ```json
+/// {"kind":"rate_limit"|"runner_crash","exit_code":<i32>,"reset_at":<u64?>}
+/// ```
+///
+/// Detection priority:
+/// 1. stream-json `rate_limit_event` whose `rate_limit_info.status != "allowed"`
+///    (mints `kind=rate_limit` + `reset_at` from `resetsAt`).
+/// 2. stderr substring match on `"rate limit"` / `"usage limit"` (no `reset_at`).
+/// 3. fall through to `kind=runner_crash`.
+fn classify_runner_exit(out: &RunnerOutput) -> String {
+    let mut kind: &str = "runner_crash";
+    let mut reset_at: Option<i64> = None;
+
+    for line in out.stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("rate_limit_event") {
+            continue;
+        }
+        let info = match v.get("rate_limit_info") {
+            Some(i) => i,
+            None => continue,
+        };
+        let status = info.get("status").and_then(|s| s.as_str()).unwrap_or("");
+        if !status.is_empty() && status != "allowed" {
+            kind = "rate_limit";
+            reset_at = info.get("resetsAt").and_then(|v| v.as_i64());
+            break;
+        }
+    }
+
+    if kind == "runner_crash" {
+        let s = out.stderr.to_lowercase();
+        if s.contains("rate limit") || s.contains("usage limit") {
+            kind = "rate_limit";
+        }
+    }
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("kind".to_string(), Value::String(kind.to_string()));
+    payload.insert("exit_code".to_string(), Value::from(out.exit_code as i64));
+    if let Some(r) = reset_at {
+        payload.insert("reset_at".to_string(), Value::from(r));
+    }
+    serde_json::to_string(&Value::Object(payload)).unwrap_or_else(|_| "{}".to_string())
+}
 
 // ---------------------------------------------------------------------------
 // Parsed agent envelope (AC3.10)
@@ -746,10 +810,36 @@ pub fn drive_loop(
                 eprintln!("runner stderr:\n{}", run_out.stderr);
                 let _ = std::io::stderr().flush();
             }
-            bail!(
-                "runner non-zero exit (code {}); task state unchanged",
-                run_out.exit_code
-            );
+
+            // T029: write a substrate transition before exit so the row leaves
+            // its current state (typically `executing`) cleanly with a
+            // structured exit reason captured in `blocked_reason`. Without
+            // this, the row would stay stuck at `executing` until the
+            // out-of-process watchdog (L062 territory) noticed PID death.
+            let blocked_reason = classify_runner_exit(&run_out);
+            match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
+                Ok(()) => {
+                    eprintln!(
+                        "[{display_id}] mark_drive_failed fired (blocked_reason={blocked_reason})"
+                    );
+                    let _ = std::io::stderr().flush();
+                    bail!(
+                        "runner non-zero exit (code {}); transitioned to blocked",
+                        run_out.exit_code
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[{display_id}] mark_drive_failed FAILED ({e:#}); row may stay at status='{}'",
+                        na.status
+                    );
+                    let _ = std::io::stderr().flush();
+                    bail!(
+                        "runner non-zero exit (code {}); mark_drive_failed transition FAILED: {e:#}",
+                        run_out.exit_code
+                    );
+                }
+            }
         }
 
         // ── Step 2e: parse envelope + dispatch submit ─────────────────────
@@ -1524,7 +1614,12 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn runner_error_mid_loop_does_not_corrupt_state() {
+    fn runner_error_mid_loop_transitions_to_blocked_with_structured_reason() {
+        // T029: runner exit != 0 must fire `mark_drive_failed` before the
+        // drive subprocess returns to its parent, so the row leaves its
+        // current state cleanly with a structured `blocked_reason`. The
+        // runner-crash branch (no rate_limit_event, no "rate limit" stderr)
+        // must classify as `kind=runner_crash`.
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
 
@@ -1532,7 +1627,7 @@ mod tests {
             &conn,
             &schema,
             "T001",
-            "planning",
+            "executing",
             "2026-01-01T00:00:00Z",
             0,
             0,
@@ -1540,13 +1635,6 @@ mod tests {
             None,
         );
 
-        // Read the row before the failed runner call.
-        let before = {
-            let (_, entry) = crate::handlers::row::read_row(&schema, &conn, "T001").unwrap();
-            entry
-        };
-
-        // Runner returns non-zero exit immediately.
         let fail_out = RunnerOutput {
             stdout: "some partial output".to_string(),
             stderr: "runner crashed".to_string(),
@@ -1566,22 +1654,89 @@ mod tests {
             err
         );
 
-        // Task state must be byte-identical.
-        let after = {
-            let (_, entry) = crate::handlers::row::read_row(&schema, &conn, "T001").unwrap();
-            entry
-        };
-
-        // Status must be unchanged.
+        let (_, after) = crate::handlers::row::read_row(&schema, &conn, "T001").unwrap();
         assert_eq!(
-            before.get("status"),
-            after.get("status"),
-            "status must be unchanged after runner error"
+            after.get("status").and_then(|v| v.as_str()),
+            Some("blocked"),
+            "row must be at 'blocked' after runner non-zero exit"
         );
+        let reason_str = after
+            .get("blocked_reason")
+            .and_then(|v| v.as_str())
+            .expect("blocked_reason must be set");
+        let reason: serde_json::Value =
+            serde_json::from_str(reason_str).expect("blocked_reason must be JSON");
+        assert_eq!(reason.get("kind").and_then(|v| v.as_str()), Some("runner_crash"));
+        assert_eq!(reason.get("exit_code").and_then(|v| v.as_i64()), Some(1));
+
+        // transition_history must record the abort from the executing state
+        // (the canonical contract path: drive_loop is invoked while the row
+        // is executing; runner non-zero exit must transition it out).
+        let (from_status, to_status, verb): (String, String, String) = conn
+            .query_row(
+                "SELECT from_status, to_status, verb FROM transition_history \
+                 WHERE display_id = ?1 ORDER BY id DESC LIMIT 1",
+                rusqlite::params!["T001"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("transition_history row must exist");
+        assert_eq!(from_status, "executing");
+        assert_eq!(to_status, "blocked");
+        assert_eq!(verb, "mark_drive_failed");
+    }
+
+    #[test]
+    fn runner_rate_limit_event_classifies_as_rate_limit_with_reset_at() {
+        // T029: when stdout carries a stream-json `rate_limit_event` whose
+        // `rate_limit_info.status != "allowed"`, classify as `rate_limit` and
+        // capture `reset_at` from `resetsAt`.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn,
+            &schema,
+            "T002",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+
+        let stdout = r#"{"type":"system","subtype":"init"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"exceeded","resetsAt":1777395000,"rateLimitType":"five_hour"}}
+"#;
+        let fail_out = RunnerOutput {
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            exit_code: 1,
+            final_message: None,
+            structured_output: None,
+            session_id: None,
+            structured_output_source: None,
+        };
+        let runner = MockRunner::new(vec![fail_out]);
+
+        let _ = drive_loop(&schema, &conn, "T002", &runner, 50)
+            .expect_err("should fail on runner non-zero");
+
+        let (_, after) = crate::handlers::row::read_row(&schema, &conn, "T002").unwrap();
         assert_eq!(
-            before.get("plan"),
-            after.get("plan"),
-            "plan must be unchanged after runner error"
+            after.get("status").and_then(|v| v.as_str()),
+            Some("blocked")
+        );
+        let reason_str = after
+            .get("blocked_reason")
+            .and_then(|v| v.as_str())
+            .expect("blocked_reason must be set");
+        let reason: serde_json::Value = serde_json::from_str(reason_str).unwrap();
+        assert_eq!(reason.get("kind").and_then(|v| v.as_str()), Some("rate_limit"));
+        assert_eq!(reason.get("exit_code").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            reason.get("reset_at").and_then(|v| v.as_i64()),
+            Some(1_777_395_000)
         );
     }
 
