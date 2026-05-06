@@ -776,6 +776,9 @@ fn maybe_validate_and_mirror_gatekeeper_decision(
             "risk_flags_set": risk_flags_arr,
             "risk_class_hint": risk_class,
             "approval_policy_hint": approval_policy,
+            "rationale": obj.get("rationale"),
+            "confidence": obj.get("confidence"),
+            "tier_hint": obj.get("tier_hint"),
         });
 
         // Check that decision_metadata is in the schema before injecting

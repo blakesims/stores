@@ -11,9 +11,8 @@ use rusqlite::Connection;
 use serde_json::json;
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
-use stores::handlers::{add, transition};
+use stores::handlers::transition;
 use stores::schema::{actor::Actor, risk_taxonomy, Schema};
-use stores::validate::{self, EntryMap, Op};
 
 fn intake_schema() -> Schema {
     let yaml = BUNDLED_STORE_SCHEMAS
@@ -39,13 +38,6 @@ fn insert_triaging_row(conn: &Connection, display_id: &str) {
          VALUES (?1, 'triaging', 'test intake item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
         rusqlite::params![display_id],
     ).unwrap();
-}
-
-fn entry_from_json(v: serde_json::Value) -> EntryMap {
-    match v {
-        serde_json::Value::Object(map) => map.into_iter().collect(),
-        _ => panic!("expected JSON object"),
-    }
 }
 
 // ---- AC2.1: required_when conditionals via validate_gatekeeper_decision ----
@@ -390,8 +382,23 @@ fn ac2_5_decision_metadata_populated_after_route() {
     );
     assert_eq!(
         meta.get("approval_policy_hint").and_then(|v| v.as_str()),
-        Some("human"),
-        "approval_policy_hint must be 'human' for T2+low"
+        Some("auto"),
+        "approval_policy_hint must be 'auto' for T2+low per § 3 matrix"
+    );
+    assert_eq!(
+        meta.get("rationale").and_then(|v| v.as_str()),
+        Some("Stale lock files need cleanup."),
+        "rationale from gatekeeper decision payload must be captured in decision_metadata"
+    );
+    assert_eq!(
+        meta.get("confidence").and_then(|v| v.as_str()),
+        Some("medium"),
+        "confidence from gatekeeper decision payload must be captured in decision_metadata"
+    );
+    assert_eq!(
+        meta.get("tier_hint").and_then(|v| v.as_str()),
+        Some("T2"),
+        "tier_hint from gatekeeper decision payload must be captured in decision_metadata"
     );
 }
 

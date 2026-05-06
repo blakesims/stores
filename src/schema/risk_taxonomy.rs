@@ -30,10 +30,10 @@ pub fn derive_risk_class(risk_flags: &[&str]) -> &'static str {
 
 /// Derive the approval_policy from size_tier, risk_class, and gatekeeper_decision.
 ///
-/// Per docs/risk-and-cluster-taxonomy.md § 3 derivation matrix:
+/// Per docs/risk-and-cluster-taxonomy.md § 3 legal-combinations matrix:
 /// - fast_track decision → auto (regardless of risk_class or size_tier)
 /// - architecture / security / authority risk_class → architecture
-/// - T0 size_tier with low/normal risk → auto
+/// - T0 + low/normal → auto; T1 + low → auto; T2 + low† → auto
 /// - everything else → human
 pub fn derive_approval_policy(
     size_tier: &str,
@@ -46,10 +46,11 @@ pub fn derive_approval_policy(
     if matches!(risk_class, "architecture" | "security" | "authority") {
         return "architecture";
     }
-    if size_tier == "T0" {
-        return "auto";
+    // Matrix: T0 auto for low+normal; T1+low and T2+low also auto per § 3 table
+    match (size_tier, risk_class) {
+        ("T0", "low") | ("T0", "normal") | ("T1", "low") | ("T2", "low") => "auto",
+        _ => "human",
     }
-    "human"
 }
 
 #[cfg(test)]
@@ -155,6 +156,12 @@ mod tests {
         assert_eq!(derive_approval_policy("T1", "low", "fast_track"), "auto");
     }
 
+    // Table row 2: T1 + low → auto (matrix cell — not just fast_track path)
+    #[test]
+    fn t1_low_normal_observation_maps_to_auto() {
+        assert_eq!(derive_approval_policy("T1", "low", "normal_observation"), "auto");
+    }
+
     // Table row 2: T1 + normal → human
     #[test]
     fn t1_normal_maps_to_human() {
@@ -171,6 +178,12 @@ mod tests {
     #[test]
     fn t2_low_fast_track_maps_to_auto() {
         assert_eq!(derive_approval_policy("T2", "low", "fast_track"), "auto");
+    }
+
+    // Table row 3: T2 + low → auto† (matrix cell — one-phase plan with purely cosmetic work)
+    #[test]
+    fn t2_low_normal_observation_maps_to_auto() {
+        assert_eq!(derive_approval_policy("T2", "low", "normal_observation"), "auto");
     }
 
     // Table row 3: T2 + normal → human
