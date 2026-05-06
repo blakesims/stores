@@ -115,10 +115,10 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
 
 /// Resolve a main-repo path via the daemon's current working directory.
 ///
-/// Validates that cwd is a git repo (via `git rev-parse --git-common-dir`).
-/// Fails loudly if cwd is not a usable git repo — silent install from a wrong
-/// place is a critical bug. Mirrors `accept_merge::resolve_main_repo_for_check`
-/// but is narrowly scoped to cargo_install's stale-workspace fallback.
+/// Validates that cwd is a git repo (via `git rev-parse --git-common-dir`) AND
+/// that the Cargo.toml at cwd belongs to the `stores` crate. Both checks must
+/// pass; failing either causes a loud bail with actionable guidance rather than
+/// silently installing from the wrong place.
 fn resolve_main_repo_via_cwd(display_id: &str) -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir().with_context(|| {
         format!(
@@ -126,6 +126,8 @@ fn resolve_main_repo_via_cwd(display_id: &str) -> anyhow::Result<PathBuf> {
             display_id
         )
     })?;
+
+    // Gate 1: cwd must be a git repository.
     let out = Command::new("git")
         .args([
             "-C",
@@ -150,12 +152,76 @@ fn resolve_main_repo_via_cwd(display_id: &str) -> anyhow::Result<PathBuf> {
             cwd.display()
         );
     }
+
+    // Gate 2: cwd must be the stores crate, not just any git/Cargo repo.
+    // Read Cargo.toml and extract the [package] name field with a simple
+    // line-scan (no extra toml dep needed — the guard is correct for any
+    // realistic Cargo.toml layout).
+    let cargo_toml_path = cwd.join("Cargo.toml");
+    let cargo_toml = std::fs::read_to_string(&cargo_toml_path).map_err(|_| {
+        anyhow::anyhow!(
+            "[cargo-install] {}: daemon cwd '{}' does not contain a Cargo.toml; \
+             cannot install stores from here. \
+             Fix: restore workspace_path or start the daemon from inside the stores repository.",
+            display_id,
+            cwd.display()
+        )
+    })?;
+    let package_name = extract_cargo_package_name(&cargo_toml);
+    match package_name.as_deref() {
+        Some("stores") => {}
+        Some(other) => bail!(
+            "[cargo-install] {}: daemon cwd '{}' is a Cargo project ('{}') but not the stores crate; \
+             cannot install from here. \
+             Fix: restore workspace_path or invoke retry-deploy from the stores repository cwd.",
+            display_id,
+            cwd.display(),
+            other
+        ),
+        None => bail!(
+            "[cargo-install] {}: daemon cwd '{}' has a Cargo.toml but no parseable [package] name; \
+             cannot verify this is the stores crate. \
+             Fix: restore workspace_path or start the daemon from inside the stores repository.",
+            display_id,
+            cwd.display()
+        ),
+    }
+
     eprintln!(
-        "[cargo-install] {}: workspace_path stale; installing from daemon cwd {}",
+        "[cargo-install] {}: workspace_path stale; installing stores crate from daemon cwd {}",
         display_id,
         cwd.display()
     );
     Ok(cwd)
+}
+
+/// Extract the `name` field from the `[package]` section of a Cargo.toml
+/// string using a simple line-scan. Returns `None` if the section or field is
+/// absent or unparseable. Does not depend on a toml-parsing crate.
+fn extract_cargo_package_name(toml: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in toml.lines() {
+        let trimmed = line.trim();
+        // Section header detection.
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        // Match `name = "..."` (with optional whitespace around `=`).
+        if let Some(rest) = trimmed.strip_prefix("name") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim();
+                if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
+                    return Some(rest[1..rest.len() - 1].to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Look up the `cargo-install` agent entry in agents.yaml and read its

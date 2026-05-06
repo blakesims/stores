@@ -483,6 +483,16 @@ fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
     let cfg = cfg_path();
 
     // Set daemon cwd to the live repo so cargo-install's cwd fallback works.
+    // Round-3: the cwd validation now requires Cargo.toml [package] name = "stores".
+    // The noop fixture uses a different name, so overwrite it before cd-ing in.
+    let stores_cargo_toml = format!(
+        "[package]\nname = \"stores\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
+         [[bin]]\nname = \"stores\"\npath = \"src/main.rs\"\n\
+         [features]\ndefault = []\nrunner-claude-code = []\n"
+    );
+    std::fs::write(repo.join("Cargo.toml"), &stores_cargo_toml)
+        .expect("overwrite Cargo.toml to name=stores for cwd validation");
+
     let _cwd_g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());
     let old_cwd = std::env::current_dir().unwrap();
     std::env::set_current_dir(&repo).expect("set daemon cwd to live repo");
@@ -548,4 +558,86 @@ fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
 
     std::env::remove_var("CARGO_HOME");
     std::env::remove_var("CARGO_TARGET_DIR");
+}
+
+/// T061 codex-revise round 3: cwd fallback must reject non-stores Cargo crates.
+///
+/// Setup: T996 in accepted (stale workspace), daemon cwd is a git repo whose
+/// Cargo.toml has [package] name = "not_stores" — a different crate.
+///
+/// Assert:
+///   - cargo_install::run returns Err containing "not the stores crate".
+///   - Row does NOT advance to cargo_installed (no mark_cargo_installed entry).
+#[test]
+fn cargo_install_cwd_fallback_rejects_wrong_crate() {
+    // Build a git repo whose Cargo.toml names a non-stores crate.
+    let tmp = tempfile::tempdir().unwrap();
+    let wrong_repo = tmp.path().to_path_buf();
+
+    // Minimal Cargo project with the wrong package name.
+    std::fs::create_dir_all(wrong_repo.join("src")).unwrap();
+    std::fs::write(
+        wrong_repo.join("Cargo.toml"),
+        "[package]\nname = \"not_stores\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [[bin]]\nname = \"not_stores\"\npath = \"src/main.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(wrong_repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    // Make it a git repo so the git-repo gate passes.
+    assert!(git(&wrong_repo, &["init", "-b", "main"]).status.success());
+    git(&wrong_repo, &["config", "user.email", "test@example.com"]);
+    git(&wrong_repo, &["config", "user.name", "Test"]);
+    git(&wrong_repo, &["add", "."]);
+    git(&wrong_repo, &["commit", "-m", "init"]);
+
+    let conn = fresh_db_with_substrate();
+    // Stale workspace path (won't be accessed; cargo_install bails before cargo).
+    let stale = wrong_repo.join("worktrees/T996-gone");
+    insert_accepted_task(
+        &conn,
+        "T996",
+        "feat/T996-wrong-crate",
+        stale.to_str().unwrap(),
+    );
+
+    let agents = AgentsYaml::default_empty();
+    let cfg = cfg_path();
+    let ctx = DispatchCtx {
+        conn: &conn,
+        agents: &agents,
+        config_path: &cfg,
+        policies_hash: "",
+    };
+
+    // Hold cwd lock and set cwd to the wrong-crate repo.
+    let _cwd_g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let old_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&wrong_repo).expect("set cwd to wrong-crate repo");
+
+    let row = task_row_json(&conn, "T996");
+    let result = cargo_install::run(&row, &ctx);
+
+    std::env::set_current_dir(&old_cwd).expect("restore cwd");
+    drop(_cwd_g);
+
+    // Must return Err, not Ok.
+    assert!(result.is_err(), "cargo_install must fail for non-stores cwd crate");
+    let err_msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        err_msg.contains("not the stores crate"),
+        "error must mention 'not the stores crate'; got: {err_msg}"
+    );
+
+    // Row must NOT have advanced to cargo_installed.
+    assert_eq!(
+        status_of(&conn, "T996"),
+        "accepted",
+        "T996 must remain at accepted (cargo_install bailed before transition)"
+    );
+    assert_eq!(
+        count_history(&conn, "T996", "mark_cargo_installed"),
+        0,
+        "T996 must have zero mark_cargo_installed history rows"
+    );
 }
