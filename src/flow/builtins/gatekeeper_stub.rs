@@ -36,7 +36,10 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     });
 
     let mut diff = EntryMap::new();
-    diff.insert("decision".to_string(), Value::String("needs_info".to_string()));
+    diff.insert(
+        "decision".to_string(),
+        Value::String("needs_info".to_string()),
+    );
     diff.insert("gatekeeper_decision_json".to_string(), decision_json);
 
     let mut merged = existing.clone();
@@ -70,7 +73,12 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         Op::Transition("route".to_string(), diff.clone()),
         Actor::AiAutonomous.into(),
     )
-    .map_err(|errs| anyhow!("gatekeeper-stub route validation failed:\n{}", validate::pretty_print(&errs)))?;
+    .map_err(|errs| {
+        anyhow!(
+            "gatekeeper-stub route validation failed:\n{}",
+            validate::pretty_print(&errs)
+        )
+    })?;
 
     execute_transition_write(
         &tx,
@@ -98,11 +106,14 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::cli::dynamic::BUNDLED_STORE_SCHEMAS;
     use crate::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
-    use crate::flow::AgentsYaml;
-    use crate::schema::Schema;
+    use crate::flow::agents_yaml::TransitionEdge;
+    use crate::flow::{
+        AgentEntry, AgentsYaml, BackoffKind, PoliciesYaml, RetryPolicy, Subscription,
+    };
+    use crate::schema::{actor::Actor, Schema};
+    use clap::{Arg, Command};
     use rusqlite::Connection;
     use std::path::Path;
 
@@ -120,33 +131,100 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_builtin_routes_triaging_row_to_needs_info() {
-        let (conn, _schema) = fresh_db();
+    fn agents_yaml_subscriber_claim_triage_dispatches_gatekeeper_stub_route() {
+        let (conn, schema) = fresh_db();
         conn.execute(
             "INSERT INTO intake (display_id, status, summary, source_agent, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
-             VALUES ('I001', 'triaging', 'stub route seam', 'executor', '2026-05-06T00:00:00Z', 'w18-d3', '2026-05-06T00:00:00Z', '2026-05-06T00:00:00Z', 'ai', 'ai')",
+             VALUES ('I001', 'draft', 'stub route seam', 'executor', '2026-05-06T00:00:00Z', 'w18-d3', '2026-05-06T00:00:00Z', '2026-05-06T00:00:00Z', 'ai', 'ai')",
             [],
         )
         .unwrap();
-        let row = serde_json::json!({"display_id":"I001"});
-        let agents = AgentsYaml::default_empty();
-        let ctx = DispatchCtx {
-            conn: &conn,
-            agents: &agents,
-            config_path: Path::new("/tmp/no-config.yaml"),
-            policies_hash: "",
+
+        let claim_matches = Command::new("claim-triage")
+            .arg(Arg::new("display_id").required(true))
+            .get_matches_from(["claim-triage", "I001"]);
+        crate::handlers::transition::run(
+            &schema,
+            &conn,
+            &claim_matches,
+            Actor::AiAutonomous.into(),
+            "claim-triage",
+        )
+        .unwrap();
+
+        let agents = AgentsYaml {
+            agents: vec![AgentEntry {
+                name: "gatekeeper".to_string(),
+                subscribes_to: vec![Subscription {
+                    store: "intake".to_string(),
+                    transition: TransitionEdge {
+                        from: "draft".to_string(),
+                        to: "triaging".to_string(),
+                    },
+                    predicate: None,
+                }],
+                command: "builtin:gatekeeper-stub".to_string(),
+                claim_window_secs: 300,
+                retry_policy: RetryPolicy {
+                    max_attempts: 3,
+                    backoff: BackoffKind::default(),
+                },
+                command_args: None,
+            }],
+            deployment_specialist: None,
         };
-        let res = crate::flow::builtins::dispatch_builtin("gatekeeper-stub", &row, &ctx)
-            .expect("builtin registered")
-            .unwrap();
-        assert_eq!(res, 0);
-        let status: String = conn
-            .query_row("SELECT status FROM intake WHERE display_id='I001'", [], |r| r.get(0))
+        let policies = PoliciesYaml {
+            hash: String::new(),
+            policies: vec![],
+        };
+
+        let dispatched = crate::handlers::agents_run::poll_once(
+            &conn,
+            &agents,
+            &policies,
+            Path::new("/tmp/no-config.yaml"),
+            "test-daemon",
+            "1970-01-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(dispatched, 1);
+
+        let (status, question, decision_json): (String, String, String) = conn
+            .query_row(
+                "SELECT status, missing_info_question, gatekeeper_decision_json FROM intake WHERE display_id='I001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .unwrap();
         assert_eq!(status, "needs_info");
-        let question: String = conn
-            .query_row("SELECT missing_info_question FROM intake WHERE display_id='I001'", [], |r| r.get(0))
-            .unwrap();
         assert!(question.contains("concrete file"));
+        assert!(decision_json.contains("builtin gatekeeper stub default"));
+
+        let history: Vec<(String, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT verb, to_status, invoker FROM transition_history WHERE display_id='I001' ORDER BY id",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            history,
+            vec![
+                (
+                    "claim-triage".to_string(),
+                    "triaging".to_string(),
+                    "ai_autonomous".to_string(),
+                ),
+                (
+                    "route".to_string(),
+                    "needs_info".to_string(),
+                    "ai_autonomous".to_string(),
+                ),
+            ]
+        );
     }
 }

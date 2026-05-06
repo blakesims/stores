@@ -1299,6 +1299,53 @@ mod tests {
     }
 
     #[test]
+    fn gatekeeper_brief_template_renders_populated_intake_row() {
+        let intake_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "intake")
+            .map(|(_, yaml)| *yaml)
+            .expect("intake schema bundled");
+        let schema = crate::schema::Schema::from_yaml(intake_yaml).unwrap();
+        let mut row = crate::validate::EntryMap::new();
+        row.insert("display_id".to_string(), serde_json::json!("I001"));
+        row.insert("status".to_string(), serde_json::json!("triaging"));
+        row.insert(
+            "summary".to_string(),
+            serde_json::json!("unique summary token"),
+        );
+        row.insert("source_agent".to_string(), serde_json::json!("executor"));
+        row.insert("body".to_string(), serde_json::json!("unique body token"));
+        row.insert(
+            "evidence".to_string(),
+            serde_json::json!("unique evidence token"),
+        );
+        let template = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == "intake")
+            .and_then(|(_, templates)| {
+                templates
+                    .iter()
+                    .find(|(path, _)| *path == "templates/gatekeeper-brief.md.tpl")
+                    .map(|(_, content)| *content)
+            })
+            .expect("gatekeeper template bundled");
+        let ctx = crate::render::build_context(&schema, &row);
+        let rendered = crate::render::render_template(template, &ctx).unwrap();
+        for expected in [
+            "Gatekeeper Brief: I001",
+            "unique summary token",
+            "source_agent: executor",
+            "unique body token",
+            "unique evidence token",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "rendered gatekeeper brief missing `{expected}`:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
     fn recon_template_does_not_show_forbidden_cli_commands_as_allowed() {
         let content = BUNDLED_STORE_TEMPLATES
             .iter()
