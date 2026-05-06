@@ -91,11 +91,16 @@ fn parse_full_def_safety(full_def: &str) -> (bool, bool) {
     // DEFAULT keywords. Only called on additive columns (validator skips
     // PRIMARY KEY / baseline columns first); additive ALTER targets must
     // declare NOT NULL / DEFAULT explicitly in `full_def` for the gate to
-    // be meaningful.
+    // be meaningful. DEFAULT can be followed by a literal (`DEFAULT 0`),
+    // a parenthesized expression (`DEFAULT(0)`, `DEFAULT (now())`), a
+    // string (`DEFAULT 'x'`), or a CURRENT_* function — accept any token
+    // that is exactly "DEFAULT" OR starts with "DEFAULT(".
     let upper = full_def.to_ascii_uppercase();
     let toks: Vec<&str> = upper.split_whitespace().collect();
     let has_not_null = toks.windows(2).any(|w| w == ["NOT", "NULL"]);
-    let has_default = toks.iter().any(|tok| *tok == "DEFAULT");
+    let has_default = toks
+        .iter()
+        .any(|tok| *tok == "DEFAULT" || tok.starts_with("DEFAULT("));
     (has_not_null, has_default)
 }
 
