@@ -91,6 +91,45 @@ fn build_policy_matches(args: &[&str]) -> clap::ArgMatches {
         .get_matches_from(args)
 }
 
+/// Codex T052 round 1 HIGH (msg_de9e5fe9 → pi msg_99dd7f21): the generic
+/// `observations update` verb must NOT accept writes to `approval_policy`,
+/// even when --invoker matches the field's schema actor. The dedicated
+/// `override-policy` verb is the only path; it carries the direction-aware
+/// tier-A/tier-B gate.
+#[test]
+fn generic_update_rejects_approval_policy_field() {
+    use clap::{Arg, Command};
+
+    let (schema, conn) = setup();
+    insert_obs(&conn, "L001");
+
+    let m = Command::new("update")
+        .arg(Arg::new("display_id").required(true).index(1))
+        .arg(Arg::new("approval-policy").long("approval-policy"))
+        .get_matches_from(["update", "L001", "--approval-policy", "auto"]);
+
+    let err = stores::handlers::update::run(&schema, &conn, &m, Actor::AiWithHuman.into())
+        .expect_err("generic update must reject approval_policy writes");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("override-policy"),
+        "error must point users to the dedicated verb; got: {msg}"
+    );
+
+    // Field unchanged (still default 'human').
+    let policy: String = conn
+        .query_row(
+            "SELECT approval_policy FROM observations WHERE display_id='L001'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        policy, "human",
+        "approval_policy must not have been mutated by the rejected update"
+    );
+}
+
 /// (a) override-risk with ai_autonomous is rejected on every path (AC3.6)
 #[test]
 fn override_risk_ai_autonomous_always_rejected() {
