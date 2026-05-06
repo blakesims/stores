@@ -8,9 +8,16 @@
 //! On failure flips the row to `deploy_blocked` with the tail of cargo's
 //! stderr captured in `blocked_reason`, fires `ntfy`, and dispatches the
 //! row to the configured `deployment_specialist`.
+//!
+//! Stale-workspace fallback (L145): when `workspace_path` is missing or
+//! unusable (worktree cleaned after merge), fall back to the daemon's cwd
+//! for the cargo install path. The cwd MUST be a git repo or the fallback
+//! fails loudly with guidance rather than silently installing from the wrong
+//! place. Mirrors accept-merge's `resolve_main_repo_for_check` pattern.
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::flow::builtins::{
@@ -28,22 +35,22 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if workspace_path.is_empty() {
+    let main_repo = if workspace_path.is_empty() {
         eprintln!(
-            "[cargo-install] {}: workspace_path empty; cannot locate project root",
+            "[cargo-install] {}: workspace_path empty; attempting daemon cwd fallback",
             display_id
         );
-        return Ok(1);
-    }
-
-    let main_repo = match resolve_main_repo(workspace_path) {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "[cargo-install] {}: could not resolve main repo from workspace_path '{}'",
-                display_id, workspace_path
-            );
-            return Ok(1);
+        resolve_main_repo_via_cwd(display_id)?
+    } else {
+        match resolve_main_repo(workspace_path) {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "[cargo-install] {}: workspace_path '{}' stale; installing from daemon cwd",
+                    display_id, workspace_path
+                );
+                resolve_main_repo_via_cwd(display_id)?
+            }
         }
     };
 
@@ -104,6 +111,51 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     dispatch_to_specialist(row, ctx, display_id, "cargo-install");
 
     Ok(0)
+}
+
+/// Resolve a main-repo path via the daemon's current working directory.
+///
+/// Validates that cwd is a git repo (via `git rev-parse --git-common-dir`).
+/// Fails loudly if cwd is not a usable git repo — silent install from a wrong
+/// place is a critical bug. Mirrors `accept_merge::resolve_main_repo_for_check`
+/// but is narrowly scoped to cargo_install's stale-workspace fallback.
+fn resolve_main_repo_via_cwd(display_id: &str) -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir().with_context(|| {
+        format!(
+            "[cargo-install] {}: could not read daemon cwd for stale-workspace fallback",
+            display_id
+        )
+    })?;
+    let out = Command::new("git")
+        .args([
+            "-C",
+            cwd.to_str().unwrap_or("."),
+            "rev-parse",
+            "--git-common-dir",
+        ])
+        .output()
+        .with_context(|| {
+            format!(
+                "[cargo-install] {}: git rev-parse failed in daemon cwd '{}'",
+                display_id,
+                cwd.display()
+            )
+        })?;
+    if !out.status.success() {
+        bail!(
+            "[cargo-install] {}: daemon cwd '{}' is not a git repository; \
+             cannot use as stale-workspace fallback. \
+             Fix: ensure the daemon is started from inside the stores repository.",
+            display_id,
+            cwd.display()
+        );
+    }
+    eprintln!(
+        "[cargo-install] {}: workspace_path stale; installing from daemon cwd {}",
+        display_id,
+        cwd.display()
+    );
+    Ok(cwd)
 }
 
 /// Look up the `cargo-install` agent entry in agents.yaml and read its
