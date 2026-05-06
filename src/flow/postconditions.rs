@@ -217,18 +217,14 @@ mod tests {
         insert_task(&conn, "T100", "planning", None, None, Some(r#"["L045"]"#));
         insert_task(&conn, "T101", "planning", None, None, Some(r#"["L099"]"#));
 
-        assert!(task_exists_for_linked_observation(
-            &conn,
-            &json!({"observation_id": "L045"}),
-            None
-        )
-        .unwrap());
-        assert!(!task_exists_for_linked_observation(
-            &conn,
-            &json!({"observation_id": "L777"}),
-            None
-        )
-        .unwrap());
+        assert!(
+            task_exists_for_linked_observation(&conn, &json!({"observation_id": "L045"}), None)
+                .unwrap()
+        );
+        assert!(
+            !task_exists_for_linked_observation(&conn, &json!({"observation_id": "L777"}), None)
+                .unwrap()
+        );
     }
 
     #[test]

@@ -376,8 +376,7 @@ pub fn run_abandon(
     // Idempotent: already abandoned → no-op success, no second audit row,
     // do not overwrite stored reason.
     if current_status == "abandoned" {
-        tx.commit()
-            .context("abandon: commit tx (idempotent no-op)")?;
+        tx.commit().context("abandon: commit tx (idempotent no-op)")?;
         println!("Already abandoned {display_id}: no-op");
         return Ok(());
     }
@@ -457,6 +456,7 @@ pub fn run_abandon(
     );
     Ok(())
 }
+
 
 /// Transaction-agnostic core.  All DB access uses `tx` (which is `Deref<Target=Connection>`).
 /// Called by `run` (single-call CLI path) and by submit handlers that pass their own `tx`
@@ -2693,8 +2693,8 @@ fields:
 
     fn build_abandon_cmd(schema: &Schema) -> clap::Command {
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
-        let mut cmd =
-            clap::Command::new("abandon").arg(clap::Arg::new("display_id").required(true).index(1));
+        let mut cmd = clap::Command::new("abandon")
+            .arg(clap::Arg::new("display_id").required(true).index(1));
         for leaf in &leaves {
             cmd = cmd.arg(
                 clap::Arg::new(leaf.cli_name.clone())
@@ -2706,10 +2706,7 @@ fields:
         cmd
     }
 
-    fn read_abandon_row(
-        conn: &Connection,
-        display_id: &str,
-    ) -> (String, Option<String>, Option<String>) {
+    fn read_abandon_row(conn: &Connection, display_id: &str) -> (String, Option<String>, Option<String>) {
         conn.query_row(
             "SELECT status, abandoned_reason, abandoned_at FROM tasks WHERE display_id = ?1",
             rusqlite::params![display_id],
@@ -2747,10 +2744,7 @@ fields:
             run_abandon(&schema, &conn, &matches, Actor::Human.into(), "stale").unwrap();
 
             let (status, reason, at) = read_abandon_row(&conn, &id);
-            assert_eq!(
-                status, "abandoned",
-                "from {from_state} must land at abandoned"
-            );
+            assert_eq!(status, "abandoned", "from {from_state} must land at abandoned");
             assert_eq!(reason.as_deref(), Some("stale"));
             assert!(
                 at.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
@@ -2777,7 +2771,8 @@ fields:
 
             let cmd = build_abandon_cmd(&schema);
             let matches = cmd.get_matches_from(["abandon", "T001", "--reason", "x"]);
-            let err = run_abandon(&schema, &conn, &matches, Actor::Human.into(), "x").unwrap_err();
+            let err = run_abandon(&schema, &conn, &matches, Actor::Human.into(), "x")
+                .unwrap_err();
             let msg = err.to_string();
             assert!(
                 msg.contains("abandon")
@@ -2787,10 +2782,7 @@ fields:
             );
             // Row unchanged
             let (status, reason, _at) = read_abandon_row(&conn, "T001");
-            assert_eq!(
-                status, from_state,
-                "row must be unchanged from {from_state}"
-            );
+            assert_eq!(status, from_state, "row must be unchanged from {from_state}");
             assert!(
                 reason.is_none(),
                 "abandoned_reason must remain null after rejected call"
@@ -2842,7 +2834,8 @@ fields:
 
         let cmd = build_abandon_cmd(&schema);
         let matches = cmd.get_matches_from(["abandon", "T001", "--reason", "   "]);
-        let err = run_abandon(&schema, &conn, &matches, Actor::Human.into(), "   ").unwrap_err();
+        let err = run_abandon(&schema, &conn, &matches, Actor::Human.into(), "   ")
+            .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("non-empty"),
@@ -2894,8 +2887,14 @@ fields:
         let cmd = build_abandon_cmd(&schema);
         let matches = cmd.get_matches_from(["abandon", "T001", "--reason", "x"]);
 
-        let err =
-            run_abandon(&schema, &conn, &matches, Actor::AiWithHuman.into(), "x").unwrap_err();
+        let err = run_abandon(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiWithHuman.into(),
+            "x",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("--approve-token"), "{err}");
         let (status, _, _) = read_abandon_row(&conn, "T001");
         assert_eq!(status, "ready");

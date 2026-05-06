@@ -3351,10 +3351,7 @@ policies:
         let check: crate::flow::checks::CheckResult = serde_json::from_str(payload).unwrap();
         assert_eq!(check.check_id, "drive_pid_recorded_or_terminal");
         assert_eq!(check.outcome, crate::flow::checks::CheckOutcome::Fail);
-        assert_eq!(
-            check.args.get("display_id").and_then(|v| v.as_str()),
-            Some("T850")
-        );
+        assert_eq!(check.args.get("display_id").and_then(|v| v.as_str()), Some("T850"));
         assert!(!check.observed_at.is_empty());
         assert!(check.reason.is_some());
         let th_count: i64 = conn
