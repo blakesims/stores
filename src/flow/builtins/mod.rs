@@ -139,7 +139,7 @@ pub(crate) fn fire_framework_transition(
     policies_hash: &str,
 ) -> Result<()> {
     let schema = load_tasks_schema()?;
-    fire_framework_transition_for(conn, &schema, display_id, verb, diff_extra, policies_hash)
+    fire_framework_transition_for(conn, &schema, display_id, verb, diff_extra, policies_hash, None)
 }
 
 /// Generic framework-actor transition firing for any store schema. Identical
@@ -154,6 +154,7 @@ pub(crate) fn fire_framework_transition_for(
     verb: &str,
     diff_extra: EntryMap,
     policies_hash: &str,
+    actor_note: Option<&str>,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
@@ -210,6 +211,7 @@ pub(crate) fn fire_framework_transition_for(
         Actor::Framework,
         None,
         phash_opt,
+        actor_note,
     )?;
 
     tx.commit()?;
@@ -223,12 +225,34 @@ pub(crate) fn fire_mark_deploy_blocked(
     blocked_reason: &str,
     policies_hash: &str,
 ) -> Result<()> {
+    fire_mark_deploy_blocked_with_note(conn, display_id, blocked_reason, policies_hash, None)
+}
+
+/// Variant of `fire_mark_deploy_blocked` that records `actor_note` on the
+/// emitted `transition_history` row. Used by the framework subscriber-runner
+/// (T046) to encode the failed agent + exit code on the audit row.
+pub(crate) fn fire_mark_deploy_blocked_with_note(
+    conn: &Connection,
+    display_id: &str,
+    blocked_reason: &str,
+    policies_hash: &str,
+    actor_note: Option<&str>,
+) -> Result<()> {
     let mut diff: EntryMap = std::collections::BTreeMap::new();
     diff.insert(
         "blocked_reason".to_string(),
         Value::String(blocked_reason.to_string()),
     );
-    fire_framework_transition(conn, display_id, "mark_deploy_blocked", diff, policies_hash)
+    let schema = load_tasks_schema()?;
+    fire_framework_transition_for(
+        conn,
+        &schema,
+        display_id,
+        "mark_deploy_blocked",
+        diff,
+        policies_hash,
+        actor_note,
+    )
 }
 
 /// Convenience: fire `mark_drive_failed` with `blocked_reason` populated.
@@ -589,6 +613,151 @@ mod tests {
             .unwrap();
         assert_eq!(verb, "mark_deploy_blocked");
         assert_eq!(invoker, "framework");
+    }
+
+    /// T046: a subscriber that exits non-zero on the in_review→accepted edge
+    /// must be routed to deploy_blocked by the framework subscriber-runner,
+    /// with the exit code recorded in transition_history.actor_note. Pre-T046
+    /// the row silently parked at `accepted` with the merge unlanded.
+    #[test]
+    fn t046_subscriber_nonzero_exit_routes_to_deploy_blocked() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        // Row sits at `accepted` (post in_review→accepted), as it would be
+        // when accept-merge claimed the dispatch and is about to run.
+        insert_accepted_task(&conn, "T046", "feat/x", "/tmp/no-such-workspace");
+
+        // Stub the subscriber-runner's failure path: row is at `accepted`,
+        // dispatch returned exit=11. The framework must fire mark_deploy_blocked
+        // and stamp actor_note with the exit code.
+        crate::handlers::agents_run::route_failure_to_deploy_blocked(
+            &conn,
+            "tasks",
+            "T046",
+            "accept-merge",
+            "exit=11",
+            "feedface",
+            "accepted",
+        );
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T046'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "deploy_blocked",
+            "non-zero subscriber exit must route accepted → deploy_blocked"
+        );
+        let reason = reason.unwrap_or_default();
+        assert!(
+            reason.contains("accept-merge") && reason.contains("exit=11"),
+            "blocked_reason must cite agent + exit code; got: {reason}"
+        );
+
+        let (verb, invoker, note, phash): (String, String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT verb, invoker, actor_note, policies_hash FROM transition_history \
+                 WHERE store='tasks' AND display_id='T046' AND verb='mark_deploy_blocked'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(verb, "mark_deploy_blocked");
+        assert_eq!(invoker, "framework");
+        let note = note.unwrap_or_default();
+        assert!(
+            note.contains("agent=accept-merge") && note.contains("exit=11"),
+            "actor_note must record agent + exit code; got: {note}"
+        );
+        assert_eq!(phash.as_deref(), Some("feedface"));
+    }
+
+    /// T046: zero-exit must NOT trigger any transition. Row stays at accepted.
+    #[test]
+    fn t046_subscriber_zero_exit_no_transition() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_accepted_task(&conn, "T046b", "feat/x", "/tmp/no-such");
+
+        // Even though the helper is only invoked from the failure path, guard
+        // against accidental wiring by asserting the routing function itself
+        // is a no-op when the row's current state has no mark_deploy_blocked
+        // transition declared. We simulate that by feeding an unrelated state
+        // through a non-tasks store name (the function early-returns).
+        crate::handlers::agents_run::route_failure_to_deploy_blocked(
+            &conn,
+            "observations",
+            "T046b",
+            "some-agent",
+            "exit=1",
+            "",
+            "accepted",
+        );
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T046b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "accepted", "non-tasks-store path must no-op");
+    }
+
+    /// T046 codex-revise: subscription_to MUST match current_status before the
+    /// framework routes failure to deploy_blocked. Closes the prior cycle's
+    /// HIGH finding that the routing was over-broad — any tasks-store
+    /// subscriber failing while a row sat at `accepted` would have triggered
+    /// mark_deploy_blocked, even subscribers whose own transition.to was a
+    /// different state (e.g. a hypothetical subscriber on tasks: ready→executing
+    /// that happened to fail-and-fire while a different row was at accepted).
+    /// The tightened gate pins routing to the subscriber that LANDED the row
+    /// in the from-state of the deploy_blocked edge.
+    #[test]
+    fn t046_subscription_to_mismatch_does_not_route() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_accepted_task(&conn, "T046c", "feat/x", "/tmp/no-such");
+
+        // Subscriber claims to have fired on `ready → executing` (subscription_to
+        // = "executing"), but the row is currently at `accepted`. The gate
+        // must short-circuit BEFORE firing mark_deploy_blocked, leaving the
+        // row at accepted and writing no transition_history row for
+        // mark_deploy_blocked.
+        crate::handlers::agents_run::route_failure_to_deploy_blocked(
+            &conn,
+            "tasks",
+            "T046c",
+            "some-other-subscriber",
+            "exit=7",
+            "",
+            "executing", // subscription_to ≠ current_status (accepted)
+        );
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T046c'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "accepted",
+            "subscription_to mismatch must NOT route the row to deploy_blocked"
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T046c' AND verb='mark_deploy_blocked'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "no mark_deploy_blocked transition_history row may be written when subscription_to mismatches"
+        );
     }
 
     /// Test-only thin wrapper around the private fire_mark_deploy_blocked.

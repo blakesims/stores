@@ -167,6 +167,7 @@ fn resolve_one(
         "auto_resolve",
         diff,
         ctx.policies_hash,
+        None,
     )?;
 
     eprintln!(
