@@ -2,11 +2,11 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-06 (seventh pass) — Big batch day plus architecture turn, then Pi-runner/load-balancing smoke. Shipped: T029/T035/T036/T037/T038/T039/T040/T041/T044/T045/T046/T047/T048/T055/T056 plus L130 direct fix. Engine cleared the T1-drive gap, retry/watchdog/accept-merge/plan-persistence failures, close-out-of-band, investigator pull-shape, gatekeeper design, auto-resolve backfill, per-role runner config, and a minimal Pi-runner structured-output smoke. Remaining pressure is now concentrated in three coherent clusters: **dispatch attempts as a typed lifecycle** (L134/L141/L149/L150), **T1 execution-shape normalization** (L133), and **gatekeeper implementation seeds** (L142/L143, held for amendment).
+**Last updated:** 2026-05-06 (eighth pass) — Big batch day plus architecture turn, Pi-runner/load-balancing smoke, and pipe-fill cleanup. Shipped: T029/T035/T036/T037/T038/T039/T040/T041/T044/T045/T046/T047/T048/T050/T052/T054/T055/T056/T057/T058/T059/T060 plus L130 direct fix. Engine cleared the T1-drive gap, retry/watchdog/accept-merge/plan-persistence failures, close-out-of-band, investigator pull-shape, gatekeeper design, auto-resolve backfill, per-role runner config, minimal Pi-runner structured-output smoke, typed dispatch lifecycle, T1 canonical plan synthesis, observation risk metadata, and watch default rebucketing. Remaining pressure is concentrated in **gatekeeper implementation** (L142/T053 in flight), **stale/retirement/admin cleanup** (L124/L002/L145), and **deeper observability/queue-drain** (L057/L058/L151/L135).
 
 ## The picture in one sentence
 
-**The engine now mostly works end-to-end; the danger has moved from "can it drive?" to "can it see and type its own control-plane state?"** Runtime/deploy are much healthier, and Pi can drive/write structured `final_output`, but status is still confusing because dispatch attempts, watchdog state, T1 contract-plans, and intake/gatekeeper risk metadata are not yet first-class enough. The next geodesic is typed observability: dispatch_locks → typed lifecycle (L134), T1 contract → canonical plan row shape (L133), raw filings → intake/gatekeeper Router (L142/L143).
+**The engine now works end-to-end often enough that the main risk is operator trust and architectural coherence, not basic propulsion.** Runtime/deploy are much healthier; Pi can drive/write structured `final_output`; dispatch attempts and T1 contract-plans are typed enough for the current batch; and `stores watch` no longer has to show terminal exhaust as in-flight by default. The next geodesic is finishing the gatekeeper Router seam (L142/T053), then cleaning stale/retirement paths and deeper observability so the operator can tell current action, blocked reason, recovered terminal, and architectural risk at a glance.
 
 ## Status legend
 
@@ -23,7 +23,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 ## Layer-by-layer state
 
 ### Layer 1 — Runtime / dispatch reliability
-*Drive-loop reliability now substantially solid. Watchdog catches silent zombies + ignores pre-deploy stale pids; retry-on-failure reschedules transient flakes. Remaining drag: dispatch_lock primitive sprawl across L087/L116/L122/L141 (typed lifecycle pending — see L134).*
+*Drive-loop reliability now substantially solid. Watchdog catches silent zombies + ignores pre-deploy stale pids; retry-on-failure reschedules transient flakes. L134/T050 typed dispatch lifecycle shipped, folding L141/T049-style implicit lock-state concerns into postconditions + typed terminal reasons. Remaining drag is narrower: stale daemon binary detection, orphan cleanup, and per-project daemon control.*
 
 | obs | state | what hurts |
 |---|---|---|
@@ -40,8 +40,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L087 | ⚪ — | auto-promote silent-fails on rapid sequential ratifies (folded into L134's typed-lifecycle umbrella) |
 | L116 | ⚪ T2 | seeder race during agents.yaml hot-reload (overlaps L141 dispatch primitive) |
 | L122 | ⚪ T2 | dispatch_lock orphans on subagent kill |
-| L134 | 🟢 T050 | typed dispatch_locks lifecycle umbrella: postcondition_id+args, daemon_epoch, terminal_reason, next_retry_at; currently blocked/recovering but right abstraction. T034/T056 smoke reinforced this: daemon/manual-drive races, terminal rows with stale watchdog attempts, and empty/ambiguous drive logs all need typed attempt state. |
-| L141 | ⚪ T2 | auto-drive marks `last_status='ok'` on dispatch, not completion; symptom folded into L134 |
+| L134 | ✅ T050 | typed dispatch_locks lifecycle umbrella: postcondition_id+args, daemon_epoch, terminal_reason, next_retry_at; shipped via close-out-of-band after codex PASS/rebase reconciliation |
+| L141 | ✅ T049/T050 | auto-drive `ok`-on-dispatch concern translated into L134 typed postcondition semantics; open-lock invariant superseded by `drive_pid_recorded_or_terminal` + watchdog on task pid |
 | L149 | ⚪ T2 | daemon/on-disk binary drift after cargo-install kills fresh auto-drive subprocesses; restart workaround; folds into L011 + L134 observability |
 | L150 | ⚪ T2 | halt/deploy-blocked subscriber mislabels blocked drive failures as deploy_blocked merge-conflict observations; another symptom of untyped terminal state / event postconditions, folded into L134/L135 |
 | L068 | ⚪ — | cross-project daemon SIGTERM (other-repo `pkill 'stores agents run'` kills mine) |
@@ -55,8 +55,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L038 | ✅ T033 | `depends_on` pre-flight guard (T1, shipped after L109/T039 unblocked T1 drives) |
 | L108 | ⚪ T2 | `fire_on_entry_follow_ons` fires only at add(); retroactive tier_hint update from T2→T1 doesn't re-trigger skip-plan |
 | L130 | ✅ direct | resume routes blocked T2/T3 with plan=null to planning instead of ready (avoids "Phase 1 of 0" deadlock); fixed direct on main during T038 push |
-| L132 | ⚪ T1 | schema validator should refuse unguarded transition shadowing a guarded one (silent override risk) |
-| L133 | ⚪ T2 | normalize T1 execution shape: synthesize a contract-derived single phase during skip-plan so plan IS the phase rather than a parallel surface (consolidates L109/L117/L123/L126/L130 — biggest engine-architecture lever) |
+| L132 | ✅ T057 | schema validator refuses unguarded transition shadowing a guarded one (silent override risk) |
+| L133 | ✅ T054 | T1 execution shape normalized: synthesize a contract-derived single phase during skip-plan so plan is canonical rather than null/special-cased |
 | L011 | ⚪ T2 | rows don't record `stores` binary version |
 | L053 | ⚪ — | tier-A actor check bypassable via `--invoker human` from `$CLAUDECODE`-detected processes |
 
@@ -82,10 +82,11 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L131 | ✅ T046 | accept-merge subscriber routes shim failure → accepted→deploy_blocked (cross-listed from Layer 1) |
 | L136 | ✅ T044 | `tasks close-out-of-band` recovery-terminal verb (closes accepted/deploy_blocked rows whose work shipped via manual merge) |
 | L138 | ✅ T045 | gatekeeper design doc + risk/cluster taxonomy ratified (docs-only; impl seeds in L142/L143) |
+| L143 | ✅ T052 | observation risk metadata + approval_policy shipped; generic update cannot bypass direction-aware override-policy gate |
 | L061 | ⚪ T2 | no pre-promotion acceptance precheck; tasks ship before discovering already-met |
 | L069 | ⚪ — | `compute_resume` rejects `deploy_blocked` rows (related: L145, schema/handler drift on resume verb) |
 | L070 | ⚪ — | accept-merge conflict path drops cargo-install + schema-migrate side effects |
-| L144 | ⚪ T2 | `stores migrate` doesn't detect framework-DDL drift (SUBSTRATE_DDL columns added in newer binary aren't applied to existing DBs); 10.06 hit this on actor_note bootstrap, manual ALTER required |
+| L144 | ✅ T051 | framework-DDL drift detection/audit shipped; existing DBs learn newer SUBSTRATE_DDL columns without manual ALTER |
 | L145 | ⚪ T2 | resume handler hardcodes 'blocked' source; schema permits deploy_blocked→ready via resume but handler rejects pre-validator. Also semantic ambiguity: should resume from deploy_blocked re-cycle or just retry-deploy? |
 | L149 | ⚪ T2 | **daemon's auto-drive spawn breaks silently after `cargo install` replaces `/home/blake/.cargo/bin/stores`** — current_exe()-based execvp loads new binary, but the daemon's in-memory image stays out of sync; spawn argv subtly mismatches new binary's CLI parsing → drive subprocess dies <5s with empty log. Workaround: restart daemon after each cargo-install. Surfaced today during pipe-fill (T048/T049 both died until daemon restart). Compounds with L011 (binary-version recording) — daemon should detect inode-replacement of own exe and self-restart. |
 | L150 | ⚪ T2 | halt/deploy-blocked subscriber files merge-conflict-shaped observations for rows that are merely `blocked` by drive failure (e.g. T034 silent-zombie / Pi-smoke failures). Needs typed event/terminal reason before templating operator-facing halt observations. |
@@ -96,6 +97,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | obs | state | what hurts |
 |---|---|---|
 | L032 | ✅ T032 | auto-scaffold symlinks `.stores/` artifacts into provisioned worktrees (closes L067 transitively) |
+| L165 | ✅ T059 | `stores watch` rebuckets task rows for actionable defaults: terminal/recovered/rejected exhaust no longer belongs in in-flight by default; blocked reason parsing improved |
 | L057 | ⚪ T2 | no per-agent-invocation metadata on rows (model / tokens / duration / transcript-ref) — usage analytics gap; data exists in `.stores/runs/*.jsonl` but not aggregated |
 | L161/T056 | ✅ T056 | minimal Pi-runner smoke target: T1 task driven via Pi produced structured `final_output`, committed one marker file, passed review/wrap, accepted, and merged. This proves Pi runner basics but not full T034 acceptance bookkeeping. |
 | L054 | ⚪ — | no structured-read verbs for task review (orchestrator falls back to grep) |
@@ -131,40 +133,46 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L092 | ✅ T044 | `tasks close-out-of-band` verb (cross-listed from Layer 4) |
 | L093 | ✅ T039 | planner brief tier-aware (cross-listed from Layer 3) |
 | L137 | ✅ T048 | auto-resolve startup-sweep / backfill; 15 stale schema_migrated→ready obs pairs cleaned by startup sweep |
-| L142 | 🟠 T3 | implement intake_items store + gatekeeper subscriber (P1 of T045 design); held for amendment — preserve direct mature-observation path, defer fast-track execution / architecture_reviews store |
-| L143 | 🟠 T3 | add risk_class + approval_policy fields to observations schema; held for amendment — enum must match canonical `{low, normal, architecture, security, authority}` |
-| L134 | 🟢 T050 | formalize dispatch_locks as typed lifecycle buffer (compounds with L039/L087/L107/L116/L122/L141/L149; umbrella fix now drafted/amended) |
+| L142 | 🟢 T053 | implement intake_items store + gatekeeper subscriber (P1 of T045 design); in flight, guarded to Router seam only |
+| L143 | ✅ T052 | risk_class + approval_policy fields to observations schema; canonical enums + direction-aware override-policy gate |
+| L134 | ✅ T050 | formalize dispatch_locks as typed lifecycle buffer (compounds with L039/L087/L107/L116/L122/L141/L149) |
 | L135 | ⚪ T2/T3 | promote Check primitive (cross-cutting validator surface for `submit-*` flows) |
 | L072 | ⚪ — | code-reviewer REPLAN gate dead-ends as `blocked` instead of routing back to planning |
 | L023 | ⚪ T2 | observations missing `next-id` verb + JSON envelope inconsistency |
 | L002 | ⚪ T2 | no admin rollback verb |
 | L003 | ⚪ T2 | observations list output unscannable for >2 rows |
 | L006 | ⚪ T2 | observations runner asymmetry (no drive cycle for obs) |
-| L021 | ⚪ T1 | render template doesn't pull `wrap_log` into Completion section |
+| L021 | ✅ T058 | render template pulls `wrap_log` into Completion section |
 | L034 | ⚪ T1 | wrap misattributes main-ahead commits as 'rides on this branch' |
 | GAP | — | **auto-investigator subscriber** — fires investigator on `open → needs_investigation` automatically; partial machinery exists (L043 investigator agent) but no subscriber wires it. Engine still can't drain its own input queue. |
 
 ## Highest-leverage next picks
 
-Layers 1–4 substantially solid post-batch. Re-ranked picks (the geodesic now points at typed-primitive coherence + queue-drain):
+Layers 1–4 are substantially solid after the batch. Re-ranked picks (the geodesic now points at completing the gatekeeper seam, then cleanup/observability):
 
-1. **L134 / T050 (typed dispatch_locks lifecycle)** — highest leverage runtime cleanup. One umbrella for L087/L116/L122/L141/L149/L150 and the T034/T056 smoke pain: typed terminal reasons, daemon epoch, postcondition_id+args, next_retry_at, and less ambiguous watchdog/drive-attempt recovery.
-2. **L133 (T1 execution shape normalization)** — biggest state-shape lever. Path B chosen: synthesize a canonical one-phase plan during skip-plan with provenance; retire plan-null branches.
-3. **L144 / T051 (framework-DDL drift)** — bootstrap/release hygiene. Existing DBs must learn new SUBSTRATE_DDL columns without manual ALTER.
-4. **L142 / L143 (gatekeeper P1/P2)** — strategic ceiling, but hold for amendment. L143 enum mismatch + L142 over-scope identified; ratify after narrowing.
-5. **L132 (schema validator unguarded-shadow refusal)** — cheap defensive schema hygiene.
-6. **L145 (resume-from-deploy_blocked semantics)** — design question: does resume re-cycle execution or retry deploy ceremony?
-7. **L135 (Check primitive)** — unifies deterministic pre/post-condition gates; pairs naturally with L134 postconditions and future fast-track audit.
-8. **Auto-investigator subscriber (GAP)** — turns L043 investigator into queue-drain automation.
-9. **L108 (on-entry retroactive trigger)** — rare but real metadata-flow gap.
+1. **L142 / T053 (gatekeeper Router seam)** — current strategic ceiling. Keep P1 narrow: intake_items + Router classifications; preserve direct observations path; no fast-track execution, architecture_reviews store, cluster registry, or watch observability yet.
+2. **L145 (resume-from-deploy_blocked semantics)** — design question: does resume re-cycle execution or retry deploy ceremony? This remains a visible recovery-path sharp edge.
+3. **L124 + L002 (retirement/admin cleanup)** — watch is better after L165, but stale/rejected/duplicate/deploy-blocked rows still need a real terminal/retirement/admin path.
+4. **L135 (Check primitive)** — unifies deterministic pre/post-condition gates; pairs naturally with L134 postconditions and future fast-track audit.
+5. **Auto-investigator subscriber (GAP/L151)** — turns L043 investigator into queue-drain automation.
+6. **L149 / L011 (daemon binary/version visibility)** — stale-exe restarts remain operational friction.
+7. **L057/L058/L059 (run/edge observability)** — aggregate transcript refs, per-edge throughput, and invocation metadata.
+8. **L108 (on-entry retroactive trigger)** — rare but real metadata-flow gap.
 
-Current picture: runtime is usable; next work is making the control plane typed enough that `stores watch`/humans can distinguish quiet, stuck, retriable, escalated, and architecturally risky without reading 100 rows.
+Current picture: propulsion is healthy enough to run a full pipe. The operator trust surface improved with L165/T059, but not all stale-row lifecycle problems are solved. Next work should finish L142/T053, then clean recovery/retirement semantics so watch output and task state feel boring rather than mysterious.
 
 
 ## Recently shipped
 
 | date | task | obs | what changed |
 |---|---|---|---|
+| 2026-05-06 | T060 | L169 | tier-aware executor/code-reviewer briefs skip phase decomposition for T1 |
+| 2026-05-06 | T059 | L165 | `stores watch` rebuckets rows for actionable defaults; terminal/recovered/rejected exhaust no longer appears as in-flight by default; blocked reason parsing improved |
+| 2026-05-06 | T058 | L021 | task render includes wrap_log in Completion section |
+| 2026-05-06 | T057 | L132 | schema validator refuses unguarded transition shadowing a guarded one |
+| 2026-05-06 | T054 | L133 | T1 canonical-plan synthesis removes plan-null special casing |
+| 2026-05-06 | T052 | L143 | observation risk_class + approval_policy shipped; generic update locked out of approval_policy bypass |
+| 2026-05-06 | T050 | L134 | typed dispatch_locks lifecycle shipped with postconditions, terminal reasons, next_retry_at, and framework_migrations marker |
 | 2026-05-06 | T056 | L161 | minimal Pi-runner smoke target: T1 docs-only marker task driven via Pi, structured `final_output`, accepted + merged (`1b1e93b`) |
 | 2026-05-06 | T055 | — | per-role runner/model config for `stores tasks drive`: config-driven runner selection, Pi runner in default build, `--claude-code-model`, auto-drive respects runner config; closed out-of-band after direct main merge (`bff3c34`) |
 | 2026-05-06 | T048 | L137 | auto-resolve startup-sweep/backfill closes historical schema_migrated→ready observation pairs |
