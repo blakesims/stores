@@ -880,6 +880,12 @@ fn build_drive_cmd() -> Command {
                      --claude-code.",
                 )
                 .required(false),
+        )
+        .arg(
+            Arg::new("claude-code-model")
+                .long("claude-code-model")
+                .help("Force a Claude Code model for all roles (e.g. sonnet, opus)")
+                .required(false),
         );
 
     #[cfg(feature = "runner-pi")]

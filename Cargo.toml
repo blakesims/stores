@@ -29,7 +29,7 @@ crossterm = "0.28"
 tempfile = "3"
 
 [features]
-default = ["runner-claude-code"]
+default = ["runner-claude-code", "runner-pi"]
 runner-claude-code = ["dep:jsonschema"]
 runner-pi = ["dep:jsonschema"]
 
