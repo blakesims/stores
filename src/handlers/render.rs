@@ -717,12 +717,8 @@ mod tests {
         );
     }
 
-    // T054 AC1.8 (task 1.15): main.md rendered with plan_source=contract_synthesized
-    // contains the provenance label; plan_source=planner_authored does not.
-    #[test]
-    fn main_md_renders_synthesized_label_for_contract_synthesized_plan() {
+    fn bundled_tasks_schema_and_main_tpl() -> (crate::schema::Schema, &'static str) {
         use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
-        use crate::render::{build_context, render_template};
 
         let tasks_yaml = BUNDLED_STORE_SCHEMAS
             .iter()
@@ -742,65 +738,164 @@ mod tests {
             .map(|(_, c)| *c)
             .expect("main.md.tpl");
 
-        let synthesized_plan = serde_json::json!({
-            "objective": "fix the thing",
-            "phases": [{
-                "name": "Contract execution",
-                "objective": "the thing is fixed",
-                "tasks": ["edit module A"],
-                "acceptance_criteria": ["the thing is fixed"],
-                "files": [],
-                "dependencies": []
-            }]
-        });
+        (schema, main_tpl)
+    }
 
-        let build_entry = |plan_source: &str| -> crate::validate::EntryMap {
-            let mut m = std::collections::BTreeMap::new();
-            m.insert("display_id".to_string(), serde_json::json!("T001"));
-            m.insert("status".to_string(), serde_json::json!("executing"));
-            m.insert("title".to_string(), serde_json::json!("Test Task"));
-            m.insert("slug".to_string(), serde_json::json!("test-task"));
-            m.insert("current_phase".to_string(), serde_json::json!(1));
-            m.insert("current_cycle".to_string(), serde_json::json!(1));
-            m.insert("tier_hint".to_string(), serde_json::json!("T1"));
-            m.insert("plan_source".to_string(), serde_json::json!(plan_source));
-            m.insert("plan".to_string(), synthesized_plan.clone());
-            m.insert(
-                "contract".to_string(),
-                serde_json::json!({
-                    "executive_intent": "fix the thing",
-                    "done_when": "the thing is fixed",
-                    "scope_in": "edit module A",
-                    "scope_out": ""
-                }),
-            );
-            m.insert(
-                "created_at".to_string(),
-                serde_json::json!("2026-01-01T00:00:00Z"),
-            );
-            m.insert(
-                "updated_at".to_string(),
-                serde_json::json!("2026-01-01T00:00:00Z"),
-            );
-            m.insert("plan_review_log".to_string(), serde_json::json!([]));
-            m.insert("cycles".to_string(), serde_json::json!([]));
-            m
-        };
+    fn bundled_tasks_entry(status: &str) -> crate::validate::EntryMap {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("display_id".to_string(), serde_json::json!("T001"));
+        m.insert("status".to_string(), serde_json::json!(status));
+        m.insert("title".to_string(), serde_json::json!("Test Task"));
+        m.insert("slug".to_string(), serde_json::json!("test-task"));
+        m.insert("current_phase".to_string(), serde_json::json!(1));
+        m.insert("current_cycle".to_string(), serde_json::json!(1));
+        m.insert("tier_hint".to_string(), serde_json::json!("T1"));
+        m.insert(
+            "plan_source".to_string(),
+            serde_json::json!("planner_authored"),
+        );
+        m.insert(
+            "plan".to_string(),
+            serde_json::json!({
+                "objective": "fix the thing",
+                "phases": [{
+                    "name": "Contract execution",
+                    "objective": "the thing is fixed",
+                    "tasks": ["edit module A"],
+                    "acceptance_criteria": ["the thing is fixed"],
+                    "files": [],
+                    "dependencies": []
+                }]
+            }),
+        );
+        m.insert(
+            "contract".to_string(),
+            serde_json::json!({
+                "executive_intent": "fix the thing",
+                "done_when": "the thing is fixed",
+                "scope_in": "edit module A",
+                "scope_out": ""
+            }),
+        );
+        m.insert(
+            "created_at".to_string(),
+            serde_json::json!("2026-01-01T00:00:00Z"),
+        );
+        m.insert(
+            "updated_at".to_string(),
+            serde_json::json!("2026-01-02T00:00:00Z"),
+        );
+        m.insert("plan_review_log".to_string(), serde_json::json!([]));
+        m.insert("cycles".to_string(), serde_json::json!([]));
+        m.insert("wrap_log".to_string(), serde_json::json!([]));
+        m
+    }
 
-        // contract_synthesized → label present
-        let ctx = build_context(&schema, &build_entry("contract_synthesized"));
+    // T054 AC1.8 (task 1.15): main.md rendered with plan_source=contract_synthesized
+    // contains the provenance label; plan_source=planner_authored does not.
+    #[test]
+    fn main_md_renders_synthesized_label_for_contract_synthesized_plan() {
+        use crate::render::{build_context, render_template};
+
+        let (schema, main_tpl) = bundled_tasks_schema_and_main_tpl();
+
+        let mut entry = bundled_tasks_entry("executing");
+        entry.insert(
+            "plan_source".to_string(),
+            serde_json::json!("contract_synthesized"),
+        );
+        let ctx = build_context(&schema, &entry);
         let rendered = render_template(main_tpl, &ctx).expect("render contract_synthesized");
         assert!(
             rendered.contains("Plan synthesized from contract; planner was skipped."),
             "contract_synthesized must produce provenance label; got:\n{rendered}"
         );
 
-        // planner_authored → label absent
-        let ctx2 = build_context(&schema, &build_entry("planner_authored"));
+        entry.insert(
+            "plan_source".to_string(),
+            serde_json::json!("planner_authored"),
+        );
+        let ctx2 = build_context(&schema, &entry);
         let rendered2 = render_template(main_tpl, &ctx2).expect("render planner_authored");
         assert!(
             !rendered2.contains("Plan synthesized from contract; planner was skipped."),
             "planner_authored must NOT produce provenance label; got:\n{rendered2}"
+        );
+    }
+
+    // T058: accepted/in_review Completion renders every wrap_log envelope field.
+    #[test]
+    fn completion_renders_structured_wrap_log_entries() {
+        use crate::render::{build_context, render_template};
+
+        let (schema, main_tpl) = bundled_tasks_schema_and_main_tpl();
+        let mut entry = bundled_tasks_entry("in_review");
+        entry.insert(
+            "wrap_log".to_string(),
+            serde_json::json!([
+                {
+                    "executive_summary": "Wrap one summary",
+                    "deviations": ["No deviations"],
+                    "residual_risks": ["Risk one"],
+                    "recommended_sanity_checks": ["cargo test"],
+                    "at": "2026-01-02T00:00:00Z",
+                    "cycle": 1
+                },
+                {
+                    "executive_summary": "Wrap two summary",
+                    "deviations": ["Deviation two"],
+                    "residual_risks": ["Risk two"],
+                    "recommended_sanity_checks": ["stores tasks render T001 --dry-run"],
+                    "at": "2026-01-03T00:00:00Z",
+                    "cycle": 2
+                }
+            ]),
+        );
+
+        let ctx = build_context(&schema, &entry);
+        let rendered = render_template(main_tpl, &ctx).expect("render in_review wrap_log");
+
+        for expected in [
+            "- **In Review:** 2026-01-02T00:00:00Z — awaiting human GO/NO_GO",
+            "### Wrap 1",
+            "- **Executive Summary:** Wrap one summary",
+            "  - No deviations",
+            "  - Risk one",
+            "  - cargo test",
+            "- **At:** 2026-01-02T00:00:00Z",
+            "- **Cycle:** 1",
+            "### Wrap 2",
+            "- **Executive Summary:** Wrap two summary",
+            "  - Deviation two",
+            "  - Risk two",
+            "  - stores tasks render T001 --dry-run",
+            "- **At:** 2026-01-03T00:00:00Z",
+            "- **Cycle:** 2",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "rendered Completion missing {expected:?}; got:\n{rendered}"
+            );
+        }
+    }
+
+    // T058: empty wrap_log on accepted rows has a clear empty-state line.
+    #[test]
+    fn completion_renders_empty_wrap_log_state() {
+        use crate::render::{build_context, render_template};
+
+        let (schema, main_tpl) = bundled_tasks_schema_and_main_tpl();
+        let entry = bundled_tasks_entry("accepted");
+        let ctx = build_context(&schema, &entry);
+        let rendered = render_template(main_tpl, &ctx).expect("render accepted empty wrap_log");
+
+        assert!(
+            rendered.contains("- **Accepted:** 2026-01-02T00:00:00Z"),
+            "accepted status line missing; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("_No wrap_log entries recorded._"),
+            "empty wrap_log state missing; got:\n{rendered}"
         );
     }
 }
