@@ -5,6 +5,7 @@ pub mod brief;
 pub mod drive;
 pub mod framework_migrate;
 pub mod guide;
+pub mod intake_route;
 pub mod list;
 pub mod migrate;
 pub mod next_action;

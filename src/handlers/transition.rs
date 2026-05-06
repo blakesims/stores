@@ -432,6 +432,19 @@ pub(crate) fn run_in_tx(
         &merged,
     )?;
 
+    // T053 P3: intake pre-validation side effects.  Fires BEFORE validate() so that
+    // required_when fields (routed_to_observation, routed_to_arch_review) are populated
+    // via auto-created side-effect rows before the validator checks them.  The caller's
+    // transaction guarantees atomicity: if obs creation fails the intake transition rolls back.
+    if schema.name == "intake" && matches!(verb, "route" | "escalate-arch-review") {
+        super::intake_route::inject_pre_validation_fields(
+            tx,
+            &mut diff,
+            &mut merged,
+            verb,
+        )?;
+    }
+
     // Run validator against merged entry; actor checks scoped to diff only.
     validate::validate(
         schema,
@@ -495,6 +508,13 @@ pub(crate) fn run_in_tx(
             pref.as_deref(),
             phash.as_deref(),
         )?;
+    }
+
+    // T053 P3: intake recon-return hook.  Fires AFTER execute_transition_write so
+    // the status row is already needs_info → triaging; then increments recon_round
+    // and enforces the ≤ 2 cap.  Failure rolls back the entire transition.
+    if schema.name == "intake" && verb == "recon-return" {
+        super::intake_route::handle_recon_return(tx, row_id, &merged, &diff)?;
     }
 
     Ok(())

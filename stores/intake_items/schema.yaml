@@ -60,6 +60,13 @@ lifecycle:
       verb: reopen
       actor: ai_with_human
 
+    # dropped → triaging: human corrects a misrouted reject_noise (Q4 resolution)
+    # Skips draft to avoid re-filing; returns directly to triaging for re-triage.
+    - from: dropped
+      to: triaging
+      verb: amend
+      actor: ai_with_human
+
     # triaging → escalated: architecture review candidate
     - from: triaging
       to: escalated
@@ -152,6 +159,12 @@ fields:
     type: integer
     required: false
     description: "0 on draft; incremented on each needs_info → triaging recon return; max 2 before gatekeeper must decide"
+
+  # --- Recon question (set when decision=needs_info; extracted from gatekeeper_decision_json) ---
+  - name: missing_info_question
+    type: text
+    required: false
+    description: "Question the gatekeeper needs answered before routing; persisted from gatekeeper_decision_json.missing_info_question"
 
   # --- Capture metadata ---
   - name: captured_at
