@@ -77,6 +77,8 @@ The trap to resist is giving that outer layer a back-channel: "let the wrapping 
 
 The autonomous-flow daemon, the `agents.yaml` / `policies.yaml` files, and the builtin subscribers are *not* wrappers — they are substrate-internal services that share `stores`'s binary, schema, and write-path enforcement. What lives outside is genuinely external: project-side scripts (`./dev`), human-operator wrappers, observing orchestrators, deployment-specialist agents that aren't builtins. The line between "in" and "out" is whether the code ships in the `stores` binary itself.
 
+A second boundary, orthogonal to the substrate-vs-wrapper line, is *local correctness vs. architectural coherence*: the substrate enforces local correctness (schema, actor gates, lifecycle predicates) but does not currently enforce architectural coherence across clusters of locally-correct fixes. See `docs/architecture-coherence.md` for the doctrine and the three drift examples (T1 plan=null, dispatch lifecycle, sidecar token propagation) that motivated T045's gatekeeper / architecture-review layer.
+
 ## The deeper bet
 
 Most agent frameworks treat the LLM as the cognitive center and the surrounding system as scaffolding. `stores` inverts that: **the schema is the cognitive center, and the LLM is a constrained worker that fills in slots the schema demands.** The framework doesn't ask "what does the agent want to do?" — it asks "what does the next row require, who is allowed to write it, and what predicate must hold?" The agent's job is to produce a value that satisfies the schema. The schema's job is to make sure no work happens without intent, and no intent goes uncaptured.
