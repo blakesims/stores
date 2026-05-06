@@ -484,6 +484,19 @@ fn build_store_command(schema: &Schema) -> Command {
                 )
             });
         }
+        // close-out-of-band (tasks recovery-terminal) requires --commit <SHA>:
+        // the merge-target SHA recorded as provenance in transition_history.
+        if verb == "close-out-of-band" {
+            transition_cmd = transition_cmd.arg(
+                Arg::new("commit")
+                    .long("commit")
+                    .help(
+                        "Merge-target git SHA (7-40 hex chars) reachable from main; \
+                         recorded in transition_history as provenance",
+                    )
+                    .required(true),
+            );
+        }
         store_cmd = store_cmd.subcommand(transition_cmd);
     }
 

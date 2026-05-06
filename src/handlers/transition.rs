@@ -212,6 +212,140 @@ pub fn run_close_as_addressed(
     Ok(())
 }
 
+/// Entry point for `close-out-of-band` (tasks recovery-terminal):
+/// validates --commit shape (7-40 hex chars) and reachability in `main`, then
+/// transitions the row to `closed_out_of_band`. Idempotent: if the row is
+/// already `closed_out_of_band`, prints a no-op line and returns Ok. Records
+/// the SHA in `transition_history.actor_note`.
+pub fn run_close_out_of_band(
+    schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    invoker: InvokerCtx,
+    commit: &str,
+) -> Result<()> {
+    // 1. Validate SHA shape: 7-40 lowercase hex chars.
+    let sha_re = regex::Regex::new(r"^[0-9a-f]{7,40}$").unwrap();
+    if !sha_re.is_match(commit) {
+        anyhow::bail!(
+            "--commit '{commit}' is not a valid git SHA (expected 7-40 lowercase hex chars)"
+        );
+    }
+
+    // 2. Validate SHA reachable in main. Checked unless STORES_SKIP_GIT_CHECK=1
+    // (test escape hatch — main code path always validates).
+    if std::env::var("STORES_SKIP_GIT_CHECK").ok().as_deref() != Some("1") {
+        validate_sha_reachable_in_main(commit)?;
+    }
+
+    let display_id = matches
+        .get_one::<String>("display_id")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    let tx = conn
+        .unchecked_transaction()
+        .context("close-out-of-band: begin tx")?;
+
+    let (row_id, existing) = read_row(schema, &tx, display_id)?;
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // 3. Idempotency: already in target state → no-op success.
+    if current_status == "closed_out_of_band" {
+        println!(
+            "{display_id} already closed_out_of_band (no-op; commit={commit})"
+        );
+        return Ok(());
+    }
+
+    // 4. Resolve transition (errors if from-state is terminal/disallowed).
+    let merged = existing.clone();
+    let transition = select_transition(
+        &schema.lifecycle.transitions,
+        current_status,
+        "close-out-of-band",
+        None,
+        &merged,
+    )?;
+
+    let diff: crate::validate::EntryMap = std::collections::BTreeMap::new();
+
+    validate::validate(
+        schema,
+        &merged,
+        Op::Transition("close-out-of-band".to_string(), diff.clone()),
+        invoker,
+    )
+    .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
+
+    // 5. Write transition + audit row with SHA in actor_note.
+    let now = now_iso8601();
+    let invoker_str = invoker.actor.to_string();
+    let qtable = quote_ident(&schema.name);
+    tx.execute(
+        &format!(
+            "UPDATE {qtable} SET updated_at = ?1, updated_by = ?2, status = ?3 WHERE id = ?4"
+        ),
+        rusqlite::params![now, invoker_str, transition.to, row_id],
+    )
+    .context("close-out-of-band: update row")?;
+
+    let (pref, phash) = read_policy_env();
+    crate::db::insert_transition_history_with_note(
+        &tx,
+        &schema.name,
+        row_id,
+        display_id,
+        current_status,
+        &transition.to,
+        "close-out-of-band",
+        &invoker_str,
+        pref.as_deref(),
+        phash.as_deref(),
+        Some(commit),
+    )?;
+
+    tx.commit().context("close-out-of-band: commit tx")?;
+
+    println!(
+        "Transitioned {display_id}: {} → {} (commit={commit})",
+        transition.from, transition.to
+    );
+    Ok(())
+}
+
+/// Verify that `sha` is reachable from the local `main` ref via
+/// `git merge-base --is-ancestor <sha> main`. Falls back to `master` when
+/// `main` is absent. Errors fail-loud with a clear message — recovery
+/// requires a real merge target.
+fn validate_sha_reachable_in_main(sha: &str) -> Result<()> {
+    use std::process::Command;
+    let try_branch = |branch: &str| -> Option<bool> {
+        let out = Command::new("git")
+            .args(["merge-base", "--is-ancestor", sha, branch])
+            .output()
+            .ok()?;
+        Some(out.status.success())
+    };
+    // Prefer `main`, then `master`. If git itself fails (no repo, no binary),
+    // both calls return None.
+    if let Some(true) = try_branch("main") {
+        return Ok(());
+    }
+    if let Some(true) = try_branch("master") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "--commit '{sha}' is not reachable from main (or master). \
+         close-out-of-band requires the merge-target SHA to already be on \
+         the trunk. Run `git fetch origin main && git merge-base \
+         --is-ancestor {sha} main` to confirm."
+    )
+}
+
 /// Transaction-agnostic core.  All DB access uses `tx` (which is `Deref<Target=Connection>`).
 /// Called by `run` (single-call CLI path) and by submit handlers that pass their own `tx`
 /// for atomic multi-step operations (Phase 5 / task 5.7).
@@ -1928,5 +2062,195 @@ fields:
             status, "confirmed",
             "row must be unchanged after rejected ratify"
         );
+    }
+
+    // ---- T044: close-out-of-band recovery-terminal verb tests ----
+
+    const COOB_SCHEMA: &str = r#"
+name: tasks
+id_format: "T{:03d}"
+lifecycle:
+  states: [planning, executing, accepted, closed_out_of_band]
+  transitions:
+    - {from: planning, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: executing, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+fields:
+  - name: title
+    type: text
+    required: true
+"#;
+
+    fn setup_coob() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(COOB_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        (schema, conn)
+    }
+
+    fn insert_coob_row(conn: &Connection, status: &str) {
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title) VALUES ('T001', ?1, 'Test')",
+            rusqlite::params![status],
+        )
+        .unwrap();
+    }
+
+    fn build_coob_cmd() -> clap::Command {
+        clap::Command::new("close-out-of-band")
+            .arg(clap::Arg::new("display_id").required(true).index(1))
+            .arg(
+                clap::Arg::new("commit")
+                    .long("commit")
+                    .required(true),
+            )
+    }
+
+    fn read_status(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT status FROM tasks WHERE display_id = 'T001'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn audit_rows_for(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+        let mut s = conn
+            .prepare(
+                "SELECT verb, to_status, actor_note FROM transition_history \
+                 WHERE display_id = 'T001' ORDER BY id ASC",
+            )
+            .unwrap();
+        let rows = s
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows
+    }
+
+    fn coob_env() {
+        std::env::set_var("STORES_SKIP_GIT_CHECK", "1");
+    }
+
+    /// AC1+AC4+AC5: happy path. Walk a `planning` row to `closed_out_of_band`,
+    /// audit row records SHA in actor_note.
+    #[test]
+    fn coob_planning_to_closed_succeeds_and_records_sha() {
+        coob_env();
+        let (schema, conn) = setup_coob();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        insert_coob_row(&conn, "planning");
+        let sha = "abc1234def5678abc1234def5678abc1234def56";
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", sha]);
+        run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), sha).unwrap();
+        assert_eq!(read_status(&conn), "closed_out_of_band");
+        let audit = audit_rows_for(&conn);
+        assert_eq!(audit.len(), 1, "one audit row");
+        assert_eq!(audit[0].0, "close-out-of-band");
+        assert_eq!(audit[0].1, "closed_out_of_band");
+        assert_eq!(audit[0].2.as_deref(), Some(sha));
+    }
+
+    /// AC3: refused from terminal state (`accepted` is not declared as a
+    /// from-state in the close-out-of-band transitions, so select_transition
+    /// must error).
+    #[test]
+    fn coob_refused_from_terminal_accepted() {
+        coob_env();
+        let (schema, conn) = setup_coob();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        insert_coob_row(&conn, "accepted");
+        let sha = "abc1234";
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", sha]);
+        let err = run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), sha).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("close-out-of-band") || msg.contains("no transition"),
+            "expected refusal citing the verb; got: {msg}"
+        );
+        assert_eq!(read_status(&conn), "accepted", "row unchanged");
+    }
+
+    /// AC6: idempotent. Calling on an already-closed_out_of_band row succeeds
+    /// (no audit row written, status unchanged).
+    #[test]
+    fn coob_idempotent_when_already_closed() {
+        coob_env();
+        let (schema, conn) = setup_coob();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        insert_coob_row(&conn, "closed_out_of_band");
+        let sha = "abc1234";
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", sha]);
+        run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), sha).unwrap();
+        assert_eq!(read_status(&conn), "closed_out_of_band");
+        let audit = audit_rows_for(&conn);
+        assert!(audit.is_empty(), "no audit row written on idempotent no-op");
+    }
+
+    /// AC2: --commit shape rejected if not 7-40 hex chars.
+    #[test]
+    fn coob_rejects_bad_sha_shape() {
+        coob_env();
+        let (schema, conn) = setup_coob();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        insert_coob_row(&conn, "planning");
+        let bad = "notahex"; // 7 chars but contains non-hex
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", bad]);
+        let err = run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), bad).unwrap_err();
+        assert!(
+            err.to_string().contains("not a valid git SHA"),
+            "expected SHA-shape error; got: {err}"
+        );
+        assert_eq!(read_status(&conn), "planning", "row unchanged");
+    }
+
+    /// AC8: tier-A — ai_autonomous rejected even with a "valid" token bit.
+    #[test]
+    fn coob_rejects_ai_autonomous() {
+        coob_env();
+        let (schema, conn) = setup_coob();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        insert_coob_row(&conn, "planning");
+        let sha = "abc1234";
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", sha]);
+        let err =
+            run_close_out_of_band(&schema, &conn, &m, Actor::AiAutonomous.into(), sha).unwrap_err();
+        assert!(
+            err.to_string().contains("validation failed")
+                || err.to_string().contains("actor"),
+            "expected actor-validation failure; got: {err}"
+        );
+        assert_eq!(read_status(&conn), "planning", "row unchanged");
+    }
+
+    /// AC8: tier-A — ai_with_human + valid token accepted.
+    #[test]
+    fn coob_accepts_ai_with_human_with_token() {
+        coob_env();
+        let (schema, conn) = setup_coob();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        insert_coob_row(&conn, "executing");
+        let sha = "abc1234";
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", sha]);
+        let invoker = InvokerCtx {
+            actor: Actor::AiWithHuman,
+            token_valid: true,
+        };
+        run_close_out_of_band(&schema, &conn, &m, invoker, sha).unwrap();
+        assert_eq!(read_status(&conn), "closed_out_of_band");
     }
 }

@@ -31,11 +31,43 @@ pub(crate) fn insert_transition_history(
     policy_ref: Option<&str>,
     policies_hash: Option<&str>,
 ) -> Result<()> {
+    insert_transition_history_with_note(
+        tx,
+        store,
+        row_id,
+        display_id,
+        from_status,
+        to_status,
+        verb,
+        invoker,
+        policy_ref,
+        policies_hash,
+        None,
+    )
+}
+
+/// Variant that records a free-form `actor_note` column. Used by recovery-
+/// terminal verbs (e.g. close-out-of-band) to record the merge-target SHA as
+/// provenance.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_transition_history_with_note(
+    tx: &Transaction,
+    store: &str,
+    row_id: i64,
+    display_id: &str,
+    from_status: &str,
+    to_status: &str,
+    verb: &str,
+    invoker: &str,
+    policy_ref: Option<&str>,
+    policies_hash: Option<&str>,
+    actor_note: Option<&str>,
+) -> Result<()> {
     let occurred_at = crate::handlers::row::now_iso8601();
     tx.execute(
         "INSERT INTO transition_history \
-         (store, row_id, display_id, from_status, to_status, verb, invoker, policy_ref, policies_hash, occurred_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         (store, row_id, display_id, from_status, to_status, verb, invoker, policy_ref, policies_hash, occurred_at, actor_note) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             store,
             row_id,
@@ -47,6 +79,7 @@ pub(crate) fn insert_transition_history(
             policy_ref,
             policies_hash,
             occurred_at,
+            actor_note,
         ],
     )
     .context("insert_transition_history")?;
