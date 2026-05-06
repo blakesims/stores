@@ -113,10 +113,10 @@ DUP_OF=$(sqlite3 .stores/db.sqlite "SELECT duplicate_of FROM intake WHERE displa
 [[ "$DUP_STATUS" == "routed" ]] || fail "duplicate: expected status=routed; got: $DUP_STATUS"
 [[ "$DUP_CK" == "dispatch-lifecycle" ]] || fail "duplicate: cluster_key not copied; got: $DUP_CK"
 [[ "$DUP_OF" == "$SRC_ID" ]] || fail "duplicate: duplicate_of not set; got: $DUP_OF"
-# No observation should have been created for the duplicate item
+# Source item's normal_observation route auto-created 1 obs (per AC3.6); duplicate adds none
 OBS_COUNT=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
-[[ "$OBS_COUNT" == "0" ]] || fail "duplicate: no observation should have been created; count=$OBS_COUNT"
-pass "duplicate: status=routed, cluster_key copied, no obs created"
+[[ "$OBS_COUNT" == "1" ]] || fail "duplicate: only source's auto-obs should exist (count=1 expected); count=$OBS_COUNT"
+pass "duplicate: status=routed, cluster_key copied, no new obs from duplicate route"
 
 # ---------------------------------------------------------------------------
 # Decision 2: fast_track
