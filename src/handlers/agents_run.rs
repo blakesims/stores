@@ -1036,7 +1036,7 @@ fn mark_claim_finished_typed(
     }
     let completed_attempt = conn
         .query_row(
-            "SELECT COALESCE(attempt, attempts, 0) + 1 FROM dispatch_locks \
+            "SELECT COALESCE(attempts, 0) + 1 FROM dispatch_locks \
              WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
             rusqlite::params![store, row_id, &agent.name],
             |r| r.get::<_, u32>(0),
@@ -1073,7 +1073,7 @@ pub(crate) fn mark_claim_silent_zombie(
     let last_status = derive_last_status("silent_zombie", Some(reason));
     let completed_attempt = conn
         .query_row(
-            "SELECT COALESCE(attempt, attempts, 0) + 1 FROM dispatch_locks              WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
+            "SELECT COALESCE(attempts, 0) + 1 FROM dispatch_locks              WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
             rusqlite::params![store, row_id, agent_name],
             |r| r.get::<_, u32>(0),
         )
@@ -1186,7 +1186,8 @@ struct RetryCandidate {
 fn claim_for_retry(conn: &Connection, c: &RetryCandidate, agent_name: &str) -> Result<bool> {
     let n = conn.execute(
         "UPDATE dispatch_locks SET last_status = 'retrying', claim_source = 'retry_claim', \
-         attempt = COALESCE(attempt, attempts, 0) + 1 \
+         attempt = COALESCE(attempt, attempts, 0) + 1, terminal_reason = NULL, \
+         next_retry_at = NULL, finished_at = NULL \
          WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
                AND attempts = ?4 AND last_status = ?5",
         rusqlite::params![
@@ -1259,7 +1260,8 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
                AND dl.finished_at IS NOT NULL \
                AND dl.terminal_reason IN ('exit_nonzero','error','silent_zombie') \
                AND dl.next_retry_at IS NOT NULL \
-               AND dl.next_retry_at <= ?3",
+               AND dl.next_retry_at <= ?3 \
+               AND dl.last_status <> 'retrying'",
     )?;
     let now_iso = crate::handlers::row::now_iso8601();
     let rows = stmt.query_map(rusqlite::params![&agent.name, max, now_iso], |r| {
@@ -2683,15 +2685,20 @@ policies:
         insert_task_row(&conn, 400, "T400", "in_review", "T2", "feat/race");
         insert_history(&conn, "tasks", 400, "T400", "ready", "in_review");
         // Insert a dispatch_locks row in a "retryable" shape: attempts<max,
-        // finished_at set, last_status='exit=1'.
+        // finished_at set, typed terminal failure, and next_retry_at elapsed.
         let now = crate::handlers::row::now_iso8601();
         conn.execute(
             "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
-             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts) \
-             VALUES ('tasks', 400, 'T400', 'flaky-race', 1, 'daemon-A', ?1, ?1, 'exit=1', 1)",
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, \
+             terminal_reason, next_retry_at) \
+             VALUES ('tasks', 400, 'T400', 'flaky-race', 1, 'daemon-A', ?1, \
+             '2000-01-01T00:00:00Z', 'exit=1', 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
             rusqlite::params![now],
         )
         .unwrap();
+
+        let agent = retry_agent("flaky-race", "exit 1", 3);
+        assert_eq!(find_retryable_locks(&conn, &agent).unwrap().len(), 1);
 
         let candidate = RetryCandidate {
             store: "tasks".to_string(),
@@ -2706,14 +2713,33 @@ policies:
 
         // First call wins.
         assert!(claim_for_retry(&conn, &candidate, "flaky-race").unwrap());
-        let status_after: String = conn
+        let (status_after, terminal_reason, finished_at, next_retry_at): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
             .query_row(
-                "SELECT last_status FROM dispatch_locks WHERE agent_name='flaky-race'",
+                "SELECT last_status, terminal_reason, finished_at, next_retry_at \
+                 FROM dispatch_locks WHERE agent_name='flaky-race'",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert_eq!(status_after, "retrying");
+        assert!(
+            terminal_reason.is_none(),
+            "retry claim leaves terminal state"
+        );
+        assert!(finished_at.is_none(), "retry claim clears finished_at");
+        assert!(
+            next_retry_at.is_none(),
+            "retry claim consumes next_retry_at"
+        );
+        assert!(
+            find_retryable_locks(&conn, &agent).unwrap().is_empty(),
+            "claimed retry must not remain eligible for duplicate dispatch"
+        );
 
         // Second call (same candidate, snapshot still 'exit=1') loses —
         // the CAS guard sees last_status='retrying' and returns false.
@@ -2890,6 +2916,40 @@ policies:
         assert_eq!(reason, "silent_zombie");
         assert_eq!(last, "drive_failed:silent_zombie_pid_dead");
         assert!(next.is_none(), "attempt at max must not schedule retry");
+    }
+
+    #[test]
+    fn t050_retry_finish_schedules_third_attempt_when_max_is_three() {
+        let conn = fresh_db();
+        let agent = retry_agent("typed-retry-three", "exit 1", 3);
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, transition_id, claimed_by, claimed_at, attempts, attempt) \
+             VALUES ('tasks', 865, 'T865', 'typed-retry-three', 1, 'daemon-A', '2000-01-01T00:00:00Z', 1, 1)",
+            [],
+        )
+        .unwrap();
+        mark_claim_finished_typed(
+            &conn,
+            "tasks",
+            865,
+            "T865",
+            &agent,
+            "exit_nonzero",
+            "exit=1",
+        )
+        .unwrap();
+        let (attempts, next): (u32, Option<String>) = conn
+            .query_row(
+                "SELECT attempts, next_retry_at FROM dispatch_locks WHERE row_id=865",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 2);
+        assert!(
+            next.is_some(),
+            "second completed failure with max_attempts=3 must schedule third dispatch"
+        );
     }
 
     /// T050 P3 AC3.4: mark_retry_halted writes terminal_reason='halted'.
