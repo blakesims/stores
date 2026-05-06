@@ -2,11 +2,11 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-06 (fifth pass) — Big batch day. Eleven tasks shipped (T029, T035, T036, T037, T038, T039, T040, T041, T044, T045, T046, T047) plus L130 direct fix. Engine cleared the T1-drive gap (L109/T039), watchdog scope (L107/T040), retry-on-failure (L039/T041), out-of-band close-out (L092/T044), accept-merge exit-code routing (L131/T046), and plan-persistence+watchdog actor_note (L120/T047). Investigator subagent pull-shape shipped (T038, accepted then closed_out_of_band via merge-commit recovery). Gatekeeper design ratified (T045 docs-only). 10.06 dogfood reached full migration smoke ship (their L026/T017, 809 LOC). 14 substrate wrinkles surfaced; ~half fixed today, the rest filed (L132–L145).
+**Last updated:** 2026-05-06 (sixth pass) — Big batch day plus architecture turn. Shipped: T029/T035/T036/T037/T038/T039/T040/T041/T044/T045/T046/T047/T048 plus L130 direct fix. Engine cleared the T1-drive gap, retry/watchdog/accept-merge/plan-persistence failures, close-out-of-band, investigator pull-shape, gatekeeper design, and auto-resolve backfill. Remaining pressure is now concentrated in three coherent clusters: **dispatch attempts as a typed lifecycle** (L134/L141/L149), **T1 execution-shape normalization** (L133), and **gatekeeper implementation seeds** (L142/L143, held for amendment).
 
 ## The picture in one sentence
 
-**The engine ratifies, drives, deploys, recovers, and watchdogs cleanly end-to-end across all three tier shapes — the remaining drag is metadata-flow ergonomics (resume-from-deploy_blocked semantics, T1 execution-shape consolidation, framework-DDL drift on bootstrap, dispatch_lock primitive sprawl) and the still-unstarted gatekeeper/intake layer.** Layers 1–4 are now substantially solid; the next geodesic is Layer 7 (typed-primitive coherence — Router shipped, Check + intake_items pending) and the auto-investigator queue-drain primitive (Layer 8) that turns the substrate from human-pulls to engine-pulls.
+**The engine now mostly works end-to-end; the danger has moved from "can it drive?" to "can it see and type its own control-plane state?"** Runtime/deploy are much healthier, but status is still confusing because dispatch attempts, T1 contract-plans, and intake/gatekeeper risk metadata are not yet first-class enough. The next geodesic is typed observability: dispatch_locks → typed lifecycle (L134), T1 contract → canonical plan row shape (L133), raw filings → intake/gatekeeper Router (L142/L143).
 
 ## Status legend
 
@@ -40,7 +40,9 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L087 | ⚪ — | auto-promote silent-fails on rapid sequential ratifies (folded into L134's typed-lifecycle umbrella) |
 | L116 | ⚪ T2 | seeder race during agents.yaml hot-reload (overlaps L141 dispatch primitive) |
 | L122 | ⚪ T2 | dispatch_lock orphans on subagent kill |
-| L141 | ⚪ T2 | auto-drive subscriber marks `last_status='ok'` on dispatch (not on completion); silent-zombie root cause cousin to L087 — cleanest fix is L134's umbrella |
+| L134 | 🟢 T050 | typed dispatch_locks lifecycle umbrella: postcondition_id+args, daemon_epoch, terminal_reason, next_retry_at; currently blocked/recovering but right abstraction |
+| L141 | ⚪ T2 | auto-drive marks `last_status='ok'` on dispatch, not completion; symptom folded into L134 |
+| L149 | ⚪ T2 | daemon/on-disk binary drift after cargo-install kills fresh auto-drive subprocesses; restart workaround; folds into L011 + L134 observability |
 | L068 | ⚪ — | cross-project daemon SIGTERM (other-repo `pkill 'stores agents run'` kills mine) |
 | GAP | — | per-project daemon PID file + `stores agents status / stop` verbs |
 
@@ -125,10 +127,10 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L049 | ✅ T037 | auto-resolve subscriber on cargo_installed→schema_migrated transition |
 | L092 | ✅ T044 | `tasks close-out-of-band` verb (cross-listed from Layer 4) |
 | L093 | ✅ T039 | planner brief tier-aware (cross-listed from Layer 3) |
-| L137 | 🟠 T1 | auto-resolve needs startup-sweep / backfill (15 stale schema_migrated→ready obs pairs) — contract drafted, awaiting ratify |
-| L142 | 🟠 T3 | implement intake_items store + gatekeeper subscriber (P1 of T045 design); pi reviewing scope today |
-| L143 | 🟠 T3 | add risk_class + approval_policy fields to observations schema (P2 of T045 design) |
-| L134 | ⚪ T2/T3 | formalize dispatch_locks as typed lifecycle buffer (compounds with L039/L087/L107/L116/L122/L141; the umbrella that retires several Layer 1 rows) |
+| L137 | ✅ T048 | auto-resolve startup-sweep / backfill; 15 stale schema_migrated→ready obs pairs cleaned by startup sweep |
+| L142 | 🟠 T3 | implement intake_items store + gatekeeper subscriber (P1 of T045 design); held for amendment — preserve direct mature-observation path, defer fast-track execution / architecture_reviews store |
+| L143 | 🟠 T3 | add risk_class + approval_policy fields to observations schema; held for amendment — enum must match canonical `{low, normal, architecture, security, authority}` |
+| L134 | 🟢 T050 | formalize dispatch_locks as typed lifecycle buffer (compounds with L039/L087/L107/L116/L122/L141/L149; umbrella fix now drafted/amended) |
 | L135 | ⚪ T2/T3 | promote Check primitive (cross-cutting validator surface for `submit-*` flows) |
 | L072 | ⚪ — | code-reviewer REPLAN gate dead-ends as `blocked` instead of routing back to planning |
 | L023 | ⚪ T2 | observations missing `next-id` verb + JSON envelope inconsistency |
@@ -143,24 +145,24 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 Layers 1–4 substantially solid post-batch. Re-ranked picks (the geodesic now points at typed-primitive coherence + queue-drain):
 
-1. **L137 (auto-resolve startup-sweep)** — T1, ~80-150 LOC. Quick win: unsticks 15 historical task→obs pairs and codifies the backfill pattern. Contract drafted, awaiting U1.
-2. **L141 (auto-drive lock-on-dispatch)** — T2. Silent-zombie root cause cousin of L087; cleanest fix is via L134's umbrella. Could ship standalone if L134 design needs more time.
-3. **L132 (schema validator unguarded-shadow refusal)** — T1. Defensive substrate hygiene; cheap.
-4. **L144 (framework-DDL drift)** — T2. 10.06's bootstrap blocker today; once shipped, fresh DB clones won't need manual ALTER. Compounds with L011 (binary-version recording).
-5. **L133 (T1 execution shape normalization)** — T2 / biggest lever. Synthesize contract-derived single phase during skip-plan so plan IS the phase rather than a parallel surface; consolidates L109/L117/L123/L126/L130 into one structural fix.
-6. **L134 (dispatch_locks typed lifecycle)** — T2/T3 umbrella. Retires L087/L116/L122/L141 (and unblocks L107's edge cases). Should be designed jointly with L135 (Check primitive) since both are cross-cutting validators.
-7. **L142 / L143 (gatekeeper P1/P2)** — T3. Pi reviewing scope; intake_items store + risk_class/approval_policy fields. Strategic ceiling for the "filings drift becomes architecture drift" loop.
-8. **Auto-investigator subscriber (GAP)** — strategic ceiling cousin to L142. Flips substrate from human-pulls to engine-pulls. T038's investigator agent is the primitive; needs the subscriber wiring.
-9. **L145 (resume-from-deploy_blocked semantics)** — T2 design question; needs pi/architecture input on whether resume should re-cycle or retry-deploy.
-10. **L108 (on-entry retroactive trigger)** — T2. Mid-flight tier_hint changes still don't re-fire skip-plan; rare but real.
+1. **L134 / T050 (typed dispatch_locks lifecycle)** — highest leverage runtime cleanup. One umbrella for L087/L116/L122/L141/L149: typed terminal reasons, daemon epoch, postcondition_id+args, next_retry_at.
+2. **L133 (T1 execution shape normalization)** — biggest state-shape lever. Path B chosen: synthesize a canonical one-phase plan during skip-plan with provenance; retire plan-null branches.
+3. **L144 / T051 (framework-DDL drift)** — bootstrap/release hygiene. Existing DBs must learn new SUBSTRATE_DDL columns without manual ALTER.
+4. **L142 / L143 (gatekeeper P1/P2)** — strategic ceiling, but hold for amendment. L143 enum mismatch + L142 over-scope identified; ratify after narrowing.
+5. **L132 (schema validator unguarded-shadow refusal)** — cheap defensive schema hygiene.
+6. **L145 (resume-from-deploy_blocked semantics)** — design question: does resume re-cycle execution or retry deploy ceremony?
+7. **L135 (Check primitive)** — unifies deterministic pre/post-condition gates; pairs naturally with L134 postconditions and future fast-track audit.
+8. **Auto-investigator subscriber (GAP)** — turns L043 investigator into queue-drain automation.
+9. **L108 (on-entry retroactive trigger)** — rare but real metadata-flow gap.
 
-The geodesic shifted again: the T1 + retry + watchdog drag is gone; the next bottleneck is **engine-shape primitives** (L133/L134/L135) and **input-queue auto-drain** (gatekeeper L142 + auto-investigator GAP).
+Current picture: runtime is usable; next work is making the control plane typed enough that `stores watch`/humans can distinguish quiet, stuck, retriable, escalated, and architecturally risky without reading 100 rows.
 
 
 ## Recently shipped
 
 | date | task | obs | what changed |
 |---|---|---|---|
+| 2026-05-06 | T048 | L137 | auto-resolve startup-sweep/backfill closes historical schema_migrated→ready observation pairs |
 | 2026-05-06 | T047 | L120 | planner plan persistence + watchdog actor_note column; claude_code runner SAP fallback uses role-aware `pick_best_sap_candidate` (10.06's #2 blocker cleared) |
 | 2026-05-06 | T046 | L131 | accept-merge subscriber routes shim failure → accepted→deploy_blocked with structured reason (10.06's #1 blocker cleared; verified live in their binary) |
 | 2026-05-06 | T045 | L138 | gatekeeper design + risk/cluster taxonomy doc-only ratification (impl seeds: L142/L143) |
