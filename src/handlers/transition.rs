@@ -436,7 +436,7 @@ pub(crate) fn run_in_tx(
     // The observation side-effect needs the derived L143 columns in `merged` so the
     // resulting observation and the intake transition are written atomically with the
     // same gatekeeper-derived risk_class / approval_policy / risk_flags / cluster_key.
-    if schema.name == "intake" && matches!(verb, "route" | "escalate-arch-review") {
+    if schema.name == "intake" && verb == "route" {
         maybe_validate_and_mirror_gatekeeper_decision(schema, &mut diff, &mut merged)?;
         super::intake_route::inject_pre_validation_fields(
             tx,
@@ -722,7 +722,7 @@ pub(crate) fn execute_transition_write(
 /// T053 P2: validate gatekeeper_decision_json and mirror risk_flags, cluster_key,
 /// and decision_metadata into diff + merged so they are written in the same transaction.
 ///
-/// Only fires for the `intake` store on `route` and `escalate-arch-review` verbs.
+/// Only fires for the `intake` store on the `route` verb.
 /// Called after generic `validate::validate()` passes — the generic validator already
 /// rejects badly-formed JSON, so here we know the value is either a parsed object or null.
 pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
@@ -732,12 +732,21 @@ pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
 ) -> anyhow::Result<()> {
     let decision_json_val = match merged.get("gatekeeper_decision_json") {
         Some(v) => v.clone(),
-        None => return Ok(()),
+        None => {
+            // FIX 2: gatekeeper_decision_json is mandatory for route — reject absent field.
+            anyhow::bail!(
+                "gatekeeper_decision_json is required for the route verb; \
+                 pass --gatekeeper-decision-json with the full gatekeeper output payload"
+            );
+        }
     };
 
-    // Null means not yet set — no validation required
+    // Null means not yet set — reject fail-loud (same as absent).
     if decision_json_val.is_null() {
-        return Ok(());
+        anyhow::bail!(
+            "gatekeeper_decision_json is required for the route verb and must be a non-null JSON \
+             object; pass --gatekeeper-decision-json with the full gatekeeper output payload"
+        );
     }
 
     // The generic JSON validator already caught malformed strings; here we expect an object.
@@ -754,6 +763,19 @@ pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
                 errs.join("\n- ")
             )
         })?;
+
+    // FIX 3: enforce --decision matches gatekeeper_decision_json.decision (exact equality).
+    // Reject fail-loud if they differ to prevent mismatched state transitions.
+    if let Some(obj) = decision_json_val.as_object() {
+        let json_decision = obj.get("decision").and_then(|v| v.as_str()).unwrap_or("");
+        let cli_decision = merged.get("decision").and_then(|v| v.as_str()).unwrap_or("");
+        if !cli_decision.is_empty() && json_decision != cli_decision {
+            anyhow::bail!(
+                "--decision '{cli_decision}' does not match gatekeeper_decision_json.decision \
+                 '{json_decision}'; they must be identical"
+            );
+        }
+    }
 
     // Mirror risk_flags and cluster_key to top-level indexed columns
     if let Some(obj) = decision_json_val.as_object() {
