@@ -105,8 +105,7 @@ fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
             match super::daemon::start_detached() {
                 Ok(pid) => {
                     app.status_bar.daemon_pid = Some(pid);
-                    app.status_bar.daemon_liveness =
-                        super::daemon::Liveness::Live { pid };
+                    app.status_bar.daemon_liveness = super::daemon::Liveness::Live { pid };
                     app.status_bar.message = format!("daemon started (pid {pid})");
                 }
                 Err(e) => {
@@ -117,9 +116,7 @@ fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
         }
 
         // Saved-view shortcuts.
-        (KeyCode::Char(c @ '1'), _)
-        | (KeyCode::Char(c @ '2'), _)
-        | (KeyCode::Char(c @ '3'), _) => {
+        (KeyCode::Char(c @ '1'), _) | (KeyCode::Char(c @ '2'), _) | (KeyCode::Char(c @ '3'), _) => {
             app.apply_preset(c);
             KeyOutcome::Continue
         }
@@ -329,16 +326,16 @@ mod tests {
         on_key(&mut app, key(KeyCode::PageUp));
         assert_eq!(app.current_flat(), Some(0));
 
-        // Tab on first row collapses TasksNeedsReview → flat list shrinks.
+        // Tab on first row collapses TasksActionableCurrentWork → flat list shrinks.
         let before = app.flat_rows().len();
         on_key(&mut app, key(KeyCode::Tab));
         let after = app.flat_rows().len();
         assert!(after < before, "tab should collapse the section");
-        assert!(app.collapsed.contains(&Section::TasksNeedsReview));
+        assert!(app.collapsed.contains(&Section::TasksActionableCurrentWork));
 
         // Tab again → expand.
         on_key(&mut app, key(KeyCode::Tab));
-        assert!(!app.collapsed.contains(&Section::TasksNeedsReview));
+        assert!(!app.collapsed.contains(&Section::TasksActionableCurrentWork));
     }
 
     #[test]

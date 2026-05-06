@@ -247,6 +247,12 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .required(false),
                 )
                 .arg(
+                    Arg::new("all-history")
+                        .long("all-history")
+                        .action(ArgAction::SetTrue)
+                        .help("Show complete task history instead of the default actionable/capped view"),
+                )
+                .arg(
                     Arg::new("legacy")
                         .long("legacy")
                         .action(ArgAction::SetTrue)
@@ -1225,7 +1231,9 @@ fn build_override_policy_cmd() -> Command {
         .arg(
             Arg::new("reason")
                 .long("reason")
-                .help("Required reason for the override (recorded in transition_history.actor_note)")
+                .help(
+                    "Required reason for the override (recorded in transition_history.actor_note)",
+                )
                 .required(true),
         )
         .arg(

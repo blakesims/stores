@@ -53,9 +53,7 @@ fn tui_smoke_paints_section_headers_within_200ms() {
     let deadline = Instant::now() + Duration::from_millis(200);
     let mut frames = 0u32;
     while Instant::now() < deadline {
-        terminal
-            .draw(|f| render::draw(f, &mut app))
-            .expect("draw");
+        terminal.draw(|f| render::draw(f, &mut app)).expect("draw");
         frames += 1;
     }
     assert!(frames > 0, "expected at least one frame within 200ms");
@@ -70,8 +68,10 @@ fn tui_smoke_paints_section_headers_within_200ms() {
     }
 
     // At least one task and one obs section header must be visible.
-    let task_label_present = painted.contains(Section::TasksNeedsReview.label())
-        || painted.contains(Section::TasksInFlight.label());
+    let task_label_present = painted.contains(Section::TasksActionableCurrentWork.label())
+        || painted.contains(Section::TasksBlockedNeedsAction.label())
+        || painted.contains(Section::TasksDeployRecovery.label())
+        || painted.contains(Section::TasksRecentlyTerminal.label());
     let obs_label_present = painted.contains(Section::ObsRatifiable.label())
         || painted.contains(Section::ObsOpenNoContract.label())
         || painted.contains(Section::ObsOther.label());

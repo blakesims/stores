@@ -182,18 +182,9 @@ mod tests {
     #[test]
     fn relative_time_buckets() {
         let now = iso8601_to_epoch_secs("2026-05-05T12:00:00Z").unwrap();
-        assert_eq!(
-            relative_time("2026-05-05T11:58:30Z", now),
-            "1m ago"
-        );
-        assert_eq!(
-            relative_time("2026-05-05T09:00:00Z", now),
-            "3h ago"
-        );
-        assert_eq!(
-            relative_time("2026-05-02T12:00:00Z", now),
-            "3d ago"
-        );
+        assert_eq!(relative_time("2026-05-05T11:58:30Z", now), "1m ago");
+        assert_eq!(relative_time("2026-05-05T09:00:00Z", now), "3h ago");
+        assert_eq!(relative_time("2026-05-02T12:00:00Z", now), "3d ago");
         assert_eq!(relative_time("", now), "never");
         assert_eq!(relative_time("not-a-time", now), "never");
     }
@@ -210,6 +201,7 @@ mod tests {
             updated_at: "2026-05-05T11:55:00Z".to_string(),
             tier_hint: Some("T3".to_string()),
             linked_observations: vec!["L075".to_string()],
+            ..Default::default()
         })];
         app.sections = classify(&app.rows);
         app.apply_sort();
