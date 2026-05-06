@@ -212,6 +212,8 @@ pub fn dispatch(
                     let claude_code = sub.get_flag("claude-code");
                     #[cfg(feature = "runner-claude-code")]
                     let testing = sub.get_flag("testing");
+                    #[cfg(feature = "runner-pi")]
+                    let pi = sub.get_flag("pi");
                     let args = handlers::drive::DriveArgs {
                         display_id,
                         auto,
@@ -220,6 +222,8 @@ pub fn dispatch(
                         claude_code,
                         #[cfg(feature = "runner-claude-code")]
                         testing,
+                        #[cfg(feature = "runner-pi")]
+                        pi,
                         max_iters,
                     };
                     handlers::drive::run_drive(schema, args)?;

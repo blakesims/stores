@@ -164,6 +164,9 @@ pub struct DriveArgs {
     /// `--claude-code`.
     #[cfg(feature = "runner-claude-code")]
     pub testing: bool,
+    /// Use Pi SDK runner (feature-gated).
+    #[cfg(feature = "runner-pi")]
+    pub pi: bool,
     /// Maximum loop iterations before hard-abort (AC3.5, default 50).
     pub max_iters: usize,
 }
@@ -331,6 +334,11 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
             )));
         }
         return crate::runner::select("claude-code");
+    }
+
+    #[cfg(feature = "runner-pi")]
+    if args.pi {
+        return crate::runner::select("pi");
     }
 
     // Default: error — a runner must be explicitly chosen.
@@ -1344,6 +1352,8 @@ mod tests {
             claude_code: false,
             #[cfg(feature = "runner-claude-code")]
             testing: false,
+            #[cfg(feature = "runner-pi")]
+            pi: false,
             max_iters: 50,
         };
 
@@ -1409,6 +1419,8 @@ mod tests {
             claude_code: false,
             #[cfg(feature = "runner-claude-code")]
             testing: false,
+            #[cfg(feature = "runner-pi")]
+            pi: false,
             max_iters: 50,
         };
 

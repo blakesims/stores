@@ -45,6 +45,12 @@ pub mod claude_code;
 #[cfg(feature = "runner-claude-code")]
 pub use claude_code::ClaudeCodeRunner;
 
+#[cfg(feature = "runner-pi")]
+pub mod pi;
+
+#[cfg(feature = "runner-pi")]
+pub use pi::PiRunner;
+
 /// The output produced by a single `Runner::spawn` call.
 #[derive(Debug, Clone)]
 pub struct RunnerOutput {
@@ -133,11 +139,17 @@ pub trait Runner: Send {
 
 /// Returns a comma-separated list of always-available runners (no feature gate).
 fn available_runners() -> String {
-    #[cfg(not(feature = "runner-claude-code"))]
-    let runners = vec!["mock"];
-    #[cfg(feature = "runner-claude-code")]
-    let runners = vec!["mock", "claude-code"];
-    runners.join(", ")
+    [
+        Some("mock"),
+        #[cfg(feature = "runner-claude-code")]
+        Some("claude-code"),
+        #[cfg(feature = "runner-pi")]
+        Some("pi"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 /// Factory: construct a `Runner` by name.
@@ -164,6 +176,19 @@ pub fn select(name: &str) -> Result<Box<dyn Runner>> {
                 bail!(
                     "runner 'claude-code' requires the runner-claude-code cargo feature; \
                      rebuild with `cargo install --features runner-claude-code`"
+                )
+            }
+        }
+        "pi" => {
+            #[cfg(feature = "runner-pi")]
+            {
+                Ok(Box::new(pi::PiRunner::new()))
+            }
+            #[cfg(not(feature = "runner-pi"))]
+            {
+                bail!(
+                    "runner 'pi' requires the runner-pi cargo feature; \
+                     rebuild with `cargo install --features runner-pi`"
                 )
             }
         }

@@ -869,6 +869,15 @@ fn build_drive_cmd() -> Command {
                 .required(false),
         );
 
+    #[cfg(feature = "runner-pi")]
+    let cmd = cmd.arg(
+        Arg::new("pi")
+            .long("pi")
+            .action(ArgAction::SetTrue)
+            .help("Use the Pi SDK runner (requires runner-pi feature)")
+            .required(false),
+    );
+
     cmd
 }
 

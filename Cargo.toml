@@ -31,6 +31,7 @@ tempfile = "3"
 [features]
 default = ["runner-claude-code"]
 runner-claude-code = ["dep:jsonschema"]
+runner-pi = ["dep:jsonschema"]
 
 [dev-dependencies]
 tempfile = "3"
