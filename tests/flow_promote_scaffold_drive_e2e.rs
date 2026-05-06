@@ -209,19 +209,21 @@ fn write_happy_drive_stub(dir: &Path, db_path: &Path) -> PathBuf {
          set -x\n\
          DISPLAY_ID=\"$1\"\n\
          echo \"stub invoked for $DISPLAY_ID at $(date -Iseconds)\"\n\
-         sqlite3 -cmd \".timeout 10000\" {db} \"UPDATE tasks SET status='in_review', \
-           wrap_log='[{{\\\"summary\\\":\\\"stub-drive ok\\\"}}]', \
-           updated_at='2026-05-04T00:00:01Z' WHERE display_id='$DISPLAY_ID'\"\n\
-         echo \"stub UPDATE rc=$?\"\n\
          # T049: drive_loop closes the auto-drive dispatch_lock on first\n\
          # successful submit. The stub stands in for drive_loop, so close\n\
-         # the lock here to mirror that contract.\n\
+         # the lock BEFORE flipping status so the test's status-based\n\
+         # predicate can rely on the lock-closed invariant once it sees\n\
+         # status='in_review'.\n\
          sqlite3 -cmd \".timeout 10000\" {db} \"UPDATE dispatch_locks \
            SET last_status='ok', finished_at='2026-05-04T00:00:01Z', \
                attempts=attempts+1 \
            WHERE store='tasks' AND display_id='$DISPLAY_ID' \
              AND agent_name='auto-drive' AND finished_at IS NULL\"\n\
-         echo \"stub LOCK rc=$?\"\n",
+         echo \"stub LOCK rc=$?\"\n\
+         sqlite3 -cmd \".timeout 10000\" {db} \"UPDATE tasks SET status='in_review', \
+           wrap_log='[{{\\\"summary\\\":\\\"stub-drive ok\\\"}}]', \
+           updated_at='2026-05-04T00:00:01Z' WHERE display_id='$DISPLAY_ID'\"\n\
+         echo \"stub UPDATE rc=$?\"\n",
         db = db_path.display(),
         log = log.display()
     );

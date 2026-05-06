@@ -202,6 +202,15 @@ fn ratify_promote_scaffold_e2e() {
         policies: vec![],
     };
 
+    // T049: auto-drive's dispatch_lock is now left OPEN until the spawned
+    // drive subprocess lands its first successful submit. The watchdog
+    // (which runs at the end of poll_once) flips any open-lock row whose
+    // PID is dead — and the real `stores tasks drive` binary exits fast in
+    // a bare test environment (no agents wired up). Stub STORES_DRIVE_CMD
+    // to a long-running sleep so the spawned process stays alive across the
+    // watchdog sweep, preserving the test's `status='planning'` invariant.
+    std::env::set_var("STORES_DRIVE_CMD", "sleep 600 #");
+
     let n1 = poll_once(&conn, &agents, &policies, &cfg_path, "t020p6-claimer", "").unwrap();
     let elapsed = started.elapsed();
     // AC6.2: ratify→promote within ~5s wall-clock.
@@ -315,4 +324,19 @@ fn ratify_promote_scaffold_e2e() {
         wp_after, wp,
         "workspace_path must not be re-mutated by a second auto-scaffold run"
     );
+
+    // T049: reap the long-running stub so we don't leak it past the test.
+    let drive_pid: Option<i64> = conn
+        .query_row(
+            "SELECT drive_pid FROM tasks WHERE display_id=?1",
+            rusqlite::params![task_display],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    if let Some(p) = drive_pid {
+        unsafe {
+            libc::kill(p as i32, libc::SIGTERM);
+        }
+    }
+    std::env::remove_var("STORES_DRIVE_CMD");
 }
