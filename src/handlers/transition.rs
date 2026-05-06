@@ -232,12 +232,6 @@ pub fn run_close_out_of_band(
         );
     }
 
-    // 2. Validate SHA reachable in main. Checked unless STORES_SKIP_GIT_CHECK=1
-    // (test escape hatch — main code path always validates).
-    if std::env::var("STORES_SKIP_GIT_CHECK").ok().as_deref() != Some("1") {
-        validate_sha_reachable_in_main(commit)?;
-    }
-
     let display_id = matches
         .get_one::<String>("display_id")
         .map(|s| s.as_str())
@@ -253,7 +247,9 @@ pub fn run_close_out_of_band(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // 3. Idempotency: already in target state → no-op success.
+    // 2. Idempotency: already in target state → no-op success. Done before
+    // git validation so a re-run after the SHA has fallen out of the local
+    // main (e.g. because the operator hasn't fetched recently) still no-ops.
     if current_status == "closed_out_of_band" {
         println!(
             "{display_id} already closed_out_of_band (no-op; commit={commit})"
@@ -261,7 +257,7 @@ pub fn run_close_out_of_band(
         return Ok(());
     }
 
-    // 4. Resolve transition (errors if from-state is terminal/disallowed).
+    // 3. Resolve transition (errors if from-state is terminal/disallowed).
     let merged = existing.clone();
     let transition = select_transition(
         &schema.lifecycle.transitions,
@@ -280,6 +276,12 @@ pub fn run_close_out_of_band(
         invoker,
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
+
+    // 4. Validate SHA reachable in main. Last gate before the write — if we
+    // reach this point, the row is non-terminal and the actor check passed,
+    // so the SHA validation is the final precondition. The contract requires
+    // real git validation; there is no production escape hatch.
+    validate_sha_reachable_in_main(commit)?;
 
     // 5. Write transition + audit row with SHA in actor_note.
     let now = now_iso8601();
@@ -318,31 +320,29 @@ pub fn run_close_out_of_band(
 }
 
 /// Verify that `sha` is reachable from the local `main` ref via
-/// `git merge-base --is-ancestor <sha> main`. Falls back to `master` when
-/// `main` is absent. Errors fail-loud with a clear message — recovery
-/// requires a real merge target.
+/// `git merge-base --is-ancestor <sha> main`. Errors fail-loud with a clear
+/// message — recovery requires a real merge target.
+///
+/// Only `main` is consulted. The contract requires reachable-in-main; a
+/// stale or divergent `master` ref must NOT silently satisfy this gate.
 fn validate_sha_reachable_in_main(sha: &str) -> Result<()> {
     use std::process::Command;
-    let try_branch = |branch: &str| -> Option<bool> {
-        let out = Command::new("git")
-            .args(["merge-base", "--is-ancestor", sha, branch])
-            .output()
-            .ok()?;
-        Some(out.status.success())
-    };
-    // Prefer `main`, then `master`. If git itself fails (no repo, no binary),
-    // both calls return None.
-    if let Some(true) = try_branch("main") {
-        return Ok(());
-    }
-    if let Some(true) = try_branch("master") {
+    let out = Command::new("git")
+        .args(["merge-base", "--is-ancestor", sha, "main"])
+        .output()
+        .map_err(|e| anyhow::anyhow!(
+            "--commit '{sha}' validation failed: could not run git ({e}). \
+             close-out-of-band requires a real git repo with a 'main' ref."
+        ))?;
+    if out.status.success() {
         return Ok(());
     }
     anyhow::bail!(
-        "--commit '{sha}' is not reachable from main (or master). \
+        "--commit '{sha}' is not reachable from main. \
          close-out-of-band requires the merge-target SHA to already be on \
-         the trunk. Run `git fetch origin main && git merge-base \
-         --is-ancestor {sha} main` to confirm."
+         the 'main' branch (no fallback to 'master'). Run \
+         `git fetch origin main && git merge-base --is-ancestor {sha} main` \
+         to confirm."
     )
 }
 
@@ -2136,28 +2136,158 @@ fields:
         rows
     }
 
-    fn coob_env() {
-        std::env::set_var("STORES_SKIP_GIT_CHECK", "1");
+    /// Set up a real temp git repo with a single empty commit on `main`.
+    /// Returns (TempDir guard, full SHA of the commit). cwd must be set to
+    /// the tempdir for `git merge-base --is-ancestor <sha> main` to find it.
+    fn coob_real_git_repo() -> (tempfile::TempDir, String) {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let must = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+        must(&["init", "-q", "-b", "main"]);
+        must(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        let rev = must(&["rev-parse", "HEAD"]);
+        let sha = String::from_utf8(rev.stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        (dir, sha)
     }
 
-    /// AC1+AC4+AC5: happy path. Walk a `planning` row to `closed_out_of_band`,
-    /// audit row records SHA in actor_note.
+    /// AC1+AC4+AC5: happy path. Walk a `planning` row to `closed_out_of_band`
+    /// against a REAL git repo with the SHA actually reachable in main; audit
+    /// row records the SHA in actor_note.
     #[test]
     fn coob_planning_to_closed_succeeds_and_records_sha() {
-        coob_env();
+        let (dir, sha) = coob_real_git_repo();
+        let _g = scoped_cwd(dir.path());
         let (schema, conn) = setup_coob();
         conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
             .unwrap();
         insert_coob_row(&conn, "planning");
-        let sha = "abc1234def5678abc1234def5678abc1234def56";
-        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", sha]);
-        run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), sha).unwrap();
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", &sha]);
+        run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), &sha).unwrap();
         assert_eq!(read_status(&conn), "closed_out_of_band");
         let audit = audit_rows_for(&conn);
         assert_eq!(audit.len(), 1, "one audit row");
         assert_eq!(audit[0].0, "close-out-of-band");
         assert_eq!(audit[0].1, "closed_out_of_band");
-        assert_eq!(audit[0].2.as_deref(), Some(sha));
+        assert_eq!(audit[0].2.as_deref(), Some(sha.as_str()));
+    }
+
+    /// AC2 (gate): unreachable SHA on a non-terminal row is REFUSED. Closes
+    /// the prior-cycle MEDIUM finding that no test exercised the validation.
+    /// Uses a real git repo whose 'main' does NOT contain the asserted SHA.
+    #[test]
+    fn coob_refuses_unreachable_sha() {
+        let (dir, _real_sha) = coob_real_git_repo();
+        let _g = scoped_cwd(dir.path());
+        let (schema, conn) = setup_coob();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        insert_coob_row(&conn, "planning");
+        // Well-formed SHA shape that is NOT in this repo.
+        let bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let m =
+            build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", bogus]);
+        let err = run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), bogus)
+            .expect_err("unreachable SHA must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not reachable from main"),
+            "expected reachable-in-main error; got: {msg}"
+        );
+        assert_eq!(read_status(&conn), "planning", "row unchanged");
+    }
+
+    /// AC2 (gate): no fallback to `master`. Even if a divergent `master`
+    /// branch exists with the SHA, the gate must fail because contract
+    /// requires reachable in `main`.
+    #[test]
+    fn coob_no_master_fallback() {
+        use std::process::Command;
+        let (dir, _) = coob_real_git_repo();
+        let p = dir.path();
+        let must = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(p)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            out
+        };
+        // Create a 'master' branch with a different commit; main does NOT
+        // contain that commit. Switch back to main so cwd is on main but
+        // master holds the divergent SHA.
+        must(&["checkout", "-q", "-b", "master"]);
+        must(&["commit", "-q", "--allow-empty", "-m", "master-only"]);
+        let rev = must(&["rev-parse", "HEAD"]);
+        let master_only_sha = String::from_utf8(rev.stdout).unwrap().trim().to_string();
+        must(&["checkout", "-q", "main"]);
+
+        let _g = scoped_cwd(p);
+        let (schema, conn) = setup_coob();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        insert_coob_row(&conn, "planning");
+        let m = build_coob_cmd().get_matches_from([
+            "close-out-of-band",
+            "T001",
+            "--commit",
+            &master_only_sha,
+        ]);
+        let err = run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), &master_only_sha)
+            .expect_err("master-only SHA must be refused");
+        assert!(
+            err.to_string().contains("not reachable from main"),
+            "expected main-only error; got: {err}"
+        );
+    }
+
+    /// Restores the previous cwd when dropped. Tests using cwd-scoped git
+    /// validation must wrap the body in this guard. Uses the process-wide
+    /// `paths::test_cwd_lock()` so we serialize with ALL other cwd-using
+    /// tests in the suite, not just among ourselves.
+    fn scoped_cwd(p: &std::path::Path) -> impl Drop {
+        let lock = crate::paths::test_cwd_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(p).unwrap();
+        struct Guard {
+            prev: std::path::PathBuf,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.prev);
+            }
+        }
+        Guard {
+            prev,
+            _lock: lock,
+        }
     }
 
     /// AC3: refused from terminal state (`accepted` is not declared as a
@@ -2165,7 +2295,6 @@ fields:
     /// must error).
     #[test]
     fn coob_refused_from_terminal_accepted() {
-        coob_env();
         let (schema, conn) = setup_coob();
         conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
             .unwrap();
@@ -2185,7 +2314,6 @@ fields:
     /// (no audit row written, status unchanged).
     #[test]
     fn coob_idempotent_when_already_closed() {
-        coob_env();
         let (schema, conn) = setup_coob();
         conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
             .unwrap();
@@ -2201,7 +2329,6 @@ fields:
     /// AC2: --commit shape rejected if not 7-40 hex chars.
     #[test]
     fn coob_rejects_bad_sha_shape() {
-        coob_env();
         let (schema, conn) = setup_coob();
         conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
             .unwrap();
@@ -2219,7 +2346,6 @@ fields:
     /// AC8: tier-A — ai_autonomous rejected even with a "valid" token bit.
     #[test]
     fn coob_rejects_ai_autonomous() {
-        coob_env();
         let (schema, conn) = setup_coob();
         conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
             .unwrap();
@@ -2239,18 +2365,18 @@ fields:
     /// AC8: tier-A — ai_with_human + valid token accepted.
     #[test]
     fn coob_accepts_ai_with_human_with_token() {
-        coob_env();
+        let (dir, sha) = coob_real_git_repo();
+        let _g = scoped_cwd(dir.path());
         let (schema, conn) = setup_coob();
         conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
             .unwrap();
         insert_coob_row(&conn, "executing");
-        let sha = "abc1234";
-        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", sha]);
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", &sha]);
         let invoker = InvokerCtx {
             actor: Actor::AiWithHuman,
             token_valid: true,
         };
-        run_close_out_of_band(&schema, &conn, &m, invoker, sha).unwrap();
+        run_close_out_of_band(&schema, &conn, &m, invoker, &sha).unwrap();
         assert_eq!(read_status(&conn), "closed_out_of_band");
     }
 }
