@@ -158,7 +158,8 @@ The gatekeeper emits exactly one of six decisions. Each has a precondition (when
 - `risk_flags` contains any `touches_*` flag (`touches_actor_authority`, `touches_lifecycle`, `touches_subscriber_semantics`, `touches_runner_boundary`, `touches_schema_core`),
 - `risk_flags` contains `introduces_new_primitive` or `changes_boundary`,
 - the gatekeeper observes that `cluster_key` count has crossed the architecture-review threshold (cluster threshold default: 3, configurable),
-- `risk_flags` contains `security_sensitive` or `authority_surface_drift`.
+- `risk_flags` contains `security_sensitive` or `authority_surface_drift`,
+- `risk_flags` contains `contradicts_prior_decision` (the suggested fix directly contradicts a previously ratified observation contract or accepted task outcome — that is itself an architectural-coherence question).
 **Downstream effect:** row transitions `triaging → escalated`, an `architecture_reviews` candidate row is produced (or, until that store ships, a tagged observation with reserved tag `arch-review-candidate`), and `routed_to_arch_review` points at it. A normal observation MAY also be created in parallel so local-fix work is not blocked, but its contract carries a `pending_architecture_review = true` field that prevents U1 ratification until the architecture review returns `allow_local_fix` or `reframe_contract`.
 
 ### 6. `reject_noise`
@@ -273,7 +274,7 @@ This split keeps investigation inside substrate-visible flow (consistent with th
 The architecture-review agent is the coherence gate. It does not fire on every routed row; it fires when the gatekeeper's classification or the cluster state crosses a named trigger. Each trigger class below is decidable from substrate-visible state — no human prompting, no out-of-band signal — so that "did review fire when it should have?" is auditable after the fact.
 
 ### Trigger 1: `risk-flag` (per-row, immediate)
-**Fires when:** the gatekeeper's `gatekeeper_decision_json.risk_flags` includes any of `touches_actor_authority`, `touches_lifecycle`, `touches_subscriber_semantics`, `touches_runner_boundary`, `touches_schema_core`, `introduces_new_primitive`, `changes_boundary`, `security_sensitive`, or `authority_surface_drift`.
+**Fires when:** the gatekeeper's `gatekeeper_decision_json.risk_flags` includes any of `touches_actor_authority`, `touches_lifecycle`, `touches_subscriber_semantics`, `touches_runner_boundary`, `touches_schema_core`, `introduces_new_primitive`, `changes_boundary`, `security_sensitive`, `authority_surface_drift`, or `contradicts_prior_decision`.
 **Threshold:** 1 (any single flag is sufficient).
 **Latency budget:** review must be requested within the same triage transaction; routing to `escalated` without firing review is a schema violation.
 

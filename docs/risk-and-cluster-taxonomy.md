@@ -119,7 +119,8 @@ def derive_risk_class(risk_flags) -> risk_class:
         return "security"
     if any(f.startswith("touches_") for f in risk_flags) \
        or "introduces_new_primitive" in risk_flags \
-       or "changes_boundary" in risk_flags:
+       or "changes_boundary" in risk_flags \
+       or "contradicts_prior_decision" in risk_flags:
         return "architecture"
     if risk_flags <= {"docs_only", "small_local_fix", "duplicate_symptom"}:
         return "low"
