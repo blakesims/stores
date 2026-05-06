@@ -153,7 +153,19 @@ pub fn run_migrate(apply: bool) -> Result<()> {
     crate::paths::ensure_initialized()?;
     let manifest = Manifest::load()?;
     let schemas = load_schemas(&manifest)?;
-    let conn = crate::db::open(&crate::paths::db_path()?)?;
+    // Open WITHOUT auto-applying framework drift so we can show the diff
+    // before mutating the DB. (db::open would have already applied it.)
+    let conn = crate::db::open_no_autoapply(&crate::paths::db_path()?)?;
+
+    // --- Framework-DDL drift (T051) ----------------------------------------
+    let framework_drift = crate::handlers::framework_migrate::compute_framework_drift(&conn)?;
+    for (table, col) in &framework_drift.additive {
+        println!(
+            "framework: ALTER TABLE {} ADD COLUMN {};",
+            quote_ident(table),
+            col.full_def
+        );
+    }
 
     let plan = compute_plan(&conn, &schemas, &manifest)?;
 
@@ -167,6 +179,15 @@ pub fn run_migrate(apply: bool) -> Result<()> {
         eprintln!(
             "warning: store '{store}': column '{col}' type mismatch — DB has '{db_type}', schema expects '{expected_type}'; not auto-coerced (additive-only)"
         );
+    }
+
+    if apply && !framework_drift.additive.is_empty() {
+        let applied = crate::handlers::framework_migrate::apply_framework_drift(&conn)?;
+        for m in &applied {
+            let line = serde_json::to_string(m)
+                .context("serialize AppliedFrameworkMigration")?;
+            println!("applied: {line}");
+        }
     }
 
     if plan.additive.is_empty() {

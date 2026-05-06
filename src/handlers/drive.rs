@@ -241,6 +241,9 @@ pub struct DriveArgs {
 /// output.  Returns Ok(()) on `complete` or `blocked` (both exit 0); returns
 /// Err on infrastructure failures or safety-rail violations (exit non-zero).
 pub fn run_drive(schema: &Schema, args: DriveArgs) -> Result<()> {
+    // Ordering invariant (T051): db::open auto-applies framework-DDL drift
+    // here, BEFORE any subscriber poll iteration sees the connection. The
+    // daemon must never observe a half-migrated DB.
     let conn = db::open(&db_path()?)?;
 
     // Resolve the task id.

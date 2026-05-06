@@ -1,5 +1,177 @@
 use crate::schema::{FieldType, Schema};
 
+/// One column declared by SUBSTRATE_DDL. Used by framework-migration drift
+/// detection in `handlers::framework_migrate` to ALTER older DBs up to the
+/// current binary's compiled-in DDL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkColumn {
+    pub name: &'static str,
+    pub sql_type: &'static str,
+    pub nullable: bool,
+    pub default_sql: Option<&'static str>,
+    /// Full column-definition fragment as it appears inside the CREATE TABLE
+    /// (matches SUBSTRATE_DDL verbatim minus the trailing comma).
+    pub full_def: &'static str,
+    /// True if this column was added to an already-shipped table after v0.1
+    /// and is therefore a candidate for ALTER TABLE ADD COLUMN against an
+    /// existing DB. Such columns MUST be nullable or carry a DEFAULT —
+    /// `validate_framework_tables` enforces this. Columns present in the
+    /// table's first CREATE TABLE version are `additive: false` (they only
+    /// ever materialise via CREATE TABLE on a fresh DB).
+    pub additive: bool,
+}
+
+/// One framework-internal table declared by SUBSTRATE_DDL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkTable {
+    pub name: &'static str,
+    pub columns: &'static [FrameworkColumn],
+}
+
+/// Mirror of SUBSTRATE_DDL for column-level introspection. Every table here
+/// MUST list every column declared in SUBSTRATE_DDL — drift between the two
+/// is checked by `framework_tables_match_substrate_ddl` below.
+pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
+    FrameworkTable {
+        name: "transition_history",
+        columns: &[
+            FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },
+            FrameworkColumn { name: "store", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "store TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "row_id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "row_id INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "display_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "display_id TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "from_status", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "from_status TEXT", additive: false },
+            FrameworkColumn { name: "to_status", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "to_status TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "verb", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "verb TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "invoker", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "invoker TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "policy_ref", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "policy_ref TEXT", additive: false },
+            FrameworkColumn { name: "policies_hash", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "policies_hash TEXT", additive: false },
+            FrameworkColumn { name: "occurred_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "occurred_at TEXT NOT NULL", additive: false },
+            // L144: actor_note added post-v0.1; older DBs lack it. Nullable so
+            // ALTER TABLE ADD COLUMN against existing rows is well-defined.
+            FrameworkColumn { name: "actor_note", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "actor_note TEXT", additive: true },
+        ],
+    },
+    FrameworkTable {
+        name: "dispatch_locks",
+        columns: &[
+            FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },
+            FrameworkColumn { name: "store", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "store TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "row_id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "row_id INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "display_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "display_id TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "agent_name", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "agent_name TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "transition_id", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "transition_id INTEGER", additive: false },
+            FrameworkColumn { name: "claimed_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "claimed_at TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "claimed_by", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "claimed_by TEXT NOT NULL", additive: false },
+            // attempts: NOT NULL DEFAULT 1 — additive-safe via DEFAULT.
+            FrameworkColumn { name: "attempts", sql_type: "INTEGER", nullable: false, default_sql: Some("1"), full_def: "attempts INTEGER NOT NULL DEFAULT 1", additive: true },
+            FrameworkColumn { name: "last_status", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "last_status TEXT", additive: false },
+            FrameworkColumn { name: "finished_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "finished_at TEXT", additive: false },
+        ],
+    },
+    FrameworkTable {
+        name: "substrate_migrations",
+        columns: &[
+            FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },
+            FrameworkColumn { name: "applied_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "applied_at TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "binary_version", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "binary_version TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "table_name", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "table_name TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "column_name", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "column_name TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "ddl_applied", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "ddl_applied TEXT NOT NULL", additive: false },
+        ],
+    },
+];
+
+/// Parse `full_def` (the column's SQL fragment) for NOT NULL / DEFAULT
+/// presence. Case-insensitive. The validator MUST ground itself in the
+/// actual SQL text rather than the parallel `nullable` / `default_sql`
+/// metadata, because the metadata is hand-maintained and could disagree
+/// with the SQL ("mirror lies"). Codex T051-r1 HIGH.
+fn parse_full_def_safety(full_def: &str) -> (bool, bool) {
+    // Cheap heuristic: search whitespace-tokenised SQL for NOT NULL and
+    // DEFAULT keywords. Only called on additive columns (validator skips
+    // PRIMARY KEY / baseline columns first); additive ALTER targets must
+    // declare NOT NULL / DEFAULT explicitly in `full_def` for the gate to
+    // be meaningful. DEFAULT can be followed by a literal (`DEFAULT 0`),
+    // a parenthesized expression (`DEFAULT(0)`, `DEFAULT (now())`), a
+    // string (`DEFAULT 'x'`), or a CURRENT_* function — accept any token
+    // that is exactly "DEFAULT" OR starts with "DEFAULT(".
+    let upper = full_def.to_ascii_uppercase();
+    let toks: Vec<&str> = upper.split_whitespace().collect();
+    let has_not_null = toks.windows(2).any(|w| w == ["NOT", "NULL"]);
+    let has_default = toks
+        .iter()
+        .any(|tok| *tok == "DEFAULT" || tok.starts_with("DEFAULT("));
+    (has_not_null, has_default)
+}
+
+/// Walk `tables` and return Err if any additive column declares `NOT NULL`
+/// without a `DEFAULT` — adding such a column to an existing non-empty table
+/// would fail at ALTER time. Validator parses each column's `full_def` SQL
+/// text directly so the gate is grounded in the truth (the DDL string used
+/// by ALTER), not in the parallel metadata flags. Used by db::open as a
+/// boot-time invariant check. Also refuses if `full_def` and the metadata
+/// flags disagree — a "mirror lies" guard so future contributors can't
+/// silently bypass the gate by setting nullable=true on a NOT NULL column.
+pub fn validate_framework_tables(tables: &[FrameworkTable]) -> anyhow::Result<()> {
+    for t in tables {
+        for c in t.columns {
+            // Only `additive` columns are candidates for ALTER TABLE ADD
+            // COLUMN against existing DBs — those are the only ones the gate
+            // protects, and the only ones whose mirror-vs-SQL disagreement
+            // matters at runtime. Baseline (additive=false) columns appear
+            // only via CREATE TABLE on a fresh DB; PRIMARY KEY / SQLite-
+            // implicit semantics make their nullable/default flags slippery
+            // to express in `full_def` text, but they're harmless because
+            // they're never ALTERed. Skip them.
+            if !c.additive {
+                continue;
+            }
+            // Mirror-vs-SQL consistency check: parse `full_def` directly
+            // (the truth that ALTER TABLE will use) and refuse if metadata
+            // disagrees. This is the "mirror lies" guard codex T051-r1
+            // flagged: a future contributor can't silently bypass the gate
+            // by setting nullable=true on a NOT NULL column.
+            let (sql_not_null, sql_has_default) = parse_full_def_safety(c.full_def);
+            if sql_not_null == c.nullable {
+                anyhow::bail!(
+                    "framework DDL mirror disagrees with SQL: {}.{} metadata nullable={} but full_def says {}NOT NULL (full_def='{}')",
+                    t.name,
+                    c.name,
+                    c.nullable,
+                    if sql_not_null { "" } else { "no " },
+                    c.full_def
+                );
+            }
+            if sql_has_default != c.default_sql.is_some() {
+                anyhow::bail!(
+                    "framework DDL mirror disagrees with SQL: {}.{} metadata default_sql={:?} but full_def {} DEFAULT (full_def='{}')",
+                    t.name,
+                    c.name,
+                    c.default_sql,
+                    if sql_has_default { "has" } else { "lacks" },
+                    c.full_def
+                );
+            }
+            // Ground the gate in the SQL text, not the metadata flag.
+            if sql_not_null && !sql_has_default {
+                anyhow::bail!(
+                    "framework DDL invariant violated: {}.{} is NOT NULL without DEFAULT in full_def (would fail on ALTER TABLE ADD COLUMN against an existing non-empty DB; full_def='{}')",
+                    t.name,
+                    c.name,
+                    c.full_def
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Same as `validate_framework_tables(FRAMEWORK_DDL_TABLES)`. Called from
+/// `db::open` so the invariant is enforced fail-loud at boot.
+pub fn validate_framework_ddl() -> anyhow::Result<()> {
+    validate_framework_tables(FRAMEWORK_DDL_TABLES)
+}
+
 /// Quote a SQL identifier using double-quote delimiters (SQL standard).
 /// Any internal `"` characters are escaped by doubling them.
 /// This makes table names like `observations-1006` safe to use in DDL/DML.
@@ -39,6 +211,14 @@ CREATE TABLE IF NOT EXISTS dispatch_locks (
     last_status TEXT,
     finished_at TEXT,
     UNIQUE(store, row_id, agent_name)
+);
+CREATE TABLE IF NOT EXISTS substrate_migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    applied_at TEXT NOT NULL,
+    binary_version TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    ddl_applied TEXT NOT NULL
 );
 ";
 
@@ -484,6 +664,96 @@ fields:
                 "{name} must not have CHECK clause"
             );
         }
+    }
+
+    // ---- framework_ tests (T051 Phase 1) ----
+
+    /// Parse a column-name set per CREATE TABLE block out of SUBSTRATE_DDL
+    /// using a simple line scanner (no full SQL parser).
+    fn scan_substrate_ddl_columns() -> std::collections::HashMap<String, Vec<String>> {
+        let mut out: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut current_table: Option<String> = None;
+        for raw in SUBSTRATE_DDL.lines() {
+            let line = raw.trim();
+            if let Some(rest) = line.strip_prefix("CREATE TABLE IF NOT EXISTS ") {
+                let name = rest.trim_end_matches('(').trim().to_string();
+                current_table = Some(name);
+                continue;
+            }
+            if line.starts_with(')') {
+                current_table = None;
+                continue;
+            }
+            if let Some(table) = &current_table {
+                if line.is_empty() {
+                    continue;
+                }
+                // A column line begins with an identifier; UNIQUE(...) is
+                // a table constraint we skip.
+                if line.starts_with("UNIQUE") {
+                    continue;
+                }
+                let name = line.split_whitespace().next().unwrap_or("").to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                out.entry(table.clone()).or_default().push(name);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn framework_tables_match_substrate_ddl() {
+        let scanned = scan_substrate_ddl_columns();
+        assert_eq!(
+            scanned.len(),
+            FRAMEWORK_DDL_TABLES.len(),
+            "FRAMEWORK_DDL_TABLES table count {} != SUBSTRATE_DDL table count {} (scanned: {:?})",
+            FRAMEWORK_DDL_TABLES.len(),
+            scanned.len(),
+            scanned.keys().collect::<Vec<_>>()
+        );
+        for t in FRAMEWORK_DDL_TABLES {
+            let scanned_cols = scanned.get(t.name).unwrap_or_else(|| {
+                panic!("table {} declared in FRAMEWORK_DDL_TABLES but not in SUBSTRATE_DDL", t.name)
+            });
+            let const_cols: Vec<String> = t.columns.iter().map(|c| c.name.to_string()).collect();
+            let scanned_set: std::collections::BTreeSet<&str> =
+                scanned_cols.iter().map(String::as_str).collect();
+            let const_set: std::collections::BTreeSet<&str> =
+                const_cols.iter().map(String::as_str).collect();
+            assert_eq!(
+                scanned_set, const_set,
+                "column-name drift in table {}: SUBSTRATE_DDL={:?}, FRAMEWORK_DDL_TABLES={:?}",
+                t.name, scanned_cols, const_cols
+            );
+        }
+    }
+
+    #[test]
+    fn framework_ddl_validates_clean() {
+        validate_framework_ddl().expect("production SUBSTRATE_DDL must validate");
+    }
+
+    #[test]
+    fn framework_ddl_validator_rejects_nonnullable_no_default() {
+        let bad = &[FrameworkTable {
+            name: "evil_table",
+            columns: &[FrameworkColumn {
+                name: "evil_col",
+                sql_type: "TEXT",
+                nullable: false,
+                default_sql: None,
+                full_def: "evil_col TEXT NOT NULL",
+                additive: true,
+            }],
+        }];
+        let err = validate_framework_tables(bad).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("evil_table"), "msg: {msg}");
+        assert!(msg.contains("evil_col"), "msg: {msg}");
     }
 
     /// AC Phase 3: DDL for a hyphenated store name produces a quoted identifier
