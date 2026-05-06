@@ -189,16 +189,16 @@ AR_ID=$(add_triaging_item "proposed change to actor authority surface")
 
 DEC_JSON_AR='{"decision":"arch_review_candidate","confidence":"high","rationale":"Touches actor authority — needs arch review.","tier_hint":"T3","risk_flags":["touches_actor_authority","authority_surface_drift"],"cluster_key":"actor-authority"}'
 
-# arch_review_candidate uses escalate-arch-review verb
-CLAUDECODE=1 "$STORES_BIN" intake escalate-arch-review "$AR_ID" --invoker ai_autonomous \
+# arch_review_candidate is a normal Router outcome via the route verb (not escalate-arch-review)
+CLAUDECODE=1 "$STORES_BIN" intake route "$AR_ID" --invoker ai_autonomous \
     --decision arch_review_candidate \
     --gatekeeper-decision-json "$DEC_JSON_AR" \
     > /dev/null
 
 AR_STATUS=$(sqlite3 .stores/db.sqlite "SELECT status FROM intake WHERE display_id='$AR_ID'")
-AR_OBS_ID=$(sqlite3 .stores/db.sqlite "SELECT routed_to_arch_review FROM intake WHERE display_id='$AR_ID'")
-[[ "$AR_STATUS" == "escalated" ]] || fail "arch_review_candidate: expected status=escalated; got: $AR_STATUS"
-[[ -n "$AR_OBS_ID" ]] || fail "arch_review_candidate: routed_to_arch_review must be set"
+AR_OBS_ID=$(sqlite3 .stores/db.sqlite "SELECT routed_to_observation FROM intake WHERE display_id='$AR_ID'")
+[[ "$AR_STATUS" == "routed" ]] || fail "arch_review_candidate: expected status=routed; got: $AR_STATUS"
+[[ -n "$AR_OBS_ID" ]] || fail "arch_review_candidate: routed_to_observation must be set"
 
 # AC3.4: verify obs has arch-review-candidate tag and pending_architecture_review=true
 AR_OBS_TAGS=$(sqlite3 .stores/db.sqlite "SELECT tags FROM observations WHERE display_id='$AR_OBS_ID'")
@@ -207,7 +207,7 @@ echo "$AR_OBS_TAGS" | grep -q "arch-review-candidate" || fail "arch_review obs: 
 
 # Check pending_architecture_review in notes (simple string match, no jq required)
 echo "$AR_OBS_NOTES" | grep -q "pending_architecture_review" || fail "arch_review obs: notes missing pending_architecture_review; got: $AR_OBS_NOTES"
-pass "arch_review_candidate: obs created, tags=[arch-review-candidate], notes has pending_architecture_review"
+pass "arch_review_candidate: obs created via route verb, status=routed, tags=[arch-review-candidate], notes has pending_architecture_review"
 
 # ---------------------------------------------------------------------------
 # Decision 5: needs_info (with recon-return loop)

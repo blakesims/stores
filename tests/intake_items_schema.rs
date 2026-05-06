@@ -60,16 +60,17 @@ fn schema_id_format_is_i_three_digits() {
 }
 
 #[test]
-fn schema_has_six_states() {
+fn schema_has_five_states() {
     let s = intake_schema();
     let states = &s.lifecycle.states;
-    for expected in &["draft", "triaging", "needs_info", "routed", "escalated", "dropped"] {
+    for expected in &["draft", "triaging", "needs_info", "routed", "dropped"] {
         assert!(
             states.iter().any(|st| st == expected),
             "missing state: {expected}"
         );
     }
-    assert_eq!(states.len(), 6, "expected exactly 6 states, got {}", states.len());
+    assert!(!states.iter().any(|st| st == "escalated"), "escalated state must not exist");
+    assert_eq!(states.len(), 5, "expected exactly 5 states, got {}", states.len());
 }
 
 #[test]
@@ -109,13 +110,31 @@ fn recon_return_is_ai_autonomous() {
 }
 
 #[test]
-fn escalate_arch_review_is_ai_autonomous() {
+fn arch_review_candidate_uses_route_verb_to_routed() {
+    use stores::schema::expr::{Lhs, Op, Rhs};
+    // arch_review_candidate is a normal Router outcome via the route verb (not a separate lifecycle family).
     let s = intake_schema();
-    let t = s.lifecycle.transitions.iter().find(|t| t.verb == "escalate-arch-review")
-        .expect("escalate-arch-review transition missing");
+    let t = s.lifecycle.transitions.iter()
+        .find(|t| {
+            if t.verb != "route" { return false; }
+            match &t.guard {
+                Some(g) => {
+                    g.lhs == Lhs::Path(vec!["decision".to_string()])
+                        && g.op == Op::Eq
+                        && g.rhs == Rhs::Literal("arch_review_candidate".to_string())
+                }
+                None => false,
+            }
+        })
+        .expect("route transition with guard decision == 'arch_review_candidate' missing");
     assert_eq!(t.actor, Some(Actor::AiAutonomous));
     assert_eq!(t.from, "triaging");
-    assert_eq!(t.to, "escalated");
+    assert_eq!(t.to, "routed");
+    // escalate-arch-review verb must not exist
+    assert!(
+        s.lifecycle.transitions.iter().all(|t| t.verb != "escalate-arch-review"),
+        "escalate-arch-review transition must not exist"
+    );
 }
 
 #[test]

@@ -41,14 +41,14 @@ fn is_absent(merged: &EntryMap, key: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Called from `transition::run_in_tx` BEFORE `validate::validate` when the
-/// schema is "intake" and verb is "route" or "escalate-arch-review".
+/// schema is "intake" and verb is "route".
 ///
 /// Decisions handled:
 /// - `duplicate`              — copy cluster_key from the referenced item (no obs created)
 /// - `needs_info`             — extract missing_info_question from gatekeeper payload
 /// - `fast_track`             — create obs (tags=[fast-track-eligible]) if not pre-supplied
 /// - `normal_observation`     — create obs + mirror L143 columns if not pre-supplied
-/// - `arch_review_candidate`  — create obs (tags=[arch-review-candidate]) if not pre-supplied
+/// - `arch_review_candidate`  — create obs (tags=[arch-review-candidate]) stored in routed_to_observation
 /// - `reject_noise`           — no pre-validation side effects
 pub(crate) fn inject_pre_validation_fields(
     tx: &Transaction,
@@ -189,33 +189,15 @@ pub(crate) fn inject_pre_validation_fields(
         }
 
         "arch_review_candidate" => {
-            // Only auto-create if routed_to_arch_review not already supplied.
-            if is_absent(merged, "routed_to_arch_review") {
+            // Only auto-create if routed_to_observation not already supplied.
+            // arch_review_candidate is a normal Router outcome: creates a tagged observation
+            // stored in routed_to_observation (not a separate lifecycle family).
+            if is_absent(merged, "routed_to_observation") {
                 let summary = merged
                     .get("summary")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(intake arch review candidate)")
                     .to_string();
-
-                let dm = merged.get("decision_metadata").and_then(|v| v.as_object()).cloned();
-                let risk_class = dm
-                    .as_ref()
-                    .and_then(|m| m.get("risk_class_hint"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let approval_policy = dm
-                    .as_ref()
-                    .and_then(|m| m.get("approval_policy_hint"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let risk_flags_val = merged
-                    .get("risk_flags")
-                    .and_then(|v| if v.is_array() { Some(v) } else { None })
-                    .cloned();
-                let cluster_key = merged
-                    .get("cluster_key")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
 
                 let notes = json!({ "pending_architecture_review": true });
                 let tags = json!(["arch-review-candidate"]);
@@ -228,14 +210,14 @@ pub(crate) fn inject_pre_validation_fields(
                     captured_week: week_label(),
                     tags: Some(tags.to_string()),
                     notes: Some(notes.to_string()),
-                    risk_class,
-                    approval_policy,
-                    risk_flags: risk_flags_val.map(|v| v.to_string()),
-                    cluster_key,
+                    risk_class: None,
+                    approval_policy: None,
+                    risk_flags: None,
+                    cluster_key: None,
                 })?;
 
-                diff.insert("routed_to_arch_review".to_string(), Value::String(obs_id.clone()));
-                merged.insert("routed_to_arch_review".to_string(), Value::String(obs_id));
+                diff.insert("routed_to_observation".to_string(), Value::String(obs_id.clone()));
+                merged.insert("routed_to_observation".to_string(), Value::String(obs_id));
             }
         }
 
@@ -515,6 +497,8 @@ mod tests {
 
     #[test]
     fn arch_review_candidate_creates_obs_with_tag_and_notes() {
+        // arch_review_candidate is a normal Router outcome via the route verb.
+        // The created observation is stored in routed_to_observation (not routed_to_arch_review).
         let conn = fresh_db();
         insert_triaging(&conn, "I001");
 
@@ -524,13 +508,18 @@ mod tests {
         merged.insert("decision".to_string(), Value::String("arch_review_candidate".to_string()));
         merged.insert("summary".to_string(), Value::String("arch candidate".to_string()));
 
-        inject_pre_validation_fields(&tx, &mut diff, &mut merged, "escalate-arch-review").unwrap();
+        inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap();
         tx.commit().unwrap();
 
         let obs_id = merged
-            .get("routed_to_arch_review")
+            .get("routed_to_observation")
             .and_then(|v| v.as_str())
-            .expect("routed_to_arch_review must be set");
+            .expect("routed_to_observation must be set for arch_review_candidate");
+        // routed_to_arch_review must NOT be set (removed field)
+        assert!(
+            merged.get("routed_to_arch_review").map_or(true, |v| v.is_null()),
+            "routed_to_arch_review must not be set"
+        );
 
         let (tags_raw, notes_raw): (Option<String>, Option<String>) = conn
             .query_row(

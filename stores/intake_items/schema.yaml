@@ -4,7 +4,7 @@ id_format: "I{:03d}"
 # Lifecycle doc: docs/gatekeeper-design.md § Lifecycle
 
 lifecycle:
-  states: [draft, triaging, needs_info, routed, escalated, dropped]
+  states: [draft, triaging, needs_info, routed, dropped]
   initial_state: draft
   transitions:
     # draft → triaging: gatekeeper claims the row for triage (ai_autonomous)
@@ -41,6 +41,13 @@ lifecycle:
       actor: ai_autonomous
       guard: "decision == 'normal_observation'"
 
+    # triaging → routed: architecture review candidate (tagged observation, no dedicated store yet)
+    - from: triaging
+      to: routed
+      verb: route
+      actor: ai_autonomous
+      guard: "decision == 'arch_review_candidate'"
+
     # triaging → dropped: noise; terminal unless reopened by human
     - from: triaging
       to: dropped
@@ -66,12 +73,6 @@ lifecycle:
       to: triaging
       verb: amend
       actor: ai_with_human
-
-    # triaging → escalated: architecture review candidate
-    - from: triaging
-      to: escalated
-      verb: escalate-arch-review
-      actor: ai_autonomous
 
 workflow:
   agent_roles:
@@ -132,7 +133,7 @@ fields:
     type: enum
     enum_values: [duplicate, needs_info, fast_track, normal_observation, arch_review_candidate, reject_noise]
     required: false
-    description: "Routing decision; set during route or escalate-arch-review transition"
+    description: "Routing decision; set during route transition"
 
   - name: decision_metadata
     type: json
@@ -162,12 +163,7 @@ fields:
     type: text
     required: false
     required_when: "decision == 'normal_observation'"
-    description: "Soft-FK to observations.display_id (L###) when decision=normal_observation"
-
-  - name: routed_to_arch_review
-    type: text
-    required: false
-    description: "Soft-FK to architecture_reviews.display_id when escalated to arch review"
+    description: "Soft-FK to observations.display_id (L###) when decision=normal_observation or arch_review_candidate (handler guarantees presence for both; required_when covers normal_observation; arch_review_candidate enforcement is at handler level)"
 
   # --- Recon loop counter ---
   - name: recon_round
