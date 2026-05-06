@@ -989,8 +989,15 @@ fn parse_envelope(
     // role would be overwritten by the inject and the check would trivially pass.
     if let Some(fm) = &out.final_message {
         if !fm.trim().is_empty() {
-            if let Some(mut candidate) = crate::runner::sap::extract_envelope_from_text(fm, None) {
-                // Peek BEFORE inject.
+            // T047: walk all candidates and prefer one whose role tag matches
+            // the expected role (or whose role-marker field is present), so an
+            // unrelated `{...}` object above the real envelope in prose cannot
+            // shadow the true envelope and silently mis-parse.
+            let candidates = crate::runner::sap::extract_all_json_objects(fm);
+            if let Some(picked) =
+                pick_best_sap_candidate(&candidates, agent_role_normalized)
+            {
+                let mut candidate = picked.clone();
                 check_role_mismatch(peek_role(&candidate), agent_role_normalized, session_id)?;
                 if let serde_json::Value::Object(ref mut map) = &mut candidate {
                     map.entry("role".to_string()).or_insert_with(|| {
@@ -1042,6 +1049,67 @@ fn parse_envelope(
             Ok((envelope, "legacy"))
         }
     }
+}
+
+/// Pick the best SAP candidate JSON object for the given agent role.
+///
+/// Preference order (T047):
+/// 1. Object whose `role` matches the expected role exactly.
+/// 2. Object that carries the role-specific marker field (e.g. `phases` for
+///    planner, `gate` for plan-reviewer / code-reviewer, `summary` for
+///    executor, `executive_summary` for wrap) — only when no `role` mismatch
+///    is present.
+/// 3. The first object overall (legacy behaviour).
+///
+/// Returning `None` means there were no parseable JSON objects at all.
+fn pick_best_sap_candidate<'a>(
+    candidates: &'a [serde_json::Value],
+    expected_role: &str,
+) -> Option<&'a serde_json::Value> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Rule 1: prefer exact role match.
+    if let Some(c) = candidates.iter().find(|c| {
+        c.get("role").and_then(|r| r.as_str()) == Some(expected_role)
+    }) {
+        return Some(c);
+    }
+
+    // Rule 2: prefer marker-field present, role absent or matching.
+    let marker = match expected_role {
+        "planner" => "phases",
+        "plan-reviewer" | "code-reviewer" => "gate",
+        "executor" => "summary",
+        "wrap" => "executive_summary",
+        _ => "",
+    };
+    if !marker.is_empty() {
+        if let Some(c) = candidates.iter().find(|c| {
+            let role_ok = match c.get("role").and_then(|r| r.as_str()) {
+                None => true,
+                Some(r) => r == expected_role,
+            };
+            // For planner specifically, require phases to be a non-empty array
+            // so a degenerate `{"phases": []}` floating in prose can't shadow
+            // the real envelope.
+            let marker_ok = if expected_role == "planner" {
+                c.get(marker)
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false)
+            } else {
+                c.get(marker).is_some()
+            };
+            role_ok && marker_ok
+        }) {
+            return Some(c);
+        }
+    }
+
+    // Rule 3: legacy — first candidate.
+    candidates.first()
 }
 
 // ---------------------------------------------------------------------------
@@ -3076,6 +3144,129 @@ mod tests {
             runner.remaining_count(),
             0,
             "all 5 mock responses must be consumed (drive ran the full happy path)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T047: SAP candidate selection prefers the real planner envelope when an
+    // unrelated JSON-like object is also present in the prose above it.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn t047_sap_picks_planner_envelope_over_unrelated_leading_object() {
+        // Wrong/unrelated object appears FIRST in prose; the real planner
+        // envelope (with non-empty phases) appears later inside a fenced block.
+        let final_message = "I'll plan this out.\n\
+            Here is some incidental data: {\"unrelated\": true}\n\
+            And the plan:\n\
+            ```json\n\
+            {\"role\":\"planner\",\"phases\":[{\"name\":\"P1\"}],\"decision_matrix\":[]}\n\
+            ```\n";
+        let out = RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: Some(final_message.to_string()),
+            structured_output: None,
+            session_id: None,
+            structured_output_source: None,
+        };
+        let (env, source) =
+            parse_envelope(&out, "planner").expect("SAP must pick the right candidate");
+        assert_eq!(source, "sap", "must succeed via SAP layer");
+        match env {
+            AgentEnvelope::Planner { phases, .. } => {
+                let arr = phases.as_array().expect("phases must be array");
+                assert_eq!(arr.len(), 1, "phases must contain the real plan, not the leading object");
+            }
+            other => panic!("expected Planner, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // T047 AC1.2: end-to-end planner envelope embedded in markdown fences ⇒
+    // tasks.plan is populated with phases array (not '{}', not empty).
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn t047_planner_with_fenced_envelope_persists_phases() {
+        use crate::codegen::ddl::quote_ident;
+
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        insert_task(
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+
+        let final_message = "Reasoning: I'm going to plan this.\n\n\
+            ```json\n\
+            {\"role\":\"planner\",\"phases\":[{\"name\":\"T047-Persisted-Phase\",\"objective\":\"do X\"}],\"decision_matrix\":[]}\n\
+            ```\n";
+
+        let runner = MockRunner::new(vec![RunnerOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: Some(final_message.to_string()),
+            structured_output: None,
+            session_id: None,
+            structured_output_source: None,
+        }]);
+
+        // Run a single iteration — drive_loop will exit after the first submit
+        // because the mock runner has no further responses for the next agent.
+        // We only care that submit-plan landed.
+        let _ = drive_loop(&schema, &conn, "T001", &runner, 1);
+
+        let table = quote_ident(&schema.name);
+        let plan_str: String = conn
+            .query_row(
+                &format!("SELECT plan FROM {table} WHERE display_id = 'T001'"),
+                [],
+                |r| r.get(0),
+            )
+            .expect("plan column must exist");
+        let plan: Value =
+            serde_json::from_str(&plan_str).expect("plan must be valid JSON");
+        let phases = plan
+            .get("phases")
+            .and_then(|v| v.as_array())
+            .expect("plan.phases must be an array (T047 regression: was '{}')");
+        assert!(
+            !phases.is_empty(),
+            "plan.phases must be non-empty (T047 regression)"
+        );
+        // Verify it's the planner-submitted plan, not the seed inserted by
+        // insert_task() — distinct phase name proves the persistence path
+        // actually overwrote the seed plan with the planner output.
+        assert_eq!(
+            phases[0]
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or(""),
+            "T047-Persisted-Phase",
+            "submit-plan must overwrite the seed plan with the planner envelope"
+        );
+
+        // Status must have advanced from 'planning' to 'plan_review'.
+        let status: String = conn
+            .query_row(
+                &format!("SELECT status FROM {table} WHERE display_id = 'T001'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "plan_review",
+            "status must advance to plan_review after submit-plan"
         );
     }
 }

@@ -590,6 +590,26 @@ pub(crate) fn compute_submit_plan(
         }
     }
 
+    // T047: hard shape gate. Reject any plan whose `phases` is missing, not an
+    // array, or empty. This makes a regression of the planner→persistence path
+    // (e.g. SAP picking the wrong JSON object in prose) fail loudly at the
+    // substrate boundary instead of silently writing a degenerate `{}` plan.
+    match plan_json.get("phases") {
+        Some(p) if p.is_array() && !p.as_array().unwrap().is_empty() => {}
+        Some(p) if p.is_array() => {
+            bail!("submit-plan: plan.phases is an empty array; planner must emit at least one phase");
+        }
+        Some(p) => {
+            bail!(
+                "submit-plan: plan.phases must be an array, got {}",
+                p.to_string()
+            );
+        }
+        None => {
+            bail!("submit-plan: plan.phases is missing; expected a non-empty array");
+        }
+    }
+
     // Step 6: validator pass
     validate::validate(schema, &merged, Op::SubmitPlan(diff), invoker.into()).map_err(|errs| {
         anyhow::anyhow!(
@@ -2656,6 +2676,58 @@ workflow:
 
         let out = compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap();
         assert_eq!(out.new_status, "plan_review");
+    }
+
+    // ---------------------------------------------------------------------------
+    // T047 AC1.4: submit-plan rejects degenerate plans (no phases / empty / non-array).
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn t047_submit_plan_rejects_missing_phases() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+
+        let plan = json!({"summary": "no phases here"});
+        let err =
+            compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("plan.phases is missing"),
+            "expected missing-phases error, got: {msg}"
+        );
+        assert_eq!(read_status(&conn), "planning", "status must not advance");
+    }
+
+    #[test]
+    fn t047_submit_plan_rejects_empty_phases_array() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+
+        let plan = json!({"phases": []});
+        let err =
+            compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("empty array"),
+            "expected empty-array error, got: {msg}"
+        );
+        assert_eq!(read_status(&conn), "planning", "status must not advance");
+    }
+
+    #[test]
+    fn t047_submit_plan_rejects_non_array_phases() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+
+        let plan = json!({"phases": "not-an-array"});
+        let err =
+            compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be an array"),
+            "expected non-array error, got: {msg}"
+        );
+        assert_eq!(read_status(&conn), "planning", "status must not advance");
     }
 
     // ---------------------------------------------------------------------------

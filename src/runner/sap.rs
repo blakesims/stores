@@ -59,6 +59,24 @@ pub fn extract_envelope_from_text(text: &str, schema: Option<&Value>) -> Option<
     None
 }
 
+/// Walk `text` and return every parseable balanced `{...}` substring as a
+/// JSON object Value. Markdown fences are stripped first.
+///
+/// Used by callers (e.g. `parse_envelope` in `handlers::drive`) that need to
+/// pick the *best* candidate for a known agent role rather than blindly take
+/// the first one. Without this, an unrelated JSON-like object embedded in
+/// prose above the real envelope would shadow the true planner/executor
+/// envelope and silently mis-parse.
+pub fn extract_all_json_objects(text: &str) -> Vec<Value> {
+    let cleaned = strip_markdown_fences(text);
+    let candidates = find_json_candidates(&cleaned);
+    candidates
+        .into_iter()
+        .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(|v| v.is_object())
+        .collect()
+}
+
 /// Strip markdown code fences from text.
 ///
 /// Handles:

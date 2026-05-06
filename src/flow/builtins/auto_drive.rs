@@ -323,10 +323,41 @@ fn is_leap(y: u32) -> bool {
     (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
+/// Ensure the `transition_history` table has the `actor_note` column. SQLite's
+/// `CREATE TABLE IF NOT EXISTS` does not migrate pre-existing tables, so a DB
+/// that predates the actor_note DDL addition is missing the column and the
+/// watchdog UPDATE in `annotate_drive_failed_history` would error
+/// `no such column: actor_note`. T047: best-effort online ALTER preserves the
+/// L062 silent-zombie audit trail.
+fn ensure_actor_note_column(conn: &Connection) {
+    let mut have_column = false;
+    if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(transition_history)") {
+        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) {
+            for name in rows.flatten() {
+                if name == "actor_note" {
+                    have_column = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !have_column {
+        if let Err(e) =
+            conn.execute("ALTER TABLE transition_history ADD COLUMN actor_note TEXT", [])
+        {
+            eprintln!(
+                "[auto-drive-watchdog] ensure_actor_note_column: ALTER TABLE failed: {}",
+                e
+            );
+        }
+    }
+}
+
 /// Annotate the most recent `mark_drive_failed` transition_history row for a
 /// display_id with a structured reason note (e.g. `drive_pid_dead`,
 /// `pid_never_recorded`). Best-effort; failures log but do not propagate.
 fn annotate_drive_failed_history(conn: &Connection, display_id: &str, note: &str) {
+    ensure_actor_note_column(conn);
     if let Err(e) = conn.execute(
         "UPDATE transition_history SET actor_note = ?1 \
          WHERE id = ( \
@@ -1403,5 +1434,78 @@ mod tests {
         let row = serde_json::json!({"display_id": ""});
         let res = crate::flow::builtins::dispatch_builtin("auto-drive", &row, &ctx);
         assert!(res.is_some(), "auto-drive keyword must resolve");
+    }
+
+    /// T047 AC1.3: a transition_history table that predates the actor_note
+    /// DDL addition (i.e. lacks the column) must be auto-migrated by the
+    /// watchdog so the UPDATE no longer hits "no such column: actor_note".
+    #[test]
+    fn t047_annotate_drive_failed_history_adds_missing_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Create a transition_history table WITHOUT the actor_note column,
+        // mirroring a pre-T030 DB on disk.
+        conn.execute_batch(
+            "CREATE TABLE transition_history (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 store TEXT NOT NULL,
+                 row_id INTEGER NOT NULL,
+                 display_id TEXT NOT NULL,
+                 from_status TEXT,
+                 to_status TEXT NOT NULL,
+                 verb TEXT NOT NULL,
+                 invoker TEXT NOT NULL,
+                 policy_ref TEXT,
+                 policies_hash TEXT,
+                 occurred_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO transition_history \
+             (store, row_id, display_id, from_status, to_status, verb, invoker, occurred_at) \
+             VALUES ('tasks', 1, 'T999', 'planning', 'blocked', 'mark_drive_failed', \
+                     'framework', '2026-05-06T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Sanity: column must NOT exist before the call.
+        let pre_cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(transition_history)").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(
+            !pre_cols.iter().any(|c| c == "actor_note"),
+            "precondition: actor_note must be absent before annotate"
+        );
+
+        // Call: must not panic, must not surface "no such column".
+        annotate_drive_failed_history(&conn, "T999", "drive_pid_dead");
+
+        // Post: column exists, row is annotated.
+        let post_cols: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(transition_history)").unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        assert!(
+            post_cols.iter().any(|c| c == "actor_note"),
+            "actor_note column must be added by ensure_actor_note_column"
+        );
+
+        let note: String = conn
+            .query_row(
+                "SELECT COALESCE(actor_note, '') FROM transition_history \
+                 WHERE display_id = 'T999' AND verb = 'mark_drive_failed' \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            note, "drive_pid_dead",
+            "actor_note must carry the supplied note value"
+        );
     }
 }
