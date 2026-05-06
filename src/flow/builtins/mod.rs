@@ -64,6 +64,21 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
     }
 }
 
+/// Map a built-in subscriber keyword to the postcondition_id it owns. The
+/// framework reads this at registration time to stamp `dispatch_locks
+/// .postcondition_id` so the row's terminal verification has a named
+/// predicate to call (T050 P2). Unknown keywords return `None`.
+pub fn postcondition_for_builtin(keyword: &str) -> Option<&'static str> {
+    match keyword {
+        "auto-promote" => Some("task_exists_for_linked_observation"),
+        "auto-scaffold" => Some("task_workspace_exists"),
+        "auto-drive" => Some("drive_pid_recorded_or_terminal"),
+        "cargo-install" => Some("cargo_installed_state"),
+        "schema-migrate" => Some("schema_migrated_state"),
+        _ => None,
+    }
+}
+
 /// Resolve the main-repo working tree from `workspace_path`. Uses
 /// `git rev-parse --git-common-dir` and strips the trailing `.git` segment.
 /// Returns `None` if the path is not a git repo or git fails.
@@ -1270,6 +1285,51 @@ mod tests {
             .unwrap();
         assert_eq!(verb, "mark_cargo_installed");
         assert_eq!(invoker, "framework");
+    }
+
+    /// T050 P2 AC2.3: postcondition_for_builtin maps each builtin keyword to
+    /// the documented postcondition_id; unknown keywords return None.
+    #[test]
+    fn postcondition_for_builtin_mapping() {
+        assert_eq!(
+            postcondition_for_builtin("auto-promote"),
+            Some("task_exists_for_linked_observation")
+        );
+        assert_eq!(
+            postcondition_for_builtin("auto-scaffold"),
+            Some("task_workspace_exists")
+        );
+        assert_eq!(
+            postcondition_for_builtin("auto-drive"),
+            Some("drive_pid_recorded_or_terminal")
+        );
+        assert_eq!(
+            postcondition_for_builtin("cargo-install"),
+            Some("cargo_installed_state")
+        );
+        assert_eq!(
+            postcondition_for_builtin("schema-migrate"),
+            Some("schema_migrated_state")
+        );
+        assert_eq!(postcondition_for_builtin("unknown-keyword"), None);
+        assert_eq!(postcondition_for_builtin(""), None);
+
+        // Each mapped postcondition_id resolves via the registry.
+        for kw in [
+            "auto-promote",
+            "auto-scaffold",
+            "auto-drive",
+            "cargo-install",
+            "schema-migrate",
+        ] {
+            let id = postcondition_for_builtin(kw).unwrap();
+            assert!(
+                crate::flow::postconditions::lookup(id).is_some(),
+                "lookup({}) returned None for keyword {}",
+                id,
+                kw
+            );
+        }
     }
 
     /// AC1.4: a row at `in_review` rejects mark_drive_failed (no transition

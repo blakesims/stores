@@ -8,6 +8,7 @@ pub mod builtins;
 pub mod config;
 pub mod ntfy;
 pub mod policies_yaml;
+pub mod postconditions;
 pub mod predicate;
 
 pub use agents_yaml::{AgentEntry, AgentsYaml, BackoffKind, RetryPolicy, Subscription};
