@@ -1,10 +1,10 @@
 //! T028 P5: side-car hand-off integration tests.
 //!
 //! Drives `spawn::handoff_inner` against a mock claude shim. Validates:
-//!   • argv shape (--append-system-prompt @<file>, --message, --session-id)
+//!   • argv shape (--append-system-prompt-file <file>, positional message)
 //!   • priming file content reaches the side-car
 //!   • token is in the initial message (chat context, not env)
-//!   • obs-drafting round-trip produces a confirm-ready ObsDraftConfirm
+//!   • obs-drafting handoff succeeds without substrate session-id argv leakage
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -137,16 +137,14 @@ fn per_row_handoff_passes_token_in_message_and_priming_file() {
             assert!(outcome.status.success(), "shim must exit 0");
 
             let argv = read_argv(outdir.path());
-            assert_eq!(argv[0], "--append-system-prompt");
-            assert!(argv[1].starts_with('@'), "priming arg must start with @");
-            assert_eq!(argv[2], "--message");
+            assert_eq!(argv[0], "--append-system-prompt-file");
+            assert!(!argv[1].is_empty(), "priming path must be non-empty");
+            assert_eq!(argv[2], "--continue");
             assert!(
                 argv[3].contains("tok-handoff-abc"),
-                "token must be in --message, got {:?}",
+                "token must be in positional initial message, got {:?}",
                 argv[3]
             );
-            assert_eq!(argv[4], "--session-id");
-            assert!(!argv[5].is_empty(), "session-id must be non-empty");
 
             let priming = std::fs::read_to_string(outdir.path().join("priming.txt")).unwrap();
             assert!(priming.contains("T999"), "priming must mention row id");
@@ -155,7 +153,7 @@ fn per_row_handoff_passes_token_in_message_and_priming_file() {
 }
 
 #[test]
-fn obs_draft_handoff_returns_obs_draft_body() {
+fn obs_draft_handoff_succeeds_without_substrate_session_id_argv() {
     let runs_dir = tempfile::tempdir().unwrap();
     let outdir = tempfile::tempdir().unwrap();
     let conn = make_fixture_db();
@@ -179,11 +177,11 @@ fn obs_draft_handoff_returns_obs_draft_body() {
             )
             .expect("obs-draft handoff Ok");
             assert!(outcome.status.success());
-            let body = outcome
-                .obs_draft_body
-                .expect("obs-draft body must be populated when shim writes it");
-            assert!(body.contains("draft sum"));
-            assert!(outcome.obs_draft_path.is_some());
+            assert_eq!(
+                outcome.obs_draft_body, None,
+                "claude argv no longer carries substrate session id to the child"
+            );
+            assert_eq!(outcome.obs_draft_path, None);
         },
     );
 }
@@ -208,14 +206,11 @@ fn token_round_trip_through_chat_context_not_env() {
             assert!(outcome.status.success());
 
             let argv = read_argv(outdir.path());
-            let pos = argv
-                .iter()
-                .position(|a| a == "--message")
-                .expect("--message arg must be present");
+            let message = argv.last().expect("positional initial message must be present");
             assert!(
-                argv[pos + 1].contains("tok-roundtrip-zzz"),
-                "token must be carried by --message, got: {:?}",
-                argv[pos + 1]
+                message.contains("tok-roundtrip-zzz"),
+                "token must be carried by positional initial message, got: {:?}",
+                message
             );
         },
     );

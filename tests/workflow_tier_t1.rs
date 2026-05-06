@@ -12,8 +12,6 @@
 //!   * runner role trace: [executor, code-reviewer, wrap]
 
 use rusqlite::Connection;
-use serde_json::json;
-
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use stores::handlers::drive::drive_loop;
@@ -59,16 +57,15 @@ fn make_run_output(stdout: &str) -> RunnerOutput {
 fn insert_t1_task_at_planning(conn: &Connection, display_id: &str) {
     let now = "2026-05-04T00:00:00Z";
     let contract = r#"{"done_when":"contract is the plan","scope_in":"a","scope_out":"b"}"#;
-    // Pre-seed plan with empty phases so submit-review's PASS guard
-    // (current_phase >= plan.phases.length) evaluates against length=0.
-    let plan = r#"{"phases":[]}"#;
+    // T1 rows have plan=NULL: contract IS the plan, so submit-review PASS
+    // resolves through the schema's explicit `tier_hint == 'T1'` guard only.
     conn.execute(
         "INSERT INTO tasks (display_id, status, title, slug, tier_hint, contract, plan, \
          current_phase, current_cycle, cycles, plan_review_log, wrap_log, \
          created_at, updated_at, created_by, updated_by) \
-         VALUES (?1, 'planning', 't1 task', 't1-task', 'T1', ?2, ?3, 0, 0, '[]', '[]', '[]', \
-         ?4, ?4, 'human', 'human')",
-        rusqlite::params![display_id, contract, plan, now],
+         VALUES (?1, 'planning', 't1 task', 't1-task', 'T1', ?2, NULL, 0, 0, '[]', '[]', '[]', \
+         ?3, ?3, 'human', 'human')",
+        rusqlite::params![display_id, contract, now],
     )
     .unwrap();
 }
@@ -190,14 +187,13 @@ fn t1_drive_skips_planner_and_plan_reviewer() {
         "T1 row must not record any submit-plan or submit-plan-review transitions"
     );
 
-    // Plan unchanged from what was inserted.
-    let plan_str: String = conn
+    // T1 plan remains NULL: contract remains the plan.
+    let plan_str: Option<String> = conn
         .query_row(
             "SELECT plan FROM tasks WHERE display_id = ?1",
             rusqlite::params![display_id],
-            |r| r.get::<_, String>(0),
+            |r| r.get(0),
         )
         .unwrap();
-    let plan_val: serde_json::Value = serde_json::from_str(&plan_str).unwrap();
-    assert_eq!(plan_val, json!({"phases": []}));
+    assert_eq!(plan_str, None);
 }

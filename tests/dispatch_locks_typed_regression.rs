@@ -18,6 +18,28 @@ fn env_lock() -> &'static Mutex<()> {
     L.get_or_init(|| Mutex::new(()))
 }
 
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
 fn fresh_db(path: &Path) -> Connection {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch(SUBSTRATE_DDL).unwrap();
@@ -197,9 +219,8 @@ fn l122_silent_zombie_is_typed_and_retry_requires_next_retry_at() {
 
     conn.execute("UPDATE dispatch_locks SET next_retry_at='2000-01-01T00:00:02Z' WHERE row_id=?1", rusqlite::params![row_id]).unwrap();
     let _guard = env_lock().lock().unwrap();
-    std::env::set_var("STORES_DRIVE_CMD", "");
+    let _drive_cmd = EnvVarGuard::set("STORES_DRIVE_CMD", "");
     let n2 = poll_once(&conn, &a, &empty_policies(), &cfg_path(&tmp), "l122", "").unwrap();
-    std::env::remove_var("STORES_DRIVE_CMD");
     assert_eq!(n2, 1, "non-null elapsed next_retry_at makes silent_zombie retry-eligible");
     let (terminal_reason, attempt): (String, i64) = conn.query_row(
         "SELECT terminal_reason, attempt FROM dispatch_locks WHERE row_id=?1",
@@ -219,9 +240,8 @@ fn l141_auto_drive_ok_only_after_drive_pid_postcondition_passes() {
     let a = agents(agent("auto-drive", "tasks", "", "planning", "builtin:auto-drive"));
 
     let _guard = env_lock().lock().unwrap();
-    std::env::set_var("STORES_DRIVE_CMD", "");
+    let _drive_cmd = EnvVarGuard::set("STORES_DRIVE_CMD", "");
     let n = poll_once(&conn, &a, &empty_policies(), &cfg_path(&tmp), "l141", "epoch-l141").unwrap();
-    std::env::remove_var("STORES_DRIVE_CMD");
     assert_eq!(n, 1);
     let (postcondition_id, terminal_reason, last_status, drive_pid): (String, String, String, Option<i64>) = conn.query_row(
         "SELECT dl.postcondition_id, dl.terminal_reason, dl.last_status, t.drive_pid \

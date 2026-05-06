@@ -2,10 +2,9 @@
 # Mock claude shim for T028 P5 hand-off tests.
 #
 # Asserts that the argv shape conforms to the spawn module's contract:
-#   --append-system-prompt @<file>
-#   --message <text>
-#   --session-id <uuid>
-#   [--resume]
+#   --append-system-prompt-file <file>
+#   [--continue]
+#   <initial-message>
 #
 # Side effects: writes the priming + initial-message contents into a
 # `claude.received` file inside MOCK_CLAUDE_OUTDIR (so tests can assert
@@ -35,41 +34,32 @@ mkdir -p "$MOCK_CLAUDE_OUTDIR"
 printf '%s\0' "$@" > "$MOCK_CLAUDE_OUTDIR/argv.txt"
 
 # Walk the args and pluck the ones we care about.
-priming_arg=""
+priming_file=""
 message=""
-session_id=""
 resume=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --append-system-prompt)
-      priming_arg="$2"
+    --append-system-prompt-file)
+      priming_file="$2"
       shift 2
       ;;
-    --message)
-      message="$2"
-      shift 2
-      ;;
-    --session-id)
-      session_id="$2"
-      shift 2
-      ;;
-    --resume)
+    --continue)
       resume=1
       shift
       ;;
     *)
+      message="$1"
       shift
       ;;
   esac
 done
 
-# AC: --append-system-prompt @<file> exists and points at a real file.
-if [[ -z "$priming_arg" ]]; then
-  echo "missing --append-system-prompt" >&2
+# AC: --append-system-prompt-file <file> exists and points at a real file.
+if [[ -z "$priming_file" ]]; then
+  echo "missing --append-system-prompt-file" >&2
   exit 65
 fi
-priming_file="${priming_arg#@}"
 if [[ ! -f "$priming_file" ]]; then
   echo "priming file '$priming_file' missing" >&2
   exit 66
@@ -88,26 +78,7 @@ if ! printf '%s' "$message" | grep -q "APPROVE_TOKEN="; then
   exit 68
 fi
 
-# AC: --session-id must be a non-empty token.
-if [[ -z "$session_id" ]]; then
-  echo "missing --session-id" >&2
-  exit 69
-fi
-printf '%s' "$session_id" > "$MOCK_CLAUDE_OUTDIR/session-id.txt"
 printf '%s' "$resume" > "$MOCK_CLAUDE_OUTDIR/resume.txt"
-
-# Append a fake jsonl line into the runs dir to simulate a real session.
 mkdir -p "$MOCK_CLAUDE_RUNS_DIR"
-# We don't know the scope_key here, so glob-find the touched session file.
-matching="$(find "$MOCK_CLAUDE_RUNS_DIR" -maxdepth 1 -name "*-${session_id}.jsonl" -print -quit)"
-if [[ -n "$matching" ]]; then
-  echo '{"role":"mock","msg":"hello"}' >> "$matching"
-fi
-
-# Optionally write an obs-draft JSON for the obs-draft scope.
-if [[ -n "${MOCK_CLAUDE_OBS_DRAFT_BODY:-}" ]]; then
-  printf '%s' "$MOCK_CLAUDE_OBS_DRAFT_BODY" \
-    > "$MOCK_CLAUDE_RUNS_DIR/obs-draft-${session_id}.json"
-fi
 
 exit 0
