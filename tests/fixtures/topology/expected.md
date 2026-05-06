@@ -34,7 +34,6 @@ stateDiagram-v2
   plan_review --> blocked :  A submit-plan-review [NOT_READY]
   ready --> executing :  F start
   executing --> code_review :  A submit-execute
-  code_review --> complete :  A submit-review [PASS]
   code_review --> executing :  A submit-review [PASS]
   code_review --> complete :  A submit-review [PASS]
   code_review --> executing :  A submit-review [REVISE]
