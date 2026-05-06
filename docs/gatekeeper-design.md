@@ -35,7 +35,7 @@ It does not specify the gatekeeper agent's prompt, the architecture-review agent
 | `triaging`  | `routed`       | `intake route --decision <D>`         | `ai_autonomous`        | `D ∈ {duplicate, fast_track, normal_observation}` and side-effect rows (observation / merge target) created in same transaction. `arch_review_candidate` does NOT route here — it routes to `escalated` (see below). |
 | `triaging`  | `dropped`      | `intake route --decision reject_noise`| `ai_autonomous`        | `rationale` non-empty; rejection is final unless `intake reopen` (below) fires. |
 | `dropped`    | `draft`        | `intake reopen`                       | `ai_with_human`         | Human disagrees with a `reject_noise` decision; rare escape hatch.    |
-| `triaging`  | `escalated`    | `intake escalate-arch-review`         | `ai_autonomous`        | Cluster threshold crossed OR `risk_flags` includes any `touches_*` flag; produces an `architecture_reviews` row (or tagged-observation stand-in until that store exists). |
+| `triaging`  | `escalated`    | `intake escalate-arch-review`         | `ai_autonomous`        | Decision is `arch_review_candidate` per its full precondition (any `touches_*` flag, OR `introduces_new_primitive` / `changes_boundary` / `security_sensitive` / `authority_surface_drift` / `contradicts_prior_decision`, OR cluster threshold crossed); produces an `architecture_reviews` row (or tagged-observation stand-in until that store exists). |
 
 State semantics:
 
