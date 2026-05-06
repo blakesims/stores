@@ -303,14 +303,14 @@ pub(crate) fn handle_recon_return(
     match new_evidence {
         Some(ev) => {
             tx.execute(
-                "UPDATE intake SET recon_round = ?1, evidence = ?2, updated_at = ?3 WHERE id = ?4",
+                "update intake SET recon_round = ?1, evidence = ?2, updated_at = ?3 WHERE id = ?4",
                 rusqlite::params![new_round, ev, now, row_id],
             )
             .context("recon_return: update recon_round + evidence")?;
         }
         None => {
             tx.execute(
-                "UPDATE intake SET recon_round = ?1, updated_at = ?2 WHERE id = ?3",
+                "update intake SET recon_round = ?1, updated_at = ?2 WHERE id = ?3",
                 rusqlite::params![new_round, now, row_id],
             )
             .context("recon_return: update recon_round")?;
@@ -347,8 +347,8 @@ struct ObsFields {
 fn insert_observation_row(tx: &Transaction, fields: &ObsFields) -> Result<String> {
     let now = super::row::now_iso8601();
 
-    // Build the INSERT dynamically to handle optional columns.
-    // display_id is NOT NULL; insert a placeholder then UPDATE after rowid is known.
+    // Build the insert dynamically to handle optional columns.
+    // display_id is NOT NULL; insert a placeholder then update after rowid is known.
     let mut cols = vec![
         "display_id", "status", "summary", "source", "priority",
         "captured_at", "captured_week",
@@ -395,22 +395,22 @@ fn insert_observation_row(tx: &Transaction, fields: &ObsFields) -> Result<String
 
     let ph: Vec<String> = (1..=vals.len()).map(|i| format!("?{i}")).collect();
     let sql = format!(
-        "INSERT INTO observations ({}) VALUES ({})",
+        "insert into observations ({}) VALUES ({})",
         cols.join(", "),
         ph.join(", ")
     );
 
     tx.execute(&sql, rusqlite::params_from_iter(vals.iter()))
-        .context("insert_observation_row: INSERT")?;
+        .context("insert_observation_row: insert")?;
 
     let rowid = tx.last_insert_rowid();
     let display_id = crate::id_format::render("L{:03d}", rowid);
 
     tx.execute(
-        "UPDATE observations SET display_id = ?1 WHERE id = ?2",
+        "update observations SET display_id = ?1 WHERE id = ?2",
         rusqlite::params![display_id, rowid],
     )
-    .context("insert_observation_row: UPDATE display_id")?;
+    .context("insert_observation_row: update display_id")?;
 
     // Synthetic 'create' transition history row so the daemon's subscriber
     // can pick up the new observation (matches the convention in add.rs).
@@ -511,7 +511,7 @@ mod tests {
 
     fn insert_triaging(conn: &rusqlite::Connection, display_id: &str) {
         conn.execute(
-            "INSERT INTO intake (display_id, status, summary, source_agent, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
+            "insert into intake (display_id, status, summary, source_agent, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
              VALUES (?1, 'triaging', 'test item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
             rusqlite::params![display_id],
         ).unwrap();
@@ -625,13 +625,13 @@ mod tests {
         let conn = fresh_db();
         // Insert two intake items; I001 is the source with cluster_key
         conn.execute(
-            "INSERT INTO intake (display_id, status, summary, source_agent, captured_at, captured_week, cluster_key, created_at, updated_at, created_by, updated_by) \
+            "insert into intake (display_id, status, summary, source_agent, captured_at, captured_week, cluster_key, created_at, updated_at, created_by, updated_by) \
              VALUES ('I001', 'routed', 'source item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', 'dispatch-lifecycle', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
             [],
         ).unwrap();
         // I002 is the duplicate
         conn.execute(
-            "INSERT INTO intake (display_id, status, summary, source_agent, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
+            "insert into intake (display_id, status, summary, source_agent, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
              VALUES ('I002', 'triaging', 'dupe item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
             [],
         ).unwrap();
@@ -683,7 +683,7 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         // Insert a needs_info row directly (bypassing lifecycle for test speed)
         tx.execute(
-            "INSERT INTO intake (id, display_id, status, summary, source_agent, captured_at, captured_week, recon_round, created_at, updated_at, created_by, updated_by) \
+            "insert into intake (id, display_id, status, summary, source_agent, captured_at, captured_week, recon_round, created_at, updated_at, created_by, updated_by) \
              VALUES (1, 'I001', 'needs_info', 'test', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', 0, '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
             [],
         ).unwrap();
@@ -706,7 +706,7 @@ mod tests {
         let conn = fresh_db();
         let tx = conn.unchecked_transaction().unwrap();
         tx.execute(
-            "INSERT INTO intake (id, display_id, status, summary, source_agent, captured_at, captured_week, recon_round, created_at, updated_at, created_by, updated_by) \
+            "insert into intake (id, display_id, status, summary, source_agent, captured_at, captured_week, recon_round, created_at, updated_at, created_by, updated_by) \
              VALUES (1, 'I001', 'needs_info', 'test', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', 2, '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
             [],
         ).unwrap();
@@ -746,11 +746,11 @@ mod tests {
 
     #[test]
     fn failed_obs_insert_rolls_back_via_transaction() {
-        // Verify that if observation INSERT fails (e.g. table doesn't exist in
+        // Verify that if observation insert fails (e.g. table doesn't exist in
         // a stripped DB), the error propagates and the caller's tx can roll back.
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(SUBSTRATE_DDL).unwrap();
-        // Deliberately omit the observations DDL so the INSERT will fail.
+        // Deliberately omit the observations DDL so the insert will fail.
         let is = intake_schema();
         conn.execute_batch(&ddl_for(&is)).unwrap();
 
