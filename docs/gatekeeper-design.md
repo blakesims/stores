@@ -159,7 +159,7 @@ The gatekeeper emits exactly one of six decisions. Each has a precondition (when
 - `risk_flags` contains `introduces_new_primitive` or `changes_boundary`,
 - the gatekeeper observes that `cluster_key` count has crossed the architecture-review threshold (cluster threshold default: 3, configurable),
 - `risk_flags` contains `security_sensitive` or `authority_surface_drift`.
-**Downstream effect:** row transitions `triaging → escalated`, an `architecture_reviews` candidate row is produced (or, until that store ships, a tagged observation with reserved tag `arch-review-candidate`), and `routed_to_arch_review` points at it. A normal observation MAY also be created in parallel so local-fix work is not blocked, but its contract carries a `pending_architecture_review = true` field that prevents U1 ratification until the architecture review returns `ok_local_fix` or `reframe_contract`.
+**Downstream effect:** row transitions `triaging → escalated`, an `architecture_reviews` candidate row is produced (or, until that store ships, a tagged observation with reserved tag `arch-review-candidate`), and `routed_to_arch_review` points at it. A normal observation MAY also be created in parallel so local-fix work is not blocked, but its contract carries a `pending_architecture_review = true` field that prevents U1 ratification until the architecture review returns `allow_local_fix` or `reframe_contract`.
 
 ### 6. `reject_noise`
 **Precondition:** the row is a re-symptom of a fully-resolved observation, an artifact of a known-broken local environment, or otherwise not actionable substrate signal. `rationale` must explain which of these applies.
