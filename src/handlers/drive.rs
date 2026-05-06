@@ -430,6 +430,54 @@ pub(crate) fn compute_git_diff_summary(
 // Main drive loop (AC3.1 / AC3.4 / AC3.5 / AC3.6 / AC3.7 / AC3.9 / AC3.10)
 // ---------------------------------------------------------------------------
 
+/// T033: pre-flight depends_on guard. Refuses to start drive when any
+/// `depends_on` dep is not yet `accepted`. Layer 1 (passive) — runs once
+/// at drive entry, no polling, no re-check after the loop begins.
+fn check_depends_on_guard(schema: &Schema, conn: &Connection, display_id: &str) -> Result<()> {
+    let (_, entry) = read_row(schema, conn, display_id)?;
+    let deps = match entry.get("depends_on") {
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => return Ok(()),
+    };
+    if deps.is_empty() {
+        return Ok(());
+    }
+
+    let table = quote_ident(&schema.name);
+    let sql = format!("SELECT status FROM {table} WHERE display_id = ?1");
+    let mut not_accepted: Vec<(String, String)> = Vec::new();
+    for d in &deps {
+        let dep_id = match d.as_str() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let status: rusqlite::Result<String> =
+            conn.query_row(&sql, rusqlite::params![dep_id], |r| r.get(0));
+        match status {
+            Ok(s) if s == "accepted" => {}
+            Ok(s) => not_accepted.push((dep_id, s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                not_accepted.push((dep_id, "<missing>".to_string()))
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    if not_accepted.is_empty() {
+        return Ok(());
+    }
+
+    let detail = not_accepted
+        .iter()
+        .map(|(id, s)| format!("{id} (status={s})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "[{display_id}] cannot start drive: depends_on not satisfied — {detail} \
+         (each dep must reach status='accepted' before this task can drive)"
+    );
+}
+
 /// Core loop.  Extracted so tests can drive it directly without going through
 /// clap or `run_drive`.
 ///
@@ -443,6 +491,10 @@ pub fn drive_loop(
     runner: &dyn Runner,
     max_iters: usize,
 ) -> Result<()> {
+    // T033: pre-flight depends_on guard (Layer 1, passive). Refuse to start
+    // when any depends_on dep is not yet accepted.
+    check_depends_on_guard(schema, conn, display_id)?;
+
     let mut iter = 0usize;
     // AC4.3 state-local flag: tracks whether wrap was dispatched in THIS drive
     // run. Prevents same-run re-dispatch while allowing fresh dispatch on every
@@ -2753,5 +2805,122 @@ mod tests {
                 "workspace_path at spawn {i} differs from spawn 0: expected {first:?}, got {p:?}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // T033: pre-flight depends_on guard
+    // ---------------------------------------------------------------------------
+
+    /// Set the depends_on column for an existing task row to the given JSON
+    /// array of display ids. Test helper.
+    fn set_depends_on(conn: &Connection, schema: &Schema, display_id: &str, deps: &[&str]) {
+        let json_str = serde_json::to_string(&deps.iter().collect::<Vec<_>>()).unwrap();
+        conn.execute(
+            &format!(
+                "UPDATE {} SET depends_on = ?1 WHERE display_id = ?2",
+                quote_ident(&schema.name)
+            ),
+            rusqlite::params![json_str, display_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn drive_refuses_when_dep_not_accepted() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        // TY: dep, status='executing' (not accepted).
+        insert_task(
+            &conn,
+            &schema,
+            "T002",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        // TX: depends on TY.
+        insert_task(
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+        set_depends_on(&conn, &schema, "T001", &["T002"]);
+
+        let runner = MockRunner::new(vec![]);
+        let err = drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect_err("drive must refuse when dep is not accepted");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("T002"),
+            "error must name the unmet dep 'T002': {msg}"
+        );
+        assert!(
+            msg.contains("executing"),
+            "error must report dep status 'executing': {msg}"
+        );
+        assert!(
+            msg.contains("depends_on"),
+            "error must reference depends_on: {msg}"
+        );
+    }
+
+    #[test]
+    fn drive_proceeds_when_dep_accepted() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        // TY: dep, status='accepted'.
+        insert_task(
+            &conn,
+            &schema,
+            "T002",
+            "accepted",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        // TX: depends on TY, ready to run a full happy path.
+        insert_task(
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+        set_depends_on(&conn, &schema, "T001", &["T002"]);
+
+        let runner = MockRunner::new(vec![
+            make_run_output(planner_fixture_json(), 0),
+            make_run_output(plan_reviewer_fixture_json(), 0),
+            make_run_output(executor_fixture_json(), 0),
+            make_run_output(code_reviewer_fixture_json(), 0),
+            make_run_output(wrap_fixture_json(), 0),
+        ]);
+
+        drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect("drive must proceed when dep is accepted");
+
+        assert_eq!(
+            runner.remaining_count(),
+            0,
+            "all 5 mock responses must be consumed (drive ran the full happy path)"
+        );
     }
 }
