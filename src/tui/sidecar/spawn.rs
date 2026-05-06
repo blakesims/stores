@@ -86,9 +86,20 @@ pub fn should_try_resume(scope: &SidecarScope) -> bool {
 /// Execute the Claude Code child inheriting our stdio. Returns the child's
 /// exit status. Caller is responsible for suspending ratatui first.
 pub fn exec_claude(claude_bin: &Path, plan: &HandoffPlan) -> Result<std::process::ExitStatus> {
+    exec_claude_with_env(claude_bin, plan, &[])
+}
+
+fn exec_claude_with_env(
+    claude_bin: &Path,
+    plan: &HandoffPlan,
+    envs: &[(&str, String)],
+) -> Result<std::process::ExitStatus> {
     let argv = build_argv(claude_bin, plan);
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
     let status = cmd
         .status()
         .with_context(|| format!("failed to exec claude binary at {}", claude_bin.display()))?;
@@ -130,7 +141,21 @@ pub fn handoff_inner(
     );
 
     let argv = build_argv(claude_bin, &plan);
-    let status = exec_claude(claude_bin, &plan)?;
+    let obs_draft_hint = if matches!(scope, SidecarScope::ObsDraft) {
+        Some((
+            "STORES_OBS_DRAFT_PATH",
+            obs_draft_path_for(runs_dir, &plan.session_id)
+                .display()
+                .to_string(),
+        ))
+    } else {
+        None
+    };
+    let status = if let Some((key, value)) = obs_draft_hint {
+        exec_claude_with_env(claude_bin, &plan, &[(key, value)])?
+    } else {
+        exec_claude(claude_bin, &plan)?
+    };
 
     // Postmortem trail — the TUI suspends raw mode + alt-screen during exec,
     // so any stderr from a failed claude invocation is wiped on restore.
@@ -209,11 +234,7 @@ mod tests {
             // Initial message rides as a positional argument (last).
             assert!(argv[4].contains("TOK=abc"));
             assert_eq!(argv.len(), 5);
-            for guard in [
-                "--message",
-                "--session-id",
-                "--resume",
-            ] {
+            for guard in ["--message", "--session-id", "--resume"] {
                 assert!(
                     !argv.iter().any(|a| a == guard),
                     "regression guard: argv must not contain {guard} (substrate does \
@@ -370,7 +391,10 @@ mod tests {
             // Pressing `y` produces a Confirm outcome; `n` produces Discard.
             let outcome_y = on_key(&mut app, key('y'));
             assert!(matches!(outcome_y, KeyOutcome::Continue));
-            assert_eq!(app.obs_draft_pending.as_ref().map(|d| d.summary.clone()), None);
+            assert_eq!(
+                app.obs_draft_pending.as_ref().map(|d| d.summary.clone()),
+                None
+            );
             assert!(app.last_obs_draft_action.as_deref() == Some("file"));
 
             // Now load a draft and discard it.

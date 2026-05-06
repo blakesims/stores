@@ -28,9 +28,6 @@ if [[ -z "${MOCK_CLAUDE_RUNS_DIR:-}" ]]; then
 fi
 
 mkdir -p "$MOCK_CLAUDE_OUTDIR"
-
-# Record the full argv for downstream argv-shape assertions.
-# NUL-separated so multi-line args (e.g. --message body) round-trip cleanly.
 printf '%s\0' "$@" > "$MOCK_CLAUDE_OUTDIR/argv.txt"
 
 # Walk the args and pluck the ones we care about.
@@ -66,10 +63,8 @@ if [[ ! -f "$priming_file" ]]; then
 fi
 cp "$priming_file" "$MOCK_CLAUDE_OUTDIR/priming.txt"
 
-# AC: --message must be non-empty and contain APPROVE_TOKEN= (the priming
-# pipeline always inlines the token into the initial chat message).
 if [[ -z "$message" ]]; then
-  echo "missing --message" >&2
+  echo "missing initial message" >&2
   exit 67
 fi
 printf '%s' "$message" > "$MOCK_CLAUDE_OUTDIR/message.txt"
@@ -80,5 +75,12 @@ fi
 
 printf '%s' "$resume" > "$MOCK_CLAUDE_OUTDIR/resume.txt"
 mkdir -p "$MOCK_CLAUDE_RUNS_DIR"
+if [[ -n "${MOCK_CLAUDE_OBS_DRAFT_BODY:-}" ]]; then
+  if [[ -z "${STORES_OBS_DRAFT_PATH:-}" ]]; then
+    echo "STORES_OBS_DRAFT_PATH not set" >&2
+    exit 70
+  fi
+  printf '%s' "$MOCK_CLAUDE_OBS_DRAFT_BODY" > "$STORES_OBS_DRAFT_PATH"
+fi
 
 exit 0

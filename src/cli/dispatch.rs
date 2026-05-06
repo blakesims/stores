@@ -307,6 +307,12 @@ pub fn dispatch(
                             handlers::transition::run_close_out_of_band(
                                 schema, &conn, sub, invoker, commit,
                             )?;
+                        } else if verb == "abandon" {
+                            // abandon requires --reason (clap enforces required=true at parse time).
+                            let reason = sub
+                                .get_one::<String>("reason")
+                                .ok_or_else(|| anyhow::anyhow!("abandon requires --reason"))?;
+                            handlers::transition::run_abandon(schema, &conn, sub, invoker, reason)?;
                         } else if verb == "close_as_addressed" {
                             // close_as_addressed requires --resolution; clap enforces required=true.
                             let resolution =

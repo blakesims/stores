@@ -38,6 +38,7 @@ pub fn status_to_dir(status: &str) -> &'static str {
         "ready" | "executing" | "code_review" | "complete" | "in_review" => "active",
         "blocked" | "rejected" => "paused",
         "accepted" => "completed",
+        "abandoned" => "completed",
         _ => "active",
     }
 }
@@ -359,6 +360,13 @@ mod tests {
     fn status_dir_accepted() {
         // accepted: human signed off; task done → completed/.
         assert_eq!(status_to_dir("accepted"), "completed");
+    }
+
+    #[test]
+    fn status_dir_abandoned() {
+        // abandoned: terminal (T043) — walked out of cycle without acceptance,
+        // still belongs under completed/ alongside accepted.
+        assert_eq!(status_to_dir("abandoned"), "completed");
     }
 
     #[test]

@@ -41,6 +41,7 @@ stateDiagram-v2
   code_review --> blocked :  A submit-review [FAIL]
   blocked --> planning :  H+ resume
   blocked --> ready :  H+ resume
+  blocked --> planning :  H+ resume
   planning --> blocked :  F mark_drive_failed
   plan_review --> blocked :  F mark_drive_failed
   ready --> blocked :  F mark_drive_failed
@@ -55,6 +56,14 @@ stateDiagram-v2
   in_review --> accepted :  H! accept
   in_review --> rejected :  H! reject
   rejected --> planning :  H+ amend
+  planning --> abandoned :  H! abandon
+  plan_review --> abandoned :  H! abandon
+  ready --> abandoned :  H! abandon
+  executing --> abandoned :  H! abandon
+  code_review --> abandoned :  H! abandon
+  blocked --> abandoned :  H! abandon
+  in_review --> abandoned :  H! abandon
+  deploy_blocked --> abandoned :  H! abandon
 ```
 
 ---

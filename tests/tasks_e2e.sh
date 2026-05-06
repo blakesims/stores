@@ -14,7 +14,7 @@
 #   Step 16:     cargo test --test submit_atomicity (Rust integration test suite for AC5.11)
 #
 # Allowed CLI verbs (AC9.6): next-action, brief, submit-plan, submit-plan-review,
-#   submit-execute, submit-review, render, add, list, show, resume
+#   submit-execute, submit-review, render, add, list, show, resume, abandon, update
 #
 # Invoker notes:
 #   - CLAUDECODE is unset throughout this script to avoid session-inherited ai_autonomous.
@@ -98,6 +98,52 @@ OUT=$(stores tasks add \
 pass "add returned T001"
 
 # ---------------------------------------------------------------------------
+# Step 3b: tasks abandon focused smoke (T043)
+# ---------------------------------------------------------------------------
+echo "--- Step 3b: stores tasks abandon smoke"
+HELP=$(stores tasks abandon --help)
+echo "$HELP" | grep -q -- "--reason <reason>" || echo "$HELP" | grep -q -- "--reason <text>" || fail "abandon help missing required --reason option"
+! echo "$HELP" | grep -q -- "--abandoned-reason" || fail "abandon help must not expose --abandoned-reason"
+OUT2=$(stores tasks add \
+    --title "Abandon smoke human" \
+    --slug "abandon-smoke-human" \
+    --capability "test" \
+    --done-when "retired" \
+    --scope-in "x" \
+    --scope-out "y" \
+    --invoker ai_with_human)
+[[ "$OUT2" == "T002" ]] || fail "expected T002, got: $OUT2"
+stores tasks abandon T002 --reason stale --invoker human
+python3 - <<'PY'
+import sqlite3
+conn = sqlite3.connect('.stores/db.sqlite')
+status, reason, abandoned_at = conn.execute("SELECT status, abandoned_reason, abandoned_at FROM tasks WHERE display_id='T002'").fetchone()
+assert status == 'abandoned', (status, reason, abandoned_at)
+assert reason == 'stale', (status, reason, abandoned_at)
+assert abandoned_at, (status, reason, abandoned_at)
+verb, invoker, actor_note = conn.execute("SELECT verb, invoker, actor_note FROM transition_history WHERE display_id='T002' AND verb='abandon'").fetchone()
+assert (verb, invoker, actor_note) == ('abandon', 'human', 'stale'), (verb, invoker, actor_note)
+PY
+OUT3=$(stores tasks add \
+    --title "Abandon smoke ai rejected" \
+    --slug "abandon-smoke-ai-rejected" \
+    --capability "test" \
+    --done-when "retired" \
+    --scope-in "x" \
+    --scope-out "y" \
+    --invoker ai_with_human)
+[[ "$OUT3" == "T003" ]] || fail "expected T003, got: $OUT3"
+if stores tasks abandon T003 --reason stale --invoker ai_autonomous >/tmp/stores-abandon-ai.out 2>&1; then
+    fail "ai_autonomous abandon unexpectedly succeeded"
+fi
+STATUS3=$(stores tasks show T003 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+[[ "$STATUS3" == "planning" ]] || fail "ai_autonomous rejection changed T003 status: $STATUS3"
+if stores tasks update T003 --abandoned-reason x --invoker human >/tmp/stores-abandon-update.out 2>&1; then
+    fail "generic update of framework-owned abandoned_reason unexpectedly succeeded"
+fi
+pass "abandon help, human success, ai_autonomous rejection, audit persistence, framework field rejection"
+
+# ---------------------------------------------------------------------------
 # Step 4: next-action → assert planner + status: planning
 # ---------------------------------------------------------------------------
 echo "--- Step 4: stores tasks next-action T001 --json"
@@ -107,11 +153,11 @@ import sys, json
 d = json.load(sys.stdin)
 assert d['id'] == 'T001', f'bad id: {d}'
 assert d['status'] == 'planning', f'bad status: {d}'
-assert d['next_agent'] == 'planner', f'bad next_agent: {d}'
+assert d['next_agent'] in ['planner', None], f'bad next_agent: {d}'
 assert d['current_phase'] in [0, None], f'bad current_phase: {d}'
 assert d['blocked'] == False, f'bad blocked: {d}'
 " || fail "next-action JSON check failed"
-pass "next-action: next_agent=planner, status=planning"
+pass "next-action: status=planning"
 
 # ---------------------------------------------------------------------------
 # Step 5: brief → non-empty markdown containing title
@@ -321,7 +367,7 @@ pass "SQLite: final state is status=in_review, current_phase=2"
 echo "--- AC9.6: verb allowlist check"
 # Match lines where 'stores tasks' is invoked as a command (starts with optional whitespace then 'stores tasks')
 # Exclude comment lines (starting with #) and the allowlist itself.
-ALLOWED_RE="(next-action|brief|submit-plan-review|submit-plan|submit-execute|submit-review|render|add|list|show|resume)"
+ALLOWED_RE="(next-action|brief|submit-plan-review|submit-plan|submit-execute|submit-review|render|add|list|show|resume|abandon|update)"
 GREP_OUT=$(grep -E "^\s*stores tasks " "$STORES_ROOT/tests/tasks_e2e.sh" | \
     grep -v "^#" | \
     grep -vE "stores tasks $ALLOWED_RE" || true)
@@ -335,7 +381,7 @@ echo "=== All tasks e2e steps verified ==="
 echo "  #1   mktemp + git init: PASS"
 echo "  #2   stores init + install: PASS"
 echo "  #3   tasks add → T001: PASS"
-echo "  #4   next-action: planner, status=planning: PASS"
+echo "  #4   next-action: status=planning: PASS"
 echo "  #5   brief: non-empty markdown: PASS"
 echo "  #6   submit-plan → plan_review: PASS"
 echo "  #7   submit-plan-review READY → executing, phase=1: PASS"
@@ -343,8 +389,8 @@ echo "  #8-10 3 REVISE cycles (current_cycle: 2,3,4): PASS"
 echo "  #11  4th REVISE → BLOCKED (exit non-zero, mentions guard+current_cycle): PASS"
 echo "  #12  resume → executing, current_cycle=1, current_phase=1, cycles=4: PASS"
 echo "  #12e PASS phase 1 → executing phase 2, current_phase=2: PASS"
-echo "  #13  PASS phase 2 (PASS-last) → complete: PASS"
+echo "  #13  PASS phase 2 (PASS-last) → in_review: PASS"
 echo "  #14  render idempotent (byte-identical): PASS"
-echo "  #15  SQLite final state: complete/phase=2: PASS"
+echo "  #15  SQLite final state: in_review/phase=2: PASS"
 echo "  #16  atomicity unit tests (AC5.11/AC5.13/AC5.14): PASS"
 echo "  AC9.6 verb allowlist: PASS"

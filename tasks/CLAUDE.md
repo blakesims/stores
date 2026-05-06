@@ -31,9 +31,12 @@ For pre-substrate work the readable record is `tasks/completed/T0XX-*/main.md` (
 | `complete` | All phases done | `tasks/completed/` |
 | `in_review` | Wrap synthesis ready for the user | `tasks/completed/` |
 | `accepted` | User accepted the wrap | `tasks/completed/` |
-| `rejected` | User rejected; awaiting amend | `tasks/completed/` |
+| `rejected` | Reviewed and rejected on the merits; awaiting amend | `tasks/completed/` |
+| `abandoned` | Intentionally retired as superseded, misadded, duplicate, or stale | `tasks/completed/` |
 
-Transitions are state-machine-enforced by the schema (`stores/tasks/schema.yaml` § `lifecycle.transitions`). The substrate refuses transitions that don't match a defined edge or fail the edge's guard. **Don't try to bypass.** If you find yourself wanting to set a status manually, the right move is either (a) the substrate's transition verb (`submit-plan`, `submit-execute`, `submit-review`, `accept`, `reject`, `amend`, `resume`) or (b) file an observation about the missing transition you wished for.
+Transitions are state-machine-enforced by the schema (`stores/tasks/schema.yaml` § `lifecycle.transitions`). The substrate refuses transitions that don't match a defined edge or fail the edge's guard. **Don't try to bypass.** If you find yourself wanting to set a status manually, the right move is either (a) the substrate's transition verb (`submit-plan`, `submit-execute`, `submit-review`, `accept`, `reject`, `amend`, `resume`, `abandon`) or (b) file an observation about the missing transition you wished for.
+
+Three terminal/history states mean different things: `rejected` = reviewed-and-rejected-on-merits; `abandoned` = intentionally-retired (superseded/misadd/duplicate/stale); `closed_out_of_band` = work-shipped-via-manual-commit. `abandoned` is the non-destructive L002 alternative to raw rollback/delete or wiping `.stores/db.sqlite` for stale or misadded task rows.
 
 ### How `stores tasks drive` works
 
@@ -43,7 +46,7 @@ Transitions are state-machine-enforced by the schema (`stores/tasks/schema.yaml`
 2. If next action is `dispatch_agent: <role>`, render the brief from `templates/<role>-brief.md.tpl`, spawn the agent via the configured runner.
 3. The spawned agent does its work and writes back via the appropriate `submit-*` verb (`ai_autonomous` invoker — these are mid-cycle writes, not U-moments).
 4. Substrate validates the envelope against the role's JSON schema, applies the transition (subject to guards), and loops.
-5. Drive exits when the row reaches a terminal state (`complete`, `accepted`, `rejected`, `blocked`).
+5. Drive exits when the row reaches a terminal/history pause (`complete`, `accepted`, `rejected`, `abandoned`, `blocked`).
 
 The orchestrator (you, in the outer Claude Code session) does NOT spawn agents directly. Drive does. Your job is to invoke `drive` and observe — `stores tasks status <id>` and `stores tasks next-action <id>` are read-only telemetry. If drive errors or behaves surprisingly, file an observation; don't reach into the loop.
 
