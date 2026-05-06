@@ -109,6 +109,13 @@ lifecycle:
     - {from: executing, to: code_review, verb: submit-execute, actor: ai_autonomous}
 
     # code_review → executing / complete / blocked (gate-keyed; PASS branches by current_phase guard per M9)
+    # PASS-T1: T1 rows have plan=null (contract IS the plan, no planner spawn).
+    # plan.phases.length cannot be evaluated, so the two phase-guarded PASS
+    # transitions below would both fail their guards and leave T1 rows stuck
+    # at code_review with no exit. T1 by design is single-phase, so PASS for
+    # a T1 row always means complete. Match-order matters: this transition is
+    # declared first so it wins for T1 rows before the phase guards run. (L123)
+    - {from: code_review, to: complete, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "tier_hint == 'T1'"}
     # PASS-non-last: bump current_phase, reset current_cycle, return to executing
     - {from: code_review, to: executing, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "current_phase < plan.phases.length"}
     # PASS-last: complete

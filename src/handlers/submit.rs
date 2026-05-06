@@ -1600,6 +1600,12 @@ lifecycle:
       requires_gate: REVISE
       actor: ai_autonomous
     - from: code_review
+      to: complete
+      verb: submit-review
+      requires_gate: PASS
+      guard: "tier_hint == 'T1'"
+      actor: ai_autonomous
+    - from: code_review
       to: executing
       verb: submit-review
       requires_gate: PASS
@@ -2056,6 +2062,54 @@ workflow:
         assert_eq!(read_status(&conn), "in_review");
         // current_phase must NOT be bumped past last
         assert_eq!(read_i64(&conn, "current_phase"), 1);
+    }
+
+    /// Regression for L123: a T1 row with plan=null cannot evaluate the
+    /// phase-counting PASS guards. The new T1-aware PASS transition must
+    /// fire first and route code_review → complete (which then framework-
+    /// fires complete → in_review on entry).
+    ///
+    /// Pre-fix: both phase-guarded PASS transitions failed their guards
+    /// (plan.phases.length is null), submit-review errored "no transition
+    /// had its guard satisfied", and T1 rows got stuck at code_review with
+    /// no exit (visible on T039 / L093 in today's phase-4 batch dogfood).
+    #[test]
+    fn t1_submit_review_pass_completes_via_tier_guard() {
+        let (_schema, conn) = setup();
+        let now = now_iso8601();
+        let cycles_json = serde_json::to_string(&json!([{
+            "phase": 1, "cycle": 1,
+            "executor": {"summary": "ok", "commit": "abc"},
+            "review": null
+        }])).unwrap();
+        // Insert T1 row at code_review with plan=NULL (the contract-is-plan shape).
+        conn.execute(
+            "INSERT INTO wf_tasks (display_id, status, created_at, updated_at, \
+             created_by, updated_by, title, tier_hint, current_phase, current_cycle, \
+             plan, cycles, plan_review_log, blocked_reason) \
+             VALUES ('WF001', 'code_review', ?1, ?1, 'human', 'human', 't1 task', \
+                     'T1', 1, 1, NULL, ?2, '[]', '')",
+            rusqlite::params![now, cycles_json],
+        )
+        .unwrap();
+
+        let out = compute_submit_review(
+            &Schema::from_yaml(WF_SCHEMA_YAML).unwrap(),
+            &conn,
+            "WF001",
+            "PASS",
+            "T1 done",
+            None,
+            0,
+            0,
+            0,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
+
+        // complete → in_review fires on-entry, so final status is in_review.
+        assert_eq!(out.new_status, "in_review", "T1 PASS must reach complete (and on-entry to in_review)");
+        assert_eq!(read_status(&conn), "in_review");
     }
 
     // ---------------------------------------------------------------------------
