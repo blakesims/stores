@@ -59,6 +59,89 @@ pub fn extract_envelope_from_text(text: &str, schema: Option<&Value>) -> Option<
     None
 }
 
+/// Pick the best SAP candidate for `expected_role` from a list of parsed JSON
+/// objects. Used by both the runner-level extraction (claude_code.rs) and the
+/// drive-level fallback (drive.rs::parse_envelope) so they share one selection
+/// rule and a leading unrelated `{...}` cannot shadow the real envelope at
+/// either layer.
+///
+/// Selection rules, in priority order:
+/// 1. Exact role-tag match (`{"role": expected_role, ...}`).
+/// 2. Marker-field present + role absent or matching, where marker is:
+///    - `phases` (non-empty array) for `planner`
+///    - `gate` for `plan-reviewer` / `code-reviewer`
+///    - `summary` for `executor`
+///    - `executive_summary` for `wrap`
+/// 3. Legacy fallback: first candidate.
+pub fn pick_best_sap_candidate<'a>(
+    candidates: &'a [Value],
+    expected_role: &str,
+) -> Option<&'a Value> {
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Rule 1: prefer exact role match.
+    if let Some(c) = candidates
+        .iter()
+        .find(|c| c.get("role").and_then(|r| r.as_str()) == Some(expected_role))
+    {
+        return Some(c);
+    }
+
+    // Rule 2: prefer marker-field present, role absent or matching.
+    let marker = match expected_role {
+        "planner" => "phases",
+        "plan-reviewer" | "code-reviewer" => "gate",
+        "executor" => "summary",
+        "wrap" => "executive_summary",
+        _ => "",
+    };
+    if !marker.is_empty() {
+        if let Some(c) = candidates.iter().find(|c| {
+            let role_ok = match c.get("role").and_then(|r| r.as_str()) {
+                None => true,
+                Some(r) => r == expected_role,
+            };
+            // For planner specifically, require phases to be a non-empty array
+            // so a degenerate `{"phases": []}` floating in prose can't shadow
+            // the real envelope.
+            let marker_ok = if expected_role == "planner" {
+                c.get(marker)
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false)
+            } else {
+                c.get(marker).is_some()
+            };
+            role_ok && marker_ok
+        }) {
+            return Some(c);
+        }
+    }
+
+    // Rule 3: legacy — first candidate.
+    candidates.first()
+}
+
+/// Walk `text` and return every parseable balanced `{...}` substring as a
+/// JSON object Value. Markdown fences are stripped first.
+///
+/// Used by callers (e.g. `parse_envelope` in `handlers::drive`) that need to
+/// pick the *best* candidate for a known agent role rather than blindly take
+/// the first one. Without this, an unrelated JSON-like object embedded in
+/// prose above the real envelope would shadow the true planner/executor
+/// envelope and silently mis-parse.
+pub fn extract_all_json_objects(text: &str) -> Vec<Value> {
+    let cleaned = strip_markdown_fences(text);
+    let candidates = find_json_candidates(&cleaned);
+    candidates
+        .into_iter()
+        .filter_map(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(|v| v.is_object())
+        .collect()
+}
+
 /// Strip markdown code fences from text.
 ///
 /// Handles:

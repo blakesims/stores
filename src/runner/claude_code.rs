@@ -52,7 +52,7 @@ use std::process::Command;
 
 use super::{Runner, RunnerOutput};
 
-use super::sap::extract_envelope_from_text;
+use super::sap::{extract_all_json_objects, pick_best_sap_candidate};
 
 /// Runner that shells out to the `claude` CLI (`claude -p`).
 ///
@@ -430,9 +430,18 @@ impl Runner for ClaudeCodeRunner {
         let (structured_output, structured_output_source) = if sdk_structured_output.is_some() {
             (sdk_structured_output, Some("sdk"))
         } else {
+            // T047 codex-revise: walk ALL candidates and pick the best one
+            // for the agent role. Previously this used extract_envelope_from_text
+            // which returns the FIRST parseable JSON object — meaning an
+            // unrelated leading `{...}` in result.result text could shadow
+            // the true planner/executor envelope (and drive.rs's later
+            // pick-best fallback never got to run because structured_output
+            // was already populated).
             let result_text = extract_result_text_from_stream_json(&stdout);
             let sap_result = result_text.as_deref().and_then(|text| {
-                extract_envelope_from_text(text, None).map(|mut value| {
+                let candidates = extract_all_json_objects(text);
+                pick_best_sap_candidate(&candidates, role).map(|picked| {
+                    let mut value = picked.clone();
                     if let serde_json::Value::Object(ref mut map) = &mut value {
                         map.entry("role".to_string())
                             .or_insert_with(|| serde_json::Value::String(role.to_string()));
