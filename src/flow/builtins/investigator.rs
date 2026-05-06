@@ -205,28 +205,33 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
         match item {
             Value::String(_) => {}
             Value::Object(o) => {
-                if !o.contains_key("file")
-                    || !o.contains_key("line")
-                    || !o.contains_key("snippet")
-                {
+                // Schema (agents/schemas/investigator.schema.json) requires
+                // only 'file'; line and snippet are optional. Parser must
+                // not be stricter than the schema contract.
+                if !o.contains_key("file") {
                     return Err(anyhow!(
-                        "'evidence[{}]' object must have 'file', 'line', 'snippet' keys",
+                        "'evidence[{}]' object must have 'file' key",
                         i
                     ));
                 }
                 if !o["file"].is_string() {
                     return Err(anyhow!("'evidence[{}].file' must be a string", i));
                 }
-                // Reject floats — schema requires integer for line numbers.
-                if !(o["line"].is_i64() || o["line"].is_u64()) {
-                    return Err(anyhow!(
-                        "'evidence[{}].line' must be an integer (got {})",
-                        i,
-                        o["line"]
-                    ));
+                // Optional fields: type-check only when present.
+                if let Some(line) = o.get("line") {
+                    // Schema requires integer; reject floats.
+                    if !(line.is_i64() || line.is_u64()) {
+                        return Err(anyhow!(
+                            "'evidence[{}].line' must be an integer (got {})",
+                            i,
+                            line
+                        ));
+                    }
                 }
-                if !o["snippet"].is_string() {
-                    return Err(anyhow!("'evidence[{}].snippet' must be a string", i));
+                if let Some(snippet) = o.get("snippet") {
+                    if !snippet.is_string() {
+                        return Err(anyhow!("'evidence[{}].snippet' must be a string", i));
+                    }
                 }
                 for key in o.keys() {
                     if !evidence_keys.contains(key.as_str()) {
