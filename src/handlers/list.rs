@@ -8,6 +8,23 @@ use crate::codegen::ddl::quote_ident;
 use crate::output;
 use crate::schema::{actor::InvokerCtx, FieldType, Schema};
 
+/// The 13 canonical risk flag values (mirrors risk_flags.list_enum in observations schema.yaml).
+pub const CANONICAL_RISK_FLAGS: &[&str] = &[
+    "touches_actor_authority",
+    "touches_lifecycle",
+    "touches_subscriber_semantics",
+    "introduces_new_primitive",
+    "changes_boundary",
+    "security_sensitive",
+    "docs_only",
+    "small_local_fix",
+    "duplicate_symptom",
+    "touches_runner_boundary",
+    "touches_schema_core",
+    "authority_surface_drift",
+    "contradicts_prior_decision",
+];
+
 pub fn run(
     schema: &Schema,
     conn: &Connection,
@@ -23,6 +40,27 @@ pub fn run(
     let sort_col = matches.get_one::<String>("sort").cloned();
     let reverse = matches.get_flag("reverse");
     let since = matches.get_one::<String>("since").cloned();
+
+    // risk-flag filter (observations only; multi-occurrence = AND semantics).
+    // Use try_get_many to avoid panicking when the arg isn't registered on the command
+    // (e.g., non-observations stores that don't include --risk-flag).
+    let risk_flags_filter: Vec<String> = matches
+        .try_get_many::<String>("risk-flag")
+        .ok()
+        .flatten()
+        .map(|vals| vals.cloned().collect())
+        .unwrap_or_default();
+
+    // Validate each supplied flag against the canonical 13
+    for flag in &risk_flags_filter {
+        if !CANONICAL_RISK_FLAGS.contains(&flag.as_str()) {
+            bail!(
+                "unknown --risk-flag value '{}'; allowed values: [{}]",
+                flag,
+                CANONICAL_RISK_FLAGS.join(", ")
+            );
+        }
+    }
 
     // Build known column set for --sort validation
     let known_cols: Vec<String> = {
@@ -88,6 +126,16 @@ pub fn run(
         // created_at is stored as ISO-8601; string prefix comparison works for YYYY-MM-DD
         where_clauses.push(format!("created_at >= ?{}", params.len() + 1));
         params.push(rusqlite::types::Value::Text(since_date.clone()));
+    }
+
+    // risk_flags membership filter via json_each — one EXISTS subquery per flag (AND semantics)
+    for flag in &risk_flags_filter {
+        let tbl = quote_ident(&schema.name);
+        where_clauses.push(format!(
+            "EXISTS (SELECT 1 FROM json_each({tbl}.risk_flags) WHERE value = ?{})",
+            params.len() + 1
+        ));
+        params.push(rusqlite::types::Value::Text(flag.clone()));
     }
 
     let where_str = if where_clauses.is_empty() {

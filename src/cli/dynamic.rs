@@ -1112,7 +1112,7 @@ fn build_list_cmd(schema: &Schema) -> Command {
     };
     let cols_help = col_names.join(", ");
 
-    Command::new("list")
+    let mut cmd = Command::new("list")
         .about("list entries")
         .arg(
             Arg::new("status")
@@ -1147,7 +1147,23 @@ fn build_list_cmd(schema: &Schema) -> Command {
                 .long("since")
                 .help("Filter rows where created_at >= date (YYYY-MM-DD)")
                 .required(false),
-        )
+        );
+
+    // Observations-only: --risk-flag <FLAG> (repeatable, AND semantics)
+    if schema.name == "observations" {
+        cmd = cmd.arg(
+            Arg::new("risk-flag")
+                .long("risk-flag")
+                .action(ArgAction::Append)
+                .help(
+                    "Filter rows whose risk_flags array contains FLAG (repeatable; multiple = AND). \
+                     Must be one of the 13 canonical risk flag values.",
+                )
+                .required(false),
+        );
+    }
+
+    cmd
 }
 
 /// Build the `schema` command.
