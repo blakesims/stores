@@ -151,6 +151,11 @@ pub struct RunArgs {
 /// tests can flip it directly without sending a signal.
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// Process-wide stale-binary flag. Set by the first stale detection inside
+/// `poll_once_with_guard` so the fail-loud message fires exactly once even
+/// when multiple auto-drive candidates are eligible in the same poll iteration.
+pub static STALE_HALTED: AtomicBool = AtomicBool::new(false);
+
 extern "C" fn handle_sigterm(_: libc::c_int) {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
@@ -279,7 +284,15 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
         ) {
             Ok(n) if n > 0 => eprintln!("[daemon] dispatched {} job(s) in iteration {}", n, iter),
             Ok(_) => {}
-            Err(e) => eprintln!("[daemon] poll error: {}", e),
+            Err(e) => {
+                // Stale-binary errors are emitted inside poll_once_with_guard
+                // (exactly once via STALE_HALTED); propagate as a hard bail so
+                // the daemon exits rather than looping on a stale binary.
+                if e.to_string() == STALE_DAEMON_MESSAGE {
+                    bail!(e);
+                }
+                eprintln!("[daemon] poll error: {}", e);
+            }
         }
         iter += 1;
         if let Some(max) = args.max_iters {
@@ -407,11 +420,19 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                 // drives BEFORE we burn a claim; otherwise a row would be
                 // claimed-and-skipped, which would prevent retry on the next
                 // poll. Only the auto-drive builtin is special-cased.
+                //
+                // The stale check here is an early-out optimization (avoids
+                // burning a claim on a stale binary). The load-bearing check
+                // is the tight pre-spawn guard below (MAJOR 1 fix). Dedup via
+                // STALE_HALTED ensures only one log line fires even when
+                // multiple candidates match in the same poll.
                 if agent.command == "builtin:auto-drive" {
                     if let Some(guard) = exe_guard {
-                        if let Some(message) = guard.check_stale()? {
-                            eprintln!("{message}");
-                            continue;
+                        if guard.check_stale()?.is_some() {
+                            if !STALE_HALTED.swap(true, Ordering::SeqCst) {
+                                eprintln!("{}", STALE_DAEMON_MESSAGE);
+                            }
+                            return Err(anyhow!(STALE_DAEMON_MESSAGE));
                         }
                     }
                     let cap = crate::flow::config::resolve_drive_max_parallel(config_path);
@@ -442,6 +463,20 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                 )?;
                 if !claimed {
                     continue;
+                }
+                // Tight pre-spawn stale guard (MAJOR 1 / MAJOR 2 fix): check
+                // immediately before run_dispatch so no work (claim, postcond
+                // computation) can slip in between the guard and the spawn.
+                // STALE_HALTED deduplicates the log line across candidates.
+                if agent.command == "builtin:auto-drive" {
+                    if let Some(guard) = exe_guard {
+                        if guard.check_stale()?.is_some() {
+                            if !STALE_HALTED.swap(true, Ordering::SeqCst) {
+                                eprintln!("{}", STALE_DAEMON_MESSAGE);
+                            }
+                            return Err(anyhow!(STALE_DAEMON_MESSAGE));
+                        }
+                    }
                 }
                 let exit_code = run_dispatch(
                     conn,
@@ -497,14 +532,6 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
             }
         };
         for c in candidates {
-            if agent.command == "builtin:auto-drive" {
-                if let Some(guard) = exe_guard {
-                    if let Some(message) = guard.check_stale()? {
-                        eprintln!("{message}");
-                        continue;
-                    }
-                }
-            }
             // Atomic CAS claim — closes the multi-daemon race where two
             // daemons would otherwise both dispatch the same retry candidate.
             // If another daemon claimed it first, our UPDATE affects 0 rows
@@ -587,6 +614,18 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                         "[daemon] open_auto_drive_retry_lock failed for '{}'/{}: {}",
                         agent.name, c.display_id, e
                     );
+                }
+            }
+            // Tight pre-spawn stale guard (retry path) — same pattern as
+            // the forward-dispatch path above. STALE_HALTED deduplicates.
+            if agent.command == "builtin:auto-drive" {
+                if let Some(guard) = exe_guard {
+                    if guard.check_stale()?.is_some() {
+                        if !STALE_HALTED.swap(true, Ordering::SeqCst) {
+                            eprintln!("{}", STALE_DAEMON_MESSAGE);
+                        }
+                        return Err(anyhow!(STALE_DAEMON_MESSAGE));
+                    }
                 }
             }
             let exit_code = run_dispatch(
@@ -1922,6 +1961,8 @@ mod tests {
     #[test]
     fn stale_auto_drive_guard_refuses_before_claim_or_spawn_side_effect() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Reset process-local dedup flag so test order doesn't matter.
+        STALE_HALTED.store(false, Ordering::SeqCst);
         std::env::remove_var("STORES_DRIVE_CMD");
         let conn = fresh_db();
         add_auto_drive_columns(&conn);
@@ -1943,7 +1984,10 @@ mod tests {
             BinaryIdentity { dev: 7, ino: 9 },
         );
 
-        let n = poll_once_with_guard(
+        // With the MAJOR 1 fix, poll_once_with_guard returns Err (not Ok(0))
+        // when stale so that run_daemon's outer loop bails rather than
+        // continuing to poll a stale binary.
+        let result = poll_once_with_guard(
             &conn,
             &agents,
             &empty_policies(),
@@ -1951,9 +1995,12 @@ mod tests {
             "test-claimer",
             "epoch",
             Some(&guard),
-        )
-        .unwrap();
-        assert_eq!(n, 0);
+        );
+        assert!(
+            result.is_err(),
+            "stale binary must cause poll_once_with_guard to return Err"
+        );
+        assert_eq!(result.unwrap_err().to_string(), STALE_DAEMON_MESSAGE);
         let (claims, drive_pid): (i64, Option<i64>) = conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM dispatch_locks WHERE agent_name='auto-drive'), drive_pid \
@@ -1969,6 +2016,7 @@ mod tests {
     #[test]
     fn fresh_auto_drive_guard_records_positive_drive_pid() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        STALE_HALTED.store(false, Ordering::SeqCst);
         let conn = fresh_db();
         add_auto_drive_columns(&conn);
         let tmp = tempfile::tempdir().unwrap();
