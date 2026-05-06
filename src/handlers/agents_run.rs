@@ -288,6 +288,7 @@ pub fn poll_once(
                         &agent.name,
                         &status_str,
                         &policies.hash,
+                        &sub.transition.to,
                     );
                 }
                 dispatched += 1;
@@ -419,6 +420,7 @@ pub fn poll_once(
                     &agent.name,
                     &status_str,
                     &policies.hash,
+                    &c.to_status,
                 );
             }
             let _ = c.attempts;
@@ -595,6 +597,7 @@ pub(crate) fn route_failure_to_deploy_blocked(
     agent_name: &str,
     last_status: &str,
     policies_hash: &str,
+    subscription_to: &str,
 ) {
     // Only the `tasks` store declares `mark_deploy_blocked` today. Avoid the
     // schema-load cost (and a spurious bundled-schema-not-found error) for
@@ -624,6 +627,16 @@ pub(crate) fn route_failure_to_deploy_blocked(
         Some(s) => s,
         None => return,
     };
+    // Tightened gate (T046 codex-revise): only route to deploy_blocked when
+    // the failed subscriber's transition.to MATCHES the row's current state.
+    // This pins the failure-routing to the subscriber whose effect was to
+    // land the row in the from-state of the deploy_blocked edge — accept-merge
+    // (in_review→accepted), schema-migrate (cargo_installed→schema_migrated /
+    // ...→deploy_blocked) — and excludes hypothetical unrelated subscribers
+    // that happen to fail while a row sits at one of these states.
+    if subscription_to != current_status {
+        return;
+    }
     let has_edge = schema.lifecycle.transitions.iter().any(|t| {
         t.from == current_status
             && t.verb == "mark_deploy_blocked"

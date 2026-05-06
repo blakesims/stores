@@ -635,6 +635,7 @@ mod tests {
             "accept-merge",
             "exit=11",
             "feedface",
+            "accepted",
         );
 
         let (status, reason): (String, Option<String>) = conn
@@ -691,6 +692,7 @@ mod tests {
             "some-agent",
             "exit=1",
             "",
+            "accepted",
         );
         let status: String = conn
             .query_row(
@@ -700,6 +702,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "accepted", "non-tasks-store path must no-op");
+    }
+
+    /// T046 codex-revise: subscription_to MUST match current_status before the
+    /// framework routes failure to deploy_blocked. Closes the prior cycle's
+    /// HIGH finding that the routing was over-broad — any tasks-store
+    /// subscriber failing while a row sat at `accepted` would have triggered
+    /// mark_deploy_blocked, even subscribers whose own transition.to was a
+    /// different state (e.g. a hypothetical subscriber on tasks: ready→executing
+    /// that happened to fail-and-fire while a different row was at accepted).
+    /// The tightened gate pins routing to the subscriber that LANDED the row
+    /// in the from-state of the deploy_blocked edge.
+    #[test]
+    fn t046_subscription_to_mismatch_does_not_route() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_accepted_task(&conn, "T046c", "feat/x", "/tmp/no-such");
+
+        // Subscriber claims to have fired on `ready → executing` (subscription_to
+        // = "executing"), but the row is currently at `accepted`. The gate
+        // must short-circuit BEFORE firing mark_deploy_blocked, leaving the
+        // row at accepted and writing no transition_history row for
+        // mark_deploy_blocked.
+        crate::handlers::agents_run::route_failure_to_deploy_blocked(
+            &conn,
+            "tasks",
+            "T046c",
+            "some-other-subscriber",
+            "exit=7",
+            "",
+            "executing", // subscription_to ≠ current_status (accepted)
+        );
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T046c'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "accepted",
+            "subscription_to mismatch must NOT route the row to deploy_blocked"
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T046c' AND verb='mark_deploy_blocked'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "no mark_deploy_blocked transition_history row may be written when subscription_to mismatches"
+        );
     }
 
     /// Test-only thin wrapper around the private fire_mark_deploy_blocked.
