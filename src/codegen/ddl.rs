@@ -210,6 +210,15 @@ CREATE TABLE IF NOT EXISTS dispatch_locks (
     attempts INTEGER NOT NULL DEFAULT 1,
     last_status TEXT,
     finished_at TEXT,
+    daemon_epoch TEXT,
+    claim_source TEXT CHECK(claim_source IN ('try_claim','retry_claim','manual','legacy')),
+    attempt INTEGER,
+    pid INTEGER,
+    heartbeat_at TEXT,
+    postcondition_id TEXT,
+    postcondition_args TEXT,
+    terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown')),
+    next_retry_at TEXT,
     UNIQUE(store, row_id, agent_name)
 );
 CREATE TABLE IF NOT EXISTS substrate_migrations (
@@ -219,6 +228,11 @@ CREATE TABLE IF NOT EXISTS substrate_migrations (
     table_name TEXT NOT NULL,
     column_name TEXT NOT NULL,
     ddl_applied TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS framework_migrations (
+    id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL,
+    note TEXT
 );
 ";
 

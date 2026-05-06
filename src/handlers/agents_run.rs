@@ -100,6 +100,15 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
     let conn = crate::db::open(&db_path)?;
     let claimer = format!("daemon-{}", std::process::id());
 
+    // L134 / T050 Phase 1: ensure typed dispatch_locks columns + backfill
+    // legacy rows BEFORE seed_starting_line so any new rows the seeder writes
+    // see the typed schema (db::open also calls these for CLI flows; daemon
+    // calls explicitly here for clarity / startup ordering).
+    ensure_dispatch_locks_typed(&conn)
+        .context("L134: ensure typed dispatch_locks columns")?;
+    backfill_legacy_locks(&conn)
+        .context("L134: backfill legacy dispatch_locks rows")?;
+
     // L116: snapshot the highest transition_history.id BEFORE seeding so the
     // seeder cannot claim transitions that fire after the daemon started
     // (e.g. between two `agents run --once` calls). Without this bound, a
@@ -585,6 +594,90 @@ pub fn snapshot_max_transition_id(conn: &Connection) -> Result<i64> {
         |r| r.get(0),
     )?;
     Ok(id.unwrap_or(0))
+}
+
+/// L134 / T050 Phase 1: ensure the 9 typed lifecycle columns exist on
+/// `dispatch_locks`. Idempotent: detects missing columns via
+/// `PRAGMA table_info('dispatch_locks')` and ALTERs only what is missing.
+/// Records a single 'L134-dispatch-locks-typed' row in `framework_migrations`
+/// the first time a column is added.
+pub fn ensure_dispatch_locks_typed(conn: &Connection) -> Result<()> {
+    // Set of columns we expect to be present after this migration.
+    let expected: &[(&str, &str)] = &[
+        ("daemon_epoch", "TEXT"),
+        (
+            "claim_source",
+            "TEXT CHECK(claim_source IN ('try_claim','retry_claim','manual','legacy'))",
+        ),
+        ("attempt", "INTEGER"),
+        ("pid", "INTEGER"),
+        ("heartbeat_at", "TEXT"),
+        ("postcondition_id", "TEXT"),
+        ("postcondition_args", "TEXT"),
+        (
+            "terminal_reason",
+            "TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown'))",
+        ),
+        ("next_retry_at", "TEXT"),
+    ];
+
+    let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info('dispatch_locks')")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for row in rows {
+            existing.insert(row?);
+        }
+    }
+
+    let mut added_any = false;
+    for (name, type_clause) in expected {
+        if !existing.contains(*name) {
+            let sql = format!("ALTER TABLE dispatch_locks ADD COLUMN {name} {type_clause}");
+            conn.execute(&sql, []).with_context(|| format!("adding column {name} to dispatch_locks"))?;
+            added_any = true;
+        }
+    }
+
+    if added_any {
+        let now = crate::handlers::row::now_iso8601();
+        conn.execute(
+            "INSERT OR IGNORE INTO framework_migrations (id, applied_at, note) \
+             VALUES ('L134-dispatch-locks-typed', ?1, 'add typed lifecycle columns to dispatch_locks')",
+            rusqlite::params![now],
+        )?;
+    }
+    Ok(())
+}
+
+/// L134 / T050 Phase 1: backfill legacy `dispatch_locks` rows with values for
+/// the new typed columns. ONLY populates rows where `claim_source IS NULL`
+/// (i.e. rows that predate the migration) — never modifies live rows. This is
+/// observability-only: lock semantics are unchanged.
+///
+/// Returns the number of rows updated.
+pub fn backfill_legacy_locks(conn: &Connection) -> Result<usize> {
+    // Single UPDATE with CASE for terminal_reason derivation. Only touches
+    // rows whose claim_source is NULL (legacy / pre-migration).
+    let n = conn.execute(
+        "UPDATE dispatch_locks SET \
+            claim_source = 'legacy', \
+            attempt = COALESCE(attempts, 1), \
+            terminal_reason = CASE \
+                WHEN last_status = 'ok' THEN 'ok' \
+                WHEN last_status LIKE 'exit=%' AND last_status != 'exit=0' THEN 'exit_nonzero' \
+                WHEN last_status LIKE 'exit=0%' THEN 'ok' \
+                WHEN last_status LIKE 'error:%' THEN 'error' \
+                WHEN last_status LIKE 'halted:%' THEN 'halted' \
+                WHEN last_status = 'skip-historical' THEN 'legacy_unknown' \
+                ELSE 'legacy_unknown' \
+            END, \
+            next_retry_at = NULL, \
+            daemon_epoch = '' \
+         WHERE claim_source IS NULL",
+        [],
+    )?;
+    Ok(n)
 }
 
 /// Atomically claim `(store, row_id, agent_name)` by inserting a
