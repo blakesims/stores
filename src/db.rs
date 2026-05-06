@@ -20,6 +20,12 @@ fn open_inner(path: &Path) -> Result<Connection> {
     // Substrate-level tables (store-agnostic). Idempotent (CREATE IF NOT EXISTS).
     conn.execute_batch(SUBSTRATE_DDL)
         .context("apply substrate DDL")?;
+    // L134 / T050 Phase 1: typed-buffer migration + legacy backfill.
+    // Idempotent; safe to run on every CLI verb that opens the DB.
+    crate::handlers::agents_run::ensure_dispatch_locks_typed(&conn)
+        .context("L134: ensure typed dispatch_locks columns")?;
+    crate::handlers::agents_run::backfill_legacy_locks(&conn)
+        .context("L134: backfill legacy dispatch_locks rows")?;
     Ok(conn)
 }
 

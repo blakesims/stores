@@ -173,22 +173,30 @@ fn silent_zombie_lock_already_closed_e2e() {
     assert_eq!(cnt, 1, "exactly one to_status='blocked' history row must land");
 }
 
-/// T049: end-to-end regression for the open-lock dead-PID detection path.
+/// L141 -> L134: end-to-end regression for the closed-ok-lock dead-PID detection path.
 ///
-/// The new T049 contract is: auto-drive's dispatch_lock is left OPEN after
-/// spawn (the drive subprocess closes it on first successful submit). A
-/// drive that dies between spawn and first submit therefore stays visible
-/// to the watchdog as an open-lock silent zombie, where pre-T049 it was
-/// silently closed with `last_status='ok'` and orphaned the row.
+/// The L134/T050 contract replaces T049's open-lock approach with typed
+/// terminal reasons. After spawn the lock closes immediately with
+/// `last_status='ok'`, `terminal_reason='ok'`,
+/// `postcondition_id='drive_pid_recorded_or_terminal'`, and `drive_pid` is
+/// set on the tasks row. A drive that dies after spawn but before any submit
+/// is still detectable: the watchdog JOINs tasks + dispatch_locks filtering
+/// on `terminal_reason != 'silent_zombie'` (not on `finished_at IS NULL`),
+/// and detects the dead PID via `tasks.drive_pid` + in-cycle status.
+///
+/// Proves the key safety property: a closed-ok lock does NOT mean a dead
+/// post-spawn drive escapes watchdog detection. Same observable outcome
+/// as T049 (row blocked with `drive_failed:silent_zombie_pid_dead`), but
+/// via typed control-plane shape rather than open-lock state.
 ///
 /// Reproduces the T045 conditions:
 ///   1. Auto-drive fires on a planning row → spawns a long-lived stub.
 ///   2. Test SIGKILLs the stub (no submit ever lands).
-///   3. Second `agents run --once` → watchdog sees open lock + dead PID
-///      → flips row to `blocked` with
+///   3. Second `agents run --once` → watchdog detects dead PID via
+///      `drive_pid` + typed lock state → flips row to `blocked` with
 ///      `blocked_reason='drive_failed:silent_zombie_pid_dead'`.
 #[test]
-fn auto_drive_open_lock_dead_pid_e2e() {
+fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
     let bin = bin();
     assert!(bin.exists(), "CARGO_BIN_EXE_stores must point at a built binary");
 
@@ -273,7 +281,7 @@ fn auto_drive_open_lock_dead_pid_e2e() {
     // does not see it.
     let stub_cmd = "sleep 600 #";
 
-    // ---- 5. First --once: dispatch auto-drive, leaving lock OPEN (T049) ----
+    // ---- 5. First --once: dispatch auto-drive, closing lock with typed ok (L141 -> L134) ----
     let out1 = Command::new(&bin)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(workspace)
@@ -288,22 +296,45 @@ fn auto_drive_open_lock_dead_pid_e2e() {
         String::from_utf8_lossy(&out1.stderr)
     );
 
-    // After dispatch, BEFORE we kill the stub: lock is OPEN (T049 invariant)
-    // and drive_pid is recorded.
+    // After dispatch, BEFORE we kill the stub: lock is CLOSED with typed ok
+    // (L141 -> L134 invariant: lock closes immediately once
+    // drive_pid_recorded_or_terminal postcondition passes), and drive_pid
+    // is recorded on the tasks row.
     let conn = Connection::open(&db_path).unwrap();
-    let (finished_at, drive_pid): (Option<String>, Option<i64>) = conn
+    let (finished_at, last_status, terminal_reason, postcondition_id, drive_pid): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ) = conn
         .query_row(
-            "SELECT dl.finished_at, t.drive_pid \
+            "SELECT dl.finished_at, dl.last_status, dl.terminal_reason, dl.postcondition_id, t.drive_pid \
              FROM dispatch_locks dl JOIN tasks t ON t.id = dl.row_id \
              WHERE t.display_id='T849' AND dl.agent_name='auto-drive'",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .unwrap();
     assert!(
-        finished_at.is_none(),
-        "T049: auto-drive lock must remain OPEN after spawn (got finished_at={:?})",
+        finished_at.is_some(),
+        "L141 -> L134: auto-drive lock must close once drive_pid_recorded_or_terminal passes (got finished_at={:?})",
         finished_at
+    );
+    assert_eq!(
+        last_status.as_deref(),
+        Some("ok"),
+        "L141 -> L134: last_status='ok' on typed-clean close",
+    );
+    assert_eq!(
+        terminal_reason.as_deref(),
+        Some("ok"),
+        "L141 -> L134: terminal_reason='ok' when postcondition passes",
+    );
+    assert_eq!(
+        postcondition_id.as_deref(),
+        Some("drive_pid_recorded_or_terminal"),
+        "L141 -> L134: postcondition_id stamped on the lock row",
     );
     let pid = drive_pid.expect("drive_pid must be recorded after spawn");
     assert!(pid > 0, "drive_pid must be > 0; got {pid}");
@@ -324,7 +355,22 @@ fn auto_drive_open_lock_dead_pid_e2e() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // ---- 7. Second --once: watchdog detects open-lock dead-PID ----
+    // Back-date drive_started_at past ZOMBIE_GRACE_SECS (10s) so the watchdog
+    // HAVING cutoff fires deterministically without sleeping. Under L134 the
+    // watchdog checks `drive_started_at < cutoff`; a freshly-spawned stub
+    // would fall inside the grace window and be skipped. This is test-fixture
+    // control only — it does not alter the safety property under test.
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE tasks SET drive_started_at = '2026-01-01T00:00:00Z' \
+             WHERE display_id = 'T849'",
+            [],
+        )
+        .unwrap();
+    }
+
+    // ---- 7. Second --once: watchdog detects closed-ok-lock dead-PID (L141 -> L134) ----
     let out2 = Command::new(&bin)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(workspace)
@@ -348,25 +394,30 @@ fn auto_drive_open_lock_dead_pid_e2e() {
         .unwrap();
     assert_eq!(
         status, "blocked",
-        "T049: row must flip to 'blocked' after watchdog detects dead PID; got '{status}'"
+        "L141 -> L134: row must flip to 'blocked' after watchdog detects dead PID; got '{status}'"
     );
     assert_eq!(
         blocked_reason.as_deref(),
         Some("drive_failed:silent_zombie_pid_dead"),
-        "T049: blocked_reason must carry the silent-zombie suffix"
+        "L141 -> L134: blocked_reason must carry the silent-zombie suffix"
     );
 
-    // Lock is now closed.
-    let finished_after: Option<String> = conn
+    // Lock terminal_reason updated to 'silent_zombie' by watchdog.
+    let (finished_after, terminal_reason_after): (Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT finished_at FROM dispatch_locks \
+            "SELECT finished_at, terminal_reason FROM dispatch_locks \
              WHERE display_id='T849' AND agent_name='auto-drive'",
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
     assert!(
         finished_after.is_some(),
-        "T049: watchdog must close the lock after the silent-zombie flip"
+        "L141 -> L134: lock must remain closed after the silent-zombie flip"
+    );
+    assert_eq!(
+        terminal_reason_after.as_deref(),
+        Some("silent_zombie"),
+        "L141 -> L134: watchdog updates terminal_reason to 'silent_zombie' after flip"
     );
 }

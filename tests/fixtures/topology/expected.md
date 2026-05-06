@@ -16,6 +16,16 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
   [*] --> planning
+  planning --> closed_out_of_band :  H! close-out-of-band
+  plan_review --> closed_out_of_band :  H! close-out-of-band
+  ready --> closed_out_of_band :  H! close-out-of-band
+  executing --> closed_out_of_band :  H! close-out-of-band
+  code_review --> closed_out_of_band :  H! close-out-of-band
+  blocked --> closed_out_of_band :  H! close-out-of-band
+  complete --> closed_out_of_band :  H! close-out-of-band
+  in_review --> closed_out_of_band :  H! close-out-of-band
+  rejected --> closed_out_of_band :  H! close-out-of-band
+  deploy_blocked --> closed_out_of_band :  H! close-out-of-band
   planning --> plan_review :  A submit-plan
   planning --> ready :  F skip-plan
   plan_review --> ready :  A submit-plan-review [READY]
@@ -24,12 +34,14 @@ stateDiagram-v2
   plan_review --> blocked :  A submit-plan-review [NOT_READY]
   ready --> executing :  F start
   executing --> code_review :  A submit-execute
+  code_review --> complete :  A submit-review [PASS]
   code_review --> executing :  A submit-review [PASS]
   code_review --> complete :  A submit-review [PASS]
   code_review --> executing :  A submit-review [REVISE]
   code_review --> blocked :  A submit-review [REVISE]
   code_review --> blocked :  A submit-review [FAIL]
   blocked --> ready :  H+ resume
+  blocked --> planning :  H+ resume
   planning --> blocked :  F mark_drive_failed
   plan_review --> blocked :  F mark_drive_failed
   ready --> blocked :  F mark_drive_failed
@@ -54,6 +66,7 @@ stateDiagram-v2
 stateDiagram-v2
   [*] --> open
   open --> investigating :  A investigate
+  open --> needs_investigation :  A needs_investigation
   open --> wont_fix :  H+ wont_fix
   open --> resolved :  A close_as_addressed
   investigating --> confirmed :  H+ confirm
@@ -64,6 +77,12 @@ stateDiagram-v2
   confirmed --> in_progress :  A claim
   in_progress --> resolved :  A resolve
   confirmed --> wont_fix :  H+ wont_fix
+  open --> resolved :  F auto_resolve
+  investigating --> resolved :  F auto_resolve
+  confirmed --> resolved :  F auto_resolve
+  ready --> resolved :  F auto_resolve
+  needs_info --> resolved :  F auto_resolve
+  in_progress --> resolved :  F auto_resolve
 ```
 
 ---

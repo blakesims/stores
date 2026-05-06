@@ -10,13 +10,15 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::Connection;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::codegen::ddl::quote_ident;
-use crate::flow::{decide, AgentEntry, AgentsYaml, BackoffKind, Decision, NotifyEvent, PoliciesYaml};
+use crate::flow::{
+    decide, AgentEntry, AgentsYaml, BackoffKind, Decision, NotifyEvent, PoliciesYaml,
+};
 
 /// Base backoff quantum for retry rescheduling. Linear: `attempts * BASE`,
 /// Exponential: `BASE * 2^(attempts-1)` (saturating).
@@ -100,6 +102,13 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
     let conn = crate::db::open(&db_path)?;
     let claimer = format!("daemon-{}", std::process::id());
 
+    // L134 / T050 Phase 1: ensure typed dispatch_locks columns + backfill
+    // legacy rows BEFORE seed_starting_line so any new rows the seeder writes
+    // see the typed schema (db::open also calls these for CLI flows; daemon
+    // calls explicitly here for clarity / startup ordering).
+    ensure_dispatch_locks_typed(&conn).context("L134: ensure typed dispatch_locks columns")?;
+    backfill_legacy_locks(&conn).context("L134: backfill legacy dispatch_locks rows")?;
+
     // L116: snapshot the highest transition_history.id BEFORE seeding so the
     // seeder cannot claim transitions that fire after the daemon started
     // (e.g. between two `agents run --once` calls). Without this bound, a
@@ -125,9 +134,7 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
             config_path: &config_path,
             policies_hash: &policies.hash,
         };
-        if let Err(e) =
-            crate::flow::builtins::auto_resolve_observation::startup_sweep(&sweep_ctx)
-        {
+        if let Err(e) = crate::flow::builtins::auto_resolve_observation::startup_sweep(&sweep_ctx) {
             eprintln!("[startup-sweep] error: {:#}", e);
         }
     }
@@ -141,7 +148,14 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
             );
             break;
         }
-        match poll_once(&conn, &agents, &policies, &config_path, &claimer, &daemon_epoch) {
+        match poll_once(
+            &conn,
+            &agents,
+            &policies,
+            &config_path,
+            &claimer,
+            &daemon_epoch,
+        ) {
             Ok(n) if n > 0 => eprintln!("[daemon] dispatched {} job(s) in iteration {}", n, iter),
             Ok(_) => {}
             Err(e) => eprintln!("[daemon] poll error: {}", e),
@@ -260,6 +274,12 @@ pub fn poll_once(
                     }
                 }
 
+                let postcondition_id = agent
+                    .command
+                    .strip_prefix("builtin:")
+                    .and_then(crate::flow::builtins::postcondition_for_builtin);
+                let postcondition_args =
+                    postcondition_id.map(|id| postcondition_args_for(id, &sub.store, &display_id));
                 let claimed = try_claim(
                     conn,
                     &sub.store,
@@ -268,6 +288,10 @@ pub fn poll_once(
                     &agent.name,
                     transition_id,
                     claimer,
+                    daemon_epoch,
+                    "try_claim",
+                    postcondition_id,
+                    postcondition_args.as_ref(),
                 )?;
                 if !claimed {
                     continue;
@@ -286,30 +310,16 @@ pub fn poll_once(
                     &policies.hash,
                     &row_json,
                 );
-                let (status_str, code) = match exit_code {
-                    Ok(c) => (
-                        if c == 0 {
-                            "ok".to_string()
-                        } else {
-                            format!("exit={}", c)
-                        },
-                        c,
-                    ),
-                    Err(e) => (format!("error: {}", e), -1),
-                };
-                // T049: auto-drive's lock close is shifted into the spawned
-                // drive subprocess (closes on first successful submit). On a
-                // healthy spawn (exit 0), leave the lock open here so a drive
-                // that dies between spawn and first submit remains visible to
-                // the watchdog. On non-zero exit / spawn error, keep the
-                // existing close so T041's retry-rescheduler sees the row.
-                let skip_close_for_auto_drive =
-                    agent.name == "auto-drive" && code == 0;
-                if !skip_close_for_auto_drive {
-                    let _ = mark_claim_finished(
-                        conn, &sub.store, row_id, &agent.name, &status_str,
-                    );
-                }
+                let (terminal_reason, status_str, code) = terminal_from_dispatch_result(exit_code);
+                let _ = mark_claim_finished_typed(
+                    conn,
+                    &sub.store,
+                    row_id,
+                    &display_id,
+                    agent,
+                    &terminal_reason,
+                    &status_str,
+                );
                 if code != 0 {
                     route_failure_to_deploy_blocked(
                         conn,
@@ -357,16 +367,10 @@ pub fn poll_once(
             }
             let row_json = read_row_as_json(conn, &c.store, c.row_id)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
-            let decision = decide(
-                policies,
-                &c.store,
-                &c.from_status,
-                &c.to_status,
-                &row_json,
-            )
-            .unwrap_or(Decision::Allow {
-                policy_id: "default-allow".into(),
-            });
+            let decision = decide(policies, &c.store, &c.from_status, &c.to_status, &row_json)
+                .unwrap_or(Decision::Allow {
+                    policy_id: "default-allow".into(),
+                });
             let policy_id = match &decision {
                 Decision::Allow { policy_id } => policy_id.clone(),
                 Decision::Halt { policy_id } => {
@@ -444,24 +448,16 @@ pub fn poll_once(
                 &policies.hash,
                 &row_json,
             );
-            let (status_str, code) = match exit_code {
-                Ok(code) => (
-                    if code == 0 {
-                        "ok".to_string()
-                    } else {
-                        format!("exit={}", code)
-                    },
-                    code,
-                ),
-                Err(e) => (format!("error: {}", e), -1),
-            };
-            // T049: mirror the dispatch path — leave auto-drive locks open on
-            // a healthy retry spawn so the drive subprocess closes them on
-            // first successful submit; close on non-zero so retry path sees it.
-            let skip_close_for_auto_drive = agent.name == "auto-drive" && code == 0;
-            if !skip_close_for_auto_drive {
-                let _ = mark_claim_finished(conn, &c.store, c.row_id, &agent.name, &status_str);
-            }
+            let (terminal_reason, status_str, code) = terminal_from_dispatch_result(exit_code);
+            let _ = mark_claim_finished_typed(
+                conn,
+                &c.store,
+                c.row_id,
+                &c.display_id,
+                agent,
+                &terminal_reason,
+                &status_str,
+            );
             if code != 0 {
                 route_failure_to_deploy_blocked(
                     conn,
@@ -541,9 +537,11 @@ pub fn seed_starting_line(
             let n = conn.execute(
                 "INSERT OR IGNORE INTO dispatch_locks \
                  (store, row_id, display_id, agent_name, transition_id, \
-                  claimed_at, claimed_by, last_status, finished_at) \
+                  claimed_at, claimed_by, last_status, finished_at, \
+                  daemon_epoch, claim_source, attempt, terminal_reason, next_retry_at) \
                  SELECT th.store, th.row_id, th.display_id, ?1, th.id, ?2, \
-                        'starting-line-marker', 'skip-historical', ?2 \
+                        'starting-line-marker', 'skip-historical', ?2, \
+                        '', 'legacy', 0, 'legacy_unknown', NULL \
                  FROM transition_history th \
                  WHERE th.store = ?3 AND th.from_status = ?4 AND th.to_status = ?5 \
                        AND th.id <= ?6",
@@ -579,12 +577,94 @@ fn agent_has_been_seeded(conn: &Connection, agent_name: &str) -> Result<bool> {
 /// have id >= 1, so a 0-bound never seeds anything — correct cold-start
 /// semantics).
 pub fn snapshot_max_transition_id(conn: &Connection) -> Result<i64> {
-    let id: Option<i64> = conn.query_row(
-        "SELECT MAX(id) FROM transition_history",
-        [],
-        |r| r.get(0),
-    )?;
+    let id: Option<i64> =
+        conn.query_row("SELECT MAX(id) FROM transition_history", [], |r| r.get(0))?;
     Ok(id.unwrap_or(0))
+}
+
+/// L134 / T050 Phase 1: ensure the 9 typed lifecycle columns exist on
+/// `dispatch_locks`. Idempotent: detects missing columns via
+/// `PRAGMA table_info('dispatch_locks')` and ALTERs only what is missing.
+/// Records a single 'L134-dispatch-locks-typed' row in `framework_migrations`
+/// the first time a column is added.
+pub fn ensure_dispatch_locks_typed(conn: &Connection) -> Result<()> {
+    // Set of columns we expect to be present after this migration.
+    let expected: &[(&str, &str)] = &[
+        ("daemon_epoch", "TEXT"),
+        (
+            "claim_source",
+            "TEXT CHECK(claim_source IN ('try_claim','retry_claim','manual','legacy'))",
+        ),
+        ("attempt", "INTEGER"),
+        ("pid", "INTEGER"),
+        ("heartbeat_at", "TEXT"),
+        ("postcondition_id", "TEXT"),
+        ("postcondition_args", "TEXT"),
+        (
+            "terminal_reason",
+            "TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown'))",
+        ),
+        ("next_retry_at", "TEXT"),
+    ];
+
+    let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info('dispatch_locks')")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for row in rows {
+            existing.insert(row?);
+        }
+    }
+
+    let mut added_any = false;
+    for (name, type_clause) in expected {
+        if !existing.contains(*name) {
+            let sql = format!("ALTER TABLE dispatch_locks ADD COLUMN {name} {type_clause}");
+            conn.execute(&sql, [])
+                .with_context(|| format!("adding column {name} to dispatch_locks"))?;
+            added_any = true;
+        }
+    }
+
+    if added_any {
+        let now = crate::handlers::row::now_iso8601();
+        conn.execute(
+            "INSERT OR IGNORE INTO framework_migrations (id, applied_at, note) \
+             VALUES ('L134-dispatch-locks-typed', ?1, 'add typed lifecycle columns to dispatch_locks')",
+            rusqlite::params![now],
+        )?;
+    }
+    Ok(())
+}
+
+/// L134 / T050 Phase 1: backfill legacy `dispatch_locks` rows with values for
+/// the new typed columns. ONLY populates rows where `claim_source IS NULL`
+/// (i.e. rows that predate the migration) — never modifies live rows. This is
+/// observability-only: lock semantics are unchanged.
+///
+/// Returns the number of rows updated.
+pub fn backfill_legacy_locks(conn: &Connection) -> Result<usize> {
+    // Single UPDATE with CASE for terminal_reason derivation. Only touches
+    // rows whose claim_source is NULL (legacy / pre-migration).
+    let n = conn.execute(
+        "UPDATE dispatch_locks SET \
+            claim_source = 'legacy', \
+            attempt = COALESCE(attempts, 1), \
+            terminal_reason = CASE \
+                WHEN last_status = 'ok' THEN 'ok' \
+                WHEN last_status LIKE 'exit=%' AND last_status != 'exit=0' THEN 'exit_nonzero' \
+                WHEN last_status LIKE 'exit=0%' THEN 'ok' \
+                WHEN last_status LIKE 'error:%' THEN 'error' \
+                WHEN last_status LIKE 'halted:%' THEN 'halted' \
+                WHEN last_status = 'skip-historical' THEN 'legacy_unknown' \
+                ELSE 'legacy_unknown' \
+            END, \
+            next_retry_at = NULL, \
+            daemon_epoch = '' \
+         WHERE claim_source IS NULL",
+        [],
+    )?;
+    Ok(n)
 }
 
 /// Atomically claim `(store, row_id, agent_name)` by inserting a
@@ -598,6 +678,10 @@ pub fn try_claim(
     agent_name: &str,
     transition_id: i64,
     claimer: &str,
+    daemon_epoch: &str,
+    claim_source: &str,
+    postcondition_id: Option<&str>,
+    postcondition_args: Option<&Value>,
 ) -> Result<bool> {
     let now = crate::handlers::row::now_iso8601();
     // Invariant (T041): try_claim inserts attempts=0 explicitly so that the
@@ -606,8 +690,9 @@ pub fn try_claim(
     // First completion → attempts=1, each subsequent retry → +1.
     let res = conn.execute(
         "INSERT INTO dispatch_locks \
-         (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, attempts) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+         (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, attempts, \
+          daemon_epoch, claim_source, attempt, postcondition_id, postcondition_args) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, 0, ?10, ?11)",
         rusqlite::params![
             store,
             row_id,
@@ -616,6 +701,10 @@ pub fn try_claim(
             transition_id,
             now,
             claimer,
+            daemon_epoch,
+            claim_source,
+            postcondition_id,
+            postcondition_args.map(|v| v.to_string()),
         ],
     );
     match res {
@@ -695,10 +784,7 @@ pub(crate) fn route_failure_to_deploy_blocked(
     if !has_edge {
         return;
     }
-    let blocked_reason = format!(
-        "subscriber '{}' failed: {}",
-        agent_name, last_status
-    );
+    let blocked_reason = format!("subscriber '{}' failed: {}", agent_name, last_status);
     let actor_note = format!("agent={} status={}", agent_name, last_status);
     if let Err(e) = crate::flow::builtins::fire_mark_deploy_blocked_with_note(
         conn,
@@ -740,12 +826,276 @@ pub(crate) fn mark_claim_finished(
     agent_name: &str,
     last_status: &str,
 ) -> Result<()> {
+    let terminal_reason = terminal_reason_from_legacy_status(last_status);
     let now = crate::handlers::row::now_iso8601();
-    // Always bumps `attempts`. See try_claim invariant.
+    let completed_attempt = conn
+        .query_row(
+            "SELECT COALESCE(attempts, 0) + 1 FROM dispatch_locks \
+             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
+            rusqlite::params![store, row_id, agent_name],
+            |r| r.get::<_, u32>(0),
+        )
+        .unwrap_or(1);
     conn.execute(
-        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, attempts = attempts + 1 \
-         WHERE store = ?3 AND row_id = ?4 AND agent_name = ?5",
-        rusqlite::params![last_status, now, store, row_id, agent_name],
+        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, attempts = attempts + 1, \
+         attempt = ?3, terminal_reason = ?4, next_retry_at = NULL \
+         WHERE store = ?5 AND row_id = ?6 AND agent_name = ?7",
+        rusqlite::params![
+            last_status,
+            now,
+            completed_attempt,
+            terminal_reason,
+            store,
+            row_id,
+            agent_name
+        ],
+    )?;
+    Ok(())
+}
+
+fn terminal_from_dispatch_result(res: Result<i32>) -> (String, String, i32) {
+    match res {
+        Ok(0) => ("ok".to_string(), derive_last_status("ok", None), 0),
+        Ok(code) if code > 0 => (
+            "exit_nonzero".to_string(),
+            derive_last_status("exit_nonzero", Some(&code.to_string())),
+            code,
+        ),
+        Ok(code) => (
+            "error".to_string(),
+            derive_last_status("error", Some(&format!("exit code {code}"))),
+            code,
+        ),
+        Err(e) => (
+            "error".to_string(),
+            derive_last_status("error", Some(&e.to_string())),
+            -1,
+        ),
+    }
+}
+
+fn terminal_reason_from_legacy_status(last_status: &str) -> &'static str {
+    if last_status == "ok" || last_status.starts_with("exit=0") {
+        "ok"
+    } else if last_status.starts_with("exit=") {
+        "exit_nonzero"
+    } else if last_status.starts_with("halted:") {
+        "halted"
+    } else if last_status.starts_with("drive_failed:silent_zombie_")
+        || last_status == "drive_failed:pid_never_recorded"
+    {
+        "silent_zombie"
+    } else if last_status.starts_with("error:") {
+        "error"
+    } else {
+        "legacy_unknown"
+    }
+}
+
+fn derive_last_status(terminal_reason: &str, detail: Option<&str>) -> String {
+    match terminal_reason {
+        "ok" => "ok".to_string(),
+        "exit_nonzero" => format!("exit={}", detail.unwrap_or("1")),
+        "error" => format!("error: {}", detail.unwrap_or("subscriber failed")),
+        "silent_zombie" => format!(
+            "drive_failed:{}",
+            detail.unwrap_or("silent_zombie_pid_dead")
+        ),
+        "halted" => format!("halted:{}", detail.unwrap_or("policy")),
+        other => other.to_string(),
+    }
+}
+
+fn postcondition_args_for(id: &str, store: &str, display_id: &str) -> Value {
+    if id == "task_exists_for_linked_observation" {
+        json!({"observation_id": display_id, "store": store})
+    } else {
+        json!({"display_id": display_id, "store": store})
+    }
+}
+
+fn run_postcondition_for_lock(
+    conn: &Connection,
+    store: &str,
+    row_id: i64,
+    agent_name: &str,
+) -> Result<Option<String>> {
+    let row: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT postcondition_id, postcondition_args FROM dispatch_locks \
+             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
+            rusqlite::params![store, row_id, agent_name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let Some((Some(id), args_text)) = row else {
+        return Ok(None);
+    };
+    let Some(pred) = crate::flow::postconditions::lookup(&id) else {
+        return Ok(Some(id));
+    };
+    let args: Value = args_text
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_else(|| json!({}));
+    let ok = pred(conn, &args, None)?;
+    Ok(if ok { None } else { Some(id) })
+}
+
+fn iso8601_add_secs(base: &str, secs: u64) -> Option<String> {
+    let epoch = parse_iso8601_to_epoch(base)?
+        .saturating_add(secs as i64)
+        .max(0) as u64;
+    let (y, mo, d, h, mi, se) = unix_to_ymd_hms(epoch);
+    Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z"))
+}
+
+fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let s = secs % 60;
+    let total_min = secs / 60;
+    let mi = total_min % 60;
+    let total_hr = total_min / 60;
+    let h = total_hr % 24;
+    let mut days = total_hr / 24;
+    let mut year = 1970u32;
+    loop {
+        let dy = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if days < dy {
+            break;
+        }
+        days -= dy;
+        year += 1;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let dim = [
+        31u64,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 0usize;
+    while month < 12 && days >= dim[month] {
+        days -= dim[month];
+        month += 1;
+    }
+    (
+        year,
+        (month + 1) as u32,
+        (days + 1) as u32,
+        h as u32,
+        mi as u32,
+        s as u32,
+    )
+}
+
+fn next_retry_at_for(
+    agent: &AgentEntry,
+    terminal_reason: &str,
+    attempt: u32,
+    finished_at: &str,
+) -> Option<String> {
+    if matches!(terminal_reason, "exit_nonzero" | "error" | "silent_zombie")
+        && attempt < agent.retry_policy.max_attempts
+    {
+        iso8601_add_secs(
+            finished_at,
+            compute_backoff_secs(agent.retry_policy.backoff, attempt),
+        )
+    } else {
+        None
+    }
+}
+
+fn mark_claim_finished_typed(
+    conn: &Connection,
+    store: &str,
+    row_id: i64,
+    display_id: &str,
+    agent: &AgentEntry,
+    terminal_reason: &str,
+    last_status: &str,
+) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    let mut reason = terminal_reason.to_string();
+    let mut status = last_status.to_string();
+    if reason == "ok" {
+        if let Some(failed_id) = run_postcondition_for_lock(conn, store, row_id, &agent.name)? {
+            reason = "error".to_string();
+            status = format!("error: postcondition {failed_id} failed");
+        }
+    }
+    let completed_attempt = conn
+        .query_row(
+            "SELECT COALESCE(attempts, 0) + 1 FROM dispatch_locks \
+             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
+            rusqlite::params![store, row_id, &agent.name],
+            |r| r.get::<_, u32>(0),
+        )
+        .unwrap_or(1);
+    let next_retry_at = next_retry_at_for(agent, &reason, completed_attempt, &now);
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, attempts = attempts + 1, \
+         attempt = ?3, terminal_reason = ?4, next_retry_at = ?5 \
+         WHERE store = ?6 AND row_id = ?7 AND agent_name = ?8",
+        rusqlite::params![
+            status,
+            now,
+            completed_attempt,
+            reason,
+            next_retry_at,
+            store,
+            row_id,
+            &agent.name
+        ],
+    )?;
+    let _ = display_id;
+    Ok(())
+}
+
+pub(crate) fn mark_claim_silent_zombie(
+    conn: &Connection,
+    store: &str,
+    row_id: i64,
+    agent: Option<&AgentEntry>,
+    agent_name: &str,
+    reason: &str,
+) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    let last_status = derive_last_status("silent_zombie", Some(reason));
+    let completed_attempt = conn
+        .query_row(
+            "SELECT COALESCE(attempts, 0) + 1 FROM dispatch_locks              WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
+            rusqlite::params![store, row_id, agent_name],
+            |r| r.get::<_, u32>(0),
+        )
+        .unwrap_or(1);
+    let next_retry_at =
+        agent.and_then(|a| next_retry_at_for(a, "silent_zombie", completed_attempt, &now));
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, attempts = attempts + 1, \
+         attempt = ?3, terminal_reason = 'silent_zombie', next_retry_at = ?4 \
+         WHERE store = ?5 AND row_id = ?6 AND agent_name = ?7",
+        rusqlite::params![
+            last_status,
+            now,
+            completed_attempt,
+            next_retry_at,
+            store,
+            row_id,
+            agent_name
+        ],
     )?;
     Ok(())
 }
@@ -793,7 +1143,13 @@ fn ymd_hms_to_epoch(y: u32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
         match m {
             1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
             4 | 6 | 9 | 11 => 30,
-            2 => if is_leap(y) { 29 } else { 28 },
+            2 => {
+                if is_leap(y) {
+                    29
+                } else {
+                    28
+                }
+            }
             _ => 0,
         }
     }
@@ -814,6 +1170,7 @@ fn ymd_hms_to_epoch(y: u32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
     days * 86_400 + h as i64 * 3600 + mi as i64 * 60 + s as i64
 }
 
+#[cfg(test)]
 fn unix_now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -829,31 +1186,30 @@ struct RetryCandidate {
     display_id: String,
     transition_id: i64,
     attempts: u32,
-    last_status_snapshot: String,
+    attempt_snapshot: u32,
+    terminal_reason_snapshot: String,
     from_status: String,
     to_status: String,
 }
 
 /// Atomic compare-and-swap claim for retry. Returns true if this caller now
-/// owns the candidate (last_status was the snapshot value and is now
-/// `retrying`); false if another daemon already moved the row. The CAS guard
-/// closes the multi-daemon race where find_retryable_locks would otherwise
-/// hand the same candidate to two callers concurrently.
-fn claim_for_retry(
-    conn: &Connection,
-    c: &RetryCandidate,
-    agent_name: &str,
-) -> Result<bool> {
+/// owns the candidate (attempt + terminal_reason match the snapshot and the
+/// row is now `retrying`); false if another daemon already moved the row. The
+/// CAS guard closes the multi-daemon race where find_retryable_locks would
+/// otherwise hand the same candidate to two callers concurrently.
+fn claim_for_retry(conn: &Connection, c: &RetryCandidate, agent_name: &str) -> Result<bool> {
     let n = conn.execute(
-        "UPDATE dispatch_locks SET last_status = 'retrying' \
+        "UPDATE dispatch_locks SET last_status = 'retrying', claim_source = 'retry_claim', \
+         attempt = ?4 + 1, terminal_reason = NULL, \
+         next_retry_at = NULL, finished_at = NULL \
          WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
-               AND attempts = ?4 AND last_status = ?5",
+               AND attempt = ?4 AND terminal_reason = ?5",
         rusqlite::params![
             &c.store,
             c.row_id,
             agent_name,
-            c.attempts,
-            &c.last_status_snapshot
+            c.attempt_snapshot,
+            &c.terminal_reason_snapshot
         ],
     )?;
     Ok(n == 1)
@@ -891,44 +1247,39 @@ fn mark_retry_halted(
     let now = crate::handlers::row::now_iso8601();
     let last = format!("halted:{policy_id}");
     conn.execute(
-        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2 \
+        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, terminal_reason = 'halted', next_retry_at = NULL \
          WHERE store = ?3 AND row_id = ?4 AND agent_name = ?5",
         rusqlite::params![last, now, &c.store, c.row_id, agent_name],
     )?;
     Ok(())
 }
 
-/// Find dispatch_locks rows for `agent` that:
-///   - failed (last_status starts with `exit=` non-zero, or `error:`),
-///   - have attempts < retry_policy.max_attempts,
-///   - whose finished_at + computed_backoff(attempts) <= now.
-///
-/// Resolves (from_status, to_status) by joining transition_history, and
-/// confirms the join hits one of the agent's declared subscriptions.
+/// Find dispatch_locks rows for `agent` whose typed retry gate has elapsed.
+/// Legacy string scans/backoff parsing are intentionally absent: retryability
+/// is carried by terminal_reason + next_retry_at written at completion time.
 fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<RetryCandidate>> {
-    let now = unix_now_secs();
     let max = agent.retry_policy.max_attempts;
     let mut stmt = conn.prepare(
         "SELECT dl.store, dl.row_id, dl.display_id, COALESCE(dl.transition_id, 0), \
-                dl.attempts, dl.last_status, dl.finished_at, \
+                COALESCE(dl.attempts, 0), dl.attempt, dl.terminal_reason, \
                 COALESCE(th.from_status, ''), COALESCE(th.to_status, '') \
          FROM dispatch_locks dl \
          LEFT JOIN transition_history th ON th.id = dl.transition_id \
          WHERE dl.agent_name = ?1 \
-               AND dl.attempts < ?2 \
-               AND dl.finished_at IS NOT NULL \
-               AND ( (dl.last_status LIKE 'exit=%' AND dl.last_status != 'exit=0') \
-                     OR dl.last_status LIKE 'error:%' \
-                     OR dl.last_status LIKE 'drive_failed:%' )",
+               AND dl.attempt < ?2 \
+               AND dl.next_retry_at IS NOT NULL \
+               AND dl.next_retry_at <= ?3 \
+               AND dl.terminal_reason IN ('exit_nonzero','error','silent_zombie')",
     )?;
-    let rows = stmt.query_map(rusqlite::params![&agent.name, max], |r| {
+    let now_iso = crate::handlers::row::now_iso8601();
+    let rows = stmt.query_map(rusqlite::params![&agent.name, max, now_iso], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, i64>(1)?,
             r.get::<_, String>(2)?,
             r.get::<_, i64>(3)?,
             r.get::<_, u32>(4)?,
-            r.get::<_, String>(5)?,
+            r.get::<_, u32>(5)?,
             r.get::<_, String>(6)?,
             r.get::<_, String>(7)?,
             r.get::<_, String>(8)?,
@@ -936,16 +1287,17 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (store, row_id, display_id, transition_id, attempts, last, finished_at, from_s, to_s) =
-            row?;
-        let backoff = compute_backoff_secs(agent.retry_policy.backoff, attempts) as i64;
-        let finished_epoch = match parse_iso8601_to_epoch(&finished_at) {
-            Some(e) => e,
-            None => continue,
-        };
-        if finished_epoch.saturating_add(backoff) > now {
-            continue;
-        }
+        let (
+            store,
+            row_id,
+            display_id,
+            transition_id,
+            attempts,
+            attempt_snapshot,
+            terminal_reason_snapshot,
+            from_s,
+            to_s,
+        ) = row?;
         let matched = agent.subscribes_to.iter().any(|sub| {
             sub.store == store && sub.transition.from == from_s && sub.transition.to == to_s
         });
@@ -958,7 +1310,8 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
             display_id,
             transition_id,
             attempts,
-            last_status_snapshot: last,
+            attempt_snapshot,
+            terminal_reason_snapshot,
             from_status: from_s,
             to_status: to_s,
         });
@@ -1097,11 +1450,7 @@ pub(crate) fn count_live_drive_pids(conn: &Connection) -> Result<usize> {
 /// Uses double-fork + a pipe so the parent can read the grandchild PID and
 /// reap the intermediate child without leaving a zombie. The grandchild is
 /// reparented to PID 1 once the intermediate child exits.
-pub(crate) fn spawn_detached_drive(
-    argv: &[String],
-    cwd: &Path,
-    log_path: &Path,
-) -> Result<i32> {
+pub(crate) fn spawn_detached_drive(argv: &[String], cwd: &Path, log_path: &Path) -> Result<i32> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::AsRawFd;
 
@@ -1123,7 +1472,10 @@ pub(crate) fn spawn_detached_drive(
 
     let argv_owned: Vec<std::ffi::CString> = argv
         .iter()
-        .map(|s| std::ffi::CString::new(s.as_bytes()).unwrap_or_else(|_| std::ffi::CString::new("").unwrap()))
+        .map(|s| {
+            std::ffi::CString::new(s.as_bytes())
+                .unwrap_or_else(|_| std::ffi::CString::new("").unwrap())
+        })
         .collect();
     let cwd_c = std::ffi::CString::new(cwd.as_os_str().as_bytes())
         .map_err(|_| anyhow!("cwd contains NUL"))?;
@@ -1194,7 +1546,10 @@ pub(crate) fn spawn_detached_drive(
         let mut status: libc::c_int = 0;
         libc::waitpid(pid1, &mut status as *mut _, 0);
         if n != 4 {
-            bail!("spawn_detached_drive: short read from pid pipe ({} bytes)", n);
+            bail!(
+                "spawn_detached_drive: short read from pid pipe ({} bytes)",
+                n
+            );
         }
         let pid2 = i32::from_le_bytes(buf);
         if pid2 <= 0 {
@@ -1392,11 +1747,37 @@ mod tests {
         let db2 = db.clone();
         let h1 = std::thread::spawn(move || {
             let c = Connection::open(&db1).unwrap();
-            try_claim(&c, "tasks", 7, "T007", "noop", 1, "claimer-1").unwrap()
+            try_claim(
+                &c,
+                "tasks",
+                7,
+                "T007",
+                "noop",
+                1,
+                "claimer-1",
+                "epoch",
+                "try_claim",
+                None,
+                None,
+            )
+            .unwrap()
         });
         let h2 = std::thread::spawn(move || {
             let c = Connection::open(&db2).unwrap();
-            try_claim(&c, "tasks", 7, "T007", "noop", 1, "claimer-2").unwrap()
+            try_claim(
+                &c,
+                "tasks",
+                7,
+                "T007",
+                "noop",
+                1,
+                "claimer-2",
+                "epoch",
+                "try_claim",
+                None,
+                None,
+            )
+            .unwrap()
         });
 
         let r1 = h1.join().unwrap();
@@ -1415,6 +1796,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cnt, 1, "exactly one dispatch_locks row exists post-race");
+    }
+
+    /// T050 P3 AC3.1: try_claim populates typed lifecycle columns.
+    #[test]
+    fn t050_try_claim_populates_typed_columns() {
+        let conn = fresh_db();
+        let args = json!({"display_id":"T050"});
+        assert!(try_claim(
+            &conn,
+            "tasks",
+            50,
+            "T050",
+            "auto-drive",
+            1,
+            "claimer",
+            "epoch-050",
+            "try_claim",
+            Some("drive_pid_recorded_or_terminal"),
+            Some(&args),
+        )
+        .unwrap());
+        let (epoch, source, attempt, pcid, pcargs): (String, String, i64, String, String) = conn
+            .query_row(
+                "SELECT daemon_epoch, claim_source, attempt, postcondition_id, postcondition_args                  FROM dispatch_locks WHERE row_id=50 AND agent_name='auto-drive'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(epoch, "epoch-050");
+        assert_eq!(source, "try_claim");
+        assert_eq!(attempt, 0);
+        assert_eq!(pcid, "drive_pid_recorded_or_terminal");
+        assert!(pcargs.contains("T050"));
     }
 
     /// AC4.5: malformed agents.yaml refuses to parse; the error names the
@@ -1719,11 +2133,10 @@ policies:
         insert_history(&conn, "tasks", 55, "T055", "", "planning");
 
         let mut agent = noop_agent("auto-drive", "tasks", "", "planning");
-        agent.subscribes_to[0].predicate =
-            Some(crate::flow::predicate::PredicateExpr::Neq {
-                left: serde_json::json!("$workspace_path"),
-                right: serde_json::json!(""),
-            });
+        agent.subscribes_to[0].predicate = Some(crate::flow::predicate::PredicateExpr::Neq {
+            left: serde_json::json!("$workspace_path"),
+            right: serde_json::json!(""),
+        });
         let agents = AgentsYaml {
             agents: vec![agent],
             deployment_specialist: None,
@@ -1758,11 +2171,10 @@ policies:
         insert_history(&conn, "tasks", 56, "T056", "", "planning");
 
         let mut agent = noop_agent("auto-drive", "tasks", "", "planning");
-        agent.subscribes_to[0].predicate =
-            Some(crate::flow::predicate::PredicateExpr::Neq {
-                left: serde_json::json!("$workspace_path"),
-                right: serde_json::json!(""),
-            });
+        agent.subscribes_to[0].predicate = Some(crate::flow::predicate::PredicateExpr::Neq {
+            left: serde_json::json!("$workspace_path"),
+            right: serde_json::json!(""),
+        });
         let agents = AgentsYaml {
             agents: vec![agent],
             deployment_specialist: None,
@@ -2112,7 +2524,7 @@ policies:
     /// window is considered elapsed regardless of BASE_BACKOFF_SECS.
     fn age_lock_finished_at(conn: &Connection, agent_name: &str) {
         conn.execute(
-            "UPDATE dispatch_locks SET finished_at = '2000-01-01T00:00:00Z' \
+            "UPDATE dispatch_locks SET finished_at = '2000-01-01T00:00:00Z', next_retry_at = '2000-01-01T00:00:01Z' \
              WHERE agent_name = ?1",
             rusqlite::params![agent_name],
         )
@@ -2279,26 +2691,91 @@ policies:
         assert_eq!(attempts_after, 2);
     }
 
+    /// T050 P4 AC4.1 / Task 4.4: legacy_unknown rows are never retryable.
+    #[test]
+    fn t050_legacy_unknown_rows_are_not_retry_candidates() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 390, "T390", "in_review", "T2", "feat/legacy");
+        insert_history(&conn, "tasks", 390, "T390", "ready", "in_review");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, \
+             attempt, terminal_reason, next_retry_at) \
+             VALUES ('tasks', 390, 'T390', 'legacy-agent', 1, 'daemon-A', \
+             '2000-01-01T00:00:00Z', '2000-01-01T00:00:01Z', 'skip-historical', 1, \
+             1, 'legacy_unknown', NULL)",
+            [],
+        )
+        .unwrap();
+
+        assert!(
+            find_retryable_locks(&conn, &retry_agent("legacy-agent", "exit 1", 3))
+                .unwrap()
+                .is_empty(),
+            "legacy_unknown with NULL next_retry_at must not auto-retry"
+        );
+        assert!(
+            find_retryable_locks(&conn, &retry_agent("other-agent", "exit 1", 3))
+                .unwrap()
+                .is_empty(),
+            "legacy_unknown must not leak to any other agent"
+        );
+    }
+
+    /// T050 P4 AC4.2: typed exit_nonzero + elapsed next_retry_at is retryable,
+    /// and claim_for_retry's typed CAS admits exactly one retry claimant.
+    #[test]
+    fn t050_exit_nonzero_retryable_and_typed_cas_single_winner() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 391, "T391", "in_review", "T2", "feat/retry");
+        insert_history(&conn, "tasks", 391, "T391", "ready", "in_review");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, \
+             attempt, terminal_reason, next_retry_at) \
+             VALUES ('tasks', 391, 'T391', 'typed-cas', 1, 'daemon-A', \
+             '2000-01-01T00:00:00Z', '2000-01-01T00:00:01Z', 'exit=1', 1, \
+             1, 'exit_nonzero', '2000-01-01T00:00:02Z')",
+            [],
+        )
+        .unwrap();
+
+        let agent = retry_agent("typed-cas", "exit 1", 3);
+        let candidates = find_retryable_locks(&conn, &agent).unwrap();
+        assert_eq!(candidates.len(), 1, "elapsed typed failure must be retryable");
+
+        assert!(claim_for_retry(&conn, &candidates[0], "typed-cas").unwrap());
+        assert!(
+            !claim_for_retry(&conn, &candidates[0], "typed-cas").unwrap(),
+            "second caller with stale attempt+terminal_reason snapshot must lose"
+        );
+    }
+
     /// T041 codex-revise (HIGH): two concurrent retry-claim attempts on
     /// the same dispatch_locks row must NOT both succeed. The atomic CAS
-    /// in `claim_for_retry` (UPDATE...WHERE last_status = old_snapshot)
-    /// ensures only the first caller flips last_status='retrying'; the
-    /// second sees affected_rows=0 and skips.
+    /// in `claim_for_retry` (UPDATE...WHERE attempt + terminal_reason match
+    /// the snapshot) ensures only the first caller flips last_status='retrying';
+    /// the second sees affected_rows=0 and skips.
     #[test]
     fn claim_for_retry_is_atomic_cas() {
         let conn = fresh_db();
         insert_task_row(&conn, 400, "T400", "in_review", "T2", "feat/race");
         insert_history(&conn, "tasks", 400, "T400", "ready", "in_review");
         // Insert a dispatch_locks row in a "retryable" shape: attempts<max,
-        // finished_at set, last_status='exit=1'.
+        // finished_at set, typed terminal failure, and next_retry_at elapsed.
         let now = crate::handlers::row::now_iso8601();
         conn.execute(
             "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
-             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts) \
-             VALUES ('tasks', 400, 'T400', 'flaky-race', 1, 'daemon-A', ?1, ?1, 'exit=1', 1)",
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, \
+             attempt, terminal_reason, next_retry_at) \
+             VALUES ('tasks', 400, 'T400', 'flaky-race', 1, 'daemon-A', ?1, \
+             '2000-01-01T00:00:00Z', 'exit=1', 1, 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
             rusqlite::params![now],
         )
         .unwrap();
+
+        let agent = retry_agent("flaky-race", "exit 1", 3);
+        assert_eq!(find_retryable_locks(&conn, &agent).unwrap().len(), 1);
 
         let candidate = RetryCandidate {
             store: "tasks".to_string(),
@@ -2306,21 +2783,41 @@ policies:
             display_id: "T400".to_string(),
             transition_id: 1,
             attempts: 1,
-            last_status_snapshot: "exit=1".to_string(),
+            attempt_snapshot: 1,
+            terminal_reason_snapshot: "exit_nonzero".to_string(),
             from_status: "ready".to_string(),
             to_status: "in_review".to_string(),
         };
 
         // First call wins.
         assert!(claim_for_retry(&conn, &candidate, "flaky-race").unwrap());
-        let status_after: String = conn
+        let (status_after, terminal_reason, finished_at, next_retry_at): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
             .query_row(
-                "SELECT last_status FROM dispatch_locks WHERE agent_name='flaky-race'",
+                "SELECT last_status, terminal_reason, finished_at, next_retry_at \
+                 FROM dispatch_locks WHERE agent_name='flaky-race'",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert_eq!(status_after, "retrying");
+        assert!(
+            terminal_reason.is_none(),
+            "retry claim leaves terminal state"
+        );
+        assert!(finished_at.is_none(), "retry claim clears finished_at");
+        assert!(
+            next_retry_at.is_none(),
+            "retry claim consumes next_retry_at"
+        );
+        assert!(
+            find_retryable_locks(&conn, &agent).unwrap().is_empty(),
+            "claimed retry must not remain eligible for duplicate dispatch"
+        );
 
         // Second call (same candidate, snapshot still 'exit=1') loses —
         // the CAS guard sees last_status='retrying' and returns false.
@@ -2342,8 +2839,8 @@ policies:
         // finished_at (year 2000).
         conn.execute(
             "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
-             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts) \
-             VALUES ('tasks', 500, 'T500', 'halted-agent', 1, 'daemon-A', ?1, '2000-01-01T00:00:00Z', 'exit=1', 1)",
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, attempt, terminal_reason, next_retry_at) \
+             VALUES ('tasks', 500, 'T500', 'halted-agent', 1, 'daemon-A', ?1, '2000-01-01T00:00:00Z', 'exit=1', 1, 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
             rusqlite::params![now],
         )
         .unwrap();
@@ -2396,16 +2893,197 @@ policies:
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(status2, "halted:halt-all-tasks", "no storm — state unchanged");
+        assert_eq!(
+            status2, "halted:halt-all-tasks",
+            "no storm — state unchanged"
+        );
+    }
+
+    /// T050 P3 AC3.2: ok subscriber is demoted when its named postcondition fails.
+    #[test]
+    fn t050_postcondition_failure_demotes_ok_to_error() {
+        let conn = fresh_db();
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN drive_pid INTEGER;")
+            .unwrap();
+        insert_task_row(&conn, 850, "T850", "planning", "T2", "feat/x");
+        let args = json!({"display_id":"T850"});
+        try_claim(
+            &conn,
+            "tasks",
+            850,
+            "T850",
+            "auto-drive",
+            1,
+            "claimer",
+            "epoch",
+            "try_claim",
+            Some("drive_pid_recorded_or_terminal"),
+            Some(&args),
+        )
+        .unwrap();
+        let agent = retry_agent("auto-drive", "exit 0", 3);
+        mark_claim_finished_typed(&conn, "tasks", 850, "T850", &agent, "ok", "ok").unwrap();
+        let (reason, last): (String, String) = conn
+            .query_row(
+                "SELECT terminal_reason, last_status FROM dispatch_locks WHERE row_id=850",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(reason, "error");
+        assert!(last.starts_with("error: postcondition drive_pid_recorded_or_terminal failed"));
+        let th_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transition_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(th_count, 0, "postcondition itself is read-only");
+    }
+
+    /// T050 P3 Task 3.6: next_retry_at is set only for retryable terminal reasons below max.
+    #[test]
+    fn t050_next_retry_at_by_terminal_reason() {
+        let conn = fresh_db();
+        let agent = retry_agent("typed-retry", "exit 1", 2);
+        for (idx, reason, last, want_retry) in [
+            (860, "exit_nonzero", "exit=1", true),
+            (861, "error", "error: x", true),
+            (862, "ok", "ok", false),
+            (863, "legacy_unknown", "weird", false),
+        ] {
+            conn.execute(
+                "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, transition_id, claimed_by, claimed_at, attempts, attempt)                  VALUES ('tasks', ?1, ?2, 'typed-retry', 1, 'daemon-A', '2000-01-01T00:00:00Z', 0, 0)",
+                rusqlite::params![idx, format!("T{idx}")],
+            ).unwrap();
+            mark_claim_finished_typed(
+                &conn,
+                "tasks",
+                idx,
+                &format!("T{idx}"),
+                &agent,
+                reason,
+                last,
+            )
+            .unwrap();
+            let next: Option<String> = conn
+                .query_row(
+                    "SELECT next_retry_at FROM dispatch_locks WHERE row_id=?1",
+                    rusqlite::params![idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(next.is_some(), want_retry, "reason={reason}");
+        }
+
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, transition_id, claimed_by, claimed_at, attempts, attempt)              VALUES ('tasks', 864, 'T864', 'typed-retry', 1, 'daemon-A', '2000-01-01T00:00:00Z', 1, 1)",
+            [],
+        ).unwrap();
+        mark_claim_silent_zombie(
+            &conn,
+            "tasks",
+            864,
+            Some(&agent),
+            "typed-retry",
+            "silent_zombie_pid_dead",
+        )
+        .unwrap();
+        let (reason, last, next): (String, String, Option<String>) = conn.query_row(
+            "SELECT terminal_reason, last_status, next_retry_at FROM dispatch_locks WHERE row_id=864",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).unwrap();
+        assert_eq!(reason, "silent_zombie");
+        assert_eq!(last, "drive_failed:silent_zombie_pid_dead");
+        assert!(next.is_none(), "attempt at max must not schedule retry");
+    }
+
+    #[test]
+    fn t050_retry_finish_schedules_third_attempt_when_max_is_three() {
+        let conn = fresh_db();
+        let agent = retry_agent("typed-retry-three", "exit 1", 3);
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, transition_id, claimed_by, claimed_at, attempts, attempt) \
+             VALUES ('tasks', 865, 'T865', 'typed-retry-three', 1, 'daemon-A', '2000-01-01T00:00:00Z', 1, 1)",
+            [],
+        )
+        .unwrap();
+        mark_claim_finished_typed(
+            &conn,
+            "tasks",
+            865,
+            "T865",
+            &agent,
+            "exit_nonzero",
+            "exit=1",
+        )
+        .unwrap();
+        let (attempts, next): (u32, Option<String>) = conn
+            .query_row(
+                "SELECT attempts, next_retry_at FROM dispatch_locks WHERE row_id=865",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 2);
+        assert!(
+            next.is_some(),
+            "second completed failure with max_attempts=3 must schedule third dispatch"
+        );
+    }
+
+    /// T050 P3 AC3.4: mark_retry_halted writes terminal_reason='halted'.
+    #[test]
+    fn t050_mark_retry_halted_sets_terminal_reason() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 851, "T851", "in_review", "T2", "feat/x");
+        insert_history(&conn, "tasks", 851, "T851", "ready", "in_review");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, attempt, terminal_reason, next_retry_at)              VALUES ('tasks', 851, 'T851', 'halted-agent', 1, 'daemon-A', '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z', 'exit=1', 1, 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
+            [],
+        ).unwrap();
+        let c = RetryCandidate {
+            store: "tasks".to_string(),
+            row_id: 851,
+            display_id: "T851".to_string(),
+            transition_id: 1,
+            attempts: 1,
+            attempt_snapshot: 1,
+            terminal_reason_snapshot: "exit_nonzero".to_string(),
+            from_status: "ready".to_string(),
+            to_status: "in_review".to_string(),
+        };
+        mark_retry_halted(&conn, &c, "halted-agent", "policy-x").unwrap();
+        let reason: String = conn
+            .query_row(
+                "SELECT terminal_reason FROM dispatch_locks WHERE row_id=851",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "halted");
     }
 
     #[test]
     fn compute_backoff_secs_linear_and_exponential() {
-        assert_eq!(compute_backoff_secs(BackoffKind::Linear, 1), BASE_BACKOFF_SECS);
-        assert_eq!(compute_backoff_secs(BackoffKind::Linear, 3), BASE_BACKOFF_SECS * 3);
-        assert_eq!(compute_backoff_secs(BackoffKind::Exponential, 1), BASE_BACKOFF_SECS);
-        assert_eq!(compute_backoff_secs(BackoffKind::Exponential, 2), BASE_BACKOFF_SECS * 2);
-        assert_eq!(compute_backoff_secs(BackoffKind::Exponential, 4), BASE_BACKOFF_SECS * 8);
+        assert_eq!(
+            compute_backoff_secs(BackoffKind::Linear, 1),
+            BASE_BACKOFF_SECS
+        );
+        assert_eq!(
+            compute_backoff_secs(BackoffKind::Linear, 3),
+            BASE_BACKOFF_SECS * 3
+        );
+        assert_eq!(
+            compute_backoff_secs(BackoffKind::Exponential, 1),
+            BASE_BACKOFF_SECS
+        );
+        assert_eq!(
+            compute_backoff_secs(BackoffKind::Exponential, 2),
+            BASE_BACKOFF_SECS * 2
+        );
+        assert_eq!(
+            compute_backoff_secs(BackoffKind::Exponential, 4),
+            BASE_BACKOFF_SECS * 8
+        );
     }
 
     #[test]
@@ -2413,10 +3091,16 @@ policies:
         let s = crate::handlers::row::now_iso8601();
         let e = parse_iso8601_to_epoch(&s).unwrap();
         let now = unix_now_secs();
-        assert!((now - e).abs() < 5, "iso8601 round-trip within 5s; got s={s} e={e} now={now}");
+        assert!(
+            (now - e).abs() < 5,
+            "iso8601 round-trip within 5s; got s={s} e={e} now={now}"
+        );
         // Known fixture.
         assert_eq!(parse_iso8601_to_epoch("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_iso8601_to_epoch("2000-01-01T00:00:00Z"), Some(946_684_800));
+        assert_eq!(
+            parse_iso8601_to_epoch("2000-01-01T00:00:00Z"),
+            Some(946_684_800)
+        );
     }
 
     /// SHUTDOWN flag is observed by sleep_interruptible.
