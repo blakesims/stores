@@ -817,12 +817,16 @@ pub fn drive_loop(
             // this, the row would stay stuck at `executing` until the
             // out-of-process watchdog (L062 territory) noticed PID death.
             let blocked_reason = classify_runner_exit(&run_out);
-            match fire_mark_drive_failed(conn, display_id, &blocked_reason, "") {
+            match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
                 Ok(()) => {
                     eprintln!(
                         "[{display_id}] mark_drive_failed fired (blocked_reason={blocked_reason})"
                     );
                     let _ = std::io::stderr().flush();
+                    bail!(
+                        "runner non-zero exit (code {}); transitioned to blocked",
+                        run_out.exit_code
+                    );
                 }
                 Err(e) => {
                     eprintln!(
@@ -830,12 +834,12 @@ pub fn drive_loop(
                         na.status
                     );
                     let _ = std::io::stderr().flush();
+                    bail!(
+                        "runner non-zero exit (code {}); mark_drive_failed transition FAILED: {e:#}",
+                        run_out.exit_code
+                    );
                 }
             }
-            bail!(
-                "runner non-zero exit (code {}); transitioned to blocked",
-                run_out.exit_code
-            );
         }
 
         // ── Step 2e: parse envelope + dispatch submit ─────────────────────
@@ -1623,7 +1627,7 @@ mod tests {
             &conn,
             &schema,
             "T001",
-            "planning",
+            "executing",
             "2026-01-01T00:00:00Z",
             0,
             0,
@@ -1665,7 +1669,9 @@ mod tests {
         assert_eq!(reason.get("kind").and_then(|v| v.as_str()), Some("runner_crash"));
         assert_eq!(reason.get("exit_code").and_then(|v| v.as_i64()), Some(1));
 
-        // transition_history must record the abort.
+        // transition_history must record the abort from the executing state
+        // (the canonical contract path: drive_loop is invoked while the row
+        // is executing; runner non-zero exit must transition it out).
         let (from_status, to_status, verb): (String, String, String) = conn
             .query_row(
                 "SELECT from_status, to_status, verb FROM transition_history \
@@ -1674,7 +1680,7 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .expect("transition_history row must exist");
-        assert_eq!(from_status, "planning");
+        assert_eq!(from_status, "executing");
         assert_eq!(to_status, "blocked");
         assert_eq!(verb, "mark_drive_failed");
     }
