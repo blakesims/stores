@@ -5,6 +5,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -31,6 +32,17 @@ pub struct ScaffoldCfg {
 pub struct DriveCfg {
     #[serde(default = "default_drive_max_parallel")]
     pub max_parallel: u32,
+    #[serde(default)]
+    pub default_runner: Option<String>,
+    #[serde(default)]
+    pub roles: BTreeMap<String, DriveRoleCfg>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DriveRoleCfg {
+    pub runner: String,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 fn default_drive_max_parallel() -> u32 {
@@ -162,7 +174,14 @@ mod tests {
         let path = tmp.path().join("config.yaml");
         std::fs::write(&path, "drive:\n  max_parallel: 3\n").unwrap();
         let cfg = load(&path).unwrap().unwrap();
-        assert_eq!(cfg.drive, Some(DriveCfg { max_parallel: 3 }));
+        assert_eq!(
+            cfg.drive,
+            Some(DriveCfg {
+                max_parallel: 3,
+                default_runner: None,
+                roles: BTreeMap::new(),
+            })
+        );
         assert_eq!(resolve_drive_max_parallel(&path), 3);
     }
 
@@ -174,6 +193,23 @@ mod tests {
         let cfg = load(&path).unwrap().unwrap();
         assert!(cfg.drive.is_none());
         assert_eq!(resolve_drive_max_parallel(&path), 1);
+    }
+
+    #[test]
+    fn parses_drive_role_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "drive:\n  default_runner: pi\n  roles:\n    planner:\n      runner: claude-code\n      model: opus\n    code_reviewer:\n      runner: pi\n",
+        )
+        .unwrap();
+        let cfg = load(&path).unwrap().unwrap();
+        let drive = cfg.drive.unwrap();
+        assert_eq!(drive.default_runner.as_deref(), Some("pi"));
+        assert_eq!(drive.roles["planner"].runner, "claude-code");
+        assert_eq!(drive.roles["planner"].model.as_deref(), Some("opus"));
+        assert_eq!(drive.roles["code_reviewer"].runner, "pi");
     }
 
     #[test]

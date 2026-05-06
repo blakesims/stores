@@ -48,6 +48,22 @@ const IN_CYCLE_STATUSES: &[&str] = &[
     "code_review",
 ];
 
+fn drive_runner_configured() -> bool {
+    let Ok(path) = crate::flow::config::default_config_path() else {
+        return false;
+    };
+    let Ok(Some(cfg)) = crate::flow::config::load(&path) else {
+        return false;
+    };
+    let Some(drive) = cfg.drive else {
+        return false;
+    };
+    drive.default_runner
+        .as_deref()
+        .is_some_and(|s| !s.is_empty())
+        || !drive.roles.is_empty()
+}
+
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let display_id = row
         .get("display_id")
@@ -109,15 +125,24 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         let exe = std::env::current_exe()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| "stores".to_string());
-        vec![
+        let mut argv = vec![
             exe,
             "tasks".to_string(),
             "drive".to_string(),
             display_id.to_string(),
-            "--claude-code".to_string(),
+        ];
+        // Phase A per-role runner config: when `.stores/config.yaml` declares
+        // drive.default_runner or drive.roles, let `tasks drive` resolve the
+        // runner per role. Preserve the historical Claude Code default when no
+        // drive runner config exists, so older projects do not break.
+        if !drive_runner_configured() {
+            argv.push("--claude-code".to_string());
+        }
+        argv.extend([
             "--invoker".to_string(),
             "ai_autonomous".to_string(),
-        ]
+        ]);
+        argv
     };
 
     let cwd = PathBuf::from(workspace_path);

@@ -212,6 +212,8 @@ pub fn dispatch(
                     let claude_code = sub.get_flag("claude-code");
                     #[cfg(feature = "runner-claude-code")]
                     let testing = sub.get_flag("testing");
+                    #[cfg(feature = "runner-claude-code")]
+                    let claude_code_model = sub.get_one::<String>("claude-code-model").cloned();
                     #[cfg(feature = "runner-pi")]
                     let pi = sub.get_flag("pi");
                     let args = handlers::drive::DriveArgs {
@@ -222,6 +224,8 @@ pub fn dispatch(
                         claude_code,
                         #[cfg(feature = "runner-claude-code")]
                         testing,
+                        #[cfg(feature = "runner-claude-code")]
+                        claude_code_model,
                         #[cfg(feature = "runner-pi")]
                         pi,
                         max_iters,

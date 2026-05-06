@@ -228,6 +228,10 @@ pub struct DriveArgs {
     /// `--claude-code`.
     #[cfg(feature = "runner-claude-code")]
     pub testing: bool,
+    /// Force a Claude Code model for all roles (e.g. `sonnet`, `opus`).
+    /// Only meaningful with `--claude-code`.
+    #[cfg(feature = "runner-claude-code")]
+    pub claude_code_model: Option<String>,
     /// Use Pi SDK runner (feature-gated).
     #[cfg(feature = "runner-pi")]
     pub pi: bool,
@@ -249,11 +253,12 @@ pub fn run_drive(schema: &Schema, args: DriveArgs) -> Result<()> {
     // Resolve the task id.
     let display_id = resolve_task_id(schema, &conn, &args)?;
 
-    // Select runner.
-    let runner: Box<dyn Runner> = build_runner(&args)?;
+    // Select runner(s). CLI flags force one runner for all roles; otherwise
+    // .stores/config.yaml may choose per-role runners.
+    let runner = build_role_runner(&args)?;
 
     // Drive the loop.
-    drive_loop(schema, &conn, &display_id, runner.as_ref(), args.max_iters)
+    drive_loop_with_role_runner(schema, &conn, &display_id, runner.as_ref(), args.max_iters)
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +405,11 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
                 "haiku",
             )));
         }
+        if let Some(model) = &args.claude_code_model {
+            return Ok(Box::new(crate::runner::ClaudeCodeRunner::with_model(
+                model.clone(),
+            )));
+        }
         return crate::runner::select("claude-code");
     }
 
@@ -410,9 +420,197 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
 
     // Default: error — a runner must be explicitly chosen.
     bail!(
-        "no runner selected; use --mock <fixture> for testing or \
-         --claude-code (requires `--features runner-claude-code`) for production"
+        "no runner selected; use --mock <fixture> for testing, \
+         --claude-code (requires `--features runner-claude-code`), \
+         --pi (requires `--features runner-pi`), or configure drive.default_runner"
     )
+}
+
+trait RoleRunner {
+    fn name_for_role(&self, role: &str) -> Result<String>;
+    fn spawn_for_role(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Result<RunnerOutput>;
+}
+
+struct BorrowedRoleRunner<'a> {
+    runner: &'a dyn Runner,
+}
+
+impl RoleRunner for BorrowedRoleRunner<'_> {
+    fn name_for_role(&self, _role: &str) -> Result<String> {
+        Ok(self.runner.name().to_string())
+    }
+
+    fn spawn_for_role(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Result<RunnerOutput> {
+        self.runner
+            .spawn(role, system_prompt, brief, schema, workspace_path)
+    }
+}
+
+struct FixedRoleRunner {
+    runner: Box<dyn Runner>,
+}
+
+impl RoleRunner for FixedRoleRunner {
+    fn name_for_role(&self, _role: &str) -> Result<String> {
+        Ok(self.runner.name().to_string())
+    }
+
+    fn spawn_for_role(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Result<RunnerOutput> {
+        self.runner
+            .spawn(role, system_prompt, brief, schema, workspace_path)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RoleRunnerChoice {
+    runner: String,
+    model: Option<String>,
+}
+
+struct ConfigRoleRunner {
+    default_runner: Option<String>,
+    roles: std::collections::BTreeMap<String, RoleRunnerChoice>,
+}
+
+impl ConfigRoleRunner {
+    fn choice_for(&self, role: &str) -> Result<RoleRunnerChoice> {
+        if let Some(choice) = self.roles.get(role) {
+            return Ok(choice.clone());
+        }
+        if let Some(default_runner) = &self.default_runner {
+            return Ok(RoleRunnerChoice {
+                runner: default_runner.clone(),
+                model: None,
+            });
+        }
+        bail!("no runner configured for role '{role}' and drive.default_runner is unset")
+    }
+
+    fn build_choice(&self, choice: &RoleRunnerChoice) -> Result<Box<dyn Runner>> {
+        match choice.runner.as_str() {
+            "claude-code" => {
+                #[cfg(feature = "runner-claude-code")]
+                {
+                    if let Some(model) = &choice.model {
+                        Ok(Box::new(crate::runner::ClaudeCodeRunner::with_model(
+                            model.clone(),
+                        )))
+                    } else {
+                        crate::runner::select("claude-code")
+                    }
+                }
+                #[cfg(not(feature = "runner-claude-code"))]
+                {
+                    bail!("runner 'claude-code' requires the runner-claude-code cargo feature")
+                }
+            }
+            other => {
+                if choice.model.is_some() {
+                    bail!("drive role config sets model for runner '{other}', but model is only supported for claude-code")
+                }
+                crate::runner::select(other)
+            }
+        }
+    }
+}
+
+impl RoleRunner for ConfigRoleRunner {
+    fn name_for_role(&self, role: &str) -> Result<String> {
+        let choice = self.choice_for(role)?;
+        Ok(match choice.model {
+            Some(model) if choice.runner == "claude-code" => format!("{}:{model}", choice.runner),
+            _ => choice.runner,
+        })
+    }
+
+    fn spawn_for_role(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Result<RunnerOutput> {
+        let choice = self.choice_for(role)?;
+        let runner = self.build_choice(&choice)?;
+        runner.spawn(role, system_prompt, brief, schema, workspace_path)
+    }
+}
+
+fn build_role_runner(args: &DriveArgs) -> Result<Box<dyn RoleRunner>> {
+    if args.mock_fixture.is_some()
+        || {
+            #[cfg(feature = "runner-claude-code")]
+            {
+                args.claude_code
+            }
+            #[cfg(not(feature = "runner-claude-code"))]
+            {
+                false
+            }
+        }
+        || {
+            #[cfg(feature = "runner-pi")]
+            {
+                args.pi
+            }
+            #[cfg(not(feature = "runner-pi"))]
+            {
+                false
+            }
+        }
+    {
+        return Ok(Box::new(FixedRoleRunner {
+            runner: build_runner(args)?,
+        }));
+    }
+
+    let config_path = crate::flow::config::default_config_path()?;
+    let cfg = crate::flow::config::load(&config_path)?.unwrap_or_default();
+    let Some(drive) = cfg.drive else {
+        bail!(
+            "no runner selected; pass --claude-code/--pi or configure drive.default_runner in {}",
+            config_path.display()
+        );
+    };
+    let roles = drive
+        .roles
+        .into_iter()
+        .map(|(role, cfg)| {
+            (
+                role,
+                RoleRunnerChoice {
+                    runner: cfg.runner,
+                    model: cfg.model,
+                },
+            )
+        })
+        .collect();
+    Ok(Box::new(ConfigRoleRunner {
+        default_runner: drive.default_runner,
+        roles,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -556,6 +754,17 @@ pub fn drive_loop(
     conn: &Connection,
     display_id: &str,
     runner: &dyn Runner,
+    max_iters: usize,
+) -> Result<()> {
+    let fixed = BorrowedRoleRunner { runner };
+    drive_loop_with_role_runner(schema, conn, display_id, &fixed, max_iters)
+}
+
+fn drive_loop_with_role_runner(
+    schema: &Schema,
+    conn: &Connection,
+    display_id: &str,
+    role_runner: &dyn RoleRunner,
     max_iters: usize,
 ) -> Result<()> {
     // T033: pre-flight depends_on guard (Layer 1, passive). Refuse to start
@@ -764,11 +973,11 @@ pub fn drive_loop(
         let cycle_for_log = na.current_cycle.as_i64().unwrap_or(0);
         eprintln!(
             "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: spawning {agent_role} via {} runner... (may take 30-90s)",
-            runner.name()
+            role_runner.name_for_role(&agent_name_normalized)?
         );
         let _ = std::io::stderr().flush();
         let spawn_start = std::time::Instant::now();
-        let run_out = runner.spawn(
+        let run_out = role_runner.spawn_for_role(
             &agent_name_normalized,
             system_prompt,
             &brief_markdown,
@@ -1542,6 +1751,8 @@ mod tests {
             claude_code: false,
             #[cfg(feature = "runner-claude-code")]
             testing: false,
+            #[cfg(feature = "runner-claude-code")]
+            claude_code_model: None,
             #[cfg(feature = "runner-pi")]
             pi: false,
             max_iters: 50,
@@ -1557,6 +1768,53 @@ mod tests {
     // ---------------------------------------------------------------------------
     // AC3.7: live-claim skip — claimed row within lock window is skipped
     // ---------------------------------------------------------------------------
+
+    #[test]
+    fn config_role_runner_selects_role_specific_runner_name() {
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert(
+            "planner".to_string(),
+            RoleRunnerChoice {
+                runner: "claude-code".to_string(),
+                model: Some("opus".to_string()),
+            },
+        );
+        roles.insert(
+            "code_reviewer".to_string(),
+            RoleRunnerChoice {
+                runner: "pi".to_string(),
+                model: None,
+            },
+        );
+        let rr = ConfigRoleRunner {
+            default_runner: Some("claude-code".to_string()),
+            roles,
+        };
+        assert_eq!(rr.name_for_role("planner").unwrap(), "claude-code:opus");
+        assert_eq!(rr.name_for_role("code_reviewer").unwrap(), "pi");
+        assert_eq!(rr.name_for_role("executor").unwrap(), "claude-code");
+    }
+
+    #[test]
+    fn config_role_runner_rejects_model_for_non_claude_name() {
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert(
+            "plan_reviewer".to_string(),
+            RoleRunnerChoice {
+                runner: "pi".to_string(),
+                model: Some("opus".to_string()),
+            },
+        );
+        let rr = ConfigRoleRunner {
+            default_runner: None,
+            roles,
+        };
+        let err = rr
+            .build_choice(&rr.choice_for("plan_reviewer").unwrap())
+            .err()
+            .expect("model on non-claude runner should be rejected");
+        assert!(err.to_string().contains("model is only supported for claude-code"));
+    }
 
     #[test]
     fn auto_selection_skips_live_claimed() {
@@ -1609,6 +1867,8 @@ mod tests {
             claude_code: false,
             #[cfg(feature = "runner-claude-code")]
             testing: false,
+            #[cfg(feature = "runner-claude-code")]
+            claude_code_model: None,
             #[cfg(feature = "runner-pi")]
             pi: false,
             max_iters: 50,
