@@ -235,6 +235,7 @@ pub(crate) fn scan_zombie_tasks(conn: &Connection, daemon_epoch: &str) -> Vec<Zo
          FROM tasks t \
          JOIN dispatch_locks dl ON dl.store = 'tasks' AND dl.row_id = t.id \
                                   AND dl.agent_name = 'auto-drive' \
+                                  AND COALESCE(dl.terminal_reason, '') != 'silent_zombie' \
          WHERE t.status IN ({in_placeholders}) \
          GROUP BY t.id \
          HAVING ( \
@@ -1377,6 +1378,26 @@ mod tests {
         assert_eq!(
             th_count, 0,
             "no mark_drive_failed transition must land for skipped row; got {th_count}"
+        );
+    }
+
+    /// T050 P4 Task 4.3: scan_zombie_tasks excludes rows already marked as
+    /// terminal_reason='silent_zombie' so the watchdog does not re-fire.
+    #[test]
+    fn t050_scan_zombie_tasks_skips_already_marked_silent_zombie() {
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T754", "executing", Some(dead_pid()));
+        insert_lock_closed(&conn, row_id, "T754");
+        conn.execute(
+            "UPDATE dispatch_locks SET terminal_reason = 'silent_zombie' WHERE row_id = ?1",
+            rusqlite::params![row_id],
+        )
+        .unwrap();
+
+        let rows = scan_zombie_tasks(&conn, "2026-05-02T00:00:00Z");
+        assert!(
+            rows.iter().all(|(_, display_id, _, _, _)| display_id != "T754"),
+            "already-marked silent_zombie locks must be excluded from watchdog scan"
         );
     }
 

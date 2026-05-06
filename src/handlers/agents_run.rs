@@ -842,11 +842,27 @@ pub(crate) fn mark_claim_finished(
 ) -> Result<()> {
     let terminal_reason = terminal_reason_from_legacy_status(last_status);
     let now = crate::handlers::row::now_iso8601();
+    let completed_attempt = conn
+        .query_row(
+            "SELECT COALESCE(attempts, 0) + 1 FROM dispatch_locks \
+             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
+            rusqlite::params![store, row_id, agent_name],
+            |r| r.get::<_, u32>(0),
+        )
+        .unwrap_or(1);
     conn.execute(
         "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, attempts = attempts + 1, \
-         terminal_reason = ?3, next_retry_at = NULL \
-         WHERE store = ?4 AND row_id = ?5 AND agent_name = ?6",
-        rusqlite::params![last_status, now, terminal_reason, store, row_id, agent_name],
+         attempt = ?3, terminal_reason = ?4, next_retry_at = NULL \
+         WHERE store = ?5 AND row_id = ?6 AND agent_name = ?7",
+        rusqlite::params![
+            last_status,
+            now,
+            completed_attempt,
+            terminal_reason,
+            store,
+            row_id,
+            agent_name
+        ],
     )?;
     Ok(())
 }
@@ -1045,11 +1061,12 @@ fn mark_claim_finished_typed(
     let next_retry_at = next_retry_at_for(agent, &reason, completed_attempt, &now);
     conn.execute(
         "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, attempts = attempts + 1, \
-         terminal_reason = ?3, next_retry_at = ?4 \
-         WHERE store = ?5 AND row_id = ?6 AND agent_name = ?7",
+         attempt = ?3, terminal_reason = ?4, next_retry_at = ?5 \
+         WHERE store = ?6 AND row_id = ?7 AND agent_name = ?8",
         rusqlite::params![
             status,
             now,
+            completed_attempt,
             reason,
             next_retry_at,
             store,
@@ -1081,8 +1098,18 @@ pub(crate) fn mark_claim_silent_zombie(
     let next_retry_at =
         agent.and_then(|a| next_retry_at_for(a, "silent_zombie", completed_attempt, &now));
     conn.execute(
-        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, attempts = attempts + 1,          terminal_reason = 'silent_zombie', next_retry_at = ?3          WHERE store = ?4 AND row_id = ?5 AND agent_name = ?6",
-        rusqlite::params![last_status, now, next_retry_at, store, row_id, agent_name],
+        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, attempts = attempts + 1, \
+         attempt = ?3, terminal_reason = 'silent_zombie', next_retry_at = ?4 \
+         WHERE store = ?5 AND row_id = ?6 AND agent_name = ?7",
+        rusqlite::params![
+            last_status,
+            now,
+            completed_attempt,
+            next_retry_at,
+            store,
+            row_id,
+            agent_name
+        ],
     )?;
     Ok(())
 }
@@ -1173,29 +1200,30 @@ struct RetryCandidate {
     display_id: String,
     transition_id: i64,
     attempts: u32,
-    last_status_snapshot: String,
+    attempt_snapshot: u32,
+    terminal_reason_snapshot: String,
     from_status: String,
     to_status: String,
 }
 
 /// Atomic compare-and-swap claim for retry. Returns true if this caller now
-/// owns the candidate (last_status was the snapshot value and is now
-/// `retrying`); false if another daemon already moved the row. The CAS guard
-/// closes the multi-daemon race where find_retryable_locks would otherwise
-/// hand the same candidate to two callers concurrently.
+/// owns the candidate (attempt + terminal_reason match the snapshot and the
+/// row is now `retrying`); false if another daemon already moved the row. The
+/// CAS guard closes the multi-daemon race where find_retryable_locks would
+/// otherwise hand the same candidate to two callers concurrently.
 fn claim_for_retry(conn: &Connection, c: &RetryCandidate, agent_name: &str) -> Result<bool> {
     let n = conn.execute(
         "UPDATE dispatch_locks SET last_status = 'retrying', claim_source = 'retry_claim', \
-         attempt = COALESCE(attempt, attempts, 0) + 1, terminal_reason = NULL, \
+         attempt = ?4 + 1, terminal_reason = NULL, \
          next_retry_at = NULL, finished_at = NULL \
          WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
-               AND attempts = ?4 AND last_status = ?5",
+               AND attempt = ?4 AND terminal_reason = ?5",
         rusqlite::params![
             &c.store,
             c.row_id,
             agent_name,
-            c.attempts,
-            &c.last_status_snapshot
+            c.attempt_snapshot,
+            &c.terminal_reason_snapshot
         ],
     )?;
     Ok(n == 1)
@@ -1240,28 +1268,22 @@ fn mark_retry_halted(
     Ok(())
 }
 
-/// Find dispatch_locks rows for `agent` that:
-///   - failed (last_status starts with `exit=` non-zero, or `error:`),
-///   - have attempts < retry_policy.max_attempts,
-///   - whose finished_at + computed_backoff(attempts) <= now.
-///
-/// Resolves (from_status, to_status) by joining transition_history, and
-/// confirms the join hits one of the agent's declared subscriptions.
+/// Find dispatch_locks rows for `agent` whose typed retry gate has elapsed.
+/// Legacy string scans/backoff parsing are intentionally absent: retryability
+/// is carried by terminal_reason + next_retry_at written at completion time.
 fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<RetryCandidate>> {
     let max = agent.retry_policy.max_attempts;
     let mut stmt = conn.prepare(
         "SELECT dl.store, dl.row_id, dl.display_id, COALESCE(dl.transition_id, 0), \
-                dl.attempts, dl.last_status, dl.finished_at, \
+                COALESCE(dl.attempts, 0), dl.attempt, dl.terminal_reason, \
                 COALESCE(th.from_status, ''), COALESCE(th.to_status, '') \
          FROM dispatch_locks dl \
          LEFT JOIN transition_history th ON th.id = dl.transition_id \
          WHERE dl.agent_name = ?1 \
-               AND dl.attempts < ?2 \
-               AND dl.finished_at IS NOT NULL \
-               AND dl.terminal_reason IN ('exit_nonzero','error','silent_zombie') \
+               AND dl.attempt < ?2 \
                AND dl.next_retry_at IS NOT NULL \
                AND dl.next_retry_at <= ?3 \
-               AND dl.last_status <> 'retrying'",
+               AND dl.terminal_reason IN ('exit_nonzero','error','silent_zombie')",
     )?;
     let now_iso = crate::handlers::row::now_iso8601();
     let rows = stmt.query_map(rusqlite::params![&agent.name, max, now_iso], |r| {
@@ -1271,7 +1293,7 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
             r.get::<_, String>(2)?,
             r.get::<_, i64>(3)?,
             r.get::<_, u32>(4)?,
-            r.get::<_, String>(5)?,
+            r.get::<_, u32>(5)?,
             r.get::<_, String>(6)?,
             r.get::<_, String>(7)?,
             r.get::<_, String>(8)?,
@@ -1279,9 +1301,17 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (store, row_id, display_id, transition_id, attempts, last, finished_at, from_s, to_s) =
-            row?;
-        let _ = (attempts, finished_at.as_str());
+        let (
+            store,
+            row_id,
+            display_id,
+            transition_id,
+            attempts,
+            attempt_snapshot,
+            terminal_reason_snapshot,
+            from_s,
+            to_s,
+        ) = row?;
         let matched = agent.subscribes_to.iter().any(|sub| {
             sub.store == store && sub.transition.from == from_s && sub.transition.to == to_s
         });
@@ -1294,7 +1324,8 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
             display_id,
             transition_id,
             attempts,
-            last_status_snapshot: last,
+            attempt_snapshot,
+            terminal_reason_snapshot,
             from_status: from_s,
             to_status: to_s,
         });
@@ -2674,11 +2705,71 @@ policies:
         assert_eq!(attempts_after, 2);
     }
 
+    /// T050 P4 AC4.1 / Task 4.4: legacy_unknown rows are never retryable.
+    #[test]
+    fn t050_legacy_unknown_rows_are_not_retry_candidates() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 390, "T390", "in_review", "T2", "feat/legacy");
+        insert_history(&conn, "tasks", 390, "T390", "ready", "in_review");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, \
+             attempt, terminal_reason, next_retry_at) \
+             VALUES ('tasks', 390, 'T390', 'legacy-agent', 1, 'daemon-A', \
+             '2000-01-01T00:00:00Z', '2000-01-01T00:00:01Z', 'skip-historical', 1, \
+             1, 'legacy_unknown', NULL)",
+            [],
+        )
+        .unwrap();
+
+        assert!(
+            find_retryable_locks(&conn, &retry_agent("legacy-agent", "exit 1", 3))
+                .unwrap()
+                .is_empty(),
+            "legacy_unknown with NULL next_retry_at must not auto-retry"
+        );
+        assert!(
+            find_retryable_locks(&conn, &retry_agent("other-agent", "exit 1", 3))
+                .unwrap()
+                .is_empty(),
+            "legacy_unknown must not leak to any other agent"
+        );
+    }
+
+    /// T050 P4 AC4.2: typed exit_nonzero + elapsed next_retry_at is retryable,
+    /// and claim_for_retry's typed CAS admits exactly one retry claimant.
+    #[test]
+    fn t050_exit_nonzero_retryable_and_typed_cas_single_winner() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 391, "T391", "in_review", "T2", "feat/retry");
+        insert_history(&conn, "tasks", 391, "T391", "ready", "in_review");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, \
+             attempt, terminal_reason, next_retry_at) \
+             VALUES ('tasks', 391, 'T391', 'typed-cas', 1, 'daemon-A', \
+             '2000-01-01T00:00:00Z', '2000-01-01T00:00:01Z', 'exit=1', 1, \
+             1, 'exit_nonzero', '2000-01-01T00:00:02Z')",
+            [],
+        )
+        .unwrap();
+
+        let agent = retry_agent("typed-cas", "exit 1", 3);
+        let candidates = find_retryable_locks(&conn, &agent).unwrap();
+        assert_eq!(candidates.len(), 1, "elapsed typed failure must be retryable");
+
+        assert!(claim_for_retry(&conn, &candidates[0], "typed-cas").unwrap());
+        assert!(
+            !claim_for_retry(&conn, &candidates[0], "typed-cas").unwrap(),
+            "second caller with stale attempt+terminal_reason snapshot must lose"
+        );
+    }
+
     /// T041 codex-revise (HIGH): two concurrent retry-claim attempts on
     /// the same dispatch_locks row must NOT both succeed. The atomic CAS
-    /// in `claim_for_retry` (UPDATE...WHERE last_status = old_snapshot)
-    /// ensures only the first caller flips last_status='retrying'; the
-    /// second sees affected_rows=0 and skips.
+    /// in `claim_for_retry` (UPDATE...WHERE attempt + terminal_reason match
+    /// the snapshot) ensures only the first caller flips last_status='retrying';
+    /// the second sees affected_rows=0 and skips.
     #[test]
     fn claim_for_retry_is_atomic_cas() {
         let conn = fresh_db();
@@ -2690,9 +2781,9 @@ policies:
         conn.execute(
             "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
              transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, \
-             terminal_reason, next_retry_at) \
+             attempt, terminal_reason, next_retry_at) \
              VALUES ('tasks', 400, 'T400', 'flaky-race', 1, 'daemon-A', ?1, \
-             '2000-01-01T00:00:00Z', 'exit=1', 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
+             '2000-01-01T00:00:00Z', 'exit=1', 1, 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
             rusqlite::params![now],
         )
         .unwrap();
@@ -2706,7 +2797,8 @@ policies:
             display_id: "T400".to_string(),
             transition_id: 1,
             attempts: 1,
-            last_status_snapshot: "exit=1".to_string(),
+            attempt_snapshot: 1,
+            terminal_reason_snapshot: "exit_nonzero".to_string(),
             from_status: "ready".to_string(),
             to_status: "in_review".to_string(),
         };
@@ -2761,8 +2853,8 @@ policies:
         // finished_at (year 2000).
         conn.execute(
             "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
-             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, terminal_reason, next_retry_at) \
-             VALUES ('tasks', 500, 'T500', 'halted-agent', 1, 'daemon-A', ?1, '2000-01-01T00:00:00Z', 'exit=1', 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, attempt, terminal_reason, next_retry_at) \
+             VALUES ('tasks', 500, 'T500', 'halted-agent', 1, 'daemon-A', ?1, '2000-01-01T00:00:00Z', 'exit=1', 1, 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
             rusqlite::params![now],
         )
         .unwrap();
@@ -2959,7 +3051,7 @@ policies:
         insert_task_row(&conn, 851, "T851", "in_review", "T2", "feat/x");
         insert_history(&conn, "tasks", 851, "T851", "ready", "in_review");
         conn.execute(
-            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, terminal_reason, next_retry_at)              VALUES ('tasks', 851, 'T851', 'halted-agent', 1, 'daemon-A', '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z', 'exit=1', 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, transition_id, claimed_by, claimed_at, finished_at, last_status, attempts, attempt, terminal_reason, next_retry_at)              VALUES ('tasks', 851, 'T851', 'halted-agent', 1, 'daemon-A', '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z', 'exit=1', 1, 1, 'exit_nonzero', '2000-01-01T00:00:01Z')",
             [],
         ).unwrap();
         let c = RetryCandidate {
@@ -2968,7 +3060,8 @@ policies:
             display_id: "T851".to_string(),
             transition_id: 1,
             attempts: 1,
-            last_status_snapshot: "exit=1".to_string(),
+            attempt_snapshot: 1,
+            terminal_reason_snapshot: "exit_nonzero".to_string(),
             from_status: "ready".to_string(),
             to_status: "in_review".to_string(),
         };
