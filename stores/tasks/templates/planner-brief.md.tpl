@@ -19,6 +19,25 @@ Your output goes to the Plan Reviewer. Make their job easier by being thorough.
 {{#if branch}}**Branch:** {{branch}}{{/if}}
 {{#if capability}}**Capability:** {{capability}}{{/if}}
 
+## Tier Guidance
+{{#if (eq tier_hint "T1")}}
+**Tier:** T1 (contract-is-plan)
+
+Planner SHOULD NOT be invoked for T1 tasks — the framework's `skip-plan` transition (planning → ready, guard `tier_hint == 'T1'`) routes T1 contracts directly to executor without a plan stage. If you are seeing this brief, a configuration drift has occurred. Emit a minimal one-phase plan that mirrors the contract's Done When and let the cycle continue, but flag this anomaly in your output `objective` so the plan reviewer surfaces it.
+{{else if (eq tier_hint "T2")}}
+**Tier:** T2 (one-phase plan)
+
+**Produce exactly one phase.** Submit-plan REJECTS any T2 plan whose `phases.length != 1` (213s of subagent work discarded per violation). The contract is small enough to ship in a single phase; do not split into setup/implement/test phases. The single phase's tasks list IS the decomposition.
+{{else if (eq tier_hint "T3")}}
+**Tier:** T3 (full multi-phase decomposition)
+
+Decompose into multiple phases (typically 3–7). Each phase should be an independently shippable / reviewable unit with its own acceptance criteria. Sequence phases by dependency, not by file layout. T3 is the only tier where multi-phase planning is appropriate.
+{{else}}
+**Tier:** _unset_
+
+The task has no `tier_hint`. Default to T3-style multi-phase decomposition, but flag the missing tier in your output `objective` so the plan reviewer can surface it for triage.
+{{/if}}
+
 ## Contract
 
 **Done When:**
