@@ -81,25 +81,79 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
     },
 ];
 
-/// Walk `tables` and return Err if any column declares `NOT NULL` without a
-/// `DEFAULT` — adding such a column to an existing non-empty table would fail
-/// at ALTER time. Used by db::open as a boot-time invariant check.
+/// Parse `full_def` (the column's SQL fragment) for NOT NULL / DEFAULT
+/// presence. Case-insensitive. The validator MUST ground itself in the
+/// actual SQL text rather than the parallel `nullable` / `default_sql`
+/// metadata, because the metadata is hand-maintained and could disagree
+/// with the SQL ("mirror lies"). Codex T051-r1 HIGH.
+fn parse_full_def_safety(full_def: &str) -> (bool, bool) {
+    // Cheap heuristic: search whitespace-tokenised SQL for NOT NULL and
+    // DEFAULT keywords. Only called on additive columns (validator skips
+    // PRIMARY KEY / baseline columns first); additive ALTER targets must
+    // declare NOT NULL / DEFAULT explicitly in `full_def` for the gate to
+    // be meaningful.
+    let upper = full_def.to_ascii_uppercase();
+    let toks: Vec<&str> = upper.split_whitespace().collect();
+    let has_not_null = toks.windows(2).any(|w| w == ["NOT", "NULL"]);
+    let has_default = toks.iter().any(|tok| *tok == "DEFAULT");
+    (has_not_null, has_default)
+}
+
+/// Walk `tables` and return Err if any additive column declares `NOT NULL`
+/// without a `DEFAULT` — adding such a column to an existing non-empty table
+/// would fail at ALTER time. Validator parses each column's `full_def` SQL
+/// text directly so the gate is grounded in the truth (the DDL string used
+/// by ALTER), not in the parallel metadata flags. Used by db::open as a
+/// boot-time invariant check. Also refuses if `full_def` and the metadata
+/// flags disagree — a "mirror lies" guard so future contributors can't
+/// silently bypass the gate by setting nullable=true on a NOT NULL column.
 pub fn validate_framework_tables(tables: &[FrameworkTable]) -> anyhow::Result<()> {
     for t in tables {
         for c in t.columns {
             // Only `additive` columns are candidates for ALTER TABLE ADD
-            // COLUMN against existing DBs. Original-CREATE-TABLE columns
-            // (additive=false) are never altered onto an existing table —
-            // they appear only via CREATE TABLE on a fresh DB — so their
-            // NOT NULL declarations are safe.
+            // COLUMN against existing DBs — those are the only ones the gate
+            // protects, and the only ones whose mirror-vs-SQL disagreement
+            // matters at runtime. Baseline (additive=false) columns appear
+            // only via CREATE TABLE on a fresh DB; PRIMARY KEY / SQLite-
+            // implicit semantics make their nullable/default flags slippery
+            // to express in `full_def` text, but they're harmless because
+            // they're never ALTERed. Skip them.
             if !c.additive {
                 continue;
             }
-            if !c.nullable && c.default_sql.is_none() {
+            // Mirror-vs-SQL consistency check: parse `full_def` directly
+            // (the truth that ALTER TABLE will use) and refuse if metadata
+            // disagrees. This is the "mirror lies" guard codex T051-r1
+            // flagged: a future contributor can't silently bypass the gate
+            // by setting nullable=true on a NOT NULL column.
+            let (sql_not_null, sql_has_default) = parse_full_def_safety(c.full_def);
+            if sql_not_null == c.nullable {
                 anyhow::bail!(
-                    "framework DDL invariant violated: {}.{} is NOT NULL without DEFAULT (would fail on ALTER TABLE ADD COLUMN against an existing non-empty DB)",
+                    "framework DDL mirror disagrees with SQL: {}.{} metadata nullable={} but full_def says {}NOT NULL (full_def='{}')",
                     t.name,
-                    c.name
+                    c.name,
+                    c.nullable,
+                    if sql_not_null { "" } else { "no " },
+                    c.full_def
+                );
+            }
+            if sql_has_default != c.default_sql.is_some() {
+                anyhow::bail!(
+                    "framework DDL mirror disagrees with SQL: {}.{} metadata default_sql={:?} but full_def {} DEFAULT (full_def='{}')",
+                    t.name,
+                    c.name,
+                    c.default_sql,
+                    if sql_has_default { "has" } else { "lacks" },
+                    c.full_def
+                );
+            }
+            // Ground the gate in the SQL text, not the metadata flag.
+            if sql_not_null && !sql_has_default {
+                anyhow::bail!(
+                    "framework DDL invariant violated: {}.{} is NOT NULL without DEFAULT in full_def (would fail on ALTER TABLE ADD COLUMN against an existing non-empty DB; full_def='{}')",
+                    t.name,
+                    c.name,
+                    c.full_def
                 );
             }
         }

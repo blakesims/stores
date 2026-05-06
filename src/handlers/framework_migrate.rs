@@ -55,10 +55,18 @@ fn diff_one_table(
 }
 
 /// Diff every entry in `FRAMEWORK_DDL_TABLES` against the live DB.
+/// Codex T051-r1 MEDIUM: only `additive` columns are candidates for ALTER
+/// TABLE ADD COLUMN against an existing DB. Non-additive (baseline) columns
+/// must already be present from a prior `execute_batch(SUBSTRATE_DDL)` —
+/// attempting to ALTER them onto a partially-malformed existing table can
+/// execute DDL the boot validator never checked.
 pub fn compute_framework_drift(conn: &Connection) -> Result<FrameworkDrift> {
     let mut drift = FrameworkDrift::default();
     for t in FRAMEWORK_DDL_TABLES {
         for col in diff_one_table(conn, t)? {
+            if !col.additive {
+                continue;
+            }
             drift.additive.push((t.name.to_string(), col));
         }
     }
@@ -77,15 +85,12 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
     let applied_at = crate::handlers::row::now_iso8601();
 
     let mut applied: Vec<AppliedFrameworkMigration> = Vec::with_capacity(drift.additive.len());
-    let mut sql = String::from("BEGIN;\n");
     for (table, col) in &drift.additive {
         let ddl = format!(
             "ALTER TABLE {} ADD COLUMN {};",
             quote_ident(table),
             col.full_def
         );
-        sql.push_str(&ddl);
-        sql.push('\n');
         applied.push(AppliedFrameworkMigration {
             table_name: table.clone(),
             column_name: col.name.to_string(),
@@ -94,14 +99,18 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
             applied_at: applied_at.clone(),
         });
     }
-    sql.push_str("COMMIT;");
-    conn.execute_batch(&sql)
-        .context("failed to apply framework-DDL drift (transaction rolled back)")?;
 
-    // Insert audit rows in a second transaction. substrate_migrations is
-    // guaranteed to exist by the SUBSTRATE_DDL execute_batch in db::open.
+    // Codex T051-r1 HIGH: apply DDL + audit insert MUST be atomic. SQLite
+    // supports ALTER TABLE inside transactions; rolling back releases the
+    // schema change cleanly. If we ever split these into separate
+    // transactions, a partial-failure leaves the DB migrated-but-unaudited
+    // and the next boot sees no missing columns, never recording the audit.
     let tx = conn.unchecked_transaction()?;
     {
+        for m in &applied {
+            tx.execute_batch(&m.ddl_applied)
+                .with_context(|| format!("failed ALTER for {}.{}", m.table_name, m.column_name))?;
+        }
         let mut stmt = tx.prepare(
             "INSERT INTO substrate_migrations \
              (applied_at, binary_version, table_name, column_name, ddl_applied) \
@@ -117,7 +126,8 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
             ])?;
         }
     }
-    tx.commit()?;
+    tx.commit()
+        .context("failed to commit atomic framework-DDL apply + audit")?;
 
     Ok(applied)
 }
