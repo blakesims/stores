@@ -44,6 +44,19 @@ Avoid concurrent edits:
 
 Before accept-merge / deploy-sensitive transitions, check for dirty main state and stash unrelated local changes if needed. Dirty templates/projections/logs have previously caused deploy_blocked false starts.
 
+Coordinate before touching architecture-sensitive files unless the change is purely mechanical from a ratified contract:
+
+- `schema.yaml`
+- `tasks/CLAUDE.md`
+- `docs/philosophy.md`
+- `docs/primitives.md`
+- `docs/architecture-coherence.md`
+- `docs/gatekeeper-design.md`
+- `docs/risk-and-cluster-taxonomy.md`
+- `.stores/config.yaml` / `.stores/agents.yaml` operational config; snapshot first and state whether daemon is running/stopped.
+
+Generated projections under `tasks/active|planning|paused` are dirty-state noise unless a task explicitly requires render output. Do not sweep them into unrelated accepts.
+
 ## When to ask Pi
 
 Ask Pi before:
@@ -131,6 +144,14 @@ When Pi answers:
 - Follow the decision unless it conflicts with hard test/code reality.
 - If new evidence invalidates the decision, halt and ask again with the new facts.
 - Do not silently reinterpret architectural guidance.
+- Treat one architectural ruling as cascading to downstream mechanical edits/tests until new evidence changes the premise.
+- Re-ask only when the downstream edit reveals a materially new semantic choice, contradicts the ruling, widens scope, or changes user/authority/security posture.
+
+Useful non-blocking update phrase:
+
+```md
+I think this is a cascading consequence of your prior ruling on X; proceeding unless you object.
+```
 
 ## Current priority doctrine
 
@@ -155,11 +176,29 @@ When a task reaches `in_review`:
 
 ## Token / approval discipline
 
-If Blake has provided a token for the session, use it only for the exact tier-A operation Blake/Pi has authorized.
+If Blake has provided a token for the session, use it only for tier-A operations within the delegated session scope.
+
+Pi is not a replacement human and cannot waive tier-A. The token is the mechanical human-grounding Blake supplied for the session; Pi supplies design judgment. Use both together, not one as a substitute for the other.
+
+You may use the session token without re-pinging Blake for PASS/cosmetic accept of an already-ratified task aligned with current priorities, especially after codex PASS.
+
+Ask Pi before using the token when the accept/ratification embeds a material design choice, priority change, schema/doctrine shift, or architectural fork. If Pi says the design is aligned and Blake's token was provided for this session, you may execute the token-mediated write. If Pi is uncertain or says this is a real choice, escalate to Blake.
 
 Do not paste the raw token into agent-comm or logs.
 
 If token validation fails, halt for Blake. Do not fabricate authority.
+
+## Failure-mode signaling
+
+If Pi sends a high-priority blocking agent-comm message whose first word is `HALT:`, stop the current action before commit if you see it in time.
+
+Recurring coordination failures should be codified into skills/CLAUDE/docs after the immediate issue is resolved. Codex/review/engine-health catching architectural drift later is fallback only, not the intended control loop.
+
+## Engine-health and worklog cadence
+
+You own `docs/engine-health.md` for shipped state, live statuses, and recently shipped rows. Pi owns or participates in architectural framing when priorities/layers drift. Commit quickly and ping Pi if you touch framing language.
+
+Write worklog notes for end-of-day handoff, context-window risk, substrate-down escape, or major architectural inflection. Do not write markdown summaries for ordinary task progress unless handoff/risk warrants it.
 
 ## Observation discipline
 

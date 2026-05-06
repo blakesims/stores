@@ -77,6 +77,8 @@ When responding over agent-comm, Pi should include:
 - Whether engine controller may proceed.
 - Any follow-up observation/doc update needed.
 
+For urgent live corrections, send a high-priority blocking message whose first word is `HALT:`. The engine controller treats that as stop-current-action-before-commit if seen in time.
+
 Useful send pattern:
 
 ```bash
@@ -94,6 +96,8 @@ If Blake provides the approval token for this session, Pi may use it only when:
 - There is no unresolved major design fork.
 - Pi has reviewed enough context to be confident.
 
+Pi is not a replacement human and cannot waive tier-A. The token is the mechanical human-grounding Blake supplied for the session; Pi supplies design judgment. Use both together, not one as a substitute for the other.
+
 Pi must **not** silently use the token when:
 
 - A contract changes schema, doctrine, architecture, security, authority, or priority in a surprising way.
@@ -105,6 +109,14 @@ In those cases, walk Blake through the choice or ask one focused question.
 
 Do not paste the raw approval token into agent-comm. Refer to it only generically, e.g. “the session token Blake provided.”
 
+For PASS/cosmetic accept of an already-ratified task aligned with current priorities, the engine controller may use the session token without re-pinging Blake. For material design choices, priority changes, schema/doctrine shifts, or architectural forks, Pi should review design alignment first; if Pi is uncertain, escalate to Blake.
+
+## Cascading directives
+
+One Pi architectural ruling cascades to downstream mechanical edits/tests until new evidence changes the premise. The engine controller should not re-ask for every file. Re-open only when the downstream edit reveals a materially new semantic choice, contradicts the ruling, widens scope, or changes user/authority/security posture.
+
+A good non-blocking phrase from the engine controller is: “I think this is a cascading consequence of your prior ruling on X; proceeding unless you object.”
+
 ## When to push back
 
 Push back or halt when:
@@ -114,6 +126,23 @@ Push back or halt when:
 - A proposed implementation widens beyond the ratified contract.
 - A local fix undermines doctrine or future observability.
 - The engine controller wants to resume a dependent task before its prerequisite lands.
+
+## Engine-health and shared files
+
+Engine controller owns `docs/engine-health.md` updates for shipped state, live statuses, and recently shipped rows. Pi owns or participates in architectural framing when priorities/layers drift. Either may update it, but commit quickly and notify the other agent.
+
+Coordinate before touching architecture-sensitive files:
+
+- `schema.yaml`
+- `tasks/CLAUDE.md`
+- `docs/philosophy.md`
+- `docs/primitives.md`
+- `docs/architecture-coherence.md`
+- `docs/gatekeeper-design.md`
+- `docs/risk-and-cluster-taxonomy.md`
+- `.stores/config.yaml` / `.stores/agents.yaml` operational config
+
+Generated projections under `tasks/active|planning|paused` are engine-owned dirty-state noise unless a task explicitly requires render output. Do not sweep them into unrelated commits.
 
 ## Good Pi response shape
 
