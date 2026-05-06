@@ -28,7 +28,6 @@ pub mod auto_promote;
 pub mod auto_resolve_observation;
 pub mod auto_scaffold;
 pub mod cargo_install;
-pub mod gatekeeper_stub;
 pub mod investigator;
 pub mod schema_migrate;
 pub mod user_escalation;
@@ -58,25 +57,9 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
         "auto-resolve-observation" => Some(auto_resolve_observation::run(row, ctx)),
         "auto-scaffold" => Some(auto_scaffold::run(row, ctx)),
         "cargo-install" => Some(cargo_install::run(row, ctx)),
-        "gatekeeper-stub" => Some(gatekeeper_stub::run(row, ctx)),
         "investigator" => Some(investigator::run(row, ctx)),
         "schema-migrate" => Some(schema_migrate::run(row, ctx)),
         "user-escalation" => Some(user_escalation::run(row, ctx)),
-        _ => None,
-    }
-}
-
-/// Map a built-in subscriber keyword to the postcondition_id it owns. The
-/// framework reads this at registration time to stamp `dispatch_locks
-/// .postcondition_id` so the row's terminal verification has a named
-/// predicate to call (T050 P2). Unknown keywords return `None`.
-pub fn postcondition_for_builtin(keyword: &str) -> Option<&'static str> {
-    match keyword {
-        "auto-promote" => Some("task_exists_for_linked_observation"),
-        "auto-scaffold" => Some("task_workspace_exists"),
-        "auto-drive" => Some("drive_pid_recorded_or_terminal"),
-        "cargo-install" => Some("cargo_installed_state"),
-        "schema-migrate" => Some("schema_migrated_state"),
         _ => None,
     }
 }
@@ -156,7 +139,7 @@ pub(crate) fn fire_framework_transition(
     policies_hash: &str,
 ) -> Result<()> {
     let schema = load_tasks_schema()?;
-    fire_framework_transition_for(conn, &schema, display_id, verb, diff_extra, policies_hash, None)
+    fire_framework_transition_for(conn, &schema, display_id, verb, diff_extra, policies_hash)
 }
 
 /// Generic framework-actor transition firing for any store schema. Identical
@@ -171,7 +154,6 @@ pub(crate) fn fire_framework_transition_for(
     verb: &str,
     diff_extra: EntryMap,
     policies_hash: &str,
-    actor_note: Option<&str>,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
@@ -228,7 +210,6 @@ pub(crate) fn fire_framework_transition_for(
         Actor::Framework,
         None,
         phash_opt,
-        actor_note,
     )?;
 
     tx.commit()?;
@@ -242,34 +223,12 @@ pub(crate) fn fire_mark_deploy_blocked(
     blocked_reason: &str,
     policies_hash: &str,
 ) -> Result<()> {
-    fire_mark_deploy_blocked_with_note(conn, display_id, blocked_reason, policies_hash, None)
-}
-
-/// Variant of `fire_mark_deploy_blocked` that records `actor_note` on the
-/// emitted `transition_history` row. Used by the framework subscriber-runner
-/// (T046) to encode the failed agent + exit code on the audit row.
-pub(crate) fn fire_mark_deploy_blocked_with_note(
-    conn: &Connection,
-    display_id: &str,
-    blocked_reason: &str,
-    policies_hash: &str,
-    actor_note: Option<&str>,
-) -> Result<()> {
     let mut diff: EntryMap = std::collections::BTreeMap::new();
     diff.insert(
         "blocked_reason".to_string(),
         Value::String(blocked_reason.to_string()),
     );
-    let schema = load_tasks_schema()?;
-    fire_framework_transition_for(
-        conn,
-        &schema,
-        display_id,
-        "mark_deploy_blocked",
-        diff,
-        policies_hash,
-        actor_note,
-    )
+    fire_framework_transition(conn, display_id, "mark_deploy_blocked", diff, policies_hash)
 }
 
 /// Convenience: fire `mark_drive_failed` with `blocked_reason` populated.
@@ -352,11 +311,7 @@ mod tests {
     use super::*;
     use crate::cli::dynamic::BUNDLED_STORE_SCHEMAS;
     use crate::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
-    use crate::flow::agents_yaml::TransitionEdge;
-    use crate::flow::{
-        install_notifier, AgentEntry, BackoffKind, MockNotifier, NotifierBackend, NotifyEvent,
-        RetryPolicy, Subscription,
-    };
+    use crate::flow::{install_notifier, MockNotifier, NotifierBackend, NotifyEvent};
     use crate::schema::Schema;
     use rusqlite::Connection;
     use std::process::Command;
@@ -634,151 +589,6 @@ mod tests {
             .unwrap();
         assert_eq!(verb, "mark_deploy_blocked");
         assert_eq!(invoker, "framework");
-    }
-
-    /// T046: a subscriber that exits non-zero on the in_review→accepted edge
-    /// must be routed to deploy_blocked by the framework subscriber-runner,
-    /// with the exit code recorded in transition_history.actor_note. Pre-T046
-    /// the row silently parked at `accepted` with the merge unlanded.
-    #[test]
-    fn t046_subscriber_nonzero_exit_routes_to_deploy_blocked() {
-        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
-        let (conn, _t, _o) = fresh_db_with_tasks();
-        // Row sits at `accepted` (post in_review→accepted), as it would be
-        // when accept-merge claimed the dispatch and is about to run.
-        insert_accepted_task(&conn, "T046", "feat/x", "/tmp/no-such-workspace");
-
-        // Stub the subscriber-runner's failure path: row is at `accepted`,
-        // dispatch returned exit=11. The framework must fire mark_deploy_blocked
-        // and stamp actor_note with the exit code.
-        crate::handlers::agents_run::route_failure_to_deploy_blocked(
-            &conn,
-            "tasks",
-            "T046",
-            "accept-merge",
-            "exit=11",
-            "feedface",
-            "accepted",
-        );
-
-        let (status, reason): (String, Option<String>) = conn
-            .query_row(
-                "SELECT status, blocked_reason FROM tasks WHERE display_id='T046'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            status, "deploy_blocked",
-            "non-zero subscriber exit must route accepted → deploy_blocked"
-        );
-        let reason = reason.unwrap_or_default();
-        assert!(
-            reason.contains("accept-merge") && reason.contains("exit=11"),
-            "blocked_reason must cite agent + exit code; got: {reason}"
-        );
-
-        let (verb, invoker, note, phash): (String, String, Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT verb, invoker, actor_note, policies_hash FROM transition_history \
-                 WHERE store='tasks' AND display_id='T046' AND verb='mark_deploy_blocked'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(verb, "mark_deploy_blocked");
-        assert_eq!(invoker, "framework");
-        let note = note.unwrap_or_default();
-        assert!(
-            note.contains("agent=accept-merge") && note.contains("exit=11"),
-            "actor_note must record agent + exit code; got: {note}"
-        );
-        assert_eq!(phash.as_deref(), Some("feedface"));
-    }
-
-    /// T046: zero-exit must NOT trigger any transition. Row stays at accepted.
-    #[test]
-    fn t046_subscriber_zero_exit_no_transition() {
-        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
-        let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(&conn, "T046b", "feat/x", "/tmp/no-such");
-
-        // Even though the helper is only invoked from the failure path, guard
-        // against accidental wiring by asserting the routing function itself
-        // is a no-op when the row's current state has no mark_deploy_blocked
-        // transition declared. We simulate that by feeding an unrelated state
-        // through a non-tasks store name (the function early-returns).
-        crate::handlers::agents_run::route_failure_to_deploy_blocked(
-            &conn,
-            "observations",
-            "T046b",
-            "some-agent",
-            "exit=1",
-            "",
-            "accepted",
-        );
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM tasks WHERE display_id='T046b'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "accepted", "non-tasks-store path must no-op");
-    }
-
-    /// T046 codex-revise: subscription_to MUST match current_status before the
-    /// framework routes failure to deploy_blocked. Closes the prior cycle's
-    /// HIGH finding that the routing was over-broad — any tasks-store
-    /// subscriber failing while a row sat at `accepted` would have triggered
-    /// mark_deploy_blocked, even subscribers whose own transition.to was a
-    /// different state (e.g. a hypothetical subscriber on tasks: ready→executing
-    /// that happened to fail-and-fire while a different row was at accepted).
-    /// The tightened gate pins routing to the subscriber that LANDED the row
-    /// in the from-state of the deploy_blocked edge.
-    #[test]
-    fn t046_subscription_to_mismatch_does_not_route() {
-        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
-        let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(&conn, "T046c", "feat/x", "/tmp/no-such");
-
-        // Subscriber claims to have fired on `ready → executing` (subscription_to
-        // = "executing"), but the row is currently at `accepted`. The gate
-        // must short-circuit BEFORE firing mark_deploy_blocked, leaving the
-        // row at accepted and writing no transition_history row for
-        // mark_deploy_blocked.
-        crate::handlers::agents_run::route_failure_to_deploy_blocked(
-            &conn,
-            "tasks",
-            "T046c",
-            "some-other-subscriber",
-            "exit=7",
-            "",
-            "executing", // subscription_to ≠ current_status (accepted)
-        );
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM tasks WHERE display_id='T046c'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            status, "accepted",
-            "subscription_to mismatch must NOT route the row to deploy_blocked"
-        );
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM transition_history \
-                 WHERE display_id='T046c' AND verb='mark_deploy_blocked'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            count, 0,
-            "no mark_deploy_blocked transition_history row may be written when subscription_to mismatches"
-        );
     }
 
     /// Test-only thin wrapper around the private fire_mark_deploy_blocked.
@@ -1087,20 +897,6 @@ mod tests {
         // Use a config file (immune to STORES_NTFY_URL env races across modules).
         let cfg_file = tmp.path().join("config.yaml");
         std::fs::write(&cfg_file, "ntfy:\n  url: https://test.local\n").unwrap();
-        let stores_bin = tmp.path().join("stores-migrate-fails.sh");
-        std::fs::write(
-            &stores_bin,
-            "#!/bin/sh\necho 'bundled store does-not-exist not found' >&2\nexit 1\n",
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&stores_bin).unwrap().permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&stores_bin, perms).unwrap();
-        }
-        std::env::set_var("STORES_BIN", stores_bin.to_string_lossy().to_string());
 
         let (conn, _t, _o) = fresh_db_with_tasks();
         insert_cargo_installed_task(&conn, "T502", root.to_str().unwrap());
@@ -1117,7 +913,6 @@ mod tests {
         };
 
         schema_migrate::run(&row, &ctx).unwrap();
-        std::env::remove_var("STORES_BIN");
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(
@@ -1306,161 +1101,6 @@ mod tests {
             .unwrap();
         assert_eq!(verb, "mark_cargo_installed");
         assert_eq!(invoker, "framework");
-    }
-
-    /// T061 / L145 codex-revise: when branch is already merged AND cargo-install
-    /// is a peer subscriber on the same accepted-entry edge (retry-deploy chain),
-    /// accept-merge must NOT fire mark_cargo_installed — it leaves that to
-    /// cargo-install so the install actually re-runs before the row advances.
-    /// accept-merge returns Ok(0) as a no-op; the row stays in `accepted`.
-    ///
-    /// This test covers the MAJOR finding from the T061 codex review:
-    /// "retry-deploy on an already-merged branch can skip the cargo-install retry."
-    #[test]
-    fn m_accept_merge_noop_no_mark_cargo_installed_when_cargo_install_peer_present() {
-        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
-        let _cwd_g = crate::paths::test_cwd_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        let (tmp, repo) = init_repo();
-        // Pre-merge the branch into main so is_branch_merged_into_main returns true.
-        git(&repo, &["checkout", "-b", "feat/already-merged-retry"]);
-        std::fs::write(repo.join("retry.txt"), "retry\n").unwrap();
-        git(&repo, &["add", "retry.txt"]);
-        git(&repo, &["commit", "-m", "retry change"]);
-        git(&repo, &["checkout", "main"]);
-        let m = git(
-            &repo,
-            &["merge", "--no-ff", "--no-edit", "feat/already-merged-retry"],
-        );
-        assert!(m.status.success(), "pre-merge into main failed: {:?}", m);
-
-        // Set daemon cwd to the live main repo.
-        let old_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&repo).expect("set_current_dir failed");
-
-        // Stale workspace path (cleaned worktree after merge — mimics retry-deploy scenario).
-        let gone = tmp.path().join("worktrees/T998-gone-retry");
-        let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(
-            &conn,
-            "T998",
-            "feat/already-merged-retry",
-            gone.to_str().unwrap(),
-        );
-        let row = task_row_json(&conn, "T998");
-
-        // Build an AgentsYaml that includes cargo-install subscribed to
-        // deploy_blocked→accepted (the retry-deploy chain). This is the
-        // peer-subscriber condition that should suppress mark_cargo_installed.
-        let agents = AgentsYaml {
-            agents: vec![AgentEntry {
-                name: "cargo-install".to_string(),
-                subscribes_to: vec![Subscription {
-                    store: "tasks".to_string(),
-                    transition: TransitionEdge {
-                        from: "deploy_blocked".to_string(),
-                        to: "accepted".to_string(),
-                    },
-                    predicate: None,
-                }],
-                command: "builtin:cargo-install".to_string(),
-                claim_window_secs: 600,
-                retry_policy: RetryPolicy {
-                    max_attempts: 1,
-                    backoff: BackoffKind::Linear,
-                },
-                command_args: None,
-            }],
-            deployment_specialist: None,
-        };
-        let cfg = cfg_path();
-        let ctx = DispatchCtx {
-            conn: &conn,
-            agents: &agents,
-            config_path: &cfg,
-            policies_hash: "",
-        };
-
-        let res = accept_merge::run(&row, &ctx);
-
-        // Restore cwd before any panic from assertions below.
-        std::env::set_current_dir(&old_cwd).expect("restore cwd failed");
-
-        assert_eq!(res.unwrap(), 0);
-
-        // Row must still be in `accepted` — mark_cargo_installed was NOT fired.
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM tasks WHERE display_id='T998'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            status, "accepted",
-            "accept-merge must not advance to cargo_installed when cargo-install peer is present"
-        );
-
-        // No mark_cargo_installed in transition_history.
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM transition_history \
-                 WHERE store='tasks' AND display_id='T998' AND verb='mark_cargo_installed'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            count, 0,
-            "mark_cargo_installed must not appear in transition_history when cargo-install peer is present"
-        );
-    }
-
-    /// T050 P2 AC2.3: postcondition_for_builtin maps each builtin keyword to
-    /// the documented postcondition_id; unknown keywords return None.
-    #[test]
-    fn postcondition_for_builtin_mapping() {
-        assert_eq!(
-            postcondition_for_builtin("auto-promote"),
-            Some("task_exists_for_linked_observation")
-        );
-        assert_eq!(
-            postcondition_for_builtin("auto-scaffold"),
-            Some("task_workspace_exists")
-        );
-        assert_eq!(
-            postcondition_for_builtin("auto-drive"),
-            Some("drive_pid_recorded_or_terminal")
-        );
-        assert_eq!(
-            postcondition_for_builtin("cargo-install"),
-            Some("cargo_installed_state")
-        );
-        assert_eq!(
-            postcondition_for_builtin("schema-migrate"),
-            Some("schema_migrated_state")
-        );
-        assert_eq!(postcondition_for_builtin("unknown-keyword"), None);
-        assert_eq!(postcondition_for_builtin(""), None);
-
-        // Each mapped postcondition_id resolves via the registry.
-        for kw in [
-            "auto-promote",
-            "auto-scaffold",
-            "auto-drive",
-            "cargo-install",
-            "schema-migrate",
-        ] {
-            let id = postcondition_for_builtin(kw).unwrap();
-            assert!(
-                crate::flow::postconditions::lookup(id).is_some(),
-                "lookup({}) returned None for keyword {}",
-                id,
-                kw
-            );
-        }
     }
 
     /// AC1.4: a row at `in_review` rejects mark_drive_failed (no transition

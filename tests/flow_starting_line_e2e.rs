@@ -118,10 +118,10 @@ fn new_subscriber_after_restart_does_not_fire_on_historical_rows() {
         agents: vec![noop_agent("late-comer", "tasks", "ready", "in_review")],
         deployment_specialist: None,
     };
-    let max_transition_id: i64 = conn
+    let max_tid: i64 = conn
         .query_row("SELECT COALESCE(MAX(id), 0) FROM transition_history", [], |r| r.get(0))
         .unwrap();
-    let seeded = seed_starting_line(&conn, &late_agents, max_transition_id).unwrap();
+    let seeded = seed_starting_line(&conn, &late_agents, max_tid).unwrap();
     assert_eq!(seeded, 1, "exactly one historical row seeded for late-comer");
 
     let n_after_seed =
@@ -188,10 +188,7 @@ fn seed_preserves_existing_drive_chain() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
     let agents = load_from_path(&agents_path).expect("production agents.yaml must parse");
 
-    let max_transition_id: i64 = conn
-        .query_row("SELECT COALESCE(MAX(id), 0) FROM transition_history", [], |r| r.get(0))
-        .unwrap();
-    let seeded = seed_starting_line(&conn, &agents, max_transition_id).unwrap();
+    let seeded = seed_starting_line(&conn, &agents, 0).unwrap();
     assert_eq!(seeded, 0, "empty transition_history → 0 rows seeded");
 
     let cnt: i64 = conn

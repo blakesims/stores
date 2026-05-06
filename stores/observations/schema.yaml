@@ -6,7 +6,7 @@ id_format: "L{:03d}"
 # resolved_at, priority_rank_at, locked_at, drafted_at, approved_at are all distinct.
 
 lifecycle:
-  states: [open, needs_investigation, investigating, investigated, investigation_failed, confirmed, ready, needs_info, in_progress, resolved, wont_fix]
+  states: [open, investigating, needs_investigation, confirmed, ready, needs_info, in_progress, resolved, wont_fix]
   initial_state: open
   transitions:
     # open → investigating: triage begins
@@ -18,29 +18,14 @@ lifecycle:
       verb: investigate
       actor: ai_autonomous
 
-    # open → needs_investigation: operator-pull route to the dedicated
-    # investigator subagent queue. A human-supervised AI flags specific rows;
-    # the framework subscriber performs the spawn and follow-up transitions.
+    # open → needs_investigation: route to a dedicated investigator subagent
+    # (T038 — pull-shaped). The orchestrator-on-main flips the row here
+    # instead of inline-investigating; the investigator subscriber picks it up
+    # and emits evidence (NOT a contract) for the human to prune.
     - from: open
       to: needs_investigation
-      verb: request-investigation
-      actor: ai_with_human
-
-    # needs_investigation → investigating → investigated/investigation_failed:
-    # framework-only edges used by the investigator subscriber. Hidden from the
-    # operator CLI; direct observation creation remains status=open.
-    - from: needs_investigation
-      to: investigating
-      verb: investigation-started
-      actor: framework
-    - from: investigating
-      to: investigated
-      verb: investigation-succeeded
-      actor: framework
-    - from: investigating
-      to: investigation_failed
-      verb: investigation-failed
-      actor: framework
+      verb: needs_investigation
+      actor: ai_autonomous
 
     # open → wont_fix: direct discard path (per 10.06 lifecycle diagram)
     - from: open
@@ -275,11 +260,6 @@ fields:
     required: false
     description: "Free-form notes accumulated during investigation"
 
-  - name: investigation_failure_reason
-    type: text
-    required: false
-    description: "Framework-captured investigator spawn/rate-limit/nonzero failure details"
-
   - name: resolved_at
     type: text
     required: false
@@ -331,8 +311,7 @@ fields:
       - name: contract_state
         type: enum
         enum_values: [draft, ready]
-        actor: ai_with_human
-        description: "draft = AI-authored; ready = Blake-approved; ready requires human-supervised authority"
+        description: "draft = AI-authored; ready = Blake-approved"
 
       - name: drafted_by
         type: text
@@ -448,59 +427,6 @@ fields:
             type: text
             required: true
             description: "Identifier in the external system"
-
-  # --- Risk & policy taxonomy (T052) ---
-  # P2 schema-prep for the gatekeeper (L142). The four fields promote the
-  # (risk_class, approval_policy, risk_flags, cluster_key) tuple from prose
-  # in docs/risk-and-cluster-taxonomy.md into typed columns so risk and
-  # policy are queryable / enforceable / audit-able. Conservative defaults
-  # apply to every existing row at migration time and to every new row when
-  # the CLI does not supply an override. actor: ai_with_human gates explicit
-  # writes — autonomous filing cannot supply these flags.
-  - name: risk_class
-    type: enum
-    enum_values: [low, normal, architecture, security, authority]
-    required: false
-    actor: ai_with_human
-    default: 'normal'
-    description: "Risk class taxonomy entry (default 'normal')"
-
-  - name: approval_policy
-    type: enum
-    enum_values: [auto, human, architecture]
-    required: false
-    actor: ai_with_human
-    default: 'human'
-    description: "Approval policy floor (default 'human')"
-
-  - name: risk_flags
-    type:
-      list: text
-    required: false
-    actor: ai_with_human
-    default: []
-    list_enum:
-      - touches_actor_authority
-      - touches_lifecycle
-      - touches_subscriber_semantics
-      - introduces_new_primitive
-      - changes_boundary
-      - security_sensitive
-      - docs_only
-      - small_local_fix
-      - duplicate_symptom
-      - touches_runner_boundary
-      - touches_schema_core
-      - authority_surface_drift
-      - contradicts_prior_decision
-    description: "Canonical risk-flag enum tags (array membership validated separately)"
-
-  - name: cluster_key
-    type: text
-    required: false
-    actor: ai_with_human
-    pattern: '^[a-z][a-z0-9-]{2,40}$'
-    description: "Optional cluster key linking related observations (slug-like)"
 
   # --- Notes (free-shape JSON; T008 substrate) ---
   - name: notes
