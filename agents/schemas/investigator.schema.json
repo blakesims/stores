@@ -40,7 +40,11 @@
         "required": ["l_id", "similarity_reason"],
         "additionalProperties": false,
         "properties": {
-          "l_id": {"type": "string"},
+          "l_id": {
+            "type": "string",
+            "pattern": "^L\\d{3,}$",
+            "description": "Substrate observation display id; matches /^L\\d{3,}$/."
+          },
           "similarity_reason": {"type": "string"}
         }
       }
