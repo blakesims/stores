@@ -25,6 +25,7 @@ use crate::validate::{self, EntryMap, Op};
 pub mod accept_merge;
 pub mod auto_drive;
 pub mod auto_promote;
+pub mod auto_resolve_observation;
 pub mod auto_scaffold;
 pub mod cargo_install;
 pub mod schema_migrate;
@@ -52,6 +53,7 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
         "accept-merge" => Some(accept_merge::run(row, ctx)),
         "auto-drive" => Some(auto_drive::run(row, ctx)),
         "auto-promote" => Some(auto_promote::run(row, ctx)),
+        "auto-resolve-observation" => Some(auto_resolve_observation::run(row, ctx)),
         "auto-scaffold" => Some(auto_scaffold::run(row, ctx)),
         "cargo-install" => Some(cargo_install::run(row, ctx)),
         "schema-migrate" => Some(schema_migrate::run(row, ctx)),

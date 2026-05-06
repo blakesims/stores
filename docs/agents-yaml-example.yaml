@@ -49,6 +49,14 @@ agents:
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }
 
+  - name: auto-resolve-observation
+    subscribes_to:
+      - store: tasks
+        transition: { from: cargo_installed, to: schema_migrated }
+    command: "builtin:auto-resolve-observation"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
   - name: user-escalation
     subscribes_to:
       - store: tasks

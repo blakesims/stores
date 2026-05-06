@@ -245,6 +245,23 @@ fn poll_until<F: Fn(&Connection) -> bool>(
     panic!("poll_until: predicate not satisfied within {:?}", timeout);
 }
 
+fn insert_task_history(
+    conn: &Connection,
+    row_id: i64,
+    display_id: &str,
+    from: &str,
+    to: &str,
+    verb: &str,
+) {
+    conn.execute(
+        "INSERT INTO transition_history \
+         (store, row_id, display_id, from_status, to_status, verb, invoker, occurred_at) \
+         VALUES ('tasks', ?1, ?2, ?3, ?4, ?5, 'framework', '2026-05-04T00:00:02Z')",
+        rusqlite::params![row_id, display_id, from, to, verb],
+    )
+    .unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // AC7.1 / AC7.2: happy-path full chain (ratify → promote → scaffold → drive
 // → in_review) within ~5s of scaffold completion.
@@ -271,8 +288,7 @@ fn ratify_promote_scaffold_drive_happy_path() {
         .unwrap();
     assert_eq!(obs_status, "ready", "obs must auto-ratify to 'ready'");
 
-    let agents_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
+    let agents_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
     let agents = load_from_path(&agents_path).expect("tests/fixtures/agents.yaml must parse");
     let policies = PoliciesYaml {
         hash: String::new(),
@@ -302,11 +318,9 @@ fn ratify_promote_scaffold_drive_happy_path() {
     if !hit {
         let log = std::fs::read_to_string(&stub_log).unwrap_or_else(|_| "<no stub log>".into());
         let (status, drive_pid): (Option<String>, Option<i64>) = conn
-            .query_row(
-                "SELECT status, drive_pid FROM tasks LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT status, drive_pid FROM tasks LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap_or((None, None));
         panic!(
             "AC7.1: status never reached in_review (status={:?}, drive_pid={:?}); stub log:\n{}",
@@ -361,6 +375,126 @@ fn ratify_promote_scaffold_drive_happy_path() {
 }
 
 // ---------------------------------------------------------------------------
+// T037: ratify → promote → scaffold → drive → accept → deploy-success → resolve.
+// The drive is stubbed as above; the human accept + deploy success transitions
+// are represented by transition_history rows so the daemon dispatches the new
+// auto-resolve subscriber on cargo_installed→schema_migrated.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ratify_promote_scaffold_drive_accept_deploy_resolves_observation() {
+    let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let (tmp, db_path, cfg_path) = setup_repo_with_scaffold();
+    let conn = Connection::open(&db_path).unwrap();
+
+    let stub = write_happy_drive_stub(tmp.path(), &db_path);
+    std::env::set_var("STORES_DRIVE_CMD", stub.to_string_lossy().to_string());
+
+    let obs_id = file_ratified_observation(&conn, "T037 resolve chain candidate");
+    let agents_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
+    let agents = load_from_path(&agents_path).expect("tests/fixtures/agents.yaml must parse");
+    let policies = PoliciesYaml {
+        hash: String::new(),
+        policies: vec![],
+    };
+
+    poll_until(
+        &conn,
+        &agents,
+        &policies,
+        &cfg_path,
+        "t037-chain",
+        |c| {
+            c.query_row("SELECT status FROM tasks LIMIT 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+            .as_deref()
+                == Some("in_review")
+        },
+        Duration::from_secs(30),
+    );
+
+    let (task_row_id, task_display): (i64, String) = conn
+        .query_row("SELECT id, display_id FROM tasks LIMIT 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    let commit = "abc1234def5678";
+    let cycles = serde_json::json!([{ "executor": { "commit": commit } }]).to_string();
+
+    conn.execute(
+        "UPDATE tasks SET status='schema_migrated', cycles=?1, updated_at='2026-05-04T00:00:02Z' WHERE id=?2",
+        rusqlite::params![cycles, task_row_id],
+    )
+    .unwrap();
+    insert_task_history(
+        &conn,
+        task_row_id,
+        &task_display,
+        "in_review",
+        "accepted",
+        "accept",
+    );
+    insert_task_history(
+        &conn,
+        task_row_id,
+        &task_display,
+        "accepted",
+        "cargo_installed",
+        "mark_cargo_installed",
+    );
+    insert_task_history(
+        &conn,
+        task_row_id,
+        &task_display,
+        "cargo_installed",
+        "schema_migrated",
+        "mark_schema_migrated",
+    );
+
+    let resolver_only = stores::flow::AgentsYaml {
+        agents: agents
+            .agents
+            .iter()
+            .filter(|a| a.name == "auto-resolve-observation")
+            .cloned()
+            .collect(),
+        deployment_specialist: None,
+    };
+    poll_until(
+        &conn,
+        &resolver_only,
+        &policies,
+        &cfg_path,
+        "t037-resolve",
+        |c| {
+            c.query_row(
+                "SELECT status FROM observations WHERE display_id=?1",
+                rusqlite::params![obs_id.clone()],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .as_deref()
+                == Some("resolved")
+        },
+        Duration::from_secs(5),
+    );
+
+    let (obs_status, resolution): (String, String) = conn
+        .query_row(
+            "SELECT status, resolution FROM observations WHERE display_id=?1",
+            rusqlite::params![obs_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(obs_status, "resolved");
+    assert_eq!(resolution, commit);
+
+    std::env::remove_var("STORES_DRIVE_CMD");
+}
+
+// ---------------------------------------------------------------------------
 // AC7.3: failure path — drive subprocess dies without producing wrap.
 // `sweep_drive_watchdog` flips the row to blocked / drive_failed, files an
 // observation, and ntfy fires.
@@ -390,11 +524,9 @@ fn drive_failure_watchdog_flips_blocked() {
         rusqlite::params![contract, dead_pid, now],
     ).unwrap();
     let row_id: i64 = conn
-        .query_row(
-            "SELECT id FROM tasks WHERE display_id='T900'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT id FROM tasks WHERE display_id='T900'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     conn.execute(
         "INSERT INTO dispatch_locks \
@@ -405,14 +537,12 @@ fn drive_failure_watchdog_flips_blocked() {
     .unwrap();
 
     // Load the production fixture so user-escalation routes via deployment_specialist.
-    let agents_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
+    let agents_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
     let agents = load_from_path(&agents_path).expect("agents.yaml must parse");
 
-    let acted = stores::flow::builtins::auto_drive::sweep_drive_watchdog(
-        &conn, &agents, &cfg_path, "",
-    )
-    .unwrap();
+    let acted =
+        stores::flow::builtins::auto_drive::sweep_drive_watchdog(&conn, &agents, &cfg_path, "")
+            .unwrap();
     assert!(acted >= 1, "watchdog must have acted on the dead drive");
 
     let (status, reason): (String, Option<String>) = conn
@@ -480,8 +610,7 @@ fn drive_idempotent_no_double_spawn_after_restart() {
     let conn = Connection::open(&db_path).unwrap();
     let _obs = file_ratified_observation(&conn, "T022 P7 idempotency candidate");
 
-    let agents_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
+    let agents_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
     let agents = load_from_path(&agents_path).expect("agents.yaml must parse");
     let policies = PoliciesYaml {
         hash: String::new(),
