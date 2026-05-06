@@ -115,8 +115,62 @@ _No plan reviews yet._
 ## Completion
 {{#if (eq status "accepted")}}- **Accepted:** {{updated_at}}
 - **Branch:** {{#if branch}}{{branch}}{{else}}—{{/if}}
+
+{{#each wrap_log}}
+### Wrap {{add @index 1}}
+- **Executive Summary:** {{#if this.executive_summary}}{{this.executive_summary}}{{else}}—{{/if}}
+- **Deviations:**
+{{#each this.deviations}}
+  - {{this}}
+{{else}}
+  - —
+{{/each}}
+- **Residual Risks:**
+{{#each this.residual_risks}}
+  - {{this}}
+{{else}}
+  - —
+{{/each}}
+- **Recommended Sanity Checks:**
+{{#each this.recommended_sanity_checks}}
+  - {{this}}
+{{else}}
+  - —
+{{/each}}
+- **At:** {{#if this.at}}{{this.at}}{{else}}—{{/if}}
+- **Cycle:** {{#if this.cycle}}{{this.cycle}}{{else}}{{#if ../current_cycle}}{{../current_cycle}}{{else}}—{{/if}}{{/if}}
+{{else}}
+_No wrap_log entries recorded._
+{{/each}}
 {{else}}{{#if (eq status "rejected")}}- **Rejected:** {{updated_at}}
 - **Branch:** {{#if branch}}{{branch}}{{else}}—{{/if}}
 {{else}}{{#if (eq status "in_review")}}- **In Review:** {{updated_at}} — awaiting human GO/NO_GO
+
+{{#each wrap_log}}
+### Wrap {{add @index 1}}
+- **Executive Summary:** {{#if this.executive_summary}}{{this.executive_summary}}{{else}}—{{/if}}
+- **Deviations:**
+{{#each this.deviations}}
+  - {{this}}
+{{else}}
+  - —
+{{/each}}
+- **Residual Risks:**
+{{#each this.residual_risks}}
+  - {{this}}
+{{else}}
+  - —
+{{/each}}
+- **Recommended Sanity Checks:**
+{{#each this.recommended_sanity_checks}}
+  - {{this}}
+{{else}}
+  - —
+{{/each}}
+- **At:** {{#if this.at}}{{this.at}}{{else}}—{{/if}}
+- **Cycle:** {{#if this.cycle}}{{this.cycle}}{{else}}{{#if ../current_cycle}}{{../current_cycle}}{{else}}—{{/if}}{{/if}}
+{{else}}
+_No wrap_log entries recorded._
+{{/each}}
 {{else}}_Not yet complete._
 {{/if}}{{/if}}{{/if}}
