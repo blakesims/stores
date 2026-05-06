@@ -291,6 +291,21 @@ pub fn poll_once(
             }
         };
         for c in candidates {
+            // Atomic CAS claim — closes the multi-daemon race where two
+            // daemons would otherwise both dispatch the same retry candidate.
+            // If another daemon claimed it first, our UPDATE affects 0 rows
+            // and we skip silently.
+            match claim_for_retry(conn, &c, &agent.name) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "[daemon] claim_for_retry failed for '{}'/{}: {}",
+                        agent.name, c.display_id, e
+                    );
+                    continue;
+                }
+            }
             let row_json = read_row_as_json(conn, &c.store, c.row_id)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
             let decision = decide(
@@ -319,6 +334,16 @@ pub fn poll_once(
                         ),
                     };
                     let _ = crate::flow::notify_with_path(config_path, event);
+                    // Park last_status='halted:<policy>' so future polls'
+                    // find_retryable_locks (which filters to error/exit
+                    // statuses) excludes this row — closes the storm where
+                    // every poll re-emits the same Halt notification.
+                    if let Err(e) = mark_retry_halted(conn, &c, &agent.name, policy_id) {
+                        eprintln!(
+                            "[daemon] mark_retry_halted failed for '{}'/{}: {}",
+                            agent.name, c.display_id, e
+                        );
+                    }
                     continue;
                 }
             };
@@ -618,8 +643,54 @@ struct RetryCandidate {
     display_id: String,
     transition_id: i64,
     attempts: u32,
+    last_status_snapshot: String,
     from_status: String,
     to_status: String,
+}
+
+/// Atomic compare-and-swap claim for retry. Returns true if this caller now
+/// owns the candidate (last_status was the snapshot value and is now
+/// `retrying`); false if another daemon already moved the row. The CAS guard
+/// closes the multi-daemon race where find_retryable_locks would otherwise
+/// hand the same candidate to two callers concurrently.
+fn claim_for_retry(
+    conn: &Connection,
+    c: &RetryCandidate,
+    agent_name: &str,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE dispatch_locks SET last_status = 'retrying' \
+         WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3 \
+               AND attempts = ?4 AND last_status = ?5",
+        rusqlite::params![
+            &c.store,
+            c.row_id,
+            agent_name,
+            c.attempts,
+            &c.last_status_snapshot
+        ],
+    )?;
+    Ok(n == 1)
+}
+
+/// Mark a retry-claimed row as halted by policy. last_status carries the
+/// halting policy id so future polls (filtered to 'exit=*' / 'error:*')
+/// will NOT re-include this row — closing the Halt-notification storm
+/// where the same row would re-emit notify on every poll forever.
+fn mark_retry_halted(
+    conn: &Connection,
+    c: &RetryCandidate,
+    agent_name: &str,
+    policy_id: &str,
+) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    let last = format!("halted:{policy_id}");
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2 \
+         WHERE store = ?3 AND row_id = ?4 AND agent_name = ?5",
+        rusqlite::params![last, now, &c.store, c.row_id, agent_name],
+    )?;
+    Ok(())
 }
 
 /// Find dispatch_locks rows for `agent` that:
@@ -659,7 +730,7 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (store, row_id, display_id, transition_id, attempts, _last, finished_at, from_s, to_s) =
+        let (store, row_id, display_id, transition_id, attempts, last, finished_at, from_s, to_s) =
             row?;
         let backoff = compute_backoff_secs(agent.retry_policy.backoff, attempts) as i64;
         let finished_epoch = match parse_iso8601_to_epoch(&finished_at) {
@@ -681,6 +752,7 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
             display_id,
             transition_id,
             attempts,
+            last_status_snapshot: last,
             from_status: from_s,
             to_status: to_s,
         });
@@ -1999,6 +2071,126 @@ policies:
             )
             .unwrap();
         assert_eq!(attempts_after, 2);
+    }
+
+    /// T041 codex-revise (HIGH): two concurrent retry-claim attempts on
+    /// the same dispatch_locks row must NOT both succeed. The atomic CAS
+    /// in `claim_for_retry` (UPDATE...WHERE last_status = old_snapshot)
+    /// ensures only the first caller flips last_status='retrying'; the
+    /// second sees affected_rows=0 and skips.
+    #[test]
+    fn claim_for_retry_is_atomic_cas() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 400, "T400", "in_review", "T2", "feat/race");
+        insert_history(&conn, "tasks", 400, "T400", "ready", "in_review");
+        // Insert a dispatch_locks row in a "retryable" shape: attempts<max,
+        // finished_at set, last_status='exit=1'.
+        let now = crate::handlers::row::now_iso8601();
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts) \
+             VALUES ('tasks', 400, 'T400', 'flaky-race', 1, 'daemon-A', ?1, ?1, 'exit=1', 1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+
+        let candidate = RetryCandidate {
+            store: "tasks".to_string(),
+            row_id: 400,
+            display_id: "T400".to_string(),
+            transition_id: 1,
+            attempts: 1,
+            last_status_snapshot: "exit=1".to_string(),
+            from_status: "ready".to_string(),
+            to_status: "in_review".to_string(),
+        };
+
+        // First call wins.
+        assert!(claim_for_retry(&conn, &candidate, "flaky-race").unwrap());
+        let status_after: String = conn
+            .query_row(
+                "SELECT last_status FROM dispatch_locks WHERE agent_name='flaky-race'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status_after, "retrying");
+
+        // Second call (same candidate, snapshot still 'exit=1') loses —
+        // the CAS guard sees last_status='retrying' and returns false.
+        assert!(!claim_for_retry(&conn, &candidate, "flaky-race").unwrap());
+    }
+
+    /// T041 codex-revise (MEDIUM): when a retry hits Decision::Halt, the
+    /// notify must fire ONCE and the row's last_status must be parked at
+    /// 'halted:<policy>' so subsequent polls' find_retryable_locks (which
+    /// filters to error/exit statuses) does NOT re-include it. Closes the
+    /// per-poll Halt-notification storm.
+    #[test]
+    fn halt_on_retry_parks_last_status_no_storm() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 500, "T500", "in_review", "T2", "feat/halt");
+        insert_history(&conn, "tasks", 500, "T500", "ready", "in_review");
+        let now = crate::handlers::row::now_iso8601();
+        // Lock in retryable shape; backoff window forced past via aged
+        // finished_at (year 2000).
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, \
+             transition_id, claimed_by, claimed_at, finished_at, last_status, attempts) \
+             VALUES ('tasks', 500, 'T500', 'halted-agent', 1, 'daemon-A', ?1, '2000-01-01T00:00:00Z', 'exit=1', 1)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+
+        let agents = AgentsYaml {
+            agents: vec![retry_agent("halted-agent", "exit 0", 5)],
+            deployment_specialist: None,
+        };
+        // One halting policy on tasks: ready→in_review.
+        let policies = PoliciesYaml {
+            hash: String::new(),
+            policies: vec![crate::flow::policies_yaml::PolicyEntry {
+                id: "halt-all-tasks".to_string(),
+                transition: crate::flow::policies_yaml::TransitionRef {
+                    store: "tasks".to_string(),
+                    from: "ready".to_string(),
+                    to: "in_review".to_string(),
+                },
+                predicate: crate::flow::predicate::PredicateExpr::Eq {
+                    left: serde_json::json!(1),
+                    right: serde_json::json!(1),
+                },
+                action: crate::flow::policies_yaml::Action::Halt,
+            }],
+        };
+        let cfg = cfg_path();
+
+        // Poll #1: retry pass picks up the row, decides Halt, notifies once,
+        // parks last_status='halted:halt-all-tasks'.
+        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n1, 0, "halted retry must not count as a dispatch");
+        let (status1, attempts1): (String, u32) = conn
+            .query_row(
+                "SELECT last_status, attempts FROM dispatch_locks WHERE agent_name='halted-agent'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status1, "halted:halt-all-tasks");
+        assert_eq!(attempts1, 1, "halt does not consume an attempt");
+
+        // Poll #2: row is no longer eligible (find_retryable_locks filters
+        // to 'exit=*' / 'error:*'), so the retry pass skips it.
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n2, 0);
+        let status2: String = conn
+            .query_row(
+                "SELECT last_status FROM dispatch_locks WHERE agent_name='halted-agent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status2, "halted:halt-all-tasks", "no storm — state unchanged");
     }
 
     #[test]
