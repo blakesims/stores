@@ -19,7 +19,7 @@ use rusqlite::{OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
 use crate::schema::{actor::Actor, Schema};
-use crate::validate::EntryMap;
+use crate::validate::{EntryMap, SideEffectAuthority};
 
 // ---------------------------------------------------------------------------
 // Absence helper
@@ -301,7 +301,17 @@ struct ObsFields {
 }
 
 /// Add a minimal observations row and return its auto-minted display_id (L###).
-/// Uses the substrate typed add helper so defaults, validation, IDs, and audit stay centralized.
+///
+/// This is a gatekeeper route side-effect write — a deterministic output of the
+/// Router's routing decision, not a human-grounded write. The invoker is
+/// `Actor::Framework` with `SideEffectAuthority::GatekeeperRoute`, which allows
+/// writing the risk-classification fields (`risk_class`, `approval_policy`,
+/// `risk_flags`, `cluster_key`) that are otherwise gated at `actor:
+/// ai_with_human`. The authority is narrow and local: generic
+/// `observations add/update` calls do NOT inherit it.
+///
+/// `created_by` / `updated_by` are set to `"framework"` (the actor string),
+/// recording that the row was authored by the engine, not a human or AI agent.
 fn insert_observation_row(tx: &Transaction, fields: &ObsFields) -> Result<String> {
     let schema = observations_schema()?;
     let mut entry = EntryMap::new();
@@ -329,7 +339,17 @@ fn insert_observation_row(tx: &Transaction, fields: &ObsFields) -> Result<String
         entry.insert("cluster_key".to_string(), Value::String(ck.clone()));
     }
 
-    super::add::add_row_in_tx(tx, &schema, entry, Actor::AiWithHuman)
+    // Use Actor::Framework + SideEffectAuthority::GatekeeperRoute so that the
+    // narrow per-callsite authority allowlist is engaged. This is NOT a generic
+    // Framework→AiWithHuman widening; it is a named, closed bypass for the
+    // specific fields written by this routing side-effect path only.
+    super::add::add_row_in_tx_with_authority(
+        tx,
+        &schema,
+        entry,
+        Actor::Framework,
+        SideEffectAuthority::GatekeeperRoute,
+    )
 }
 
 fn observations_schema() -> Result<Schema> {

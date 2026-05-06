@@ -6,6 +6,27 @@ use crate::validate::error::RuleKind;
 use crate::validate::required::lookup;
 use crate::validate::{EntryMap, ValidationError};
 
+/// Named internal authority for framework-originated side-effect writes.
+///
+/// `Actor::Framework` is a sibling actor to `AiAutonomous` and `AiWithHuman`
+/// — it is NOT globally higher-authority. It does NOT satisfy `actor:
+/// ai_with_human` gates for generic writes. `SideEffectAuthority` is a narrow,
+/// closed allowlist of specific framework code-paths whose writes are
+/// deterministic Router/engine outputs, not human-grounded actions. Adding a
+/// variant here is a deliberate, named expansion of trust — not a blanket
+/// elevation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideEffectAuthority {
+    /// Gatekeeper route side-effect observations are deterministic outputs of
+    /// the Router's routing decision. They are not human-grounded writes; they
+    /// are framework-authored records of a routing action. The fields they write
+    /// (`risk_class`, `approval_policy`, `risk_flags`, `cluster_key`, `tags`,
+    /// `body`, `source`, `priority`, `notes`, `summary`, `captured_at`,
+    /// `captured_week`) describe the routing outcome and are set exclusively by
+    /// the intake_route handler, not by any user-facing CLI path.
+    GatekeeperRoute,
+}
+
 /// Determine the effective actor for a field, falling back to the store default.
 fn effective_actor(field: &Field, default_actor: Option<Actor>) -> Option<Actor> {
     field.actor.or(default_actor)
@@ -23,6 +44,24 @@ pub fn check_actor(
     default_actor: Option<Actor>,
     errors: &mut Vec<ValidationError>,
 ) {
+    check_actor_with_authority(field, field_path, entry, invoker, default_actor, None, errors);
+}
+
+/// Like `check_actor`, but accepts an optional `SideEffectAuthority` that may
+/// satisfy `actor: ai_with_human` gates for a named, closed set of fields.
+///
+/// This is the internal entry point used exclusively by gatekeeper route
+/// side-effect writes. Generic `observations add/update` and all other callers
+/// use `check_actor` (authority=None) and are unaffected.
+pub fn check_actor_with_authority(
+    field: &Field,
+    field_path: &[String],
+    entry: &EntryMap,
+    invoker: InvokerCtx,
+    default_actor: Option<Actor>,
+    authority: Option<SideEffectAuthority>,
+    errors: &mut Vec<ValidationError>,
+) {
     // Only check fields that are actually being written (treat Null as absent)
     match lookup(entry, field_path) {
         None | Some(serde_json::Value::Null) => return,
@@ -34,7 +73,8 @@ pub fn check_actor(
         None => return, // no actor constraint
     };
 
-    if !actor_allowed(invoker.actor, required_actor, invoker.token_valid) {
+    let field_name = field_path.last().map(String::as_str).unwrap_or("");
+    if !actor_allowed_with_authority(invoker.actor, required_actor, invoker.token_valid, authority, field_name) {
         let remedy = invoker_remedy(invoker.actor, required_actor);
         errors.push(ValidationError {
             field_path: field_path.to_vec(),
@@ -85,7 +125,71 @@ pub fn check_transition_actor(
 ///   Token does not change this branch — `ai_with_human` already satisfies.
 /// - `framework` required → only `framework` (the engine) is acceptable;
 ///   no human or agent invoker can satisfy this. Token irrelevant.
+///
+/// `Actor::Framework` is a sibling actor — it does NOT globally satisfy
+/// `actor: ai_with_human` gates. Use `actor_allowed_with_authority` for the
+/// narrow gatekeeper-route side-effect path.
 fn actor_allowed(invoker: Actor, required: Actor, token_valid: bool) -> bool {
+    actor_allowed_with_authority(invoker, required, token_valid, None, "")
+}
+
+/// Extended form of `actor_allowed` that accepts a named `SideEffectAuthority`.
+///
+/// When `authority == Some(SideEffectAuthority::GatekeeperRoute)` AND
+/// `invoker == Actor::Framework` AND `required == Actor::AiWithHuman`, the
+/// write is allowed IFF the field name is in the closed allowlist of fields
+/// that the gatekeeper route side-effect path is permitted to set.
+///
+/// The allowlist is closed and named here — no wildcards. Adding a new field
+/// requires an explicit change to this list and a comment explaining why.
+/// Generic Framework writes (authority=None) do NOT satisfy ai_with_human.
+fn actor_allowed_with_authority(
+    invoker: Actor,
+    required: Actor,
+    token_valid: bool,
+    authority: Option<SideEffectAuthority>,
+    field_name: &str,
+) -> bool {
+    // Narrow gatekeeper-route side-effect bypass: Framework invoker + GatekeeperRoute
+    // authority may write a specific closed set of ai_with_human-gated observation
+    // fields. These fields describe the routing outcome (risk classification,
+    // approval policy, risk flags, cluster assignment) and are written exclusively
+    // by the intake_route handler as deterministic Router outputs.
+    if required == Actor::AiWithHuman
+        && invoker == Actor::Framework
+        && matches!(authority, Some(SideEffectAuthority::GatekeeperRoute))
+    {
+        // Closed allowlist — gatekeeper route side-effect fields only.
+        // Each field here is a direct output of the routing decision:
+        //   risk_class        — the risk bucket assigned by the Router
+        //   approval_policy   — derived approval flow from risk_class
+        //   risk_flags        — fine-grained risk signal tags
+        //   cluster_key       — cluster the observation belongs to (Router output)
+        //   tags              — routing-assigned classification tags
+        //   body              — description filled by the route side-effect
+        //   source            — provenance of the observation (always "intake" here)
+        //   priority          — routing-assigned priority
+        //   notes             — structured catch-all for routing metadata
+        //   summary           — one-line description filled by side-effect
+        //   captured_at       — timestamp of routing action
+        //   captured_week     — week label at routing time
+        const GATEKEEPER_ROUTE_FIELDS: &[&str] = &[
+            "risk_class",
+            "approval_policy",
+            "risk_flags",
+            "cluster_key",
+            "tags",
+            "body",
+            "source",
+            "priority",
+            "notes",
+            "summary",
+            "captured_at",
+            "captured_week",
+        ];
+        return GATEKEEPER_ROUTE_FIELDS.contains(&field_name);
+    }
+
     match required {
         Actor::Human => invoker == Actor::Human || (invoker == Actor::AiWithHuman && token_valid),
         Actor::AiAutonomous => invoker == Actor::AiAutonomous,
