@@ -6,7 +6,7 @@ id_format: "L{:03d}"
 # resolved_at, priority_rank_at, locked_at, drafted_at, approved_at are all distinct.
 
 lifecycle:
-  states: [open, investigating, confirmed, ready, needs_info, in_progress, resolved, wont_fix]
+  states: [open, investigating, needs_investigation, confirmed, ready, needs_info, in_progress, resolved, wont_fix]
   initial_state: open
   transitions:
     # open → investigating: triage begins
@@ -16,6 +16,15 @@ lifecycle:
     - from: open
       to: investigating
       verb: investigate
+      actor: ai_autonomous
+
+    # open → needs_investigation: route to a dedicated investigator subagent
+    # (T038 — pull-shaped). The orchestrator-on-main flips the row here
+    # instead of inline-investigating; the investigator subscriber picks it up
+    # and emits evidence (NOT a contract) for the human to prune.
+    - from: open
+      to: needs_investigation
+      verb: needs_investigation
       actor: ai_autonomous
 
     # open → wont_fix: direct discard path (per 10.06 lifecycle diagram)

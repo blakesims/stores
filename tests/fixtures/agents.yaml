@@ -44,6 +44,17 @@ agents:
     retry_policy:
       max_attempts: 1
       backoff: linear
+  - name: investigator
+    subscribes_to:
+      - store: observations
+        transition:
+          from: open
+          to: needs_investigation
+    command: "builtin:investigator"
+    claim_window_secs: 600
+    retry_policy:
+      max_attempts: 1
+      backoff: linear
   - name: auto-drive
     subscribes_to:
       - store: tasks
