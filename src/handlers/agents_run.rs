@@ -285,25 +285,39 @@ pub fn poll_once(
     Ok(dispatched)
 }
 
-/// Starting-line seeder (T026 P1). For each subscription declared in
-/// `agents.yaml`, insert a `dispatch_locks` row marked
-/// `claimed_by='starting-line-marker'` / `last_status='skip-historical'` for
-/// every existing `transition_history` row that matches the subscription's
-/// `(store, from, to)` edge. Uses `INSERT OR IGNORE` so any pre-existing real
-/// claim is left untouched (the UNIQUE(store, row_id, agent_name) constraint
-/// is what gives us the silent skip).
+/// Starting-line seeder (T026 P1, refined for L116). For each agent declared
+/// in `agents.yaml`, IF the agent has never seen a `dispatch_locks` row,
+/// seed the entire matching transition_history as `skip-historical` so that
+/// when a brand-new subscriber comes online it doesn't fire retroactively on
+/// pre-existing rows (the original L055 case). Otherwise the agent has run
+/// before — DO NOT re-seed, because that would race the dispatcher on any
+/// transition that fired after the agent's previous run (the L116 case: a
+/// user `confirm` verb between two `agents run --once` calls that lands a
+/// new transition_history row, which the seeder then mis-claims as
+/// historical and the dispatcher loses the UNIQUE(store, row_id, agent_name)
+/// race against).
 ///
-/// `max_transition_id` bounds the seeder to transition_history rows whose id
-/// is `<= max_transition_id`. Callers should snapshot `MAX(id)` BEFORE any
-/// new transitions can fire (i.e. at daemon startup, before the poll loop
-/// begins). This closes L116: without the bound, every fresh `agents run
-/// --once` after a brand-new transition (e.g. the user's `confirm` verb that
-/// just fired confirmed→ready) would race the dispatcher — the seeder
-/// claims-as-historical first, the dispatcher's try_claim then loses the
-/// UNIQUE(store, row_id, agent_name) race, and the new transition silently
-/// drops on the floor.
+/// The per-agent presence check keys on `agent_name` because a previously-
+/// seeded agent will have at least the marker locks from its first seed.
+/// This handles the four real cases:
+///   - First daemon run, no history yet → no agent has locks; seeding is a
+///     no-op (correct).
+///   - First daemon run, history exists → no agent has locks; everything
+///     gets seeded as historical (closes L055).
+///   - Subsequent run, no new transitions → agents have locks; skip seeding
+///     (correct, idempotent).
+///   - Subsequent run, NEW transitions fired between runs → agents have
+///     locks; skip seeding so the dispatcher can claim the new transitions
+///     (closes L116).
 ///
-/// Returns the count of newly-inserted skip-historical rows.
+/// `max_transition_id` is retained as belt-and-suspenders for the rare case
+/// where a brand-new agent is added AND new transitions fire during the
+/// daemon's startup window before this seeder finishes — the bound prevents
+/// the seeder from claiming those mid-startup transitions. Callers should
+/// snapshot MAX(id) BEFORE invoking this function.
+///
+/// Returns the count of newly-inserted skip-historical rows across all
+/// agents that needed seeding.
 pub fn seed_starting_line(
     conn: &Connection,
     agents: &AgentsYaml,
@@ -312,6 +326,9 @@ pub fn seed_starting_line(
     let now = crate::handlers::row::now_iso8601();
     let mut total = 0usize;
     for agent in &agents.agents {
+        if agent_has_been_seeded(conn, &agent.name)? {
+            continue;
+        }
         for sub in &agent.subscribes_to {
             let n = conn.execute(
                 "INSERT OR IGNORE INTO dispatch_locks \
@@ -335,6 +352,18 @@ pub fn seed_starting_line(
         }
     }
     Ok(total)
+}
+
+/// True iff at least one dispatch_locks row exists for this agent_name. Used
+/// to decide whether the starting-line seeder should run for the agent —
+/// agents with prior locks have already had their starting-line drawn.
+fn agent_has_been_seeded(conn: &Connection, agent_name: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dispatch_locks WHERE agent_name = ?1)",
+        rusqlite::params![agent_name],
+        |r| r.get(0),
+    )?;
+    Ok(n == 1)
 }
 
 /// Snapshot the current MAX(transition_history.id) for use as the seeder's
@@ -1406,48 +1435,46 @@ policies:
     }
 
     /// L116 regression: the seeder MUST NOT claim transitions that fire
-    /// after the daemon's startup snapshot. Sequence:
-    ///   1. transition T_old fires (gets transition_history.id = X).
-    ///   2. Daemon snapshots MAX(id) = X.
-    ///   3. transition T_new fires (gets id = X+1) — e.g. user's `confirm`
-    ///      between two `agents run --once` calls.
-    ///   4. Seeder runs with bound = X. It must seed T_old as
-    ///      skip-historical but leave T_new unclaimed so the dispatcher's
-    ///      try_claim() can win it.
+    /// between two daemon runs (e.g. user `confirm` verb between
+    /// `agents run --once` calls). Realistic sequence:
+    ///   1. Daemon run #1: agent has no locks → seeder seeds historical
+    ///      transitions as skip-historical, then idle (no new transitions).
+    ///   2. Between runs: user fires a verb, transition_history gets a NEW
+    ///      row matching the agent's subscription (id > all previously-
+    ///      seeded ids).
+    ///   3. Daemon run #2: agent already has locks (from run #1) → seeder
+    ///      MUST skip seeding entirely. The dispatcher's poll then wins
+    ///      try_claim on the new transition.
     ///
-    /// Pre-fix: the seeder claimed every matching transition_history row
-    /// regardless of when it fired, so T_new lost its claim race and the
-    /// new transition silently dropped.
+    /// Pre-fix: the seeder ran on every daemon start regardless of prior
+    /// state, claimed the new transition as skip-historical, and the
+    /// dispatcher lost the UNIQUE(store, row_id, agent_name) race —
+    /// silently swallowing the user's verb.
     #[test]
-    fn seed_starting_line_skips_transitions_above_snapshot_id() {
+    fn seed_starting_line_skips_when_agent_already_has_locks() {
         let conn = fresh_db();
-
-        // T_old fires before the snapshot.
+        // Run #1: pre-existing historical transition T001.
         insert_history(&conn, "tasks", 1, "T001", "ready", "in_review");
-        let snapshot = snapshot_max_transition_id(&conn).unwrap();
-        assert!(snapshot >= 1, "snapshot must capture T_old's id");
-
-        // T_new fires after the snapshot.
-        insert_history(&conn, "tasks", 2, "T002", "ready", "in_review");
-
         let agents = AgentsYaml {
             agents: vec![noop_agent("noop", "tasks", "ready", "in_review")],
             deployment_specialist: None,
         };
+        let snap1 = snapshot_max_transition_id(&conn).unwrap();
+        let n1 = seed_starting_line(&conn, &agents, snap1).unwrap();
+        assert_eq!(n1, 1, "first run seeds the pre-existing historical row");
 
-        let n = seed_starting_line(&conn, &agents, snapshot).unwrap();
-        assert_eq!(n, 1, "seeder must seed exactly the pre-snapshot transition");
+        // Between runs: a NEW transition fires.
+        insert_history(&conn, "tasks", 2, "T002", "ready", "in_review");
 
-        // T_old got a starting-line lock; T_new must remain unclaimed.
-        let t_old_locks: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM dispatch_locks WHERE store='tasks' AND row_id=1 AND agent_name='noop'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(t_old_locks, 1, "T_old must be seeded as skip-historical");
+        // Run #2: agent has locks from run #1; seeder must skip entirely.
+        let snap2 = snapshot_max_transition_id(&conn).unwrap();
+        let n2 = seed_starting_line(&conn, &agents, snap2).unwrap();
+        assert_eq!(
+            n2, 0,
+            "subsequent run must skip seeding because agent already has locks (L116)"
+        );
 
+        // The new transition T002 must be UNCLAIMED so the dispatcher can win.
         let t_new_locks: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM dispatch_locks WHERE store='tasks' AND row_id=2 AND agent_name='noop'",
@@ -1457,25 +1484,70 @@ policies:
             .unwrap();
         assert_eq!(
             t_new_locks, 0,
-            "T_new (post-snapshot transition) must NOT be claimed by the seeder; \
-             dispatcher try_claim() needs to win it (L116)"
+            "post-startup transition must remain unclaimed by seeder (L116)"
         );
     }
 
+    /// L116 corollary: a brand-new agent (never seen in dispatch_locks) DOES
+    /// get its full starting-line seeded, even when other agents already
+    /// have locks. Closes the L055 case (new subscriber added to running
+    /// daemon) without reopening L116.
+    #[test]
+    fn seed_starting_line_seeds_new_agent_even_when_others_have_locks() {
+        let conn = fresh_db();
+        // Pre-existing transitions for two distinct subscriptions.
+        insert_history(&conn, "tasks", 1, "T001", "ready", "in_review");
+        insert_history(&conn, "tasks", 2, "T002", "ready", "in_review");
+
+        // 'incumbent' has already run before — pretend it has prior locks.
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, \
+              claimed_at, claimed_by, last_status, finished_at) \
+             VALUES ('tasks', 1, 'T001', 'incumbent', 1, '2026-01-01T00:00:00Z', \
+                     'daemon-old', 'ok', '2026-01-01T00:00:01Z')",
+            [],
+        )
+        .unwrap();
+
+        // Now a NEW agent 'newcomer' is added. seeder must seed for newcomer
+        // but skip for incumbent.
+        let agents = AgentsYaml {
+            agents: vec![
+                noop_agent("incumbent", "tasks", "ready", "in_review"),
+                noop_agent("newcomer", "tasks", "ready", "in_review"),
+            ],
+            deployment_specialist: None,
+        };
+        let snap = snapshot_max_transition_id(&conn).unwrap();
+        let n = seed_starting_line(&conn, &agents, snap).unwrap();
+        assert_eq!(n, 2, "exactly 2 new rows for newcomer (T001 + T002)");
+
+        let incumbent_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE agent_name='incumbent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(incumbent_count, 1, "incumbent untouched (no new seeds)");
+
+        let newcomer_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE agent_name='newcomer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(newcomer_count, 2, "newcomer seeded against full history");
+    }
+
     /// snapshot_max_transition_id returns 0 on an empty table (cold start).
-    /// A 0-bound seeds nothing because transition_history.id starts at 1.
     #[test]
     fn snapshot_max_transition_id_returns_zero_when_empty() {
         let conn = fresh_db();
         let n = snapshot_max_transition_id(&conn).unwrap();
         assert_eq!(n, 0);
-
-        let agents = AgentsYaml {
-            agents: vec![noop_agent("noop", "tasks", "ready", "in_review")],
-            deployment_specialist: None,
-        };
-        let seeded = seed_starting_line(&conn, &agents, 0).unwrap();
-        assert_eq!(seeded, 0, "0-bound on empty history seeds nothing");
     }
 
     /// SHUTDOWN flag is observed by sleep_interruptible.
