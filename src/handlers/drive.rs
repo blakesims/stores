@@ -1062,55 +1062,12 @@ fn parse_envelope(
 /// 3. The first object overall (legacy behaviour).
 ///
 /// Returning `None` means there were no parseable JSON objects at all.
-fn pick_best_sap_candidate<'a>(
-    candidates: &'a [serde_json::Value],
-    expected_role: &str,
-) -> Option<&'a serde_json::Value> {
-    if candidates.is_empty() {
-        return None;
-    }
-
-    // Rule 1: prefer exact role match.
-    if let Some(c) = candidates.iter().find(|c| {
-        c.get("role").and_then(|r| r.as_str()) == Some(expected_role)
-    }) {
-        return Some(c);
-    }
-
-    // Rule 2: prefer marker-field present, role absent or matching.
-    let marker = match expected_role {
-        "planner" => "phases",
-        "plan-reviewer" | "code-reviewer" => "gate",
-        "executor" => "summary",
-        "wrap" => "executive_summary",
-        _ => "",
-    };
-    if !marker.is_empty() {
-        if let Some(c) = candidates.iter().find(|c| {
-            let role_ok = match c.get("role").and_then(|r| r.as_str()) {
-                None => true,
-                Some(r) => r == expected_role,
-            };
-            // For planner specifically, require phases to be a non-empty array
-            // so a degenerate `{"phases": []}` floating in prose can't shadow
-            // the real envelope.
-            let marker_ok = if expected_role == "planner" {
-                c.get(marker)
-                    .and_then(|v| v.as_array())
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false)
-            } else {
-                c.get(marker).is_some()
-            };
-            role_ok && marker_ok
-        }) {
-            return Some(c);
-        }
-    }
-
-    // Rule 3: legacy — first candidate.
-    candidates.first()
-}
+// pick_best_sap_candidate moved to crate::runner::sap so the runner-level
+// extraction in claude_code.rs can apply the same role-aware selection logic
+// rather than blindly picking the first JSON object (which lets unrelated
+// `{...}` content above the real envelope shadow the planner output — codex
+// T047 round 2 finding).
+use crate::runner::sap::pick_best_sap_candidate;
 
 // ---------------------------------------------------------------------------
 // Submit dispatcher
