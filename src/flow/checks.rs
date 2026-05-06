@@ -32,6 +32,21 @@ impl<'a> CheckCtx<'a> {
     }
 }
 
+/// Outcome of a Check evaluation.
+///
+/// ## Serialization shape (intentional flat design)
+///
+/// `CheckOutcome` serializes as a lowercase string (`"pass"` or `"fail"`).  The associated
+/// failure reason lives in the sibling `reason` field on [`CheckResult`].  This is a deliberate
+/// choice: the flat shape keeps `CheckResult` JSON human-readable and easy to grep/match
+/// without needing to unwrap a nested variant.
+///
+/// Audit consumers should match on `outcome == "fail"` and read the sibling `reason` value.
+/// They do **not** need to special-case `reason: null` for the pass branch — a `CheckResult`
+/// with `outcome == "pass"` is guaranteed to have `reason: null`.
+///
+/// Contract shape from L135: `outcome: Pass | Fail(reason)` — reason is carried in the flat
+/// sibling `reason` field rather than embedded in the variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CheckOutcome {
@@ -164,6 +179,29 @@ impl Check for GatekeeperDecisionValid {
             )),
         }
     }
+}
+
+/// Format a Check failure into an operator-readable error string that carries BOTH:
+/// - Human-readable diagnostic lines (the legacy fail-loud text operators already see).
+/// - A JSON-serialized `CheckResult` payload so downstream audit consumers can parse
+///   `check_id`, `args`, `observed_at`, and `reason` without string-scraping.
+///
+/// Output shape:
+/// ```text
+/// gatekeeper_decision_json validation failed:
+/// - <diagnostic line 1>
+/// - <diagnostic line 2>
+/// [check] {"check_id":"...","outcome":"fail",...}
+/// ```
+pub fn format_check_failure(result: &CheckResult) -> String {
+    let diagnostics = gatekeeper_failure_diagnostics(result);
+    let structured = serde_json::to_string(result)
+        .unwrap_or_else(|_| format!("{{\"check_id\":\"{}\"}}", result.check_id));
+    format!(
+        "gatekeeper_decision_json validation failed:\n- {}\n[check] {}",
+        diagnostics.join("\n- "),
+        structured,
+    )
 }
 
 pub fn gatekeeper_failure_diagnostics(result: &CheckResult) -> Vec<String> {

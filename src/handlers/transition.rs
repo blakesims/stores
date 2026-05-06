@@ -864,10 +864,9 @@ pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
         .ok_or_else(|| anyhow::anyhow!("missing Check: gatekeeper-decision-valid"))?
         .evaluate(crate::flow::checks::CheckCtx::without_conn(), &check_args)?;
     if !check_result.is_pass() {
-        let errs = crate::flow::checks::gatekeeper_failure_diagnostics(&check_result);
         anyhow::bail!(
-            "gatekeeper_decision_json validation failed:\n- {}",
-            errs.join("\n- ")
+            "{}",
+            crate::flow::checks::format_check_failure(&check_result)
         );
     }
 

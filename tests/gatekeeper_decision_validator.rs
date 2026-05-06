@@ -521,6 +521,12 @@ fn route_malformed_gatekeeper_decision_json_rejected_via_check_registry() {
             && (err.contains("decision is required") || err.contains("confidence")),
         "error must preserve validator diagnostics through Check registry; got: {err}"
     );
+    // MAJOR fix (codex): structured CheckResult must appear in the error so audit consumers
+    // can parse check_id, args, observed_at, and reason without string-scraping.
+    assert!(
+        err.contains("[check]") && err.contains("gatekeeper-decision-valid"),
+        "error must include serialized CheckResult with check_id; got: {err}"
+    );
 }
 
 // ---- FIX 3: --decision must match gatekeeper_decision_json.decision ----
