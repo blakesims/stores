@@ -51,11 +51,12 @@ fn ac2_1_tier_hint_required_when_fast_track() {
         "risk_flags": ["docs_only"]
         // tier_hint absent → must fail
     });
-    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v)
-        .unwrap_err();
+    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v).unwrap_err();
     assert!(
-        errs.iter().any(|e| e.contains("tier_hint") && e.contains("fast_track")),
-        "expected tier_hint required error; got: {:?}", errs
+        errs.iter()
+            .any(|e| e.contains("tier_hint") && e.contains("fast_track")),
+        "expected tier_hint required error; got: {:?}",
+        errs
     );
 }
 
@@ -68,11 +69,12 @@ fn ac2_1_cluster_key_required_when_normal_observation() {
         "tier_hint": "T2"
         // cluster_key absent → must fail
     });
-    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v)
-        .unwrap_err();
+    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v).unwrap_err();
     assert!(
-        errs.iter().any(|e| e.contains("cluster_key") && e.contains("normal_observation")),
-        "expected cluster_key required error; got: {:?}", errs
+        errs.iter()
+            .any(|e| e.contains("cluster_key") && e.contains("normal_observation")),
+        "expected cluster_key required error; got: {:?}",
+        errs
     );
 }
 
@@ -85,11 +87,12 @@ fn ac2_1_duplicate_candidates_required_when_duplicate() {
         "cluster_key": "dispatch-lifecycle"
         // duplicate_candidates absent → must fail
     });
-    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v)
-        .unwrap_err();
+    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v).unwrap_err();
     assert!(
-        errs.iter().any(|e| e.contains("duplicate_candidates") && e.contains("required")),
-        "expected duplicate_candidates required error; got: {:?}", errs
+        errs.iter()
+            .any(|e| e.contains("duplicate_candidates") && e.contains("required")),
+        "expected duplicate_candidates required error; got: {:?}",
+        errs
     );
 }
 
@@ -101,11 +104,12 @@ fn ac2_1_missing_info_question_required_when_needs_info() {
         "rationale": "Need more evidence."
         // missing_info_question absent → must fail
     });
-    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v)
-        .unwrap_err();
+    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v).unwrap_err();
     assert!(
-        errs.iter().any(|e| e.contains("missing_info_question") && e.contains("required")),
-        "expected missing_info_question required error; got: {:?}", errs
+        errs.iter()
+            .any(|e| e.contains("missing_info_question") && e.contains("required")),
+        "expected missing_info_question required error; got: {:?}",
+        errs
     );
 }
 
@@ -116,11 +120,11 @@ fn ac2_1_invalid_decision_enum_rejected() {
         "confidence": "high",
         "rationale": "x"
     });
-    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v)
-        .unwrap_err();
+    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v).unwrap_err();
     assert!(
         errs.iter().any(|e| e.contains("not_a_real_decision")),
-        "expected decision enum violation; got: {:?}", errs
+        "expected decision enum violation; got: {:?}",
+        errs
     );
 }
 
@@ -132,11 +136,11 @@ fn ac2_1_risk_flags_enum_enforced() {
         "rationale": "x",
         "risk_flags": ["definitely_not_a_flag"]
     });
-    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v)
-        .unwrap_err();
+    let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v).unwrap_err();
     assert!(
         errs.iter().any(|e| e.contains("definitely_not_a_flag")),
-        "expected risk flag enum violation; got: {:?}", errs
+        "expected risk flag enum violation; got: {:?}",
+        errs
     );
 }
 
@@ -150,8 +154,8 @@ fn ac2_2_fast_track_with_touches_lifecycle_rejected_fail_loud() {
 
     // Build the add-like CLI command using the schema's leaf args
     let leaves = stores::schema::flatten::leaf_args(&schema).unwrap();
-    let mut cmd = clap::Command::new("route")
-        .arg(clap::Arg::new("display_id").required(true).index(1));
+    let mut cmd =
+        clap::Command::new("route").arg(clap::Arg::new("display_id").required(true).index(1));
     for leaf in &leaves {
         cmd = cmd.arg(
             clap::Arg::new(leaf.cli_name.clone())
@@ -178,8 +182,14 @@ fn ac2_2_fast_track_with_touches_lifecycle_rejected_fail_loud() {
         &decision_json,
     ]);
 
-    let err = transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route")
-        .unwrap_err();
+    let err = transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "route",
+    )
+    .unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("PROHIBITED") && msg.contains("touches_lifecycle"),
@@ -196,8 +206,8 @@ fn ac2_3_valid_route_mirrors_risk_flags_and_cluster_key() {
     insert_triaging_row(&conn, "I001");
 
     let leaves = stores::schema::flatten::leaf_args(&schema).unwrap();
-    let mut cmd = clap::Command::new("route")
-        .arg(clap::Arg::new("display_id").required(true).index(1));
+    let mut cmd =
+        clap::Command::new("route").arg(clap::Arg::new("display_id").required(true).index(1));
     for leaf in &leaves {
         cmd = cmd.arg(
             clap::Arg::new(leaf.cli_name.clone())
@@ -227,7 +237,14 @@ fn ac2_3_valid_route_mirrors_risk_flags_and_cluster_key() {
         "L042",
     ]);
 
-    transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route").unwrap();
+    transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "route",
+    )
+    .unwrap();
 
     // Verify top-level columns were populated without JSON parsing
     let (risk_flags_raw, cluster_key): (Option<String>, Option<String>) = conn
@@ -256,7 +273,10 @@ fn ac2_4_derive_risk_class_six_representative_vectors() {
     assert_eq!(risk_taxonomy::derive_risk_class(&["docs_only"]), "low");
 
     // Row 2: T1 + small_local_fix → low
-    assert_eq!(risk_taxonomy::derive_risk_class(&["small_local_fix"]), "low");
+    assert_eq!(
+        risk_taxonomy::derive_risk_class(&["small_local_fix"]),
+        "low"
+    );
 
     // Row 3: touches_lifecycle + contradicts_prior_decision → architecture
     assert_eq!(
@@ -291,13 +311,22 @@ fn ac2_4_derive_risk_class_six_representative_vectors() {
 #[test]
 fn ac2_4_derive_approval_policy_six_representative_vectors() {
     // fast_track → always auto
-    assert_eq!(risk_taxonomy::derive_approval_policy("T1", "low", "fast_track"), "auto");
+    assert_eq!(
+        risk_taxonomy::derive_approval_policy("T1", "low", "fast_track"),
+        "auto"
+    );
 
     // T0 + normal → auto
-    assert_eq!(risk_taxonomy::derive_approval_policy("T0", "normal", "normal_observation"), "auto");
+    assert_eq!(
+        risk_taxonomy::derive_approval_policy("T0", "normal", "normal_observation"),
+        "auto"
+    );
 
     // T1 + normal → human
-    assert_eq!(risk_taxonomy::derive_approval_policy("T1", "normal", "normal_observation"), "human");
+    assert_eq!(
+        risk_taxonomy::derive_approval_policy("T1", "normal", "normal_observation"),
+        "human"
+    );
 
     // T2 + architecture → architecture
     assert_eq!(
@@ -306,7 +335,10 @@ fn ac2_4_derive_approval_policy_six_representative_vectors() {
     );
 
     // T3 + normal → human
-    assert_eq!(risk_taxonomy::derive_approval_policy("T3", "normal", "normal_observation"), "human");
+    assert_eq!(
+        risk_taxonomy::derive_approval_policy("T3", "normal", "normal_observation"),
+        "human"
+    );
 
     // T2 + security → architecture (security ≥ architecture gate)
     assert_eq!(
@@ -324,8 +356,8 @@ fn ac2_5_decision_metadata_populated_after_route() {
     insert_triaging_row(&conn, "I001");
 
     let leaves = stores::schema::flatten::leaf_args(&schema).unwrap();
-    let mut cmd = clap::Command::new("route")
-        .arg(clap::Arg::new("display_id").required(true).index(1));
+    let mut cmd =
+        clap::Command::new("route").arg(clap::Arg::new("display_id").required(true).index(1));
     for leaf in &leaves {
         cmd = cmd.arg(
             clap::Arg::new(leaf.cli_name.clone())
@@ -355,7 +387,14 @@ fn ac2_5_decision_metadata_populated_after_route() {
         "L099",
     ]);
 
-    transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route").unwrap();
+    transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "route",
+    )
+    .unwrap();
 
     let meta_raw: Option<String> = conn
         .query_row(
@@ -370,8 +409,7 @@ fn ac2_5_decision_metadata_populated_after_route() {
         serde_json::from_str(&meta_raw).expect("decision_metadata must be valid JSON");
 
     assert_eq!(
-        meta.get("matched_cluster_key")
-            .and_then(|v| v.as_str()),
+        meta.get("matched_cluster_key").and_then(|v| v.as_str()),
         Some("dispatch-lifecycle"),
         "matched_cluster_key must be set"
     );
@@ -411,8 +449,8 @@ fn reject_noise_routes_to_dropped_state() {
     insert_triaging_row(&conn, "I001");
 
     let leaves = stores::schema::flatten::leaf_args(&schema).unwrap();
-    let mut cmd = clap::Command::new("route")
-        .arg(clap::Arg::new("display_id").required(true).index(1));
+    let mut cmd =
+        clap::Command::new("route").arg(clap::Arg::new("display_id").required(true).index(1));
     for leaf in &leaves {
         cmd = cmd.arg(
             clap::Arg::new(leaf.cli_name.clone())
@@ -437,7 +475,14 @@ fn reject_noise_routes_to_dropped_state() {
         &decision_json,
     ]);
 
-    transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route").unwrap();
+    transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "route",
+    )
+    .unwrap();
 
     let status: String = conn
         .query_row(
@@ -459,8 +504,8 @@ fn route_without_gatekeeper_decision_json_rejected() {
     insert_triaging_row(&conn, "I001");
 
     let leaves = stores::schema::flatten::leaf_args(&schema).unwrap();
-    let mut cmd = clap::Command::new("route")
-        .arg(clap::Arg::new("display_id").required(true).index(1));
+    let mut cmd =
+        clap::Command::new("route").arg(clap::Arg::new("display_id").required(true).index(1));
     for leaf in &leaves {
         cmd = cmd.arg(
             clap::Arg::new(leaf.cli_name.clone())
@@ -477,12 +522,67 @@ fn route_without_gatekeeper_decision_json_rejected() {
         // Intentionally omitting --gatekeeper-decision-json
     ]);
 
-    let result = transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route");
-    assert!(result.is_err(), "route without gatekeeper_decision_json must be rejected");
+    let result = transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "route",
+    );
+    assert!(
+        result.is_err(),
+        "route without gatekeeper_decision_json must be rejected"
+    );
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("gatekeeper_decision_json is required"),
         "error must mention gatekeeper_decision_json is required; got: {err}"
+    );
+}
+
+#[test]
+fn route_malformed_gatekeeper_decision_json_rejected_via_check_registry() {
+    let schema = intake_schema();
+    let conn = fresh_db(&schema);
+    insert_triaging_row(&conn, "I001");
+
+    let leaves = stores::schema::flatten::leaf_args(&schema).unwrap();
+    let mut cmd =
+        clap::Command::new("route").arg(clap::Arg::new("display_id").required(true).index(1));
+    for leaf in &leaves {
+        cmd = cmd.arg(
+            clap::Arg::new(leaf.cli_name.clone())
+                .long(leaf.cli_name.clone())
+                .required(false),
+        );
+    }
+
+    let decision_json = serde_json::json!({"confidence":"certain"}).to_string();
+    let matches = cmd.get_matches_from([
+        "route",
+        "I001",
+        "--decision",
+        "reject_noise",
+        "--gatekeeper-decision-json",
+        &decision_json,
+    ]);
+
+    let result = transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "route",
+    );
+    assert!(
+        result.is_err(),
+        "malformed gatekeeper_decision_json must be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("gatekeeper_decision_json validation failed")
+            && (err.contains("decision is required") || err.contains("confidence")),
+        "error must preserve validator diagnostics through Check registry; got: {err}"
     );
 }
 
@@ -496,8 +596,8 @@ fn route_decision_mismatch_between_cli_and_json_rejected() {
     insert_triaging_row(&conn, "I001");
 
     let leaves = stores::schema::flatten::leaf_args(&schema).unwrap();
-    let mut cmd = clap::Command::new("route")
-        .arg(clap::Arg::new("display_id").required(true).index(1));
+    let mut cmd =
+        clap::Command::new("route").arg(clap::Arg::new("display_id").required(true).index(1));
     for leaf in &leaves {
         cmd = cmd.arg(
             clap::Arg::new(leaf.cli_name.clone())
@@ -514,7 +614,8 @@ fn route_decision_mismatch_between_cli_and_json_rejected() {
         "tier_hint": "T2",
         "risk_flags": ["small_local_fix"],
         "cluster_key": "dispatch-lifecycle"
-    }).to_string();
+    })
+    .to_string();
 
     let matches = cmd.get_matches_from([
         "route",
@@ -525,7 +626,13 @@ fn route_decision_mismatch_between_cli_and_json_rejected() {
         &decision_json,
     ]);
 
-    let result = transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route");
+    let result = transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "route",
+    );
     assert!(result.is_err(), "mismatched decision must be rejected");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -546,13 +653,14 @@ fn p3_normal_observation_auto_create_integration() {
     let obs_schema = stores::schema::Schema::from_yaml(obs_yaml).expect("parse obs schema");
 
     let conn = fresh_db(&intake_schema);
-    conn.execute_batch(&stores::codegen::ddl::ddl_for(&obs_schema)).unwrap();
+    conn.execute_batch(&stores::codegen::ddl::ddl_for(&obs_schema))
+        .unwrap();
 
     insert_triaging_row(&conn, "I001");
 
     let leaves = stores::schema::flatten::leaf_args(&intake_schema).unwrap();
-    let mut cmd = clap::Command::new("route")
-        .arg(clap::Arg::new("display_id").required(true).index(1));
+    let mut cmd =
+        clap::Command::new("route").arg(clap::Arg::new("display_id").required(true).index(1));
     for leaf in &leaves {
         cmd = cmd.arg(
             clap::Arg::new(leaf.cli_name.clone())
@@ -568,7 +676,8 @@ fn p3_normal_observation_auto_create_integration() {
         "tier_hint": "T2",
         "risk_flags": ["small_local_fix"],
         "cluster_key": "dispatch-lifecycle"
-    }).to_string();
+    })
+    .to_string();
 
     let matches = cmd.get_matches_from([
         "route",
@@ -581,9 +690,17 @@ fn p3_normal_observation_auto_create_integration() {
     ]);
 
     let result = stores::handlers::transition::run(
-        &intake_schema, &conn, &matches, Actor::AiAutonomous.into(), "route"
+        &intake_schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "route",
     );
-    assert!(result.is_ok(), "route should succeed with auto-created observation: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "route should succeed with auto-created observation: {:?}",
+        result
+    );
 
     let obs_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))

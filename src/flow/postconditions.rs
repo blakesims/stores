@@ -9,6 +9,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde_json::Value;
 
+use crate::flow::checks::{self, CheckCtx};
+
 /// Pure substrate-state predicate. `args` carries the postcondition's bound
 /// arguments (e.g. `{"display_id": "T123"}` or `{"observation_id": "L045"}`);
 /// `ctx` is an optional companion value (the dispatch_locks row, the trigger
@@ -120,20 +122,18 @@ pub fn task_workspace_exists(
 pub fn drive_pid_recorded_or_terminal(
     conn: &Connection,
     args: &Value,
-    _ctx: Option<&Value>,
+    ctx: Option<&Value>,
 ) -> Result<bool> {
-    let display_id =
-        arg_str(args, "display_id").ok_or_else(|| anyhow::anyhow!("missing arg: display_id"))?;
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tasks \
-         WHERE display_id = ?1 AND ( \
-           (drive_pid IS NOT NULL AND drive_pid > 0) \
-           OR status IN ('blocked','accepted','deploy_blocked','schema_migrated') \
-         )",
-        rusqlite::params![display_id],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
+    let result = checks::lookup(checks::DRIVE_PID_RECORDED_OR_TERMINAL)
+        .ok_or_else(|| anyhow::anyhow!("missing Check: drive_pid_recorded_or_terminal"))?
+        .evaluate(
+            CheckCtx {
+                conn: Some(conn),
+                companion: ctx,
+            },
+            args,
+        )?;
+    Ok(result.is_pass())
 }
 
 /// True iff the named task row is at `cargo_installed`.
@@ -217,14 +217,18 @@ mod tests {
         insert_task(&conn, "T100", "planning", None, None, Some(r#"["L045"]"#));
         insert_task(&conn, "T101", "planning", None, None, Some(r#"["L099"]"#));
 
-        assert!(
-            task_exists_for_linked_observation(&conn, &json!({"observation_id": "L045"}), None)
-                .unwrap()
-        );
-        assert!(
-            !task_exists_for_linked_observation(&conn, &json!({"observation_id": "L777"}), None)
-                .unwrap()
-        );
+        assert!(task_exists_for_linked_observation(
+            &conn,
+            &json!({"observation_id": "L045"}),
+            None
+        )
+        .unwrap());
+        assert!(!task_exists_for_linked_observation(
+            &conn,
+            &json!({"observation_id": "L777"}),
+            None
+        )
+        .unwrap());
     }
 
     #[test]

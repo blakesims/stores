@@ -1108,12 +1108,17 @@ fn postcondition_args_for(id: &str, store: &str, display_id: &str) -> Value {
     }
 }
 
+enum PostconditionFailure {
+    Check(crate::flow::checks::CheckResult),
+    Legacy(String),
+}
+
 fn run_postcondition_for_lock(
     conn: &Connection,
     store: &str,
     row_id: i64,
     agent_name: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<PostconditionFailure>> {
     let row: Option<(Option<String>, Option<String>)> = conn
         .query_row(
             "SELECT postcondition_id, postcondition_args FROM dispatch_locks \
@@ -1125,15 +1130,33 @@ fn run_postcondition_for_lock(
     let Some((Some(id), args_text)) = row else {
         return Ok(None);
     };
-    let Some(pred) = crate::flow::postconditions::lookup(&id) else {
-        return Ok(Some(id));
-    };
     let args: Value = args_text
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_else(|| json!({}));
+    if let Some(check) = crate::flow::checks::lookup(&id) {
+        let result = check.evaluate(
+            crate::flow::checks::CheckCtx {
+                conn: Some(conn),
+                companion: None,
+            },
+            &args,
+        )?;
+        return Ok(if result.is_pass() {
+            None
+        } else {
+            Some(PostconditionFailure::Check(result))
+        });
+    }
+    let Some(pred) = crate::flow::postconditions::lookup(&id) else {
+        return Ok(Some(PostconditionFailure::Legacy(id)));
+    };
     let ok = pred(conn, &args, None)?;
-    Ok(if ok { None } else { Some(id) })
+    Ok(if ok {
+        None
+    } else {
+        Some(PostconditionFailure::Legacy(id))
+    })
 }
 
 fn iso8601_add_secs(base: &str, secs: u64) -> Option<String> {
@@ -1225,9 +1248,15 @@ fn mark_claim_finished_typed(
     let mut reason = terminal_reason.to_string();
     let mut status = last_status.to_string();
     if reason == "ok" {
-        if let Some(failed_id) = run_postcondition_for_lock(conn, store, row_id, &agent.name)? {
+        if let Some(failed) = run_postcondition_for_lock(conn, store, row_id, &agent.name)? {
             reason = "error".to_string();
-            status = format!("error: postcondition {failed_id} failed");
+            status = match failed {
+                PostconditionFailure::Check(result) => {
+                    let payload = serde_json::to_string(&result)?;
+                    format!("error: check failed: {payload}")
+                }
+                PostconditionFailure::Legacy(id) => format!("error: postcondition {id} failed"),
+            };
         }
     }
     let completed_attempt = conn
@@ -3317,7 +3346,17 @@ policies:
             )
             .unwrap();
         assert_eq!(reason, "error");
-        assert!(last.starts_with("error: postcondition drive_pid_recorded_or_terminal failed"));
+        assert!(last.starts_with("error: check failed: "));
+        let payload = last.strip_prefix("error: check failed: ").unwrap();
+        let check: crate::flow::checks::CheckResult = serde_json::from_str(payload).unwrap();
+        assert_eq!(check.check_id, "drive_pid_recorded_or_terminal");
+        assert_eq!(check.outcome, crate::flow::checks::CheckOutcome::Fail);
+        assert_eq!(
+            check.args.get("display_id").and_then(|v| v.as_str()),
+            Some("T850")
+        );
+        assert!(!check.observed_at.is_empty());
+        assert!(check.reason.is_some());
         let th_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM transition_history", [], |r| r.get(0))
             .unwrap();
