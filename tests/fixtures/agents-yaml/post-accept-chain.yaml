@@ -7,6 +7,8 @@ agents:
     subscribes_to:
       - store: tasks
         transition: { from: in_review, to: accepted }
+      - store: tasks
+        transition: { from: deploy_blocked, to: accepted }
     command: "builtin:accept-merge"
     claim_window_secs: 300
     retry_policy: { max_attempts: 3, backoff: linear }
@@ -15,6 +17,8 @@ agents:
     subscribes_to:
       - store: tasks
         transition: { from: in_review, to: accepted }
+      - store: tasks
+        transition: { from: deploy_blocked, to: accepted }
     command: "builtin:cargo-install"
     claim_window_secs: 600
     retry_policy: { max_attempts: 1, backoff: linear }

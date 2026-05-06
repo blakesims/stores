@@ -252,9 +252,7 @@ pub fn run_close_out_of_band(
     // git validation so a re-run after the SHA has fallen out of the local
     // main (e.g. because the operator hasn't fetched recently) still no-ops.
     if current_status == "closed_out_of_band" {
-        println!(
-            "{display_id} already closed_out_of_band (no-op; commit={commit})"
-        );
+        println!("{display_id} already closed_out_of_band (no-op; commit={commit})");
         return Ok(());
     }
 
@@ -289,9 +287,7 @@ pub fn run_close_out_of_band(
     let invoker_str = invoker.actor.to_string();
     let qtable = quote_ident(&schema.name);
     tx.execute(
-        &format!(
-            "UPDATE {qtable} SET updated_at = ?1, updated_by = ?2, status = ?3 WHERE id = ?4"
-        ),
+        &format!("UPDATE {qtable} SET updated_at = ?1, updated_by = ?2, status = ?3 WHERE id = ?4"),
         rusqlite::params![now, invoker_str, transition.to, row_id],
     )
     .context("close-out-of-band: update row")?;
@@ -331,10 +327,12 @@ fn validate_sha_reachable_in_main(sha: &str) -> Result<()> {
     let out = Command::new("git")
         .args(["merge-base", "--is-ancestor", sha, "main"])
         .output()
-        .map_err(|e| anyhow::anyhow!(
-            "--commit '{sha}' validation failed: could not run git ({e}). \
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "--commit '{sha}' validation failed: could not run git ({e}). \
              close-out-of-band requires a real git repo with a 'main' ref."
-        ))?;
+            )
+        })?;
     if out.status.success() {
         return Ok(());
     }
@@ -438,12 +436,7 @@ pub(crate) fn run_in_tx(
     // same gatekeeper-derived risk_class / approval_policy / risk_flags / cluster_key.
     if schema.name == "intake" && verb == "route" {
         maybe_validate_and_mirror_gatekeeper_decision(schema, &mut diff, &mut merged)?;
-        super::intake_route::inject_pre_validation_fields(
-            tx,
-            &mut diff,
-            &mut merged,
-            verb,
-        )?;
+        super::intake_route::inject_pre_validation_fields(tx, &mut diff, &mut merged, verb)?;
     }
 
     // T053 P3/P5: recon-return writes recon_round/evidence through the same typed
@@ -531,10 +524,7 @@ pub(crate) fn maybe_auto_ratify_observation(
         Some(o) => o,
         None => return Ok(()),
     };
-    let contract_ready = intent
-        .get("contract_state")
-        .and_then(|v| v.as_str())
-        == Some("ready");
+    let contract_ready = intent.get("contract_state").and_then(|v| v.as_str()) == Some("ready");
     let approved_by_set = intent
         .get("approved_by")
         .map(|v| match v {
@@ -768,7 +758,10 @@ pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
     // Reject fail-loud if they differ to prevent mismatched state transitions.
     if let Some(obj) = decision_json_val.as_object() {
         let json_decision = obj.get("decision").and_then(|v| v.as_str()).unwrap_or("");
-        let cli_decision = merged.get("decision").and_then(|v| v.as_str()).unwrap_or("");
+        let cli_decision = merged
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if !cli_decision.is_empty() && json_decision != cli_decision {
             anyhow::bail!(
                 "--decision '{cli_decision}' does not match gatekeeper_decision_json.decision \
@@ -797,8 +790,7 @@ pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        let risk_class =
-            crate::schema::risk_taxonomy::derive_risk_class(&risk_flags_arr);
+        let risk_class = crate::schema::risk_taxonomy::derive_risk_class(&risk_flags_arr);
         let decision_str = obj.get("decision").and_then(|v| v.as_str()).unwrap_or("");
         let tier_hint = obj.get("tier_hint").and_then(|v| v.as_str()).unwrap_or("");
         let approval_policy = crate::schema::risk_taxonomy::derive_approval_policy(
@@ -2102,13 +2094,15 @@ fields:
                  WHERE store='observations' AND display_id='L001' ORDER BY id",
             )
             .unwrap()
-            .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert_eq!(rows.len(), 2, "expected 2 transition_history rows; got {rows:?}");
+        assert_eq!(
+            rows.len(),
+            2,
+            "expected 2 transition_history rows; got {rows:?}"
+        );
         assert_eq!(rows[0].0, "investigating");
         assert_eq!(rows[0].1, "confirmed");
         assert_eq!(rows[0].2, "confirm");
@@ -2204,10 +2198,11 @@ fields:
 name: tasks
 id_format: "T{:03d}"
 lifecycle:
-  states: [planning, executing, accepted, closed_out_of_band]
+  states: [planning, executing, accepted, deploy_blocked, closed_out_of_band]
   transitions:
     - {from: planning, to: closed_out_of_band, verb: close-out-of-band, actor: human}
     - {from: executing, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: deploy_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human}
 fields:
   - name: title
     type: text
@@ -2233,11 +2228,7 @@ fields:
     fn build_coob_cmd() -> clap::Command {
         clap::Command::new("close-out-of-band")
             .arg(clap::Arg::new("display_id").required(true).index(1))
-            .arg(
-                clap::Arg::new("commit")
-                    .long("commit")
-                    .required(true),
-            )
+            .arg(clap::Arg::new("commit").long("commit").required(true))
     }
 
     fn read_status(conn: &Connection) -> String {
@@ -2297,10 +2288,7 @@ fields:
         must(&["init", "-q", "-b", "main"]);
         must(&["commit", "-q", "--allow-empty", "-m", "init"]);
         let rev = must(&["rev-parse", "HEAD"]);
-        let sha = String::from_utf8(rev.stdout)
-            .unwrap()
-            .trim()
-            .to_string();
+        let sha = String::from_utf8(rev.stdout).unwrap().trim().to_string();
         (dir, sha)
     }
 
@@ -2338,8 +2326,7 @@ fields:
         insert_coob_row(&conn, "planning");
         // Well-formed SHA shape that is NOT in this repo.
         let bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-        let m =
-            build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", bogus]);
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", bogus]);
         let err = run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), bogus)
             .expect_err("unreachable SHA must be refused");
         let msg = err.to_string();
@@ -2418,10 +2405,7 @@ fields:
                 let _ = std::env::set_current_dir(&self.prev);
             }
         }
-        Guard {
-            prev,
-            _lock: lock,
-        }
+        Guard { prev, _lock: lock }
     }
 
     /// AC3: refused from terminal state (`accepted` is not declared as a
@@ -2442,6 +2426,39 @@ fields:
             "expected refusal citing the verb; got: {msg}"
         );
         assert_eq!(read_status(&conn), "accepted", "row unchanged");
+    }
+
+    #[test]
+    fn coob_deploy_blocked_to_closed_records_sha_and_no_dispatch_work() {
+        let (dir, sha) = coob_real_git_repo();
+        let _g = scoped_cwd(dir.path());
+        let (schema, conn) = setup_coob();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        insert_coob_row(&conn, "deploy_blocked");
+        let m = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", &sha]);
+        run_close_out_of_band(&schema, &conn, &m, Actor::Human.into(), &sha).unwrap();
+        assert_eq!(read_status(&conn), "closed_out_of_band");
+        let audit = audit_rows_for(&conn);
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].0, "close-out-of-band");
+        assert_eq!(audit[0].2.as_deref(), Some(sha.as_str()));
+        let dispatches: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dispatch_locks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            dispatches, 0,
+            "manual close-out must not enqueue deploy subscribers"
+        );
+
+        let m2 = build_coob_cmd().get_matches_from(["close-out-of-band", "T001", "--commit", &sha]);
+        run_close_out_of_band(&schema, &conn, &m2, Actor::Human.into(), &sha).unwrap();
+        assert_eq!(read_status(&conn), "closed_out_of_band");
+        assert_eq!(
+            audit_rows_for(&conn).len(),
+            1,
+            "repeat remains terminal/idempotent"
+        );
     }
 
     /// AC6: idempotent. Calling on an already-closed_out_of_band row succeeds
@@ -2489,8 +2506,7 @@ fields:
         let err =
             run_close_out_of_band(&schema, &conn, &m, Actor::AiAutonomous.into(), sha).unwrap_err();
         assert!(
-            err.to_string().contains("validation failed")
-                || err.to_string().contains("actor"),
+            err.to_string().contains("validation failed") || err.to_string().contains("actor"),
             "expected actor-validation failure; got: {err}"
         );
         assert_eq!(read_status(&conn), "planning", "row unchanged");

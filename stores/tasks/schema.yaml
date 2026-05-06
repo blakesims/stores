@@ -149,13 +149,12 @@ lifecycle:
     # FAIL: code-reviewer hard-fail goes to blocked
     - {from: code_review, to: blocked, verb: submit-review, actor: ai_autonomous, requires_gate: FAIL}
 
-    # blocked → planning (resume) — T054: route any plan-empty row back to
-    # planning regardless of tier so the planning on-entry cascade (planner
-    # for T2/T3, skip-plan synthesis for T1) idempotently re-fires. Decision
-    # is keyed on plan emptiness, not tier_hint; for T1 rows post-synthesis
-    # plan is populated so this transition does not fire.
+    # blocked recovery: resume continues the work cycle. Plan-empty rows go
+    # back through planning; plan-populated rows resume ready→executing.
+    # deploy_blocked is release-ceremony recovery, not work-cycle resume:
+    # use retry-deploy after fixing the deploy issue, or close-out-of-band
+    # when manually recovered outside the substrate.
     - {from: blocked, to: planning, verb: resume, actor: ai_with_human, guard: "plan.length == 0"}
-    # blocked → ready (resume) — default path after guarded resume cases.
     - {from: blocked, to: ready, verb: resume, actor: ai_with_human}
 
     # {planning, plan_review, ready, executing, code_review} → blocked (framework, fired by auto-drive subscriber on drive failure)
@@ -167,8 +166,9 @@ lifecycle:
 
     # accepted → deploy_blocked (framework, fired by accept-merge agent on conflict)
     - {from: accepted, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework}
-    # deploy_blocked → ready (resume after specialist intervention)
-    - {from: deploy_blocked, to: ready, verb: resume, actor: ai_with_human}
+    # deploy_blocked recovery: retry the release ceremony from the accepted edge
+    # after fixing the underlying deploy issue. Do not use resume here.
+    - {from: deploy_blocked, to: accepted, verb: retry-deploy, actor: ai_with_human}
 
     # accepted → cargo_installed (framework, fired by builtin:cargo-install on success)
     - {from: accepted, to: cargo_installed, verb: mark_cargo_installed, actor: framework}

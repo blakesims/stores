@@ -8,8 +8,9 @@
 #   3. builtin:schema-migrate (T019) — apply additive DB migrations.
 #
 # Each link only fires after its predecessor reports success:
-#   - accept-merge subscribes to in_review→accepted (the human accept verb).
-#   - cargo-install subscribes to in_review→accepted as a peer; it runs
+#   - accept-merge subscribes to in_review→accepted (the human accept verb)
+#     and deploy_blocked→accepted (operator retry-deploy recovery).
+#   - cargo-install subscribes to the same accepted-entry edges as a peer; it runs
 #     after accept-merge within the same poll iteration (declaration order
 #     is dispatch order) and on success fires mark_cargo_installed
 #     (accepted→cargo_installed).
@@ -19,13 +20,18 @@
 # Failure at any link halts the chain: the row flips to `deploy_blocked`
 # (cargo_installed→deploy_blocked or accepted→deploy_blocked) with stderr
 # captured in `blocked_reason`, ntfy fires, and the row is dispatched to
-# `deployment_specialist` (default: `builtin:user-escalation`).
+# `deployment_specialist` (default: `builtin:user-escalation`). Ordinary
+# `blocked` rows use `stores tasks resume`; deploy_blocked rows use
+# `stores tasks retry-deploy` after fixing the issue, or
+# `stores tasks close-out-of-band --commit <sha>` for manual recovery.
 
 agents:
   - name: accept-merge
     subscribes_to:
       - store: tasks
         transition: { from: in_review, to: accepted }
+      - store: tasks
+        transition: { from: deploy_blocked, to: accepted }
     command: "builtin:accept-merge"
     claim_window_secs: 300
     retry_policy: { max_attempts: 3, backoff: linear }
@@ -34,6 +40,8 @@ agents:
     subscribes_to:
       - store: tasks
         transition: { from: in_review, to: accepted }
+      - store: tasks
+        transition: { from: deploy_blocked, to: accepted }
     command: "builtin:cargo-install"
     claim_window_secs: 600
     retry_policy: { max_attempts: 1, backoff: linear }

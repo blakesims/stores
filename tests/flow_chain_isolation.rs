@@ -19,7 +19,9 @@ use std::process::Command;
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use stores::flow::builtins::{accept_merge, cargo_install, schema_migrate, DispatchCtx};
-use stores::flow::AgentsYaml;
+use stores::flow::{AgentsYaml, PoliciesYaml};
+use stores::handlers::{agents_run, submit};
+use stores::schema::actor::Actor;
 use stores::schema::Schema;
 
 fn git(repo: &Path, args: &[&str]) -> std::process::Output {
@@ -50,8 +52,7 @@ fn copy_dir(src: &Path, dst: &Path) {
 fn setup_chain_repo(branch: &str, unique: &str) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().to_path_buf();
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/cargo-install-noop");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-install-noop");
     copy_dir(&src, &repo);
 
     assert!(git(&repo, &["init", "-b", "main"]).status.success());
@@ -61,7 +62,11 @@ fn setup_chain_repo(branch: &str, unique: &str) -> (tempfile::TempDir, PathBuf) 
     git(&repo, &["commit", "-m", "init"]);
 
     git(&repo, &["checkout", "-b", branch]);
-    std::fs::write(repo.join(format!("{}.txt", unique)), format!("{}\n", unique)).unwrap();
+    std::fs::write(
+        repo.join(format!("{}.txt", unique)),
+        format!("{}\n", unique),
+    )
+    .unwrap();
     git(&repo, &["add", &format!("{}.txt", unique)]);
     git(&repo, &["commit", "-m", "feat"]);
     git(&repo, &["checkout", "main"]);
@@ -75,8 +80,7 @@ fn setup_chain_repo(branch: &str, unique: &str) -> (tempfile::TempDir, PathBuf) 
 fn setup_conflict_repo(branch: &str) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().to_path_buf();
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/cargo-install-noop");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-install-noop");
     copy_dir(&src, &repo);
 
     assert!(git(&repo, &["init", "-b", "main"]).status.success());
@@ -213,6 +217,25 @@ fn ac4_2_post_accept_chain_fixture_parses() {
     assert!(names.contains(&"schema-migrate"), "names: {:?}", names);
     assert!(names.contains(&"user-escalation"), "names: {:?}", names);
 
+    let accept = parsed
+        .agents
+        .iter()
+        .find(|a| a.name == "accept-merge")
+        .unwrap();
+    assert!(accept
+        .subscribes_to
+        .iter()
+        .any(|s| s.transition.from == "deploy_blocked" && s.transition.to == "accepted"));
+    let cargo = parsed
+        .agents
+        .iter()
+        .find(|a| a.name == "cargo-install")
+        .unwrap();
+    assert!(cargo
+        .subscribes_to
+        .iter()
+        .any(|s| s.transition.from == "deploy_blocked" && s.transition.to == "accepted"));
+
     let spec = parsed.deployment_specialist.as_deref();
     assert_eq!(spec, Some("user-escalation"));
     assert!(
@@ -314,6 +337,68 @@ fn ac4_1_chain_isolation_failure_does_not_block_peer() {
         1,
         "T101 must have one mark_deploy_blocked history row"
     );
+
+    std::env::remove_var("CARGO_HOME");
+    std::env::remove_var("CARGO_TARGET_DIR");
+}
+
+/// retry-deploy writes deploy_blocked→accepted; daemon polling observes that
+/// edge and re-runs the normal accept-merge/cargo-install/schema-migrate chain.
+#[test]
+fn retry_deploy_daemon_poll_retries_post_accept_chain() {
+    let cargo_home = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    std::env::set_var("CARGO_HOME", cargo_home.path());
+    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
+
+    let (_tmp, repo) = setup_chain_repo("feat/retry", "retry-only");
+    let conn = fresh_db_with_substrate();
+    insert_accepted_task(&conn, "T200", "feat/retry", repo.to_str().unwrap());
+    conn.execute(
+        "UPDATE tasks SET status='deploy_blocked', blocked_reason='fixed before retry' WHERE display_id='T200'",
+        [],
+    )
+    .unwrap();
+
+    let task_schema = Schema::from_yaml(
+        BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .unwrap(),
+    )
+    .unwrap();
+    submit::run_retry_deploy(&task_schema, &conn, "T200", Actor::AiWithHuman.into()).unwrap();
+    assert_eq!(status_of(&conn, "T200"), "accepted");
+
+    let yaml = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agents-yaml/post-accept-chain.yaml"),
+    )
+    .unwrap();
+    let agents = AgentsYaml::from_yaml(&yaml).unwrap();
+    let policies = PoliciesYaml::from_yaml("policies: []\n").unwrap();
+    let cfg = cfg_path();
+
+    let n1 = agents_run::poll_once(&conn, &agents, &policies, &cfg, "retry-test", "").unwrap();
+    assert!(
+        n1 >= 3,
+        "retry edge should dispatch accept-merge, cargo-install, and schema-migrate through subscriber polling; got {n1}"
+    );
+    assert_eq!(status_of(&conn, "T200"), "schema_migrated");
+    assert_eq!(count_history(&conn, "T200", "retry-deploy"), 1);
+    assert_eq!(count_history(&conn, "T200", "mark_cargo_installed"), 1);
+    assert_eq!(count_history(&conn, "T200", "mark_schema_migrated"), 1);
+
+    let workflow_dispatches: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dispatch_locks WHERE display_id='T200' AND agent_name IN ('planner','executor','code_reviewer','plan_reviewer')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(workflow_dispatches, 0);
 
     std::env::remove_var("CARGO_HOME");
     std::env::remove_var("CARGO_TARGET_DIR");

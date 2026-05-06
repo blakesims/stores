@@ -26,4 +26,6 @@ stores tasks render T001             # write tasks/active/T001-slug/main.md
 
 `planning` → `plan_review` → `ready` → `executing` → `code_review` → `complete`
 
-Blocked on guard failure; `resume` returns to `executing`. Plan-review: NEEDS_WORK 3× → BLOCKED. Code-review: REVISE 3× → BLOCKED.
+Blocked on guard failure; ordinary `blocked` rows use `resume` to continue the work cycle (`blocked` → `ready`/`planning`). Plan-review: NEEDS_WORK 3× → BLOCKED. Code-review: REVISE 3× → BLOCKED.
+
+Deploy ceremony failures enter `deploy_blocked`. After fixing the underlying deploy issue, run `stores tasks retry-deploy <id>` to retry the existing accept-merge → cargo-install → schema-migrate subscriber chain. If the work was recovered manually, run `stores tasks close-out-of-band <id> --commit <sha>` instead.

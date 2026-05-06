@@ -58,7 +58,7 @@ digraph stores_topology {
     "z1_tasks__executing" -> "z1_tasks__blocked" [label=" F\nmark_drive_failed", color=gray, fontcolor=gray];
     "z1_tasks__code_review" -> "z1_tasks__blocked" [label=" F\nmark_drive_failed", color=gray, fontcolor=gray];
     "z1_tasks__accepted" -> "z1_tasks__deploy_blocked" [label=" F\nmark_deploy_blocked", color=gray, fontcolor=gray];
-    "z1_tasks__deploy_blocked" -> "z1_tasks__ready" [label=" H+\nresume", color=gold, fontcolor=gold];
+    "z1_tasks__deploy_blocked" -> "z1_tasks__accepted" [label=" H+\nretry-deploy", color=gold, fontcolor=gold];
     "z1_tasks__accepted" -> "z1_tasks__cargo_installed" [label=" F\nmark_cargo_installed", color=gray, fontcolor=gray];
     "z1_tasks__cargo_installed" -> "z1_tasks__schema_migrated" [label=" F\nmark_schema_migrated", color=gray, fontcolor=gray];
     "z1_tasks__cargo_installed" -> "z1_tasks__deploy_blocked" [label=" F\nmark_deploy_blocked", color=gray, fontcolor=gray];
