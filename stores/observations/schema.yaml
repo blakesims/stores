@@ -458,6 +458,20 @@ fields:
     required: false
     actor: ai_with_human
     default: []
+    list_enum:
+      - touches_actor_authority
+      - touches_lifecycle
+      - touches_subscriber_semantics
+      - introduces_new_primitive
+      - changes_boundary
+      - security_sensitive
+      - docs_only
+      - small_local_fix
+      - duplicate_symptom
+      - touches_runner_boundary
+      - touches_schema_core
+      - authority_surface_drift
+      - contradicts_prior_decision
     description: "Canonical risk-flag enum tags (array membership validated separately)"
 
   - name: cluster_key

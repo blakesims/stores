@@ -6,6 +6,8 @@ pub enum RuleKind {
         expr: String,
     },
     Enum,
+    /// An element of a List(Text) field is not in the declared list_enum set.
+    ListEnum,
     Pattern {
         pattern: String,
     },
