@@ -210,13 +210,21 @@ fn extract_cargo_package_name(toml: &str) -> Option<String> {
         if !in_package {
             continue;
         }
-        // Match `name = "..."` (with optional whitespace around `=`).
+        // Match `name = "..."` (with optional whitespace around `=`,
+        // tolerant of a trailing inline comment like `name = "stores" # crate`).
+        // Guard against false-matching `namespace = ...` etc. by requiring the
+        // char after "name" to be whitespace or '='.
         if let Some(rest) = trimmed.strip_prefix("name") {
+            if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
+                continue;
+            }
             let rest = rest.trim_start();
             if let Some(rest) = rest.strip_prefix('=') {
-                let rest = rest.trim();
-                if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
-                    return Some(rest[1..rest.len() - 1].to_string());
+                let rest = rest.trim_start();
+                if let Some(after_open) = rest.strip_prefix('"') {
+                    if let Some(end) = after_open.find('"') {
+                        return Some(after_open[..end].to_string());
+                    }
                 }
             }
         }
