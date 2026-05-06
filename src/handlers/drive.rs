@@ -564,6 +564,10 @@ pub fn drive_loop(
     // run. Prevents same-run re-dispatch while allowing fresh dispatch on every
     // new drive invocation (covers re-entry after reject → amend → re-complete).
     let mut dispatched_wrap_this_run = false;
+    // T049: close the auto-drive dispatch_lock the first time we land a
+    // successful submit. Drives that die before this point leave the lock
+    // open for the watchdog to detect as a silent zombie.
+    let mut auto_drive_lock_closed = false;
 
     loop {
         // ── Step 2a: compute next-action ──────────────────────────────────
@@ -860,6 +864,22 @@ pub fn drive_loop(
             })?;
 
         let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;
+
+        // T049: first successful submit ⇒ close the auto-drive dispatch_lock.
+        // Up to this point the lock has been left open (by agents_run.rs's
+        // post-spawn skip), so a drive subprocess that dies between spawn and
+        // first submit remains visible to the watchdog as an open-lock zombie.
+        if !auto_drive_lock_closed {
+            if let Err(e) =
+                crate::handlers::agents_run::close_auto_drive_lock_ok(conn, display_id)
+            {
+                eprintln!(
+                    "[{display_id}] close_auto_drive_lock_ok failed (non-fatal): {e}"
+                );
+                let _ = std::io::stderr().flush();
+            }
+            auto_drive_lock_closed = true;
+        }
 
         // AC4.3 flag: wrap dispatches when na.status == "in_review" (the row is in
         // in_review, next_agent is wrap). Once dispatch_submit returns successfully

@@ -212,7 +212,16 @@ fn write_happy_drive_stub(dir: &Path, db_path: &Path) -> PathBuf {
          sqlite3 -cmd \".timeout 10000\" {db} \"UPDATE tasks SET status='in_review', \
            wrap_log='[{{\\\"summary\\\":\\\"stub-drive ok\\\"}}]', \
            updated_at='2026-05-04T00:00:01Z' WHERE display_id='$DISPLAY_ID'\"\n\
-         echo \"stub UPDATE rc=$?\"\n",
+         echo \"stub UPDATE rc=$?\"\n\
+         # T049: drive_loop closes the auto-drive dispatch_lock on first\n\
+         # successful submit. The stub stands in for drive_loop, so close\n\
+         # the lock here to mirror that contract.\n\
+         sqlite3 -cmd \".timeout 10000\" {db} \"UPDATE dispatch_locks \
+           SET last_status='ok', finished_at='2026-05-04T00:00:01Z', \
+               attempts=attempts+1 \
+           WHERE store='tasks' AND display_id='$DISPLAY_ID' \
+             AND agent_name='auto-drive' AND finished_at IS NULL\"\n\
+         echo \"stub LOCK rc=$?\"\n",
         db = db_path.display(),
         log = log.display()
     );
@@ -555,8 +564,8 @@ fn drive_failure_watchdog_flips_blocked() {
     assert_eq!(status, "blocked", "AC7.3: row must flip to blocked");
     assert_eq!(
         reason.as_deref(),
-        Some("drive_failed"),
-        "AC7.3: blocked_reason must be 'drive_failed'"
+        Some("drive_failed:silent_zombie_pid_dead"),
+        "AC7.3 (T049): blocked_reason carries silent-zombie suffix"
     );
 
     // Observation filed with task_id back-link to T900.

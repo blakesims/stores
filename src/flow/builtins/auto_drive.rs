@@ -433,9 +433,15 @@ pub fn sweep_drive_watchdog(
             handled.insert(display_id.clone());
             continue;
         }
-        match fire_mark_drive_failed(conn, &display_id, "drive_failed", policies_hash, None) {
+        match fire_mark_drive_failed(
+            conn,
+            &display_id,
+            "drive_failed",
+            policies_hash,
+            Some("silent_zombie_pid_dead"),
+        ) {
             Ok(()) => {
-                annotate_drive_failed_history(conn, &display_id, "drive_pid_dead");
+                annotate_drive_failed_history(conn, &display_id, "silent_zombie_pid_dead");
                 let ctx = DispatchCtx {
                     conn,
                     agents,
@@ -861,7 +867,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "blocked");
-        assert_eq!(reason.as_deref(), Some("drive_failed"));
+        assert_eq!(reason.as_deref(), Some("drive_failed:silent_zombie_pid_dead"));
 
         let (obs_count, obs_task_id): (i64, String) = conn
             .query_row(
@@ -975,7 +981,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(reason.as_deref(), Some("drive_failed"));
+        assert_eq!(reason.as_deref(), Some("drive_failed:silent_zombie_pid_dead"));
         let finished: Option<String> = conn2
             .query_row(
                 "SELECT finished_at FROM dispatch_locks WHERE display_id='T723'",
