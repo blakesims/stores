@@ -425,3 +425,9 @@ The design's last acceptance criterion (T045 § Done When) is "at least one foll
 - **L143 — Add `risk_class` + `approval_policy` fields to observations schema** — `tier_hint: T3`. Promote the `(size_tier, risk_class, approval_policy)` triple from `docs/risk-and-cluster-taxonomy.md` into typed columns on the `observations` row so risk and policy are queryable and enforceable, not prose. Co-ratifies with L142 — the gatekeeper writes these columns; without them it has nowhere to land its decision blob.
 
 Both observations cite `docs/gatekeeper-design.md`, `docs/risk-and-cluster-taxonomy.md`, and `docs/architecture-coherence.md` in their bodies. Their `task_id` field is set to `T045` so the surfacing-task linkage is preserved in the substrate's soft-FK convention.
+
+T053/P1 shipped the Router seam only. Phase 3-5 rollout work is deferred into substrate observations cross-linked here:
+
+- **L171 — Implement dedicated architecture_reviews typed store (P3 of T045 design)** — replaces the P1 tagged-observation stand-in for `arch_review_candidate` routing with the dedicated typed store described in § *Architecture-review outputs*.
+- **L172 — Implement fast-track auto-execution + L135 Check primitive (P4 of T045 design)** — implements the deferred fast-track execution/check audit shape from § *Fast-track policy* and § *Required audit trail for every fast-track*.
+- **L173 — Curated cluster_key registry + watch/observability dashboards (P5 of T045 design)** — implements registry curation and observability from § *Open questions* and § *Abuse case 2: Cluster-key collision*.
