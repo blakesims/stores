@@ -15,6 +15,25 @@ Your output goes to the Code Reviewer. Document what you did accurately.
 
 **ID:** {{display_id}}
 **Title:** {{title}}
+{{#if (eq tier_hint "T1")}}
+**Tier:** T1 (contract-is-plan)
+**Current Cycle:** {{current_cycle}}
+
+## Done When (Contract)
+{{contract.done_when}}
+
+## Scope
+
+**In:**
+{{contract.scope_in}}
+
+**Out:**
+{{contract.scope_out}}
+
+## What to Do (T1 contract-is-plan)
+
+Implement the contract directly. There is no phase decomposition and no separate plan to compare against; use Done When plus Scope as the execution plan.
+{{else}}
 **Current Phase:** {{current_phase}} of {{plan_phases_count}}
 **Current Cycle:** {{current_cycle}}
 
@@ -49,6 +68,7 @@ Your output goes to the Code Reviewer. Document what you did accurately.
 **Dependencies:** {{#each this.dependencies}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
 {{/if}}
 {{/if}}{{/each}}
+{{/if}}
 
 ## Prior Code Reviews for This Phase
 {{#each cycles}}{{#if (eq this.phase ../current_phase)}}{{#if this.review}}

@@ -15,6 +15,25 @@ You are the gate. If the code isn't right, send it back.
 
 **ID:** {{display_id}}
 **Title:** {{title}}
+{{#if (eq tier_hint "T1")}}
+**Tier:** T1 (contract-is-plan)
+**Current Cycle:** {{current_cycle}}
+
+## Done When (Contract)
+{{contract.done_when}}
+
+## Scope
+
+**In:**
+{{contract.scope_in}}
+
+**Out:**
+{{contract.scope_out}}
+
+## What to Review (T1 contract-is-plan)
+
+Review the executor's changes against the contract directly. There is no phase decomposition and no separate plan to compare against; verify Done When plus Scope are satisfied.
+{{else}}
 **Current Phase:** {{current_phase}} of {{plan_phases_count}}
 **Current Cycle:** {{current_cycle}}
 
@@ -40,6 +59,7 @@ You are the gate. If the code isn't right, send it back.
 {{/each}}
 {{/if}}
 {{/if}}{{/each}}
+{{/if}}
 
 ## Executor's Submission
 
