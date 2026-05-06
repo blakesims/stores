@@ -1320,6 +1320,79 @@ mod tests {
         );
     }
 
+    /// T040 codex-revise: the `pid_never_recorded` branch (drive_pid IS NULL,
+    /// stale executing row + lock) must also honor the daemon-epoch gate.
+    /// Pre-existing zombie shape: lock claimed before this daemon's epoch ⇒
+    /// SKIP; in-lifetime shape: lock claimed before epoch is FALSE ⇒ FLIP.
+    #[test]
+    fn watchdog_skips_pre_existing_pid_never_recorded() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        // drive_pid IS NULL → exercises the pid_never_recorded branch.
+        let row_id = insert_task_full(&conn, "T752", "executing", None);
+        insert_lock_closed(&conn, row_id, "T752");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        // daemon_epoch is FUTURE relative to the lock's claimed_at.
+        let _ =
+            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-04T00:00:00Z").unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T752'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "executing",
+            "pid_never_recorded pre-existing zombie must NOT flip under the gate; got {status}"
+        );
+
+        let th_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T752' AND verb='mark_drive_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(th_count, 0, "no mark_drive_failed must land");
+    }
+
+    #[test]
+    fn watchdog_flips_in_lifetime_pid_never_recorded() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T753", "executing", None);
+        insert_lock_closed(&conn, row_id, "T753");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        // daemon_epoch PREDATES the lock's claimed_at.
+        let _ =
+            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-02T00:00:00Z").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T753'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked");
+        assert_eq!(
+            reason.as_deref(),
+            Some("drive_failed:pid_never_recorded"),
+            "blocked_reason must carry the pid_never_recorded suffix"
+        );
+    }
+
     /// AC4.4: dispatch_builtin("auto-drive", ...) resolves to this module.
     #[test]
     fn dispatch_builtin_returns_some_for_auto_drive() {
