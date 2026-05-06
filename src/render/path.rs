@@ -105,7 +105,12 @@ pub fn find_all_task_dirs(repo_root: &Path, display_id: &str) -> Vec<PathBuf> {
 
     for status_dir_entry in entries.flatten() {
         let status_dir_path = status_dir_entry.path();
-        if !status_dir_path.is_dir() {
+        // Skip symlinked status dirs — following them could escape the repo.
+        let st_meta = match std::fs::symlink_metadata(&status_dir_path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if st_meta.file_type().is_symlink() || !st_meta.is_dir() {
             continue;
         }
         let inner_entries = match std::fs::read_dir(&status_dir_path) {
@@ -114,7 +119,13 @@ pub fn find_all_task_dirs(repo_root: &Path, display_id: &str) -> Vec<PathBuf> {
         };
         for task_dir_entry in inner_entries.flatten() {
             let task_dir_path = task_dir_entry.path();
-            if !task_dir_path.is_dir() {
+            // Skip symlinked task dirs — cleanup would otherwise migrate
+            // files OUT of the symlink target (potentially outside repo_root).
+            let td_meta = match std::fs::symlink_metadata(&task_dir_path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if td_meta.file_type().is_symlink() || !td_meta.is_dir() {
                 continue;
             }
             if let Some(name) = task_dir_path.file_name().and_then(|n| n.to_str()) {
@@ -224,11 +235,19 @@ fn consolidate_stale_dir(stale: &Path, target_dir: &Path) -> Result<()> {
             continue;
         }
 
-        // Preserve user data: migrate into target_dir if no collision.
+        // Preserve user data: migrate into target_dir if no name collision.
+        //
+        // NOTE: the substrate's wf_tasks.display_id UNIQUE constraint makes
+        // true display_id directory collision (two distinct rows on the same
+        // slug) structurally impossible. The collision shape that CAN fire
+        // here is purely a per-file user-data conflict during stale-dir
+        // consolidation (e.g., notes.md exists in both stale and target).
+        // The warning text reflects the actual shape, not the contract's
+        // "display_id collision" framing which is invariant-prevented.
         let dst = target_dir.join(&name);
         if dst.exists() {
             eprintln!(
-                "warning: display_id collision: '{}' exists in both '{}' and '{}'; \
+                "warning: file-migration collision: '{}' exists in both '{}' and '{}'; \
                  leaving stale copy at '{}'",
                 name,
                 stale.display(),
@@ -529,6 +548,79 @@ mod tests {
 
         cleanup_stale_task_dirs(tmp.path(), "T036", &target).unwrap();
         assert!(target.exists());
+    }
+
+    /// T036 codex-revise: symlinked task dirs MUST NOT be followed during
+    /// stale-dir discovery. A malicious or accidental symlink in
+    /// `tasks/<status>/` pointing outside the repo would otherwise let
+    /// `cleanup_stale_task_dirs` migrate files OUT of that target into
+    /// `target_dir` (or, on render-artifact deletion, unlink the symlink
+    /// target's contents). Both `find_all_task_dirs` and the cleanup pass
+    /// must skip symlinks at the status-dir AND task-dir level.
+    #[cfg(unix)]
+    #[test]
+    fn find_all_task_dirs_skips_symlinks() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        // Outside tempdir contains a "victim" file we must NOT touch.
+        std::fs::write(outside.path().join("notes.md"), "user secret").unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("tasks/active")).unwrap();
+        // Plant a symlink shaped like a task dir, pointing outside the repo.
+        symlink(
+            outside.path(),
+            tmp.path().join("tasks/active/T036-slug"),
+        )
+        .unwrap();
+        // Plant a real (legitimate) match elsewhere as a control.
+        std::fs::create_dir_all(tmp.path().join("tasks/completed/T036-slug")).unwrap();
+
+        let matches = find_all_task_dirs(tmp.path(), "T036");
+        assert_eq!(
+            matches.len(),
+            1,
+            "symlinked task dir must be skipped; got {matches:?}"
+        );
+        assert!(
+            matches[0].ends_with("tasks/completed/T036-slug"),
+            "only the real (non-symlinked) match should be returned"
+        );
+
+        // The outside target's victim file MUST remain untouched after
+        // a cleanup pass against the legitimate target.
+        let target = tmp.path().join("tasks/completed/T036-slug");
+        cleanup_stale_task_dirs(tmp.path(), "T036", &target).unwrap();
+        assert!(
+            outside.path().join("notes.md").exists(),
+            "cleanup must not have followed the symlink to migrate outside files"
+        );
+    }
+
+    /// T036 codex-revise: a symlinked status dir (e.g., tasks/active → /etc)
+    /// MUST also be skipped — otherwise its inner entries would be enumerated
+    /// as if they were legitimate task dirs.
+    #[cfg(unix)]
+    #[test]
+    fn find_all_task_dirs_skips_symlinked_status_dir() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("T036-evil")).unwrap();
+        std::fs::write(
+            outside.path().join("T036-evil/notes.md"),
+            "would be migrated out",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("tasks")).unwrap();
+        symlink(outside.path(), tmp.path().join("tasks/active")).unwrap();
+
+        let matches = find_all_task_dirs(tmp.path(), "T036");
+        assert!(
+            matches.is_empty(),
+            "symlinked status dir must be skipped; got {matches:?}"
+        );
     }
 
     // maybe_move_dir
