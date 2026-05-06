@@ -4,6 +4,7 @@ pub mod flatten;
 pub mod lifecycle;
 pub mod parse;
 pub mod required_when;
+pub mod risk_taxonomy;
 pub mod types;
 pub mod workflow;
 
