@@ -166,13 +166,19 @@ Do not resume T053 before L143 lands.
 
 ## Codex / review gate doctrine
 
-When a task reaches `in_review`:
+Codex is a tier-gated review tool, not a universal one. Run it where the architectural blast radius justifies the latency; skip it where the in-cycle `code_reviewer` agent's PASS/REVISE/FAIL gate is sufficient.
+
+**T1 (contract-is-plan, narrow scope):** skip codex. Trust the in-cycle code_reviewer's gate. When the task reaches `in_review`, rebase the branch onto current main and accept directly with the valid human/session token. The contract is small enough that codex is overhead, not insurance.
+
+**T2 / T3 (single-phase or multi-phase, broader surface):** run codex.
 
 1. Rebase task branch onto current main.
 2. Run codex against branch diff.
 3. PASS / cosmetic-only → accept with valid human/session token.
 4. Substantive local findings → revise in task worktree, commit, re-run codex.
 5. Critical/architectural findings → halt and ask Pi / Blake.
+
+If a task's tier is ambiguous (e.g., a T1 contract that grew through revision), default to running codex — false positives on review depth are cheaper than false negatives on architectural risk.
 
 ## Token / approval discipline
 
