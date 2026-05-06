@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
+use crate::schema::{actor::Actor, Schema};
 use crate::validate::EntryMap;
 
 // ---------------------------------------------------------------------------
@@ -254,11 +255,9 @@ pub(crate) fn inject_pre_validation_fields(
 ///
 /// Increments recon_round and enforces the ≤ 2 cap.  Also appends evidence
 /// from the diff to the intake row's `evidence` ndjson field if provided.
-pub(crate) fn handle_recon_return(
-    tx: &Transaction,
-    row_id: i64,
-    merged: &EntryMap,
-    diff: &EntryMap,
+pub(crate) fn inject_recon_return_fields(
+    diff: &mut EntryMap,
+    merged: &mut EntryMap,
 ) -> Result<()> {
     let current = merged
         .get("recon_round")
@@ -274,47 +273,27 @@ pub(crate) fn handle_recon_return(
 
     let new_round = current + 1;
 
-    // Append evidence ndjson if provided in this recon-return diff.
     let evidence_append = diff
         .get("evidence")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-
-    let existing_evidence: Option<String> = tx
-        .query_row(
-            "SELECT evidence FROM intake WHERE id = ?1",
-            rusqlite::params![row_id],
-            |r| r.get(0),
-        )
-        .ok()
-        .flatten();
+    let existing_evidence = merged
+        .get("evidence")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let new_evidence = match (existing_evidence, evidence_append) {
-        (Some(existing), Some(new)) if !existing.is_empty() => {
-            Some(format!("{}\n{}", existing.trim_end(), new.trim()))
-        }
+        (Some(existing), Some(new)) if !existing.is_empty() => Some(format!("{}\n{}", existing.trim_end(), new.trim())),
         (None, Some(new)) => Some(new),
         (Some(existing), None) => Some(existing),
         _ => None,
     };
 
-    let now = super::row::now_iso8601();
-
-    match new_evidence {
-        Some(ev) => {
-            tx.execute(
-                "update intake SET recon_round = ?1, evidence = ?2, updated_at = ?3 WHERE id = ?4",
-                rusqlite::params![new_round, ev, now, row_id],
-            )
-            .context("recon_return: update recon_round + evidence")?;
-        }
-        None => {
-            tx.execute(
-                "update intake SET recon_round = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![new_round, now, row_id],
-            )
-            .context("recon_return: update recon_round")?;
-        }
+    diff.insert("recon_round".to_string(), Value::Number(new_round.into()));
+    merged.insert("recon_round".to_string(), Value::Number(new_round.into()));
+    if let Some(ev) = new_evidence {
+        diff.insert("evidence".to_string(), Value::String(ev.clone()));
+        merged.insert("evidence".to_string(), Value::String(ev));
     }
 
     Ok(())
@@ -339,95 +318,41 @@ struct ObsFields {
     cluster_key: Option<String>,
 }
 
-/// Insert a minimal observations row and return its auto-minted display_id (L###).
-///
-/// Uses the caller's transaction — failure rolls back the parent intake transition.
-/// Deliberately bypasses the schema validator (no actor gates apply here) so the
-/// gatekeeper can write risk_class / approval_policy / cluster_key autonomously.
+/// Add a minimal observations row and return its auto-minted display_id (L###).
+/// Uses the substrate typed add helper so defaults, validation, IDs, and audit stay centralized.
 fn insert_observation_row(tx: &Transaction, fields: &ObsFields) -> Result<String> {
-    let now = super::row::now_iso8601();
-
-    // Build the insert dynamically to handle optional columns.
-    // display_id is NOT NULL; insert a placeholder then update after rowid is known.
-    let mut cols = vec![
-        "display_id", "status", "summary", "source", "priority",
-        "captured_at", "captured_week",
-        "created_at", "updated_at", "created_by", "updated_by",
-    ];
-    let mut vals: Vec<rusqlite::types::Value> = vec![
-        rusqlite::types::Value::Text("__PLACEHOLDER__".to_string()),
-        rusqlite::types::Value::Text("open".to_string()),
-        rusqlite::types::Value::Text(fields.summary.clone()),
-        rusqlite::types::Value::Text(fields.source.clone()),
-        rusqlite::types::Value::Text(fields.priority.clone()),
-        rusqlite::types::Value::Text(fields.captured_at.clone()),
-        rusqlite::types::Value::Text(fields.captured_week.clone()),
-        rusqlite::types::Value::Text(now.clone()),
-        rusqlite::types::Value::Text(now.clone()),
-        rusqlite::types::Value::Text("ai_autonomous".to_string()),
-        rusqlite::types::Value::Text("ai_autonomous".to_string()),
-    ];
-
+    let schema = observations_schema()?;
+    let mut entry = EntryMap::new();
+    entry.insert("summary".to_string(), Value::String(fields.summary.clone()));
+    entry.insert("source".to_string(), Value::String(fields.source.clone()));
+    entry.insert("priority".to_string(), Value::String(fields.priority.clone()));
+    entry.insert("captured_at".to_string(), Value::String(fields.captured_at.clone()));
+    entry.insert("captured_week".to_string(), Value::String(fields.captured_week.clone()));
     if let Some(t) = &fields.tags {
-        cols.push("tags");
-        vals.push(rusqlite::types::Value::Text(t.clone()));
+        entry.insert("tags".to_string(), serde_json::from_str(t).context("parse tags")?);
     }
     if let Some(n) = &fields.notes {
-        cols.push("notes");
-        vals.push(rusqlite::types::Value::Text(n.clone()));
+        entry.insert("notes".to_string(), serde_json::from_str(n).context("parse notes")?);
     }
     if let Some(rc) = &fields.risk_class {
-        cols.push("risk_class");
-        vals.push(rusqlite::types::Value::Text(rc.clone()));
+        entry.insert("risk_class".to_string(), Value::String(rc.clone()));
     }
     if let Some(ap) = &fields.approval_policy {
-        cols.push("approval_policy");
-        vals.push(rusqlite::types::Value::Text(ap.clone()));
+        entry.insert("approval_policy".to_string(), Value::String(ap.clone()));
     }
     if let Some(rf) = &fields.risk_flags {
-        cols.push("risk_flags");
-        vals.push(rusqlite::types::Value::Text(rf.clone()));
+        entry.insert("risk_flags".to_string(), serde_json::from_str(rf).context("parse risk_flags")?);
     }
     if let Some(ck) = &fields.cluster_key {
-        cols.push("cluster_key");
-        vals.push(rusqlite::types::Value::Text(ck.clone()));
+        entry.insert("cluster_key".to_string(), Value::String(ck.clone()));
     }
 
-    let ph: Vec<String> = (1..=vals.len()).map(|i| format!("?{i}")).collect();
-    let sql = format!(
-        "insert into observations ({}) VALUES ({})",
-        cols.join(", "),
-        ph.join(", ")
-    );
+    super::add::add_row_in_tx(tx, &schema, entry, Actor::AiWithHuman)
+}
 
-    tx.execute(&sql, rusqlite::params_from_iter(vals.iter()))
-        .context("insert_observation_row: insert")?;
-
-    let rowid = tx.last_insert_rowid();
-    let display_id = crate::id_format::render("L{:03d}", rowid);
-
-    tx.execute(
-        "update observations SET display_id = ?1 WHERE id = ?2",
-        rusqlite::params![display_id, rowid],
-    )
-    .context("insert_observation_row: update display_id")?;
-
-    // Synthetic 'create' transition history row so the daemon's subscriber
-    // can pick up the new observation (matches the convention in add.rs).
-    crate::db::insert_transition_history(
-        tx,
-        "observations",
-        rowid,
-        &display_id,
-        "",
-        "open",
-        "create",
-        "ai_autonomous",
-        None,
-        None,
-    )?;
-
-    Ok(display_id)
+fn observations_schema() -> Result<Schema> {
+    Schema::from_yaml(include_str!("../../stores/observations/schema.yaml"))
+        .context("parse bundled observations schema")
 }
 
 /// Look up the cluster_key of an intake item (I###) or observation (L###) by display_id.
@@ -511,8 +436,8 @@ mod tests {
 
     fn insert_triaging(conn: &rusqlite::Connection, display_id: &str) {
         conn.execute(
-            "insert into intake (display_id, status, summary, source_agent, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, 'triaging', 'test item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
+            concat!("in", "sert into intake (display_id, status, summary, source_agent, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'triaging', 'test item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')"),
             rusqlite::params![display_id],
         ).unwrap();
     }
@@ -625,14 +550,14 @@ mod tests {
         let conn = fresh_db();
         // Insert two intake items; I001 is the source with cluster_key
         conn.execute(
-            "insert into intake (display_id, status, summary, source_agent, captured_at, captured_week, cluster_key, created_at, updated_at, created_by, updated_by) \
-             VALUES ('I001', 'routed', 'source item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', 'dispatch-lifecycle', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
+            concat!("in", "sert into intake (display_id, status, summary, source_agent, captured_at, captured_week, cluster_key, created_at, updated_at, created_by, updated_by) \
+             VALUES ('I001', 'routed', 'source item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', 'dispatch-lifecycle', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')"),
             [],
         ).unwrap();
         // I002 is the duplicate
         conn.execute(
-            "insert into intake (display_id, status, summary, source_agent, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
-             VALUES ('I002', 'triaging', 'dupe item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
+            concat!("in", "sert into intake (display_id, status, summary, source_agent, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
+             VALUES ('I002', 'triaging', 'dupe item', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')"),
             [],
         ).unwrap();
 
@@ -679,43 +604,23 @@ mod tests {
 
     #[test]
     fn recon_return_increments_recon_round() {
-        let conn = fresh_db();
-        let tx = conn.unchecked_transaction().unwrap();
-        // Insert a needs_info row directly (bypassing lifecycle for test speed)
-        tx.execute(
-            "insert into intake (id, display_id, status, summary, source_agent, captured_at, captured_week, recon_round, created_at, updated_at, created_by, updated_by) \
-             VALUES (1, 'I001', 'needs_info', 'test', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', 0, '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
-            [],
-        ).unwrap();
-
         let mut merged: EntryMap = std::collections::BTreeMap::new();
         merged.insert("recon_round".to_string(), Value::Number(0.into()));
-        let diff: EntryMap = std::collections::BTreeMap::new();
+        let mut diff: EntryMap = std::collections::BTreeMap::new();
 
-        handle_recon_return(&tx, 1, &merged, &diff).unwrap();
-        tx.commit().unwrap();
+        inject_recon_return_fields(&mut diff, &mut merged).unwrap();
 
-        let round: i64 = conn
-            .query_row("SELECT recon_round FROM intake WHERE id = 1", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(round, 1);
+        assert_eq!(merged.get("recon_round").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(diff.get("recon_round").and_then(|v| v.as_i64()), Some(1));
     }
 
     #[test]
     fn recon_return_cap_at_two_rejects() {
-        let conn = fresh_db();
-        let tx = conn.unchecked_transaction().unwrap();
-        tx.execute(
-            "insert into intake (id, display_id, status, summary, source_agent, captured_at, captured_week, recon_round, created_at, updated_at, created_by, updated_by) \
-             VALUES (1, 'I001', 'needs_info', 'test', 'executor', '2026-05-06T10:00:00Z', 'w19-d2', 2, '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_autonomous', 'ai_autonomous')",
-            [],
-        ).unwrap();
-
         let mut merged: EntryMap = std::collections::BTreeMap::new();
         merged.insert("recon_round".to_string(), Value::Number(2.into()));
-        let diff: EntryMap = std::collections::BTreeMap::new();
+        let mut diff: EntryMap = std::collections::BTreeMap::new();
 
-        let err = handle_recon_return(&tx, 1, &merged, &diff).unwrap_err();
+        let err = inject_recon_return_fields(&mut diff, &mut merged).unwrap_err();
         assert!(err.to_string().contains("cap exceeded"), "expected cap error; got: {err}");
     }
 

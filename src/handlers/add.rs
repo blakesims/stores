@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::ArgMatches;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 use serde_json::Value;
 
 use crate::codegen::ddl::quote_ident;
@@ -443,6 +443,111 @@ pub fn run(
 
     println!("{display_id}");
     Ok(())
+}
+
+/// Add one row inside the caller's transaction using the store schema's typed
+/// add path: defaults, validation, auto-minted display_id, and create audit row.
+pub(crate) fn add_row_in_tx(
+    tx: &Transaction,
+    schema: &Schema,
+    mut entry: crate::validate::EntryMap,
+    invoker: Actor,
+) -> Result<String> {
+    let initial_status = schema.lifecycle.resolved_initial_state()?.to_string();
+    let invoker_str = invoker.to_string();
+    let now = now_iso8601();
+
+    entry.insert("status".to_string(), Value::String(initial_status.clone()));
+    entry.entry("created_at".to_string()).or_insert_with(|| Value::String(now.clone()));
+    entry.entry("updated_at".to_string()).or_insert_with(|| Value::String(now.clone()));
+    entry.entry("created_by".to_string()).or_insert_with(|| Value::String(invoker_str.clone()));
+    entry.entry("updated_by".to_string()).or_insert_with(|| Value::String(invoker_str.clone()));
+
+    validate::validate(schema, &entry, Op::Add, invoker.into()).map_err(|errs| {
+        anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
+    })?;
+
+    let mut col_names = vec!["display_id".to_string()];
+    let mut placeholders = vec!["?1".to_string()];
+    let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text("__PLACEHOLDER__".to_string())];
+    let mut param_idx = 2usize;
+
+    for common in ["status", "created_at", "updated_at", "created_by", "updated_by"] {
+        if let Some(Value::String(s)) = entry.get(common) {
+            col_names.push(common.to_string());
+            placeholders.push(format!("?{param_idx}"));
+            param_idx += 1;
+            values.push(rusqlite::types::Value::Text(s.clone()));
+        }
+    }
+
+    for field in &schema.fields {
+        if field.name == "display_id" {
+            continue;
+        }
+        let Some(val) = entry.get(&field.name) else { continue; };
+        col_names.push(field.name.clone());
+        placeholders.push(format!("?{param_idx}"));
+        param_idx += 1;
+
+        match &field.ty {
+            FieldType::Record(_)
+            | FieldType::List(_)
+            | FieldType::ListRecord(_)
+            | FieldType::ListFk { .. }
+            | FieldType::Json => values.push(rusqlite::types::Value::Text(
+                serde_json::to_string(val).unwrap_or_else(|_| "null".to_string()),
+            )),
+            FieldType::Bool => {
+                let i = match val {
+                    Value::Bool(b) => i64::from(*b),
+                    Value::Number(n) => n.as_i64().unwrap_or(0),
+                    _ => 0,
+                };
+                values.push(rusqlite::types::Value::Integer(i));
+            }
+            FieldType::Integer => values.push(rusqlite::types::Value::Integer(val.as_i64().unwrap_or(0))),
+            _ => {
+                let s = match val {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                values.push(rusqlite::types::Value::Text(s));
+            }
+        }
+    }
+
+    let sql = format!(
+        "INSERT INTO {} ({}) VALUES ({})",
+        quote_ident(&schema.name),
+        col_names.join(", "),
+        placeholders.join(", ")
+    );
+    tx.execute(&sql, rusqlite::params_from_iter(values.iter()))
+        .context("add_row_in_tx: add row")?;
+
+    let rowid = tx.last_insert_rowid();
+    let display_id = id_format::render(&schema.id_format, rowid);
+    tx.execute(
+        &format!("UPDATE {} SET display_id = ?1 WHERE id = ?2", quote_ident(&schema.name)),
+        rusqlite::params![display_id, rowid],
+    )
+    .context("add_row_in_tx: mint display_id")?;
+
+    crate::db::insert_transition_history(
+        tx,
+        &schema.name,
+        rowid,
+        &display_id,
+        "",
+        &initial_status,
+        "create",
+        &invoker_str,
+        None,
+        None,
+    )?;
+
+    Ok(display_id)
 }
 
 #[cfg(test)]

@@ -86,10 +86,10 @@ fn rejects_fast_track_with_prohibit_surface_flag() {
 }
 
 #[test]
-fn implementation_files_do_not_introduce_uppercase_raw_sql_writes() {
+fn implementation_files_do_not_introduce_raw_sql_writes_case_insensitive() {
     // Mechanical audit target from AC5.2: grep over src/handlers/intake*.rs and
     // src/validate/gatekeeper_decision.rs must not find raw-SQL UPDATE/INSERT/DELETE
-    // writes on substrate tables. Keep this in sync with the shell verification.
+    // writes on substrate tables, regardless of SQL casing.
     let mut files = vec!["src/validate/gatekeeper_decision.rs".to_string()];
     for entry in fs::read_dir("src/handlers").expect("src/handlers exists") {
         let entry = entry.expect("dir entry");
@@ -100,10 +100,19 @@ fn implementation_files_do_not_introduce_uppercase_raw_sql_writes() {
         }
     }
 
-    let needles = ["UPDATE intake", "INSERT INTO intake", "DELETE FROM intake", "UPDATE observations", "INSERT INTO observations", "DELETE FROM observations"];
+    let needles = [
+        "update intake",
+        "insert into intake",
+        "delete from intake",
+        "update observations",
+        "insert into observations",
+        "delete from observations",
+    ];
     let mut hits = Vec::new();
     for file in files {
-        let body = fs::read_to_string(Path::new(&file)).expect("read audited file");
+        let body = fs::read_to_string(Path::new(&file))
+            .expect("read audited file")
+            .to_lowercase();
         for needle in needles {
             if body.contains(needle) {
                 hits.push(format!("{file}: {needle}"));
