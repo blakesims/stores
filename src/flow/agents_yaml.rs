@@ -339,8 +339,8 @@ agents:
     /// with the expected subscription edges.
     #[test]
     fn fixture_yaml_includes_t020_builtins() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/agents.yaml");
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
         let p = load_from_path(&path).expect("fixture must parse");
         let names: Vec<&str> = p.agents.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -367,12 +367,32 @@ agents:
         assert_eq!(scaffold.retry_policy.max_attempts, 1);
     }
 
+    /// T037: tests/fixtures/agents.yaml carries the auto-resolve-observation
+    /// entry wired to the post-deploy success edge.
+    #[test]
+    fn fixture_yaml_includes_auto_resolve_observation() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
+        let p = load_from_path(&path).expect("fixture must parse");
+        let resolver = p
+            .agents
+            .iter()
+            .find(|a| a.name == "auto-resolve-observation")
+            .expect("fixture missing auto-resolve-observation entry");
+        assert_eq!(resolver.command, "builtin:auto-resolve-observation");
+        assert_eq!(resolver.retry_policy.max_attempts, 1);
+        let sub = &resolver.subscribes_to[0];
+        assert_eq!(sub.store, "tasks");
+        assert_eq!(sub.transition.from, "cargo_installed");
+        assert_eq!(sub.transition.to, "schema_migrated");
+    }
+
     /// T022 P6 / AC6.1: tests/fixtures/agents.yaml carries the auto-drive entry
     /// with the `workspace_path != ""` predicate gate.
     #[test]
     fn fixture_yaml_includes_auto_drive() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/agents.yaml");
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
         let p = load_from_path(&path).expect("fixture must parse");
         let drive = p
             .agents

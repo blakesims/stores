@@ -25,6 +25,7 @@ use crate::validate::{self, EntryMap, Op};
 pub mod accept_merge;
 pub mod auto_drive;
 pub mod auto_promote;
+pub mod auto_resolve_observation;
 pub mod auto_scaffold;
 pub mod cargo_install;
 pub mod schema_migrate;
@@ -52,6 +53,7 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
         "accept-merge" => Some(accept_merge::run(row, ctx)),
         "auto-drive" => Some(auto_drive::run(row, ctx)),
         "auto-promote" => Some(auto_promote::run(row, ctx)),
+        "auto-resolve-observation" => Some(auto_resolve_observation::run(row, ctx)),
         "auto-scaffold" => Some(auto_scaffold::run(row, ctx)),
         "cargo-install" => Some(cargo_install::run(row, ctx)),
         "schema-migrate" => Some(schema_migrate::run(row, ctx)),
@@ -110,12 +112,17 @@ pub(crate) fn refresh_task_row(conn: &Connection, display_id: &str) -> Option<Va
 }
 
 pub(crate) fn load_tasks_schema() -> Result<Schema> {
+    load_store_schema("tasks")
+}
+
+/// Load a bundled store schema by name.
+pub(crate) fn load_store_schema(name: &str) -> Result<Schema> {
     let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
         .iter()
-        .find(|(n, _)| *n == "tasks")
+        .find(|(n, _)| *n == name)
         .map(|(_, y)| *y)
-        .ok_or_else(|| anyhow!("tasks bundled schema not found"))?;
-    Schema::from_yaml(yaml).context("parsing bundled tasks schema")
+        .ok_or_else(|| anyhow!("{} bundled schema not found", name))?;
+    Schema::from_yaml(yaml).with_context(|| format!("parsing bundled {} schema", name))
 }
 
 /// Fire a framework-actor transition on a `tasks` row in-process. Optional
@@ -130,9 +137,25 @@ pub(crate) fn fire_framework_transition(
     policies_hash: &str,
 ) -> Result<()> {
     let schema = load_tasks_schema()?;
+    fire_framework_transition_for(conn, &schema, display_id, verb, diff_extra, policies_hash)
+}
+
+/// Generic framework-actor transition firing for any store schema. Identical
+/// semantics to `fire_framework_transition` but routed at a caller-supplied
+/// schema (e.g. `observations` for the auto-resolve-observation subscriber,
+/// T037 P1). All gates — declared transition lookup, validators, actor —
+/// fire just as they do for tasks.
+pub(crate) fn fire_framework_transition_for(
+    conn: &Connection,
+    schema: &Schema,
+    display_id: &str,
+    verb: &str,
+    diff_extra: EntryMap,
+    policies_hash: &str,
+) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
 
-    let (row_id, existing) = read_row(&schema, &tx, display_id)?;
+    let (row_id, existing) = read_row(schema, &tx, display_id)?;
     let current_status = existing
         .get("status")
         .and_then(|v| v.as_str())
@@ -154,7 +177,7 @@ pub(crate) fn fire_framework_transition(
     )?;
 
     validate::validate(
-        &schema,
+        schema,
         &merged,
         Op::Transition(verb.to_string(), diff.clone()),
         Actor::Framework.into(),
@@ -174,7 +197,7 @@ pub(crate) fn fire_framework_transition(
     };
     execute_transition_write(
         &tx,
-        &schema,
+        schema,
         row_id,
         display_id,
         &current_status,
