@@ -39,8 +39,8 @@ stateDiagram-v2
   code_review --> executing :  A submit-review [REVISE]
   code_review --> blocked :  A submit-review [REVISE]
   code_review --> blocked :  A submit-review [FAIL]
-  blocked --> ready :  H+ resume
   blocked --> planning :  H+ resume
+  blocked --> ready :  H+ resume
   planning --> blocked :  F mark_drive_failed
   plan_review --> blocked :  F mark_drive_failed
   ready --> blocked :  F mark_drive_failed

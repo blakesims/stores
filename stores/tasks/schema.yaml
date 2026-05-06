@@ -149,14 +149,14 @@ lifecycle:
     # FAIL: code-reviewer hard-fail goes to blocked
     - {from: code_review, to: blocked, verb: submit-review, actor: ai_autonomous, requires_gate: FAIL}
 
-    # blocked → ready (resume) — default path.
-    - {from: blocked, to: ready, verb: resume, actor: ai_with_human}
     # blocked → planning (resume) — T054: route any plan-empty row back to
     # planning regardless of tier so the planning on-entry cascade (planner
     # for T2/T3, skip-plan synthesis for T1) idempotently re-fires. Decision
     # is keyed on plan emptiness, not tier_hint; for T1 rows post-synthesis
     # plan is populated so this transition does not fire.
     - {from: blocked, to: planning, verb: resume, actor: ai_with_human, guard: "plan.length == 0"}
+    # blocked → ready (resume) — default path after guarded resume cases.
+    - {from: blocked, to: ready, verb: resume, actor: ai_with_human}
 
     # {planning, plan_review, ready, executing, code_review} → blocked (framework, fired by auto-drive subscriber on drive failure)
     - {from: planning, to: blocked, verb: mark_drive_failed, actor: framework}

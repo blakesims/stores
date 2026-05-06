@@ -6,21 +6,6 @@ use anyhow::bail;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-/// Helper for deserializing the `guard:` field as a string, then parsing it.
-fn deserialize_guard<'de, D>(d: D) -> Result<Option<Expr>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de::Error;
-    let opt: Option<String> = Option::deserialize(d)?;
-    match opt {
-        None => Ok(None),
-        Some(s) => parse_guard(&s)
-            .map(Some)
-            .map_err(|e| D::Error::custom(e.to_string())),
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Transition {
     pub from: String,
@@ -50,17 +35,29 @@ impl<'de> Deserialize<'de> for Transition {
             actor: Option<Actor>,
             #[serde(default)]
             requires_gate: Option<String>,
-            #[serde(default, deserialize_with = "deserialize_guard")]
-            guard: Option<Expr>,
+            #[serde(default)]
+            guard: Option<String>,
+            #[serde(default)]
+            when: Option<String>,
         }
         let r = Raw::deserialize(d)?;
+        if r.guard.is_some() && r.when.is_some() {
+            return Err(serde::de::Error::custom(
+                "transition declares both `guard:` and `when:`; use one guard key",
+            ));
+        }
+        let guard = r
+            .guard
+            .or(r.when)
+            .map(|s| parse_guard(&s).map_err(|e| serde::de::Error::custom(e.to_string())))
+            .transpose()?;
         Ok(Transition {
             from: r.from,
             to: r.to,
             verb: r.verb,
             actor: r.actor,
             requires_gate: r.requires_gate,
-            guard: r.guard,
+            guard,
         })
     }
 }
