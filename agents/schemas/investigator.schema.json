@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stores.local/schemas/investigator",
+  "title": "InvestigatorEnvelope",
+  "description": "Pull-shaped evidence brief produced by the investigator subagent. The investigator outputs evidence for the human to prune, NOT a draft contract. Forbidden fields (draft_contract, intent_contract, done_when, scope_in, scope_out, acceptance, objective) are mechanically rejected.",
+  "type": "object",
+  "required": [
+    "evidence",
+    "duplicate_candidates",
+    "confidence",
+    "proposed_tier",
+    "grill_question"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "evidence": {
+      "type": "array",
+      "description": "Citable refs supporting the observation. Each item is either a free-form string or an object with file/line/snippet.",
+      "items": {
+        "oneOf": [
+          {"type": "string"},
+          {
+            "type": "object",
+            "required": ["file"],
+            "additionalProperties": false,
+            "properties": {
+              "file": {"type": "string"},
+              "line": {"type": "integer"},
+              "snippet": {"type": "string"}
+            }
+          }
+        ]
+      }
+    },
+    "duplicate_candidates": {
+      "type": "array",
+      "description": "Possible duplicate observations with similarity reasons.",
+      "items": {
+        "type": "object",
+        "required": ["l_id", "similarity_reason"],
+        "additionalProperties": false,
+        "properties": {
+          "l_id": {"type": "string"},
+          "similarity_reason": {"type": "string"}
+        }
+      }
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"],
+      "description": "Investigator's confidence the observation is real."
+    },
+    "proposed_tier": {
+      "type": "string",
+      "enum": ["T0", "T1", "T2", "T3"],
+      "description": "Suggested tier (advisory, not authoritative — human decides)."
+    },
+    "grill_question": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "One tight question the human should consider before ratifying."
+    }
+  }
+}

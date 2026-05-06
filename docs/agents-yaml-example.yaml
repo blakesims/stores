@@ -64,6 +64,20 @@ agents:
   # rows scaffolded without an isolated worktree). The daemon spawns
   # `stores tasks drive <id>` detached so the polling loop continues; concurrency
   # is capped by `drive.max_parallel` in .stores/config.yaml below.
+  # T038 — investigator. Routes a freshly-flipped open→needs_investigation
+  # observation to a dedicated subagent that emits a PULL-SHAPED evidence
+  # envelope (NOT a draft contract). The builtin parses the envelope, runs
+  # a status guard (no-op if the row moved on), and persists evidence to
+  # `investigation_note` + `notes`. The human ratifies the contract next —
+  # the investigator does not pre-decide acceptance, scope, or done-when.
+  - name: investigator
+    subscribes_to:
+      - store: observations
+        transition: { from: open, to: needs_investigation }
+    command: "builtin:investigator"
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+
   - name: auto-drive
     subscribes_to:
       - store: tasks
