@@ -524,9 +524,7 @@ pub(crate) fn compute_submit_plan(
             .map(|a| a.len())
             .unwrap_or(0);
         if n != 1 {
-            bail!(
-                "submit-plan: tier T2 requires phases.length == 1, got {n}"
-            );
+            bail!("submit-plan: tier T2 requires phases.length == 1, got {n}");
         }
     }
 
@@ -1395,6 +1393,8 @@ pub fn run_submit_wrap(
 ///   - `current_cycle = 1` (reset; audit trail in cycles[] preserved)
 ///   - `current_phase` UNCHANGED
 ///   - `blocked_reason` cleared
+///   - stale auto-drive bookkeeping cleared so the watchdog does not immediately
+///     re-block a human-resumed row based on an old dead PID/lock
 pub(crate) fn compute_resume(
     schema: &Schema,
     conn: &Connection,
@@ -1468,6 +1468,30 @@ pub(crate) fn compute_resume(
 
     // Step 9: fire on-entry follow-ons (ready → executing)
     fire_on_entry_follow_ons(&tx, schema, display_id, row_id, "ready")?;
+
+    // Clear stale auto-drive ownership. A blocked row may carry drive_pid and an
+    // auto-drive dispatch_lock from a previous detached drive. If left intact,
+    // the watchdog can immediately mark the resumed row blocked again as
+    // silent_zombie_pid_dead/pid_never_recorded even when a fresh manual drive is
+    // active. Resume is the human-authorized recovery point, so it severs that
+    // stale ownership before commit.
+    let has_drive_pid = schema.fields.iter().any(|f| f.name == "drive_pid");
+    let has_drive_started_at = schema.fields.iter().any(|f| f.name == "drive_started_at");
+    if has_drive_pid && has_drive_started_at {
+        let table = crate::codegen::ddl::quote_ident(&schema.name);
+        tx.execute(
+            &format!(
+                "UPDATE {table} SET drive_pid = NULL, drive_started_at = '', updated_at = ?1 WHERE id = ?2"
+            ),
+            rusqlite::params![now_iso8601(), row_id],
+        )
+        .context("resume: clear stale auto-drive task bookkeeping")?;
+        tx.execute(
+            "DELETE FROM dispatch_locks WHERE store = ?1 AND row_id = ?2 AND agent_name = 'auto-drive'",
+            rusqlite::params![schema.name, row_id],
+        )
+        .context("resume: delete stale auto-drive dispatch lock")?;
+    }
 
     // Read final status after follow-ons
     let (_, final_entry) = read_row(schema, &tx, display_id)?;
@@ -1634,6 +1658,12 @@ fields:
     type: text
     actor: framework
   - name: claimed_at
+    type: timestamp
+    actor: framework
+  - name: drive_pid
+    type: integer
+    actor: framework
+  - name: drive_started_at
     type: timestamp
     actor: framework
   - name: plan
@@ -2437,8 +2467,8 @@ workflow:
             "phases": [{"name": "p1"}, {"name": "p2"}]
         });
 
-        let err = compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous)
-            .unwrap_err();
+        let err =
+            compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("tier T2 requires phases.length == 1"),
@@ -2844,6 +2874,26 @@ fields:
             Some("4th revise rejected by guard current_cycle <= 4 on phase 1 cycle 4: test"),
         );
 
+        // Seed stale auto-drive bookkeeping from a prior detached drive. Resume
+        // must clear this or the watchdog will immediately re-block the row.
+        conn.execute(
+            "UPDATE wf_tasks SET drive_pid = 999999, drive_started_at = '2026-01-01T00:00:00Z' WHERE display_id = 'WF001'",
+            [],
+        )
+        .unwrap();
+        let row_id: i64 = conn
+            .query_row(
+                "SELECT id FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, claimed_at, claimed_by, last_status, finished_at) VALUES ('wf_tasks', ?1, 'WF001', 'auto-drive', '2026-01-01T00:00:00Z', 'daemon-test', 'drive_failed', '2026-01-01T00:01:00Z')",
+            rusqlite::params![row_id],
+        )
+        .unwrap();
+
         // Call through compute_resume (production code path, not raw helpers)
         let out = compute_resume(&schema, &conn, "WF001", Actor::AiWithHuman).unwrap();
 
@@ -2881,6 +2931,35 @@ fields:
             4,
             "cycles audit trail must be preserved after resume"
         );
+
+        // Stale auto-drive bookkeeping cleared.
+        let drive_pid: Option<i64> = conn
+            .query_row(
+                "SELECT drive_pid FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(drive_pid.is_none(), "drive_pid must be cleared on resume");
+        let drive_started_at: String = conn
+            .query_row(
+                "SELECT COALESCE(drive_started_at, '') FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            drive_started_at.is_empty(),
+            "drive_started_at must be cleared on resume"
+        );
+        let auto_drive_locks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE display_id = 'WF001' AND agent_name = 'auto-drive'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(auto_drive_locks, 0, "stale auto-drive lock must be deleted");
 
         // Lock released
         let claimed_by = read_text(&conn, "claimed_by");
