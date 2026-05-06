@@ -25,7 +25,9 @@ use crate::flow::builtins::{
     dispatch_to_specialist, fire_mark_drive_failed, refresh_task_row, BuiltinResult, DispatchCtx,
 };
 use crate::flow::AgentsYaml;
-use crate::handlers::agents_run::{mark_claim_finished, pid_is_alive, spawn_detached_drive};
+use crate::handlers::agents_run::{
+    mark_claim_finished, mark_claim_silent_zombie, pid_is_alive, spawn_detached_drive,
+};
 use crate::handlers::row::now_iso8601;
 
 /// Grace window (seconds) before the silent-zombie scan flips a row whose
@@ -65,10 +67,7 @@ fn drive_runner_configured() -> bool {
 }
 
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
-    let display_id = row
-        .get("display_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let display_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
     if display_id.is_empty() {
         eprintln!("[auto-drive] tasks row missing display_id; skipping");
         return Ok(1);
@@ -326,7 +325,20 @@ fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
         year += 1;
     }
     let leap = is_leap(year);
-    let dim = [31u32, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let dim = [
+        31u32,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 0u32;
     let mut d = days as u32;
     while month < 12 && d >= dim[month as usize] {
@@ -367,9 +379,10 @@ fn ensure_actor_note_column(conn: &Connection) {
         }
     }
     if !have_column {
-        if let Err(e) =
-            conn.execute("ALTER TABLE transition_history ADD COLUMN actor_note TEXT", [])
-        {
+        if let Err(e) = conn.execute(
+            "ALTER TABLE transition_history ADD COLUMN actor_note TEXT",
+            [],
+        ) {
             eprintln!(
                 "[auto-drive-watchdog] ensure_actor_note_column: ALTER TABLE failed: {}",
                 e
@@ -474,12 +487,14 @@ pub fn sweep_drive_watchdog(
                     policies_hash,
                 };
                 dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog");
-                let _ = mark_claim_finished(
+                let agent = agents.agents.iter().find(|a| a.name == "auto-drive");
+                let _ = mark_claim_silent_zombie(
                     conn,
                     "tasks",
                     row_id,
+                    agent,
                     "auto-drive",
-                    "drive_failed:silent_zombie_pid_dead",
+                    "silent_zombie_pid_dead",
                 );
                 acted += 1;
                 handled.insert(display_id.clone());
@@ -534,9 +549,9 @@ pub fn sweep_drive_watchdog(
                     policies_hash,
                 };
                 dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog-zombie");
-                // mark_claim_finished is idempotent: re-closing an already
-                // closed lock is a no-op UPDATE matching zero rows.
-                let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "drive_failed");
+                let agent = agents.agents.iter().find(|a| a.name == "auto-drive");
+                let _ =
+                    mark_claim_silent_zombie(conn, "tasks", row_id, agent, "auto-drive", reason);
                 acted += 1;
             }
             Err(e) => {
@@ -1072,7 +1087,20 @@ mod tests {
             "L062 silent zombie: row stays '{}' instead of flipping to 'blocked' (closed-lock path)",
             status
         );
-        assert_eq!(reason.as_deref(), Some("drive_failed:silent_zombie_pid_dead"));
+        assert_eq!(
+            reason.as_deref(),
+            Some("drive_failed:silent_zombie_pid_dead")
+        );
+
+        let (terminal_reason, last_status): (String, String) = conn
+            .query_row(
+                "SELECT terminal_reason, last_status FROM dispatch_locks WHERE row_id=?1",
+                rusqlite::params![row_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(terminal_reason, "silent_zombie");
+        assert_eq!(last_status, "drive_failed:silent_zombie_pid_dead");
     }
 
     /// L062 silent-zombie shape #2: drive subprocess died before recording
@@ -1246,10 +1274,9 @@ mod tests {
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
 
-        let zombie_re = regex::Regex::new(
-            r"^drive_failed:(silent_zombie_pid_dead|pid_never_recorded)$",
-        )
-        .unwrap();
+        let zombie_re =
+            regex::Regex::new(r"^drive_failed:(silent_zombie_pid_dead|pid_never_recorded)$")
+                .unwrap();
 
         for (id, want_suffix) in [
             ("T740", "silent_zombie_pid_dead"),
@@ -1283,7 +1310,10 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(verb, "mark_drive_failed");
-            assert_eq!(note, want_suffix, "{id}: actor_note must match bare variant");
+            assert_eq!(
+                note, want_suffix,
+                "{id}: actor_note must match bare variant"
+            );
         }
     }
 
@@ -1310,8 +1340,7 @@ mod tests {
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         // daemon_epoch is FUTURE relative to the lock's claimed_at.
-        let _ =
-            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-04T00:00:00Z").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-04T00:00:00Z").unwrap();
 
         // Row must remain at executing — not flipped.
         let status: String = conn
@@ -1367,8 +1396,7 @@ mod tests {
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         // daemon_epoch PREDATES the lock's claimed_at (2026-05-03T00:00:00Z).
-        let _ =
-            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-02T00:00:00Z").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-02T00:00:00Z").unwrap();
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(
@@ -1405,8 +1433,7 @@ mod tests {
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         // daemon_epoch is FUTURE relative to the lock's claimed_at.
-        let _ =
-            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-04T00:00:00Z").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-04T00:00:00Z").unwrap();
 
         let status: String = conn
             .query_row(
@@ -1443,8 +1470,7 @@ mod tests {
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         // daemon_epoch PREDATES the lock's claimed_at.
-        let _ =
-            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-02T00:00:00Z").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-02T00:00:00Z").unwrap();
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(
@@ -1508,7 +1534,9 @@ mod tests {
 
         // Sanity: column must NOT exist before the call.
         let pre_cols: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(transition_history)").unwrap();
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(transition_history)")
+                .unwrap();
             let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
             rows.filter_map(|r| r.ok()).collect()
         };
@@ -1522,7 +1550,9 @@ mod tests {
 
         // Post: column exists, row is annotated.
         let post_cols: Vec<String> = {
-            let mut stmt = conn.prepare("PRAGMA table_info(transition_history)").unwrap();
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(transition_history)")
+                .unwrap();
             let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
             rows.filter_map(|r| r.ok()).collect()
         };
