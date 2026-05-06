@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::codegen::ddl::{expected_columns, quote_ident, ExpectedColumn};
 use crate::manifest::Manifest;
-use crate::schema::Schema;
+use crate::schema::{FieldType, Schema};
 
 /// Outcome of an applied migration. Returned by `apply_with` / `apply_at`.
 #[derive(Debug, Default, Clone)]
@@ -137,7 +137,90 @@ pub fn apply_with(
     let batch = format!("BEGIN;\n{}\nCOMMIT;", sql_lines.join("\n"));
     conn.execute_batch(&batch)
         .context("failed to apply additive migrations (transaction rolled back)")?;
+
+    // T052 P1: defensive default-backfill. ALTER TABLE ADD COLUMN with a
+    // DEFAULT clause normally backfills existing rows, but list:text JSON
+    // cells (DEFAULT '[]') and any path where the SQLite version / pragma
+    // state elides the implicit backfill must still materialise as the
+    // declared default rather than SQL NULL. For every newly-added column
+    // whose schema field declares `default: <non-null>`, run an UPDATE that
+    // fills NULL cells with the literal default value.
+    backfill_defaults(conn, schemas, manifest, &plan)?;
+
     Ok(report)
+}
+
+/// Defensive UPDATE pass after ALTER TABLE ADD COLUMN (T052 P1).
+/// For every additive column whose schema field declares a non-null default,
+/// run `UPDATE <store> SET <col> = ? WHERE <col> IS NULL`.
+fn backfill_defaults(
+    conn: &Connection,
+    schemas: &HashMap<String, Schema>,
+    manifest: &Manifest,
+    plan: &MigrationPlan,
+) -> Result<()> {
+    for (store_name, col) in &plan.additive {
+        let schema = match schemas.get(store_name) {
+            Some(s) => s,
+            None => continue,
+        };
+        let field = match schema.fields.iter().find(|f| f.name == col.name) {
+            Some(f) => f,
+            None => continue,
+        };
+        let default_value = match &field.default {
+            Some(v) if !v.is_null() => v,
+            _ => continue,
+        };
+        let table = manifest
+            .stores
+            .iter()
+            .find(|s| &s.name == store_name)
+            .map(|s| s.table_name.as_str())
+            .unwrap_or(store_name.as_str());
+        let sql = format!(
+            "UPDATE {} SET {} = ?1 WHERE {} IS NULL",
+            quote_ident(table),
+            quote_ident(&col.name),
+            quote_ident(&col.name),
+        );
+        let sql_value = default_to_sql_value(&field.ty, default_value);
+        conn.execute(&sql, rusqlite::params![sql_value]).with_context(|| {
+            format!("failed to backfill default for '{store_name}.{}'", col.name)
+        })?;
+    }
+    Ok(())
+}
+
+/// Convert a JSON default value into the SQLite literal representation that
+/// matches how the add handler / DDL would store it.
+fn default_to_sql_value(ty: &FieldType, v: &serde_json::Value) -> rusqlite::types::Value {
+    use rusqlite::types::Value as SqlValue;
+    match ty {
+        FieldType::List(_)
+        | FieldType::Record(_)
+        | FieldType::ListRecord(_)
+        | FieldType::ListFk { .. }
+        | FieldType::Json => {
+            let json = serde_json::to_string(v).unwrap_or_else(|_| "null".to_string());
+            SqlValue::Text(json)
+        }
+        FieldType::Bool => match v {
+            serde_json::Value::Bool(b) => SqlValue::Integer(if *b { 1 } else { 0 }),
+            _ => SqlValue::Null,
+        },
+        FieldType::Integer => match v {
+            serde_json::Value::Number(n) => {
+                SqlValue::Integer(n.as_i64().unwrap_or(0))
+            }
+            _ => SqlValue::Null,
+        },
+        _ => match v {
+            serde_json::Value::String(s) => SqlValue::Text(s.clone()),
+            serde_json::Value::Null => SqlValue::Null,
+            other => SqlValue::Text(other.to_string()),
+        },
+    }
 }
 
 /// Convenience: load manifest + schemas from `root/.stores/manifest.yaml`
@@ -429,6 +512,94 @@ mod tests {
             msg.contains("reserved column 'created_by' is absent"),
             "unexpected error: {msg}"
         );
+    }
+
+    // ---- T052 P1: defaults backfill on migration ----
+
+    /// AC1.3 / Task 1.6 (b): apply_with backfills risk_class='normal',
+    /// approval_policy='human', risk_flags='[]', cluster_key IS NULL on
+    /// existing rows when the four columns were absent before migration.
+    #[test]
+    fn t052_p1_migrate_backfills_risk_taxonomy_defaults_on_existing_rows() {
+        let (schemas, manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        install_all(&conn, &schemas);
+
+        // Drop the four T052 columns so the live DB is shaped like a pre-T052
+        // observations table.
+        for col in ["risk_class", "approval_policy", "risk_flags", "cluster_key"] {
+            conn.execute_batch(&format!(
+                "ALTER TABLE \"observations\" DROP COLUMN \"{col}\";"
+            ))
+            .unwrap();
+        }
+
+        // Insert an existing row that pre-dates the migration.
+        conn.execute(
+            "INSERT INTO observations (display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                "L001", "open", "2026-05-01T00:00:00Z", "2026-05-01T00:00:00Z",
+                "ai_autonomous", "ai_autonomous",
+                "pre-existing observation", "dev", "normal",
+                "2026-05-01T00:00:00Z", "w18-d1"
+            ],
+        ).unwrap();
+
+        // Run additive migration: should ALTER ADD COLUMN the four columns
+        // and backfill defaults on the existing row.
+        let report = apply_with(&conn, &schemas, &manifest).expect("apply_with ok");
+        let added: Vec<&str> = report
+            .applied_columns
+            .iter()
+            .filter(|(s, _)| s == "observations")
+            .map(|(_, c)| c.as_str())
+            .collect();
+        for expected in ["risk_class", "approval_policy", "risk_flags", "cluster_key"] {
+            assert!(
+                added.contains(&expected),
+                "expected '{expected}' in applied_columns: {added:?}"
+            );
+        }
+
+        // Read the pre-existing row and assert backfilled defaults.
+        let (risk_class, approval_policy, risk_flags, cluster_key): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT risk_class, approval_policy, risk_flags, cluster_key FROM observations WHERE display_id = ?1",
+                rusqlite::params!["L001"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(risk_class.as_deref(), Some("normal"));
+        assert_eq!(approval_policy.as_deref(), Some("human"));
+        assert_eq!(risk_flags.as_deref(), Some("[]"));
+        assert_eq!(cluster_key, None, "cluster_key must remain NULL");
+    }
+
+    /// AC1.5: PRAGMA table_info reports the four columns with the expected
+    /// SQL types after install. CHECK constraints are exercised by the
+    /// integration test below; PRAGMA only reports the bare type.
+    #[test]
+    fn t052_p1_observations_pragma_table_info_reports_taxonomy_columns() {
+        let (schemas, _manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        install_all(&conn, &schemas);
+        let live = read_table_info(&conn, "observations").unwrap();
+        for col in ["risk_class", "approval_policy", "risk_flags", "cluster_key"] {
+            assert!(
+                live.contains_key(col),
+                "column '{col}' missing from observations PRAGMA table_info: {live:?}"
+            );
+        }
+        assert_eq!(live.get("risk_class").map(|s| s.as_str()), Some("TEXT"));
+        assert_eq!(live.get("approval_policy").map(|s| s.as_str()), Some("TEXT"));
+        assert_eq!(live.get("risk_flags").map(|s| s.as_str()), Some("TEXT"));
+        assert_eq!(live.get("cluster_key").map(|s| s.as_str()), Some("TEXT"));
     }
 
     /// Type comparison is case-insensitive on the bare token.

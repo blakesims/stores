@@ -75,6 +75,20 @@ pub fn run(
         merged.insert(k.clone(), v.clone());
     }
 
+    // L143 / T052: `approval_policy` is verb-owned. The dedicated
+    // `override-policy` verb encodes the direction-aware tier-A/tier-B gate
+    // (relaxation human→auto needs a token; escalation can be tier-B). The
+    // generic `update` verb can't see direction without re-reading the
+    // existing row, and even if it did the gate logic would have to be
+    // duplicated in two places. Reject the field here and force callers
+    // through the named verb. Codex T052 round 1 caught this leak.
+    if schema.name == "observations" && diff.contains_key("approval_policy") {
+        anyhow::bail!(
+            "approval_policy must be changed via `stores observations override-policy`; \
+             generic update is not the right surface for direction-gated authority fields"
+        );
+    }
+
     // Run validator against merged entry; actor checks scoped to diff only.
     validate::validate(schema, &merged, Op::Update(diff.clone()), invoker)
         .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;

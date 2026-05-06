@@ -428,6 +428,59 @@ fields:
             required: true
             description: "Identifier in the external system"
 
+  # --- Risk & policy taxonomy (T052) ---
+  # P2 schema-prep for the gatekeeper (L142). The four fields promote the
+  # (risk_class, approval_policy, risk_flags, cluster_key) tuple from prose
+  # in docs/risk-and-cluster-taxonomy.md into typed columns so risk and
+  # policy are queryable / enforceable / audit-able. Conservative defaults
+  # apply to every existing row at migration time and to every new row when
+  # the CLI does not supply an override. actor: ai_with_human gates explicit
+  # writes — autonomous filing cannot supply these flags.
+  - name: risk_class
+    type: enum
+    enum_values: [low, normal, architecture, security, authority]
+    required: false
+    actor: ai_with_human
+    default: 'normal'
+    description: "Risk class taxonomy entry (default 'normal')"
+
+  - name: approval_policy
+    type: enum
+    enum_values: [auto, human, architecture]
+    required: false
+    actor: ai_with_human
+    default: 'human'
+    description: "Approval policy floor (default 'human')"
+
+  - name: risk_flags
+    type:
+      list: text
+    required: false
+    actor: ai_with_human
+    default: []
+    list_enum:
+      - touches_actor_authority
+      - touches_lifecycle
+      - touches_subscriber_semantics
+      - introduces_new_primitive
+      - changes_boundary
+      - security_sensitive
+      - docs_only
+      - small_local_fix
+      - duplicate_symptom
+      - touches_runner_boundary
+      - touches_schema_core
+      - authority_surface_drift
+      - contradicts_prior_decision
+    description: "Canonical risk-flag enum tags (array membership validated separately)"
+
+  - name: cluster_key
+    type: text
+    required: false
+    actor: ai_with_human
+    pattern: '^[a-z][a-z0-9-]{2,40}$'
+    description: "Optional cluster key linking related observations (slug-like)"
+
   # --- Notes (free-shape JSON; T008 substrate) ---
   - name: notes
     type: json

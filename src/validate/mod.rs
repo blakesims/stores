@@ -2,6 +2,7 @@ pub mod actor;
 pub mod enum_check;
 pub mod error;
 pub mod expr_eval;
+pub mod list_enum;
 pub mod regex_check;
 pub mod required;
 
@@ -255,6 +256,9 @@ fn validate_field(
 
     // enum check
     enum_check::check_enum(field, &field_path, entry, errors);
+
+    // list_enum membership check (T052 P2)
+    list_enum::check_list_enum(field, &field_path, entry, errors);
 
     // pattern / regex check
     regex_check::check_pattern(field, &field_path, entry, errors);

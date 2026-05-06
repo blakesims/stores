@@ -1,4 +1,4 @@
-use crate::schema::{FieldType, Schema};
+use crate::schema::{Field, FieldType, Schema};
 
 /// One column declared by SUBSTRATE_DDL. Used by framework-migration drift
 /// detection in `handlers::framework_migrate` to ALTER older DBs up to the
@@ -314,6 +314,29 @@ fn scalar_col_def(field_name: &str, ty: &FieldType) -> Option<String> {
     }
 }
 
+/// Render the SQL fragment ` DEFAULT '<val>'` for a field's declared default,
+/// or `None` if the field has no default. Quoting strategy:
+/// - JSON null → `DEFAULT NULL` (no value materialised; equivalent to absent)
+/// - JSON string → SQL string literal with single-quote doubling
+/// - JSON number/bool → SQL literal (numbers as-is, bool → 0/1)
+/// - JSON array/object → JSON-encoded, wrapped in single-quote SQL literal
+///   (intent: `DEFAULT '[]'` for list:text fields with `default: '[]'`).
+/// (T052 P1)
+pub(crate) fn default_clause(field: &Field) -> Option<String> {
+    let v = field.default.as_ref()?;
+    let lit = match v {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            let json = serde_json::to_string(v).unwrap_or_else(|_| "null".to_string());
+            format!("'{}'", json.replace('\'', "''"))
+        }
+    };
+    Some(format!(" DEFAULT {lit}"))
+}
+
 /// Description of a column the substrate expects a generated table to have.
 ///
 /// `name` and `sql_type` are the two halves of the column definition that
@@ -365,20 +388,27 @@ pub fn expected_columns(schema: &Schema) -> Vec<ExpectedColumn> {
             | FieldType::ListRecord(_)
             | FieldType::ListFk { .. }
             | FieldType::Json => {
+                let mut full_def = format!("{} TEXT", field.name);
+                if let Some(suffix) = default_clause(field) {
+                    full_def.push_str(&suffix);
+                }
                 json_cols.push(ExpectedColumn {
                     name: field.name.clone(),
                     sql_type: "TEXT".to_string(),
-                    full_def: format!("{} TEXT", field.name),
+                    full_def,
                     is_reserved: false,
                 });
             }
             ty => {
-                if let Some(def) = scalar_col_def(&field.name, ty) {
+                if let Some(mut def) = scalar_col_def(&field.name, ty) {
                     let sql_type = match ty {
                         FieldType::Integer | FieldType::Bool => "INTEGER",
                         _ => "TEXT",
                     }
                     .to_string();
+                    if let Some(suffix) = default_clause(field) {
+                        def.push_str(&suffix);
+                    }
                     scalar_cols.push(ExpectedColumn {
                         name: field.name.clone(),
                         sql_type,
@@ -789,6 +819,85 @@ fields:
         let msg = format!("{err}");
         assert!(msg.contains("evil_table"), "msg: {msg}");
         assert!(msg.contains("evil_col"), "msg: {msg}");
+    }
+
+    // ---- T052 P1: per-field DEFAULT clauses ----
+
+    /// AC1.5 / Task 1.6 (a): DDL emits DEFAULT for the four risk taxonomy
+    /// columns on the bundled observations schema.
+    #[test]
+    fn t052_p1_observations_ddl_emits_default_clauses_for_risk_taxonomy() {
+        let yaml = include_str!("../../stores/observations/schema.yaml");
+        let schema = Schema::from_yaml(yaml).expect("observations schema must parse");
+        let ddl = ddl_for(&schema);
+
+        // risk_class: enum with CHECK + DEFAULT 'normal'
+        assert!(
+            ddl.contains("risk_class TEXT CHECK (risk_class IN ('low', 'normal', 'architecture', 'security', 'authority')) DEFAULT 'normal'"),
+            "risk_class DDL missing CHECK + DEFAULT 'normal':\n{ddl}"
+        );
+
+        // approval_policy: enum CHECK + DEFAULT 'human'
+        assert!(
+            ddl.contains("approval_policy TEXT CHECK (approval_policy IN ('auto', 'human', 'architecture')) DEFAULT 'human'"),
+            "approval_policy DDL missing CHECK + DEFAULT 'human':\n{ddl}"
+        );
+
+        // risk_flags: list:text → JSON TEXT with DEFAULT '[]'
+        assert!(
+            ddl.contains("risk_flags TEXT DEFAULT '[]'"),
+            "risk_flags DDL missing DEFAULT '[]':\n{ddl}"
+        );
+
+        // cluster_key: TEXT, no default → bare `cluster_key TEXT` with no DEFAULT clause
+        assert!(
+            ddl.contains("cluster_key TEXT"),
+            "cluster_key column missing:\n{ddl}"
+        );
+        // Find the cluster_key line specifically and confirm no DEFAULT
+        let cluster_line = ddl
+            .lines()
+            .find(|l| l.trim_start().starts_with("cluster_key"))
+            .expect("cluster_key line present");
+        assert!(
+            !cluster_line.contains("DEFAULT"),
+            "cluster_key must not carry a DEFAULT clause: {cluster_line}"
+        );
+    }
+
+    /// Task 1.6 (a): scalar DEFAULT clause is emitted via expected_columns.full_def.
+    #[test]
+    fn t052_p1_default_clause_in_expected_columns_full_def() {
+        let yaml = include_str!("../../stores/observations/schema.yaml");
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let cols = expected_columns(&schema);
+        let risk_class = cols
+            .iter()
+            .find(|c| c.name == "risk_class")
+            .expect("risk_class column");
+        assert!(
+            risk_class.full_def.contains("DEFAULT 'normal'"),
+            "risk_class.full_def missing DEFAULT clause: {}",
+            risk_class.full_def
+        );
+        let risk_flags = cols
+            .iter()
+            .find(|c| c.name == "risk_flags")
+            .expect("risk_flags column");
+        assert!(
+            risk_flags.full_def.contains("DEFAULT '[]'"),
+            "risk_flags.full_def missing DEFAULT '[]': {}",
+            risk_flags.full_def
+        );
+        let cluster_key = cols
+            .iter()
+            .find(|c| c.name == "cluster_key")
+            .expect("cluster_key column");
+        assert!(
+            !cluster_key.full_def.contains("DEFAULT"),
+            "cluster_key must not have DEFAULT: {}",
+            cluster_key.full_def
+        );
     }
 
     /// AC Phase 3: DDL for a hyphenated store name produces a quoted identifier

@@ -281,8 +281,12 @@ pub fn dispatch(
                     handlers::next_id::run_next_id()?;
                 }
                 Some((verb, sub)) => {
-                    // Check if this is a declared lifecycle transition verb
-                    if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {
+                    // override-risk and override-policy are observations-only non-transition verbs
+                    if verb == "override-risk" {
+                        handlers::overrides::run_override_risk(schema, &conn, sub, invoker)?;
+                    } else if verb == "override-policy" {
+                        handlers::overrides::run_override_policy(schema, &conn, sub, invoker)?;
+                    } else if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {
                         if verb == "reject" {
                             // reject requires --reason (clap enforces required=true at parse time).
                             let reason = sub
