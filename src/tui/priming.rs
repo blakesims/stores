@@ -100,8 +100,7 @@ impl Priming {
     /// Write the body to a NamedTempFile. Caller owns the file; dropping
     /// removes it from disk.
     pub fn write_to_tempfile(&self) -> Result<NamedTempFile> {
-        let mut f = NamedTempFile::new()
-            .context("failed to mkstemp for side-car priming body")?;
+        let mut f = NamedTempFile::new().context("failed to mkstemp for side-car priming body")?;
         std::io::Write::write_all(&mut f, self.body.as_bytes())
             .context("failed to write priming body to tempfile")?;
         Ok(f)
@@ -280,7 +279,7 @@ fn fetch_live_rows(conn: &Connection) -> Result<String> {
     let mut out = String::new();
     let mut stmt = conn.prepare(
         "SELECT display_id, status, COALESCE(title, '') FROM tasks \
-         WHERE status NOT IN ('accepted', 'complete', 'cargo_installed', 'schema_migrated') \
+         WHERE status NOT IN ('accepted', 'rejected', 'complete', 'cargo_installed', 'schema_migrated', 'closed_out_of_band', 'abandoned') \
          ORDER BY display_id ASC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -405,8 +404,7 @@ mod tests {
         conn
     }
 
-    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
-        std::sync::OnceLock::new();
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         let m = ENV_LOCK.get_or_init(|| std::sync::Mutex::new(()));
@@ -447,10 +445,41 @@ mod tests {
             assert!(p.body.contains("L001"), "linked obs row missing");
             assert!(p.body.contains("Demo obs"), "linked obs body missing");
             assert!(p.body.contains("hello wrap"), "wrap_log missing");
-            assert!(p.body.contains("planning → code_review"), "transitions missing");
+            assert!(
+                p.body.contains("planning → code_review"),
+                "transitions missing"
+            );
             assert_eq!(p.token, "tok-test-123");
-            assert!(p.initial_message.contains("tok-test-123"), "token in initial");
+            assert!(
+                p.initial_message.contains("tok-test-123"),
+                "token in initial"
+            );
         });
+    }
+
+    #[test]
+    fn live_rows_exclude_abandoned_terminal_history() {
+        let conn = make_test_db();
+        conn.execute(
+            "INSERT INTO tasks VALUES
+               (2, 'T998', 'abandoned', 'Retired task', 'T2', NULL, '[]', '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks VALUES
+               (3, 'T997', 'executing', 'Live task', 'T2', NULL, '[]', '[]')",
+            [],
+        )
+        .unwrap();
+
+        let live = fetch_live_rows(&conn).unwrap();
+
+        assert!(live.contains("T997"), "executing task remains live: {live}");
+        assert!(
+            !live.contains("T998"),
+            "abandoned task must not be live: {live}"
+        );
     }
 
     #[test]

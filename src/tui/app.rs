@@ -397,6 +397,46 @@ impl App {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::super::data::TaskRow;
+    use super::*;
+
+    fn task(status: &str) -> Row {
+        Row::Task(TaskRow {
+            display_id: format!("T-{status}"),
+            status: status.to_string(),
+            title: "task".to_string(),
+            claimed_by: None,
+            updated_at: String::new(),
+            tier_hint: None,
+            linked_observations: Vec::new(),
+            blocked_reason: None,
+            blocked_reason_class: None,
+        })
+    }
+
+    #[test]
+    fn status_bar_counts_abandoned_as_terminal_history() {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![task("executing"), task("abandoned"), task("rejected")];
+
+        app.recompute_status_bar();
+
+        assert_eq!(app.status_bar.cap, (1, 3));
+    }
+
+    #[test]
+    fn abandoned_is_terminal_task_status() {
+        assert!(is_terminal_task_status("abandoned"));
+        assert!(is_terminal_task_status("closed_out_of_band"));
+        assert!(is_terminal_task_status("rejected"));
+        assert!(!is_terminal_task_status("executing"));
+    }
+}
+
+
 fn local_clock_string() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -266,6 +266,7 @@ pub fn is_terminal_task_status(s: &str) -> bool {
             | "cargo_installed"
             | "schema_migrated"
             | "rejected"
+            | "abandoned"
     )
 }
 

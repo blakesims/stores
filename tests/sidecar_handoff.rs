@@ -1,7 +1,7 @@
 //! T028 P5: side-car hand-off integration tests.
 //!
 //! Drives `spawn::handoff_inner` against a mock claude shim. Validates:
-//!   • argv shape (--append-system-prompt-file <file>, positional message)
+//!   • argv shape (--append-system-prompt-file <file>, [--continue], <message>)
 //!   • priming file content reaches the side-car
 //!   • token is in the initial message (chat context, not env)
 //!   • obs-drafting handoff succeeds without substrate session-id argv leakage
@@ -101,8 +101,7 @@ fn with_test_env<F: FnOnce()>(token: &str, vars: &[(&str, &str)], f: F) {
 }
 
 fn read_argv(outdir: &Path) -> Vec<String> {
-    let bytes = std::fs::read(outdir.join("argv.txt"))
-        .expect("shim should have recorded argv.txt");
+    let bytes = std::fs::read(outdir.join("argv.txt")).expect("shim should have recorded argv.txt");
     bytes
         .split(|b| *b == 0)
         .filter(|s| !s.is_empty())
@@ -145,6 +144,7 @@ fn per_row_handoff_passes_token_in_message_and_priming_file() {
                 "token must be in positional initial message, got {:?}",
                 argv[3]
             );
+            assert_eq!(argv.len(), 4);
 
             let priming = std::fs::read_to_string(outdir.path().join("priming.txt")).unwrap();
             assert!(priming.contains("T999"), "priming must mention row id");
@@ -237,13 +237,8 @@ fn handoff_does_not_increment_counter_on_shim_failure() {
             ("MOCK_CLAUDE_RUNS_DIR", runs_dir.path().to_str().unwrap()),
         ],
         || {
-            let outcome = handoff_inner(
-                SidecarScope::General,
-                runs_dir.path(),
-                &shim_path,
-                &conn,
-            )
-            .expect("handoff_inner returns Ok even when child exits non-zero");
+            let outcome = handoff_inner(SidecarScope::General, runs_dir.path(), &shim_path, &conn)
+                .expect("handoff_inner returns Ok even when child exits non-zero");
             assert!(!outcome.status.success(), "shim exited 7 → non-success");
         },
     );
