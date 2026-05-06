@@ -432,6 +432,26 @@ pub(crate) fn run_in_tx(
         &merged,
     )?;
 
+    // T053 P2/P3: validate + mirror the gatekeeper payload BEFORE routing side-effects.
+    // The observation side-effect needs the derived L143 columns in `merged` so the
+    // resulting observation and the intake transition are written atomically with the
+    // same gatekeeper-derived risk_class / approval_policy / risk_flags / cluster_key.
+    if schema.name == "intake" && verb == "route" {
+        maybe_validate_and_mirror_gatekeeper_decision(schema, &mut diff, &mut merged)?;
+        super::intake_route::inject_pre_validation_fields(
+            tx,
+            &mut diff,
+            &mut merged,
+            verb,
+        )?;
+    }
+
+    // T053 P3/P5: recon-return writes recon_round/evidence through the same typed
+    // transition write as the status move, avoiding intake-specific raw writes.
+    if schema.name == "intake" && verb == "recon-return" {
+        super::intake_route::inject_recon_return_fields(&mut diff, &mut merged)?;
+    }
+
     // Run validator against merged entry; actor checks scoped to diff only.
     validate::validate(
         schema,
@@ -695,6 +715,115 @@ pub(crate) fn execute_transition_write(
         policies_hash,
         actor_note,
     )?;
+
+    Ok(())
+}
+
+/// T053 P2: validate gatekeeper_decision_json and mirror risk_flags, cluster_key,
+/// and decision_metadata into diff + merged so they are written in the same transaction.
+///
+/// Only fires for the `intake` store on the `route` verb.
+/// Called after generic `validate::validate()` passes — the generic validator already
+/// rejects badly-formed JSON, so here we know the value is either a parsed object or null.
+pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
+    schema: &crate::schema::Schema,
+    diff: &mut crate::validate::EntryMap,
+    merged: &mut crate::validate::EntryMap,
+) -> anyhow::Result<()> {
+    let decision_json_val = match merged.get("gatekeeper_decision_json") {
+        Some(v) => v.clone(),
+        None => {
+            // FIX 2: gatekeeper_decision_json is mandatory for route — reject absent field.
+            anyhow::bail!(
+                "gatekeeper_decision_json is required for the route verb; \
+                 pass --gatekeeper-decision-json with the full gatekeeper output payload"
+            );
+        }
+    };
+
+    // Null means not yet set — reject fail-loud (same as absent).
+    if decision_json_val.is_null() {
+        anyhow::bail!(
+            "gatekeeper_decision_json is required for the route verb and must be a non-null JSON \
+             object; pass --gatekeeper-decision-json with the full gatekeeper output payload"
+        );
+    }
+
+    // The generic JSON validator already caught malformed strings; here we expect an object.
+    // If it's a String (sentinel), bail gracefully — the generic validator's error already fired.
+    if decision_json_val.is_string() {
+        return Ok(());
+    }
+
+    // Validate the gatekeeper decision payload
+    crate::validate::gatekeeper_decision::validate_gatekeeper_decision(&decision_json_val)
+        .map_err(|errs| {
+            anyhow::anyhow!(
+                "gatekeeper_decision_json validation failed:\n- {}",
+                errs.join("\n- ")
+            )
+        })?;
+
+    // FIX 3: enforce --decision matches gatekeeper_decision_json.decision (exact equality).
+    // Reject fail-loud if they differ to prevent mismatched state transitions.
+    if let Some(obj) = decision_json_val.as_object() {
+        let json_decision = obj.get("decision").and_then(|v| v.as_str()).unwrap_or("");
+        let cli_decision = merged.get("decision").and_then(|v| v.as_str()).unwrap_or("");
+        if !cli_decision.is_empty() && json_decision != cli_decision {
+            anyhow::bail!(
+                "--decision '{cli_decision}' does not match gatekeeper_decision_json.decision \
+                 '{json_decision}'; they must be identical"
+            );
+        }
+    }
+
+    // Mirror risk_flags and cluster_key to top-level indexed columns
+    if let Some(obj) = decision_json_val.as_object() {
+        // risk_flags → top-level column (type: json, stores as JSON array string)
+        if let Some(flags) = obj.get("risk_flags") {
+            diff.insert("risk_flags".to_string(), flags.clone());
+            merged.insert("risk_flags".to_string(), flags.clone());
+        }
+
+        // cluster_key → top-level column (type: text)
+        if let Some(ck) = obj.get("cluster_key") {
+            diff.insert("cluster_key".to_string(), ck.clone());
+            merged.insert("cluster_key".to_string(), ck.clone());
+        }
+
+        // decision_metadata: {matched_cluster_key, risk_flags_set, risk_class_hint, approval_policy_hint}
+        let risk_flags_arr: Vec<&str> = obj
+            .get("risk_flags")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let risk_class =
+            crate::schema::risk_taxonomy::derive_risk_class(&risk_flags_arr);
+        let decision_str = obj.get("decision").and_then(|v| v.as_str()).unwrap_or("");
+        let tier_hint = obj.get("tier_hint").and_then(|v| v.as_str()).unwrap_or("");
+        let approval_policy = crate::schema::risk_taxonomy::derive_approval_policy(
+            tier_hint,
+            risk_class,
+            decision_str,
+        );
+
+        let meta = serde_json::json!({
+            "matched_cluster_key": obj.get("cluster_key"),
+            "risk_flags_set": risk_flags_arr,
+            "risk_class_hint": risk_class,
+            "approval_policy_hint": approval_policy,
+            "rationale": obj.get("rationale"),
+            "confidence": obj.get("confidence"),
+            "tier_hint": obj.get("tier_hint"),
+        });
+
+        // Check that decision_metadata is in the schema before injecting
+        let has_decision_metadata = schema.fields.iter().any(|f| f.name == "decision_metadata");
+        if has_decision_metadata {
+            diff.insert("decision_metadata".to_string(), meta.clone());
+            merged.insert("decision_metadata".to_string(), meta);
+        }
+    }
 
     Ok(())
 }

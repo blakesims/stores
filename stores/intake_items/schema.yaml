@@ -1,0 +1,189 @@
+name: intake
+id_format: "I{:03d}"
+# No store-level default_actor — fields are unguarded by default; explicit actor per-field only.
+# Lifecycle doc: docs/gatekeeper-design.md § Lifecycle
+
+lifecycle:
+  states: [draft, triaging, needs_info, routed, dropped]
+  initial_state: draft
+  transitions:
+    # draft → triaging: gatekeeper claims the row for triage (ai_autonomous)
+    - from: draft
+      to: triaging
+      verb: claim-triage
+      actor: ai_autonomous
+
+    # triaging → needs_info: insufficient evidence; gatekeeper needs recon
+    - from: triaging
+      to: needs_info
+      verb: route
+      actor: ai_autonomous
+      guard: "decision == 'needs_info'"
+
+    # triaging → routed: duplicate detected
+    - from: triaging
+      to: routed
+      verb: route
+      actor: ai_autonomous
+      guard: "decision == 'duplicate'"
+
+    # triaging → routed: fast-track eligible (T0/T1, low risk flags only)
+    - from: triaging
+      to: routed
+      verb: route
+      actor: ai_autonomous
+      guard: "decision == 'fast_track'"
+
+    # triaging → routed: creates a regular observation
+    - from: triaging
+      to: routed
+      verb: route
+      actor: ai_autonomous
+      guard: "decision == 'normal_observation'"
+
+    # triaging → routed: architecture review candidate (tagged observation, no dedicated store yet)
+    - from: triaging
+      to: routed
+      verb: route
+      actor: ai_autonomous
+      guard: "decision == 'arch_review_candidate'"
+
+    # triaging → dropped: noise; terminal unless reopened by human
+    - from: triaging
+      to: dropped
+      verb: route
+      actor: ai_autonomous
+      guard: "decision == 'reject_noise'"
+
+    # needs_info → triaging: recon agent returns evidence; bumps recon_round
+    - from: needs_info
+      to: triaging
+      verb: recon-return
+      actor: ai_autonomous
+
+    # dropped → draft: human disagrees with reject_noise decision (rare escape hatch)
+    - from: dropped
+      to: draft
+      verb: reopen
+      actor: ai_with_human
+
+    # dropped → triaging: human corrects a misrouted reject_noise (Q4 resolution)
+    # Skips draft to avoid re-filing; returns directly to triaging for re-triage.
+    - from: dropped
+      to: triaging
+      verb: amend
+      actor: ai_with_human
+
+workflow:
+  agent_roles:
+    gatekeeper:
+      description: "Classifies intake items into one of six gatekeeper routing decisions"
+    recon:
+      description: "Gathers narrow evidence for needs_info round-trips"
+  briefing_templates:
+    gatekeeper: "templates/gatekeeper-brief.md.tpl"
+    recon: "templates/recon-brief.md.tpl"
+  on_state:
+    triaging:
+      - dispatch_agent: gatekeeper
+    needs_info:
+      - dispatch_agent: recon
+
+fields:
+  # --- Core identity ---
+  - name: summary
+    type: text
+    required: true
+    description: "One-line summary of the intake item"
+
+  - name: body
+    type: text
+    required: false
+    description: "Extended description; supports --body-from-file"
+
+  # --- Source / origin ---
+  - name: source_task
+    type: text
+    required: false
+    description: "Soft-FK to tasks.display_id (T###); plain text, no referential guard"
+
+  - name: source_agent
+    type: text
+    required: true
+    description: "Role name of the filing agent (planner, executor, code_reviewer, orchestrator, ...)"
+
+  # --- Filing metadata ---
+  - name: suggested_fix
+    type: text
+    required: false
+    description: "Raw filer's proposal; advisory only, not policy"
+
+  - name: evidence
+    type: text
+    required: false
+    description: "ndjson of recon findings (paths, greps, repro); ndjson line per finding: {kind, path, line?, snippet?, summary}"
+
+  # --- Gatekeeper decision ---
+  - name: gatekeeper_decision_json
+    type: json
+    required: false
+    description: "Full structured-output payload from gatekeeper agent (see docs/gatekeeper-design.md § Gatekeeper output schema)"
+
+  - name: decision
+    type: enum
+    enum_values: [duplicate, needs_info, fast_track, normal_observation, arch_review_candidate, reject_noise]
+    required: false
+    description: "Routing decision; set during route transition"
+
+  - name: decision_metadata
+    type: json
+    required: false
+    description: "Additional metadata about the gatekeeper decision (rationale, confidence, tier_hint)"
+
+  # --- Risk / cluster indexing (mirrored from gatekeeper_decision_json for indexed queries) ---
+  - name: risk_flags
+    type: json
+    required: false
+    description: "Risk flags array mirrored from gatekeeper_decision_json for indexed queries; no re-parse needed"
+
+  - name: cluster_key
+    type: text
+    required: false
+    pattern: "^[a-z][a-z0-9-]{2,40}$"
+    description: "Cluster key mirrored from gatekeeper_decision_json; kebab-case, e.g. dispatch-lifecycle"
+
+  # --- Routing cross-references (soft-FK, plain text per D4) ---
+  - name: duplicate_of
+    type: text
+    required: false
+    required_when: "decision == 'duplicate'"
+    description: "Soft-FK to intake_items.display_id (I###) when decision=duplicate"
+
+  - name: routed_to_observation
+    type: text
+    required: false
+    required_when: "decision == 'normal_observation'"
+    description: "Soft-FK to observations.display_id (L###) when decision=normal_observation or arch_review_candidate (handler guarantees presence for both; required_when covers normal_observation; arch_review_candidate enforcement is at handler level)"
+
+  # --- Recon loop counter ---
+  - name: recon_round
+    type: integer
+    required: false
+    description: "0 on draft; incremented on each needs_info → triaging recon return; max 2 before gatekeeper must decide"
+
+  # --- Recon question (set when decision=needs_info; extracted from gatekeeper_decision_json) ---
+  - name: missing_info_question
+    type: text
+    required: false
+    description: "Question the gatekeeper needs answered before routing; persisted from gatekeeper_decision_json.missing_info_question"
+
+  # --- Capture metadata ---
+  - name: captured_at
+    type: text
+    required: true
+    description: "ISO timestamp when the intake item was captured"
+
+  - name: captured_week
+    type: text
+    required: true
+    description: "Operator week label (e.g. w18-d3); mirrors observations convention"

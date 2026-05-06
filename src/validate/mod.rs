@@ -2,6 +2,7 @@ pub mod actor;
 pub mod enum_check;
 pub mod error;
 pub mod expr_eval;
+pub mod gatekeeper_decision;
 pub mod list_enum;
 pub mod regex_check;
 pub mod required;
@@ -13,6 +14,7 @@ use crate::schema::{
     FieldType, Schema,
 };
 
+pub use actor::SideEffectAuthority;
 pub use error::{pretty_print, ValidationError};
 
 /// In-memory entry map: nested structure mirroring the schema.
@@ -59,6 +61,26 @@ pub fn validate(
     op: Op,
     invoker: InvokerCtx,
 ) -> Result<(), Vec<ValidationError>> {
+    validate_with_authority(schema, entry, op, invoker, None)
+}
+
+/// Like `validate`, but accepts a `SideEffectAuthority` for named internal
+/// framework code-paths.
+///
+/// This entry point is used exclusively by `add_row_in_tx_with_authority` for
+/// gatekeeper route side-effect observation inserts. Generic `observations
+/// add/update` callers go through `validate` (authority=None) and are
+/// unaffected by the authority allowlist.
+///
+/// The authority is threaded into actor checks only; all other validation rules
+/// (required, enum, pattern, list_enum) are unchanged.
+pub fn validate_with_authority(
+    schema: &Schema,
+    entry: &EntryMap,
+    op: Op,
+    invoker: InvokerCtx,
+    authority: Option<SideEffectAuthority>,
+) -> Result<(), Vec<ValidationError>> {
     let mut errors: Vec<ValidationError> = Vec::new();
 
     // Determine the transition verb and diff for actor scoping.
@@ -95,6 +117,7 @@ pub fn validate(
             &[],
             &schema.default_actor,
             invoker,
+            authority,
             &mut errors,
         );
 
@@ -108,6 +131,7 @@ pub fn validate(
                     &parent_path,
                     &schema.default_actor,
                     invoker,
+                    authority,
                     &mut errors,
                 );
             }
@@ -159,6 +183,7 @@ pub fn validate(
                                 &[], // no parent — elem_entry is flat at sub-field level
                                 &schema.default_actor,
                                 invoker,
+                                authority,
                                 &mut errors,
                             );
                         }
@@ -186,6 +211,7 @@ fn validate_field(
     parent_path: &[String],
     default_actor: &Option<Actor>,
     invoker: InvokerCtx,
+    authority: Option<SideEffectAuthority>,
     errors: &mut Vec<ValidationError>,
 ) {
     let mut field_path = parent_path.to_vec();
@@ -264,12 +290,13 @@ fn validate_field(
     regex_check::check_pattern(field, &field_path, entry, errors);
 
     // actor check — uses actor_entry (diff only for Transition/Update, full entry for Add)
-    actor::check_actor(
+    actor::check_actor_with_authority(
         field,
         &field_path,
         actor_entry,
         invoker,
         *default_actor,
+        authority,
         errors,
     );
 }

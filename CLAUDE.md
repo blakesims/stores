@@ -14,7 +14,7 @@
 
 ### Cross-project filing (`--meta` / `STORES_META_PATH`)
 
-When friction surfaces while doing client work, file it against the stores substrate without context-switching: pass `--meta=<PATH>` (or set `STORES_META_PATH=<PATH>` once and use bare `--meta`) to route a single CLI invocation at a META substrate. The META substrate is just another `.stores/` — by convention, the stores repo itself. The flag is global, so it works uniformly with `observations add`, `tasks add`, `tasks render`, etc. Bare `--meta` with `STORES_META_PATH` unset, or a path that doesn't contain a `.stores/` directory, errors fail-loud — no silent fallback to CWD.
+When friction surfaces while doing client work, file it against the stores substrate without context-switching: pass `--meta=<PATH>` (or set `STORES_META_PATH=<PATH>` once and use bare `--meta`) to route a single CLI invocation at a META substrate. The META substrate is just another `.stores/` — by convention, the stores repo itself. The flag is global, so it works uniformly with `intake add`, `observations add`, `tasks add`, `tasks render`, etc. Bare `--meta` with `STORES_META_PATH` unset, or a path that doesn't contain a `.stores/` directory, errors fail-loud — no silent fallback to CWD.
 
 ### `--invoker` discipline (the strict rule)
 
@@ -70,20 +70,21 @@ The doctrine is: tier-A is cryptographically gated; tier-B is honor-system; `ai_
 
 ### Bugs are observations, not blockers
 
-When the substrate hurts mid-task, **do not retreat to hand-editing markdown**. File the friction in the observations store with `--invoker ai_autonomous` — filing friction is autonomous work, not a U-moment. The observation lands in the `open` state and shows up in the next `/pickup` queue.
+When the substrate hurts mid-task, **do not retreat to hand-editing markdown**. Prefer the intake gate for autonomous local friction: `stores intake add --invoker ai_autonomous` lands raw signal in `draft` for gatekeeper classification before it becomes an observation. Filing friction is autonomous work, not a U-moment.
 
 ```bash
-stores observations add --invoker ai_autonomous \
+stores intake add --invoker ai_autonomous \
   --summary "<one-line>" \
-  --source dev \
-  --priority high|normal|low \
+  --source-agent "<planner|executor|code_reviewer|orchestrator|...>" \
   --captured-at "$(date -Iseconds)" \
-  --captured-week "$(date +w%V)" \
-  --task-id "<surfacing-task-display-id>" \
+  --captured-week "w$(date +%V)-d$(date +%u)" \
+  --source-task "<surfacing-task-display-id>" \
   --body "<longer description; --body-from-file for multi-line>"
 ```
 
-Observations get `L{:03d}` IDs (`L001`, `L002`, …) — distinct from tasks' `T###`. The `task_id` field is a soft-FK (plain text, no referential guard) — set it to the display id of the task that surfaced the friction.
+`stores observations add` remains valid as the explicit escape hatch for human / `ai_with_human` filings and for gatekeeper routing side-effects. Direct observation add is not blocked by this rule; it is no longer the default autonomous-local-friction path.
+
+Intake items get `I{:03d}` IDs (`I001`, `I002`, …). Routed observations get `L{:03d}` IDs (`L001`, `L002`, …) — distinct from tasks' `T###`. The `source_task` / observation `task_id` fields are soft-FKs (plain text, no referential guard) — set them to the display id of the task that surfaced the friction.
 
 **Observations carry their own triage tier** via their `intent_contract.tier_hint` (T0 / T1 / T2 / T3):
 - **T0** — doctrinal-only. **Do not file.** Edit `CLAUDE.md` (or the relevant doc) directly. T0 is the class of change too small or too implicit to deserve a substrate row; there is no observation, no task, no cycle.

@@ -10,7 +10,7 @@ use crate::schema::{FieldType, Schema};
 // ---------------------------------------------------------------------------
 
 /// Names of bundled stores (the subdirectory name == schema name).
-pub static BUNDLED_STORE_NAMES: &[&str] = &["observations", "gate", "tasks"];
+pub static BUNDLED_STORE_NAMES: &[&str] = &["observations", "gate", "tasks", "intake"];
 
 /// Embedded schema.yaml content for each bundled store (same order as BUNDLED_STORE_NAMES).
 pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
@@ -20,6 +20,10 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
     ),
     ("gate", include_str!("../../stores/gate/schema.yaml")),
     ("tasks", include_str!("../../stores/tasks/schema.yaml")),
+    (
+        "intake",
+        include_str!("../../stores/intake_items/schema.yaml"),
+    ),
 ];
 
 /// Embedded template content for bundled workflow stores.
@@ -27,35 +31,50 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
 /// Map: store-name → list of (template-relative-path, content).
 /// Path keys must match schema's `briefing_templates` and `render_template` values.
 /// Used by brief.rs and render.rs when `schema_path` starts with `"bundled:"`.
-pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[(
-    "tasks",
-    &[
-        (
-            "templates/planner-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/planner-brief.md.tpl"),
-        ),
-        (
-            "templates/plan-reviewer-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/plan-reviewer-brief.md.tpl"),
-        ),
-        (
-            "templates/executor-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/executor-brief.md.tpl"),
-        ),
-        (
-            "templates/code-reviewer-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/code-reviewer-brief.md.tpl"),
-        ),
-        (
-            "templates/wrap-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/wrap-brief.md.tpl"),
-        ),
-        (
-            "templates/main.md.tpl",
-            include_str!("../../stores/tasks/templates/main.md.tpl"),
-        ),
-    ],
-)];
+pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[
+    (
+        "tasks",
+        &[
+            (
+                "templates/planner-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/planner-brief.md.tpl"),
+            ),
+            (
+                "templates/plan-reviewer-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/plan-reviewer-brief.md.tpl"),
+            ),
+            (
+                "templates/executor-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/executor-brief.md.tpl"),
+            ),
+            (
+                "templates/code-reviewer-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/code-reviewer-brief.md.tpl"),
+            ),
+            (
+                "templates/wrap-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/wrap-brief.md.tpl"),
+            ),
+            (
+                "templates/main.md.tpl",
+                include_str!("../../stores/tasks/templates/main.md.tpl"),
+            ),
+        ],
+    ),
+    (
+        "intake",
+        &[
+            (
+                "templates/gatekeeper-brief.md.tpl",
+                include_str!("../../stores/intake_items/templates/gatekeeper-brief.md.tpl"),
+            ),
+            (
+                "templates/recon-brief.md.tpl",
+                include_str!("../../stores/intake_items/templates/recon-brief.md.tpl"),
+            ),
+        ],
+    ),
+];
 
 /// Build the root `stores` Command with all installed stores added as subcommands.
 pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Command {
@@ -1258,4 +1277,103 @@ fn is_reserved(name: &str) -> bool {
             | "help"
             | "version"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intake_templates_are_bundled() {
+        let templates = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == "intake")
+            .map(|(_, templates)| *templates)
+            .expect("intake templates bundled");
+        assert!(templates.iter().any(|(path, content)| {
+            *path == "templates/gatekeeper-brief.md.tpl" && content.contains("Six decisions")
+        }));
+        assert!(templates.iter().any(|(path, content)| {
+            *path == "templates/recon-brief.md.tpl" && content.contains("Required output")
+        }));
+    }
+
+    #[test]
+    fn gatekeeper_brief_template_renders_populated_intake_row() {
+        let intake_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "intake")
+            .map(|(_, yaml)| *yaml)
+            .expect("intake schema bundled");
+        let schema = crate::schema::Schema::from_yaml(intake_yaml).unwrap();
+        let mut row = crate::validate::EntryMap::new();
+        row.insert("display_id".to_string(), serde_json::json!("I001"));
+        row.insert("status".to_string(), serde_json::json!("triaging"));
+        row.insert(
+            "summary".to_string(),
+            serde_json::json!("unique summary token"),
+        );
+        row.insert("source_agent".to_string(), serde_json::json!("executor"));
+        row.insert("body".to_string(), serde_json::json!("unique body token"));
+        row.insert(
+            "evidence".to_string(),
+            serde_json::json!("unique evidence token"),
+        );
+        let template = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == "intake")
+            .and_then(|(_, templates)| {
+                templates
+                    .iter()
+                    .find(|(path, _)| *path == "templates/gatekeeper-brief.md.tpl")
+                    .map(|(_, content)| *content)
+            })
+            .expect("gatekeeper template bundled");
+        let ctx = crate::render::build_context(&schema, &row);
+        let rendered = crate::render::render_template(template, &ctx).unwrap();
+        for expected in [
+            "Gatekeeper Brief: I001",
+            "unique summary token",
+            "source_agent: executor",
+            "unique body token",
+            "unique evidence token",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "rendered gatekeeper brief missing `{expected}`:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn recon_template_does_not_show_forbidden_cli_commands_as_allowed() {
+        let content = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == "intake")
+            .and_then(|(_, templates)| {
+                templates
+                    .iter()
+                    .find(|(path, _)| *path == "templates/recon-brief.md.tpl")
+                    .map(|(_, content)| *content)
+            })
+            .expect("recon template bundled");
+        for forbidden in [
+            "stores observations add",
+            "stores tasks add",
+            "stores intake add",
+            "stores tasks submit-",
+            "stores intake route",
+            "stores tasks accept",
+            "stores tasks reject",
+        ] {
+            assert!(
+                !content.contains(forbidden),
+                "recon template must not present forbidden command `{forbidden}`"
+            );
+        }
+        assert!(content.contains("Do not call workflow submission verbs"));
+        assert!(content.contains("routing verbs"));
+        assert!(content.contains("acceptance verbs"));
+        assert!(content.contains("rejection verbs"));
+    }
 }
