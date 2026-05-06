@@ -83,6 +83,14 @@ Most agent frameworks treat the LLM as the cognitive center and the surrounding 
 
 It's a bet that the durable assets in an AI-collaborative workflow are **not the prose**, but **the typed, validated, actor-attributed rows** — and that if you make those cheap to define and impossible to bypass, the prose can be rendered from them whenever anyone needs to read it.
 
+## Loops vs forks: when a state is not enough
+
+A row should stay in one buffer when it remains the same semantic object on the same journey. A code-review `REVISE` loops a task from `code_review` back to `executing`, but it is still the same task moving toward the same terminal family. That is a lifecycle transition.
+
+A new buffer is warranted when classification can fork the row into different semantic objects, schemas, or terminal meanings. A raw local filing can become a mature observation, a duplicate, noise/dropped, a `needs_info` recon request, an architecture-review candidate, a security escalation, or a task. Those are not merely observation states; they are different journeys. The gatekeeper/intake pattern exists for this reason: use an inlet buffer for candidate signals, then route them across the graph once their kind is known.
+
+Rule of thumb: **loop within a buffer when identity and destination are preserved; route across buffers when classification changes the identity, schema, actor surface, or terminal family.** When in doubt, prefer adding states first; fork into a new buffer only when post-classification entities have meaningfully different lifecycles, invariants, or actor gates. This avoids premature buffer explosion while still naming real semantic forks.
+
 ## Pull from real use
 
 The substrate is dogfooded by being used to build itself — but self-build alone pulls toward generalizations that fit only the self-build. (`cargo install` as the deploy verb is the canonical example: shipping it as a builtin made it look general, when it was only ever the self-build's deploy step.) The substrate stays honest by being driven by real client work in parallel, where the schema, the gates, and the deploy chain meet failure modes the self-build cannot surface — different deploy targets, different test gates, different gate categories, different lock-contention shapes. The dogfood doctrine ("use the substrate to build the substrate") is necessary; the realistic-pull doctrine ("AND use it on work where the substrate doesn't choose its environment") is what keeps it from collapsing inward. Generalizations that survive both pulls are durable; generalizations that survive only the self-build are leaks waiting to be discovered.
@@ -108,6 +116,7 @@ This closes L030 (the tier-aware-cycle observation): the durable surface is the 
 
 ## Revision history
 
+- **v1.7** (2026-05-06) — added loops-vs-forks doctrine: keep rows in one buffer when they loop within the same semantic journey; route across buffers when classification changes object identity, schema, actor surface, or terminal family. Grounds the `intake_items`/gatekeeper direction.
 - **v1.6** (2026-05-05) — tier-structural drive cycle (T027): T0 / T1 / T2 / T3 cycle shapes via `when:` predicates on `StateAction`. T1 skips planner+plan_reviewer; T2 plans constrained to one phase; T3 unchanged. L030 superseded.
 - **v1.5** (2026-05-04) — added "What the substrate is FOR (from the human's perspective)": operating principle (high-signal, low-noise; protect human attention) + the steam-engine inlet metaphor (filing is cheap, refinement is the substrate's burden; same inlet for clear bugs and vague ideas; refinement depth scales to input entropy).
 - **v1.4** (2026-05-04) — primitives extracted to `docs/primitives.md` (single source of truth, with changelog). Philosophy now references it in one line.
