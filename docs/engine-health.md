@@ -2,11 +2,11 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-06 (sixth pass) — Big batch day plus architecture turn. Shipped: T029/T035/T036/T037/T038/T039/T040/T041/T044/T045/T046/T047/T048 plus L130 direct fix. Engine cleared the T1-drive gap, retry/watchdog/accept-merge/plan-persistence failures, close-out-of-band, investigator pull-shape, gatekeeper design, and auto-resolve backfill. Remaining pressure is now concentrated in three coherent clusters: **dispatch attempts as a typed lifecycle** (L134/L141/L149), **T1 execution-shape normalization** (L133), and **gatekeeper implementation seeds** (L142/L143, held for amendment).
+**Last updated:** 2026-05-06 (seventh pass) — Big batch day plus architecture turn, then Pi-runner/load-balancing smoke. Shipped: T029/T035/T036/T037/T038/T039/T040/T041/T044/T045/T046/T047/T048/T055/T056 plus L130 direct fix. Engine cleared the T1-drive gap, retry/watchdog/accept-merge/plan-persistence failures, close-out-of-band, investigator pull-shape, gatekeeper design, auto-resolve backfill, per-role runner config, and a minimal Pi-runner structured-output smoke. Remaining pressure is now concentrated in three coherent clusters: **dispatch attempts as a typed lifecycle** (L134/L141/L149/L150), **T1 execution-shape normalization** (L133), and **gatekeeper implementation seeds** (L142/L143, held for amendment).
 
 ## The picture in one sentence
 
-**The engine now mostly works end-to-end; the danger has moved from "can it drive?" to "can it see and type its own control-plane state?"** Runtime/deploy are much healthier, but status is still confusing because dispatch attempts, T1 contract-plans, and intake/gatekeeper risk metadata are not yet first-class enough. The next geodesic is typed observability: dispatch_locks → typed lifecycle (L134), T1 contract → canonical plan row shape (L133), raw filings → intake/gatekeeper Router (L142/L143).
+**The engine now mostly works end-to-end; the danger has moved from "can it drive?" to "can it see and type its own control-plane state?"** Runtime/deploy are much healthier, and Pi can drive/write structured `final_output`, but status is still confusing because dispatch attempts, watchdog state, T1 contract-plans, and intake/gatekeeper risk metadata are not yet first-class enough. The next geodesic is typed observability: dispatch_locks → typed lifecycle (L134), T1 contract → canonical plan row shape (L133), raw filings → intake/gatekeeper Router (L142/L143).
 
 ## Status legend
 
@@ -40,9 +40,10 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L087 | ⚪ — | auto-promote silent-fails on rapid sequential ratifies (folded into L134's typed-lifecycle umbrella) |
 | L116 | ⚪ T2 | seeder race during agents.yaml hot-reload (overlaps L141 dispatch primitive) |
 | L122 | ⚪ T2 | dispatch_lock orphans on subagent kill |
-| L134 | 🟢 T050 | typed dispatch_locks lifecycle umbrella: postcondition_id+args, daemon_epoch, terminal_reason, next_retry_at; currently blocked/recovering but right abstraction |
+| L134 | 🟢 T050 | typed dispatch_locks lifecycle umbrella: postcondition_id+args, daemon_epoch, terminal_reason, next_retry_at; currently blocked/recovering but right abstraction. T034/T056 smoke reinforced this: daemon/manual-drive races, terminal rows with stale watchdog attempts, and empty/ambiguous drive logs all need typed attempt state. |
 | L141 | ⚪ T2 | auto-drive marks `last_status='ok'` on dispatch, not completion; symptom folded into L134 |
 | L149 | ⚪ T2 | daemon/on-disk binary drift after cargo-install kills fresh auto-drive subprocesses; restart workaround; folds into L011 + L134 observability |
+| L150 | ⚪ T2 | halt/deploy-blocked subscriber mislabels blocked drive failures as deploy_blocked merge-conflict observations; another symptom of untyped terminal state / event postconditions, folded into L134/L135 |
 | L068 | ⚪ — | cross-project daemon SIGTERM (other-repo `pkill 'stores agents run'` kills mine) |
 | GAP | — | per-project daemon PID file + `stores agents status / stop` verbs |
 
@@ -87,6 +88,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L144 | ⚪ T2 | `stores migrate` doesn't detect framework-DDL drift (SUBSTRATE_DDL columns added in newer binary aren't applied to existing DBs); 10.06 hit this on actor_note bootstrap, manual ALTER required |
 | L145 | ⚪ T2 | resume handler hardcodes 'blocked' source; schema permits deploy_blocked→ready via resume but handler rejects pre-validator. Also semantic ambiguity: should resume from deploy_blocked re-cycle or just retry-deploy? |
 | L149 | ⚪ T2 | **daemon's auto-drive spawn breaks silently after `cargo install` replaces `/home/blake/.cargo/bin/stores`** — current_exe()-based execvp loads new binary, but the daemon's in-memory image stays out of sync; spawn argv subtly mismatches new binary's CLI parsing → drive subprocess dies <5s with empty log. Workaround: restart daemon after each cargo-install. Surfaced today during pipe-fill (T048/T049 both died until daemon restart). Compounds with L011 (binary-version recording) — daemon should detect inode-replacement of own exe and self-restart. |
+| L150 | ⚪ T2 | halt/deploy-blocked subscriber files merge-conflict-shaped observations for rows that are merely `blocked` by drive failure (e.g. T034 silent-zombie / Pi-smoke failures). Needs typed event/terminal reason before templating operator-facing halt observations. |
 | GAP | — | acceptance-time precheck for "task touches files with uncommitted main-side changes → accept-merge will fail" |
 
 ### Layer 5 — Discovery / observability
@@ -95,6 +97,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 |---|---|---|
 | L032 | ✅ T032 | auto-scaffold symlinks `.stores/` artifacts into provisioned worktrees (closes L067 transitively) |
 | L057 | ⚪ T2 | no per-agent-invocation metadata on rows (model / tokens / duration / transcript-ref) — usage analytics gap; data exists in `.stores/runs/*.jsonl` but not aggregated |
+| L161/T056 | ✅ T056 | minimal Pi-runner smoke target: T1 task driven via Pi produced structured `final_output`, committed one marker file, passed review/wrap, accepted, and merged. This proves Pi runner basics but not full T034 acceptance bookkeeping. |
 | L054 | ⚪ — | no structured-read verbs for task review (orchestrator falls back to grep) |
 | L058 | ⚪ T2 | no read surface for per-edge throughput / fleet metrics |
 | L059 | ⚪ T1 | `.stores/runs/<task>/<role>.json` transcripts have no index, no row→transcript link |
@@ -145,7 +148,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 Layers 1–4 substantially solid post-batch. Re-ranked picks (the geodesic now points at typed-primitive coherence + queue-drain):
 
-1. **L134 / T050 (typed dispatch_locks lifecycle)** — highest leverage runtime cleanup. One umbrella for L087/L116/L122/L141/L149: typed terminal reasons, daemon epoch, postcondition_id+args, next_retry_at.
+1. **L134 / T050 (typed dispatch_locks lifecycle)** — highest leverage runtime cleanup. One umbrella for L087/L116/L122/L141/L149/L150 and the T034/T056 smoke pain: typed terminal reasons, daemon epoch, postcondition_id+args, next_retry_at, and less ambiguous watchdog/drive-attempt recovery.
 2. **L133 (T1 execution shape normalization)** — biggest state-shape lever. Path B chosen: synthesize a canonical one-phase plan during skip-plan with provenance; retire plan-null branches.
 3. **L144 / T051 (framework-DDL drift)** — bootstrap/release hygiene. Existing DBs must learn new SUBSTRATE_DDL columns without manual ALTER.
 4. **L142 / L143 (gatekeeper P1/P2)** — strategic ceiling, but hold for amendment. L143 enum mismatch + L142 over-scope identified; ratify after narrowing.
@@ -162,6 +165,8 @@ Current picture: runtime is usable; next work is making the control plane typed 
 
 | date | task | obs | what changed |
 |---|---|---|---|
+| 2026-05-06 | T056 | L161 | minimal Pi-runner smoke target: T1 docs-only marker task driven via Pi, structured `final_output`, accepted + merged (`1b1e93b`) |
+| 2026-05-06 | T055 | — | per-role runner/model config for `stores tasks drive`: config-driven runner selection, Pi runner in default build, `--claude-code-model`, auto-drive respects runner config; closed out-of-band after direct main merge (`bff3c34`) |
 | 2026-05-06 | T048 | L137 | auto-resolve startup-sweep/backfill closes historical schema_migrated→ready observation pairs |
 | 2026-05-06 | T047 | L120 | planner plan persistence + watchdog actor_note column; claude_code runner SAP fallback uses role-aware `pick_best_sap_candidate` (10.06's #2 blocker cleared) |
 | 2026-05-06 | T046 | L131 | accept-merge subscriber routes shim failure → accepted→deploy_blocked with structured reason (10.06's #1 blocker cleared; verified live in their binary) |
