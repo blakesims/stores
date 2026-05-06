@@ -98,6 +98,12 @@ pub struct Field {
     /// Validated: target must exist, be an integer with actor==Framework, and
     /// must not name itself.  (Task 1.2)
     pub auto_increment_within: Option<String>,
+    /// Declarative: per-field default value applied at two layers:
+    /// (a) DDL codegen emits `DEFAULT '<val>'` so ALTER TABLE ADD COLUMN
+    /// backfills existing rows on migration; (b) add handler materialises the
+    /// default into the entry post-validation when the CLI did not supply a
+    /// value.  (T052 P1)
+    pub default: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +158,9 @@ struct RawField {
     /// auto_increment_within attribute (Task 1.2)
     #[serde(default)]
     auto_increment_within: Option<String>,
+    /// Per-field default value (T052 P1).
+    #[serde(default)]
+    default: Option<serde_json::Value>,
 }
 
 /// Raw field type before full resolution.
@@ -343,6 +352,7 @@ fn raw_to_field(r: &RawField) -> anyhow::Result<Field> {
         description: r.description.clone(),
         auto_increment: r.auto_increment,
         auto_increment_within: r.auto_increment_within.clone(),
+        default: r.default.clone(),
     })
 }
 

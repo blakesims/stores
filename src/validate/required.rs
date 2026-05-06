@@ -92,6 +92,7 @@ mod tests {
             description: None,
             auto_increment: false,
             auto_increment_within: None,
+            default: None,
         }
     }
 

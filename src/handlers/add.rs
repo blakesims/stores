@@ -160,6 +160,19 @@ pub fn run(
     validate::validate(schema, &entry, Op::Add, invoker)
         .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
+    // T052 P1: materialise field-level defaults for any top-level field the CLI
+    // did not supply. Applied AFTER validation so framework-applied defaults
+    // never trip actor checks (overrides remain gated; defaults are
+    // conservative, declared in the schema, and not user writes).
+    for field in &schema.fields {
+        if let Some(default_value) = &field.default {
+            let absent = matches!(entry.get(&field.name), None | Some(Value::Null));
+            if absent {
+                entry.insert(field.name.clone(), default_value.clone());
+            }
+        }
+    }
+
     // L001: optional --display-id override. When supplied, parse + collision-check
     // up-front so we fail before any INSERT.
     let explicit_display_id: Option<(String, i64)> =

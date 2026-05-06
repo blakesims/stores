@@ -1,4 +1,4 @@
-use crate::schema::{FieldType, Schema};
+use crate::schema::{Field, FieldType, Schema};
 
 /// One column declared by SUBSTRATE_DDL. Used by framework-migration drift
 /// detection in `handlers::framework_migrate` to ALTER older DBs up to the
@@ -314,6 +314,29 @@ fn scalar_col_def(field_name: &str, ty: &FieldType) -> Option<String> {
     }
 }
 
+/// Render the SQL fragment ` DEFAULT '<val>'` for a field's declared default,
+/// or `None` if the field has no default. Quoting strategy:
+/// - JSON null → `DEFAULT NULL` (no value materialised; equivalent to absent)
+/// - JSON string → SQL string literal with single-quote doubling
+/// - JSON number/bool → SQL literal (numbers as-is, bool → 0/1)
+/// - JSON array/object → JSON-encoded, wrapped in single-quote SQL literal
+///   (intent: `DEFAULT '[]'` for list:text fields with `default: '[]'`).
+/// (T052 P1)
+pub(crate) fn default_clause(field: &Field) -> Option<String> {
+    let v = field.default.as_ref()?;
+    let lit = match v {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            let json = serde_json::to_string(v).unwrap_or_else(|_| "null".to_string());
+            format!("'{}'", json.replace('\'', "''"))
+        }
+    };
+    Some(format!(" DEFAULT {lit}"))
+}
+
 /// Description of a column the substrate expects a generated table to have.
 ///
 /// `name` and `sql_type` are the two halves of the column definition that
@@ -365,20 +388,27 @@ pub fn expected_columns(schema: &Schema) -> Vec<ExpectedColumn> {
             | FieldType::ListRecord(_)
             | FieldType::ListFk { .. }
             | FieldType::Json => {
+                let mut full_def = format!("{} TEXT", field.name);
+                if let Some(suffix) = default_clause(field) {
+                    full_def.push_str(&suffix);
+                }
                 json_cols.push(ExpectedColumn {
                     name: field.name.clone(),
                     sql_type: "TEXT".to_string(),
-                    full_def: format!("{} TEXT", field.name),
+                    full_def,
                     is_reserved: false,
                 });
             }
             ty => {
-                if let Some(def) = scalar_col_def(&field.name, ty) {
+                if let Some(mut def) = scalar_col_def(&field.name, ty) {
                     let sql_type = match ty {
                         FieldType::Integer | FieldType::Bool => "INTEGER",
                         _ => "TEXT",
                     }
                     .to_string();
+                    if let Some(suffix) = default_clause(field) {
+                        def.push_str(&suffix);
+                    }
                     scalar_cols.push(ExpectedColumn {
                         name: field.name.clone(),
                         sql_type,

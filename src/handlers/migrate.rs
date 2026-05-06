@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::codegen::ddl::{expected_columns, quote_ident, ExpectedColumn};
 use crate::manifest::Manifest;
-use crate::schema::Schema;
+use crate::schema::{FieldType, Schema};
 
 /// Outcome of an applied migration. Returned by `apply_with` / `apply_at`.
 #[derive(Debug, Default, Clone)]
@@ -137,7 +137,90 @@ pub fn apply_with(
     let batch = format!("BEGIN;\n{}\nCOMMIT;", sql_lines.join("\n"));
     conn.execute_batch(&batch)
         .context("failed to apply additive migrations (transaction rolled back)")?;
+
+    // T052 P1: defensive default-backfill. ALTER TABLE ADD COLUMN with a
+    // DEFAULT clause normally backfills existing rows, but list:text JSON
+    // cells (DEFAULT '[]') and any path where the SQLite version / pragma
+    // state elides the implicit backfill must still materialise as the
+    // declared default rather than SQL NULL. For every newly-added column
+    // whose schema field declares `default: <non-null>`, run an UPDATE that
+    // fills NULL cells with the literal default value.
+    backfill_defaults(conn, schemas, manifest, &plan)?;
+
     Ok(report)
+}
+
+/// Defensive UPDATE pass after ALTER TABLE ADD COLUMN (T052 P1).
+/// For every additive column whose schema field declares a non-null default,
+/// run `UPDATE <store> SET <col> = ? WHERE <col> IS NULL`.
+fn backfill_defaults(
+    conn: &Connection,
+    schemas: &HashMap<String, Schema>,
+    manifest: &Manifest,
+    plan: &MigrationPlan,
+) -> Result<()> {
+    for (store_name, col) in &plan.additive {
+        let schema = match schemas.get(store_name) {
+            Some(s) => s,
+            None => continue,
+        };
+        let field = match schema.fields.iter().find(|f| f.name == col.name) {
+            Some(f) => f,
+            None => continue,
+        };
+        let default_value = match &field.default {
+            Some(v) if !v.is_null() => v,
+            _ => continue,
+        };
+        let table = manifest
+            .stores
+            .iter()
+            .find(|s| &s.name == store_name)
+            .map(|s| s.table_name.as_str())
+            .unwrap_or(store_name.as_str());
+        let sql = format!(
+            "UPDATE {} SET {} = ?1 WHERE {} IS NULL",
+            quote_ident(table),
+            quote_ident(&col.name),
+            quote_ident(&col.name),
+        );
+        let sql_value = default_to_sql_value(&field.ty, default_value);
+        conn.execute(&sql, rusqlite::params![sql_value]).with_context(|| {
+            format!("failed to backfill default for '{store_name}.{}'", col.name)
+        })?;
+    }
+    Ok(())
+}
+
+/// Convert a JSON default value into the SQLite literal representation that
+/// matches how the add handler / DDL would store it.
+fn default_to_sql_value(ty: &FieldType, v: &serde_json::Value) -> rusqlite::types::Value {
+    use rusqlite::types::Value as SqlValue;
+    match ty {
+        FieldType::List(_)
+        | FieldType::Record(_)
+        | FieldType::ListRecord(_)
+        | FieldType::ListFk { .. }
+        | FieldType::Json => {
+            let json = serde_json::to_string(v).unwrap_or_else(|_| "null".to_string());
+            SqlValue::Text(json)
+        }
+        FieldType::Bool => match v {
+            serde_json::Value::Bool(b) => SqlValue::Integer(if *b { 1 } else { 0 }),
+            _ => SqlValue::Null,
+        },
+        FieldType::Integer => match v {
+            serde_json::Value::Number(n) => {
+                SqlValue::Integer(n.as_i64().unwrap_or(0))
+            }
+            _ => SqlValue::Null,
+        },
+        _ => match v {
+            serde_json::Value::String(s) => SqlValue::Text(s.clone()),
+            serde_json::Value::Null => SqlValue::Null,
+            other => SqlValue::Text(other.to_string()),
+        },
+    }
 }
 
 /// Convenience: load manifest + schemas from `root/.stores/manifest.yaml`
