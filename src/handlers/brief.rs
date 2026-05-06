@@ -711,10 +711,10 @@ fields:
         );
     }
 
-    // T054 AC1.9 (task 1.16): executor and code-reviewer briefs render correctly
-    // with a synthesized one-phase plan — no plan-null branch required.
+    // T060: executor and code-reviewer briefs are tier-aware. T1 uses the
+    // contract as the plan; T3 keeps the existing phase-decomposition sections.
     #[test]
-    fn executor_brief_for_t1_synthesized_plan_renders_phase_block() {
+    fn executor_and_code_reviewer_briefs_branch_by_tier() {
         use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
         use crate::render::{build_context, render_template};
 
@@ -730,8 +730,18 @@ fields:
             .find(|(n, _)| *n == "tasks")
             .map(|(_, t)| *t)
             .expect("tasks templates");
+        let executor_tpl = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/executor-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("executor-brief template");
+        let cr_tpl = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/code-reviewer-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("code-reviewer-brief template");
 
-        let synthesized_plan = serde_json::json!({
+        let plan = serde_json::json!({
             "objective": "fix the thing",
             "phases": [{
                 "name": "Contract execution",
@@ -743,27 +753,23 @@ fields:
             }]
         });
 
-        let entry: crate::validate::EntryMap = {
+        let entry_for_tier = |tier: &str| -> crate::validate::EntryMap {
             let mut m = std::collections::BTreeMap::new();
             m.insert("display_id".to_string(), serde_json::json!("T001"));
             m.insert("status".to_string(), serde_json::json!("executing"));
-            m.insert("title".to_string(), serde_json::json!("T1 task"));
-            m.insert("slug".to_string(), serde_json::json!("t1-task"));
+            m.insert("title".to_string(), serde_json::json!(format!("{tier} task")));
+            m.insert("slug".to_string(), serde_json::json!("tier-task"));
             m.insert("current_phase".to_string(), serde_json::json!(1));
             m.insert("current_cycle".to_string(), serde_json::json!(1));
-            m.insert("tier_hint".to_string(), serde_json::json!("T1"));
-            m.insert(
-                "plan_source".to_string(),
-                serde_json::json!("contract_synthesized"),
-            );
-            m.insert("plan".to_string(), synthesized_plan.clone());
+            m.insert("tier_hint".to_string(), serde_json::json!(tier));
+            m.insert("plan".to_string(), plan.clone());
             m.insert(
                 "contract".to_string(),
                 serde_json::json!({
                     "executive_intent": "fix the thing",
                     "done_when": "the thing is fixed",
                     "scope_in": "edit module A\nedit module B",
-                    "scope_out": ""
+                    "scope_out": "do not edit module C"
                 }),
             );
             m.insert(
@@ -778,34 +784,63 @@ fields:
             m.insert("cycles".to_string(), serde_json::json!([]));
             m
         };
-        let ctx = build_context(&schema, &entry);
 
-        // Executor brief
-        let executor_tpl = templates
-            .iter()
-            .find(|(p, _)| *p == "templates/executor-brief.md.tpl")
-            .map(|(_, c)| *c)
-            .expect("executor-brief template");
-        let rendered_exec = render_template(executor_tpl, &ctx).expect("executor brief render");
+        let t1_ctx = build_context(&schema, &entry_for_tier("T1"));
+        let t1_exec = render_template(executor_tpl, &t1_ctx).expect("T1 executor brief render");
         assert!(
-            rendered_exec.contains("**Current Phase:** 1 of 1"),
-            "executor brief must show '1 of 1': {rendered_exec}"
+            t1_exec.contains("**Tier:** T1 (contract-is-plan)"),
+            "T1 executor brief must label contract-is-plan tier: {t1_exec}"
         );
         assert!(
-            rendered_exec.contains("Contract execution"),
-            "executor brief must show phase name: {rendered_exec}"
+            t1_exec.contains("## Scope")
+                && t1_exec.contains("edit module A")
+                && t1_exec.contains("do not edit module C"),
+            "T1 executor brief must show contract scope: {t1_exec}"
+        );
+        assert!(
+            t1_exec.contains("## What to Do (T1 contract-is-plan)"),
+            "T1 executor brief must show T1 guidance: {t1_exec}"
+        );
+        assert!(
+            !t1_exec.contains("**Current Phase:** 1 of 1")
+                && !t1_exec.contains("## Current Phase to Execute"),
+            "T1 executor brief must skip phase decomposition: {t1_exec}"
         );
 
-        // Code-reviewer brief
-        let cr_tpl = templates
-            .iter()
-            .find(|(p, _)| *p == "templates/code-reviewer-brief.md.tpl")
-            .map(|(_, c)| *c)
-            .expect("code-reviewer-brief template");
-        let rendered_cr = render_template(cr_tpl, &ctx).expect("code-reviewer brief render");
+        let t1_cr = render_template(cr_tpl, &t1_ctx).expect("T1 code-reviewer brief render");
         assert!(
-            rendered_cr.contains("**Current Phase:** 1 of 1"),
-            "code-reviewer brief must show '1 of 1': {rendered_cr}"
+            t1_cr.contains("## What to Review (T1 contract-is-plan)"),
+            "T1 code-reviewer brief must show T1 review guidance: {t1_cr}"
+        );
+        assert!(
+            !t1_cr.contains("## Phase Being Reviewed")
+                && !t1_cr.contains("**Current Phase:** 1 of 1"),
+            "T1 code-reviewer brief must skip phase decomposition: {t1_cr}"
+        );
+
+        let t3_ctx = build_context(&schema, &entry_for_tier("T3"));
+        let t3_exec = render_template(executor_tpl, &t3_ctx).expect("T3 executor brief render");
+        assert!(
+            t3_exec.contains("**Current Phase:** 1 of 1")
+                && t3_exec.contains("## Current Phase to Execute")
+                && t3_exec.contains("Contract execution"),
+            "T3 executor brief must keep phase decomposition: {t3_exec}"
+        );
+        assert!(
+            !t3_exec.contains("contract-is-plan"),
+            "T3 executor brief must not show T1 guidance: {t3_exec}"
+        );
+
+        let t3_cr = render_template(cr_tpl, &t3_ctx).expect("T3 code-reviewer brief render");
+        assert!(
+            t3_cr.contains("**Current Phase:** 1 of 1")
+                && t3_cr.contains("## Phase Being Reviewed")
+                && t3_cr.contains("Contract execution"),
+            "T3 code-reviewer brief must keep phase review section: {t3_cr}"
+        );
+        assert!(
+            !t3_cr.contains("contract-is-plan"),
+            "T3 code-reviewer brief must not show T1 guidance: {t3_cr}"
         );
     }
 
