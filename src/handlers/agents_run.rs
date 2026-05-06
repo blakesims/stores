@@ -16,7 +16,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::codegen::ddl::quote_ident;
-use crate::flow::{decide, AgentEntry, AgentsYaml, Decision, NotifyEvent, PoliciesYaml};
+use crate::flow::{decide, AgentEntry, AgentsYaml, BackoffKind, Decision, NotifyEvent, PoliciesYaml};
+
+/// Base backoff quantum for retry rescheduling. Linear: `attempts * BASE`,
+/// Exponential: `BASE * 2^(attempts-1)` (saturating).
+const BASE_BACKOFF_SECS: u64 = 30;
 
 /// Args parsed from the CLI.
 pub struct RunArgs {
@@ -272,6 +276,103 @@ pub fn poll_once(
             }
         }
     }
+    // T041: retry-on-failure pass. Re-dispatch failed dispatch_locks rows
+    // up to retry_policy.max_attempts with the configured backoff. The lock
+    // already exists (try_claim was won on the first attempt), so we do NOT
+    // call try_claim here. Auto-drive cap-check is intentionally skipped on
+    // the retry path: the lock is already taken; gating it again would mean
+    // a transient flake mid-cap permanently strands the row.
+    for agent in &agents.agents {
+        let candidates = match find_retryable_locks(conn, agent) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[daemon] find_retryable_locks for '{}': {}", agent.name, e);
+                continue;
+            }
+        };
+        for c in candidates {
+            let row_json = read_row_as_json(conn, &c.store, c.row_id)
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            let decision = decide(
+                policies,
+                &c.store,
+                &c.from_status,
+                &c.to_status,
+                &row_json,
+            )
+            .unwrap_or(Decision::Allow {
+                policy_id: "default-allow".into(),
+            });
+            let policy_id = match &decision {
+                Decision::Allow { policy_id } => policy_id.clone(),
+                Decision::Halt { policy_id } => {
+                    let event = NotifyEvent {
+                        row_id: c.display_id.clone(),
+                        transition_attempted: format!(
+                            "{}: {}→{}",
+                            c.store, c.from_status, c.to_status
+                        ),
+                        policy_id_or_actor_halt: policy_id.clone(),
+                        summary: format!(
+                            "policy '{}' halted retry-dispatch to agent '{}'",
+                            policy_id, agent.name
+                        ),
+                    };
+                    let _ = crate::flow::notify_with_path(config_path, event);
+                    continue;
+                }
+            };
+            let sub_match = agent.subscribes_to.iter().find(|s| {
+                s.store == c.store
+                    && s.transition.from == c.from_status
+                    && s.transition.to == c.to_status
+            });
+            if let Some(sub) = sub_match {
+                if let Some(pred) = &sub.predicate {
+                    match crate::flow::predicate::eval(pred, &row_json) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(e) => {
+                            eprintln!(
+                                "[daemon] predicate eval error (retry) agent '{}' on {}/{}: {}",
+                                agent.name, c.store, c.display_id, e
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+            let exit_code = run_dispatch(
+                conn,
+                agents,
+                config_path,
+                agent,
+                &c.store,
+                c.row_id,
+                &c.display_id,
+                &c.from_status,
+                &c.to_status,
+                &policy_id,
+                &policies.hash,
+                &row_json,
+            );
+            let status_str = match exit_code {
+                Ok(code) => {
+                    if code == 0 {
+                        "ok".to_string()
+                    } else {
+                        format!("exit={}", code)
+                    }
+                }
+                Err(e) => format!("error: {}", e),
+            };
+            let _ = mark_claim_finished(conn, &c.store, c.row_id, &agent.name, &status_str);
+            let _ = c.attempts;
+            let _ = c.transition_id;
+            dispatched += 1;
+        }
+    }
+
     // T022 P5: drive watchdog sweep — reconcile dispatch_locks for `auto-drive`
     // whose grandchild PID is no longer alive. Errors are logged, not fatal.
     if let Err(e) = crate::flow::builtins::auto_drive::sweep_drive_watchdog(
@@ -392,10 +493,14 @@ pub fn try_claim(
     claimer: &str,
 ) -> Result<bool> {
     let now = crate::handlers::row::now_iso8601();
+    // Invariant (T041): try_claim inserts attempts=0 explicitly so that the
+    // post-dispatch UPDATE (mark_claim_finished) can ALWAYS do
+    // `attempts = attempts + 1` without distinguishing first-run from retry.
+    // First completion → attempts=1, each subsequent retry → +1.
     let res = conn.execute(
         "INSERT INTO dispatch_locks \
-         (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, attempts) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
         rusqlite::params![
             store,
             row_id,
@@ -425,12 +530,162 @@ pub(crate) fn mark_claim_finished(
     last_status: &str,
 ) -> Result<()> {
     let now = crate::handlers::row::now_iso8601();
+    // Always bumps `attempts`. See try_claim invariant.
     conn.execute(
-        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2 \
+        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, attempts = attempts + 1 \
          WHERE store = ?3 AND row_id = ?4 AND agent_name = ?5",
         rusqlite::params![last_status, now, store, row_id, agent_name],
     )?;
     Ok(())
+}
+
+/// Compute the backoff window in seconds for a retry that has already
+/// completed `attempt` attempts. Linear scales linearly with attempt;
+/// Exponential doubles per additional attempt (saturating).
+fn compute_backoff_secs(kind: BackoffKind, attempt: u32) -> u64 {
+    match kind {
+        BackoffKind::Linear => BASE_BACKOFF_SECS.saturating_mul(attempt as u64),
+        BackoffKind::Exponential => {
+            // 2^(attempt-1), but bound shift so we don't UB and saturate at
+            // a reasonable ceiling. attempt=0 → BASE * 1 (treat as "no wait
+            // before first retry"), attempt=N → BASE * 2^(N-1).
+            let shift = attempt.saturating_sub(1).min(32) as u32;
+            BASE_BACKOFF_SECS.saturating_mul(1u64 << shift)
+        }
+    }
+}
+
+/// Parse `YYYY-MM-DDTHH:MM:SSZ` (the format produced by `now_iso8601`) into
+/// a unix epoch (seconds). Returns None on malformed input.
+fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
+    if s.len() < 20 {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let y: u32 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
+    let mo: u32 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
+    let d: u32 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
+    let h: u32 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
+    let mi: u32 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
+    let se: u32 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
+    Some(ymd_hms_to_epoch(y, mo, d, h, mi, se))
+}
+
+fn ymd_hms_to_epoch(y: u32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
+    fn is_leap(y: u32) -> bool {
+        (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+    }
+    fn days_in_month(y: u32, m: u32) -> u32 {
+        match m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => if is_leap(y) { 29 } else { 28 },
+            _ => 0,
+        }
+    }
+    let mut days: i64 = 0;
+    if y >= 1970 {
+        for yy in 1970..y {
+            days += if is_leap(yy) { 366 } else { 365 };
+        }
+    } else {
+        for yy in y..1970 {
+            days -= if is_leap(yy) { 366 } else { 365 };
+        }
+    }
+    for mm in 1..mo {
+        days += days_in_month(y, mm) as i64;
+    }
+    days += (d.saturating_sub(1)) as i64;
+    days * 86_400 + h as i64 * 3600 + mi as i64 * 60 + s as i64
+}
+
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// One row eligible for a retry-dispatch.
+#[derive(Debug)]
+struct RetryCandidate {
+    store: String,
+    row_id: i64,
+    display_id: String,
+    transition_id: i64,
+    attempts: u32,
+    from_status: String,
+    to_status: String,
+}
+
+/// Find dispatch_locks rows for `agent` that:
+///   - failed (last_status starts with `exit=` non-zero, or `error:`),
+///   - have attempts < retry_policy.max_attempts,
+///   - whose finished_at + computed_backoff(attempts) <= now.
+///
+/// Resolves (from_status, to_status) by joining transition_history, and
+/// confirms the join hits one of the agent's declared subscriptions.
+fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<RetryCandidate>> {
+    let now = unix_now_secs();
+    let max = agent.retry_policy.max_attempts;
+    let mut stmt = conn.prepare(
+        "SELECT dl.store, dl.row_id, dl.display_id, COALESCE(dl.transition_id, 0), \
+                dl.attempts, dl.last_status, dl.finished_at, \
+                COALESCE(th.from_status, ''), COALESCE(th.to_status, '') \
+         FROM dispatch_locks dl \
+         LEFT JOIN transition_history th ON th.id = dl.transition_id \
+         WHERE dl.agent_name = ?1 \
+               AND dl.attempts < ?2 \
+               AND dl.finished_at IS NOT NULL \
+               AND ( (dl.last_status LIKE 'exit=%' AND dl.last_status != 'exit=0') \
+                     OR dl.last_status LIKE 'error:%' )",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![&agent.name, max], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, u32>(4)?,
+            r.get::<_, String>(5)?,
+            r.get::<_, String>(6)?,
+            r.get::<_, String>(7)?,
+            r.get::<_, String>(8)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (store, row_id, display_id, transition_id, attempts, _last, finished_at, from_s, to_s) =
+            row?;
+        let backoff = compute_backoff_secs(agent.retry_policy.backoff, attempts) as i64;
+        let finished_epoch = match parse_iso8601_to_epoch(&finished_at) {
+            Some(e) => e,
+            None => continue,
+        };
+        if finished_epoch.saturating_add(backoff) > now {
+            continue;
+        }
+        let matched = agent.subscribes_to.iter().any(|sub| {
+            sub.store == store && sub.transition.from == from_s && sub.transition.to == to_s
+        });
+        if !matched {
+            continue;
+        }
+        out.push(RetryCandidate {
+            store,
+            row_id,
+            display_id,
+            transition_id,
+            attempts,
+            from_status: from_s,
+            to_status: to_s,
+        });
+    }
+    Ok(out)
 }
 
 /// Run an agent's command. For builtins this is a stub until Phase 6.
@@ -1548,6 +1803,222 @@ policies:
         let conn = fresh_db();
         let n = snapshot_max_transition_id(&conn).unwrap();
         assert_eq!(n, 0);
+    }
+
+    // ---- T041: retry-on-failure tests ----
+
+    /// Helper: build an agent that runs `command` against tasks ready→in_review
+    /// with a configurable retry policy.
+    fn retry_agent(name: &str, command: &str, max_attempts: u32) -> AgentEntry {
+        AgentEntry {
+            name: name.to_string(),
+            subscribes_to: vec![Subscription {
+                store: "tasks".to_string(),
+                transition: TransitionEdge {
+                    from: "ready".to_string(),
+                    to: "in_review".to_string(),
+                },
+                predicate: None,
+            }],
+            command: command.to_string(),
+            claim_window_secs: 300,
+            retry_policy: RetryPolicy {
+                max_attempts,
+                backoff: BackoffKind::Linear,
+            },
+            command_args: None,
+        }
+    }
+
+    /// Force `finished_at` of the lock far into the past so the backoff
+    /// window is considered elapsed regardless of BASE_BACKOFF_SECS.
+    fn age_lock_finished_at(conn: &Connection, agent_name: &str) {
+        conn.execute(
+            "UPDATE dispatch_locks SET finished_at = '2000-01-01T00:00:00Z' \
+             WHERE agent_name = ?1",
+            rusqlite::params![agent_name],
+        )
+        .unwrap();
+    }
+
+    /// AC1.2: an agent whose command fails on first attempt and succeeds on
+    /// retry dispatches twice and lands in last_status='ok' with attempts=2.
+    #[test]
+    fn retry_then_succeed_dispatches_twice() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 100, "T100", "in_review", "T2", "feat/x");
+        insert_history(&conn, "tasks", 100, "T100", "ready", "in_review");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sentinel = tmp.path().join("sentinel");
+        let cmd = format!(
+            "if [ -f '{p}' ]; then exit 0; else touch '{p}'; exit 1; fi",
+            p = sentinel.display()
+        );
+        let agents = AgentsYaml {
+            agents: vec![retry_agent("flaky", &cmd, 3)],
+            deployment_specialist: None,
+        };
+        let policies = empty_policies();
+        let cfg = cfg_path();
+
+        // Poll #1: first dispatch fails, attempts=1, status=exit=1.
+        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n1, 1, "first poll dispatches once");
+
+        let (attempts1, status1): (u32, String) = conn
+            .query_row(
+                "SELECT attempts, last_status FROM dispatch_locks WHERE agent_name='flaky'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts1, 1);
+        assert!(
+            status1.starts_with("exit=") && status1 != "exit=0",
+            "expected non-zero exit; got {status1}"
+        );
+
+        // Skip the backoff window.
+        age_lock_finished_at(&conn, "flaky");
+
+        // Poll #2: retry pass re-dispatches; sentinel exists → success.
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n2, 1, "retry pass fires the second dispatch");
+
+        let (attempts2, status2): (u32, String) = conn
+            .query_row(
+                "SELECT attempts, last_status FROM dispatch_locks WHERE agent_name='flaky'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts2, 2);
+        assert_eq!(status2, "ok");
+    }
+
+    /// AC1.3: retries cap at max_attempts. With max_attempts=2 and a command
+    /// that always fails, exactly 2 dispatches fire; a third poll past the
+    /// backoff does not re-fire.
+    #[test]
+    fn max_attempts_boundary_terminates() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 200, "T200", "in_review", "T2", "feat/y");
+        insert_history(&conn, "tasks", 200, "T200", "ready", "in_review");
+
+        let agents = AgentsYaml {
+            agents: vec![retry_agent("always-fail", "exit 1", 2)],
+            deployment_specialist: None,
+        };
+        let policies = empty_policies();
+        let cfg = cfg_path();
+
+        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n1, 1);
+        age_lock_finished_at(&conn, "always-fail");
+
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n2, 1, "second (final) retry fires");
+
+        let (attempts, status): (u32, String) = conn
+            .query_row(
+                "SELECT attempts, last_status FROM dispatch_locks WHERE agent_name='always-fail'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 2, "exactly max_attempts dispatches");
+        assert!(
+            status.starts_with("exit=") && status != "exit=0",
+            "terminal failure preserved; got {status}"
+        );
+
+        // Even past the backoff, no further retry — attempts >= max_attempts.
+        age_lock_finished_at(&conn, "always-fail");
+        let n3 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n3, 0, "no retry beyond max_attempts");
+
+        let attempts_final: u32 = conn
+            .query_row(
+                "SELECT attempts FROM dispatch_locks WHERE agent_name='always-fail'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts_final, 2, "attempts must not bump past max");
+    }
+
+    /// AC1.4: a retry called within the backoff window must not fire; once
+    /// the window has elapsed (simulated via finished_at backdate) it does.
+    #[test]
+    fn backoff_window_blocks_premature_retry() {
+        let conn = fresh_db();
+        insert_task_row(&conn, 300, "T300", "in_review", "T2", "feat/z");
+        insert_history(&conn, "tasks", 300, "T300", "ready", "in_review");
+
+        let agents = AgentsYaml {
+            agents: vec![retry_agent("flaky2", "exit 1", 3)],
+            deployment_specialist: None,
+        };
+        let policies = empty_policies();
+        let cfg = cfg_path();
+
+        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n1, 1);
+        let attempts1: u32 = conn
+            .query_row(
+                "SELECT attempts FROM dispatch_locks WHERE agent_name='flaky2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts1, 1);
+
+        // Immediate poll — backoff window NOT elapsed; no retry fires.
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n2, 0, "premature retry must be skipped");
+        let attempts_mid: u32 = conn
+            .query_row(
+                "SELECT attempts FROM dispatch_locks WHERE agent_name='flaky2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts_mid, 1, "attempts unchanged inside backoff");
+
+        // Simulate elapsed backoff and re-poll.
+        age_lock_finished_at(&conn, "flaky2");
+        let n3 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        assert_eq!(n3, 1, "post-backoff retry fires");
+
+        let attempts_after: u32 = conn
+            .query_row(
+                "SELECT attempts FROM dispatch_locks WHERE agent_name='flaky2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts_after, 2);
+    }
+
+    #[test]
+    fn compute_backoff_secs_linear_and_exponential() {
+        assert_eq!(compute_backoff_secs(BackoffKind::Linear, 1), BASE_BACKOFF_SECS);
+        assert_eq!(compute_backoff_secs(BackoffKind::Linear, 3), BASE_BACKOFF_SECS * 3);
+        assert_eq!(compute_backoff_secs(BackoffKind::Exponential, 1), BASE_BACKOFF_SECS);
+        assert_eq!(compute_backoff_secs(BackoffKind::Exponential, 2), BASE_BACKOFF_SECS * 2);
+        assert_eq!(compute_backoff_secs(BackoffKind::Exponential, 4), BASE_BACKOFF_SECS * 8);
+    }
+
+    #[test]
+    fn parse_iso8601_to_epoch_roundtrips() {
+        let s = crate::handlers::row::now_iso8601();
+        let e = parse_iso8601_to_epoch(&s).unwrap();
+        let now = unix_now_secs();
+        assert!((now - e).abs() < 5, "iso8601 round-trip within 5s; got s={s} e={e} now={now}");
+        // Known fixture.
+        assert_eq!(parse_iso8601_to_epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso8601_to_epoch("2000-01-01T00:00:00Z"), Some(946_684_800));
     }
 
     /// SHUTDOWN flag is observed by sleep_interruptible.
