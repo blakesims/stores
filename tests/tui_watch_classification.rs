@@ -92,4 +92,22 @@ fn blocked_reason_classes_have_unknown_fallback() {
     assert_eq!(blocked_reason_class(Some("stale timeout")), "stale");
     assert_eq!(blocked_reason_class(Some("opaque")), "unknown");
     assert_eq!(blocked_reason_class(None), "unknown");
+
+    // Codex T059-r1 MEDIUM: structured-JSON blocked_reason from the runner
+    // (real shape used by L141/T049's rate-limit path) must classify cleanly,
+    // not fall through to "unknown".
+    assert_eq!(
+        blocked_reason_class(Some("{\"exit_code\":1,\"kind\":\"rate_limit\",\"reset_at\":1778500800}")),
+        "rate_limit"
+    );
+    assert_eq!(
+        blocked_reason_class(Some("{\"kind\":\"retry\"}")),
+        "retry"
+    );
+    // Unknown structured kind falls through to substring heuristics on the
+    // raw payload — preserves existing behavior for non-canonical shapes.
+    assert_eq!(
+        blocked_reason_class(Some("{\"kind\":\"weird_unknown\",\"note\":\"deploy window\"}")),
+        "deploy"
+    );
 }

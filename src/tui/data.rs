@@ -270,11 +270,32 @@ pub fn is_terminal_task_status(s: &str) -> bool {
 }
 
 pub fn blocked_reason_class(reason: Option<&str>) -> &'static str {
-    let r = reason.unwrap_or("").trim().to_lowercase();
-    if r.is_empty() {
+    let raw = reason.unwrap_or("").trim();
+    if raw.is_empty() {
         return "unknown";
     }
-    if r.contains("rate limit") || r.contains("ratelimit") || r.contains("429") {
+    // Codex T059-r1 MEDIUM: real blocked_reason values are often structured
+    // JSON like `{"exit_code":1,"kind":"rate_limit","reset_at":...}` written
+    // by the drive runner. Parse the `kind` first; fall back to substring
+    // heuristics on the raw text only if the JSON path doesn't yield one of
+    // the known classes.
+    if raw.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(kind) = v.get("kind").and_then(|k| k.as_str()) {
+                match kind {
+                    "rate_limit" => return "rate_limit",
+                    "retry" => return "retry",
+                    "dependency" => return "dependency",
+                    "user" => return "user",
+                    "deploy" => return "deploy",
+                    "stale" => return "stale",
+                    _ => {} // unknown kind → fall through to heuristics below
+                }
+            }
+        }
+    }
+    let r = raw.to_lowercase();
+    if r.contains("rate limit") || r.contains("ratelimit") || r.contains("429") || r.contains("rate_limit") {
         "rate_limit"
     } else if r.contains("retry") || r.contains("again") || r.contains("transient") {
         "retry"
