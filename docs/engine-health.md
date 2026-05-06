@@ -2,11 +2,11 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-06 (eighth pass) — Big batch day plus architecture turn, Pi-runner/load-balancing smoke, and pipe-fill cleanup. Shipped: T029/T035/T036/T037/T038/T039/T040/T041/T044/T045/T046/T047/T048/T050/T052/T054/T055/T056/T057/T058/T059/T060 plus L130 direct fix. Engine cleared the T1-drive gap, retry/watchdog/accept-merge/plan-persistence failures, close-out-of-band, investigator pull-shape, gatekeeper design, auto-resolve backfill, per-role runner config, minimal Pi-runner structured-output smoke, typed dispatch lifecycle, T1 canonical plan synthesis, observation risk metadata, and watch default rebucketing. Remaining pressure is concentrated in **gatekeeper implementation** (L142/T053 in flight), **stale/retirement/admin cleanup** (L124/L002/L145), and **deeper observability/queue-drain** (L057/L058/L151/L135).
+**Last updated:** 2026-05-07 (ninth pass) — T053/L142 gatekeeper Router seam shipped after Sonnet-scaffold→all-Pi-revise→codex-revise (3 rounds) loop; first real `stores intake add` row filed (I001 = FIX 5 follow-up for `required_when` parser OR/IN expressiveness). Shipped today (cumulative across 2026-05-06/07): T029/T035/T036/T037/T038/T039/T040/T041/T044/T045/T046/T047/T048/T050/T052/T053/T054/T055/T056/T057/T058/T059/T060 plus L130 direct fix. Engine now has the gatekeeper Router seam (intake_items lifecycle + six routing decisions + structured gatekeeper_decision_json validator + tagged-observation stand-in for arch_review_candidate + narrow `SideEffectAuthority::GatekeeperRoute` typed authority). Remaining pressure: **post-P1 gatekeeper follow-ups** (L171 dedicated `architecture_reviews` store / L172 fast-track exec + Check primitive / L173 cluster registry), **stale/retirement/admin cleanup** (L124/L002/L145), **deeper observability/queue-drain** (L057/L058/L151/L135), and **schema predicate primitive** (I001 — required_when OR/IN).
 
 ## The picture in one sentence
 
-**The engine now works end-to-end often enough that the main risk is operator trust and architectural coherence, not basic propulsion.** Runtime/deploy are much healthier; Pi can drive/write structured `final_output`; dispatch attempts and T1 contract-plans are typed enough for the current batch; and `stores watch` no longer has to show terminal exhaust as in-flight by default. The next geodesic is finishing the gatekeeper Router seam (L142/T053), then cleaning stale/retirement paths and deeper observability so the operator can tell current action, blocked reason, recovered terminal, and architectural risk at a glance.
+**The engine now works end-to-end often enough that the main risk is operator trust and architectural coherence, not basic propulsion.** Runtime/deploy are much healthier; Pi can drive/write structured `final_output`; dispatch attempts and T1 contract-plans are typed enough; the gatekeeper Router seam ships local friction through `intake add → route` instead of straight to `observations`; and `stores watch` no longer has to show terminal exhaust as in-flight by default. The next geodesic is the post-P1 gatekeeper layers (architecture_reviews store / Check primitive / cluster registry — L171/L172/L173), then stale/retirement semantics, then deeper observability so the operator can tell current action, blocked reason, recovered terminal, and architectural risk at a glance.
 
 ## Status legend
 
@@ -122,6 +122,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L005 | ⚪ T1 | list-typed fields accept only single-string at update (no JSON-array input) |
 | L035 | ⚪ T3 | no schema-enforced inter-agent context refs (typed agents) |
 | L019 | ⚪ T3 | no DockerRunner / standardized agent sandboxing |
+| I001 | ⚪ T1 | `required_when` parser only supports `field == literal`; needs `IN [...]` membership or `expr OR expr` composition. Surfaced from T053 codex-revise FIX 5 (filed via `stores intake add` — first real-world use of the new gatekeeper Router seam). |
 
 ### Layer 8 — Orchestration / triage discipline
 *Investigator pull-shape shipped (T038/L043) — orchestrator now has a substrate primitive for "spawn a fresh sandboxed dive on this question". Auto-resolve subscriber shipped (T037/L049). The auto-investigator-fires-on-unblock-of-open-obs primitive is still the #1 strategic weakness; ~30 open obs sit without ratified contracts and the engine can't draft them itself yet.*
@@ -133,10 +134,13 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L092 | ✅ T044 | `tasks close-out-of-band` verb (cross-listed from Layer 4) |
 | L093 | ✅ T039 | planner brief tier-aware (cross-listed from Layer 3) |
 | L137 | ✅ T048 | auto-resolve startup-sweep / backfill; 15 stale schema_migrated→ready obs pairs cleaned by startup sweep |
-| L142 | 🟢 T053 | implement intake_items store + gatekeeper subscriber (P1 of T045 design); in flight, guarded to Router seam only |
+| L142 | ✅ T053 | intake_items store + gatekeeper Router seam shipped (P1 of T045 design): six routing decisions, structured gatekeeper_decision_json validator, tagged-observation stand-in for arch_review_candidate, narrow `SideEffectAuthority::GatekeeperRoute` typed authority. Codex caught architectural drift (escalated state, missing route validation, decision-mismatch, side-effect actor); revise loop landed clean. Direct observations add escape hatch preserved. |
 | L143 | ✅ T052 | risk_class + approval_policy fields to observations schema; canonical enums + direction-aware override-policy gate |
 | L134 | ✅ T050 | formalize dispatch_locks as typed lifecycle buffer (compounds with L039/L087/L107/L116/L122/L141/L149) |
-| L135 | ⚪ T2/T3 | promote Check primitive (cross-cutting validator surface for `submit-*` flows) |
+| L135 | ⚪ T2/T3 | promote Check primitive (cross-cutting validator surface for `submit-*` flows) — pairs naturally with L172 fast-track auto-execution |
+| L171 | ⚪ T3 | **deferred** post-T053: dedicated `architecture_reviews` typed store (P3 of T045 design); replaces P1 tagged-observation stand-in for arch_review_candidate routing |
+| L172 | ⚪ T3 | **deferred** post-T053: fast-track auto-execution + L135 Check primitive (P4 of T045 design); deterministic check record audit shape |
+| L173 | ⚪ T3 | **deferred** post-T053: curated cluster_key registry + watch/observability dashboards (P5 of T045 design) |
 | L072 | ⚪ — | code-reviewer REPLAN gate dead-ends as `blocked` instead of routing back to planning |
 | L023 | ⚪ T2 | observations missing `next-id` verb + JSON envelope inconsistency |
 | L002 | ⚪ T2 | no admin rollback verb |
@@ -148,24 +152,26 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Highest-leverage next picks
 
-Layers 1–4 are substantially solid after the batch. Re-ranked picks (the geodesic now points at completing the gatekeeper seam, then cleanup/observability):
+Layers 1–4 are substantially solid after the batch. L142/T053 gatekeeper Router seam shipped. Re-ranked picks (pi msg_b9604036, post-T053):
 
-1. **L142 / T053 (gatekeeper Router seam)** — current strategic ceiling. Keep P1 narrow: intake_items + Router classifications; preserve direct observations path; no fast-track execution, architecture_reviews store, cluster registry, or watch observability yet.
-2. **L145 (resume-from-deploy_blocked semantics)** — design question: does resume re-cycle execution or retry deploy ceremony? This remains a visible recovery-path sharp edge.
-3. **L124 + L002 (retirement/admin cleanup)** — watch is better after L165, but stale/rejected/duplicate/deploy-blocked rows still need a real terminal/retirement/admin path.
-4. **L135 (Check primitive)** — unifies deterministic pre/post-condition gates; pairs naturally with L134 postconditions and future fast-track audit.
-5. **Auto-investigator subscriber (GAP/L151)** — turns L043 investigator into queue-drain automation.
-6. **L149 / L011 (daemon binary/version visibility)** — stale-exe restarts remain operational friction.
-7. **L057/L058/L059 (run/edge observability)** — aggregate transcript refs, per-edge throughput, and invocation metadata.
-8. **L108 (on-entry retroactive trigger)** — rare but real metadata-flow gap.
+1. **L145 (resume-from-deploy_blocked semantics)** — next operator-trust/recovery sharp edge. Design question first: does resume retry deploy ceremony or re-cycle execution? Affects watch/status clarity. **Pi guidance: design/contract before implementation.**
+2. **L124 + L002 (retirement/admin cleanup)** — watch is better after L165, but stale/rejected/duplicate/deploy-blocked rows still need a real lifecycle/admin path so the dashboard doesn't rely only on filtering.
+3. **L135 (Check primitive)** — unifies deterministic pre/post-condition gates; pairs naturally with L134 postconditions and future L172 fast-track audit.
+4. **L151 / GAP (auto-investigator subscriber / queue drain)** — strategic throughput improvement once lifecycle/status surfaces are less confusing.
+5. **L149 / L011 (daemon binary/version visibility)** — stale-exe restarts remain operational friction; becomes urgent if it continues to bite during normal daemon-driven work.
+6. **L057/L058/L059 (run/edge observability)** — aggregate transcript refs, per-edge throughput, and invocation metadata. After status/recovery cleanup.
+7. **L108 (on-entry retroactive trigger)** — rare but real metadata-flow gap.
+8. **L171/L172/L173 (gatekeeper P3-P5)** — deferred post-T053 follow-ups; surface after the operator-trust layer is solid (gatekeeper P1 needs real-world drive shaping before ratifying P3).
+9. **I001 (schema required_when OR/IN expressiveness)** — small substrate primitive task; T1; not blocking.
 
-Current picture: propulsion is healthy enough to run a full pipe. The operator trust surface improved with L165/T059, but not all stale-row lifecycle problems are solved. Next work should finish L142/T053, then clean recovery/retirement semantics so watch output and task state feel boring rather than mysterious.
+Current picture: propulsion + the architectural router both work end-to-end. Operator-trust gaps are the dominant remaining pressure: recovery semantics, retirement/admin lifecycle, and daemon stale-exe operational annoyance. Next work should make stale/recovered/blocked rows feel boring rather than mysterious.
 
 
 ## Recently shipped
 
 | date | task | obs | what changed |
 |---|---|---|---|
+| 2026-05-07 | T053 | L142 | gatekeeper Router seam P1 shipped: `intake_items` typed store with five-state lifecycle (draft/triaging/needs_info/routed/dropped); single `route` verb covering all six decisions (duplicate/needs_info/fast_track/normal_observation/arch_review_candidate/reject_noise) with same-tx side effects; structured gatekeeper_decision_json validator; `arch_review_candidate` produces a tagged-observation stand-in (no dedicated `architecture_reviews` store); `SideEffectAuthority::GatekeeperRoute` typed enum for narrow per-callsite framework authority on observation L143 fields; direct `observations add` escape hatch preserved; recon-return ≤2-cap. Codex (3 rounds) caught 2 critical (escalated lifecycle violation + missing route-validation), 2 major (CLI/JSON decision equality + side-effect actor discipline), then doc-stragglers + cosmetic typo. Drive economy: 4 cycles all-Pi from blank slate failed (commit='none'); switched to Sonnet executor, landed phases 1-2 + most of 3 before rate limit; resumed all-Pi from concrete 812-LOC scaffold and completed 3-5 in 5 cycles; codex-revise 4 substantive fixes via subagent. Merge `ebfaaf2`. First real intake row: `I001` (FIX 5 follow-up). |
 | 2026-05-06 | T060 | L169 | tier-aware executor/code-reviewer briefs skip phase decomposition for T1 |
 | 2026-05-06 | T059 | L165 | `stores watch` rebuckets rows for actionable defaults; terminal/recovered/rejected exhaust no longer appears as in-flight by default; blocked reason parsing improved |
 | 2026-05-06 | T058 | L021 | task render includes wrap_log in Completion section |
