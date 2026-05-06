@@ -577,6 +577,140 @@ fields:
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // T039: Planner brief tier_hint awareness.
+    // ---------------------------------------------------------------------------
+
+    fn render_planner_brief_with_tier(tier: Option<&str>) -> String {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+        use crate::render::{build_context, render_template};
+
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .expect("tasks schema");
+        let schema = Schema::from_yaml(tasks_yaml).unwrap();
+
+        let entry: crate::validate::EntryMap = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("display_id".to_string(), serde_json::json!("T001"));
+            m.insert("status".to_string(), serde_json::json!("planning"));
+            m.insert("title".to_string(), serde_json::json!("Test Task"));
+            m.insert("slug".to_string(), serde_json::json!("test-task"));
+            m.insert("current_phase".to_string(), serde_json::json!(1));
+            m.insert("current_cycle".to_string(), serde_json::json!(1));
+            if let Some(t) = tier {
+                m.insert("tier_hint".to_string(), serde_json::json!(t));
+            }
+            m.insert(
+                "contract".to_string(),
+                serde_json::json!({
+                    "done_when": "Feature X works end-to-end",
+                    "scope_in": "All API endpoints",
+                    "scope_out": "UI changes"
+                }),
+            );
+            m.insert("plan_review_log".to_string(), serde_json::json!([]));
+            m.insert("cycles".to_string(), serde_json::json!([]));
+            m
+        };
+        let ctx = build_context(&schema, &entry);
+
+        let templates = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, t)| *t)
+            .expect("tasks templates");
+        let content = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/planner-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("planner-brief template");
+        render_template(content, &ctx).expect("render")
+    }
+
+    #[test]
+    fn planner_brief_t1_carries_defensive_should_not_be_invoked_note() {
+        let rendered = render_planner_brief_with_tier(Some("T1"));
+        assert!(
+            rendered.contains("**Tier:** T1"),
+            "T1 brief must label tier: {rendered}"
+        );
+        assert!(
+            rendered.contains("SHOULD NOT be invoked"),
+            "T1 brief must contain defensive note: {rendered}"
+        );
+        // T1 must NOT carry T2/T3 instructions.
+        assert!(
+            !rendered.contains("Produce exactly one phase"),
+            "T1 brief must not contain T2 instruction"
+        );
+        assert!(
+            !rendered.contains("Decompose into multiple phases"),
+            "T1 brief must not contain T3 instruction"
+        );
+    }
+
+    #[test]
+    fn planner_brief_t2_contains_produce_exactly_one_phase_instruction() {
+        let rendered = render_planner_brief_with_tier(Some("T2"));
+        assert!(
+            rendered.contains("**Tier:** T2"),
+            "T2 brief must label tier: {rendered}"
+        );
+        assert!(
+            rendered.contains("Produce exactly one phase"),
+            "T2 brief must contain explicit one-phase instruction: {rendered}"
+        );
+        assert!(
+            rendered.contains("phases.length != 1"),
+            "T2 brief must explain the schema rejection: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Decompose into multiple phases"),
+            "T2 brief must not contain T3 instruction"
+        );
+        assert!(
+            !rendered.contains("SHOULD NOT be invoked"),
+            "T2 brief must not contain T1 defensive note"
+        );
+    }
+
+    #[test]
+    fn planner_brief_t3_contains_multi_phase_decomposition_instruction() {
+        let rendered = render_planner_brief_with_tier(Some("T3"));
+        assert!(
+            rendered.contains("**Tier:** T3"),
+            "T3 brief must label tier: {rendered}"
+        );
+        assert!(
+            rendered.contains("Decompose into multiple phases"),
+            "T3 brief must contain multi-phase instruction: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Produce exactly one phase"),
+            "T3 brief must not contain T2 instruction"
+        );
+        assert!(
+            !rendered.contains("SHOULD NOT be invoked"),
+            "T3 brief must not contain T1 defensive note"
+        );
+    }
+
+    #[test]
+    fn planner_brief_unset_tier_falls_back_with_flag() {
+        let rendered = render_planner_brief_with_tier(None);
+        assert!(
+            rendered.contains("**Tier:** _unset_"),
+            "unset-tier brief must label tier as unset: {rendered}"
+        );
+        assert!(
+            rendered.contains("flag the missing tier"),
+            "unset-tier brief must instruct planner to flag: {rendered}"
+        );
+    }
+
     // find_next_agent helper test — kept for regression coverage.
     #[test]
     fn find_next_agent_returns_first_dispatch() {
