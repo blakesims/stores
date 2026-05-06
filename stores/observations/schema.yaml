@@ -90,6 +90,40 @@ lifecycle:
       verb: wont_fix
       actor: ai_with_human
 
+    # auto_resolve: framework-fired by the auto-resolve-observation subscriber
+    # when the observation's linked task hits cargo_installed → schema_migrated.
+    # Mirror image of auto-promote (T020 P1) — the upstream ratify created the
+    # task; this closes the back-link by setting status=resolved and resolution
+    # to the task's commit_sha. T037 P1.
+    #
+    # Source states cover every state where auto-promotion or direct promotion
+    # could have left an observation. wont_fix and resolved are intentionally
+    # excluded (terminal states; no auto-resolve from there).
+    - from: open
+      to: resolved
+      verb: auto_resolve
+      actor: framework
+    - from: investigating
+      to: resolved
+      verb: auto_resolve
+      actor: framework
+    - from: confirmed
+      to: resolved
+      verb: auto_resolve
+      actor: framework
+    - from: ready
+      to: resolved
+      verb: auto_resolve
+      actor: framework
+    - from: needs_info
+      to: resolved
+      verb: auto_resolve
+      actor: framework
+    - from: in_progress
+      to: resolved
+      verb: auto_resolve
+      actor: framework
+
 fields:
   # --- Core identity ---
   - name: summary

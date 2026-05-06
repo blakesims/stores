@@ -11,9 +11,12 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::flow::builtins::{BuiltinResult, DispatchCtx};
+use crate::flow::builtins::{
+    fire_framework_transition_for, load_store_schema, BuiltinResult, DispatchCtx,
+};
 use crate::flow::NotifyEvent;
 use crate::handlers::row::now_iso8601;
+use crate::validate::EntryMap;
 
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let task_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -145,37 +148,30 @@ fn resolve_one(
         return Ok(ResolveOutcome::AlreadyResolved);
     }
 
-    let now = now_iso8601();
-    let tx = ctx.conn.unchecked_transaction()?;
-    tx.execute(
-        "UPDATE observations \
-         SET status = 'resolved', resolution = ?1, resolved_at = ?2, updated_at = ?2, updated_by = 'ai_autonomous' \
-         WHERE display_id = ?3 AND status != 'resolved'",
-        rusqlite::params![resolution, now, obs_id],
-    )?;
+    // Route through the schema-declared `auto_resolve` transition (T037 P1
+    // REVISE). The substrate gates the legal source states (open / investigating
+    // / confirmed / ready / needs_info / in_progress); wont_fix and resolved
+    // raise a "no transition" error which we surface as a soft skip.
+    let schema = load_store_schema("observations")?;
+    let mut diff: EntryMap = std::collections::BTreeMap::new();
+    diff.insert(
+        "resolution".to_string(),
+        Value::String(resolution.to_string()),
+    );
+    diff.insert("resolved_at".to_string(), Value::String(now_iso8601()));
 
-    let row_id: i64 = tx.query_row(
-        "SELECT id FROM observations WHERE display_id = ?1",
-        rusqlite::params![obs_id],
-        |r| r.get(0),
-    )?;
-    crate::db::insert_transition_history(
-        &tx,
-        "observations",
-        row_id,
+    fire_framework_transition_for(
+        ctx.conn,
+        &schema,
         obs_id,
-        &status,
-        "resolved",
-        "auto_resolve_observation",
-        "ai_autonomous",
-        None,
-        None,
+        "auto_resolve",
+        diff,
+        ctx.policies_hash,
     )?;
-    tx.commit()?;
 
     eprintln!(
-        "[auto-resolve-observation] {}: {} resolved with {}",
-        task_id, obs_id, resolution
+        "[auto-resolve-observation] {}: {} resolved with {} (was {})",
+        task_id, obs_id, resolution, status
     );
     Ok(ResolveOutcome::Resolved)
 }
@@ -239,8 +235,8 @@ mod tests {
     fn insert_obs(conn: &Connection, id: &str, status: &str, resolution: Option<&str>) {
         conn.execute(
             "INSERT INTO observations \
-             (display_id, status, summary, source, priority, captured_at, resolution, created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, ?2, 'obs', 'dev', 'normal', '2026-05-03T00:00:00Z', ?3, '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z', 'human', 'human')",
+             (display_id, status, summary, source, priority, captured_at, captured_week, resolution, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, ?2, 'obs', 'dev', 'normal', '2026-05-03T00:00:00Z', 'w-test', ?3, '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z', 'human', 'human')",
             rusqlite::params![id, status, resolution],
         )
         .unwrap();
@@ -379,17 +375,83 @@ mod tests {
     #[test]
     fn dispatch_keyword_resolves() {
         let conn = fresh_db();
+        insert_obs(&conn, "L555", "ready", None);
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
-        let row = row(serde_json::json!([]), "abc1234");
+        let row = row(serde_json::json!(["L555"]), "deadbeef");
         let res = crate::flow::builtins::dispatch_builtin(
             "auto-resolve-observation",
             &row,
             &ctx(&conn, &agents, &cfg),
-        );
-        assert!(
-            res.is_some(),
-            "auto-resolve-observation keyword must resolve"
-        );
+        )
+        .expect("auto-resolve-observation keyword must resolve");
+        let code = res.expect("dispatch must not error");
+        assert_eq!(code, 0);
+
+        let (status, resolution): (String, String) = conn
+            .query_row(
+                "SELECT status, resolution FROM observations WHERE display_id = 'L555'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "resolved");
+        assert_eq!(resolution, "deadbeef");
+    }
+
+    #[test]
+    fn auto_resolve_writes_declared_transition_history_row() {
+        let conn = fresh_db();
+        insert_obs(&conn, "L046", "ready", None);
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
+
+        run(
+            &row(serde_json::json!(["L046"]), "abc1234"),
+            &ctx(&conn, &agents, &cfg),
+        )
+        .unwrap();
+
+        let (verb, from_status, to_status, invoker): (String, String, String, String) = conn
+            .query_row(
+                "SELECT verb, from_status, to_status, invoker \
+                 FROM transition_history \
+                 WHERE store = 'observations' AND display_id = 'L046' \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(verb, "auto_resolve");
+        assert_eq!(from_status, "ready");
+        assert_eq!(to_status, "resolved");
+        assert_eq!(invoker, "framework");
+    }
+
+    #[test]
+    fn auto_resolve_rejects_terminal_source_state() {
+        // wont_fix is terminal; the schema declares no auto_resolve from there.
+        // The subscriber must surface the rejection (soft failure code 1)
+        // rather than silently force-flipping the row.
+        let conn = fresh_db();
+        insert_obs(&conn, "L800", "wont_fix", None);
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
+
+        let code = run(
+            &row(serde_json::json!(["L800"]), "abc1234"),
+            &ctx(&conn, &agents, &cfg),
+        )
+        .unwrap();
+        assert_eq!(code, 1, "wont_fix is terminal; auto_resolve must fail");
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM observations WHERE display_id = 'L800'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "wont_fix", "row must not have been force-flipped");
     }
 }
