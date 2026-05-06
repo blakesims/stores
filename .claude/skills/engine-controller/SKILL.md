@@ -215,3 +215,89 @@ When substrate friction surfaces mid-task:
 - Use `stores observations add --invoker ai_autonomous ...`.
 - Keep investigations bounded unless the task explicitly owns the investigation.
 - Route architectural interpretation to Pi when needed.
+
+## Operational patterns
+
+### Ratifying an observation autonomously (T1, with session token)
+
+The full sequence for taking a fresh `open` observation through to auto-promoted task:
+
+```bash
+NOW=$(date -Iseconds)
+stores observations update LXXX \
+  --tier-hint T1 --type work \
+  --objective "..." \
+  --in-scope "..." --out-of-scope "..." --acceptance "..." \
+  --contract-state ready --approved-by blake --approved-at "$NOW" \
+  --invoker ai_with_human --approve-token <T>
+stores observations investigate LXXX --invoker ai_autonomous
+stores observations confirm LXXX --invoker ai_with_human --approve-token <T>
+# auto-ratify fires, status → ready, auto-promote subscriber creates the task within ~5s
+```
+
+`--type` is required when `--contract-state ready` is set. Confirm guard requires `intent_contract.contract_state == 'ready'` so update must come before confirm.
+
+### Direct-task escape hatch (auto-promote already fired or won't fire)
+
+If an obs is at `status: ready` from a previous session and `auto-promote` already fired (no task exists, but the subscriber treats the transition as already-handled), use the direct-task verb:
+
+```bash
+stores tasks add --invoker ai_with_human --approve-token <T> \
+  --linked-observations LXXX \
+  --title "..." --slug "..." \
+  --done-when "..." --scope-in "..." --scope-out "..."
+```
+
+This is the documented escape hatch in `CLAUDE.md` § *--invoker discipline* / U1 direct-task path.
+
+### Per-task runner override
+
+Operational config snapshot/restore pattern for "this one task needs a different runner":
+
+```bash
+cp .stores/config.yaml /tmp/stores-config-backup-$(date +%H%M).yaml
+# edit .stores/config.yaml — change drive.roles.executor.runner per task need
+# (config reads fresh per spawn; daemon does not need restart for config changes)
+# drive task to ship
+# restore:
+cp /tmp/stores-config-backup-XXXX.yaml .stores/config.yaml
+```
+
+Used today when Pi runner failed 4 cycles of `commit='none'` on a complex T2 task (T053/L142). Sonnet executor produced substantive commits where Pi could not.
+
+### Daemon stale-exe after cargo install (L149)
+
+After every `cargo install` (which runs as part of accept-merge ceremony), the daemon's `current_exe()` points at a deleted inode. Spawned drives die silently with `drive_failed:silent_zombie_pid_dead`.
+
+Detection: `ls -la /proc/<daemon-pid>/exe` shows `(deleted)`.
+
+Workaround (always do this after a cargo install):
+
+```bash
+kill <daemon-pid>
+sleep 2
+stores agents run --detach --invoker ai_autonomous \
+  --log-file /home/blake/repos/experiments/stores/logs/agents-daemon.log
+```
+
+This is filed as L149 in `engine-health.md` and is part of the L134 typed dispatch_locks umbrella.
+
+### Manual `stores tasks drive` ↔ daemon hand-off
+
+When `stores tasks drive <id> --max-iters N` exits naturally (max-iters reached), it writes a `dispatch_locks` row with `terminal_reason='ok'`. The daemon's auto-drive subscriber sees that as "drive finished" and does NOT re-fire on the same row even if `next_agent` is non-null. The row stays in `executing/code_review/...` indefinitely.
+
+To continue: re-run `stores tasks drive <id> --max-iters M` manually, OR `stores tasks resume <id>` to re-trigger. The daemon will not pick it up on its own.
+
+This is L087/L141 surface area, partially-resolved by L134 but the "drive max-iters exit ↔ daemon poll" handshake remains a known gap.
+
+### Sonnet runner rate limit
+
+`runner-claude-code` with model=sonnet has a 5-hour rate limit window per Anthropic org. When Sonnet exhausts its quota mid-drive, the task ends up `blocked` with `blocked_reason={"exit_code":1,"kind":"rate_limit","reset_at":<unix-epoch>}`. Resume after reset; or swap executor to Pi runner; or codex:rescue.
+
+Sonnet's session may produce substantial work + a self-diagnosis summary before the limit hits. Read the `[T###] mark_drive_failed fired (...)` log entry's preceding session snapshot for diagnostics.
+
+### Subagent delegation for bulk mechanical work
+
+When a single task surfaces a multi-file mechanical sweep (e.g., updating many tests to assert a new invariant after a contract change), delegate to a `task-workflow:executor` or `general-purpose` subagent rather than doing it inline. Brief them with the architectural directive verbatim and the file list. Keeps engine-controller context lean for architectural conversations.
+
+Example trigger: "T049 was superseded by T050; update these 3 e2e tests to assert the new typed invariant" — pi-blessed, mechanical, well-defined.
