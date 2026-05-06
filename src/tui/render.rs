@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use super::app::{App, FlatRow, Mode};
-use super::data::Row;
+use super::data::{blocked_reason_class, Row};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Search-mode adds an extra 1-line input bar above the status bar.
@@ -17,11 +17,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),                // rows pane
-            Constraint::Length(1),             // selected-row footer
-            Constraint::Length(search_bar),    // search input
-            Constraint::Length(1),             // hint line
-            Constraint::Length(1),             // status bar
+            Constraint::Min(1),             // rows pane
+            Constraint::Length(1),          // selected-row footer
+            Constraint::Length(search_bar), // search input
+            Constraint::Length(1),          // hint line
+            Constraint::Length(1),          // status bar
         ])
         .split(f.area());
 
@@ -138,8 +138,11 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
         ))));
     }
 
-    let list =
-        List::new(items).block(Block::default().borders(Borders::NONE).title("stores watch"));
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::NONE)
+            .title("stores watch"),
+    );
     f.render_widget(list, area);
 }
 
@@ -152,7 +155,7 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
                 Style::default().fg(Color::Cyan),
             ),
             Span::styled(
-                format!("{:<14}", t.status),
+                format!("{:<24}", task_status_label(t)),
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(" "),
@@ -165,7 +168,7 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
                 Style::default().fg(Color::Magenta),
             ),
             Span::styled(
-                format!("{:<14}", o.status),
+                format!("{:<24}", o.status),
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(" "),
@@ -183,16 +186,29 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
     }
 }
 
+fn task_status_label(t: &super::data::TaskRow) -> String {
+    match t.status.as_str() {
+        "closed_out_of_band" | "accepted" | "complete" | "cargo_installed" | "schema_migrated" => {
+            "recovered/done".to_string()
+        }
+        "rejected" => "terminal-unless-amended".to_string(),
+        "blocked" => format!(
+            "blocked:{}",
+            t.blocked_reason_class
+                .as_deref()
+                .unwrap_or_else(|| blocked_reason_class(t.blocked_reason.as_deref()))
+        ),
+        other => other.to_string(),
+    }
+}
+
 fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
         Span::styled("/", Style::default().fg(Color::Yellow)),
         Span::raw(app.search.query.clone()),
         Span::raw("  "),
         Span::styled(
-            format!(
-                "{} hit(s)",
-                app.search.hits.len()
-            ),
+            format!("{} hit(s)", app.search.hits.len()),
             Style::default().fg(Color::DarkGray),
         ),
     ]);
@@ -250,6 +266,24 @@ mod tests {
     use crate::tui::app::{App, TuiOpts};
     use crate::tui::data::{Row, TaskRow};
 
+    fn line_text(line: Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn task_row(status: &str, reason: Option<&str>) -> Row {
+        Row::Task(TaskRow {
+            display_id: "T999".to_string(),
+            status: status.to_string(),
+            title: "render status".to_string(),
+            blocked_reason: reason.map(str::to_string),
+            blocked_reason_class: Some(crate::tui::data::blocked_reason_class(reason).to_string()),
+            ..Default::default()
+        })
+    }
+
     fn synthetic_rows(n: usize) -> Vec<Row> {
         (0..n)
             .map(|i| {
@@ -268,6 +302,29 @@ mod tests {
     /// AC2.5: with 200 synthetic rows and viewport=10, only 10 row widgets
     /// are rendered into the list, and selection stays in view on PgDn.
     #[test]
+    #[test]
+    fn task_terminal_and_blocked_status_labels_render_operator_actionably() {
+        let closed = line_text(format_row_line(
+            &task_row("closed_out_of_band", None),
+            false,
+        ));
+        assert!(closed.contains("recovered/done"));
+        assert!(!closed.contains("in flight"));
+
+        let rejected = line_text(format_row_line(&task_row("rejected", None), false));
+        assert!(rejected.contains("terminal-unless-amended"));
+        assert!(!rejected.contains("in flight"));
+
+        let blocked = line_text(format_row_line(
+            &task_row("blocked", Some("rate limit 429")),
+            false,
+        ));
+        assert!(blocked.contains("blocked:rate_limit"));
+        let unknown = line_text(format_row_line(&task_row("blocked", Some("opaque")), false));
+        assert!(unknown.contains("blocked:unknown"));
+    }
+
+    #[test]
     fn virtual_scroll() {
         let mut app = App::new(TuiOpts::default());
         app.rows = synthetic_rows(200);
@@ -275,7 +332,7 @@ mod tests {
         app.apply_sort();
         app.viewport_height = 10;
         app.selection = crate::tui::app::Selection {
-            section: 1, /* TasksInFlight */
+            section: 0, /* TasksActionableCurrentWork */
             row: 0,
         };
 
@@ -300,8 +357,7 @@ mod tests {
         );
         let cursor = app.current_flat().expect("cursor in flat list");
         assert!(
-            cursor >= app.scroll_offset
-                && cursor < app.scroll_offset + app.viewport_height,
+            cursor >= app.scroll_offset && cursor < app.scroll_offset + app.viewport_height,
             "selection (idx={cursor}) must stay inside viewport window \
              [{}, {}) after PgDn",
             app.scroll_offset,

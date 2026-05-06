@@ -60,7 +60,7 @@ fn build_app(rows: Vec<Row>) -> App {
 
 fn fixtures() -> Vec<Row> {
     vec![
-        task("T001", "plan_review", "2026-05-05"),
+        task("T001", "blocked", "2026-05-05"),
         task("T002", "executing", "2026-05-04"),
         task("T010", "executing", "2026-05-03"),
         task("T011", "deploy_blocked", "2026-05-02"),
@@ -121,7 +121,7 @@ fn filter_palette_round_trip_and_esc() {
     assert_eq!(app.mode, Mode::Filter);
     assert!(app.filter_palette.is_some());
 
-    for c in "state=in_flight".chars() {
+    for c in "state=actionable_current_work".chars() {
         on_key(&mut app, key(KeyCode::Char(c)));
     }
     on_key(&mut app, key(KeyCode::Enter));
@@ -129,16 +129,16 @@ fn filter_palette_round_trip_and_esc() {
     assert_eq!(
         app.filter,
         FilterPredicate {
-            state: Some("in_flight".to_string()),
+            state: Some("actionable_current_work".to_string()),
             ..Default::default()
         }
     );
-    // Filter narrows the visible flat list to TasksInFlight rows only.
+    // Filter narrows the visible flat list to TasksActionableCurrentWork rows only.
     let flat = app.flat_rows();
     assert!(!flat.is_empty());
     for fr in &flat {
         let (sec, _) = app.sections[fr.section];
-        assert_eq!(sec, Section::TasksInFlight);
+        assert_eq!(sec, Section::TasksActionableCurrentWork);
     }
 
     // Re-open and Esc-cancel: predicate is unchanged.
@@ -183,14 +183,14 @@ fn search_jumps_to_first_match_and_n_advances() {
 }
 
 #[test]
-fn saved_view_preset_2_filters_in_flight() {
+fn saved_view_preset_2_filters_actionable_current_work() {
     let mut app = build_app(fixtures());
     on_key(&mut app, key(KeyCode::Char('2')));
-    assert_eq!(app.filter.state.as_deref(), Some("in_flight"));
+    assert_eq!(app.filter.state.as_deref(), Some("actionable_current_work"));
     let flat = app.flat_rows();
     for fr in &flat {
         let (sec, _) = app.sections[fr.section];
-        assert_eq!(sec, Section::TasksInFlight);
+        assert_eq!(sec, Section::TasksActionableCurrentWork);
     }
 }
 
@@ -233,8 +233,7 @@ fn virtual_scroll_keeps_selection_in_viewport() {
     }
     let cursor = app.current_flat().expect("cursor");
     assert!(
-        cursor >= app.scroll_offset
-            && cursor < app.scroll_offset + app.viewport_height,
+        cursor >= app.scroll_offset && cursor < app.scroll_offset + app.viewport_height,
         "selection {} out of viewport [{}, {})",
         cursor,
         app.scroll_offset,

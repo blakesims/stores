@@ -161,6 +161,7 @@ fn main() -> Result<()> {
             let interval_secs = sub.get_one::<f64>("interval").copied().unwrap_or(1.0);
             let interval_ms = (interval_secs * 1000.0).max(100.0) as u64;
             let legacy = *sub.get_one::<bool>("legacy").unwrap_or(&false);
+            let all_history = *sub.get_one::<bool>("all-history").unwrap_or(&false);
             if legacy {
                 cli::watch::run(interval_ms)?;
             } else {
@@ -171,6 +172,7 @@ fn main() -> Result<()> {
                     tier_filter: sub.get_one::<String>("tier").cloned(),
                     since_filter: sub.get_one::<String>("since").cloned(),
                     legacy: false,
+                    all_history,
                     claude_bin: None,
                 };
                 stores::tui::run(opts)?;
@@ -211,10 +213,11 @@ fn main() -> Result<()> {
                 let detach = *rsub.get_one::<bool>("detach").unwrap_or(&false);
                 let log_file = rsub.get_one::<String>("log-file").cloned();
                 let once = *rsub.get_one::<bool>("once").unwrap_or(&false);
-                let max_iters = rsub
-                    .get_one::<usize>("max-iters")
-                    .copied()
-                    .or(if once { Some(1) } else { None });
+                let max_iters = rsub.get_one::<usize>("max-iters").copied().or(if once {
+                    Some(1)
+                } else {
+                    None
+                });
                 let args = handlers::agents_run::RunArgs {
                     poll_interval_ms: (poll_interval_secs * 1000.0).max(50.0) as u64,
                     detach,

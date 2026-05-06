@@ -55,10 +55,10 @@ fn state_matches(state: &str, row: &Row, section: Section) -> bool {
         // filter palette can be opened with a preset and the same predicate
         // works for keypresses 1/2/3.
         "ratifiable" => section == Section::ObsRatifiable,
-        "in_flight" => section == Section::TasksInFlight,
-        "deploy_blocked" => section == Section::TasksDeployBlocked,
-        "needs_review" => section == Section::TasksNeedsReview,
-        "accepted" => section == Section::TasksAccepted,
+        "actionable_current_work" | "in_flight" => section == Section::TasksActionableCurrentWork,
+        "deploy_recovery" | "deploy_blocked" => section == Section::TasksDeployRecovery,
+        "blocked_needs_action" => section == Section::TasksBlockedNeedsAction,
+        "recently_terminal" => section == Section::TasksRecentlyTerminal,
         // Otherwise match the raw status field.
         other => match row {
             Row::Task(t) => t.status == other,
@@ -75,11 +75,11 @@ pub fn preset(key: char) -> Option<FilterPredicate> {
             ..Default::default()
         }),
         '2' => Some(FilterPredicate {
-            state: Some("in_flight".to_string()),
+            state: Some("actionable_current_work".to_string()),
             ..Default::default()
         }),
         '3' => Some(FilterPredicate {
-            state: Some("deploy_blocked".to_string()),
+            state: Some("deploy_recovery".to_string()),
             ..Default::default()
         }),
         _ => None,
@@ -183,8 +183,8 @@ mod tests {
             state: Some("in_flight".to_string()),
             ..Default::default()
         };
-        assert!(p.matches(&task("executing"), Section::TasksInFlight));
-        assert!(!p.matches(&task("plan_review"), Section::TasksNeedsReview));
+        assert!(p.matches(&task("executing"), Section::TasksActionableCurrentWork));
+        assert!(!p.matches(&task("blocked"), Section::TasksBlockedNeedsAction));
     }
 
     #[test]
@@ -199,14 +199,14 @@ mod tests {
 
     #[test]
     fn presets_for_saved_views() {
+        assert_eq!(preset('1').unwrap().state.as_deref(), Some("ratifiable"));
         assert_eq!(
-            preset('1').unwrap().state.as_deref(),
-            Some("ratifiable")
+            preset('2').unwrap().state.as_deref(),
+            Some("actionable_current_work")
         );
-        assert_eq!(preset('2').unwrap().state.as_deref(), Some("in_flight"));
         assert_eq!(
             preset('3').unwrap().state.as_deref(),
-            Some("deploy_blocked")
+            Some("deploy_recovery")
         );
         assert!(preset('4').is_none());
     }

@@ -17,7 +17,7 @@ const HELP_LINES: &[&str] = &[
     "  ,                 cycle sort key",
     "  f / F             open filter palette / clear filter",
     "  / n N             search · next · prev",
-    "  1 2 3             preset views (ratifiable / in-flight / deploy-blocked)",
+    "  1 2 3             preset views (ratifiable / actionable / deploy-recovery)",
     "  D                 start agents daemon (detached)",
     "  s / S             spawn per-row sidecar (resume / fresh)",
     "  g / o             general / obs-drafting sidecar",
@@ -47,7 +47,9 @@ pub fn render_popup(f: &mut Frame, _app: &App) {
 /// Context-aware single-line bottom hint, chosen from current mode.
 pub fn hint_for(mode: Mode) -> &'static str {
     match mode {
-        Mode::Normal => "j/k nav  , sort  f filter  / search  D daemon  s/S/g/o sidecar  ? help  q quit",
+        Mode::Normal => {
+            "j/k nav  , sort  f filter  / search  D daemon  s/S/g/o sidecar  ? help  q quit"
+        }
         Mode::Filter => "type k=v (state= priority= tier= since=)  Enter apply  Esc cancel",
         Mode::Search => "type to search  Enter accept  Esc cancel  n/N next/prev",
         Mode::ObsDraftConfirm => "y file obs  n discard  Esc discard",

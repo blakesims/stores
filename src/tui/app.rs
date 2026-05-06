@@ -6,12 +6,14 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use super::daemon::Liveness;
-use std::time::{SystemTime, UNIX_EPOCH};
-use super::data::{classify, Row, Section};
+use super::data::{
+    classify_with_options, is_terminal_task_status, Row, Section, WatchClassifyOptions,
+};
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
 use super::sidecar::SidecarScope;
 use super::sort::{sort_indices, Sort};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Options threaded from the CLI into the TUI.
 #[derive(Debug, Clone, Default)]
@@ -22,6 +24,7 @@ pub struct TuiOpts {
     pub tier_filter: Option<String>,
     pub since_filter: Option<String>,
     pub legacy: bool,
+    pub all_history: bool,
     /// Override for the `claude` executable used by side-car hand-off.
     /// `None` → resolves "claude" from `$PATH` at spawn time.
     pub claude_bin: Option<PathBuf>,
@@ -177,7 +180,7 @@ impl App {
     /// Reload rows and rebuild sections (then re-apply current sort).
     pub fn refresh(&mut self, conn: &Connection) -> Result<()> {
         self.rows = super::data::load_rows(conn)?;
-        self.sections = classify(&self.rows);
+        self.sections = classify_with_options(&self.rows, self.watch_classify_options());
         self.apply_sort();
         self.recompute_status_bar();
         Ok(())
@@ -209,6 +212,13 @@ impl App {
                 Liveness::Live { pid } => Some(pid),
                 Liveness::Dead => None,
             };
+        }
+    }
+
+    fn watch_classify_options(&self) -> WatchClassifyOptions {
+        WatchClassifyOptions {
+            show_all_history: self.opts.all_history,
+            ..Default::default()
         }
     }
 
@@ -262,9 +272,8 @@ impl App {
     /// selection has fallen out of view due to filter/collapse changes).
     pub fn current_flat(&self) -> Option<usize> {
         let flat = self.flat_rows();
-        flat.iter().position(|f| {
-            f.section == self.selection.section && f.row == self.selection.row
-        })
+        flat.iter()
+            .position(|f| f.section == self.selection.section && f.row == self.selection.row)
     }
 
     /// Move the selection by `delta` flat positions, clamped to bounds.
@@ -388,13 +397,6 @@ impl App {
     }
 }
 
-fn is_terminal_task_status(s: &str) -> bool {
-    matches!(
-        s,
-        "accepted" | "complete" | "cargo_installed" | "schema_migrated"
-    )
-}
-
 fn local_clock_string() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -405,4 +407,3 @@ fn local_clock_string() -> String {
     let s = secs % 60;
     format!("{h:02}:{m:02}:{s:02} UTC")
 }
-

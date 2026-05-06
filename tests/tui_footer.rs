@@ -29,6 +29,7 @@ fn footer_renders_canonical_task_row() {
         updated_at: "2026-05-05T11:55:00Z".to_string(),
         tier_hint: Some("T3".to_string()),
         linked_observations: vec!["L075".to_string()],
+        ..Default::default()
     })]);
     let now = iso8601_to_epoch_secs("2026-05-05T12:00:00Z").unwrap();
     let text = render_text(&app, now);
