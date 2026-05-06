@@ -84,6 +84,14 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
 
     install_sigterm_handler();
 
+    // T040: capture the daemon process's start timestamp once. The watchdog's
+    // silent-zombie scan uses this to skip rows whose dispatch_lock was
+    // claimed by a prior daemon lifetime — those locks are not THIS daemon's
+    // recovery target. Tests / debugging can override via STORES_DAEMON_EPOCH
+    // (e.g. "1970-01-01T00:00:00Z" to disable the gate's effect).
+    let daemon_epoch = std::env::var("STORES_DAEMON_EPOCH")
+        .unwrap_or_else(|_| crate::handlers::row::now_iso8601());
+
     let db_path = crate::paths::db_path()?;
     let conn = crate::db::open(&db_path)?;
     let claimer = format!("daemon-{}", std::process::id());
@@ -111,7 +119,7 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
             );
             break;
         }
-        match poll_once(&conn, &agents, &policies, &config_path, &claimer) {
+        match poll_once(&conn, &agents, &policies, &config_path, &claimer, &daemon_epoch) {
             Ok(n) if n > 0 => eprintln!("[daemon] dispatched {} job(s) in iteration {}", n, iter),
             Ok(_) => {}
             Err(e) => eprintln!("[daemon] poll error: {}", e),
@@ -147,6 +155,7 @@ pub fn poll_once(
     policies: &PoliciesYaml,
     config_path: &Path,
     claimer: &str,
+    daemon_epoch: &str,
 ) -> Result<usize> {
     let mut dispatched = 0;
     for agent in &agents.agents {
@@ -279,6 +288,7 @@ pub fn poll_once(
         agents,
         config_path,
         &policies.hash,
+        daemon_epoch,
     ) {
         eprintln!("[daemon] drive watchdog sweep error: {}", e);
     }
@@ -822,7 +832,7 @@ mod tests {
         let policies = empty_policies();
         let cfg = cfg_path();
 
-        let n = poll_once(&conn, &agents, &policies, &cfg, "test-claimer").unwrap();
+        let n = poll_once(&conn, &agents, &policies, &cfg, "test-claimer", "").unwrap();
         assert_eq!(n, 1, "first poll dispatches the matching row exactly once");
 
         // Lock recorded.
@@ -836,7 +846,7 @@ mod tests {
         assert_eq!(cnt, 1);
 
         // Second poll on same db is a no-op (already claimed).
-        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test-claimer").unwrap();
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test-claimer", "").unwrap();
         assert_eq!(
             n2, 0,
             "second poll does not re-dispatch an already-claimed row"
@@ -969,7 +979,7 @@ policies:
             insert_task_row(&conn, 11, "T011", "in_review", "T2", "feat/x");
             insert_history(&conn, "tasks", 11, "T011", "ready", "in_review");
 
-            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer", "").unwrap();
             assert_eq!(n, 1, "T2 row matches allow policy and is dispatched");
         }
 
@@ -981,7 +991,7 @@ policies:
             insert_task_row(&conn, 21, "T021", "in_review", "T2", "feat/x");
             insert_history(&conn, "tasks", 21, "T021", "ready", "in_review");
 
-            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer", "").unwrap();
             assert_eq!(n, 1, "default-allow lets the row flow");
         }
 
@@ -1006,7 +1016,7 @@ policies:
             insert_task_row(&conn, 31, "T031", "in_review", "T3", "feat/x");
             insert_history(&conn, "tasks", 31, "T031", "ready", "in_review");
 
-            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer", "").unwrap();
             assert_eq!(n, 0, "NEVER halts dispatch (overrides Allow)");
 
             // No claim recorded.
@@ -1152,7 +1162,7 @@ policies:
             insert_task_row(&conn, 99, "T099", "in_review", "T2", "");
             insert_history(&conn, "tasks", 99, "T099", "ready", "in_review");
 
-            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+            let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer", "").unwrap();
             assert_eq!(n, 0, "halt policy must skip dispatch");
 
             let evs = mock.events();
@@ -1197,7 +1207,7 @@ policies:
         };
         let policies = empty_policies();
 
-        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer", "").unwrap();
         assert_eq!(n, 0, "predicate-false rows must not dispatch");
 
         let cnt: i64 = conn
@@ -1236,7 +1246,7 @@ policies:
         };
         let policies = empty_policies();
 
-        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer", "").unwrap();
         assert_eq!(n, 1, "predicate-true row must dispatch once");
 
         let cnt: i64 = conn
@@ -1289,7 +1299,7 @@ policies:
         };
         let policies = empty_policies();
 
-        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer").unwrap();
+        let n = poll_once(&conn, &agents, &policies, &cfg_path(), "test-claimer", "").unwrap();
         assert_eq!(n, 0, "cap is full → no dispatch");
 
         let cnt: i64 = conn

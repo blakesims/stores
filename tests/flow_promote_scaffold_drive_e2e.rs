@@ -236,7 +236,7 @@ fn poll_until<F: Fn(&Connection) -> bool>(
 ) {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        let _ = poll_once(conn, agents, policies, cfg, claimer).unwrap();
+        let _ = poll_once(conn, agents, policies, cfg, claimer, "").unwrap();
         if predicate(conn) {
             return;
         }
@@ -307,7 +307,7 @@ fn ratify_promote_scaffold_drive_happy_path() {
     let mut hit = false;
     let pl_start = Instant::now();
     while pl_start.elapsed() < Duration::from_secs(30) {
-        let _ = poll_once(&conn, &agents, &policies, &cfg_path, "t022p7-claimer").unwrap();
+        let _ = poll_once(&conn, &agents, &policies, &cfg_path, "t022p7-claimer", "").unwrap();
         if predicate(&conn) {
             hit = true;
             elapsed = pl_start.elapsed();
@@ -541,7 +541,7 @@ fn drive_failure_watchdog_flips_blocked() {
     let agents = load_from_path(&agents_path).expect("agents.yaml must parse");
 
     let acted =
-        stores::flow::builtins::auto_drive::sweep_drive_watchdog(&conn, &agents, &cfg_path, "")
+        stores::flow::builtins::auto_drive::sweep_drive_watchdog(&conn, &agents, &cfg_path, "", "")
             .unwrap();
     assert!(acted >= 1, "watchdog must have acted on the dead drive");
 
@@ -649,7 +649,7 @@ fn drive_idempotent_no_double_spawn_after_restart() {
     // Restart simulation: drop connection, rebuild from disk, run poll_once.
     drop(conn);
     let conn2 = Connection::open(&db_path).unwrap();
-    let _ = poll_once(&conn2, &agents, &policies, &cfg_path, "t022p7-claimer-2").unwrap();
+    let _ = poll_once(&conn2, &agents, &policies, &cfg_path, "t022p7-claimer-2", "").unwrap();
 
     let lock_count_after: i64 = conn2
         .query_row(

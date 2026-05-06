@@ -171,7 +171,15 @@ pub(crate) type ZombieRow = (i64, String, String, i64, &'static str);
 /// immediately after spawn (`mark_claim_finished("ok")`), so the existing
 /// open-lock sweep (`WHERE finished_at IS NULL`) cannot see it. This scan
 /// inspects the `tasks` table directly and does not filter on `finished_at`.
-pub(crate) fn scan_zombie_tasks(conn: &Connection) -> Vec<ZombieRow> {
+///
+/// `daemon_epoch` is an ISO-8601 Z-timestamp marking the current daemon
+/// process's start time. When non-empty, rows whose `MIN(dispatch_locks.
+/// claimed_at) < daemon_epoch` are skipped — these are pre-existing zombies
+/// from a prior daemon lifetime and recovery is not the new daemon's
+/// responsibility to assert. An empty string disables the gate (used by
+/// tests that pre-date the gate's introduction and by callers that want
+/// the legacy behavior).
+pub(crate) fn scan_zombie_tasks(conn: &Connection, daemon_epoch: &str) -> Vec<ZombieRow> {
     // Cutoff timestamp string for grace-window comparison. Lexicographic
     // comparison on ISO-8601 Z-strings matches chronological order.
     let cutoff = {
@@ -193,6 +201,10 @@ pub(crate) fn scan_zombie_tasks(conn: &Connection) -> Vec<ZombieRow> {
         .join(",");
     let cutoff_idx = IN_CYCLE_STATUSES.len() + 1;
 
+    let epoch_idx = IN_CYCLE_STATUSES.len() + 2;
+    // When daemon_epoch is empty the gate is disabled — the `?epoch_idx`
+    // bind is the empty string, which is lexicographically <= every
+    // ISO-8601 Z timestamp, so `MIN(dl.claimed_at) >= ''` always holds.
     let sql = format!(
         "SELECT t.id, t.display_id, t.status, COALESCE(t.drive_pid, 0), \
                 COALESCE(MIN(dl.claimed_at), ''), COALESCE(t.drive_started_at, '') \
@@ -202,14 +214,17 @@ pub(crate) fn scan_zombie_tasks(conn: &Connection) -> Vec<ZombieRow> {
          WHERE t.status IN ({in_placeholders}) \
          GROUP BY t.id \
          HAVING ( \
-                  COALESCE(t.drive_pid, 0) > 0 \
-                  AND COALESCE(t.drive_started_at, '') < ?{cutoff_idx} \
+                  ( \
+                    COALESCE(t.drive_pid, 0) > 0 \
+                    AND COALESCE(t.drive_started_at, '') < ?{cutoff_idx} \
+                  ) \
+                  OR ( \
+                    COALESCE(t.drive_pid, 0) = 0 \
+                    AND COALESCE(MIN(dl.claimed_at), '') < ?{cutoff_idx} \
+                    AND COALESCE(MIN(dl.claimed_at), '') != '' \
+                  ) \
                 ) \
-             OR ( \
-                  COALESCE(t.drive_pid, 0) = 0 \
-                  AND COALESCE(MIN(dl.claimed_at), '') < ?{cutoff_idx} \
-                  AND COALESCE(MIN(dl.claimed_at), '') != '' \
-                )"
+                AND COALESCE(MIN(dl.claimed_at), '') >= ?{epoch_idx}"
     );
 
     let mut params: Vec<rusqlite::types::Value> = IN_CYCLE_STATUSES
@@ -217,6 +232,7 @@ pub(crate) fn scan_zombie_tasks(conn: &Connection) -> Vec<ZombieRow> {
         .map(|s| rusqlite::types::Value::Text(s.to_string()))
         .collect();
     params.push(rusqlite::types::Value::Text(cutoff.clone()));
+    params.push(rusqlite::types::Value::Text(daemon_epoch.to_string()));
 
     let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
@@ -341,11 +357,18 @@ fn annotate_drive_failed_history(conn: &Connection, display_id: &str, note: &str
 /// Returns the number of locks the sweep took action on (closed or flipped).
 /// Locks whose PID is still alive, or whose drive_pid is NULL (spawn UPDATE
 /// not yet committed), are left untouched and counted zero.
+///
+/// `daemon_epoch` is an ISO-8601 Z-timestamp captured once at daemon start.
+/// It is forwarded to `scan_zombie_tasks` to gate the silent-zombie
+/// (closed-lock) pass against pre-existing dead drive_pids whose lock
+/// predates this daemon process. Pass `""` to disable the gate (legacy
+/// semantics; preserved for tests).
 pub fn sweep_drive_watchdog(
     conn: &Connection,
     agents: &AgentsYaml,
     config_path: &Path,
     policies_hash: &str,
+    daemon_epoch: &str,
 ) -> Result<usize> {
     let mut acted = 0usize;
     let locks: Vec<(i64, String)> = {
@@ -406,7 +429,13 @@ pub fn sweep_drive_watchdog(
     // whose owning auto-drive subprocess is dead but whose dispatch_lock has
     // already been closed (the L062 shape). The open-lock scan above can
     // never see these because it filters on `finished_at IS NULL`.
-    let zombies = scan_zombie_tasks(conn);
+    // The open-lock pass above intentionally does NOT take a daemon_epoch
+    // gate: a dead-PID open lock from a prior lifetime is the same recovery
+    // target regardless of which daemon process owned it. Only the
+    // closed-lock (silent-zombie) path needs the epoch gate, because the
+    // closed lock cannot be distinguished from a healthy mid-cycle row
+    // without it (drive_pid stays set across daemon restarts).
+    let zombies = scan_zombie_tasks(conn, daemon_epoch);
     for (row_id, display_id, _status, _pid, reason) in zombies {
         if handled.contains(&display_id) {
             // Already actioned by the open-lock pass this sweep.
@@ -737,7 +766,7 @@ mod tests {
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
-        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
         assert_eq!(acted, 0, "live PID must not be touched");
 
         let status: String = conn
@@ -791,7 +820,7 @@ mod tests {
         insert_lock(&conn, row_id, "T721");
 
         let agents = AgentsYaml::default_empty();
-        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "", "").unwrap();
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(
@@ -846,7 +875,7 @@ mod tests {
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
-        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
         assert_eq!(acted, 1);
 
         let status: String = conn
@@ -898,7 +927,7 @@ mod tests {
         let conn2 = Connection::open(&db).unwrap();
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
-        let _ = sweep_drive_watchdog(&conn2, &agents, &cfg, "").unwrap();
+        let _ = sweep_drive_watchdog(&conn2, &agents, &cfg, "", "").unwrap();
 
         let status: String = conn2
             .query_row(
@@ -961,7 +990,7 @@ mod tests {
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
-        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(
@@ -1001,7 +1030,7 @@ mod tests {
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
-        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(
@@ -1059,7 +1088,7 @@ mod tests {
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
-        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
 
         let status: String = conn
             .query_row(
@@ -1094,9 +1123,9 @@ mod tests {
 
         let agents = AgentsYaml::default_empty();
         // Sweep #1 — flips row to blocked, files one observation.
-        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "", "").unwrap();
         // Sweep #2 — must be a no-op.
-        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "", "").unwrap();
 
         let th_count: i64 = conn
             .query_row(
@@ -1147,7 +1176,7 @@ mod tests {
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
-        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "").unwrap();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
 
         let zombie_re = regex::Regex::new(
             r"^drive_failed:(silent_zombie_pid_dead|pid_never_recorded)$",
@@ -1188,6 +1217,180 @@ mod tests {
             assert_eq!(verb, "mark_drive_failed");
             assert_eq!(note, want_suffix, "{id}: actor_note must match bare variant");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // T040: daemon-epoch gate against pre-existing zombies from a prior
+    // daemon lifetime (false-positive scenario closed)
+    // -----------------------------------------------------------------
+
+    /// T040 regression: a row with a dead drive_pid + closed lock whose
+    /// `claimed_at` predates the current daemon's start MUST NOT be flipped
+    /// to `blocked`. The lock belongs to a prior daemon lifetime; recovery
+    /// is not this daemon's responsibility to assert. No observation should
+    /// be filed and no `mark_drive_failed` transition should land.
+    #[test]
+    fn watchdog_skips_pre_existing_zombie_from_prior_lifetime() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        // Lock claimed_at hard-coded by insert_lock_closed = 2026-05-03T00:00:00Z.
+        let row_id = insert_task_full(&conn, "T750", "executing", Some(dead_pid()));
+        insert_lock_closed(&conn, row_id, "T750");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        // daemon_epoch is FUTURE relative to the lock's claimed_at.
+        let _ =
+            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-04T00:00:00Z").unwrap();
+
+        // Row must remain at executing — not flipped.
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T750'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "executing",
+            "pre-existing zombie must NOT be flipped under the daemon-epoch gate; got {status}"
+        );
+
+        // No observation filed for this display_id.
+        let obs_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM observations WHERE task_id='T750'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(obs_count, 0, "no observation must be filed for skipped row");
+
+        // No mark_drive_failed transition row landed for T750.
+        let th_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T750' AND verb='mark_drive_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            th_count, 0,
+            "no mark_drive_failed transition must land for skipped row; got {th_count}"
+        );
+    }
+
+    /// T040 corollary: same closed-lock + dead-PID setup, but with a
+    /// daemon_epoch that PREDATES the lock's `claimed_at` — the row IS an
+    /// in-lifetime zombie and the gate must allow the flip. Proves the gate
+    /// does not over-block legitimate silent zombies.
+    #[test]
+    fn watchdog_flips_in_lifetime_zombie() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T751", "executing", Some(dead_pid()));
+        insert_lock_closed(&conn, row_id, "T751");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        // daemon_epoch PREDATES the lock's claimed_at (2026-05-03T00:00:00Z).
+        let _ =
+            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-02T00:00:00Z").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T751'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "blocked",
+            "in-lifetime zombie must still flip when daemon_epoch predates the lock"
+        );
+        assert_eq!(
+            reason.as_deref(),
+            Some("drive_failed:silent_zombie_pid_dead"),
+            "blocked_reason must carry the silent-zombie suffix"
+        );
+    }
+
+    /// T040 codex-revise: the `pid_never_recorded` branch (drive_pid IS NULL,
+    /// stale executing row + lock) must also honor the daemon-epoch gate.
+    /// Pre-existing zombie shape: lock claimed before this daemon's epoch ⇒
+    /// SKIP; in-lifetime shape: lock claimed before epoch is FALSE ⇒ FLIP.
+    #[test]
+    fn watchdog_skips_pre_existing_pid_never_recorded() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        // drive_pid IS NULL → exercises the pid_never_recorded branch.
+        let row_id = insert_task_full(&conn, "T752", "executing", None);
+        insert_lock_closed(&conn, row_id, "T752");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        // daemon_epoch is FUTURE relative to the lock's claimed_at.
+        let _ =
+            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-04T00:00:00Z").unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T752'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "executing",
+            "pid_never_recorded pre-existing zombie must NOT flip under the gate; got {status}"
+        );
+
+        let th_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T752' AND verb='mark_drive_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(th_count, 0, "no mark_drive_failed must land");
+    }
+
+    #[test]
+    fn watchdog_flips_in_lifetime_pid_never_recorded() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T753", "executing", None);
+        insert_lock_closed(&conn, row_id, "T753");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        // daemon_epoch PREDATES the lock's claimed_at.
+        let _ =
+            sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-02T00:00:00Z").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T753'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked");
+        assert_eq!(
+            reason.as_deref(),
+            Some("drive_failed:pid_never_recorded"),
+            "blocked_reason must carry the pid_never_recorded suffix"
+        );
     }
 
     /// AC4.4: dispatch_builtin("auto-drive", ...) resolves to this module.
