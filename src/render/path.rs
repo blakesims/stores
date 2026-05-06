@@ -84,24 +84,23 @@ pub fn resolve_render_path(
 // Directory detection + move
 // ---------------------------------------------------------------------------
 
-/// Find an existing task directory by display_id glob.
+/// Find all task directories on disk matching `<display_id>-*` (or exactly
+/// `<display_id>`) under any state subdirectory of `tasks/`.
 ///
-/// Searches `tasks/*/{{display_id}}-*` relative to `repo_root`.
-/// Returns `None` when zero matches exist; `Some(path)` when exactly one match
-/// exists; when multiple matches exist, logs a warning and returns `None` so
-/// the caller falls back to the canonical path.
-pub fn find_existing_task_dir(repo_root: &Path, display_id: &str) -> Option<PathBuf> {
+/// Used by render to detect stale shells across state dirs (planning/active/
+/// paused/completed/etc.) so they can be canonicalized to the current state's
+/// directory.
+pub fn find_all_task_dirs(repo_root: &Path, display_id: &str) -> Vec<PathBuf> {
     let tasks_root = repo_root.join("tasks");
     if !tasks_root.exists() {
-        return None;
+        return Vec::new();
     }
 
     let mut matches: Vec<PathBuf> = Vec::new();
 
-    // Iterate over immediate subdirectories of tasks/
     let entries = match std::fs::read_dir(&tasks_root) {
         Ok(e) => e,
-        Err(_) => return None,
+        Err(_) => return Vec::new(),
     };
 
     for status_dir_entry in entries.flatten() {
@@ -109,7 +108,6 @@ pub fn find_existing_task_dir(repo_root: &Path, display_id: &str) -> Option<Path
         if !status_dir_path.is_dir() {
             continue;
         }
-        // Look for subdirectories matching `{{display_id}}-*`
         let inner_entries = match std::fs::read_dir(&status_dir_path) {
             Ok(e) => e,
             Err(_) => continue,
@@ -120,7 +118,6 @@ pub fn find_existing_task_dir(repo_root: &Path, display_id: &str) -> Option<Path
                 continue;
             }
             if let Some(name) = task_dir_path.file_name().and_then(|n| n.to_str()) {
-                // Match: starts with display_id followed by '-'
                 let prefix = format!("{}-", display_id);
                 if name.starts_with(&prefix) || name == display_id {
                     matches.push(task_dir_path);
@@ -129,22 +126,142 @@ pub fn find_existing_task_dir(repo_root: &Path, display_id: &str) -> Option<Path
         }
     }
 
+    matches
+}
+
+/// Find an existing task directory by display_id.
+///
+/// Searches `tasks/*/{{display_id}}-*` relative to `repo_root`.
+/// Returns `None` when no match exists; `Some(path)` for the canonical
+/// existing dir when one or more matches exist. When multiple matches exist
+/// (stale shells from prior states), the most-recently-modified one is
+/// returned so the caller can move/canonicalize it; a follow-up cleanup pass
+/// removes the other shells.
+pub fn find_existing_task_dir(repo_root: &Path, display_id: &str) -> Option<PathBuf> {
+    let mut matches = find_all_task_dirs(repo_root, display_id);
     match matches.len() {
         0 => None,
         1 => Some(matches.remove(0)),
         _ => {
-            eprintln!(
-                "warning: multiple task directories found for '{}': {:?}; \
-                 writing to canonical path without moving",
-                display_id,
-                matches
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-            );
-            None
+            // Multiple stale shells exist — pick the most recently modified
+            // so the caller can canonicalize it. The remaining shells are
+            // cleaned up by `cleanup_stale_task_dirs` after the write.
+            matches.sort_by_key(|p| {
+                std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .ok()
+            });
+            matches.pop()
         }
     }
+}
+
+/// After a render write, remove any stale task directories for `display_id`
+/// that are not the canonical `target_dir`.
+///
+/// A stale dir is removed when it is empty or contains only render artifacts
+/// (`main.md`, `main.md.tmp`). When a stale dir contains other files (user
+/// notes, etc.) those files are migrated into `target_dir` if no same-named
+/// file already exists there; otherwise a warning is logged and the file is
+/// left in place (preserving user data).
+///
+/// A genuine display_id collision — multiple non-target dirs that cannot be
+/// safely consolidated — surfaces as a warning so the operator can resolve.
+pub fn cleanup_stale_task_dirs(
+    repo_root: &Path,
+    display_id: &str,
+    target_dir: &Path,
+) -> Result<()> {
+    let target_canon = target_dir.canonicalize().unwrap_or_else(|_| target_dir.to_path_buf());
+    let stale_dirs: Vec<PathBuf> = find_all_task_dirs(repo_root, display_id)
+        .into_iter()
+        .filter(|p| {
+            let pc = p.canonicalize().unwrap_or_else(|_| p.clone());
+            pc != target_canon
+        })
+        .collect();
+
+    for stale in stale_dirs {
+        consolidate_stale_dir(&stale, target_dir)?;
+    }
+    Ok(())
+}
+
+/// Migrate non-render files from `stale` into `target_dir` and remove `stale`
+/// if it becomes empty. Render artifacts (main.md, main.md.tmp) are dropped
+/// since the canonical target_dir owns them.
+fn consolidate_stale_dir(stale: &Path, target_dir: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(stale) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!(
+                "warning: cannot read stale task dir '{}': {}; leaving in place",
+                stale.display(),
+                e
+            );
+            return Ok(());
+        }
+    };
+
+    let mut leftover = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => {
+                leftover = true;
+                continue;
+            }
+        };
+
+        if name == "main.md" || name == "main.md.tmp" {
+            // Render artifact — the canonical target_dir owns the fresh copy.
+            let _ = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            continue;
+        }
+
+        // Preserve user data: migrate into target_dir if no collision.
+        let dst = target_dir.join(&name);
+        if dst.exists() {
+            eprintln!(
+                "warning: display_id collision: '{}' exists in both '{}' and '{}'; \
+                 leaving stale copy at '{}'",
+                name,
+                stale.display(),
+                target_dir.display(),
+                path.display()
+            );
+            leftover = true;
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if let Err(e) = std::fs::rename(&path, &dst) {
+            eprintln!(
+                "warning: cannot migrate '{}' → '{}': {}; leaving in place",
+                path.display(),
+                dst.display(),
+                e
+            );
+            leftover = true;
+        }
+    }
+
+    if !leftover {
+        if let Err(e) = std::fs::remove_dir(stale) {
+            eprintln!(
+                "warning: cannot remove empty stale task dir '{}': {}",
+                stale.display(),
+                e
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Move `src_dir` to `dst_dir` (parent of dst is created if needed).
@@ -315,14 +432,103 @@ mod tests {
     }
 
     #[test]
-    fn find_existing_dir_returns_none_on_multiple_matches() {
+    fn find_existing_dir_returns_some_on_multiple_matches() {
+        // T036: multi-match used to return None (causing accumulation).
+        // It now returns Some(most_recent) so the caller can canonicalize.
         let tmp = tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("tasks/active/T003-task-a")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("tasks/planning/T003-task-a")).unwrap();
+        let older = tmp.path().join("tasks/planning/T003-task-a");
+        let newer = tmp.path().join("tasks/active/T003-task-a");
+        std::fs::create_dir_all(&older).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::create_dir_all(&newer).unwrap();
 
         let found = find_existing_task_dir(tmp.path(), "T003");
-        // Multiple matches → None + warning printed
-        assert!(found.is_none());
+        assert!(found.is_some(), "should pick a canonical match, not None");
+    }
+
+    #[test]
+    fn find_all_task_dirs_returns_every_match() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks/active/T036-slug")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks/planning/T036-slug")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks/completed/T036-slug")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tasks/active/T999-other")).unwrap();
+
+        let all = find_all_task_dirs(tmp.path(), "T036");
+        assert_eq!(all.len(), 3, "should find all 3 stale shells");
+    }
+
+    #[test]
+    fn cleanup_stale_task_dirs_removes_empty_shells() {
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("tasks/completed/T036-slug");
+        let stale_a = tmp.path().join("tasks/active/T036-slug");
+        let stale_b = tmp.path().join("tasks/planning/T036-slug");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&stale_a).unwrap();
+        std::fs::create_dir_all(&stale_b).unwrap();
+        std::fs::write(target.join("main.md"), "current").unwrap();
+        std::fs::write(stale_a.join("main.md"), "old").unwrap();
+
+        cleanup_stale_task_dirs(tmp.path(), "T036", &target).unwrap();
+
+        assert!(target.exists(), "target dir preserved");
+        assert!(!stale_a.exists(), "stale active/ shell removed");
+        assert!(!stale_b.exists(), "stale planning/ shell removed");
+    }
+
+    #[test]
+    fn cleanup_stale_task_dirs_migrates_user_files() {
+        // notes.md (non-render artifact) should migrate into target_dir.
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("tasks/completed/T036-slug");
+        let stale = tmp.path().join("tasks/active/T036-slug");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(target.join("main.md"), "current").unwrap();
+        std::fs::write(stale.join("main.md"), "old").unwrap();
+        std::fs::write(stale.join("notes.md"), "user notes").unwrap();
+
+        cleanup_stale_task_dirs(tmp.path(), "T036", &target).unwrap();
+
+        assert!(!stale.exists(), "stale dir removed after migration");
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes.md")).unwrap(),
+            "user notes",
+            "user notes migrated to target"
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_task_dirs_warns_on_collision() {
+        // notes.md exists in both stale and target — leave stale's copy.
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("tasks/completed/T036-slug");
+        let stale = tmp.path().join("tasks/active/T036-slug");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(target.join("notes.md"), "kept").unwrap();
+        std::fs::write(stale.join("notes.md"), "stale dup").unwrap();
+
+        cleanup_stale_task_dirs(tmp.path(), "T036", &target).unwrap();
+
+        assert!(stale.exists(), "stale dir preserved when collision present");
+        assert_eq!(
+            std::fs::read_to_string(target.join("notes.md")).unwrap(),
+            "kept",
+            "target's notes.md untouched"
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_task_dirs_noop_when_no_stale() {
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("tasks/active/T036-slug");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("main.md"), "x").unwrap();
+
+        cleanup_stale_task_dirs(tmp.path(), "T036", &target).unwrap();
+        assert!(target.exists());
     }
 
     // maybe_move_dir
