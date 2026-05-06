@@ -86,9 +86,26 @@ fields:
       - {name: at, type: timestamp}
 
 lifecycle:
-  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected, deploy_blocked, cargo_installed, schema_migrated]
+  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected, deploy_blocked, cargo_installed, schema_migrated, closed_out_of_band]
   initial_state: planning
   transitions:
+    # close-out-of-band: tier-A recovery terminal for tasks whose work merged
+    # to main without going through the substrate's accept verb (typical for
+    # tasks where review/wrap/accept were skipped). Refused from terminal-ish
+    # states (accepted, cargo_installed, schema_migrated, closed_out_of_band);
+    # allowed from every other state. The `--commit` SHA is the merge-target
+    # provenance and is recorded in transition_history.actor_note.
+    - {from: planning, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: plan_review, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: ready, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: executing, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: code_review, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: complete, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: in_review, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: rejected, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: deploy_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+
     # planning → plan_review (submit-plan)
     - {from: planning, to: plan_review, verb: submit-plan, actor: ai_autonomous}
 

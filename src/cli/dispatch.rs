@@ -285,6 +285,13 @@ pub fn dispatch(
                                 .get_one::<String>("reason")
                                 .ok_or_else(|| anyhow::anyhow!("reject requires --reason"))?;
                             handlers::transition::run_reject(schema, &conn, sub, invoker, reason)?;
+                        } else if verb == "close-out-of-band" {
+                            let commit = sub.get_one::<String>("commit").ok_or_else(|| {
+                                anyhow::anyhow!("close-out-of-band requires --commit")
+                            })?;
+                            handlers::transition::run_close_out_of_band(
+                                schema, &conn, sub, invoker, commit,
+                            )?;
                         } else if verb == "close_as_addressed" {
                             // close_as_addressed requires --resolution; clap enforces required=true.
                             let resolution =
