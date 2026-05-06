@@ -3,6 +3,7 @@
 **Path:** `docs/gatekeeper-design.md`
 **Status:** design doc (T045 phase 2). Pre-implementation; an executor should be able to schema-codify from this.
 **Companion doctrine:** `docs/architecture-coherence.md` (T045 phase 1).
+**Companion taxonomy:** `docs/risk-and-cluster-taxonomy.md` (T045 phase 3) — canonical definitions for `risk_flags`, `cluster_key` conventions, and the orthogonal (size_tier, risk_class, approval_policy) triple referenced throughout this doc.
 **Brainstorm seed:** `docs/worklog/2026-05-06/06-gatekeeper-architecture-observability.md`.
 
 ## Purpose
