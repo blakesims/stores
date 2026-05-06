@@ -196,6 +196,7 @@ lifecycle:
     - {from: blocked, to: abandoned, verb: abandon, actor: human}
     - {from: in_review, to: abandoned, verb: abandon, actor: human}
     - {from: deploy_blocked, to: abandoned, verb: abandon, actor: human}
+    - {from: complete, to: abandoned, verb: abandon, actor: human}
 
 workflow:
   max_revise_cycles: 3

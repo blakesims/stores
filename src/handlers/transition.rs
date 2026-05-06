@@ -2662,6 +2662,7 @@ lifecycle:
     - {from: blocked, to: abandoned, verb: abandon, actor: human}
     - {from: in_review, to: abandoned, verb: abandon, actor: human}
     - {from: deploy_blocked, to: abandoned, verb: abandon, actor: human}
+    - {from: complete, to: abandoned, verb: abandon, actor: human}
 fields:
   - {name: title, type: text, required: true}
   - {name: abandoned_reason, type: text, required: false, actor: framework}
@@ -2710,8 +2711,10 @@ fields:
         .unwrap()
     }
 
-    /// AC1.3: abandon from each of the 7 allowed states succeeds and
-    /// writes abandoned_reason + abandoned_at.
+    /// AC1.3: abandon from each of the 9 allowed non-terminal states succeeds
+    /// and writes abandoned_reason + abandoned_at. `complete` is included because
+    /// it is transient (has an outgoing framework `request_review` edge), not a
+    /// successful deployment terminal.
     #[test]
     fn abandon_from_each_allowed_state_succeeds() {
         for (idx, from_state) in [
@@ -2723,6 +2726,7 @@ fields:
             "blocked",
             "in_review",
             "deploy_blocked",
+            "complete",
         ]
         .iter()
         .enumerate()
@@ -2745,13 +2749,15 @@ fields:
         }
     }
 
-    /// AC1.4: abandon from terminal states is refused.
+    /// AC1.4: abandon from successful-terminal deployment states is refused.
+    /// `complete` is intentionally NOT in this list — it is transient (with an
+    /// outgoing framework `request_review` edge) and IS abandonable, covered
+    /// by `abandon_from_each_allowed_state_succeeds`.
     #[test]
     fn abandon_from_terminal_states_refused() {
         for from_state in [
             "accepted",
             "rejected",
-            "complete",
             "cargo_installed",
             "schema_migrated",
             "closed_out_of_band",

@@ -1085,7 +1085,13 @@ fn build_leaf_cmd(
     }
 
     for leaf in leaves {
-        if is_reserved(&leaf.cli_name) {
+        // Skip reserved names AND framework-only fields. Framework fields are
+        // populated by handler code (claimed_by, drive_pid, abandoned_reason
+        // via run_abandon, etc.) and exposing them on generic add/update is
+        // misleading even when validation rejects the write.
+        if is_reserved(&leaf.cli_name)
+            || leaf.field.actor == Some(crate::schema::actor::Actor::Framework)
+        {
             continue;
         }
 
