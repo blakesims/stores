@@ -140,10 +140,12 @@ fn invoke_subagent(display_id: &str) -> Result<String> {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
 
-    // Default path: spawn claude-code with the bundled investigator prompt.
-    // The user message is the row's display_id; the system prompt carries
-    // the pull-shape doctrine + envelope schema.
-    let output = Command::new("claude-code")
+    // Default path: spawn `claude` (the same binary src/runner/claude_code.rs
+    // uses — `claude-code` is the *Cargo feature* name, not the binary) with
+    // the bundled investigator prompt. The user message is the row's
+    // display_id; the system prompt carries the pull-shape doctrine + envelope
+    // schema.
+    let output = Command::new("claude")
         .arg("--append-system-prompt")
         .arg(BUNDLED_INVESTIGATOR_PROMPT)
         .arg("--print")
@@ -152,13 +154,13 @@ fn invoke_subagent(display_id: &str) -> Result<String> {
         .env("STORES_STORE", "observations")
         .output()
         .with_context(|| {
-            "spawning default investigator subagent (claude-code). \
-             Set STORES_INVESTIGATOR_CMD to override, or ensure 'claude-code' is on PATH."
+            "spawning default investigator subagent (claude). \
+             Set STORES_INVESTIGATOR_CMD to override, or ensure 'claude' is on PATH."
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(
-            "default investigator subagent (claude-code) exited non-zero: {} (stderr: {})",
+            "default investigator subagent (claude) exited non-zero: {} (stderr: {})",
             output.status,
             stderr.trim()
         ));
@@ -191,6 +193,11 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
     }
 
     // Evidence: array of strings OR objects with {file, line, snippet}.
+    // Nested objects enforce additionalProperties:false — only {file, line,
+    // snippet} keys are accepted; line must be an integer (NOT a float, even
+    // though serde_json treats both as numbers).
+    let evidence_keys: std::collections::HashSet<&str> =
+        ["file", "line", "snippet"].iter().copied().collect();
     let evidence = obj["evidence"]
         .as_array()
         .ok_or_else(|| anyhow!("'evidence' must be an array"))?;
@@ -210,11 +217,25 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
                 if !o["file"].is_string() {
                     return Err(anyhow!("'evidence[{}].file' must be a string", i));
                 }
-                if !o["line"].is_number() {
-                    return Err(anyhow!("'evidence[{}].line' must be a number", i));
+                // Reject floats — schema requires integer for line numbers.
+                if !(o["line"].is_i64() || o["line"].is_u64()) {
+                    return Err(anyhow!(
+                        "'evidence[{}].line' must be an integer (got {})",
+                        i,
+                        o["line"]
+                    ));
                 }
                 if !o["snippet"].is_string() {
                     return Err(anyhow!("'evidence[{}].snippet' must be a string", i));
+                }
+                for key in o.keys() {
+                    if !evidence_keys.contains(key.as_str()) {
+                        return Err(anyhow!(
+                            "'evidence[{}]' has extra field '{}' (additionalProperties: false)",
+                            i,
+                            key
+                        ));
+                    }
                 }
             }
             _ => {
@@ -228,6 +249,9 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
     }
 
     // duplicate_candidates: array of {l_id, similarity_reason} objects.
+    // Nested additionalProperties:false enforced.
+    let dup_keys: std::collections::HashSet<&str> =
+        ["l_id", "similarity_reason"].iter().copied().collect();
     let dups = obj["duplicate_candidates"]
         .as_array()
         .ok_or_else(|| anyhow!("'duplicate_candidates' must be an array"))?;
@@ -258,6 +282,15 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
                 "'duplicate_candidates[{}].similarity_reason' must be a string",
                 i
             ));
+        }
+        for key in o.keys() {
+            if !dup_keys.contains(key.as_str()) {
+                return Err(anyhow!(
+                    "'duplicate_candidates[{}]' has extra field '{}' (additionalProperties: false)",
+                    i,
+                    key
+                ));
+            }
         }
     }
 
