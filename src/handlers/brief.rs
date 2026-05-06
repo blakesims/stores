@@ -711,6 +711,104 @@ fields:
         );
     }
 
+    // T054 AC1.9 (task 1.16): executor and code-reviewer briefs render correctly
+    // with a synthesized one-phase plan — no plan-null branch required.
+    #[test]
+    fn executor_brief_for_t1_synthesized_plan_renders_phase_block() {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+        use crate::render::{build_context, render_template};
+
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .expect("tasks schema");
+        let schema = Schema::from_yaml(tasks_yaml).unwrap();
+
+        let templates = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, t)| *t)
+            .expect("tasks templates");
+
+        let synthesized_plan = serde_json::json!({
+            "objective": "fix the thing",
+            "phases": [{
+                "name": "Contract execution",
+                "objective": "the thing is fixed",
+                "tasks": ["edit module A", "edit module B"],
+                "acceptance_criteria": ["the thing is fixed"],
+                "files": [],
+                "dependencies": []
+            }]
+        });
+
+        let entry: crate::validate::EntryMap = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("display_id".to_string(), serde_json::json!("T001"));
+            m.insert("status".to_string(), serde_json::json!("executing"));
+            m.insert("title".to_string(), serde_json::json!("T1 task"));
+            m.insert("slug".to_string(), serde_json::json!("t1-task"));
+            m.insert("current_phase".to_string(), serde_json::json!(1));
+            m.insert("current_cycle".to_string(), serde_json::json!(1));
+            m.insert("tier_hint".to_string(), serde_json::json!("T1"));
+            m.insert(
+                "plan_source".to_string(),
+                serde_json::json!("contract_synthesized"),
+            );
+            m.insert("plan".to_string(), synthesized_plan.clone());
+            m.insert(
+                "contract".to_string(),
+                serde_json::json!({
+                    "executive_intent": "fix the thing",
+                    "done_when": "the thing is fixed",
+                    "scope_in": "edit module A\nedit module B",
+                    "scope_out": ""
+                }),
+            );
+            m.insert(
+                "created_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert(
+                "updated_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert("plan_review_log".to_string(), serde_json::json!([]));
+            m.insert("cycles".to_string(), serde_json::json!([]));
+            m
+        };
+        let ctx = build_context(&schema, &entry);
+
+        // Executor brief
+        let executor_tpl = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/executor-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("executor-brief template");
+        let rendered_exec = render_template(executor_tpl, &ctx).expect("executor brief render");
+        assert!(
+            rendered_exec.contains("**Current Phase:** 1 of 1"),
+            "executor brief must show '1 of 1': {rendered_exec}"
+        );
+        assert!(
+            rendered_exec.contains("Contract execution"),
+            "executor brief must show phase name: {rendered_exec}"
+        );
+
+        // Code-reviewer brief
+        let cr_tpl = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/code-reviewer-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("code-reviewer-brief template");
+        let rendered_cr = render_template(cr_tpl, &ctx).expect("code-reviewer brief render");
+        assert!(
+            rendered_cr.contains("**Current Phase:** 1 of 1"),
+            "code-reviewer brief must show '1 of 1': {rendered_cr}"
+        );
+    }
+
     // find_next_agent helper test — kept for regression coverage.
     #[test]
     fn find_next_agent_returns_first_dispatch() {

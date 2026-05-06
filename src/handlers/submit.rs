@@ -374,6 +374,93 @@ pub(crate) fn find_transition<'a>(
 /// If on_state[state] contains TransitionTo(target), transitions the row to
 /// target inside the same tx.  Recurses if target also has on-entry follow-ons.
 /// All writes use Actor::Framework as invoker.
+/// T054: derive a deliberately-sparse one-phase plan from the contract for
+/// T1 rows during the planning → ready (skip-plan) on-entry transition.
+///
+/// Mapping is mechanical:
+/// - `plan.objective` ← `contract.executive_intent` (fallback `contract.done_when`)
+/// - `phases[0].name` ← "Contract execution"
+/// - `phases[0].objective` ← `contract.done_when`
+/// - `phases[0].tasks` ← bullet/newline split of `contract.scope_in`
+///   (fallback `["Execute the ratified contract scope"]`)
+/// - `phases[0].acceptance_criteria` ← `[contract.done_when]`
+/// - `phases[0].files` ← `[]`
+/// - `phases[0].dependencies` ← `[]`
+///
+/// No invented detail; every field traces back to the human-ratified contract.
+pub(crate) fn synthesize_t1_plan_from_contract(entry: &EntryMap) -> Value {
+    let contract = entry.get("contract").cloned().unwrap_or(Value::Null);
+    let get_str = |k: &str| -> String {
+        contract
+            .get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let executive_intent = get_str("executive_intent");
+    let done_when = get_str("done_when");
+    let scope_in = get_str("scope_in");
+
+    let objective = if !executive_intent.trim().is_empty() {
+        executive_intent.clone()
+    } else {
+        done_when.clone()
+    };
+
+    let tasks = parse_scope_in_bullets(&scope_in);
+    let tasks = if tasks.is_empty() {
+        vec!["Execute the ratified contract scope".to_string()]
+    } else {
+        tasks
+    };
+
+    serde_json::json!({
+        "objective": objective,
+        "phases": [{
+            "name": "Contract execution",
+            "objective": done_when,
+            "tasks": tasks,
+            "acceptance_criteria": [done_when],
+            "files": [],
+            "dependencies": [],
+        }]
+    })
+}
+
+/// Split a free-text scope_in string into a list of task bullets. Recognises
+/// leading `- `, `* `, `• `, or `<n>. ` markers and falls back to newline-
+/// separated trimmed lines. Empty inputs return an empty Vec.
+fn parse_scope_in_bullets(scope_in: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in scope_in.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Strip common bullet markers
+        let stripped = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| trimmed.strip_prefix("• "))
+            .unwrap_or(trimmed);
+        // Strip "<n>. " numeric markers
+        let stripped = if let Some(rest) = stripped.split_once(". ") {
+            if rest.0.chars().all(|c| c.is_ascii_digit()) && !rest.0.is_empty() {
+                rest.1
+            } else {
+                stripped
+            }
+        } else {
+            stripped
+        };
+        let s = stripped.trim().to_string();
+        if !s.is_empty() {
+            out.push(s);
+        }
+    }
+    out
+}
+
 pub fn fire_on_entry_follow_ons(
     tx: &Transaction,
     schema: &Schema,
@@ -440,8 +527,37 @@ pub fn fire_on_entry_follow_ons(
             }
 
             // Compute framework fields for entering target_state
-            let (fw_fields, txt_fields) =
+            let (fw_fields, mut txt_fields) =
                 compute_on_entry_framework_fields(schema, target_state, &current_entry);
+
+            // T054: skip-plan branch synthesises a one-phase plan from the
+            // contract so plan IS NULL becomes impossible for T1 rows past
+            // planning → ready. Idempotent: only writes when the plan field
+            // is currently null/empty.
+            let schema_has_plan = schema.fields.iter().any(|f| f.name == "plan");
+            if follow_on_t.verb == "skip-plan"
+                && state == "planning"
+                && target_state == "ready"
+                && schema_has_plan
+            {
+                let plan_is_empty = current_entry
+                    .get("plan")
+                    .map(|v| match v {
+                        Value::Null => true,
+                        Value::String(s) => s.trim().is_empty(),
+                        Value::Object(m) => m.is_empty(),
+                        _ => false,
+                    })
+                    .unwrap_or(true);
+                if plan_is_empty {
+                    let synthesized = synthesize_t1_plan_from_contract(&current_entry);
+                    txt_fields.insert("plan".to_string(), serde_json::to_string(&synthesized)?);
+                    txt_fields.insert(
+                        "plan_source".to_string(),
+                        "contract_synthesized".to_string(),
+                    );
+                }
+            }
 
             write_status_and_fields(
                 tx,
@@ -626,6 +742,11 @@ pub(crate) fn compute_submit_plan(
     let plan_json_str = serde_json::to_string(&plan_json)?;
     let mut text_fields: BTreeMap<String, String> = BTreeMap::new();
     text_fields.insert(plan_field.to_string(), plan_json_str);
+    // T054: tag every planner-authored plan symmetrically with synthesized
+    // plans (which carry plan_source = "contract_synthesized"). Consumers
+    // (render, audit) distinguish by reading plan_source rather than
+    // branching on plan-shape heuristics.
+    text_fields.insert("plan_source".to_string(), "planner_authored".to_string());
 
     let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
 
@@ -1532,28 +1653,21 @@ pub(crate) fn compute_resume(
     let mut txt_fields: BTreeMap<String, String> = BTreeMap::new();
     txt_fields.insert("blocked_reason".to_string(), String::new());
 
-    // L130: route non-T1 rows with plan=NULL/empty back to planning instead
-    // of ready. Without this, resume cascades blocked → ready → executing
-    // and the executor blocks again on "Phase 1 of 0" because plan_phases is
-    // empty. T1 rows (contract-is-plan) bypass plan-stage entirely and
-    // resume → ready is correct for them.
-    let tier_hint = existing
-        .get("tier_hint")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    // T054: route plan-empty rows back to planning regardless of tier so the
+    // planning on-entry cascade re-fires idempotently. For T1 rows that
+    // case is the contract-synthesis path (skip-plan synthesizes a one-phase
+    // plan, then ready → executing); for T2/T3 rows the planner is
+    // re-dispatched. Plan-populated rows resume to ready as before.
     let plan_is_empty = existing
         .get("plan")
         .map(|v| match v {
             serde_json::Value::Null => true,
             serde_json::Value::String(s) => s.trim().is_empty(),
+            serde_json::Value::Object(m) => m.is_empty(),
             _ => false,
         })
         .unwrap_or(true);
-    let resume_target = if tier_hint != "T1" && plan_is_empty {
-        "planning"
-    } else {
-        "ready"
-    };
+    let resume_target = if plan_is_empty { "planning" } else { "ready" };
 
     // Step 8: write blocked → resume_target
     write_status_and_fields(
@@ -1709,12 +1823,6 @@ lifecycle:
       requires_gate: REVISE
       actor: ai_autonomous
     - from: code_review
-      to: complete
-      verb: submit-review
-      requires_gate: PASS
-      guard: "tier_hint == 'T1'"
-      actor: ai_autonomous
-    - from: code_review
       to: executing
       verb: submit-review
       requires_gate: PASS
@@ -1780,6 +1888,9 @@ fields:
     actor: framework
   - name: drive_started_at
     type: timestamp
+    actor: framework
+  - name: plan_source
+    type: text
     actor: framework
   - name: plan
     type: record
@@ -2173,17 +2284,14 @@ workflow:
         assert_eq!(read_i64(&conn, "current_phase"), 1);
     }
 
-    /// Regression for L123: a T1 row with plan=null cannot evaluate the
-    /// phase-counting PASS guards. The new T1-aware PASS transition must
-    /// fire first and route code_review → complete (which then framework-
-    /// fires complete → in_review on entry).
-    ///
-    /// Pre-fix: both phase-guarded PASS transitions failed their guards
-    /// (plan.phases.length is null), submit-review errored "no transition
-    /// had its guard satisfied", and T1 rows got stuck at code_review with
-    /// no exit (visible on T039 / L093 in today's phase-4 batch dogfood).
+    /// T054 task 1.14 (L123 regression): a T1 row carrying a synthesized
+    /// one-phase plan completes via the generic `current_phase >= plan.phases.length`
+    /// PASS branch. With T054, plan IS NULL is impossible post planning→ready,
+    /// so the previously declared T1-specific PASS-to-complete transition is
+    /// no longer required and has been removed. This test proves the generic
+    /// branch suffices for T1 PASS.
     #[test]
-    fn t1_submit_review_pass_completes_via_tier_guard() {
+    fn submit_review_pass_completes_t1_via_generic_phase_guard() {
         let (_schema, conn) = setup();
         let now = now_iso8601();
         let cycles_json = serde_json::to_string(&json!([{
@@ -2191,14 +2299,26 @@ workflow:
             "executor": {"summary": "ok", "commit": "abc"},
             "review": null
         }])).unwrap();
-        // Insert T1 row at code_review with plan=NULL (the contract-is-plan shape).
+        // Insert T1 row at code_review with a synthesized 1-phase plan (the
+        // post-T054 shape for a T1 row that has executed phase 1).
+        let synthesized_plan = serde_json::to_string(&json!({
+            "objective": "intent text",
+            "phases": [{
+                "name": "Contract execution",
+                "objective": "done when X",
+                "tasks": ["do X"],
+                "acceptance_criteria": ["X done"],
+                "files": [],
+                "dependencies": []
+            }]
+        })).unwrap();
         conn.execute(
             "INSERT INTO wf_tasks (display_id, status, created_at, updated_at, \
              created_by, updated_by, title, tier_hint, current_phase, current_cycle, \
-             plan, cycles, plan_review_log, blocked_reason) \
+             plan, plan_source, cycles, plan_review_log, blocked_reason) \
              VALUES ('WF001', 'code_review', ?1, ?1, 'human', 'human', 't1 task', \
-                     'T1', 1, 1, NULL, ?2, '[]', '')",
-            rusqlite::params![now, cycles_json],
+                     'T1', 1, 1, ?2, 'contract_synthesized', ?3, '[]', '')",
+            rusqlite::params![now, synthesized_plan, cycles_json],
         )
         .unwrap();
 
@@ -2217,7 +2337,11 @@ workflow:
         .unwrap();
 
         // complete → in_review fires on-entry, so final status is in_review.
-        assert_eq!(out.new_status, "in_review", "T1 PASS must reach complete (and on-entry to in_review)");
+        assert_eq!(
+            out.new_status, "in_review",
+            "T1 PASS with synthesized 1-phase plan must reach complete via the \
+             generic current_phase >= plan.phases.length branch (and on-entry to in_review)"
+        );
         assert_eq!(read_status(&conn), "in_review");
     }
 
@@ -4509,6 +4633,277 @@ workflow:
         assert_eq!(
             status2, "planning",
             "T3 row must NOT take when=T1-true follow-on; status stays at planning"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T054: contract-derived T1 plan synthesis tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn synthesize_t1_plan_from_contract_maps_contract_fields() {
+        // (a) executive_intent populated → objective uses it
+        let mut entry: EntryMap = std::collections::BTreeMap::new();
+        entry.insert(
+            "contract".to_string(),
+            json!({
+                "executive_intent": "intent text",
+                "done_when": "the X is done",
+                "scope_in": "- bullet one\n- bullet two",
+                "scope_out": "",
+            }),
+        );
+        let plan = synthesize_t1_plan_from_contract(&entry);
+        assert_eq!(plan["objective"].as_str().unwrap(), "intent text");
+        assert_eq!(
+            plan["phases"].as_array().unwrap().len(),
+            1,
+            "synthesised plan must always have exactly one phase"
+        );
+        let phase = &plan["phases"][0];
+        assert_eq!(phase["name"].as_str().unwrap(), "Contract execution");
+        assert_eq!(phase["objective"].as_str().unwrap(), "the X is done");
+        let tasks: Vec<String> = phase["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(tasks, vec!["bullet one".to_string(), "bullet two".to_string()]);
+        assert_eq!(
+            phase["acceptance_criteria"].as_array().unwrap().len(),
+            1,
+            "AC list must contain exactly one bullet (done_when)"
+        );
+        assert_eq!(
+            phase["acceptance_criteria"][0].as_str().unwrap(),
+            "the X is done"
+        );
+        assert!(phase["files"].as_array().unwrap().is_empty());
+        assert!(phase["dependencies"].as_array().unwrap().is_empty());
+
+        // (b) executive_intent empty → objective falls back to done_when
+        let mut entry2: EntryMap = std::collections::BTreeMap::new();
+        entry2.insert(
+            "contract".to_string(),
+            json!({
+                "executive_intent": "",
+                "done_when": "fallback objective",
+                "scope_in": "- only one",
+                "scope_out": "",
+            }),
+        );
+        let plan2 = synthesize_t1_plan_from_contract(&entry2);
+        assert_eq!(plan2["objective"].as_str().unwrap(), "fallback objective");
+
+        // (c) scope_in with newline list → tasks split correctly
+        let mut entry3: EntryMap = std::collections::BTreeMap::new();
+        entry3.insert(
+            "contract".to_string(),
+            json!({
+                "executive_intent": "i",
+                "done_when": "d",
+                "scope_in": "do A\ndo B\ndo C",
+                "scope_out": "",
+            }),
+        );
+        let plan3 = synthesize_t1_plan_from_contract(&entry3);
+        let tasks3: Vec<String> = plan3["phases"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(tasks3, vec!["do A".to_string(), "do B".to_string(), "do C".to_string()]);
+
+        // (d) empty scope_in → fallback single task
+        let mut entry4: EntryMap = std::collections::BTreeMap::new();
+        entry4.insert(
+            "contract".to_string(),
+            json!({
+                "executive_intent": "i",
+                "done_when": "d",
+                "scope_in": "",
+                "scope_out": "",
+            }),
+        );
+        let plan4 = synthesize_t1_plan_from_contract(&entry4);
+        let tasks4: Vec<String> = plan4["phases"][0]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(tasks4, vec!["Execute the ratified contract scope".to_string()]);
+
+        // (e) phases.length always == 1, regardless of input
+        for input in [&plan, &plan2, &plan3, &plan4] {
+            assert_eq!(input["phases"].as_array().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn fire_on_entry_follow_ons_t1_skip_plan_synthesizes_plan() {
+        // Use the production tasks schema so the contract field shape and
+        // the on_state.planning when-predicates match real behaviour.
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+
+        let now = "2026-05-06T00:00:00Z";
+        let contract = serde_json::to_string(&json!({
+            "executive_intent": "fix the thing",
+            "done_when": "the thing is fixed",
+            "scope_in": "- edit module A\n- edit module B",
+            "scope_out": "UI",
+        }))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, current_phase, current_cycle) \
+             VALUES ('T910', 'planning', ?1, ?1, 'framework', 'framework', \
+             't1 synth', 't1-synth', 'feat/t910', '/tmp/no', 'T1', \
+             ?2, NULL, 0, 0)",
+            rusqlite::params![now, contract],
+        )
+        .unwrap();
+        let row_id = conn.last_insert_rowid();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        fire_on_entry_follow_ons(&tx, &task_schema, "T910", row_id, "planning").unwrap();
+        tx.commit().unwrap();
+
+        let (status, plan_json, plan_source): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, plan, plan_source FROM tasks WHERE display_id = 'T910'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        // Cascade: planning → ready → executing
+        assert_eq!(status, "executing");
+        let plan_v: Value = serde_json::from_str(&plan_json.unwrap()).unwrap();
+        assert_eq!(
+            plan_v["phases"].as_array().unwrap().len(),
+            1,
+            "synthesized plan must have exactly one phase"
+        );
+        assert_eq!(
+            plan_v["phases"][0]["objective"].as_str().unwrap(),
+            "the thing is fixed"
+        );
+        assert_eq!(plan_source.as_deref(), Some("contract_synthesized"));
+    }
+
+    #[test]
+    fn compute_submit_plan_sets_planner_authored_plan_source() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "planning", 0, 0, 0, vec![], vec![], None);
+        set_tier_hint(&conn, "T3");
+
+        let plan = json!({
+            "summary": "p",
+            "phases": [{"name": "p1"}, {"name": "p2"}]
+        });
+        let _ = compute_submit_plan(&schema, &conn, "WF001", plan, Actor::AiAutonomous).unwrap();
+
+        let plan_source: Option<String> = conn
+            .query_row(
+                "SELECT plan_source FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            plan_source.as_deref(),
+            Some("planner_authored"),
+            "compute_submit_plan must label every planner-authored plan with plan_source"
+        );
+    }
+
+    #[test]
+    fn compute_resume_t1_with_null_plan_routes_to_planning_and_synthesizes() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+
+        let now = "2026-05-06T00:00:00Z";
+        let contract = serde_json::to_string(&json!({
+            "executive_intent": "fix it",
+            "done_when": "is fixed",
+            "scope_in": "- step 1",
+            "scope_out": "",
+        }))
+        .unwrap();
+        // Blocked T1 row, plan IS NULL — historical shape produced before T054.
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, current_phase, current_cycle, \
+             blocked_reason) \
+             VALUES ('T911', 'blocked', ?1, ?1, 'framework', 'framework', \
+             'historical t1', 'historical-t1', 'feat/t911', '/tmp/no', 'T1', \
+             ?2, NULL, 0, 1, 'transient')",
+            rusqlite::params![now, contract],
+        )
+        .unwrap();
+
+        let out = compute_resume(&task_schema, &conn, "T911", Actor::AiWithHuman).unwrap();
+        // Cascade: blocked → planning → ready → executing
+        assert_eq!(out.new_status, "executing");
+
+        let (status, plan_json, plan_source): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, plan, plan_source FROM tasks WHERE display_id = 'T911'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "executing");
+        let plan_v: Value = serde_json::from_str(&plan_json.unwrap()).unwrap();
+        assert_eq!(plan_v["phases"].as_array().unwrap().len(), 1);
+        assert_eq!(plan_source.as_deref(), Some("contract_synthesized"));
+
+        // Idempotency: running compute_resume again on this row would error
+        // (status is 'executing', not 'blocked'). The relevant idempotency
+        // claim is that the synthesis branch only fires when plan is empty;
+        // re-firing fire_on_entry_follow_ons("planning") on this row would
+        // see plan populated and skip synthesis, leaving plan unchanged.
+        let tx = conn.unchecked_transaction().unwrap();
+        let row_id: i64 = tx
+            .query_row(
+                "SELECT id FROM tasks WHERE display_id = 'T911'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Reset to planning to re-fire the cascade.
+        tx.execute(
+            "UPDATE tasks SET status = 'planning' WHERE id = ?1",
+            rusqlite::params![row_id],
+        )
+        .unwrap();
+        fire_on_entry_follow_ons(&tx, &task_schema, "T911", row_id, "planning").unwrap();
+        tx.commit().unwrap();
+        let plan_after: Option<String> = conn
+            .query_row(
+                "SELECT plan FROM tasks WHERE display_id = 'T911'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let plan_after_v: Value = serde_json::from_str(&plan_after.unwrap()).unwrap();
+        assert_eq!(
+            plan_after_v["phases"].as_array().unwrap().len(),
+            1,
+            "re-firing skip-plan with plan already populated must be idempotent"
         );
     }
 }

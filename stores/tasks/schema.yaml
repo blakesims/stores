@@ -70,6 +70,12 @@ fields:
           - {name: at, type: timestamp}
   - {name: current_phase, type: integer, actor: framework, auto_increment: true}
   - {name: current_cycle, type: integer, actor: framework, auto_increment: true, auto_increment_within: current_phase}
+  - name: plan_source
+    type: enum
+    enum_values: [contract_synthesized, planner_authored]
+    required: false
+    actor: framework
+    description: "Provenance label for the plan record: contract_synthesized when the framework derived a one-phase plan from the contract during skip-plan (T1); planner_authored when the planner agent submitted the plan via submit-plan (T2/T3)."
   - {name: claimed_by, type: text, actor: framework}
   - {name: claimed_at, type: timestamp, actor: framework}
   - {name: blocked_reason, type: text}
@@ -126,13 +132,12 @@ lifecycle:
     - {from: executing, to: code_review, verb: submit-execute, actor: ai_autonomous}
 
     # code_review → executing / complete / blocked (gate-keyed; PASS branches by current_phase guard per M9)
-    # PASS-T1: T1 rows have plan=null (contract IS the plan, no planner spawn).
-    # plan.phases.length cannot be evaluated, so the two phase-guarded PASS
-    # transitions below would both fail their guards and leave T1 rows stuck
-    # at code_review with no exit. T1 by design is single-phase, so PASS for
-    # a T1 row always means complete. Match-order matters: this transition is
-    # declared first so it wins for T1 rows before the phase guards run. (L123)
-    - {from: code_review, to: complete, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "tier_hint == 'T1'"}
+    # T054: T1 rows now carry a synthesized one-phase plan written during the
+    # skip-plan on-entry cascade, so the generic phase-guarded PASS branches
+    # below cover T1 correctly (current_phase >= plan.phases.length == 1 ⇒
+    # complete). The previously declared T1-specific PASS-to-complete row
+    # (with guard `tier_hint == 'T1'`) became redundant once plan IS NULL was
+    # eliminated as a T1 representation; it has been removed.
     # PASS-non-last: bump current_phase, reset current_cycle, return to executing
     - {from: code_review, to: executing, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "current_phase < plan.phases.length"}
     # PASS-last: complete
@@ -146,11 +151,12 @@ lifecycle:
 
     # blocked → ready (resume) — default path.
     - {from: blocked, to: ready, verb: resume, actor: ai_with_human}
-    # blocked → planning (resume) — L130 fix: when a non-T1 row blocked
-    # before its planner produced a plan (plan IS NULL/empty), route
-    # resume back to planning so the executor doesn't cascade into
-    # "Phase 1 of 0" malformed-brief territory.
-    - {from: blocked, to: planning, verb: resume, actor: ai_with_human, guard: "tier_hint != 'T1'"}
+    # blocked → planning (resume) — T054: route any plan-empty row back to
+    # planning regardless of tier so the planning on-entry cascade (planner
+    # for T2/T3, skip-plan synthesis for T1) idempotently re-fires. Decision
+    # is keyed on plan emptiness, not tier_hint; for T1 rows post-synthesis
+    # plan is populated so this transition does not fire.
+    - {from: blocked, to: planning, verb: resume, actor: ai_with_human, guard: "plan.length == 0"}
 
     # {planning, plan_review, ready, executing, code_review} → blocked (framework, fired by auto-drive subscriber on drive failure)
     - {from: planning, to: blocked, verb: mark_drive_failed, actor: framework}

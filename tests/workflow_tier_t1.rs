@@ -187,13 +187,28 @@ fn t1_drive_skips_planner_and_plan_reviewer() {
         "T1 row must not record any submit-plan or submit-plan-review transitions"
     );
 
-    // T1 plan remains NULL: contract remains the plan.
-    let plan_str: Option<String> = conn
+    // T054 / L133: T1 plan is synthesized from the contract during the
+    // skip-plan on-entry cascade — it is no longer NULL. plan_source labels
+    // the provenance as `contract_synthesized` so downstream readers can
+    // distinguish framework-derived from planner-authored plans.
+    let (plan_str, plan_source): (Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT plan FROM tasks WHERE display_id = ?1",
+            "SELECT plan, plan_source FROM tasks WHERE display_id = ?1",
             rusqlite::params![display_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(plan_str, None);
+    let plan_str = plan_str.expect("T1 row must carry a synthesized plan, not NULL");
+    let plan: serde_json::Value =
+        serde_json::from_str(&plan_str).expect("plan must be valid JSON");
+    let phases = plan
+        .get("phases")
+        .and_then(|v| v.as_array())
+        .expect("synthesized plan must have phases array");
+    assert_eq!(phases.len(), 1, "T1 synthesized plan must have exactly one phase");
+    assert_eq!(
+        plan_source.as_deref(),
+        Some("contract_synthesized"),
+        "T1 plan provenance must be contract_synthesized"
+    );
 }

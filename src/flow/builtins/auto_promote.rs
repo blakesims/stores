@@ -590,17 +590,30 @@ mod tests {
         let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
         assert_eq!(res, 0);
 
-        let (status, tier): (String, Option<String>) = conn
+        let (status, tier, plan_json, plan_source): (String, Option<String>, Option<String>, Option<String>) = conn
             .query_row(
-                "SELECT status, tier_hint FROM tasks LIMIT 1",
+                "SELECT status, tier_hint, plan, plan_source FROM tasks LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert_eq!(tier.as_deref(), Some("T1"));
         assert_eq!(
             status, "executing",
             "T1 task must cascade planning → ready → executing via on-entry follow-ons (L117)"
+        );
+        // T054: assert synthesized plan was written during skip-plan cascade.
+        let plan_v: serde_json::Value =
+            serde_json::from_str(&plan_json.expect("plan must be populated")).unwrap();
+        assert_eq!(
+            plan_v["phases"].as_array().unwrap().len(),
+            1,
+            "T1 auto-promoted task must have exactly 1 synthesized phase"
+        );
+        assert_eq!(
+            plan_source.as_deref(),
+            Some("contract_synthesized"),
+            "T1 auto-promoted task plan_source must be contract_synthesized"
         );
     }
 

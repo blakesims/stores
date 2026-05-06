@@ -716,4 +716,91 @@ mod tests {
             expected_path.display()
         );
     }
+
+    // T054 AC1.8 (task 1.15): main.md rendered with plan_source=contract_synthesized
+    // contains the provenance label; plan_source=planner_authored does not.
+    #[test]
+    fn main_md_renders_synthesized_label_for_contract_synthesized_plan() {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+        use crate::render::{build_context, render_template};
+
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .expect("tasks schema");
+        let schema = crate::schema::Schema::from_yaml(tasks_yaml).unwrap();
+
+        let templates = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, t)| *t)
+            .expect("tasks templates");
+        let main_tpl = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/main.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("main.md.tpl");
+
+        let synthesized_plan = serde_json::json!({
+            "objective": "fix the thing",
+            "phases": [{
+                "name": "Contract execution",
+                "objective": "the thing is fixed",
+                "tasks": ["edit module A"],
+                "acceptance_criteria": ["the thing is fixed"],
+                "files": [],
+                "dependencies": []
+            }]
+        });
+
+        let build_entry = |plan_source: &str| -> crate::validate::EntryMap {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("display_id".to_string(), serde_json::json!("T001"));
+            m.insert("status".to_string(), serde_json::json!("executing"));
+            m.insert("title".to_string(), serde_json::json!("Test Task"));
+            m.insert("slug".to_string(), serde_json::json!("test-task"));
+            m.insert("current_phase".to_string(), serde_json::json!(1));
+            m.insert("current_cycle".to_string(), serde_json::json!(1));
+            m.insert("tier_hint".to_string(), serde_json::json!("T1"));
+            m.insert("plan_source".to_string(), serde_json::json!(plan_source));
+            m.insert("plan".to_string(), synthesized_plan.clone());
+            m.insert(
+                "contract".to_string(),
+                serde_json::json!({
+                    "executive_intent": "fix the thing",
+                    "done_when": "the thing is fixed",
+                    "scope_in": "edit module A",
+                    "scope_out": ""
+                }),
+            );
+            m.insert(
+                "created_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert(
+                "updated_at".to_string(),
+                serde_json::json!("2026-01-01T00:00:00Z"),
+            );
+            m.insert("plan_review_log".to_string(), serde_json::json!([]));
+            m.insert("cycles".to_string(), serde_json::json!([]));
+            m
+        };
+
+        // contract_synthesized → label present
+        let ctx = build_context(&schema, &build_entry("contract_synthesized"));
+        let rendered = render_template(main_tpl, &ctx).expect("render contract_synthesized");
+        assert!(
+            rendered.contains("Plan synthesized from contract; planner was skipped."),
+            "contract_synthesized must produce provenance label; got:\n{rendered}"
+        );
+
+        // planner_authored → label absent
+        let ctx2 = build_context(&schema, &build_entry("planner_authored"));
+        let rendered2 = render_template(main_tpl, &ctx2).expect("render planner_authored");
+        assert!(
+            !rendered2.contains("Plan synthesized from contract; planner was skipped."),
+            "planner_authored must NOT produce provenance label; got:\n{rendered2}"
+        );
+    }
 }
