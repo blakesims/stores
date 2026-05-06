@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use stores::codegen::ddl::SUBSTRATE_DDL;
 use stores::flow::agents_yaml::TransitionEdge;
@@ -155,6 +156,36 @@ fn stale_auto_drive_leaves_drive_pid_null_and_no_claim() {
     assert_eq!(claims, 0);
     assert!(drive_pid.is_none());
     assert_eq!(guard.check_stale().unwrap(), Some(STALE_DAEMON_MESSAGE));
+}
+
+#[test]
+fn stale_daemon_command_exits_nonzero_and_emits_one_message_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stores_dir = tmp.path().join(".stores");
+    std::fs::create_dir_all(&stores_dir).unwrap();
+    std::fs::write(stores_dir.join("manifest.yaml"), "stores: []\n").unwrap();
+    let db = Connection::open(stores_dir.join("db.sqlite")).unwrap();
+    db.execute_batch(SUBSTRATE_DDL).unwrap();
+    drop(db);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .output()
+        .expect("invoke stale daemon command");
+
+    assert!(!output.status.success(), "stale daemon must exit nonzero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let matching_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains(STALE_DAEMON_MESSAGE))
+        .collect();
+    assert_eq!(
+        matching_lines.len(),
+        1,
+        "stderr must contain exactly one stale message line; stderr:\n{stderr}"
+    );
 }
 
 #[test]

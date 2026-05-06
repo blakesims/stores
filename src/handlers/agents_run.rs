@@ -94,8 +94,16 @@ impl DaemonExeGuard<FsBinaryIdentityProvider> {
     pub fn from_process() -> Result<Self> {
         let provider = FsBinaryIdentityProvider;
         let current_exe = std::env::current_exe().context("resolving current_exe")?;
-        let startup_identity = provider.identity(&current_exe)?;
+        let mut startup_identity = provider.identity(&current_exe)?;
         let launch_path = resolve_launch_path_from_env()?;
+        #[cfg(debug_assertions)]
+        if std::env::var_os("STORES_TEST_DAEMON_FORCE_STALE").is_some() {
+            let launch_identity = provider.identity(&launch_path)?;
+            startup_identity = BinaryIdentity {
+                dev: launch_identity.dev,
+                ino: launch_identity.ino.saturating_add(1),
+            };
+        }
         Ok(Self::new(startup_identity, launch_path, provider))
     }
 }
@@ -258,7 +266,6 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
             break;
         }
         if let Some(message) = exe_guard.check_stale()? {
-            eprintln!("{message}");
             bail!(message);
         }
         match poll_once_with_guard(
