@@ -1512,12 +1512,35 @@ pub(crate) fn compute_resume(
     let mut txt_fields: BTreeMap<String, String> = BTreeMap::new();
     txt_fields.insert("blocked_reason".to_string(), String::new());
 
-    // Step 8: write blocked → ready
+    // L130: route non-T1 rows with plan=NULL/empty back to planning instead
+    // of ready. Without this, resume cascades blocked → ready → executing
+    // and the executor blocks again on "Phase 1 of 0" because plan_phases is
+    // empty. T1 rows (contract-is-plan) bypass plan-stage entirely and
+    // resume → ready is correct for them.
+    let tier_hint = existing
+        .get("tier_hint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let plan_is_empty = existing
+        .get("plan")
+        .map(|v| match v {
+            serde_json::Value::Null => true,
+            serde_json::Value::String(s) => s.trim().is_empty(),
+            _ => false,
+        })
+        .unwrap_or(true);
+    let resume_target = if tier_hint != "T1" && plan_is_empty {
+        "planning"
+    } else {
+        "ready"
+    };
+
+    // Step 8: write blocked → resume_target
     write_status_and_fields(
         &tx,
         &schema.name,
         row_id,
-        "ready",
+        resume_target,
         &invoker.to_string(),
         &fw_fields,
         &txt_fields,
@@ -1530,8 +1553,10 @@ pub(crate) fn compute_resume(
         }),
     )?;
 
-    // Step 9: fire on-entry follow-ons (ready → executing)
-    fire_on_entry_follow_ons(&tx, schema, display_id, row_id, "ready")?;
+    // Step 9: fire on-entry follow-ons. For target=ready this cascades
+    // ready → executing; for target=planning there's no follow-on (planner
+    // is dispatched by the daemon's auto-drive subscriber on next poll).
+    fire_on_entry_follow_ons(&tx, schema, display_id, row_id, resume_target)?;
 
     // Clear stale auto-drive ownership. A blocked row may carry drive_pid and an
     // auto-drive dispatch_lock from a previous detached drive. If left intact,
@@ -3151,7 +3176,7 @@ fields:
         let agents = crate::flow::AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         let acted =
-            crate::flow::builtins::auto_drive::sweep_drive_watchdog(&conn, &agents, &cfg, "")
+            crate::flow::builtins::auto_drive::sweep_drive_watchdog(&conn, &agents, &cfg, "", "")
                 .unwrap();
         assert_eq!(
             acted, 0,
@@ -3166,6 +3191,103 @@ fields:
             .unwrap(),
             "executing"
         );
+    }
+
+    /// L130 fix: a non-T1 row blocked before its planner submitted a plan
+    /// (plan IS NULL) MUST resume into 'planning', not 'ready'. Without this,
+    /// resume cascades blocked → ready → executing and the executor blocks
+    /// again on "Phase 1 of 0" because plan_phases is empty.
+    #[test]
+    fn resume_with_null_plan_routes_to_planning_for_non_t1() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+
+        let now = "2026-05-03T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        // T2 row, plan IS NULL — exactly the L043/T038 shape.
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, current_phase, current_cycle, \
+             blocked_reason) \
+             VALUES ('T901', 'blocked', ?1, ?1, 'framework', 'framework', \
+             'planner crashed before submit', 'planner-crash', 'feat/t901', '/tmp/no-such', 'T2', \
+             ?2, NULL, 0, 1, 'planner crashed')",
+            rusqlite::params![now, contract],
+        )
+        .unwrap();
+
+        let out = compute_resume(&task_schema, &conn, "T901", Actor::AiWithHuman).unwrap();
+        assert_eq!(
+            out.new_status, "planning",
+            "non-T1 with plan=NULL must route to planning, not ready/executing"
+        );
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T901'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "planning");
+
+        // transition_history must record the resume verb with from='blocked'
+        // and to='planning' so the audit trail reflects the actual route.
+        let (from_s, to_s, verb): (String, String, String) = conn
+            .query_row(
+                "SELECT from_status, to_status, verb FROM transition_history \
+                 WHERE display_id='T901' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(from_s, "blocked");
+        assert_eq!(to_s, "planning");
+        assert_eq!(verb, "resume");
+    }
+
+    /// L130 corollary: T1 row with plan=NULL is the contract-is-plan case
+    /// (T1 skips plan-stage entirely). Resume must NOT divert to planning;
+    /// it should still land at ready → executing.
+    #[test]
+    fn resume_with_null_plan_keeps_ready_path_for_t1() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+
+        let now = "2026-05-03T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, current_phase, current_cycle, \
+             blocked_reason) \
+             VALUES ('T902', 'blocked', ?1, ?1, 'framework', 'framework', \
+             't1 contract-is-plan', 't1-contract-is-plan', 'feat/t902', '/tmp/no-such', 'T1', \
+             ?2, NULL, 0, 1, 'transient flake')",
+            rusqlite::params![now, contract],
+        )
+        .unwrap();
+
+        let out = compute_resume(&task_schema, &conn, "T902", Actor::AiWithHuman).unwrap();
+        // T1 ready→executing follow-on still fires.
+        assert_eq!(out.new_status, "executing");
     }
 
     // ---------------------------------------------------------------------------

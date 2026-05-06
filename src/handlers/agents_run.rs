@@ -1945,7 +1945,7 @@ policies:
         let cfg = cfg_path();
 
         // Poll #1: first dispatch fails, attempts=1, status=exit=1.
-        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n1, 1, "first poll dispatches once");
 
         let (attempts1, status1): (u32, String) = conn
@@ -1965,7 +1965,7 @@ policies:
         age_lock_finished_at(&conn, "flaky");
 
         // Poll #2: retry pass re-dispatches; sentinel exists → success.
-        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n2, 1, "retry pass fires the second dispatch");
 
         let (attempts2, status2): (u32, String) = conn
@@ -1995,11 +1995,11 @@ policies:
         let policies = empty_policies();
         let cfg = cfg_path();
 
-        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n1, 1);
         age_lock_finished_at(&conn, "always-fail");
 
-        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n2, 1, "second (final) retry fires");
 
         let (attempts, status): (u32, String) = conn
@@ -2017,7 +2017,7 @@ policies:
 
         // Even past the backoff, no further retry — attempts >= max_attempts.
         age_lock_finished_at(&conn, "always-fail");
-        let n3 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n3 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n3, 0, "no retry beyond max_attempts");
 
         let attempts_final: u32 = conn
@@ -2045,7 +2045,7 @@ policies:
         let policies = empty_policies();
         let cfg = cfg_path();
 
-        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n1, 1);
         let attempts1: u32 = conn
             .query_row(
@@ -2057,7 +2057,7 @@ policies:
         assert_eq!(attempts1, 1);
 
         // Immediate poll — backoff window NOT elapsed; no retry fires.
-        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n2, 0, "premature retry must be skipped");
         let attempts_mid: u32 = conn
             .query_row(
@@ -2070,7 +2070,7 @@ policies:
 
         // Simulate elapsed backoff and re-poll.
         age_lock_finished_at(&conn, "flaky2");
-        let n3 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n3 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n3, 1, "post-backoff retry fires");
 
         let attempts_after: u32 = conn
@@ -2177,7 +2177,7 @@ policies:
 
         // Poll #1: retry pass picks up the row, decides Halt, notifies once,
         // parks last_status='halted:halt-all-tasks'.
-        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n1 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n1, 0, "halted retry must not count as a dispatch");
         let (status1, attempts1): (String, u32) = conn
             .query_row(
@@ -2191,7 +2191,7 @@ policies:
 
         // Poll #2: row is no longer eligible (find_retryable_locks filters
         // to 'exit=*' / 'error:*'), so the retry pass skips it.
-        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test").unwrap();
+        let n2 = poll_once(&conn, &agents, &policies, &cfg, "test", "").unwrap();
         assert_eq!(n2, 0);
         let status2: String = conn
             .query_row(

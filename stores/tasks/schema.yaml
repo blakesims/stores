@@ -127,8 +127,13 @@ lifecycle:
     # FAIL: code-reviewer hard-fail goes to blocked
     - {from: code_review, to: blocked, verb: submit-review, actor: ai_autonomous, requires_gate: FAIL}
 
-    # blocked → ready (resume)
+    # blocked → ready (resume) — default path.
     - {from: blocked, to: ready, verb: resume, actor: ai_with_human}
+    # blocked → planning (resume) — L130 fix: when a non-T1 row blocked
+    # before its planner produced a plan (plan IS NULL/empty), route
+    # resume back to planning so the executor doesn't cascade into
+    # "Phase 1 of 0" malformed-brief territory.
+    - {from: blocked, to: planning, verb: resume, actor: ai_with_human, guard: "tier_hint != 'T1'"}
 
     # {planning, plan_review, ready, executing, code_review} → blocked (framework, fired by auto-drive subscriber on drive failure)
     - {from: planning, to: blocked, verb: mark_drive_failed, actor: framework}
