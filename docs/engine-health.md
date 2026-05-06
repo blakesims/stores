@@ -84,6 +84,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L070 | ⚪ — | accept-merge conflict path drops cargo-install + schema-migrate side effects |
 | L144 | ⚪ T2 | `stores migrate` doesn't detect framework-DDL drift (SUBSTRATE_DDL columns added in newer binary aren't applied to existing DBs); 10.06 hit this on actor_note bootstrap, manual ALTER required |
 | L145 | ⚪ T2 | resume handler hardcodes 'blocked' source; schema permits deploy_blocked→ready via resume but handler rejects pre-validator. Also semantic ambiguity: should resume from deploy_blocked re-cycle or just retry-deploy? |
+| L149 | ⚪ T2 | **daemon's auto-drive spawn breaks silently after `cargo install` replaces `/home/blake/.cargo/bin/stores`** — current_exe()-based execvp loads new binary, but the daemon's in-memory image stays out of sync; spawn argv subtly mismatches new binary's CLI parsing → drive subprocess dies <5s with empty log. Workaround: restart daemon after each cargo-install. Surfaced today during pipe-fill (T048/T049 both died until daemon restart). Compounds with L011 (binary-version recording) — daemon should detect inode-replacement of own exe and self-restart. |
 | GAP | — | acceptance-time precheck for "task touches files with uncommitted main-side changes → accept-merge will fail" |
 
 ### Layer 5 — Discovery / observability
