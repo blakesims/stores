@@ -82,59 +82,83 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         return Ok(1);
     }
 
-    // Status guard: re-read the row; abort if no longer needs_investigation.
-    let current_status: Option<String> = ctx
-        .conn
-        .query_row(
-            "SELECT status FROM observations WHERE display_id = ?1",
-            rusqlite::params![display_id],
-            |r| r.get(0),
-        )
-        .ok();
-    match current_status.as_deref() {
-        Some("needs_investigation") => {}
-        Some(other) => {
-            eprintln!(
-                "[investigator] {}: status is '{}' (expected 'needs_investigation'); persist is a no-op",
-                display_id, other
-            );
-            return Ok(0);
-        }
-        None => {
-            eprintln!("[investigator] {}: row not found; aborting", display_id);
+    // Status guard + persist as ONE atomic CAS UPDATE — the previous shape
+    // (SELECT status, then UPDATE without status predicate) had a TOCTOU race
+    // where a human transition between SELECT and UPDATE could clobber the
+    // row's new state. The CAS UPDATE includes WHERE status='needs_investigation';
+    // 0 rows affected ⇒ row moved on, persist is a no-op.
+    let affected = match persist_cas(ctx.conn, display_id, &envelope) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[investigator] {}: persist failed: {:#}", display_id, e);
             return Ok(1);
         }
-    }
-
-    if let Err(e) = persist(ctx.conn, display_id, &envelope) {
-        eprintln!("[investigator] {}: persist failed: {:#}", display_id, e);
-        return Ok(1);
+    };
+    if affected == 0 {
+        eprintln!(
+            "[investigator] {}: status moved off 'needs_investigation' before persist; no-op",
+            display_id
+        );
+        return Ok(0);
     }
 
     eprintln!("[investigator] {}: evidence persisted", display_id);
     Ok(0)
 }
 
+/// Bundled investigator agent prompt. Used as the default system prompt when
+/// `STORES_INVESTIGATOR_CMD` is not set.
+const BUNDLED_INVESTIGATOR_PROMPT: &str = include_str!("../../../agents/investigator.md");
+
 /// Spawn the configured subagent command (or test shim) and return its
-/// stdout. Resolution order: `STORES_INVESTIGATOR_CMD` env var (test/prod
-/// override) — fail-loud if unset.
+/// stdout. Resolution order:
+///   1. `STORES_INVESTIGATOR_CMD` env var (test/prod override).
+///   2. Default: `claude-code` with the bundled `agents/investigator.md`
+///      prompt, given the row's display_id as the user message. Fails loud
+///      if `claude-code` is not on PATH.
+///
+/// The default closes the prior cycle's HIGH finding that `agents/investigator.md`
+/// was never invoked — without an env var override, the bundled prompt now
+/// drives the default subagent.
 fn invoke_subagent(display_id: &str) -> Result<String> {
-    let cmd_str = std::env::var("STORES_INVESTIGATOR_CMD").map_err(|_| {
-        anyhow!(
-            "STORES_INVESTIGATOR_CMD not set; cannot invoke investigator subagent"
-        )
-    })?;
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&cmd_str)
+    if let Ok(cmd_str) = std::env::var("STORES_INVESTIGATOR_CMD") {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd_str)
+            .env("STORES_DISPLAY_ID", display_id)
+            .env("STORES_STORE", "observations")
+            .output()
+            .with_context(|| format!("spawning STORES_INVESTIGATOR_CMD: {cmd_str}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!(
+                "STORES_INVESTIGATOR_CMD exited non-zero: {} (stderr: {})",
+                output.status,
+                stderr.trim()
+            ));
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+
+    // Default path: spawn claude-code with the bundled investigator prompt.
+    // The user message is the row's display_id; the system prompt carries
+    // the pull-shape doctrine + envelope schema.
+    let output = Command::new("claude-code")
+        .arg("--append-system-prompt")
+        .arg(BUNDLED_INVESTIGATOR_PROMPT)
+        .arg("--print")
+        .arg(format!("Investigate observation {}", display_id))
         .env("STORES_DISPLAY_ID", display_id)
         .env("STORES_STORE", "observations")
         .output()
-        .with_context(|| format!("spawning STORES_INVESTIGATOR_CMD: {cmd_str}"))?;
+        .with_context(|| {
+            "spawning default investigator subagent (claude-code). \
+             Set STORES_INVESTIGATOR_CMD to override, or ensure 'claude-code' is on PATH."
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(
-            "subagent exited non-zero: {} (stderr: {})",
+            "default investigator subagent (claude-code) exited non-zero: {} (stderr: {})",
             output.status,
             stderr.trim()
         ));
@@ -166,11 +190,89 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
         }
     }
 
-    if !obj["evidence"].is_array() {
-        return Err(anyhow!("'evidence' must be an array"));
+    // Evidence: array of strings OR objects with {file, line, snippet}.
+    let evidence = obj["evidence"]
+        .as_array()
+        .ok_or_else(|| anyhow!("'evidence' must be an array"))?;
+    for (i, item) in evidence.iter().enumerate() {
+        match item {
+            Value::String(_) => {}
+            Value::Object(o) => {
+                if !o.contains_key("file")
+                    || !o.contains_key("line")
+                    || !o.contains_key("snippet")
+                {
+                    return Err(anyhow!(
+                        "'evidence[{}]' object must have 'file', 'line', 'snippet' keys",
+                        i
+                    ));
+                }
+                if !o["file"].is_string() {
+                    return Err(anyhow!("'evidence[{}].file' must be a string", i));
+                }
+                if !o["line"].is_number() {
+                    return Err(anyhow!("'evidence[{}].line' must be a number", i));
+                }
+                if !o["snippet"].is_string() {
+                    return Err(anyhow!("'evidence[{}].snippet' must be a string", i));
+                }
+            }
+            _ => {
+                return Err(anyhow!(
+                    "'evidence[{}]' must be a string or {{file, line, snippet}} object; got {}",
+                    i,
+                    item
+                ));
+            }
+        }
     }
-    if !obj["duplicate_candidates"].is_array() {
-        return Err(anyhow!("'duplicate_candidates' must be an array"));
+
+    // duplicate_candidates: array of {l_id, similarity_reason} objects.
+    let dups = obj["duplicate_candidates"]
+        .as_array()
+        .ok_or_else(|| anyhow!("'duplicate_candidates' must be an array"))?;
+    for (i, item) in dups.iter().enumerate() {
+        let o = item.as_object().ok_or_else(|| {
+            anyhow!(
+                "'duplicate_candidates[{}]' must be an object; got {}",
+                i,
+                item
+            )
+        })?;
+        let l_id = o.get("l_id").and_then(|v| v.as_str()).ok_or_else(|| {
+            anyhow!("'duplicate_candidates[{}].l_id' must be a string", i)
+        })?;
+        if !regex::Regex::new(r"^L\d{3,}$").unwrap().is_match(l_id) {
+            return Err(anyhow!(
+                "'duplicate_candidates[{}].l_id' must match /^L\\d{{3,}}$/; got '{}'",
+                i,
+                l_id
+            ));
+        }
+        if !o
+            .get("similarity_reason")
+            .map(|v| v.is_string())
+            .unwrap_or(false)
+        {
+            return Err(anyhow!(
+                "'duplicate_candidates[{}].similarity_reason' must be a string",
+                i
+            ));
+        }
+    }
+
+    // Reject any extra top-level fields outside the required set. This is
+    // the "additionalProperties: false" check the JSON schema declares; it
+    // closes the MEDIUM finding that nested forbidden fields could slip
+    // through (e.g. {"notes": {"draft_contract": ...}}).
+    let allowed: std::collections::HashSet<&str> = REQUIRED_FIELDS.iter().copied().collect();
+    for key in obj.keys() {
+        if !allowed.contains(key.as_str()) {
+            return Err(anyhow!(
+                "envelope contains extra field '{}' (additionalProperties: false)",
+                key
+            ));
+        }
     }
     let confidence = obj["confidence"]
         .as_str()
@@ -200,17 +302,27 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Persist the validated envelope. Writes:
+/// Persist the validated envelope via a CAS UPDATE. The WHERE clause
+/// includes `status = 'needs_investigation'` so a human transition between
+/// the subagent spawn and the persist (TOCTOU window) does NOT clobber the
+/// row. Returns the number of rows affected: 1 ⇒ persisted; 0 ⇒ row moved
+/// on, persist no-op'd.
+///
+/// Writes:
 ///   * `investigation_note` — compact JSON-stringified envelope
 ///   * `notes` — merged JSON object containing duplicate_candidates,
 ///     confidence, proposed_tier, grill_question (preserves any pre-existing
 ///     keys outside this set)
 /// No transition is fired; the human reviews evidence next.
-fn persist(conn: &Connection, display_id: &str, envelope: &Value) -> Result<()> {
+fn persist_cas(conn: &Connection, display_id: &str, envelope: &Value) -> Result<usize> {
     let envelope_str =
         serde_json::to_string(envelope).context("serialize investigator envelope")?;
 
-    // Merge into existing notes JSON (if any).
+    // Merge into existing notes JSON (if any). Note: this read is outside the
+    // CAS, so a concurrent writer to `notes` could have its data merged in;
+    // the CAS UPDATE only protects `status`. For the investigator path that
+    // is acceptable: notes is owned by this subscriber while the row is at
+    // needs_investigation.
     let existing_notes: Option<String> = conn
         .query_row(
             "SELECT notes FROM observations WHERE display_id = ?1",
@@ -235,15 +347,15 @@ fn persist(conn: &Connection, display_id: &str, envelope: &Value) -> Result<()> 
         .context("serialize merged notes")?;
 
     let now = now_iso8601();
-    conn.execute(
-        "UPDATE observations \
-         SET investigation_note = ?1, notes = ?2, updated_at = ?3, updated_by = 'ai_autonomous' \
-         WHERE display_id = ?4",
-        rusqlite::params![envelope_str, notes_str, now, display_id],
-    )
-    .context("UPDATE observations (investigator persist)")?;
-
-    Ok(())
+    let n = conn
+        .execute(
+            "UPDATE observations \
+             SET investigation_note = ?1, notes = ?2, updated_at = ?3, updated_by = 'ai_autonomous' \
+             WHERE display_id = ?4 AND status = 'needs_investigation'",
+            rusqlite::params![envelope_str, notes_str, now, display_id],
+        )
+        .context("UPDATE observations (investigator persist CAS)")?;
+    Ok(n)
 }
 
 #[cfg(test)]
