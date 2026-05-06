@@ -1752,6 +1752,16 @@ pub struct ResumeOutput {
     pub summary: String,
 }
 
+/// Structured output from retry-deploy handler. Distinct from `ResumeOutput`
+/// to reflect the handler-scope separation L145 requires (retry-deploy is not
+/// a resume — it re-fires the full deploy ceremony via subscriber chain).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryDeployOutput {
+    pub display_id: String,
+    pub new_status: String,
+    pub summary: String,
+}
+
 pub fn run_resume(
     schema: &Schema,
     conn: &Connection,
@@ -1776,7 +1786,7 @@ pub(crate) fn compute_retry_deploy(
     conn: &Connection,
     display_id: &str,
     invoker: Actor,
-) -> Result<ResumeOutput> {
+) -> Result<RetryDeployOutput> {
     require_workflow(schema, "retry-deploy")?;
 
     let tx = conn
@@ -1836,7 +1846,7 @@ pub(crate) fn compute_retry_deploy(
     release_lock(&tx, &schema.name, display_id)?;
     tx.commit().context("retry-deploy: commit")?;
 
-    Ok(ResumeOutput {
+    Ok(RetryDeployOutput {
         display_id: display_id.to_string(),
         new_status: transition.to.clone(),
         summary: format!(

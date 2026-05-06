@@ -352,7 +352,11 @@ mod tests {
     use super::*;
     use crate::cli::dynamic::BUNDLED_STORE_SCHEMAS;
     use crate::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
-    use crate::flow::{install_notifier, MockNotifier, NotifierBackend, NotifyEvent};
+    use crate::flow::agents_yaml::TransitionEdge;
+    use crate::flow::{
+        install_notifier, AgentEntry, BackoffKind, MockNotifier, NotifierBackend, NotifyEvent,
+        RetryPolicy, Subscription,
+    };
     use crate::schema::Schema;
     use rusqlite::Connection;
     use std::process::Command;
@@ -1287,6 +1291,116 @@ mod tests {
             .unwrap();
         assert_eq!(verb, "mark_cargo_installed");
         assert_eq!(invoker, "framework");
+    }
+
+    /// T061 / L145 codex-revise: when branch is already merged AND cargo-install
+    /// is a peer subscriber on the same accepted-entry edge (retry-deploy chain),
+    /// accept-merge must NOT fire mark_cargo_installed — it leaves that to
+    /// cargo-install so the install actually re-runs before the row advances.
+    /// accept-merge returns Ok(0) as a no-op; the row stays in `accepted`.
+    ///
+    /// This test covers the MAJOR finding from the T061 codex review:
+    /// "retry-deploy on an already-merged branch can skip the cargo-install retry."
+    #[test]
+    fn m_accept_merge_noop_no_mark_cargo_installed_when_cargo_install_peer_present() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _cwd_g = crate::paths::test_cwd_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let (tmp, repo) = init_repo();
+        // Pre-merge the branch into main so is_branch_merged_into_main returns true.
+        git(&repo, &["checkout", "-b", "feat/already-merged-retry"]);
+        std::fs::write(repo.join("retry.txt"), "retry\n").unwrap();
+        git(&repo, &["add", "retry.txt"]);
+        git(&repo, &["commit", "-m", "retry change"]);
+        git(&repo, &["checkout", "main"]);
+        let m = git(
+            &repo,
+            &["merge", "--no-ff", "--no-edit", "feat/already-merged-retry"],
+        );
+        assert!(m.status.success(), "pre-merge into main failed: {:?}", m);
+
+        // Set daemon cwd to the live main repo.
+        let old_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&repo).expect("set_current_dir failed");
+
+        // Stale workspace path (cleaned worktree after merge — mimics retry-deploy scenario).
+        let gone = tmp.path().join("worktrees/T998-gone-retry");
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_accepted_task(
+            &conn,
+            "T998",
+            "feat/already-merged-retry",
+            gone.to_str().unwrap(),
+        );
+        let row = task_row_json(&conn, "T998");
+
+        // Build an AgentsYaml that includes cargo-install subscribed to
+        // deploy_blocked→accepted (the retry-deploy chain). This is the
+        // peer-subscriber condition that should suppress mark_cargo_installed.
+        let agents = AgentsYaml {
+            agents: vec![AgentEntry {
+                name: "cargo-install".to_string(),
+                subscribes_to: vec![Subscription {
+                    store: "tasks".to_string(),
+                    transition: TransitionEdge {
+                        from: "deploy_blocked".to_string(),
+                        to: "accepted".to_string(),
+                    },
+                    predicate: None,
+                }],
+                command: "builtin:cargo-install".to_string(),
+                claim_window_secs: 600,
+                retry_policy: RetryPolicy {
+                    max_attempts: 1,
+                    backoff: BackoffKind::Linear,
+                },
+                command_args: None,
+            }],
+            deployment_specialist: None,
+        };
+        let cfg = cfg_path();
+        let ctx = DispatchCtx {
+            conn: &conn,
+            agents: &agents,
+            config_path: &cfg,
+            policies_hash: "",
+        };
+
+        let res = accept_merge::run(&row, &ctx);
+
+        // Restore cwd before any panic from assertions below.
+        std::env::set_current_dir(&old_cwd).expect("restore cwd failed");
+
+        assert_eq!(res.unwrap(), 0);
+
+        // Row must still be in `accepted` — mark_cargo_installed was NOT fired.
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T998'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "accepted",
+            "accept-merge must not advance to cargo_installed when cargo-install peer is present"
+        );
+
+        // No mark_cargo_installed in transition_history.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE store='tasks' AND display_id='T998' AND verb='mark_cargo_installed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "mark_cargo_installed must not appear in transition_history when cargo-install peer is present"
+        );
     }
 
     /// T050 P2 AC2.3: postcondition_for_builtin maps each builtin keyword to
