@@ -202,7 +202,7 @@ fn ratify_promote_scaffold_e2e() {
         policies: vec![],
     };
 
-    let n1 = poll_once(&conn, &agents, &policies, &cfg_path, "t020p6-claimer").unwrap();
+    let n1 = poll_once(&conn, &agents, &policies, &cfg_path, "t020p6-claimer", "").unwrap();
     let elapsed = started.elapsed();
     // AC6.2: ratify→promote within ~5s wall-clock.
     assert!(
@@ -264,7 +264,7 @@ fn ratify_promote_scaffold_e2e() {
     // (auto-scaffold may already have fired in the first poll if its agent
     // entry sorted after auto-promote in the agents loop; either way, by the
     // end of the second poll the workspace_path must be populated.)
-    let _n2 = poll_once(&conn, &agents, &policies, &cfg_path, "t020p6-claimer").unwrap();
+    let _n2 = poll_once(&conn, &agents, &policies, &cfg_path, "t020p6-claimer", "").unwrap();
     let workspace_path: Option<String> = conn
         .query_row(
             "SELECT workspace_path FROM tasks WHERE display_id=?1",
@@ -296,7 +296,7 @@ fn ratify_promote_scaffold_e2e() {
     let task_count_before: i64 = conn
         .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
         .unwrap();
-    let _n3 = poll_once(&conn, &agents, &policies, &cfg_path, "t020p6-claimer").unwrap();
+    let _n3 = poll_once(&conn, &agents, &policies, &cfg_path, "t020p6-claimer", "").unwrap();
     let task_count_after: i64 = conn
         .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
         .unwrap();

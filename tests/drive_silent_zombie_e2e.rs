@@ -125,9 +125,15 @@ fn silent_zombie_lock_already_closed_e2e() {
     drop(conn);
 
     // ---- 4. Invoke the real binary: `stores agents run --once` ----
+    // T040: override the daemon-epoch gate so the in-lifetime detection
+    // still fires for this test's hard-coded `claimed_at` (2026-01-01).
+    // Without the override, run_daemon would capture today's timestamp as
+    // the epoch and the silent-zombie scan would (correctly) skip the row
+    // as a pre-existing zombie from a prior daemon lifetime.
     let output = Command::new(&bin)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(workspace)
+        .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
         .output()
         .expect("invoke daemon");
     assert!(

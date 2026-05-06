@@ -109,7 +109,7 @@ fn new_subscriber_after_restart_does_not_fire_on_historical_rows() {
         deployment_specialist: None,
     };
     let policies = empty_policies();
-    let n_sanity = poll_once(&conn, &original_agents, &policies, &cfg_path(), "claimer-1").unwrap();
+    let n_sanity = poll_once(&conn, &original_agents, &policies, &cfg_path(), "claimer-1", "").unwrap();
     assert_eq!(n_sanity, 1, "sanity: matching transition would dispatch normally");
 
     // (d) Restart simulation: a fresh AgentsYaml with a NEW subscriber name.
@@ -125,7 +125,7 @@ fn new_subscriber_after_restart_does_not_fire_on_historical_rows() {
     assert_eq!(seeded, 1, "exactly one historical row seeded for late-comer");
 
     let n_after_seed =
-        poll_once(&conn, &late_agents, &policies, &cfg_path(), "claimer-2").unwrap();
+        poll_once(&conn, &late_agents, &policies, &cfg_path(), "claimer-2", "").unwrap();
     assert_eq!(
         n_after_seed, 0,
         "late-comer must NOT fire on pre-startup transition"
@@ -159,7 +159,7 @@ fn new_subscriber_after_restart_does_not_fire_on_historical_rows() {
         .unwrap();
     insert_history(&conn, "tasks", row_id2, "T101", "ready", "in_review");
 
-    let n_fresh = poll_once(&conn, &late_agents, &policies, &cfg_path(), "claimer-3").unwrap();
+    let n_fresh = poll_once(&conn, &late_agents, &policies, &cfg_path(), "claimer-3", "").unwrap();
     assert_eq!(n_fresh, 1, "fresh post-seed transition must dispatch normally");
 
     let claimed_by_fresh: String = conn
@@ -228,7 +228,7 @@ fn seed_preserves_existing_drive_chain() {
     let start = Instant::now();
     let mut claimed = false;
     while start.elapsed() < Duration::from_secs(5) {
-        let _ = poll_once(&conn, &agents, &policies, &cfg_path(), "seed-test").unwrap();
+        let _ = poll_once(&conn, &agents, &policies, &cfg_path(), "seed-test", "").unwrap();
         let cb: Option<String> = conn
             .query_row(
                 "SELECT claimed_by FROM dispatch_locks \
