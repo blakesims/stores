@@ -79,6 +79,8 @@ fields:
   - {name: claimed_by, type: text, actor: framework}
   - {name: claimed_at, type: timestamp, actor: framework}
   - {name: blocked_reason, type: text}
+  - {name: abandoned_reason, type: text, required: false, actor: framework}
+  - {name: abandoned_at, type: timestamp, required: false, actor: framework}
   - {name: drive_pid, type: integer, required: false, actor: framework}
   - {name: drive_started_at, type: timestamp, required: false, actor: framework}
   - name: wrap_log
@@ -92,7 +94,7 @@ fields:
       - {name: at, type: timestamp}
 
 lifecycle:
-  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected, deploy_blocked, cargo_installed, schema_migrated, closed_out_of_band]
+  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected, deploy_blocked, cargo_installed, schema_migrated, closed_out_of_band, abandoned]
   initial_state: planning
   transitions:
     # close-out-of-band: tier-A recovery terminal for tasks whose work merged
@@ -184,6 +186,15 @@ lifecycle:
     - {from: in_review, to: rejected, verb: reject, actor: human}
     # rejected → planning (amend: re-open contract authoring)
     - {from: rejected, to: planning, verb: amend, actor: ai_with_human}
+
+    # <non_terminal> → abandoned (T043: walk a stale row to terminal abandoned without burning a drive cycle)
+    - {from: planning, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: plan_review, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: ready, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: executing, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: code_review, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: blocked, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: in_review, to: abandoned, verb: abandon, actor: ai_with_human}
 
 workflow:
   max_revise_cycles: 3

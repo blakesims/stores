@@ -345,6 +345,119 @@ fn validate_sha_reachable_in_main(sha: &str) -> Result<()> {
     )
 }
 
+/// Entry point for `abandon` (T043) — walks a stale or duplicate-shipped row to
+/// the terminal `abandoned` state without burning a drive cycle. Idempotent on
+/// already-abandoned rows. Requires a non-empty reason. Tier-A actor gating
+/// (human or token-mediated ai_with_human) is enforced by the schema's actor field on each transition.
+pub fn run_abandon(
+    schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    invoker: InvokerCtx,
+    reason: &str,
+) -> Result<()> {
+    if reason.trim().is_empty() {
+        anyhow::bail!("--reason must be a non-empty string");
+    }
+
+    let display_id = matches
+        .get_one::<String>("display_id")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    let tx = conn.unchecked_transaction().context("abandon: begin tx")?;
+
+    let (row_id, existing) = read_row(schema, &tx, display_id)?;
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Idempotent: already abandoned → no-op success, no second audit row,
+    // do not overwrite stored reason.
+    if current_status == "abandoned" {
+        tx.commit().context("abandon: commit tx (idempotent no-op)")?;
+        println!("Already abandoned {display_id}: no-op");
+        return Ok(());
+    }
+
+    let now = now_iso8601();
+
+    // Build base diff from CLI args (won't include --reason since there's no
+    // matching schema field), then inject the abandon-specific fields.
+    let mut diff = build_entry_map(schema, |cli_name| {
+        match matches.try_get_many::<String>(cli_name) {
+            Ok(Some(vals)) => {
+                let collected: Vec<String> = vals.cloned().collect();
+                if collected.is_empty() {
+                    None
+                } else {
+                    Some(collected)
+                }
+            }
+            _ => None,
+        }
+    })?;
+    diff.insert(
+        "abandoned_reason".to_string(),
+        Value::String(reason.to_string()),
+    );
+    diff.insert("abandoned_at".to_string(), Value::String(now.clone()));
+
+    let mut merged = existing.clone();
+    for (k, v) in &diff {
+        merged.insert(k.clone(), v.clone());
+    }
+
+    let transition = select_transition(
+        &schema.lifecycle.transitions,
+        current_status,
+        "abandon",
+        None,
+        &merged,
+    )?;
+
+    // Validate caller authority for the lifecycle transition using a diff that
+    // excludes framework-owned abandon metadata. Those two fields are written
+    // only by this handler's narrow framework-authorized path below.
+    let mut caller_diff = diff.clone();
+    caller_diff.remove("abandoned_reason");
+    caller_diff.remove("abandoned_at");
+    validate::validate(
+        schema,
+        &merged,
+        Op::Transition("abandon".to_string(), caller_diff),
+        invoker,
+    )
+    .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
+
+    let (pref, phash) = read_policy_env();
+    execute_transition_write(
+        &tx,
+        schema,
+        row_id,
+        display_id,
+        current_status,
+        &transition.to,
+        "abandon",
+        &diff,
+        &merged,
+        invoker.actor,
+        pref.as_deref(),
+        phash.as_deref(),
+        Some(reason),
+    )?;
+
+    tx.commit().context("abandon: commit tx")?;
+
+    println!(
+        "Transitioned {display_id}: {} → {} (abandoned)",
+        transition.from, transition.to
+    );
+    Ok(())
+}
+
+
 /// Transaction-agnostic core.  All DB access uses `tx` (which is `Deref<Target=Connection>`).
 /// Called by `run` (single-call CLI path) and by submit handlers that pass their own `tx`
 /// for atomic multi-step operations (Phase 5 / task 5.7).
@@ -2528,5 +2641,273 @@ fields:
         };
         run_close_out_of_band(&schema, &conn, &m, invoker, &sha).unwrap();
         assert_eq!(read_status(&conn), "closed_out_of_band");
+    }
+
+    // ---- T043: abandon verb tests ----
+
+    /// Schema mirroring the production tasks shape (subset): the 7 non-terminal
+    /// states allowed to abandon, plus the relevant terminal states for
+    /// refusal tests, the abandoned terminal, and the 7 abandon transitions.
+    const ABANDON_SCHEMA: &str = r#"
+name: tasks
+id_format: "T{:03d}"
+lifecycle:
+  states: [planning, plan_review, ready, executing, code_review, blocked, in_review, accepted, rejected, complete, schema_migrated, abandoned]
+  transitions:
+    - {from: planning, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: plan_review, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: ready, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: executing, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: code_review, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: blocked, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: in_review, to: abandoned, verb: abandon, actor: ai_with_human}
+fields:
+  - {name: title, type: text, required: true}
+  - {name: abandoned_reason, type: text, required: false}
+  - {name: abandoned_at, type: timestamp, required: false}
+"#;
+
+    fn setup_abandon() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(ABANDON_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
+        (schema, conn)
+    }
+
+    fn insert_abandon_row(conn: &Connection, display_id: &str, status: &str) {
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title) VALUES (?1, ?2, 'Test')",
+            rusqlite::params![display_id, status],
+        )
+        .unwrap();
+    }
+
+    fn build_abandon_cmd(schema: &Schema) -> clap::Command {
+        let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
+        let mut cmd = clap::Command::new("abandon")
+            .arg(clap::Arg::new("display_id").required(true).index(1));
+        for leaf in &leaves {
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name.clone())
+                    .required(false),
+            );
+        }
+        cmd = cmd.arg(clap::Arg::new("reason").long("reason").required(true));
+        cmd
+    }
+
+    fn read_abandon_row(conn: &Connection, display_id: &str) -> (String, Option<String>, Option<String>) {
+        conn.query_row(
+            "SELECT status, abandoned_reason, abandoned_at FROM tasks WHERE display_id = ?1",
+            rusqlite::params![display_id],
+            |r| Ok((r.get(0).unwrap(), r.get(1).ok(), r.get(2).ok())),
+        )
+        .unwrap()
+    }
+
+    /// AC1.3: abandon from each of the 7 allowed states succeeds and
+    /// writes abandoned_reason + abandoned_at.
+    #[test]
+    fn abandon_from_each_allowed_state_succeeds() {
+        for (idx, from_state) in [
+            "planning",
+            "plan_review",
+            "ready",
+            "executing",
+            "code_review",
+            "blocked",
+            "in_review",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let (schema, conn) = setup_abandon();
+            let id = format!("T{:03}", idx + 1);
+            insert_abandon_row(&conn, &id, from_state);
+
+            let cmd = build_abandon_cmd(&schema);
+            let matches = cmd.get_matches_from(["abandon", &id, "--reason", "stale"]);
+            run_abandon(&schema, &conn, &matches, Actor::Human.into(), "stale").unwrap();
+
+            let (status, reason, at) = read_abandon_row(&conn, &id);
+            assert_eq!(status, "abandoned", "from {from_state} must land at abandoned");
+            assert_eq!(reason.as_deref(), Some("stale"));
+            assert!(
+                at.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
+                "abandoned_at must be populated for {from_state}; got: {at:?}"
+            );
+        }
+    }
+
+    /// AC1.4: abandon from terminal states is refused.
+    #[test]
+    fn abandon_from_terminal_states_refused() {
+        for from_state in ["accepted", "rejected", "complete", "schema_migrated"] {
+            let (schema, conn) = setup_abandon();
+            insert_abandon_row(&conn, "T001", from_state);
+
+            let cmd = build_abandon_cmd(&schema);
+            let matches = cmd.get_matches_from(["abandon", "T001", "--reason", "x"]);
+            let err = run_abandon(&schema, &conn, &matches, Actor::Human.into(), "x")
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("abandon")
+                    || msg.contains("no transition")
+                    || msg.contains(from_state),
+                "expected no-transition error from {from_state}; got: {msg}"
+            );
+            // Row unchanged
+            let (status, reason, _at) = read_abandon_row(&conn, "T001");
+            assert_eq!(status, from_state, "row must be unchanged from {from_state}");
+            assert!(
+                reason.is_none(),
+                "abandoned_reason must remain null after rejected call"
+            );
+        }
+    }
+
+    /// AC1.5: idempotent — running abandon on an already-abandoned row is a no-op.
+    /// Second call must NOT add another transition_history row and must NOT
+    /// overwrite the original reason.
+    #[test]
+    fn abandon_idempotent_on_already_abandoned() {
+        let (schema, conn) = setup_abandon();
+        insert_abandon_row(&conn, "T001", "ready");
+
+        let cmd = build_abandon_cmd(&schema);
+        let matches = cmd.get_matches_from(["abandon", "T001", "--reason", "first"]);
+        run_abandon(&schema, &conn, &matches, Actor::Human.into(), "first").unwrap();
+
+        // Second call: should be a no-op (early return).
+        let cmd2 = build_abandon_cmd(&schema);
+        let matches2 = cmd2.get_matches_from(["abandon", "T001", "--reason", "second"]);
+        run_abandon(&schema, &conn, &matches2, Actor::Human.into(), "second").unwrap();
+
+        let (status, reason, _at) = read_abandon_row(&conn, "T001");
+        assert_eq!(status, "abandoned");
+        assert_eq!(
+            reason.as_deref(),
+            Some("first"),
+            "second call must not overwrite stored reason"
+        );
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE store='tasks' AND display_id='T001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "second call must not duplicate audit rows");
+    }
+
+    /// AC1.7: empty --reason rejected.
+    #[test]
+    fn abandon_empty_reason_rejected() {
+        let (schema, conn) = setup_abandon();
+        insert_abandon_row(&conn, "T001", "ready");
+
+        let cmd = build_abandon_cmd(&schema);
+        let matches = cmd.get_matches_from(["abandon", "T001", "--reason", "   "]);
+        let err = run_abandon(&schema, &conn, &matches, Actor::Human.into(), "   ")
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non-empty"),
+            "expected non-empty-reason error; got: {msg}"
+        );
+        // Row unchanged
+        let (status, _, _) = read_abandon_row(&conn, "T001");
+        assert_eq!(status, "ready");
+    }
+
+    /// AC1.6: tier-A enforcement — ai_autonomous invoker is rejected by the
+    /// schema's actor: ai_with_human gate.
+    #[test]
+    fn abandon_ai_autonomous_invoker_rejected() {
+        let (schema, conn) = setup_abandon();
+        insert_abandon_row(&conn, "T001", "ready");
+
+        let cmd = build_abandon_cmd(&schema);
+        let matches = cmd.get_matches_from(["abandon", "T001", "--reason", "x"]);
+        let err = run_abandon(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiAutonomous.into(),
+            "x",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ai_with_human"),
+            "expected error citing required actor 'ai_with_human'; got: {msg}"
+        );
+        assert!(
+            msg.contains("ai_autonomous"),
+            "expected error citing invoker 'ai_autonomous'; got: {msg}"
+        );
+        // Row unchanged
+        let (status, _, _) = read_abandon_row(&conn, "T001");
+        assert_eq!(status, "ready");
+    }
+
+    /// AC1.3 (audit): abandon writes a transition_history row with verb=abandon
+    /// and invoker matching the caller. Walk-through covers T032 (audit).
+    #[test]
+    fn abandon_writes_transition_history_audit_row() {
+        let (schema, conn) = setup_abandon();
+        insert_abandon_row(&conn, "T001", "blocked");
+
+        let cmd = build_abandon_cmd(&schema);
+        let matches = cmd.get_matches_from(["abandon", "T001", "--reason", "duplicate-shipped"]);
+        run_abandon(
+            &schema,
+            &conn,
+            &matches,
+            Actor::Human.into(),
+            "duplicate-shipped",
+        )
+        .unwrap();
+
+        let (from_status, to_status, verb, invoker): (String, String, String, String) = conn
+            .query_row(
+                "SELECT from_status, to_status, verb, invoker FROM transition_history \
+                 WHERE store='tasks' AND display_id='T001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(from_status, "blocked");
+        assert_eq!(to_status, "abandoned");
+        assert_eq!(verb, "abandon");
+        assert_eq!(invoker, "human");
+    }
+
+    /// T034 lifecycle walk-through: `abandoned` is terminal — there is no
+    /// outgoing transition declared from it.
+    #[test]
+    fn abandoned_is_terminal_no_outgoing_transitions() {
+        let schema = Schema::from_yaml(ABANDON_SCHEMA).unwrap();
+        let outgoing: Vec<_> = schema
+            .lifecycle
+            .transitions
+            .iter()
+            .filter(|t| t.from == "abandoned")
+            .collect();
+        assert!(
+            outgoing.is_empty(),
+            "abandoned must be terminal; found outgoing: {outgoing:?}"
+        );
+        assert!(
+            schema.lifecycle.states.iter().any(|s| s == "abandoned"),
+            "abandoned must be a declared lifecycle state"
+        );
     }
 }

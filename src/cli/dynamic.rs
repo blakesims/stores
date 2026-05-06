@@ -501,6 +501,18 @@ fn build_store_command(schema: &Schema) -> Command {
                     .required(true),
             );
         }
+        // `abandon` (T043) requires a human-supplied reason written to the
+        // top-level `abandoned_reason` field. The schema declares
+        // `abandoned_reason` as a non-required leaf, so we add a separate
+        // `--reason` flag here that the dispatcher routes into run_abandon.
+        if verb == "abandon" {
+            transition_cmd = transition_cmd.arg(
+                Arg::new("reason")
+                    .long("reason")
+                    .help("Why this row is being abandoned (written to abandoned_reason)")
+                    .required(true),
+            );
+        }
         // close_as_addressed (observations open → resolved) requires a reference
         // to the artifact that addressed the row: a task-id (T###), an
         // observation-id (L###), or a commit-sha (7-40 hex chars). Substrate
