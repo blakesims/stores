@@ -713,7 +713,9 @@ pub(crate) fn compute_submit_plan(
     match plan_json.get("phases") {
         Some(p) if p.is_array() && !p.as_array().unwrap().is_empty() => {}
         Some(p) if p.is_array() => {
-            bail!("submit-plan: plan.phases is an empty array; planner must emit at least one phase");
+            bail!(
+                "submit-plan: plan.phases is an empty array; planner must emit at least one phase"
+            );
         }
         Some(p) => {
             bail!(
@@ -1620,6 +1622,11 @@ pub(crate) fn compute_resume(
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    if current_status == "deploy_blocked" {
+        bail!(
+            "cannot resume: row is in state 'deploy_blocked'; deploy_blocked rows use retry-deploy or close-out-of-band, not resume"
+        );
+    }
     if current_status != "blocked" {
         bail!(
             "cannot resume: row is in state '{}', expected 'blocked'",
@@ -1745,6 +1752,16 @@ pub struct ResumeOutput {
     pub summary: String,
 }
 
+/// Structured output from retry-deploy handler. Distinct from `ResumeOutput`
+/// to reflect the handler-scope separation L145 requires (retry-deploy is not
+/// a resume — it re-fires the full deploy ceremony via subscriber chain).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryDeployOutput {
+    pub display_id: String,
+    pub new_status: String,
+    pub summary: String,
+}
+
 pub fn run_resume(
     schema: &Schema,
     conn: &Connection,
@@ -1752,6 +1769,100 @@ pub fn run_resume(
     invoker: InvokerCtx,
 ) -> Result<()> {
     let out = compute_resume(schema, conn, display_id, invoker.actor)?;
+    println!("{}", out.summary);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// retry-deploy: deploy_blocked → accepted (subscriber edge retry)
+// ---------------------------------------------------------------------------
+
+/// Retry the deploy ceremony by writing the schema-declared
+/// deploy_blocked → accepted edge. Subscribers observe the resulting
+/// transition_history row and re-run the existing ceremony; this handler does
+/// not directly call planner/executor/code-reviewer or deploy builtins.
+pub(crate) fn compute_retry_deploy(
+    schema: &Schema,
+    conn: &Connection,
+    display_id: &str,
+    invoker: Actor,
+) -> Result<RetryDeployOutput> {
+    require_workflow(schema, "retry-deploy")?;
+
+    let tx = conn
+        .unchecked_transaction()
+        .context("retry-deploy: begin tx")?;
+    acquire_lock(&tx, &schema.name, display_id, &invoker.to_string())?;
+
+    let (row_id, existing) = read_row(schema, &tx, display_id)?;
+    let current_status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if current_status != "deploy_blocked" {
+        bail!(
+            "cannot retry-deploy: row is in state '{}', expected 'deploy_blocked'",
+            current_status
+        );
+    }
+
+    let diff: EntryMap = BTreeMap::new();
+    validate::validate(
+        schema,
+        &existing,
+        Op::Transition("retry-deploy".to_string(), diff),
+        invoker.into(),
+    )
+    .map_err(|errs| {
+        anyhow::anyhow!(
+            "retry-deploy validation failed:\n{}",
+            validate::pretty_print(&errs)
+        )
+    })?;
+
+    let transition = find_transition(schema, "deploy_blocked", "retry-deploy", None, &existing)?;
+
+    let fw_fields: BTreeMap<String, i64> = BTreeMap::new();
+    let mut txt_fields: BTreeMap<String, String> = BTreeMap::new();
+    txt_fields.insert("blocked_reason".to_string(), String::new());
+
+    write_status_and_fields(
+        &tx,
+        &schema.name,
+        row_id,
+        &transition.to,
+        &invoker.to_string(),
+        &fw_fields,
+        &txt_fields,
+        Some(TransitionAudit {
+            display_id,
+            from_status: "deploy_blocked",
+            verb: "retry-deploy",
+            policy_ref: None,
+            policies_hash: None,
+        }),
+    )?;
+
+    release_lock(&tx, &schema.name, display_id)?;
+    tx.commit().context("retry-deploy: commit")?;
+
+    Ok(RetryDeployOutput {
+        display_id: display_id.to_string(),
+        new_status: transition.to.clone(),
+        summary: format!(
+            "Retrying deploy for {display_id}; status now: {}",
+            transition.to
+        ),
+    })
+}
+
+pub fn run_retry_deploy(
+    schema: &Schema,
+    conn: &Connection,
+    display_id: &str,
+    invoker: InvokerCtx,
+) -> Result<()> {
+    let out = compute_retry_deploy(schema, conn, display_id, invoker.actor)?;
     println!("{}", out.summary);
     Ok(())
 }
@@ -2298,7 +2409,8 @@ workflow:
             "phase": 1, "cycle": 1,
             "executor": {"summary": "ok", "commit": "abc"},
             "review": null
-        }])).unwrap();
+        }]))
+        .unwrap();
         // Insert T1 row at code_review with a synthesized 1-phase plan (the
         // post-T054 shape for a T1 row that has executed phase 1).
         let synthesized_plan = serde_json::to_string(&json!({
@@ -2311,7 +2423,8 @@ workflow:
                 "files": [],
                 "dependencies": []
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         conn.execute(
             "INSERT INTO wf_tasks (display_id, status, created_at, updated_at, \
              created_by, updated_by, title, tier_hint, current_phase, current_cycle, \
@@ -4669,7 +4782,10 @@ workflow:
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(tasks, vec!["bullet one".to_string(), "bullet two".to_string()]);
+        assert_eq!(
+            tasks,
+            vec!["bullet one".to_string(), "bullet two".to_string()]
+        );
         assert_eq!(
             phase["acceptance_criteria"].as_array().unwrap().len(),
             1,
@@ -4714,7 +4830,10 @@ workflow:
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(tasks3, vec!["do A".to_string(), "do B".to_string(), "do C".to_string()]);
+        assert_eq!(
+            tasks3,
+            vec!["do A".to_string(), "do B".to_string(), "do C".to_string()]
+        );
 
         // (d) empty scope_in → fallback single task
         let mut entry4: EntryMap = std::collections::BTreeMap::new();
@@ -4734,7 +4853,10 @@ workflow:
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(tasks4, vec!["Execute the ratified contract scope".to_string()]);
+        assert_eq!(
+            tasks4,
+            vec!["Execute the ratified contract scope".to_string()]
+        );
 
         // (e) phases.length always == 1, regardless of input
         for input in [&plan, &plan2, &plan3, &plan4] {
@@ -4878,11 +5000,9 @@ workflow:
         // see plan populated and skip synthesis, leaving plan unchanged.
         let tx = conn.unchecked_transaction().unwrap();
         let row_id: i64 = tx
-            .query_row(
-                "SELECT id FROM tasks WHERE display_id = 'T911'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM tasks WHERE display_id = 'T911'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         // Reset to planning to re-fire the cascade.
         tx.execute(
@@ -4905,5 +5025,109 @@ workflow:
             1,
             "re-firing skip-plan with plan already populated must be idempotent"
         );
+    }
+
+    fn setup_bundled_tasks_for_retry() -> (Schema, Connection) {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+        (task_schema, conn)
+    }
+
+    fn insert_task_for_retry(conn: &Connection, display_id: &str, status: &str) {
+        let now = "2026-05-07T00:00:00Z";
+        let contract = serde_json::to_string(&json!({
+            "done_when": "done",
+            "scope_in": "scope",
+            "scope_out": "out",
+        }))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, contract, current_phase, current_cycle, blocked_reason) \
+             VALUES (?1, ?2, ?3, ?3, 'framework', 'framework', \
+             'retry task', 'retry-task', 'feat/retry', '/tmp/no', ?4, 1, 1, 'deploy failed')",
+            rusqlite::params![display_id, status, now, contract],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn compute_resume_from_deploy_blocked_errors_with_guidance_and_row_unchanged() {
+        let (schema, conn) = setup_bundled_tasks_for_retry();
+        insert_task_for_retry(&conn, "T920", "deploy_blocked");
+
+        let err = compute_resume(&schema, &conn, "T920", Actor::AiWithHuman).unwrap_err();
+        let msg = err.to_string();
+        for needle in [
+            "deploy_blocked",
+            "retry-deploy",
+            "close-out-of-band",
+            "not resume",
+        ] {
+            assert!(msg.contains(needle), "missing {needle}: {msg}");
+        }
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id = 'T920'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "deploy_blocked");
+    }
+
+    #[test]
+    fn retry_deploy_from_deploy_blocked_to_accepted_records_history() {
+        let (schema, conn) = setup_bundled_tasks_for_retry();
+        insert_task_for_retry(&conn, "T921", "deploy_blocked");
+
+        let out = compute_retry_deploy(&schema, &conn, "T921", Actor::AiWithHuman).unwrap();
+        assert_eq!(out.new_status, "accepted");
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id = 'T921'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "accepted");
+        let row: (String, String, String) = conn
+            .query_row(
+                "SELECT from_status, to_status, verb FROM transition_history \
+                 WHERE store='tasks' AND display_id='T921'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "deploy_blocked".into(),
+                "accepted".into(),
+                "retry-deploy".into()
+            )
+        );
+    }
+
+    #[test]
+    fn retry_deploy_from_non_deploy_blocked_rejected() {
+        let (schema, conn) = setup_bundled_tasks_for_retry();
+        insert_task_for_retry(&conn, "T922", "blocked");
+
+        let err = compute_retry_deploy(&schema, &conn, "T922", Actor::AiWithHuman).unwrap_err();
+        assert!(err.to_string().contains("expected 'deploy_blocked'"));
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id = 'T922'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked");
     }
 }

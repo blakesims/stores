@@ -46,26 +46,43 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     // been cleaned up post-merge, resolve_main_repo() returns None and the
     // legacy code path falls into a no-op Ok(1). Probe via a usable main-repo
     // path (workspace_path if still live, else daemon cwd) and, if the branch
-    // is already merged into main, fire mark_cargo_installed and return Ok(0).
+    // is already merged into main, either fire mark_cargo_installed (solo path)
+    // or return a no-op success (cargo-install peer path).
+    //
+    // When cargo-install is also subscribed on the same accepted-entry edge,
+    // it is responsible for firing mark_cargo_installed after running the
+    // actual install. Firing it here would race: the row would advance to
+    // cargo_installed before cargo-install's subscriber runs, causing it to
+    // transition from the wrong state. So we check ctx.agents: if cargo-install
+    // is a peer subscriber on any accepted-entry edge, skip the fire and let
+    // cargo-install own the mark_cargo_installed step (L145 / codex-revise).
     if let Some(main_repo_for_check) = resolve_main_repo_for_check(workspace_path) {
         if is_branch_merged_into_main(&main_repo_for_check, branch) {
-            eprintln!(
-                "[accept-merge] {}: branch '{}' already merged into main; firing mark_cargo_installed (noop-merge)",
-                display_id, branch
-            );
-            fire_framework_transition(
-                ctx.conn,
-                display_id,
-                "mark_cargo_installed",
-                BTreeMap::new(),
-                ctx.policies_hash,
-            )
-            .with_context(|| {
-                format!(
-                    "firing mark_cargo_installed for already-merged {}",
-                    display_id
+            if cargo_install_subscribed_to_accepted(ctx) {
+                eprintln!(
+                    "[accept-merge] {}: branch '{}' already merged into main; cargo-install peer present — \
+                     skipping mark_cargo_installed (cargo-install will fire it)",
+                    display_id, branch
+                );
+            } else {
+                eprintln!(
+                    "[accept-merge] {}: branch '{}' already merged into main; firing mark_cargo_installed (noop-merge)",
+                    display_id, branch
+                );
+                fire_framework_transition(
+                    ctx.conn,
+                    display_id,
+                    "mark_cargo_installed",
+                    BTreeMap::new(),
+                    ctx.policies_hash,
                 )
-            })?;
+                .with_context(|| {
+                    format!(
+                        "firing mark_cargo_installed for already-merged {}",
+                        display_id
+                    )
+                })?;
+            }
             return Ok(0);
         }
     }
@@ -183,6 +200,18 @@ fn resolve_main_repo_for_check(workspace_path: &str) -> Option<PathBuf> {
         return None;
     }
     Some(cwd)
+}
+
+/// Returns true iff any agent in `ctx.agents` with the cargo-install command
+/// subscribes to a transition whose `to` is `"accepted"`. This is used by the
+/// already-merged short-circuit to decide whether to fire `mark_cargo_installed`
+/// directly (solo mode — no peer) or skip it and let the cargo-install subscriber
+/// run the actual install first (peer mode — retry-deploy chain, L145).
+fn cargo_install_subscribed_to_accepted(ctx: &DispatchCtx) -> bool {
+    ctx.agents.agents.iter().any(|a| {
+        a.command.trim_start_matches("builtin:") == "cargo-install"
+            && a.subscribes_to.iter().any(|s| s.transition.to == "accepted")
+    })
 }
 
 fn list_conflict_files(main_repo: &Path) -> Vec<String> {

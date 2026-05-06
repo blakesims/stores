@@ -8,9 +8,16 @@
 //! On failure flips the row to `deploy_blocked` with the tail of cargo's
 //! stderr captured in `blocked_reason`, fires `ntfy`, and dispatches the
 //! row to the configured `deployment_specialist`.
+//!
+//! Stale-workspace fallback (L145): when `workspace_path` is missing or
+//! unusable (worktree cleaned after merge), fall back to the daemon's cwd
+//! for the cargo install path. The cwd MUST be a git repo or the fallback
+//! fails loudly with guidance rather than silently installing from the wrong
+//! place. Mirrors accept-merge's `resolve_main_repo_for_check` pattern.
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use serde_json::Value;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::flow::builtins::{
@@ -28,22 +35,22 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if workspace_path.is_empty() {
+    let main_repo = if workspace_path.is_empty() {
         eprintln!(
-            "[cargo-install] {}: workspace_path empty; cannot locate project root",
+            "[cargo-install] {}: workspace_path empty; attempting daemon cwd fallback",
             display_id
         );
-        return Ok(1);
-    }
-
-    let main_repo = match resolve_main_repo(workspace_path) {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "[cargo-install] {}: could not resolve main repo from workspace_path '{}'",
-                display_id, workspace_path
-            );
-            return Ok(1);
+        resolve_main_repo_via_cwd(display_id)?
+    } else {
+        match resolve_main_repo(workspace_path) {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "[cargo-install] {}: workspace_path '{}' stale; installing from daemon cwd",
+                    display_id, workspace_path
+                );
+                resolve_main_repo_via_cwd(display_id)?
+            }
         }
     };
 
@@ -104,6 +111,125 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     dispatch_to_specialist(row, ctx, display_id, "cargo-install");
 
     Ok(0)
+}
+
+/// Resolve a main-repo path via the daemon's current working directory.
+///
+/// Validates that cwd is a git repo (via `git rev-parse --git-common-dir`) AND
+/// that the Cargo.toml at cwd belongs to the `stores` crate. Both checks must
+/// pass; failing either causes a loud bail with actionable guidance rather than
+/// silently installing from the wrong place.
+fn resolve_main_repo_via_cwd(display_id: &str) -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir().with_context(|| {
+        format!(
+            "[cargo-install] {}: could not read daemon cwd for stale-workspace fallback",
+            display_id
+        )
+    })?;
+
+    // Gate 1: cwd must be a git repository.
+    let out = Command::new("git")
+        .args([
+            "-C",
+            cwd.to_str().unwrap_or("."),
+            "rev-parse",
+            "--git-common-dir",
+        ])
+        .output()
+        .with_context(|| {
+            format!(
+                "[cargo-install] {}: git rev-parse failed in daemon cwd '{}'",
+                display_id,
+                cwd.display()
+            )
+        })?;
+    if !out.status.success() {
+        bail!(
+            "[cargo-install] {}: daemon cwd '{}' is not a git repository; \
+             cannot use as stale-workspace fallback. \
+             Fix: ensure the daemon is started from inside the stores repository.",
+            display_id,
+            cwd.display()
+        );
+    }
+
+    // Gate 2: cwd must be the stores crate, not just any git/Cargo repo.
+    // Read Cargo.toml and extract the [package] name field with a simple
+    // line-scan (no extra toml dep needed — the guard is correct for any
+    // realistic Cargo.toml layout).
+    let cargo_toml_path = cwd.join("Cargo.toml");
+    let cargo_toml = std::fs::read_to_string(&cargo_toml_path).map_err(|_| {
+        anyhow::anyhow!(
+            "[cargo-install] {}: daemon cwd '{}' does not contain a Cargo.toml; \
+             cannot install stores from here. \
+             Fix: restore workspace_path or start the daemon from inside the stores repository.",
+            display_id,
+            cwd.display()
+        )
+    })?;
+    let package_name = extract_cargo_package_name(&cargo_toml);
+    match package_name.as_deref() {
+        Some("stores") => {}
+        Some(other) => bail!(
+            "[cargo-install] {}: daemon cwd '{}' is a Cargo project ('{}') but not the stores crate; \
+             cannot install from here. \
+             Fix: restore workspace_path or invoke retry-deploy from the stores repository cwd.",
+            display_id,
+            cwd.display(),
+            other
+        ),
+        None => bail!(
+            "[cargo-install] {}: daemon cwd '{}' has a Cargo.toml but no parseable [package] name; \
+             cannot verify this is the stores crate. \
+             Fix: restore workspace_path or start the daemon from inside the stores repository.",
+            display_id,
+            cwd.display()
+        ),
+    }
+
+    eprintln!(
+        "[cargo-install] {}: workspace_path stale; installing stores crate from daemon cwd {}",
+        display_id,
+        cwd.display()
+    );
+    Ok(cwd)
+}
+
+/// Extract the `name` field from the `[package]` section of a Cargo.toml
+/// string using a simple line-scan. Returns `None` if the section or field is
+/// absent or unparseable. Does not depend on a toml-parsing crate.
+fn extract_cargo_package_name(toml: &str) -> Option<String> {
+    let mut in_package = false;
+    for line in toml.lines() {
+        let trimmed = line.trim();
+        // Section header detection.
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        // Match `name = "..."` (with optional whitespace around `=`,
+        // tolerant of a trailing inline comment like `name = "stores" # crate`).
+        // Guard against false-matching `namespace = ...` etc. by requiring the
+        // char after "name" to be whitespace or '='.
+        if let Some(rest) = trimmed.strip_prefix("name") {
+            if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
+                continue;
+            }
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim_start();
+                if let Some(after_open) = rest.strip_prefix('"') {
+                    if let Some(end) = after_open.find('"') {
+                        return Some(after_open[..end].to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Look up the `cargo-install` agent entry in agents.yaml and read its

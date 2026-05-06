@@ -203,6 +203,13 @@ pub fn dispatch(
                         .unwrap_or("");
                     handlers::submit::run_resume(schema, &conn, display_id, invoker)?;
                 }
+                Some(("retry-deploy", sub)) if schema.workflow.is_some() => {
+                    let display_id = sub
+                        .get_one::<String>("display_id")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    handlers::submit::run_retry_deploy(schema, &conn, display_id, invoker)?;
+                }
                 Some(("drive", sub)) => {
                     let display_id = sub.get_one::<String>("display_id").cloned();
                     let auto = sub.get_flag("auto");

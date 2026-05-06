@@ -47,7 +47,7 @@ stateDiagram-v2
   executing --> blocked :  F mark_drive_failed
   code_review --> blocked :  F mark_drive_failed
   accepted --> deploy_blocked :  F mark_deploy_blocked
-  deploy_blocked --> ready :  H+ resume
+  deploy_blocked --> accepted :  H+ retry-deploy
   accepted --> cargo_installed :  F mark_cargo_installed
   cargo_installed --> schema_migrated :  F mark_schema_migrated
   cargo_installed --> deploy_blocked :  F mark_deploy_blocked

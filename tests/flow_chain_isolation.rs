@@ -19,7 +19,9 @@ use std::process::Command;
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use stores::flow::builtins::{accept_merge, cargo_install, schema_migrate, DispatchCtx};
-use stores::flow::AgentsYaml;
+use stores::flow::{AgentsYaml, PoliciesYaml};
+use stores::handlers::{agents_run, submit};
+use stores::schema::actor::Actor;
 use stores::schema::Schema;
 
 fn git(repo: &Path, args: &[&str]) -> std::process::Output {
@@ -50,8 +52,7 @@ fn copy_dir(src: &Path, dst: &Path) {
 fn setup_chain_repo(branch: &str, unique: &str) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().to_path_buf();
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/cargo-install-noop");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-install-noop");
     copy_dir(&src, &repo);
 
     assert!(git(&repo, &["init", "-b", "main"]).status.success());
@@ -61,7 +62,11 @@ fn setup_chain_repo(branch: &str, unique: &str) -> (tempfile::TempDir, PathBuf) 
     git(&repo, &["commit", "-m", "init"]);
 
     git(&repo, &["checkout", "-b", branch]);
-    std::fs::write(repo.join(format!("{}.txt", unique)), format!("{}\n", unique)).unwrap();
+    std::fs::write(
+        repo.join(format!("{}.txt", unique)),
+        format!("{}\n", unique),
+    )
+    .unwrap();
     git(&repo, &["add", &format!("{}.txt", unique)]);
     git(&repo, &["commit", "-m", "feat"]);
     git(&repo, &["checkout", "main"]);
@@ -75,8 +80,7 @@ fn setup_chain_repo(branch: &str, unique: &str) -> (tempfile::TempDir, PathBuf) 
 fn setup_conflict_repo(branch: &str) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().to_path_buf();
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/cargo-install-noop");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-install-noop");
     copy_dir(&src, &repo);
 
     assert!(git(&repo, &["init", "-b", "main"]).status.success());
@@ -213,6 +217,25 @@ fn ac4_2_post_accept_chain_fixture_parses() {
     assert!(names.contains(&"schema-migrate"), "names: {:?}", names);
     assert!(names.contains(&"user-escalation"), "names: {:?}", names);
 
+    let accept = parsed
+        .agents
+        .iter()
+        .find(|a| a.name == "accept-merge")
+        .unwrap();
+    assert!(accept
+        .subscribes_to
+        .iter()
+        .any(|s| s.transition.from == "deploy_blocked" && s.transition.to == "accepted"));
+    let cargo = parsed
+        .agents
+        .iter()
+        .find(|a| a.name == "cargo-install")
+        .unwrap();
+    assert!(cargo
+        .subscribes_to
+        .iter()
+        .any(|s| s.transition.from == "deploy_blocked" && s.transition.to == "accepted"));
+
     let spec = parsed.deployment_specialist.as_deref();
     assert_eq!(spec, Some("user-escalation"));
     assert!(
@@ -317,4 +340,304 @@ fn ac4_1_chain_isolation_failure_does_not_block_peer() {
 
     std::env::remove_var("CARGO_HOME");
     std::env::remove_var("CARGO_TARGET_DIR");
+}
+
+/// retry-deploy writes deploy_blocked→accepted; daemon polling observes that
+/// edge and re-runs the normal accept-merge/cargo-install/schema-migrate chain.
+#[test]
+fn retry_deploy_daemon_poll_retries_post_accept_chain() {
+    let cargo_home = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    std::env::set_var("CARGO_HOME", cargo_home.path());
+    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
+
+    let (_tmp, repo) = setup_chain_repo("feat/retry", "retry-only");
+    let conn = fresh_db_with_substrate();
+    insert_accepted_task(&conn, "T200", "feat/retry", repo.to_str().unwrap());
+    conn.execute(
+        "UPDATE tasks SET status='deploy_blocked', blocked_reason='fixed before retry' WHERE display_id='T200'",
+        [],
+    )
+    .unwrap();
+
+    let task_schema = Schema::from_yaml(
+        BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .unwrap(),
+    )
+    .unwrap();
+    submit::run_retry_deploy(&task_schema, &conn, "T200", Actor::AiWithHuman.into()).unwrap();
+    assert_eq!(status_of(&conn, "T200"), "accepted");
+
+    let yaml = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agents-yaml/post-accept-chain.yaml"),
+    )
+    .unwrap();
+    let agents = AgentsYaml::from_yaml(&yaml).unwrap();
+    let policies = PoliciesYaml::from_yaml("policies: []\n").unwrap();
+    let cfg = cfg_path();
+
+    let n1 = agents_run::poll_once(&conn, &agents, &policies, &cfg, "retry-test", "").unwrap();
+    assert!(
+        n1 >= 3,
+        "retry edge should dispatch accept-merge, cargo-install, and schema-migrate through subscriber polling; got {n1}"
+    );
+    assert_eq!(status_of(&conn, "T200"), "schema_migrated");
+    assert_eq!(count_history(&conn, "T200", "retry-deploy"), 1);
+    assert_eq!(count_history(&conn, "T200", "mark_cargo_installed"), 1);
+    assert_eq!(count_history(&conn, "T200", "mark_schema_migrated"), 1);
+
+    let workflow_dispatches: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM dispatch_locks WHERE display_id='T200' AND agent_name IN ('planner','executor','code_reviewer','plan_reviewer')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(workflow_dispatches, 0);
+
+    std::env::remove_var("CARGO_HOME");
+    std::env::remove_var("CARGO_TARGET_DIR");
+}
+
+/// T061 codex-revise round 2: stale-workspace retry-deploy chain.
+///
+/// Setup: T997 in deploy_blocked, branch `feat/T997-stale` already merged
+/// into main, workspace cleaned (stale path). Daemon cwd is the live main
+/// repo.
+///
+/// Assert:
+///   - accept_merge no-ops (branch already merged, cargo-install peer
+///     present — round-1 guard prevents mark_cargo_installed).
+///   - cargo_install detects stale workspace, falls back to cwd, ACTUALLY
+///     runs and fires mark_cargo_installed.
+///   - Row reaches `cargo_installed` (not stranded at `accepted`).
+///   - transition_history shows mark_cargo_installed with invoker='framework'.
+#[test]
+fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
+    let cargo_home = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    std::env::set_var("CARGO_HOME", cargo_home.path());
+    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
+
+    // Build a valid cargo repo + git repo that has the branch already merged.
+    let (tmp, repo) = setup_chain_repo("feat/T997-stale", "t997-stale-unique");
+
+    // Pre-merge the branch into main so accept-merge's already-merged probe
+    // returns true.
+    assert!(
+        git(&repo, &["merge", "--no-ff", "--no-edit", "feat/T997-stale"])
+            .status
+            .success(),
+        "pre-merge feat/T997-stale into main must succeed"
+    );
+
+    let conn = fresh_db_with_substrate();
+
+    // Stale workspace path — worktree was cleaned after the original merge.
+    let stale_workspace = tmp.path().join("worktrees/T997-gone");
+    insert_accepted_task(
+        &conn,
+        "T997",
+        "feat/T997-stale",
+        stale_workspace.to_str().unwrap(),
+    );
+
+    // Simulate retry-deploy: mark row deploy_blocked then retry.
+    conn.execute(
+        "UPDATE tasks SET status='deploy_blocked', blocked_reason='prior cargo failure' WHERE display_id='T997'",
+        [],
+    )
+    .unwrap();
+
+    let task_schema = Schema::from_yaml(
+        BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .unwrap(),
+    )
+    .unwrap();
+    submit::run_retry_deploy(
+        &task_schema,
+        &conn,
+        "T997",
+        Actor::AiWithHuman.into(),
+    )
+    .unwrap();
+    assert_eq!(status_of(&conn, "T997"), "accepted");
+
+    // Use production agents.yaml fixture (cargo-install is a peer subscriber
+    // on deploy_blocked→accepted) so the accept-merge peer-detection guard fires.
+    let yaml = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/agents-yaml/post-accept-chain.yaml"),
+    )
+    .unwrap();
+    let agents = AgentsYaml::from_yaml(&yaml).unwrap();
+    let cfg = cfg_path();
+
+    // Set daemon cwd to the live repo so cargo-install's cwd fallback works.
+    // Round-3: the cwd validation now requires Cargo.toml [package] name = "stores".
+    // The noop fixture uses a different name, so overwrite it before cd-ing in.
+    let stores_cargo_toml = format!(
+        "[package]\nname = \"stores\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
+         [[bin]]\nname = \"stores\"\npath = \"src/main.rs\"\n\
+         [features]\ndefault = []\nrunner-claude-code = []\n"
+    );
+    std::fs::write(repo.join("Cargo.toml"), &stores_cargo_toml)
+        .expect("overwrite Cargo.toml to name=stores for cwd validation");
+
+    let _cwd_g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let old_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&repo).expect("set daemon cwd to live repo");
+
+    let ctx = DispatchCtx {
+        conn: &conn,
+        agents: &agents,
+        config_path: &cfg,
+        policies_hash: "",
+    };
+
+    // Step 1: accept-merge — branch already merged, cargo-install peer present.
+    // Must no-op (not fire mark_cargo_installed). Row stays at accepted.
+    let row = task_row_json(&conn, "T997");
+    let am_rc = accept_merge::run(&row, &ctx).expect("accept-merge T997");
+    assert_eq!(am_rc, 0, "accept-merge must succeed (no-op)");
+    assert_eq!(
+        status_of(&conn, "T997"),
+        "accepted",
+        "accept-merge must not advance row when cargo-install peer present"
+    );
+    assert_eq!(
+        count_history(&conn, "T997", "mark_cargo_installed"),
+        0,
+        "accept-merge must not fire mark_cargo_installed when cargo-install peer present"
+    );
+
+    // Step 2: cargo-install — stale workspace, falls back to cwd (the live repo),
+    // runs install, fires mark_cargo_installed. Row advances to cargo_installed.
+    let row = task_row_json(&conn, "T997");
+    let ci_rc = cargo_install::run(&row, &ctx).expect("cargo-install T997");
+
+    std::env::set_current_dir(&old_cwd).expect("restore cwd");
+    drop(_cwd_g);
+
+    assert_eq!(ci_rc, 0, "cargo-install must succeed via cwd fallback");
+
+    // Row must have advanced to cargo_installed (not stranded at accepted).
+    assert_eq!(
+        status_of(&conn, "T997"),
+        "cargo_installed",
+        "T997 must reach cargo_installed (not stranded at accepted)"
+    );
+
+    // mark_cargo_installed must appear in transition_history with invoker=framework.
+    assert_eq!(
+        count_history(&conn, "T997", "mark_cargo_installed"),
+        1,
+        "T997 must have exactly one mark_cargo_installed history row"
+    );
+    let invoker: String = conn
+        .query_row(
+            "SELECT invoker FROM transition_history \
+             WHERE store='tasks' AND display_id='T997' AND verb='mark_cargo_installed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        invoker, "framework",
+        "mark_cargo_installed must be fired by framework actor"
+    );
+
+    std::env::remove_var("CARGO_HOME");
+    std::env::remove_var("CARGO_TARGET_DIR");
+}
+
+/// T061 codex-revise round 3: cwd fallback must reject non-stores Cargo crates.
+///
+/// Setup: T996 in accepted (stale workspace), daemon cwd is a git repo whose
+/// Cargo.toml has [package] name = "not_stores" — a different crate.
+///
+/// Assert:
+///   - cargo_install::run returns Err containing "not the stores crate".
+///   - Row does NOT advance to cargo_installed (no mark_cargo_installed entry).
+#[test]
+fn cargo_install_cwd_fallback_rejects_wrong_crate() {
+    // Build a git repo whose Cargo.toml names a non-stores crate.
+    let tmp = tempfile::tempdir().unwrap();
+    let wrong_repo = tmp.path().to_path_buf();
+
+    // Minimal Cargo project with the wrong package name.
+    std::fs::create_dir_all(wrong_repo.join("src")).unwrap();
+    std::fs::write(
+        wrong_repo.join("Cargo.toml"),
+        "[package]\nname = \"not_stores\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+         [[bin]]\nname = \"not_stores\"\npath = \"src/main.rs\"\n",
+    )
+    .unwrap();
+    std::fs::write(wrong_repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    // Make it a git repo so the git-repo gate passes.
+    assert!(git(&wrong_repo, &["init", "-b", "main"]).status.success());
+    git(&wrong_repo, &["config", "user.email", "test@example.com"]);
+    git(&wrong_repo, &["config", "user.name", "Test"]);
+    git(&wrong_repo, &["add", "."]);
+    git(&wrong_repo, &["commit", "-m", "init"]);
+
+    let conn = fresh_db_with_substrate();
+    // Stale workspace path (won't be accessed; cargo_install bails before cargo).
+    let stale = wrong_repo.join("worktrees/T996-gone");
+    insert_accepted_task(
+        &conn,
+        "T996",
+        "feat/T996-wrong-crate",
+        stale.to_str().unwrap(),
+    );
+
+    let agents = AgentsYaml::default_empty();
+    let cfg = cfg_path();
+    let ctx = DispatchCtx {
+        conn: &conn,
+        agents: &agents,
+        config_path: &cfg,
+        policies_hash: "",
+    };
+
+    // Hold cwd lock and set cwd to the wrong-crate repo.
+    let _cwd_g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let old_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&wrong_repo).expect("set cwd to wrong-crate repo");
+
+    let row = task_row_json(&conn, "T996");
+    let result = cargo_install::run(&row, &ctx);
+
+    std::env::set_current_dir(&old_cwd).expect("restore cwd");
+    drop(_cwd_g);
+
+    // Must return Err, not Ok.
+    assert!(result.is_err(), "cargo_install must fail for non-stores cwd crate");
+    let err_msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        err_msg.contains("not the stores crate"),
+        "error must mention 'not the stores crate'; got: {err_msg}"
+    );
+
+    // Row must NOT have advanced to cargo_installed.
+    assert_eq!(
+        status_of(&conn, "T996"),
+        "accepted",
+        "T996 must remain at accepted (cargo_install bailed before transition)"
+    );
+    assert_eq!(
+        count_history(&conn, "T996", "mark_cargo_installed"),
+        0,
+        "T996 must have zero mark_cargo_installed history rows"
+    );
 }

@@ -424,6 +424,7 @@ fn build_store_command(schema: &Schema) -> Command {
         "submit-review",
         "submit-wrap",
         "resume",
+        "retry-deploy",
     ];
 
     let mut store_cmd = Command::new(schema.name.clone())
@@ -449,6 +450,7 @@ fn build_store_command(schema: &Schema) -> Command {
             .subcommand(build_submit_review_cmd())
             .subcommand(build_submit_wrap_cmd())
             .subcommand(build_resume_cmd())
+            .subcommand(build_retry_deploy_cmd())
             .subcommand(build_guide_cmd());
     }
 
@@ -750,14 +752,21 @@ fn build_submit_wrap_cmd() -> Command {
 /// Build the `resume` command.
 fn build_resume_cmd() -> Command {
     Command::new("resume")
-        .about("Resume a blocked workflow entry (blocked → ready → executing)")
+        .about("Resume blocked work-cycle execution (blocked → ready/planning; not deploy_blocked recovery)")
         .arg(Arg::new("display_id").help("Display ID").required(true))
         .arg(
             Arg::new("summary")
                 .long("summary")
-                .help("Optional reason for resuming")
+                .help("Optional reason for resuming blocked work-cycle execution")
                 .required(false),
         )
+}
+
+/// Build the `retry-deploy` command.
+fn build_retry_deploy_cmd() -> Command {
+    Command::new("retry-deploy")
+        .about("Retry deploy-blocked release ceremony (deploy_blocked → accepted; use after fixing deploy issue)")
+        .arg(Arg::new("display_id").help("Display ID").required(true))
 }
 
 /// Build the `status` command.
