@@ -449,12 +449,11 @@ fn reject_noise_routes_to_dropped_state() {
     assert_eq!(status, "dropped");
 }
 
-// ---- Additional: route without gatekeeper_decision_json still works (nullable field) ----
+// ---- FIX 2: route without gatekeeper_decision_json is now rejected fail-loud ----
 
 #[test]
-fn route_without_gatekeeper_decision_json_allowed() {
-    // The gatekeeper_decision_json field is required: false in the schema.
-    // A route can proceed without it (the validator only fires when the field is set).
+fn route_without_gatekeeper_decision_json_rejected() {
+    // gatekeeper_decision_json is mandatory for route. Omitting it must fail with a clear error.
     let schema = intake_schema();
     let conn = fresh_db(&schema);
     insert_triaging_row(&conn, "I001");
@@ -470,26 +469,69 @@ fn route_without_gatekeeper_decision_json_allowed() {
         );
     }
 
-    // route without --gatekeeper-decision-json; required_when for duplicate_of fires
-    // because decision=duplicate needs duplicate_of. Use reject_noise (no side-effects needed).
     let matches = cmd.get_matches_from([
         "route",
         "I001",
         "--decision",
         "reject_noise",
+        // Intentionally omitting --gatekeeper-decision-json
     ]);
 
-    // Should succeed: no gatekeeper_decision_json validation runs for null field
-    transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route").unwrap();
+    let result = transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route");
+    assert!(result.is_err(), "route without gatekeeper_decision_json must be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("gatekeeper_decision_json is required"),
+        "error must mention gatekeeper_decision_json is required; got: {err}"
+    );
+}
 
-    let status: String = conn
-        .query_row(
-            "SELECT status FROM intake WHERE display_id = 'I001'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(status, "dropped");
+// ---- FIX 3: --decision must match gatekeeper_decision_json.decision ----
+
+#[test]
+fn route_decision_mismatch_between_cli_and_json_rejected() {
+    // --decision and gatekeeper_decision_json.decision must be identical.
+    let schema = intake_schema();
+    let conn = fresh_db(&schema);
+    insert_triaging_row(&conn, "I001");
+
+    let leaves = stores::schema::flatten::leaf_args(&schema).unwrap();
+    let mut cmd = clap::Command::new("route")
+        .arg(clap::Arg::new("display_id").required(true).index(1));
+    for leaf in &leaves {
+        cmd = cmd.arg(
+            clap::Arg::new(leaf.cli_name.clone())
+                .long(leaf.cli_name.clone())
+                .required(false),
+        );
+    }
+
+    // CLI says reject_noise but JSON says normal_observation
+    let decision_json = serde_json::json!({
+        "decision": "normal_observation",
+        "confidence": "medium",
+        "rationale": "Mismatch test.",
+        "tier_hint": "T2",
+        "risk_flags": ["small_local_fix"],
+        "cluster_key": "dispatch-lifecycle"
+    }).to_string();
+
+    let matches = cmd.get_matches_from([
+        "route",
+        "I001",
+        "--decision",
+        "reject_noise",
+        "--gatekeeper-decision-json",
+        &decision_json,
+    ]);
+
+    let result = transition::run(&schema, &conn, &matches, Actor::AiAutonomous.into(), "route");
+    assert!(result.is_err(), "mismatched decision must be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("does not match"),
+        "error must mention decision mismatch; got: {err}"
+    );
 }
 
 // T053 P3 integration test: full transition::run flow without pre-supplied routed_to_observation
