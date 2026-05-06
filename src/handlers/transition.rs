@@ -432,11 +432,12 @@ pub(crate) fn run_in_tx(
         &merged,
     )?;
 
-    // T053 P3: intake pre-validation side effects.  Fires BEFORE validate() so that
-    // required_when fields (routed_to_observation, routed_to_arch_review) are populated
-    // via auto-created side-effect rows before the validator checks them.  The caller's
-    // transaction guarantees atomicity: if obs creation fails the intake transition rolls back.
+    // T053 P2/P3: validate + mirror the gatekeeper payload BEFORE routing side-effects.
+    // The observation side-effect needs the derived L143 columns in `merged` so the
+    // resulting observation and the intake transition are written atomically with the
+    // same gatekeeper-derived risk_class / approval_policy / risk_flags / cluster_key.
     if schema.name == "intake" && matches!(verb, "route" | "escalate-arch-review") {
+        maybe_validate_and_mirror_gatekeeper_decision(schema, &mut diff, &mut merged)?;
         super::intake_route::inject_pre_validation_fields(
             tx,
             &mut diff,
@@ -461,12 +462,6 @@ pub(crate) fn run_in_tx(
         merged.insert("current_cycle".to_string(), Value::Number(0.into()));
         diff.insert("current_phase".to_string(), Value::Number(0.into()));
         diff.insert("current_cycle".to_string(), Value::Number(0.into()));
-    }
-
-    // T053 P2: gatekeeper-specific validation + field mirroring for the intake store.
-    // Fires on route and escalate-arch-review verbs when gatekeeper_decision_json is present.
-    if schema.name == "intake" && matches!(verb, "route" | "escalate-arch-review") {
-        maybe_validate_and_mirror_gatekeeper_decision(schema, &mut diff, &mut merged)?;
     }
 
     // Write: UPDATE merged fields + status = transition.to + updated_*

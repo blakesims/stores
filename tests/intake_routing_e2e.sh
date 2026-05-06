@@ -30,7 +30,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "=== stores intake routing e2e (T053 Phase 3) ==="
 echo "tmp dir: $TMP"
-echo "stores binary: $(command -v stores)"
+STORES_BIN="${STORES_BIN:-$STORES_ROOT/target/debug/stores}"
+if [[ ! -x "$STORES_BIN" ]]; then
+    STORES_BIN="$(command -v stores)"
+fi
+echo "stores binary: $STORES_BIN"
 echo ""
 
 cd "$TMP"
@@ -39,10 +43,10 @@ cd "$TMP"
 # Setup: init + install both stores
 # ---------------------------------------------------------------------------
 echo "--- Setup: init + install stores"
-stores init
+"$STORES_BIN" init
 
-stores install "$STORES_ROOT/stores/intake_items"
-stores install "$STORES_ROOT/stores/observations"
+"$STORES_BIN" install "$STORES_ROOT/stores/intake_items"
+"$STORES_BIN" install "$STORES_ROOT/stores/observations"
 
 sqlite3 .stores/db.sqlite ".tables" | grep -q "intake" || fail "intake table not created"
 sqlite3 .stores/db.sqlite ".tables" | grep -q "observations" || fail "observations table not created"
@@ -53,7 +57,7 @@ pass "stores installed"
 # ---------------------------------------------------------------------------
 add_triaging_item() {
     local summary="$1"
-    CLAUDECODE=1 stores intake add --invoker ai_autonomous \
+    CLAUDECODE=1 "$STORES_BIN" intake add --invoker ai_autonomous \
         --summary "$summary" \
         --source-agent executor \
         --captured-at "2026-05-06T10:00:00Z" \
@@ -66,7 +70,7 @@ add_triaging_item() {
         "SELECT display_id FROM intake ORDER BY id DESC LIMIT 1")
 
     # Claim triage
-    CLAUDECODE=1 stores intake claim-triage "$id" --invoker ai_autonomous > /dev/null
+    CLAUDECODE=1 "$STORES_BIN" intake claim-triage "$id" --invoker ai_autonomous > /dev/null
 
     echo "$id"
 }
@@ -77,18 +81,18 @@ add_triaging_item() {
 echo "--- Decision 1: duplicate"
 
 # Create source item with a known cluster_key (set directly for test convenience)
-CLAUDECODE=1 stores intake add --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake add --invoker ai_autonomous \
     --summary "source item for duplicate test" \
     --source-agent executor \
     --captured-at "2026-05-06T10:00:00Z" \
     --captured-week "w19-d2" \
     > /dev/null
 SRC_ID=$(sqlite3 .stores/db.sqlite "SELECT display_id FROM intake ORDER BY id DESC LIMIT 1")
-CLAUDECODE=1 stores intake claim-triage "$SRC_ID" --invoker ai_autonomous > /dev/null
+CLAUDECODE=1 "$STORES_BIN" intake claim-triage "$SRC_ID" --invoker ai_autonomous > /dev/null
 
 # Route source as normal_observation so it gets a cluster_key
 DEC_JSON_SRC='{"decision":"normal_observation","confidence":"high","rationale":"source","tier_hint":"T2","risk_flags":["small_local_fix"],"cluster_key":"dispatch-lifecycle"}'
-CLAUDECODE=1 stores intake route "$SRC_ID" --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake route "$SRC_ID" --invoker ai_autonomous \
     --decision normal_observation \
     --gatekeeper-decision-json "$DEC_JSON_SRC" \
     > /dev/null
@@ -100,7 +104,7 @@ SRC_CK=$(sqlite3 .stores/db.sqlite "SELECT cluster_key FROM intake WHERE display
 DUP_ID=$(add_triaging_item "duplicate of source item")
 
 DEC_JSON_DUP='{"decision":"duplicate","confidence":"high","rationale":"already filed","cluster_key":"dispatch-lifecycle","duplicate_candidates":["'"$SRC_ID"'"]}'
-CLAUDECODE=1 stores intake route "$DUP_ID" --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake route "$DUP_ID" --invoker ai_autonomous \
     --decision duplicate \
     --duplicate-of "$SRC_ID" \
     --gatekeeper-decision-json "$DEC_JSON_DUP" \
@@ -126,7 +130,7 @@ echo "--- Decision 2: fast_track"
 FT_ID=$(add_triaging_item "fast track eligible item")
 
 DEC_JSON_FT='{"decision":"fast_track","confidence":"high","rationale":"Tiny doc fix.","tier_hint":"T1","risk_flags":["docs_only"]}'
-CLAUDECODE=1 stores intake route "$FT_ID" --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake route "$FT_ID" --invoker ai_autonomous \
     --decision fast_track \
     --gatekeeper-decision-json "$DEC_JSON_FT" \
     > /dev/null
@@ -154,7 +158,7 @@ echo "--- Decision 3: normal_observation"
 NO_ID=$(add_triaging_item "stale pid files causing dispatch confusion")
 
 DEC_JSON_NO='{"decision":"normal_observation","confidence":"medium","rationale":"Stale lock files.","tier_hint":"T2","risk_flags":["small_local_fix"],"cluster_key":"dispatch-lifecycle"}'
-CLAUDECODE=1 stores intake route "$NO_ID" --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake route "$NO_ID" --invoker ai_autonomous \
     --decision normal_observation \
     --gatekeeper-decision-json "$DEC_JSON_NO" \
     > /dev/null
@@ -186,7 +190,7 @@ AR_ID=$(add_triaging_item "proposed change to actor authority surface")
 DEC_JSON_AR='{"decision":"arch_review_candidate","confidence":"high","rationale":"Touches actor authority — needs arch review.","tier_hint":"T3","risk_flags":["touches_actor_authority","authority_surface_drift"],"cluster_key":"actor-authority"}'
 
 # arch_review_candidate uses escalate-arch-review verb
-CLAUDECODE=1 stores intake escalate-arch-review "$AR_ID" --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake escalate-arch-review "$AR_ID" --invoker ai_autonomous \
     --decision arch_review_candidate \
     --gatekeeper-decision-json "$DEC_JSON_AR" \
     > /dev/null
@@ -213,7 +217,7 @@ echo "--- Decision 5: needs_info + recon-return"
 NI_ID=$(add_triaging_item "ambiguous friction report")
 
 DEC_JSON_NI='{"decision":"needs_info","confidence":"low","rationale":"Need reproduction steps.","missing_info_question":"What is the exact command that failed?"}'
-CLAUDECODE=1 stores intake route "$NI_ID" --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake route "$NI_ID" --invoker ai_autonomous \
     --decision needs_info \
     --gatekeeper-decision-json "$DEC_JSON_NI" \
     > /dev/null
@@ -224,7 +228,7 @@ NI_MIQ=$(sqlite3 .stores/db.sqlite "SELECT missing_info_question FROM intake WHE
 [[ "$NI_MIQ" == "What is the exact command that failed?" ]] || fail "needs_info: missing_info_question wrong; got: $NI_MIQ"
 
 # Round 1: recon-return with evidence
-CLAUDECODE=1 stores intake recon-return "$NI_ID" --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake recon-return "$NI_ID" --invoker ai_autonomous \
     --evidence '{"kind":"repro","summary":"runs stores intake route","path":"src/handlers/transition.rs","line":460}' \
     > /dev/null
 
@@ -235,21 +239,27 @@ NI_STATUS2=$(sqlite3 .stores/db.sqlite "SELECT status FROM intake WHERE display_
 pass "needs_info: recon_round=1, status=triaging after first recon-return"
 
 # Route needs_info again (second round)
-CLAUDECODE=1 stores intake route "$NI_ID" --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake route "$NI_ID" --invoker ai_autonomous \
     --decision needs_info \
     --gatekeeper-decision-json "$DEC_JSON_NI" \
     > /dev/null
 
 # Round 2: recon-return (recon_round should become 2 — the cap)
-CLAUDECODE=1 stores intake recon-return "$NI_ID" --invoker ai_autonomous > /dev/null
+CLAUDECODE=1 "$STORES_BIN" intake recon-return "$NI_ID" --invoker ai_autonomous > /dev/null
 NI_ROUND2=$(sqlite3 .stores/db.sqlite "SELECT recon_round FROM intake WHERE display_id='$NI_ID'")
 [[ "$NI_ROUND2" == "2" ]] || fail "needs_info: recon_round must be 2 after second return; got: $NI_ROUND2"
 pass "needs_info: recon_round=2 at cap limit"
 
-# Round 3: recon-return should be REJECTED (cap=2 exceeded)
-NI_ERR_OUT=$(CLAUDECODE=1 stores intake recon-return "$NI_ID" --invoker ai_autonomous 2>&1 || true)
+# Route needs_info a third time, then recon-return should be REJECTED (cap=2 exceeded)
+CLAUDECODE=1 "$STORES_BIN" intake route "$NI_ID" --invoker ai_autonomous \
+    --decision needs_info \
+    --gatekeeper-decision-json "$DEC_JSON_NI" \
+    > /dev/null
+NI_ERR_OUT=$(CLAUDECODE=1 "$STORES_BIN" intake recon-return "$NI_ID" --invoker ai_autonomous 2>&1 || true)
 echo "$NI_ERR_OUT" | grep -qi "cap\|exceeded\|max" \
     || fail "needs_info: third recon-return should fail with cap error; got: $NI_ERR_OUT"
+NI_STATUS_CAP=$(sqlite3 .stores/db.sqlite "SELECT status FROM intake WHERE display_id='$NI_ID'")
+[[ "$NI_STATUS_CAP" == "needs_info" ]] || fail "needs_info: failed capped recon-return must roll back to needs_info; got: $NI_STATUS_CAP"
 pass "needs_info: third recon-return correctly rejected (cap exceeded)"
 
 # ---------------------------------------------------------------------------
@@ -260,7 +270,7 @@ echo "--- Decision 6: reject_noise + amend recovery"
 RN_ID=$(add_triaging_item "duplicate log line appearing in output")
 
 DEC_JSON_RN='{"decision":"reject_noise","confidence":"high","rationale":"Already-resolved symptom re-appearing."}'
-CLAUDECODE=1 stores intake route "$RN_ID" --invoker ai_autonomous \
+CLAUDECODE=1 "$STORES_BIN" intake route "$RN_ID" --invoker ai_autonomous \
     --decision reject_noise \
     --gatekeeper-decision-json "$DEC_JSON_RN" \
     > /dev/null
@@ -269,18 +279,20 @@ RN_STATUS=$(sqlite3 .stores/db.sqlite "SELECT status FROM intake WHERE display_i
 [[ "$RN_STATUS" == "dropped" ]] || fail "reject_noise: expected status=dropped; got: $RN_STATUS"
 pass "reject_noise: status=dropped (terminal)"
 
+# AC3.5: ai_autonomous on amend must be rejected while the row is dropped
+RN_AUTH_ERR=$(CLAUDECODE=1 "$STORES_BIN" intake amend "$RN_ID" --invoker ai_autonomous 2>&1 || true)
+echo "$RN_AUTH_ERR" | grep -qi "actor\|autonomous\|permission\|unauthorized\|invoker" \
+    || fail "amend with ai_autonomous should be rejected; got: $RN_AUTH_ERR"
+RN_STILL_DROPPED=$(sqlite3 .stores/db.sqlite "SELECT status FROM intake WHERE display_id='$RN_ID'")
+[[ "$RN_STILL_DROPPED" == "dropped" ]] || fail "failed ai_autonomous amend must leave status=dropped; got: $RN_STILL_DROPPED"
+pass "amend --invoker ai_autonomous correctly rejected"
+
 # AC3.5: amend with ai_with_human recovers dropped → triaging
-stores intake amend "$RN_ID" --invoker ai_with_human > /dev/null
+"$STORES_BIN" intake amend "$RN_ID" --invoker ai_with_human > /dev/null
 
 RN_AMENDED=$(sqlite3 .stores/db.sqlite "SELECT status FROM intake WHERE display_id='$RN_ID'")
 [[ "$RN_AMENDED" == "triaging" ]] || fail "amend: expected status=triaging; got: $RN_AMENDED"
 pass "reject_noise + amend: dropped → triaging recovered"
-
-# AC3.5: ai_autonomous on amend must be rejected
-RN_AUTH_ERR=$(CLAUDECODE=1 stores intake amend "$RN_ID" --invoker ai_autonomous 2>&1 || true)
-echo "$RN_AUTH_ERR" | grep -qi "actor\|autonomous\|permission\|unauthorized\|invoker" \
-    || fail "amend with ai_autonomous should be rejected; got: $RN_AUTH_ERR"
-pass "amend --invoker ai_autonomous correctly rejected"
 
 # ---------------------------------------------------------------------------
 # AC3.6 recap: SELECT from the normal_observation obs row

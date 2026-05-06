@@ -112,6 +112,7 @@ pub(crate) fn inject_pre_validation_fields(
 
                 let notes = json!({
                     "fast_track_audit": {
+                        "decision_blob": gdj,
                         "gatekeeper_rationale": rationale,
                         "deterministic_check_pending": true
                     }
@@ -429,12 +430,17 @@ fn insert_observation_row(tx: &Transaction, fields: &ObsFields) -> Result<String
     Ok(display_id)
 }
 
-/// Look up the cluster_key of an intake item (I###) by display_id.
+/// Look up the cluster_key of an intake item (I###) or observation (L###) by display_id.
 /// Returns None if the row doesn't exist or has no cluster_key set.
 fn lookup_cluster_key(tx: &Transaction, display_id: &str) -> Result<Option<String>> {
+    let table = if display_id.starts_with('L') {
+        "observations"
+    } else {
+        "intake"
+    };
     let result: Option<Option<String>> = tx
         .query_row(
-            "SELECT cluster_key FROM intake WHERE display_id = ?1",
+            &format!("SELECT cluster_key FROM {table} WHERE display_id = ?1"),
             rusqlite::params![display_id],
             |r| r.get(0),
         )
