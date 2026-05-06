@@ -2645,26 +2645,27 @@ fields:
 
     // ---- T043: abandon verb tests ----
 
-    /// Schema mirroring the production tasks shape (subset): the 7 non-terminal
+    /// Schema mirroring the production tasks shape (subset): the 8 non-terminal
     /// states allowed to abandon, plus the relevant terminal states for
-    /// refusal tests, the abandoned terminal, and the 7 abandon transitions.
+    /// refusal tests, the abandoned terminal, and the 8 abandon transitions.
     const ABANDON_SCHEMA: &str = r#"
 name: tasks
 id_format: "T{:03d}"
 lifecycle:
-  states: [planning, plan_review, ready, executing, code_review, blocked, in_review, accepted, rejected, complete, schema_migrated, abandoned]
+  states: [planning, plan_review, ready, executing, code_review, blocked, in_review, deploy_blocked, accepted, rejected, complete, cargo_installed, schema_migrated, closed_out_of_band, abandoned]
   transitions:
-    - {from: planning, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: plan_review, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: ready, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: executing, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: code_review, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: blocked, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: in_review, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: planning, to: abandoned, verb: abandon, actor: human}
+    - {from: plan_review, to: abandoned, verb: abandon, actor: human}
+    - {from: ready, to: abandoned, verb: abandon, actor: human}
+    - {from: executing, to: abandoned, verb: abandon, actor: human}
+    - {from: code_review, to: abandoned, verb: abandon, actor: human}
+    - {from: blocked, to: abandoned, verb: abandon, actor: human}
+    - {from: in_review, to: abandoned, verb: abandon, actor: human}
+    - {from: deploy_blocked, to: abandoned, verb: abandon, actor: human}
 fields:
   - {name: title, type: text, required: true}
-  - {name: abandoned_reason, type: text, required: false}
-  - {name: abandoned_at, type: timestamp, required: false}
+  - {name: abandoned_reason, type: text, required: false, actor: framework}
+  - {name: abandoned_at, type: timestamp, required: false, actor: framework}
 "#;
 
     fn setup_abandon() -> (Schema, Connection) {
@@ -2721,6 +2722,7 @@ fields:
             "code_review",
             "blocked",
             "in_review",
+            "deploy_blocked",
         ]
         .iter()
         .enumerate()
@@ -2746,7 +2748,14 @@ fields:
     /// AC1.4: abandon from terminal states is refused.
     #[test]
     fn abandon_from_terminal_states_refused() {
-        for from_state in ["accepted", "rejected", "complete", "schema_migrated"] {
+        for from_state in [
+            "accepted",
+            "rejected",
+            "complete",
+            "cargo_installed",
+            "schema_migrated",
+            "closed_out_of_band",
+        ] {
             let (schema, conn) = setup_abandon();
             insert_abandon_row(&conn, "T001", from_state);
 
@@ -2828,7 +2837,7 @@ fields:
     }
 
     /// AC1.6: tier-A enforcement — ai_autonomous invoker is rejected by the
-    /// schema's actor: ai_with_human gate.
+    /// schema's actor: human gate, even with a valid token.
     #[test]
     fn abandon_ai_autonomous_invoker_rejected() {
         let (schema, conn) = setup_abandon();
@@ -2840,14 +2849,17 @@ fields:
             &schema,
             &conn,
             &matches,
-            Actor::AiAutonomous.into(),
+            InvokerCtx {
+                actor: Actor::AiAutonomous,
+                token_valid: true,
+            },
             "x",
         )
         .unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("ai_with_human"),
-            "expected error citing required actor 'ai_with_human'; got: {msg}"
+            msg.contains("human"),
+            "expected error citing required actor 'human'; got: {msg}"
         );
         assert!(
             msg.contains("ai_autonomous"),
@@ -2856,6 +2868,41 @@ fields:
         // Row unchanged
         let (status, _, _) = read_abandon_row(&conn, "T001");
         assert_eq!(status, "ready");
+    }
+
+    #[test]
+    fn abandon_ai_with_human_requires_valid_token() {
+        let (schema, conn) = setup_abandon();
+        insert_abandon_row(&conn, "T001", "ready");
+        let cmd = build_abandon_cmd(&schema);
+        let matches = cmd.get_matches_from(["abandon", "T001", "--reason", "x"]);
+
+        let err = run_abandon(
+            &schema,
+            &conn,
+            &matches,
+            Actor::AiWithHuman.into(),
+            "x",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--approve-token"), "{err}");
+        let (status, _, _) = read_abandon_row(&conn, "T001");
+        assert_eq!(status, "ready");
+
+        run_abandon(
+            &schema,
+            &conn,
+            &matches,
+            InvokerCtx {
+                actor: Actor::AiWithHuman,
+                token_valid: true,
+            },
+            "x",
+        )
+        .unwrap();
+        let (status, reason, _) = read_abandon_row(&conn, "T001");
+        assert_eq!(status, "abandoned");
+        assert_eq!(reason.as_deref(), Some("x"));
     }
 
     /// AC1.3 (audit): abandon writes a transition_history row with verb=abandon
@@ -2876,18 +2923,25 @@ fields:
         )
         .unwrap();
 
-        let (from_status, to_status, verb, invoker): (String, String, String, String) = conn
+        let (from_status, to_status, verb, invoker, actor_note): (
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
             .query_row(
-                "SELECT from_status, to_status, verb, invoker FROM transition_history \
+                "SELECT from_status, to_status, verb, invoker, actor_note FROM transition_history \
                  WHERE store='tasks' AND display_id='T001'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
         assert_eq!(from_status, "blocked");
         assert_eq!(to_status, "abandoned");
         assert_eq!(verb, "abandon");
         assert_eq!(invoker, "human");
+        assert_eq!(actor_note, "duplicate-shipped");
     }
 
     /// T034 lifecycle walk-through: `abandoned` is terminal — there is no

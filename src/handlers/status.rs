@@ -132,8 +132,7 @@ fn next_from_status(status: &str) -> &'static str {
 
 /// Is this status a truly-terminal state (no further progress without human action)?
 ///
-/// `accepted` and `rejected` are terminal — `accepted` is the positive end-state;
-/// `rejected` requires the human to decide what to do next (amend contract or close).
+/// `accepted`, `rejected`, and `abandoned` are terminal/history end-states.
 /// `in_review` and `blocked` are NOT terminal but ARE "awaiting human" — `status follow`
 /// can safely stop on them via `is_awaiting_human`. `complete` is transient (the
 /// `complete → in_review` follow-on fires in the same tx; it should never be observable
@@ -141,7 +140,8 @@ fn next_from_status(status: &str) -> &'static str {
 fn is_terminal(status: &str) -> bool {
     // accepted: human signed off — nothing more to do.
     // rejected: human said no — requires amend, which is a human decision.
-    status == "accepted" || status == "rejected"
+    // abandoned: intentionally retired — no further workflow action.
+    matches!(status, "accepted" | "rejected" | "abandoned" | "closed_out_of_band" | "schema_migrated")
 }
 
 /// Is this status one where drive (or `status follow`) should pause for human input?
@@ -258,7 +258,7 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
 
 /// Fetch all non-terminal task rows ordered by created_at.
 ///
-/// Excludes truly-terminal states (`accepted`, `rejected`) from the active view.
+/// Excludes truly-terminal states (`accepted`, `rejected`, `abandoned`) from the active view.
 /// `complete` is transient and appears here if a row is somehow stuck mid-follow-on.
 /// `blocked` and `in_review` ARE included — they are awaiting human input but are
 /// still "active" from a monitoring standpoint.
@@ -266,7 +266,7 @@ pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
     let mut stmt = conn.prepare(
         "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan \
          FROM tasks \
-         WHERE status NOT IN ('accepted', 'rejected') \
+         WHERE status NOT IN ('accepted', 'rejected', 'abandoned', 'closed_out_of_band', 'schema_migrated') \
          ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -679,9 +679,10 @@ mod tests {
     #[test]
     fn multi_frame_excludes_terminal_tasks() {
         let (_dir, conn) = open_test_conn();
-        // accepted and rejected are terminal; complete is transient (active); blocked is active.
+        // accepted, rejected, and abandoned are terminal/history; executing is active.
         insert_task(&conn, "T001", "accepted", None, None, None, None);
         insert_task(&conn, "T002", "rejected", None, None, None, None);
+        insert_task(&conn, "T004", "abandoned", None, None, None, None);
         insert_task(&conn, "T003", "executing", Some(1), Some(1), None, Some(2));
 
         let tasks = fetch_all_tasks(&conn).unwrap();
@@ -859,9 +860,10 @@ mod tests {
     fn bounded_follow_loop_multi_task_exits_when_all_terminal() {
         let (_dir, conn) = open_test_conn();
         // All tasks are terminal — multi-task loop should exit immediately.
-        // `accepted` and `rejected` are the terminal states; `blocked` is still active.
+        // `accepted`, `rejected`, and `abandoned` are terminal; `blocked` is still active.
         insert_task(&conn, "T001", "accepted", None, None, None, None);
         insert_task(&conn, "T002", "rejected", None, None, None, None);
+        insert_task(&conn, "T003", "abandoned", None, None, None, None);
         let db_path_val = _dir.path().join("test.db");
 
         let args = StatusArgs {

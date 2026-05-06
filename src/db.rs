@@ -70,6 +70,7 @@ pub(crate) fn insert_transition_history(
     invoker: &str,
     policy_ref: Option<&str>,
     policies_hash: Option<&str>,
+    actor_note: Option<&str>,
 ) -> Result<()> {
     insert_transition_history_with_note(
         tx,
@@ -82,7 +83,7 @@ pub(crate) fn insert_transition_history(
         invoker,
         policy_ref,
         policies_hash,
-        None,
+        actor_note,
     )
 }
 

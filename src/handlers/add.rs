@@ -390,6 +390,7 @@ pub fn run(
         &invoker_str,
         None,
         None,
+        None,
     )?;
 
     // T020 P2 (Task 2.1 / Decision Matrix Q1): --lock-contract synthesises the
@@ -407,6 +408,7 @@ pub fn run(
             "framework",
             None,
             None,
+            None,
         )?;
         crate::db::insert_transition_history(
             &tx,
@@ -417,6 +419,7 @@ pub fn run(
             "confirmed",
             "confirm",
             &invoker_str,
+            None,
             None,
             None,
         )?;
@@ -545,6 +548,7 @@ pub(crate) fn add_row_in_tx(
         &invoker_str,
         None,
         None,
+        None,
     )?;
 
     Ok(display_id)
@@ -666,6 +670,7 @@ pub(crate) fn add_row_in_tx_with_authority(
         &initial_status,
         "create",
         &invoker_str,
+        None,
         None,
         None,
     )?;

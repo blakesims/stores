@@ -509,6 +509,7 @@ fn build_store_command(schema: &Schema) -> Command {
             transition_cmd = transition_cmd.arg(
                 Arg::new("reason")
                     .long("reason")
+                    .value_name("text")
                     .help("Why this row is being abandoned (written to abandoned_reason)")
                     .required(true),
             );
@@ -976,7 +977,9 @@ fn build_leaf_cmd_owned(
     }
 
     for leaf in leaves {
-        if is_reserved(&leaf.cli_name) {
+        if is_reserved(&leaf.cli_name)
+            || leaf.field.actor == Some(crate::schema::actor::Actor::Framework)
+        {
             continue;
         }
 

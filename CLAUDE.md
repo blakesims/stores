@@ -30,7 +30,7 @@ The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by defa
   - **Observation-first (post-T020 — the path you should default to):** `observations update LXXX --contract-state ready --approved-by blake --approved-at <now> --invoker ai_with_human --approve-token <T>`. The auto-promote subscriber (L046) creates the task autonomously within ~5s; the human does **not** separately approve "promotion." U1 covers ratification; the framework-fired task creation is grounded transitively by the human-approved upstream contract.
   - **Direct-task (escape hatch):** `tasks add --invoker ai_with_human --title ... --slug ... --done-when ... --scope-in ... --scope-out ...` for tasks born without an observation (emergency hot-fix; infrastructure work where filing→ratify→promote is overkill). Prefer observation-first when an observation would do; the observation row is the durable surface and the dominant path.
 - **U3 — Acceptance.** `tasks accept` / `tasks reject`. Tier-A (token-mediated): the user either types the verb (`--invoker human`) OR pre-authorizes via `--invoker ai_with_human --approve-token <T>` and the AI executes.
-- **U4 — Resume / amend.** `tasks resume` (blocked → ready), `tasks amend` (rejected → planning). The human must have seen the blocker / rejection and authorized the unblock.
+- **U4 — Resume / amend / abandon.** `tasks resume` (blocked → ready), `tasks amend` (rejected → planning), `tasks abandon <id> --reason <text>` (non-terminal → abandoned). The human must have seen the blocker / rejection / stale-row rationale and authorized the unblock, re-open, or retirement.
 
 (The earlier "U2 — Promotion" moment is folded into U1: with auto-promote, ratifying the contract IS the act that produces the task. There is no longer a separate U2.)
 
@@ -42,6 +42,8 @@ Each U-moment now has two equivalent grounding paths:
 Both paths are equally valid grounding. Pick (a) when the user is at the keyboard for this exact verb; pick (b) when the user has pre-authorized a session of work and wants the AI to execute without typing each verb.
 
 **Everything else is `ai_autonomous`:** every `submit-*` during a drive cycle, every `observations add` for friction encountered mid-work, every `tasks render` / `tasks status` / `tasks next-action`, every read.
+
+Task terminal/history semantics are distinct: `rejected` = reviewed-and-rejected-on-merits; `abandoned` = intentionally-retired (superseded/misadd/duplicate/stale); `closed_out_of_band` = work-shipped-via-manual-commit. `tasks abandon` is the non-destructive L002 alternative to raw rollback/delete or wiping `.stores/db.sqlite` for stale or misadded task rows.
 
 **Halting is a feature.** When autonomous work hits a moment that needs U1–U4 grounding, **halt and propose**, then write `ai_with_human` after assent. Do not pre-seek consent for autonomous moments; do not skip consent for grounding moments. The schema's rejection of an undergrounded write is the fail-loud signal we want — getting rejected is not an error to recover from, it's the substrate doing its job.
 

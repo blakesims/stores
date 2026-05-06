@@ -242,7 +242,7 @@ fn section_for(row: &Row) -> Option<Section> {
             "blocked" => Some(Section::TasksBlockedNeedsAction),
             "deploy_blocked" => Some(Section::TasksDeployRecovery),
             "closed_out_of_band" | "accepted" | "complete" | "cargo_installed"
-            | "schema_migrated" | "rejected" => Some(Section::TasksRecentlyTerminal),
+            | "schema_migrated" | "rejected" | "abandoned" => Some(Section::TasksRecentlyTerminal),
             _ => Some(Section::TasksActionableCurrentWork),
         },
         Row::Obs(o) => {
@@ -470,6 +470,7 @@ mod tests {
             ("closed_out_of_band", Section::TasksRecentlyTerminal),
             ("cargo_installed", Section::TasksRecentlyTerminal),
             ("schema_migrated", Section::TasksRecentlyTerminal),
+            ("abandoned", Section::TasksRecentlyTerminal),
         ];
         for (status, expected) in mappings {
             let r = task(status);

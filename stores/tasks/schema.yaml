@@ -188,13 +188,14 @@ lifecycle:
     - {from: rejected, to: planning, verb: amend, actor: ai_with_human}
 
     # <non_terminal> → abandoned (T043: walk a stale row to terminal abandoned without burning a drive cycle)
-    - {from: planning, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: plan_review, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: ready, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: executing, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: code_review, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: blocked, to: abandoned, verb: abandon, actor: ai_with_human}
-    - {from: in_review, to: abandoned, verb: abandon, actor: ai_with_human}
+    - {from: planning, to: abandoned, verb: abandon, actor: human}
+    - {from: plan_review, to: abandoned, verb: abandon, actor: human}
+    - {from: ready, to: abandoned, verb: abandon, actor: human}
+    - {from: executing, to: abandoned, verb: abandon, actor: human}
+    - {from: code_review, to: abandoned, verb: abandon, actor: human}
+    - {from: blocked, to: abandoned, verb: abandon, actor: human}
+    - {from: in_review, to: abandoned, verb: abandon, actor: human}
+    - {from: deploy_blocked, to: abandoned, verb: abandon, actor: human}
 
 workflow:
   max_revise_cycles: 3

@@ -234,6 +234,7 @@ fn promote(
         "ai_autonomous",
         None,
         None,
+        None,
     )?;
 
     // Back-link the observation. task_id is a non-status text field with no

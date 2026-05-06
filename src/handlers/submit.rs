@@ -334,6 +334,7 @@ pub(crate) fn write_status_and_fields(
             invoker,
             a.policy_ref,
             a.policies_hash,
+            None,
         )?;
     }
 
