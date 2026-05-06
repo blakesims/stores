@@ -564,6 +564,10 @@ pub fn drive_loop(
     // run. Prevents same-run re-dispatch while allowing fresh dispatch on every
     // new drive invocation (covers re-entry after reject → amend → re-complete).
     let mut dispatched_wrap_this_run = false;
+    // T049: close the auto-drive dispatch_lock the first time we land a
+    // successful submit. Drives that die before this point leave the lock
+    // open for the watchdog to detect as a silent zombie.
+    let mut auto_drive_lock_closed = false;
 
     loop {
         // ── Step 2a: compute next-action ──────────────────────────────────
@@ -860,6 +864,22 @@ pub fn drive_loop(
             })?;
 
         let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;
+
+        // T049: first successful submit ⇒ close the auto-drive dispatch_lock.
+        // Up to this point the lock has been left open (by agents_run.rs's
+        // post-spawn skip), so a drive subprocess that dies between spawn and
+        // first submit remains visible to the watchdog as an open-lock zombie.
+        if !auto_drive_lock_closed {
+            if let Err(e) =
+                crate::handlers::agents_run::close_auto_drive_lock_ok(conn, display_id)
+            {
+                eprintln!(
+                    "[{display_id}] close_auto_drive_lock_ok failed (non-fatal): {e}"
+                );
+                let _ = std::io::stderr().flush();
+            }
+            auto_drive_lock_closed = true;
+        }
 
         // AC4.3 flag: wrap dispatches when na.status == "in_review" (the row is in
         // in_review, next_agent is wrap). Once dispatch_submit returns successfully
@@ -1595,6 +1615,74 @@ mod tests {
         assert_eq!(
             selected, "T002",
             "should skip live-claimed T001 and pick T002"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T049: drive_loop closes the auto-drive dispatch_lock on first successful
+    // submit. Pre-seed an open auto-drive lock and assert it transitions to
+    // (finished_at != NULL, last_status='ok') after one planner submit.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn drive_loop_first_submit_closes_auto_drive_lock() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn,
+            &schema,
+            "T801",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+
+        let row_id: i64 = conn
+            .query_row(
+                "SELECT id FROM tasks WHERE display_id='T801'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Open auto-drive dispatch_lock — mirrors the post-T049 invariant
+        // where agents_run leaves the lock open when auto-drive spawn returns 0.
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, \
+              claimed_at, claimed_by) \
+             VALUES ('tasks', ?1, 'T801', 'auto-drive', 1, \
+                     '2026-05-04T00:00:00Z', 'test-claimer')",
+            rusqlite::params![row_id],
+        )
+        .unwrap();
+
+        // One successful planner envelope is enough to land the first submit;
+        // max_iters=1 trips the bail post-iteration so the loop exits Err
+        // (which is fine — we only care that the lock was closed before exit).
+        let planner_out = make_run_output(planner_fixture_json(), 0);
+        let runner = MockRunner::new(vec![planner_out]);
+        let _ = drive_loop(&schema, &conn, "T801", &runner, 1);
+
+        let (finished_at, last_status): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT finished_at, last_status FROM dispatch_locks \
+                 WHERE display_id='T801' AND agent_name='auto-drive'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            finished_at.is_some(),
+            "T049: auto-drive lock must be closed by drive_loop's first submit"
+        );
+        assert_eq!(
+            last_status.as_deref(),
+            Some("ok"),
+            "T049: closed lock must carry last_status='ok'"
         );
     }
 

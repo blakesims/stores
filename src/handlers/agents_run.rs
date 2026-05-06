@@ -297,7 +297,19 @@ pub fn poll_once(
                     ),
                     Err(e) => (format!("error: {}", e), -1),
                 };
-                let _ = mark_claim_finished(conn, &sub.store, row_id, &agent.name, &status_str);
+                // T049: auto-drive's lock close is shifted into the spawned
+                // drive subprocess (closes on first successful submit). On a
+                // healthy spawn (exit 0), leave the lock open here so a drive
+                // that dies between spawn and first submit remains visible to
+                // the watchdog. On non-zero exit / spawn error, keep the
+                // existing close so T041's retry-rescheduler sees the row.
+                let skip_close_for_auto_drive =
+                    agent.name == "auto-drive" && code == 0;
+                if !skip_close_for_auto_drive {
+                    let _ = mark_claim_finished(
+                        conn, &sub.store, row_id, &agent.name, &status_str,
+                    );
+                }
                 if code != 0 {
                     route_failure_to_deploy_blocked(
                         conn,
@@ -404,6 +416,20 @@ pub fn poll_once(
                     }
                 }
             }
+            // T049: only NOW clear finished_at for auto-drive, after all retry
+            // gates (decision halt, predicate match) have passed. This keeps
+            // the lock open during the spawn-to-first-submit window so T040
+            // watchdog catches a retry-spawned drive that dies pre-submit; a
+            // gated-out retry leaves the lock with finished_at intact (no
+            // orphan).
+            if agent.name == "auto-drive" {
+                if let Err(e) = open_auto_drive_retry_lock(conn, &c) {
+                    eprintln!(
+                        "[daemon] open_auto_drive_retry_lock failed for '{}'/{}: {}",
+                        agent.name, c.display_id, e
+                    );
+                }
+            }
             let exit_code = run_dispatch(
                 conn,
                 agents,
@@ -429,7 +455,13 @@ pub fn poll_once(
                 ),
                 Err(e) => (format!("error: {}", e), -1),
             };
-            let _ = mark_claim_finished(conn, &c.store, c.row_id, &agent.name, &status_str);
+            // T049: mirror the dispatch path — leave auto-drive locks open on
+            // a healthy retry spawn so the drive subprocess closes them on
+            // first successful submit; close on non-zero so retry path sees it.
+            let skip_close_for_auto_drive = agent.name == "auto-drive" && code == 0;
+            if !skip_close_for_auto_drive {
+                let _ = mark_claim_finished(conn, &c.store, c.row_id, &agent.name, &status_str);
+            }
             if code != 0 {
                 route_failure_to_deploy_blocked(
                     conn,
@@ -682,6 +714,25 @@ pub(crate) fn route_failure_to_deploy_blocked(
     }
 }
 
+/// T049: close the open auto-drive `dispatch_locks` row for `display_id`
+/// with `last_status='ok'`. Called from inside the drive subprocess on its
+/// first successful `compute_submit_*` call so a drive that dies between
+/// spawn and first submit leaves the lock open for the watchdog.
+///
+/// Idempotent: the WHERE clause filters on `finished_at IS NULL`, so a
+/// second call is a no-op zero-row UPDATE.
+pub(crate) fn close_auto_drive_lock_ok(conn: &Connection, display_id: &str) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = 'ok', finished_at = ?1, \
+                                  claimed_at = ?1, attempts = attempts + 1 \
+         WHERE store = 'tasks' AND display_id = ?2 AND agent_name = 'auto-drive' \
+           AND finished_at IS NULL",
+        rusqlite::params![now, display_id],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn mark_claim_finished(
     conn: &Connection,
     store: &str,
@@ -808,6 +859,25 @@ fn claim_for_retry(
     Ok(n == 1)
 }
 
+/// T049: open the auto-drive retry-claimed lock by clearing `finished_at`
+/// IMMEDIATELY before `run_dispatch` actually spawns the retry drive. This
+/// must run after all retry gates (decision halt, predicate match) so a
+/// gated-out retry leaves the lock with `finished_at` intact (no orphan).
+/// Auto-drive's lock-stays-open semantics require finished_at IS NULL during
+/// the spawn-to-first-submit window so T040's watchdog catches a dead PID.
+fn open_auto_drive_retry_lock(
+    conn: &Connection,
+    c: &RetryCandidate,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE dispatch_locks SET finished_at = NULL \
+         WHERE store = ?1 AND row_id = ?2 AND agent_name = 'auto-drive' \
+               AND last_status = 'retrying'",
+        rusqlite::params![&c.store, c.row_id],
+    )?;
+    Ok(())
+}
+
 /// Mark a retry-claimed row as halted by policy. last_status carries the
 /// halting policy id so future polls (filtered to 'exit=*' / 'error:*')
 /// will NOT re-include this row — closing the Halt-notification storm
@@ -848,7 +918,8 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
                AND dl.attempts < ?2 \
                AND dl.finished_at IS NOT NULL \
                AND ( (dl.last_status LIKE 'exit=%' AND dl.last_status != 'exit=0') \
-                     OR dl.last_status LIKE 'error:%' )",
+                     OR dl.last_status LIKE 'error:%' \
+                     OR dl.last_status LIKE 'drive_failed:%' )",
     )?;
     let rows = stmt.query_map(rusqlite::params![&agent.name, max], |r| {
         Ok((

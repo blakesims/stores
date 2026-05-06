@@ -172,3 +172,201 @@ fn silent_zombie_lock_already_closed_e2e() {
         .unwrap();
     assert_eq!(cnt, 1, "exactly one to_status='blocked' history row must land");
 }
+
+/// T049: end-to-end regression for the open-lock dead-PID detection path.
+///
+/// The new T049 contract is: auto-drive's dispatch_lock is left OPEN after
+/// spawn (the drive subprocess closes it on first successful submit). A
+/// drive that dies between spawn and first submit therefore stays visible
+/// to the watchdog as an open-lock silent zombie, where pre-T049 it was
+/// silently closed with `last_status='ok'` and orphaned the row.
+///
+/// Reproduces the T045 conditions:
+///   1. Auto-drive fires on a planning row → spawns a long-lived stub.
+///   2. Test SIGKILLs the stub (no submit ever lands).
+///   3. Second `agents run --once` → watchdog sees open lock + dead PID
+///      → flips row to `blocked` with
+///      `blocked_reason='drive_failed:silent_zombie_pid_dead'`.
+#[test]
+fn auto_drive_open_lock_dead_pid_e2e() {
+    let bin = bin();
+    assert!(bin.exists(), "CARGO_BIN_EXE_stores must point at a built binary");
+
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let workspace = tmp.path();
+    let stores_dir = workspace.join(".stores");
+    std::fs::create_dir_all(&stores_dir).unwrap();
+
+    // ---- 1. .stores/db.sqlite with substrate + tasks + observations DDL ----
+    let db_path = stores_dir.join("db.sqlite");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        install_store_ddl(&conn, "tasks");
+        install_store_ddl(&conn, "observations");
+    }
+    std::fs::write(stores_dir.join("manifest.yaml"), "stores: []\n").unwrap();
+
+    // ---- 2. agents.yaml with the auto-drive subscriber ----
+    let agents_yaml = "agents:\n\
+                       \x20\x20- name: auto-drive\n\
+                       \x20\x20\x20\x20subscribes_to:\n\
+                       \x20\x20\x20\x20\x20\x20- store: tasks\n\
+                       \x20\x20\x20\x20\x20\x20\x20\x20transition:\n\
+                       \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20from: \"\"\n\
+                       \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20to: planning\n\
+                       \x20\x20\x20\x20\x20\x20\x20\x20predicate:\n\
+                       \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20op: \"!=\"\n\
+                       \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20left: \"$workspace_path\"\n\
+                       \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20right: \"\"\n\
+                       \x20\x20\x20\x20command: \"builtin:auto-drive\"\n\
+                       \x20\x20\x20\x20claim_window_secs: 300\n\
+                       \x20\x20\x20\x20retry_policy:\n\
+                       \x20\x20\x20\x20\x20\x20max_attempts: 1\n\
+                       \x20\x20\x20\x20\x20\x20backoff: linear\n";
+    std::fs::write(stores_dir.join("agents.yaml"), agents_yaml).unwrap();
+
+    // ---- 3. Seed a planning task with workspace_path + history row ----
+    let now_iso = "2026-05-04T00:00:00Z";
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, \
+                            contract, created_at, updated_at, created_by, updated_by) \
+         VALUES ('T849', 'planning', 'auto-drive-zombie', 'adz', 'feat/adz', ?1, \
+                 '{\"done_when\":\"x\",\"scope_in\":\"y\",\"scope_out\":\"z\"}', \
+                 ?2, ?2, 'ai_autonomous', 'ai_autonomous')",
+        rusqlite::params![workspace.to_str().unwrap(), now_iso],
+    )
+    .unwrap();
+    let row_id: i64 = conn
+        .query_row("SELECT id FROM tasks WHERE display_id='T849'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    conn.execute(
+        "INSERT INTO transition_history \
+         (store, row_id, display_id, from_status, to_status, verb, invoker, occurred_at) \
+         VALUES ('tasks', ?1, 'T849', '', 'planning', 'submit', \
+                 'ai_autonomous', ?2)",
+        rusqlite::params![row_id, now_iso],
+    )
+    .unwrap();
+    // Sentinel marker so the daemon's starting-line seeder skips re-seeding
+    // (agent_has_been_seeded keys on agent_name). Without this, the seeder
+    // would mark our just-inserted T849 history row as `skip-historical` and
+    // poll_once's try_claim would lose the UNIQUE race, blocking dispatch.
+    conn.execute(
+        "INSERT INTO dispatch_locks \
+         (store, row_id, display_id, agent_name, transition_id, \
+          claimed_at, claimed_by, last_status, finished_at) \
+         VALUES ('tasks', 999999, 'SENTINEL', 'auto-drive', 0, \
+                 ?1, 'starting-line-marker', 'skip-historical', ?1)",
+        rusqlite::params![now_iso],
+    )
+    .unwrap();
+    drop(conn);
+
+    // ---- 4. Long-lived stub so first --once spawns + records pid (alive) ----
+    // sleep 600 keeps the grandchild alive across both --once invocations
+    // until we explicitly SIGKILL it. The stub is invoked with "$@" expanded
+    // to the display_id; the literal `#` swallows the trailing arg so `sleep`
+    // does not see it.
+    let stub_cmd = "sleep 600 #";
+
+    // ---- 5. First --once: dispatch auto-drive, leaving lock OPEN (T049) ----
+    let out1 = Command::new(&bin)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(workspace)
+        .env("STORES_DRIVE_CMD", stub_cmd)
+        // T040 epoch override so the watchdog gate doesn't filter the row.
+        .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
+        .output()
+        .expect("invoke daemon (1)");
+    assert!(
+        out1.status.success(),
+        "first agents run --once must exit 0; stderr:\n{}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+
+    // After dispatch, BEFORE we kill the stub: lock is OPEN (T049 invariant)
+    // and drive_pid is recorded.
+    let conn = Connection::open(&db_path).unwrap();
+    let (finished_at, drive_pid): (Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT dl.finished_at, t.drive_pid \
+             FROM dispatch_locks dl JOIN tasks t ON t.id = dl.row_id \
+             WHERE t.display_id='T849' AND dl.agent_name='auto-drive'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        finished_at.is_none(),
+        "T049: auto-drive lock must remain OPEN after spawn (got finished_at={:?})",
+        finished_at
+    );
+    let pid = drive_pid.expect("drive_pid must be recorded after spawn");
+    assert!(pid > 0, "drive_pid must be > 0; got {pid}");
+    drop(conn);
+
+    // ---- 6. SIGKILL the stub before any submit lands ----
+    // The stub is `sleep 600`, reparented to PID 1 by the spawn double-fork.
+    // SIGKILL guarantees the process is gone before the watchdog sweep.
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    // Brief wait for the kernel to reap. The watchdog uses kill(pid, 0)
+    // (`pid_is_alive`); after SIGKILL + reaping, that returns ESRCH.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline
+        && unsafe { libc::kill(pid as i32, 0) } == 0
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // ---- 7. Second --once: watchdog detects open-lock dead-PID ----
+    let out2 = Command::new(&bin)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(workspace)
+        .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
+        .output()
+        .expect("invoke daemon (2)");
+    assert!(
+        out2.status.success(),
+        "second agents run --once must exit 0; stderr:\n{}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+
+    // ---- 8. Assertions: row blocked with structured silent-zombie reason ----
+    let conn = Connection::open(&db_path).unwrap();
+    let (status, blocked_reason): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, blocked_reason FROM tasks WHERE display_id='T849'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "blocked",
+        "T049: row must flip to 'blocked' after watchdog detects dead PID; got '{status}'"
+    );
+    assert_eq!(
+        blocked_reason.as_deref(),
+        Some("drive_failed:silent_zombie_pid_dead"),
+        "T049: blocked_reason must carry the silent-zombie suffix"
+    );
+
+    // Lock is now closed.
+    let finished_after: Option<String> = conn
+        .query_row(
+            "SELECT finished_at FROM dispatch_locks \
+             WHERE display_id='T849' AND agent_name='auto-drive'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        finished_after.is_some(),
+        "T049: watchdog must close the lock after the silent-zombie flip"
+    );
+}

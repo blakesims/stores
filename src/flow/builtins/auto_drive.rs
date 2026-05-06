@@ -433,9 +433,15 @@ pub fn sweep_drive_watchdog(
             handled.insert(display_id.clone());
             continue;
         }
-        match fire_mark_drive_failed(conn, &display_id, "drive_failed", policies_hash, None) {
+        match fire_mark_drive_failed(
+            conn,
+            &display_id,
+            "drive_failed",
+            policies_hash,
+            Some("silent_zombie_pid_dead"),
+        ) {
             Ok(()) => {
-                annotate_drive_failed_history(conn, &display_id, "drive_pid_dead");
+                annotate_drive_failed_history(conn, &display_id, "silent_zombie_pid_dead");
                 let ctx = DispatchCtx {
                     conn,
                     agents,
@@ -443,7 +449,13 @@ pub fn sweep_drive_watchdog(
                     policies_hash,
                 };
                 dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog");
-                let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "drive_failed");
+                let _ = mark_claim_finished(
+                    conn,
+                    "tasks",
+                    row_id,
+                    "auto-drive",
+                    "drive_failed:silent_zombie_pid_dead",
+                );
                 acted += 1;
                 handled.insert(display_id.clone());
             }
@@ -861,7 +873,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "blocked");
-        assert_eq!(reason.as_deref(), Some("drive_failed"));
+        assert_eq!(reason.as_deref(), Some("drive_failed:silent_zombie_pid_dead"));
 
         let (obs_count, obs_task_id): (i64, String) = conn
             .query_row(
@@ -975,7 +987,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(reason.as_deref(), Some("drive_failed"));
+        assert_eq!(reason.as_deref(), Some("drive_failed:silent_zombie_pid_dead"));
         let finished: Option<String> = conn2
             .query_row(
                 "SELECT finished_at FROM dispatch_locks WHERE display_id='T723'",
@@ -1507,5 +1519,113 @@ mod tests {
             note, "drive_pid_dead",
             "actor_note must carry the supplied note value"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // T049: post-spawn auto-drive lock is left OPEN. Drive subprocess
+    // closes it on first successful submit; watchdog catches drives that
+    // die before then.
+    // -----------------------------------------------------------------
+
+    /// poll_once-driven test: after auto-drive successfully spawns its drive
+    /// subprocess, the dispatch_lock must remain OPEN (finished_at IS NULL,
+    /// last_status IS NULL). Pre-T049 the lock was closed with last_status='ok'
+    /// immediately, which orphaned drives that died before first submit.
+    #[test]
+    fn auto_drive_run_leaves_lock_open() {
+        use crate::flow::agents_yaml::TransitionEdge;
+        use crate::flow::policies_yaml::PoliciesYaml;
+        use crate::flow::{AgentEntry, BackoffKind, RetryPolicy, Subscription};
+        use crate::handlers::agents_run::poll_once;
+
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Long-running stub so the spawned drive is still alive when we check.
+        std::env::set_var("STORES_DRIVE_CMD", "sleep 30 #");
+
+        let conn = fresh_db_with_obs();
+        let tmp = temp_cwd();
+        insert_planning_task(&conn, "T780", tmp.path().to_str().unwrap());
+        let row_id: i64 = conn
+            .query_row(
+                "SELECT id FROM tasks WHERE display_id='T780'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // History row that fires the ''→'planning' subscription.
+        conn.execute(
+            "INSERT INTO transition_history \
+             (store, row_id, display_id, from_status, to_status, verb, \
+              invoker, occurred_at) \
+             VALUES ('tasks', ?1, 'T780', '', 'planning', 'submit', \
+                     'ai_autonomous', '2026-05-03T00:00:00Z')",
+            rusqlite::params![row_id],
+        )
+        .unwrap();
+
+        let agent = AgentEntry {
+            name: "auto-drive".to_string(),
+            subscribes_to: vec![Subscription {
+                store: "tasks".to_string(),
+                transition: TransitionEdge {
+                    from: "".to_string(),
+                    to: "planning".to_string(),
+                },
+                predicate: None,
+            }],
+            command: "builtin:auto-drive".to_string(),
+            claim_window_secs: 300,
+            retry_policy: RetryPolicy {
+                max_attempts: 3,
+                backoff: BackoffKind::Linear,
+            },
+            command_args: None,
+        };
+        let agents = AgentsYaml {
+            agents: vec![agent],
+            deployment_specialist: None,
+        };
+        let policies = PoliciesYaml {
+            hash: String::new(),
+            policies: vec![],
+        };
+        let cfg = std::path::PathBuf::from("/tmp/stores-test-no-config.yaml");
+
+        let n = poll_once(&conn, &agents, &policies, &cfg, "test-claimer", "")
+            .expect("poll_once must succeed");
+        assert_eq!(n, 1, "exactly one auto-drive dispatch must fire");
+
+        // T049 invariant: the lock is left OPEN post-spawn.
+        let (finished_at, last_status, drive_pid): (
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ) = conn
+            .query_row(
+                "SELECT dl.finished_at, dl.last_status, t.drive_pid \
+                 FROM dispatch_locks dl JOIN tasks t ON t.id = dl.row_id \
+                 WHERE t.display_id='T780' AND dl.agent_name='auto-drive'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            finished_at.is_none(),
+            "T049: auto-drive lock must remain OPEN post-spawn (got finished_at={:?})",
+            finished_at
+        );
+        assert!(
+            last_status.is_none(),
+            "T049: last_status must be NULL on an open lock (got {:?})",
+            last_status
+        );
+
+        // Reap the stub.
+        if let Some(p) = drive_pid {
+            unsafe {
+                libc::kill(p as i32, libc::SIGTERM);
+            }
+        }
+        std::env::remove_var("STORES_DRIVE_CMD");
     }
 }
