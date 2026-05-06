@@ -98,6 +98,27 @@ agents:
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }
 
+  # T053 P4 — intake gatekeeper. Production is shell-out: the command renders
+  # a bundled brief, asks the configured agent CLI for one JSON decision, then
+  # calls `stores intake route` / `stores intake escalate-arch-review`.
+  # Tests may replace this with `builtin:gatekeeper-stub` to avoid LLM IO.
+  - name: gatekeeper
+    subscribes_to:
+      - store: intake
+        transition: { from: draft, to: triaging }
+    command: >-
+      sh -c 'tmp=$(mktemp); stores intake brief "$STORES_DISPLAY_ID" --for gatekeeper | claude --print > "$tmp"; decision=$(jq -r .decision "$tmp"); if [ "$decision" = arch_review_candidate ]; then stores intake escalate-arch-review "$STORES_DISPLAY_ID" --decision arch_review_candidate --gatekeeper-decision-json-from-file "$tmp" --invoker ai_autonomous; else stores intake route "$STORES_DISPLAY_ID" --decision "$decision" --gatekeeper-decision-json-from-file "$tmp" --invoker ai_autonomous; fi'
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  - name: recon
+    subscribes_to:
+      - store: intake
+        transition: { from: triaging, to: needs_info }
+    command: "stores intake brief ${STORES_DISPLAY_ID} --for recon | claude --print | sh"
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+
 deployment_specialist: user-escalation
 
 # ---------------------------------------------------------------------------

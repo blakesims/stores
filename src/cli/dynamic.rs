@@ -31,35 +31,50 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
 /// Map: store-name → list of (template-relative-path, content).
 /// Path keys must match schema's `briefing_templates` and `render_template` values.
 /// Used by brief.rs and render.rs when `schema_path` starts with `"bundled:"`.
-pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[(
-    "tasks",
-    &[
-        (
-            "templates/planner-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/planner-brief.md.tpl"),
-        ),
-        (
-            "templates/plan-reviewer-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/plan-reviewer-brief.md.tpl"),
-        ),
-        (
-            "templates/executor-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/executor-brief.md.tpl"),
-        ),
-        (
-            "templates/code-reviewer-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/code-reviewer-brief.md.tpl"),
-        ),
-        (
-            "templates/wrap-brief.md.tpl",
-            include_str!("../../stores/tasks/templates/wrap-brief.md.tpl"),
-        ),
-        (
-            "templates/main.md.tpl",
-            include_str!("../../stores/tasks/templates/main.md.tpl"),
-        ),
-    ],
-)];
+pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[
+    (
+        "tasks",
+        &[
+            (
+                "templates/planner-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/planner-brief.md.tpl"),
+            ),
+            (
+                "templates/plan-reviewer-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/plan-reviewer-brief.md.tpl"),
+            ),
+            (
+                "templates/executor-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/executor-brief.md.tpl"),
+            ),
+            (
+                "templates/code-reviewer-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/code-reviewer-brief.md.tpl"),
+            ),
+            (
+                "templates/wrap-brief.md.tpl",
+                include_str!("../../stores/tasks/templates/wrap-brief.md.tpl"),
+            ),
+            (
+                "templates/main.md.tpl",
+                include_str!("../../stores/tasks/templates/main.md.tpl"),
+            ),
+        ],
+    ),
+    (
+        "intake",
+        &[
+            (
+                "templates/gatekeeper-brief.md.tpl",
+                include_str!("../../stores/intake_items/templates/gatekeeper-brief.md.tpl"),
+            ),
+            (
+                "templates/recon-brief.md.tpl",
+                include_str!("../../stores/intake_items/templates/recon-brief.md.tpl"),
+            ),
+        ],
+    ),
+];
 
 /// Build the root `stores` Command with all installed stores added as subcommands.
 pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Command {
@@ -1262,4 +1277,56 @@ fn is_reserved(name: &str) -> bool {
             | "help"
             | "version"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intake_templates_are_bundled() {
+        let templates = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == "intake")
+            .map(|(_, templates)| *templates)
+            .expect("intake templates bundled");
+        assert!(templates.iter().any(|(path, content)| {
+            *path == "templates/gatekeeper-brief.md.tpl" && content.contains("Six decisions")
+        }));
+        assert!(templates.iter().any(|(path, content)| {
+            *path == "templates/recon-brief.md.tpl" && content.contains("Required output")
+        }));
+    }
+
+    #[test]
+    fn recon_template_does_not_show_forbidden_cli_commands_as_allowed() {
+        let content = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == "intake")
+            .and_then(|(_, templates)| {
+                templates
+                    .iter()
+                    .find(|(path, _)| *path == "templates/recon-brief.md.tpl")
+                    .map(|(_, content)| *content)
+            })
+            .expect("recon template bundled");
+        for forbidden in [
+            "stores observations add",
+            "stores tasks add",
+            "stores intake add",
+            "stores tasks submit-",
+            "stores intake route",
+            "stores tasks accept",
+            "stores tasks reject",
+        ] {
+            assert!(
+                !content.contains(forbidden),
+                "recon template must not present forbidden command `{forbidden}`"
+            );
+        }
+        assert!(content.contains("Do not call workflow submission verbs"));
+        assert!(content.contains("routing verbs"));
+        assert!(content.contains("acceptance verbs"));
+        assert!(content.contains("rejection verbs"));
+    }
 }

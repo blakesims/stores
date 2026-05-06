@@ -726,7 +726,7 @@ pub(crate) fn execute_transition_write(
 /// Only fires for the `intake` store on `route` and `escalate-arch-review` verbs.
 /// Called after generic `validate::validate()` passes — the generic validator already
 /// rejects badly-formed JSON, so here we know the value is either a parsed object or null.
-fn maybe_validate_and_mirror_gatekeeper_decision(
+pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
     schema: &crate::schema::Schema,
     diff: &mut crate::validate::EntryMap,
     merged: &mut crate::validate::EntryMap,

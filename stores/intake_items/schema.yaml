@@ -73,6 +73,21 @@ lifecycle:
       verb: escalate-arch-review
       actor: ai_autonomous
 
+workflow:
+  agent_roles:
+    gatekeeper:
+      description: "Classifies intake items into one of six gatekeeper routing decisions"
+    recon:
+      description: "Gathers narrow evidence for needs_info round-trips"
+  briefing_templates:
+    gatekeeper: "templates/gatekeeper-brief.md.tpl"
+    recon: "templates/recon-brief.md.tpl"
+  on_state:
+    triaging:
+      - dispatch_agent: gatekeeper
+    needs_info:
+      - dispatch_agent: recon
+
 fields:
   # --- Core identity ---
   - name: summary

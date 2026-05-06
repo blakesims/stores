@@ -4,7 +4,9 @@ description: Observations store protocol — friction goes here, not into markdo
 
 ## Observations under dogfood
 
-Observations are how the system learns about itself. Filing one is autonomous (`ai_autonomous`); investigating, confirming, promoting, and won't-fix-ing are user-authority moments. The substrate enforces this via per-transition `actor:` declarations in `schema.yaml`.
+Autonomous local friction should now enter through `stores intake add --invoker ai_autonomous` so the gatekeeper can classify, deduplicate, fast-track-mark, or escalate it before observation creation. `stores observations add` remains the escape hatch for human / `ai_with_human` filings and for gatekeeper routing side-effects; direct add is preserved, not blocked.
+
+Observations are how the system learns about itself after routing or explicit escape-hatch filing. Filing one is autonomous (`ai_autonomous`) when used directly; investigating, confirming, promoting, and won't-fix-ing are user-authority moments. The substrate enforces this via per-transition `actor:` declarations in `schema.yaml`.
 
 For the dogfood rule, the verbs you'll use, and `--invoker` discipline, see the project root `CLAUDE.md`. This file assumes you've read that.
 
@@ -22,25 +24,24 @@ File an observation **the moment** the substrate behaves in any way you didn't e
 
 The bar is "you noticed friction." Don't filter for "is this important enough." Filter at triage, not at filing. Unfiled friction is data thrown away.
 
-### The verb (the only one for filing)
+### The autonomous filing verb
 
 ```bash
-stores observations add --invoker ai_autonomous \
+stores intake add --invoker ai_autonomous \
   --summary "<one-line>" \
-  --source dev \
-  --priority high|normal|low \
+  --source-agent "<planner|executor|code_reviewer|orchestrator|...>" \
   --captured-at "$(date -Iseconds)" \
   --captured-week "w$(date +%V)-d$(date +%u)" \
-  --task-id "<surfacing-task-display-id>" \
+  --source-task "<surfacing-task-display-id>" \
   --body-from-file <(cat <<'EOF'
 <longer description; what you tried; what you expected; what happened; reproducible?>
 EOF
 )
 ```
 
-Required fields the agent must supply: `summary`, `source` (use `dev` for substrate-friction), `priority`, `captured_at` (ISO timestamp), `captured_week` (ops label like `w18-d5`). Optional but recommended: `task_id` (the task that surfaced the friction; soft-FK, just the display id), `body` (the longer description).
+Required intake fields the agent must supply: `summary`, `source_agent`, `captured_at` (ISO timestamp), `captured_week` (ops label like `w18-d5`). Optional but recommended: `source_task` (the task that surfaced the friction; soft-FK, just the display id), `body` (the longer description).
 
-The substrate auto-mints an L-id (`L001`, `L002`, …) and lands the row in state `open`.
+The substrate auto-mints an I-id (`I001`, `I002`, …) and lands the row in state `draft`. Gatekeeper routing may create an L-id observation. Use `stores observations add` directly only for the documented escape hatch above.
 
 ### The lifecycle (and where the user gates apply)
 
