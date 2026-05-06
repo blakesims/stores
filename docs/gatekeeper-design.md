@@ -415,3 +415,12 @@ The design must hold under the substrate's existing doctrine. Each axis below is
 **Auditability.** Every transition lands in the substrate's transition-history table (same machinery `tasks` and `observations` use). The full `gatekeeper_decision_json` is persisted; nothing about the routing decision is reconstructible-only-from-prose. Drops, fast-tracks, and escalations are queryable by SQL read or by a future `intake list --filter ...` verb. Cluster counts are computable from indexed `cluster_key` columns without re-parsing JSON.
 
 **Architectural coherence (the doctrine the design is grounded by).** Per `docs/architecture-coherence.md`, local correctness does not imply architectural coherence. The gatekeeper does not claim to *enforce* coherence — it routes to architecture-review, which is a separate agent (T045 phase 4). The gatekeeper's contribution to coherence is making sure that risk-flagged and cluster-threshold-crossed items reach the coherence gate at all, rather than slipping through as locally-correct observations whose contracts ratify on local merits.
+
+## Follow-ups
+
+The design's last acceptance criterion (T045 § Done When) is "at least one follow-up implementation task can be ratified from the design." Two ratifiable observations have been filed against this doc; both await U1 ratification before they auto-promote to tasks.
+
+- **L142 — Implement intake_items store + gatekeeper subscriber (P1 of T045 design)** — `tier_hint: T3`. Schema-codify the `intake_items` typed store and ship the gatekeeper router agent so locally-filed friction is dedup/risk-classed/fast-tracked/escalated before becoming observations. Scope is drawn directly from § *Lifecycle*, § *Schema*, § *Routing decisions*, § *Gatekeeper output schema*, and § *Recon agent contract* of this doc.
+- **L143 — Add `risk_class` + `approval_policy` fields to observations schema** — `tier_hint: T3`. Promote the `(size_tier, risk_class, approval_policy)` triple from `docs/risk-and-cluster-taxonomy.md` into typed columns on the `observations` row so risk and policy are queryable and enforceable, not prose. Co-ratifies with L142 — the gatekeeper writes these columns; without them it has nowhere to land its decision blob.
+
+Both observations cite `docs/gatekeeper-design.md`, `docs/risk-and-cluster-taxonomy.md`, and `docs/architecture-coherence.md` in their bodies. Their `task_id` field is set to `T045` so the surfacing-task linkage is preserved in the substrate's soft-FK convention.
