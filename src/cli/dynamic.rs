@@ -10,7 +10,7 @@ use crate::schema::{FieldType, Schema};
 // ---------------------------------------------------------------------------
 
 /// Names of bundled stores (the subdirectory name == schema name).
-pub static BUNDLED_STORE_NAMES: &[&str] = &["observations", "gate", "tasks"];
+pub static BUNDLED_STORE_NAMES: &[&str] = &["observations", "gate", "tasks", "intake"];
 
 /// Embedded schema.yaml content for each bundled store (same order as BUNDLED_STORE_NAMES).
 pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
@@ -20,6 +20,10 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
     ),
     ("gate", include_str!("../../stores/gate/schema.yaml")),
     ("tasks", include_str!("../../stores/tasks/schema.yaml")),
+    (
+        "intake",
+        include_str!("../../stores/intake_items/schema.yaml"),
+    ),
 ];
 
 /// Embedded template content for bundled workflow stores.

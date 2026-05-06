@@ -1,0 +1,6 @@
+# Minimal intake_items fixture — represents the required fields for a valid intake item in draft state.
+# Used by tests/intake_items_schema.rs to verify the schema parses and the DDL round-trips.
+summary: "substrate CLI flag missing in intake route"
+source_agent: planner
+captured_at: "2026-05-06T10:00:00Z"
+captured_week: "w19-d2"
