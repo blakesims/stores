@@ -104,6 +104,9 @@ pub struct Field {
     /// default into the entry post-validation when the CLI did not supply a
     /// value.  (T052 P1)
     pub default: Option<serde_json::Value>,
+    /// Declarative: for `List(Text)` fields, the allowed set of string values
+    /// for each element.  Parsed from the `list_enum:` YAML key.  (T052 P2)
+    pub list_enum: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +164,9 @@ struct RawField {
     /// Per-field default value (T052 P1).
     #[serde(default)]
     default: Option<serde_json::Value>,
+    /// Allowed values for each element in a List(Text) field (T052 P2).
+    #[serde(default)]
+    list_enum: Option<Vec<String>>,
 }
 
 /// Raw field type before full resolution.
@@ -353,6 +359,7 @@ fn raw_to_field(r: &RawField) -> anyhow::Result<Field> {
         auto_increment: r.auto_increment,
         auto_increment_within: r.auto_increment_within.clone(),
         default: r.default.clone(),
+        list_enum: r.list_enum.clone(),
     })
 }
 

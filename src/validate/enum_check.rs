@@ -57,6 +57,7 @@ mod tests {
             auto_increment: false,
             auto_increment_within: None,
             default: None,
+            list_enum: None,
         }
     }
 
