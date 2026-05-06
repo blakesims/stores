@@ -133,6 +133,16 @@ The pure-dogfood rule says: drive substrate work through substrate verbs. We've 
 
 **When to revisit:** when L116 + L117 ship and the dogfood path is restored end-to-end, tighten the rule back toward "always dogfood unless [extreme circumstance]." This is a working rule for 2026-05-06, not a permanent relaxation.
 
+### Codex review as the in_review gate (2026-05-06)
+
+When a task hits `in_review`:
+
+1. Rebase the task's branch onto current `main` (codex "deleted X" findings are often stale-base artifacts).
+2. Run codex against the branch diff. If `/codex:review` fails with bwrap errors, fall back to `cd <worktree> && codex exec --dangerously-bypass-approvals-and-sandbox --color never "<focus prompt>"`.
+3. PASS / cosmetic-only → `tasks accept <id> --invoker ai_with_human --approve-token <T>`.
+4. Substantive findings, non-critical → direct-edit the worktree, commit as `<TID> codex-revise: <summary>`, re-run codex, loop until PASS.
+5. Critical / architectural findings → halt and surface to the user.
+
 ### What NOT to do
 
 - Don't retreat to hand-editing markdown when the substrate hurts. The pain is the data.
