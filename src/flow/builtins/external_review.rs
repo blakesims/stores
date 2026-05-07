@@ -312,8 +312,15 @@ fn fire_task_external_review_revise(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let diff: EntryMap = BTreeMap::new();
-    let merged = existing.clone();
+    let current_cycle = existing
+        .get("current_cycle")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let bumped_cycle = current_cycle + 1;
+    let mut diff: EntryMap = BTreeMap::new();
+    let mut merged = existing.clone();
+    merged.insert("current_cycle".to_string(), Value::from(bumped_cycle));
+    diff.insert("current_cycle".to_string(), Value::from(bumped_cycle));
     let transition = select_transition(
         &schema.lifecycle.transitions,
         &current_status,
