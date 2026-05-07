@@ -38,10 +38,10 @@ The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by defa
 
 Each U-moment now has two equivalent grounding paths:
 
-(a) **`--invoker human`** — the user types the verb themselves (works for any U-moment, required where the field is `actor: human` and no token is presented).
+(a) **`--invoker human`** — the user types the verb themselves from a non-AI shell. If an AI runtime is detected (`STORES_AI_RUNTIME`, `$CLAUDECODE`, or equivalent), explicit `--invoker human` is rejected: human provenance is unavailable from inside the AI runtime.
 (b) **`--invoker ai_with_human --approve-token <T>`** — the user pre-authorized the row by allowing the AI to read the host-bound plaintext token at `~/.config/stores/approve.token` (mode 0600), typically via `stores auth show`; the AI executes the write with the token attached. The substrate verifies the token via constant-time hash-equality and accepts the write under tier-A semantics.
 
-Both paths are equally valid grounding. Pick (a) when the user is at the keyboard for this exact verb; pick (b) when the user has pre-authorized a session of work and wants the AI to execute without typing each verb.
+Both paths are equally valid grounding, but they preserve different provenance. Pick (a) when the user is at the keyboard for this exact verb in a non-AI shell; pick (b) when the user has pre-authorized a session of work and wants the AI to execute without typing each verb.
 
 **Everything else is `ai_autonomous`:** every `submit-*` during a drive cycle, every `observations add` for friction encountered mid-work, every `tasks render` / `tasks status` / `tasks next-action`, every read.
 
@@ -55,7 +55,7 @@ See `docs/philosophy.md` § *What's outside the substrate*.
 
 The substrate distinguishes two grades of "human-grounded" writes:
 
-- **Tier-A — `actor: human` gates (host-bound token-mediated).** Fields and transitions marked `actor: human` in `schema.yaml` are the highest-stakes assent moments: task acceptance/rejection, observation `confirm`, `intent_contract.approved_by/at`, and similar. They accept EITHER `--invoker human` (the user typed the verb) OR `--invoker ai_with_human --approve-token <T>` where `<T>` is the approval token stored on this host at `~/.config/stores/approve.token` (mode 0600). The substrate verifies the presented token by constant-time hash-equality against `~/.config/stores/approve.token.hash`. `ai_autonomous` is rejected even with a valid token — the token does not relax the AI-only case.
+- **Tier-A — `actor: human` gates (host-bound token-mediated).** Fields and transitions marked `actor: human` in `schema.yaml` are the highest-stakes assent moments: task acceptance/rejection, observation `confirm`, `intent_contract.approved_by/at`, and similar. They accept EITHER `--invoker human` from a non-AI shell (the user typed the verb) OR `--invoker ai_with_human --approve-token <T>` where `<T>` is the approval token stored on this host at `~/.config/stores/approve.token` (mode 0600). Explicit `--invoker human` from an AI-detected runtime is rejected fail-loud; use the token path for AI-executed human-grounded writes, or rerun from a non-AI shell for true human provenance. The substrate verifies the presented token by constant-time hash-equality against `~/.config/stores/approve.token.hash`. `ai_autonomous` is rejected even with a valid token — the token does not relax the AI-only case.
 
 - **Tier-B — `actor: ai_with_human` gates (honor-system, no token).** Fields and transitions marked `actor: ai_with_human` accept `--invoker ai_with_human` without a token. These are lower-stakes "human in the loop" moments where the AI's ask-first discipline is the runtime protection. The schema does not enforce token possession here; it enforces only that the invoker is not `ai_autonomous`.
 
