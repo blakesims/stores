@@ -64,7 +64,12 @@ const IN_CYCLE_STATUSES: &[&str] = &[
     "ready",
     "executing",
     "code_review",
+    "in_review",
 ];
+
+fn is_watchdog_actionable_status(status: &str) -> bool {
+    IN_CYCLE_STATUSES.contains(&status)
+}
 
 /// Returns true when the task still has auto-drive work to do.
 ///
@@ -426,7 +431,7 @@ pub(crate) type ZombieRow = (i64, String, String, i64, &'static str);
 /// auto-drive subprocess is no longer alive (the L062 silent-zombie shape).
 ///
 /// A row qualifies as a silent zombie when:
-///   * `status` is in {planning, plan_review, ready, executing, code_review}
+///   * `status` is in {planning, plan_review, ready, executing, code_review, in_review}
 ///   * an auto-drive `dispatch_locks` row exists for it (any state, including
 ///     already-closed via `mark_claim_finished`), AND
 ///   * either `drive_pid` is set but the PID is dead, OR `drive_pid` is NULL
@@ -708,6 +713,9 @@ pub fn sweep_drive_watchdog(
             continue;
         }
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if !is_watchdog_actionable_status(status) {
+            continue;
+        }
         if status == "in_review" {
             if redispatch_pending_drive(
                 conn,
@@ -1267,6 +1275,68 @@ mod tests {
             "exactly one ntfy event with 'blocked' for T721; got events: {:?}",
             evs
         );
+    }
+
+    #[test]
+    fn watchdog_mixed_state_open_locks_marks_only_actionable() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let rows = [
+            ("T890", "planning"),
+            ("T891", "executing"),
+            ("T892", "code_review"),
+            ("T893", "abandoned"),
+            ("T894", "closed_out_of_band"),
+            ("T895", "schema_migrated"),
+            ("T896", "accepted"),
+            ("T897", "cargo_installed"),
+            ("T898", "deploy_blocked"),
+            ("T899", "rejected"),
+        ];
+        for (display_id, status) in rows {
+            let row_id = insert_task_full(&conn, display_id, status, Some(dead_pid()));
+            insert_lock(&conn, row_id, display_id);
+        }
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+        assert_eq!(acted, 3, "only actionable rows should be watchdog-actioned");
+
+        let marked: Vec<String> = conn
+            .prepare(
+                "SELECT display_id FROM transition_history \
+                 WHERE verb = 'mark_drive_failed' ORDER BY display_id",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(marked, vec!["T890", "T891", "T892"]);
+
+        for display_id in ["T893", "T894", "T895", "T896", "T897", "T898", "T899"] {
+            let status: String = conn
+                .query_row(
+                    "SELECT status FROM tasks WHERE display_id = ?1",
+                    rusqlite::params![display_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                matches!(
+                    status.as_str(),
+                    "abandoned"
+                        | "closed_out_of_band"
+                        | "schema_migrated"
+                        | "accepted"
+                        | "cargo_installed"
+                        | "deploy_blocked"
+                        | "rejected"
+                ),
+                "terminal row {display_id} must not be mutated; got {status}"
+            );
+        }
     }
 
     /// A1-strict AC5.1 (iii): dead PID + status='in_review' + open lock →
