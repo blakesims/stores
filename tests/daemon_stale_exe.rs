@@ -384,6 +384,9 @@ fn reexec_argv_strips_detach_preserves_invoker_and_log_file() {
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
         .env("STORES_DAEMON_BIN_PATH", &launch_path)
+        // Strip AI-runtime signals so the subprocess simulates a non-AI shell.
+        .env_remove("STORES_AI_RUNTIME")
+        .env_remove("CLAUDECODE")
         .output()
         .expect("invoke detached stale daemon command");
 

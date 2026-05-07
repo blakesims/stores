@@ -7,6 +7,8 @@ use std::process::Command;
 fn run_ok(bin: &str, cwd: &Path, args: &[&str], token_dir: Option<&Path>) {
     let mut cmd = Command::new(bin);
     cmd.current_dir(cwd).args(args);
+    // Strip AI-runtime signals so subprocess tests simulate a non-AI shell.
+    cmd.env_remove("STORES_AI_RUNTIME").env_remove("CLAUDECODE");
     if let Some(dir) = token_dir {
         cmd.env("STORES_TOKEN_DIR", dir);
     }
@@ -120,6 +122,9 @@ fn ratify_amend_rejects_non_human_even_with_valid_token() {
         let output = Command::new(bin)
             .current_dir(tmp.path())
             .env("STORES_TOKEN_DIR", &token_dir)
+            // Strip AI-runtime env so the subprocess is not mistaken for an AI runtime.
+            .env_remove("STORES_AI_RUNTIME")
+            .env_remove("CLAUDECODE")
             .args([
                 "architecture-reviews",
                 "ratify-amend",
@@ -141,6 +146,32 @@ fn ratify_amend_rejects_non_human_even_with_valid_token() {
             "ratify-amend {actor} stderr did not cite human-only rule:\n{stderr}"
         );
     }
+
+    // AC1 positive-rejection: --invoker human from inside an AI runtime must fail.
+    let output = Command::new(bin)
+        .current_dir(tmp.path())
+        .env("STORES_TOKEN_DIR", &token_dir)
+        .env("STORES_AI_RUNTIME", "1")
+        .args([
+            "architecture-reviews",
+            "ratify-amend",
+            "A001",
+            "--invoker",
+            "human",
+            "--approve-token",
+            "valid-token",
+        ])
+        .output()
+        .expect("ratify-amend AI-runtime human invocation");
+    assert!(
+        !output.status.success(),
+        "ratify-amend must reject --invoker human from an AI runtime"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("human provenance is unavailable from an AI runtime"),
+        "AI-runtime + --invoker human must cite provenance unavailability:\n{stderr}"
+    );
 
     run_ok(
         bin,

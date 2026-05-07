@@ -38,7 +38,7 @@ The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by defa
 
 Each U-moment now has two equivalent grounding paths:
 
-(a) **`--invoker human`** — the user types the verb themselves from a non-AI shell. If an AI runtime is detected (`STORES_AI_RUNTIME`, `$CLAUDECODE`, or equivalent), explicit `--invoker human` is rejected: human provenance is unavailable from inside the AI runtime.
+(a) **`--invoker human`** — the user types the verb themselves from a non-AI shell. If an AI runtime is detected (supported signals are exactly `STORES_AI_RUNTIME` and `CLAUDECODE`; other AI runtimes such as Cursor, Continue, etc. MUST set `STORES_AI_RUNTIME=1` to be detected — this is the contract), explicit `--invoker human` is rejected: human provenance is unavailable from inside the AI runtime.
 (b) **`--invoker ai_with_human --approve-token <T>`** — the user pre-authorized the row by allowing the AI to read the host-bound plaintext token at `~/.config/stores/approve.token` (mode 0600), typically via `stores auth show`; the AI executes the write with the token attached. The substrate verifies the token via constant-time hash-equality and accepts the write under tier-A semantics.
 
 Both paths are equally valid grounding, but they preserve different provenance. Pick (a) when the user is at the keyboard for this exact verb in a non-AI shell; pick (b) when the user has pre-authorized a session of work and wants the AI to execute without typing each verb.
@@ -71,6 +71,8 @@ The token mechanism's purpose is to bind tier-A writes to this solo-operated hos
 - **Verification remains mechanical.** The schema gate verifies `--approve-token <T>` by constant-time hash-equality, so a tier-A write without the host token is rejected fail-loud.
 
 The doctrine is: tier-A is host-bound plaintext+0600 plus constant-time verification; tier-B is honor-system; `ai_autonomous` is autonomous. Drift across the tiers is what the schema fights.
+
+AI-runtime detection is a fail-loud drift guard, not an anti-forgery boundary; deliberately unsetting `STORES_AI_RUNTIME` or `CLAUDECODE` bypasses detection by design — that bypass is outside the substrate's enforcement scope and lives in the AI's ask-first behavioral discipline.
 
 ### Bugs are observations, not blockers
 
