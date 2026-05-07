@@ -540,9 +540,67 @@ fn layer2_repeated_tick_does_not_duplicate_dispatch() {
     assert_eq!(running_count, 1, "exactly ONE pending→running transition must exist");
 }
 
+/// Test: cap accounting includes BOTH pending AND running rows (Finding 1 fix).
+///
+/// Pi msg_ccfb6b59: "pending/tooling_held-eligible" accounting.  The scenario
+/// where this matters: M reviews are already `running` (long-running external
+/// processes) and N pending reviews are queued.  cap_allows_or_log must count
+/// running+pending (excluding the candidate itself) so that M+N > cap causes
+/// the pending candidates to be held rather than all dispatched simultaneously.
+///
+/// Setup: cap=2, 2 rows already `running`, 3 rows `pending`.
+/// Expected: all 3 pending rows are cap-held (running already fills the cap).
+#[test]
+fn layer2_cap_accounting_includes_pending_rows() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    external_review::visible_status_rows(&conn).unwrap(); // adds runtime cols
+
+    // 2 reviews already running — fills the cap=2 lane.
+    insert_review(&conn, "ER048", "T948", "running", 1);
+    insert_review(&conn, "ER049", "T949", "running", 1);
+    // 3 pending reviews — should all be cap-held.
+    insert_review(&conn, "ER050", "T951", "pending", 1);
+    insert_review(&conn, "ER051", "T952", "pending", 1);
+    insert_review(&conn, "ER052", "T953", "pending", 1);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
+    // cap=2 — the two running rows already fill the cap.
+    let cfg_path = cfg(tmp.path(), &sh, 2);
+    let a = agents();
+
+    let dispatches =
+        reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
+
+    // cap_allows_or_log counts running(2) + pending-excluding-candidate(2) = 4 >= 2
+    // for each candidate; all 3 pending rows must be cap-held.
+    let dispatched: Vec<_> = dispatches
+        .iter()
+        .filter(|d| d.outcome == ExternalReviewDispatchOutcome::Dispatched)
+        .collect();
+    let held: Vec<_> = dispatches
+        .iter()
+        .filter(|d| d.outcome == ExternalReviewDispatchOutcome::CapHeld)
+        .collect();
+
+    assert_eq!(
+        dispatched.len(),
+        0,
+        "no pending rows must dispatch when 2 running rows already fill cap=2; got {} dispatched",
+        dispatched.len()
+    );
+    assert_eq!(
+        held.len(),
+        3,
+        "all 3 pending rows must be cap-held; got {} held",
+        held.len()
+    );
+}
+
 /// Test: lane cap is respected — reconciler holds when cap full.
 ///
-/// When a review is already running (count_running_reviews = cap), Layer 2
+/// When a review is already running (count_active_reviews = cap), Layer 2
 /// must NOT dispatch additional rows; it must mark them cap-held and return
 /// the CapHeld outcome.
 #[test]
@@ -581,4 +639,133 @@ fn layer2_lane_cap_respected_when_at_capacity() {
         |r| r.get(0),
     ).unwrap();
     assert_eq!(status, "pending", "cap-held row must remain at pending");
+}
+
+/// Real concurrent race test for `run()` CAS gate (Finding 2 fix).
+///
+/// Two independent connections call `external_review::run()` simultaneously
+/// against the same `pending` ER row.  The BEGIN IMMEDIATE transaction wrapping
+/// load+cap-check+mark_running must guarantee exactly ONE caller wins the CAS
+/// and transitions pending→running; the other must abort silently with 0 rows
+/// affected and must NOT insert a duplicate transition history record.
+///
+/// Sync mechanism (mirrors the promote_elapsed_tooling_held race test above):
+///   - `STORES_TEST_RUN_CAS_DELAY_MS=150` causes Thread A to sleep BEFORE
+///     opening its BEGIN IMMEDIATE.
+///   - `RUN_CAS_DELAY_HOOK_ENTERED` (AtomicBool, debug_assertions only) is set
+///     BEFORE the sleep so Thread B knows Thread A is in the window.
+///
+/// Assertions:
+///   (a) Exactly ONE pending→running transition history record.
+///   (b) Final row status is NOT 'pending' (winner ran to completion).
+///   (c) No second history record (loser returned silently).
+#[cfg(debug_assertions)]
+#[test]
+fn external_review_run_cas_concurrent_race_exactly_one_winner() {
+    // Reset sentinels before the test.
+    stores::flow::builtins::external_review::RUN_CAS_DELAY_HOOK_ENTERED
+        .store(false, Ordering::SeqCst);
+
+    std::env::set_var("STORES_TEST_RUN_CAS_DELAY_MS", "150");
+
+    // Temp-file DB so two independent connections share the same database.
+    let db_file = tempfile::NamedTempFile::new().unwrap();
+    let db_path = db_file.path().to_owned();
+
+    // Write config + shim to a temp dir that outlives the threads.
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let sh = shim(tmp_dir.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
+    let cfg_path = cfg(tmp_dir.path(), &sh, 10); // high cap so cap doesn't interfere
+    let cfg_path_a = cfg_path.clone();
+    let cfg_path_b = cfg_path.clone();
+
+    // Setup: schema + one pending ER row.
+    {
+        let setup_conn = Connection::open(&db_path).unwrap();
+        setup_conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        install_db(&setup_conn);
+        let ws = git_workspace();
+        insert_task(&setup_conn, ws.path(), "in_review");
+        insert_review(&setup_conn, "ER060", "T900", "pending", 1);
+        external_review::visible_status_rows(&setup_conn).unwrap(); // add runtime cols
+    } // setup_conn dropped
+
+    // ── Thread A ─────────────────────────────────────────────────────────────
+    let db_path_a = db_path.clone();
+    let thread_a = std::thread::spawn(move || {
+        let conn = Connection::open(&db_path_a).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "busy_timeout", 5000i64).unwrap();
+        let a = agents();
+        let row_json = json!({"display_id": "ER060"});
+        let ctx = DispatchCtx {
+            conn: &conn,
+            agents: &a,
+            config_path: &cfg_path_a,
+            policies_hash: "",
+        };
+        external_review::run(&row_json, &ctx).unwrap();
+    });
+
+    // ── Main thread (Thread B) ────────────────────────────────────────────────
+    // Wait until Thread A signals it has entered the delay hook.
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if stores::flow::builtins::external_review::RUN_CAS_DELAY_HOOK_ENTERED
+                .load(Ordering::Acquire)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for RUN_CAS_DELAY_HOOK_ENTERED signal"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    // Thread A is in the pre-TX delay window.  Thread B races to open run() now.
+    let conn_b = Connection::open(&db_path).unwrap();
+    conn_b.pragma_update(None, "journal_mode", "WAL").unwrap();
+    conn_b.pragma_update(None, "busy_timeout", 5000i64).unwrap();
+    let a_b = agents();
+    let row_json_b = json!({"display_id": "ER060"});
+    let ctx_b = DispatchCtx {
+        conn: &conn_b,
+        agents: &a_b,
+        config_path: &cfg_path_b,
+        policies_hash: "",
+    };
+    external_review::run(&row_json_b, &ctx_b).unwrap();
+
+    thread_a.join().expect("thread A panicked");
+
+    std::env::remove_var("STORES_TEST_RUN_CAS_DELAY_MS");
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+    let verify_conn = Connection::open(&db_path).unwrap();
+
+    // (a) Exactly ONE pending→running transition history record.
+    let running_hist: i64 = verify_conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='external_reviews' AND from_status='pending' AND to_status='running'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(
+        running_hist, 1,
+        "exactly ONE pending→running transition must exist (CAS winner); got {running_hist}"
+    );
+
+    // (b) Row must no longer be pending (winner completed the run).
+    let final_status: String = verify_conn.query_row(
+        "SELECT status FROM external_reviews WHERE display_id='ER060'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_ne!(
+        final_status, "pending",
+        "ER060 must have left pending after the race"
+    );
 }
