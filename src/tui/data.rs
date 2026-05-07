@@ -289,6 +289,14 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
                     model.active += 1;
                 }
             }
+            Row::Review(r) => {
+                if matches!(r.status.as_str(), "running" | "tooling_held" | "pending") {
+                    model.active += 1;
+                }
+                if r.status == "tooling_held" {
+                    model.held += 1;
+                }
+            }
         }
     }
     model

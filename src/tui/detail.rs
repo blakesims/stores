@@ -3,7 +3,7 @@
 use ratatui::text::Line;
 
 use super::app::App;
-use super::data::{ArtifactPointer, IntakeRow, ObsRow, RecentEvent, Row, TaskRow};
+use super::data::{ArtifactPointer, IntakeRow, ObsRow, RecentEvent, ReviewRow, Row, TaskRow};
 
 pub fn selected_detail_lines(app: &App) -> Vec<Line<'static>> {
     let Some(detail) = &app.detail else {
@@ -31,6 +31,7 @@ fn lines_for_row(row: &Row, app: &App) -> Vec<String> {
     match row {
         Row::Task(t) => task_lines(t, app),
         Row::Obs(o) => observation_lines(o),
+        Row::Review(r) => review_lines(r),
         Row::Intake(i) => intake_lines(i),
     }
 }
@@ -182,6 +183,22 @@ fn intake_lines(i: &IntakeRow) -> Vec<String> {
         format!("  duplicate_of: {}", present_opt(i.duplicate_of.as_deref())),
     ]);
     lines
+}
+
+fn review_lines(r: &ReviewRow) -> Vec<String> {
+    vec![
+        format!("External review detail · {}", r.display_id),
+        String::new(),
+        "Review state".to_string(),
+        format!("  status: {}", r.status),
+        format!("  task: {}", r.task_id),
+        format!("  runner: {}", if r.runner.is_empty() { "unknown" } else { &r.runner }),
+        format!("  attempts: {}", r.attempts),
+        String::new(),
+        "Hold state".to_string(),
+        format!("  held_reason: {}", r.held_reason.as_deref().unwrap_or("none")),
+        format!("  next_retry_at: {}", r.next_retry_at.as_deref().unwrap_or("none")),
+    ]
 }
 
 fn append_events(lines: &mut Vec<String>, events: &[RecentEvent]) {

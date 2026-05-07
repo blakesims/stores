@@ -124,6 +124,13 @@ fn row_line(row: &Row) -> String {
             "{} {} priority:{} {}",
             o.display_id, o.status, o.priority, o.summary
         ),
+        Row::Review(r) => format!(
+            "{} review:{} task={} runner={}",
+            r.display_id,
+            r.status,
+            r.task_id,
+            if r.runner.is_empty() { "unknown" } else { &r.runner },
+        ),
         Row::Intake(i) => format!(
             "{} {} priority:{} {} held:{}",
             i.display_id,

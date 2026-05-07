@@ -55,6 +55,7 @@ pub enum Mode {
 pub enum DetailKind {
     Task,
     Observation,
+    Review,
     Intake,
 }
 
@@ -413,6 +414,7 @@ impl App {
         let kind = match row {
             Row::Task(_) => DetailKind::Task,
             Row::Obs(_) => DetailKind::Observation,
+            Row::Review(_) => DetailKind::Review,
             Row::Intake(_) => DetailKind::Intake,
         };
         self.detail = Some(DetailSelection {
