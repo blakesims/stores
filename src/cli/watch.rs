@@ -87,7 +87,6 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
         crate::tui::data::Section::TasksActionableCurrentWork
         | crate::tui::data::Section::TasksBlockedNeedsAction
         | crate::tui::data::Section::TasksDeployRecovery
-        | crate::tui::data::Section::TasksNeedsTriage
         | crate::tui::data::Section::TasksRecentlyTerminal => idxs.clone(),
         _ => Vec::new(),
     }).collect();
