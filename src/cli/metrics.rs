@@ -87,7 +87,8 @@ struct TransitionRow {
 }
 
 pub fn run(args: MetricsArgs) -> Result<()> {
-    let conn = Connection::open(crate::paths::db_path()?).context("open .stores/db.sqlite")?;
+    let db_path = crate::paths::db_path()?;
+    let conn = crate::db::open(&db_path).context("open .stores/db.sqlite")?;
     let report = build_report(&conn, &args.window)?;
     if args.text && !args.json {
         print!("{}", render_text(&report));
@@ -304,9 +305,26 @@ fn collect_reviews(v: &Value, out: &mut Vec<(String, String)>) {
             let phase = m
                 .get("phase")
                 .or_else(|| m.get("phase_name"))
-                .and_then(Value::as_str);
-            let verdict = m
-                .get("verdict")
+                .and_then(|p| {
+                    if let Some(s) = p.as_str() {
+                        Some(s.to_string())
+                    } else if let Some(n) = p.as_i64() {
+                        Some(n.to_string())
+                    } else {
+                        p.as_u64().map(|n| n.to_string())
+                    }
+                });
+            let review = m.get("review").and_then(Value::as_object);
+            let verdict = review
+                .and_then(|r| {
+                    r.get("gate")
+                        .or_else(|| r.get("verdict"))
+                        .or_else(|| r.get("result"))
+                        .or_else(|| r.get("status"))
+                        .or_else(|| r.get("outcome"))
+                })
+                .or_else(|| m.get("gate"))
+                .or_else(|| m.get("verdict"))
                 .or_else(|| m.get("result"))
                 .or_else(|| m.get("status"))
                 .or_else(|| m.get("outcome"))
@@ -314,7 +332,7 @@ fn collect_reviews(v: &Value, out: &mut Vec<(String, String)>) {
             if let (Some(p), Some(verdict)) = (phase, verdict) {
                 let verdict = verdict.to_ascii_uppercase();
                 if verdict == "PASS" || verdict == "REVISE" {
-                    out.push((p.to_string(), verdict));
+                    out.push((p, verdict));
                 }
             }
             for child in m.values() {
@@ -583,13 +601,13 @@ mod tests {
         let c = conn();
         c.execute_batch("CREATE TABLE tasks (display_id TEXT, tier_hint TEXT, cycles TEXT);")
             .unwrap();
-        c.execute("INSERT INTO tasks VALUES ('T1','T1',?1)", [r#"[{"phase":"plan","verdict":"PASS"},{"phase":"plan","verdict":"REVISE"},{"phase":"execute","verdict":"PASS"}]"#]).unwrap();
+        c.execute("INSERT INTO tasks VALUES ('T1','T1',?1)", [r#"[{"phase":1,"cycle":1,"review":{"gate":"PASS"}},{"phase":1,"cycle":2,"review":{"gate":"REVISE"}},{"phase":2,"cycle":1,"review":{"gate":"PASS"}}]"#]).unwrap();
         let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
         let row = r
             .revise_rate
             .rows
             .iter()
-            .find(|m| m.phase == "plan" && m.tier_hint == "T1")
+            .find(|m| m.phase == "1" && m.tier_hint == "T1")
             .unwrap();
         assert_eq!(
             (row.task_type.as_str(), row.revise_count, row.total_reviews),
