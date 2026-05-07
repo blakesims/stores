@@ -159,6 +159,8 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         }
     };
 
+    surface_scaffold_stderr(display_id, &output.stderr);
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let tail: String = stderr.lines().rev().take(20).collect::<Vec<_>>().join("\n");
@@ -171,14 +173,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         return Ok(1);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let last_line = stdout
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .last()
-        .unwrap_or("")
-        .to_string();
+    let last_line = last_nonempty_stdout_line(&output.stdout);
     if last_line.is_empty() {
         eprintln!(
             "[auto-scaffold] {}: scaffold command produced no stdout path",
@@ -246,6 +241,29 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         );
     }
     Ok(0)
+}
+
+fn scaffold_stderr_log_lines(display_id: &str, stderr: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(|line| format!("[auto-scaffold] {display_id}: scaffold stderr: {line}"))
+        .collect()
+}
+
+fn surface_scaffold_stderr(display_id: &str, stderr: &[u8]) {
+    for line in scaffold_stderr_log_lines(display_id, stderr) {
+        eprintln!("{line}");
+    }
+}
+
+fn last_nonempty_stdout_line(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .last()
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Resolve the worktree's current branch via `git -C <wt> rev-parse --abbrev-ref HEAD`.
@@ -373,6 +391,38 @@ mod tests {
             .unwrap();
         let canon = target.canonicalize().unwrap().to_string_lossy().to_string();
         assert_eq!(wp, canon);
+    }
+
+    #[test]
+    fn scaffold_captures_stderr_and_preserves_stdout_last_line_parse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("worktree-T108");
+        let command = format!(
+            "echo ignored-stdout && echo seed-decision: create-worktree >&2 && echo shim diagnostic >&2 && mkdir -p {0} && echo {0}",
+            target.display()
+        );
+
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .output()
+            .expect("scaffold shim command");
+        assert!(output.status.success());
+
+        let captured = scaffold_stderr_log_lines("T108", &output.stderr);
+        assert_eq!(
+            captured,
+            vec![
+                "[auto-scaffold] T108: scaffold stderr: seed-decision: create-worktree",
+                "[auto-scaffold] T108: scaffold stderr: shim diagnostic",
+            ],
+            "shim stderr must be surfaced with daemon-log prefix"
+        );
+        assert_eq!(
+            last_nonempty_stdout_line(&output.stdout),
+            target.display().to_string(),
+            "workspace_path parse must still use the last non-empty stdout line"
+        );
     }
 
     #[test]
