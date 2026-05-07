@@ -267,9 +267,26 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
         let _ = std::fs::write(&pidfile, std::process::id().to_string());
     }
 
-    let daemon_argv: Vec<OsString> = std::env::args_os().collect();
+    // Collect argv and strip --detach (and --detach=...) before reexec so
+    // that a self-reexecing daemon does not attempt to re-daemonize — it is
+    // already detached. --invoker, --log-file, --meta, and all other flags are
+    // preserved. (MEDIUM codex fix: Pi Option A.)
+    let daemon_argv: Vec<OsString> = std::env::args_os()
+        .filter(|a| {
+            let s = a.to_string_lossy();
+            s != "--detach" && !s.starts_with("--detach=")
+        })
+        .collect();
+
+    // Construct the exe guard and perform an IMMEDIATE stale check BEFORE
+    // opening the DB or running any migrations / seeds / sweeps. If the binary
+    // on disk already differs from the one we were launched from, reexec now so
+    // no stale code touches the substrate. (HIGH codex fix.)
     let exe_guard =
         DaemonExeGuard::from_process().context("constructing daemon executable guard")?;
+    if exe_guard.check_stale()?.is_some() {
+        handle_stale_daemon_reexec(&exe_guard, &daemon_argv)?;
+    }
 
     install_sigterm_handler();
 

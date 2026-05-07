@@ -266,9 +266,12 @@ fn stale_then_reexec_fails_fallback_exits_nonzero() {
     assert!(stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
 }
 
+/// MEDIUM fix (Pi Option A): --detach must be stripped from reexec argv so the
+/// daemon does not attempt to re-daemonize on self-reexec. --invoker and
+/// --log-file must be preserved.
 #[cfg(unix)]
 #[test]
-fn argv_preservation_includes_invoker_detach_and_log_file() {
+fn reexec_argv_strips_detach_preserves_invoker_and_log_file() {
     use std::os::unix::process::CommandExt;
     use std::time::{Duration, Instant};
 
@@ -303,9 +306,77 @@ fn argv_preservation_includes_invoker_detach_and_log_file() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let argv = std::fs::read_to_string(&args_file).unwrap();
+    // --invoker and --log-file must survive the reexec.
     assert!(argv.contains("--invoker\nhuman\n"), "argv:\n{argv}");
-    assert!(argv.contains("--detach\n"), "argv:\n{argv}");
     assert!(argv.contains(&format!("--log-file\n{}\n", log_file.display())), "argv:\n{argv}");
+    // --detach must be stripped so the reexec-ed daemon does not re-daemonize.
+    assert!(!argv.contains("--detach\n"), "--detach must be stripped from reexec argv:\n{argv}");
+}
+
+/// HIGH fix: stale-at-startup must reexec BEFORE opening the DB. This test
+/// verifies that when the daemon binary is stale before startup, no migration
+/// / seed / sweep DB side-effects occur.
+///
+/// Strategy: use STORES_TEST_DAEMON_FORCE_STALE with a non-executable stub so
+/// execv fails and the daemon exits non-zero immediately — which means it
+/// cannot have opened and migrated the DB (migration only runs after execv
+/// would have been called in the new order). We then check the DB stays empty.
+#[cfg(unix)]
+#[test]
+fn stale_at_startup_no_db_side_effects_before_reexec() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let stores_dir = tmp.path().join(".stores");
+    std::fs::create_dir_all(&stores_dir).unwrap();
+    std::fs::write(stores_dir.join("manifest.yaml"), "stores: []\n").unwrap();
+    // Create the DB file but leave it empty (no DDL) so any migration/seed
+    // attempt would write rows we can detect.
+    std::fs::write(stores_dir.join("db.sqlite"), "").unwrap();
+
+    // Non-executable stub so execv fails fast — the daemon must bail before
+    // doing any DB work.
+    let launch_path = tmp.path().join("stores_stale_stub");
+    std::fs::write(&launch_path, "not executable\n").unwrap();
+    let mut perms = std::fs::metadata(&launch_path).unwrap().permissions();
+    perms.set_mode(0o644);
+    std::fs::set_permissions(&launch_path, perms).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&launch_path)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .output()
+        .expect("invoke stale-at-startup daemon command");
+
+    // Must exit non-zero (execv failed, fallback to fail-loud).
+    assert!(
+        !output.status.success(),
+        "stale-at-startup with non-executable stub must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Reexec was attempted.
+    assert!(
+        stderr.contains("daemon binary stale; reexecing into"),
+        "must log reexec attempt; stderr:\n{stderr}"
+    );
+    // execv failed (not executable).
+    assert!(
+        stderr.contains("execv failed"),
+        "must log execv failure; stderr:\n{stderr}"
+    );
+    // The DB file we placed is empty (0 bytes), meaning no migration ran.
+    // If migration had run, rusqlite would have written the DDL and the file
+    // would be non-empty (SQLite page size ≥ 4096 bytes).
+    let db_size = std::fs::metadata(stores_dir.join("db.sqlite"))
+        .unwrap()
+        .len();
+    assert_eq!(
+        db_size, 0,
+        "DB must remain untouched (size 0) when stale-at-startup reexec fires before DB open"
+    );
 }
 
 #[cfg(unix)]
