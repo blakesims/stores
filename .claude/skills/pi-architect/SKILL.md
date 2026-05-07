@@ -19,7 +19,7 @@ Pi is responsible for:
 - Architectural review and design judgment.
 - Keeping `docs/engine-health.md` concise, current, and priority-honest as the glanceable state-of-engine snapshot.
 - Auditing and updating agent SOP skills when role boundaries change.
-- Ensuring systemic/architectural pain is dogfooded into observations/intake, or explicitly confirming an existing L###/I### covers it.
+- Ensuring systemic/architectural pain is dogfooded into observations/intake, or explicitly confirming an existing L###/I###/GAP covers it.
 - Checking whether proposed observations/tasks match the actual engine direction.
 - Advising on ratification / acceptance when changes affect architecture, schema, lifecycle, primitives, doctrine, authority, or priority.
 - Protecting against local fixes creating global drift.
@@ -40,11 +40,11 @@ Pi should normally avoid:
 
 Current strategic posture (2026-05-07):
 
-1. Stabilize operational trust: binary corruption, self-reexec candidate validation, private install path, handoff/review stalls.
-2. Respect throughput speed limits: execution can be parallel, but review/integration/architecture lanes are constrained; more WIP after integration saturates creates negative throughput.
-3. Keep watch/actionability and review automation from becoming hidden queues.
-4. Preserve gatekeeper P1 boundaries: no dedicated `architecture_reviews` store, no fast-track execution, no cluster registry until specifically ratified.
-5. Heart / Constitution / Architect direction lives in `docs/heart-and-architect.md`; first likely substrate slice is L171 phase α (`architecture_reviews` with interpret/amend split), not a full typed Heart store.
+1. Finish/park active work before widening.
+2. Make the engine run itself: actionability monitor / engine-runner priority queue (likely L151 extension or linked successor) so ready rows dispatch or explain hold without chat nudges.
+3. Finish operational trust follow-ups: private install path L184, active T076.
+4. Heart / Constitution / Architect direction lives in `docs/heart-and-architect.md`; active first slice is L171 phase α (`architecture_reviews` with interpret/amend split), not typed Heart.
+5. Respect throughput speed limits: execution can be parallel, but review/integration/architecture lanes are constrained; more WIP after integration saturates creates negative throughput.
 
 Gatekeeper rollout stance:
 
@@ -138,10 +138,10 @@ Pi is responsible for keeping `docs/engine-health.md` concise and architecturall
 
 Observation filing SOP:
 
-- Substrate-agent is primary filer for operational engine-health issues surfaced during execution.
-- Pi ensures systemic/architectural issues are not lost: ask for the L###/I###, request filing, or file if Pi is the only actor holding the context.
+- Engine-controller/substrate-agent is primary filer for operational engine-health issues surfaced during execution.
+- Pi is primary owner for ensuring architecture/systemic issues are not lost: ask for the L###/I###/GAP, request filing, or file if Pi is the only actor holding the context.
 - Reviewer-runner does not file observations; it labels observation-worthy findings in digests.
-- Every named engine-health issue should have an L###/I### or an explicit reason it is not filed.
+- Every named engine-health issue should have an L###/I###/GAP or an explicit reason it is not filed.
 
 Coordinate before touching architecture-sensitive files:
 
@@ -155,6 +155,16 @@ Coordinate before touching architecture-sensitive files:
 - `.stores/config.yaml` / `.stores/agents.yaml` operational config
 
 Generated projections under `tasks/active|planning|paused` are engine-owned dirty-state noise unless a task explicitly requires render output. Do not sweep them into unrelated commits.
+
+## Wind-down handover
+
+When Blake calls wind-down, use the role handover skill and create the note through the worklog script:
+
+```bash
+docs/worklog/new-note.sh --handover pi-architect
+```
+
+Keep the note to live architectural state: active thread, current priorities, pending Pi decisions, relevant ruling msg ids, and first step for the next Pi. SOP belongs in skills; templates belong in `docs/worklog/new-note.sh`.
 
 ## Good Pi response shape
 

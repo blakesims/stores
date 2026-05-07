@@ -177,3 +177,13 @@ If a finding recurs, link it to the prior digest/finding. If Pi adjudicates a re
 ## RE-REBASE-ONLY-NO-CODEX dispatch
 
 When substrate-agent dispatches `RE-REBASE-ONLY-NO-CODEX T0XX (commit <sha>)`: verify `git diff --name-only main...HEAD` is byte-for-byte identical to the prior reviewed scope (pure commit replay, no merge-resolution edits). Ack without codex if identical; reject and require re-codex if any change (even a one-line rename).
+
+## Wind-down handover
+
+When Blake calls wind-down, use the role handover skill and create the note through the worklog script:
+
+```bash
+docs/worklog/new-note.sh --handover reviewer-runner
+```
+
+Record only live review state: active codex PIDs, task/commit/worktree, command, log path, whether stdin was closed, pending digests, and first step for the next reviewer. Detached codex may continue only if the handover makes it recoverable.

@@ -91,18 +91,17 @@ Commit SOP/doc updates promptly with explicit paths staged; never `git add -A`.
 
 ## 5. Prepare handover
 
-Create a worklog handover note only when useful for the next agent. Use the worklog system (`docs/worklog/new-note.sh`), never manual filenames.
+Each role writes its own concise handover note using the worklog script, never manual filenames:
 
-Handover should include:
+```bash
+docs/worklog/new-note.sh --handover engine-controller
+docs/worklog/new-note.sh --handover reviewer-runner
+docs/worklog/new-note.sh --handover pi-architect
+```
 
-- Current daemon/CLI health.
-- Current task pipeline state.
-- What shipped this session.
-- What is parked or needs rescue.
-- Current top priorities from `docs/engine-health.md`.
-- Active agent-comm thread and whether a new thread should be created next session.
-- Any special SOP still in force, especially no subagent `cargo install`.
-- Stashes/worktrees that must not be dropped.
+Use the matching role handover skill. Handover notes contain live state only: active thread, active tasks/processes/PIDs, worktrees/branches/commits, blockers, do-not-do list, and first step for the next same-role agent. SOP belongs in skills; templates belong in `docs/worklog/new-note.sh`.
+
+Engine-controller owns creating the next agent-comm thread after all three handover notes exist and then posts links to the notes. Blake starts the next three agents with their notes and tells engine-controller when to start the engine.
 
 ## 6. Tell Blake how to start next session
 

@@ -13,7 +13,10 @@ Usage:
   new-note.sh --summary       Create or locate today's daily summary
   new-note.sh --tomorrow      Pre-create tomorrow's daily summary
   new-note.sh --weekly        Create or locate this week's weekly summary
+  new-note.sh --handover <role>
+                              Create a role handover note from a template
 
+Roles: engine-controller, reviewer-runner, pi-architect.
 After creating, the script prints the file path and a reminder to use the
 Read tool before editing. Slugs must be kebab-case.
 EOF
@@ -137,6 +140,32 @@ emit_weekly() {
 EOF
 }
 
+emit_handover() {
+    local role="$1" date="$2"
+    cat <<EOF
+# Handover — $role
+
+**Date:** $date
+**Type:** handover
+**Role:** $role
+
+## Active thread
+
+## Current responsibility
+
+## Active work / processes
+
+| item | status | pid | worktree | branch | commit | next action |
+|---|---|---|---|---|---|---|
+
+## Do not do
+
+## First step for next agent
+
+## Notes
+EOF
+}
+
 print_path_and_reminder() {
     local path="$1"
     echo "$path"
@@ -214,6 +243,23 @@ if [[ "$1" == "--weekly" ]]; then
     esac
     mkdir -p "$DIR"
     [[ -f "$FILEPATH" ]] || emit_weekly "$ISO_WEEK" "$TODAY" > "$FILEPATH"
+    print_path_and_reminder "$FILEPATH"
+    exit 0
+fi
+
+# --- Mode: --handover <role> ---
+if [[ "$1" == "--handover" ]]; then
+    [[ $# -eq 2 ]] || { echo "Error: --handover requires exactly one role." >&2; usage; }
+    ROLE="$2"
+    case "$ROLE" in
+        engine-controller|reviewer-runner|pi-architect) ;;
+        *) echo "Error: unknown handover role '$ROLE'." >&2; usage ;;
+    esac
+    DIR="$(target_dir "$TODAY" "$ISO_WEEK")"
+    mkdir -p "$DIR"
+    PREFIX="$(filename_prefix "$TODAY")"
+    FILEPATH="$DIR/${PREFIX}handover-${ROLE}.md"
+    [[ -f "$FILEPATH" ]] || emit_handover "$ROLE" "$TODAY" > "$FILEPATH"
     print_path_and_reminder "$FILEPATH"
     exit 0
 fi
