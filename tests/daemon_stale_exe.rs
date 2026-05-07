@@ -425,6 +425,7 @@ fn stale_reexec_empty_output_candidate_rejected_without_exec() {
 #[test]
 fn stale_reexec_timeout_candidate_rejected_without_exec() {
     use std::os::unix::process::CommandExt;
+    use std::time::{Duration, Instant};
 
     let tmp = tempfile::tempdir().unwrap();
     init_empty_stores_dir(tmp.path());
@@ -432,6 +433,7 @@ fn stale_reexec_timeout_candidate_rejected_without_exec() {
     let args_file = tmp.path().join("argv-timeout.txt");
     write_reexec_stub(&launch_path, &args_file, 0, StubHelpBehavior::Timeout);
 
+    let started = Instant::now();
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
@@ -439,8 +441,13 @@ fn stale_reexec_timeout_candidate_rejected_without_exec() {
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
         .output()
         .expect("invoke stale daemon command");
+    let elapsed = started.elapsed();
 
     assert!(!output.status.success(), "hung --help candidate must fail");
+    assert!(
+        elapsed < Duration::from_millis(2250),
+        "timeout validation must be deadline-bounded; elapsed={elapsed:?}"
+    );
     assert!(
         !args_file.exists(),
         "candidate agents-run path must not be exec'd"

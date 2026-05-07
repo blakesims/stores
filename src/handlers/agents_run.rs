@@ -366,19 +366,29 @@ fn validate_stale_reexec_candidate(
 ) -> std::result::Result<(), CandidateValidationFailure> {
     let size = std::fs::metadata(path).map(|m| m.len()).ok();
     let command = format!("{} --help", path.display());
-    let mut child = std::process::Command::new(path)
-        .arg("--help")
+    let mut cmd = std::process::Command::new(path);
+    cmd.arg("--help")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| CandidateValidationFailure {
-            path: path.to_path_buf(),
-            size,
-            command: command.clone(),
-            reason: format!("spawn error: {e}"),
-            stdout: String::new(),
-            stderr: String::new(),
-        })?;
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    let mut child = cmd.spawn().map_err(|e| CandidateValidationFailure {
+        path: path.to_path_buf(),
+        size,
+        command: command.clone(),
+        reason: format!("spawn error: {e}"),
+        stdout: String::new(),
+        stderr: String::new(),
+    })?;
 
     let deadline = Instant::now() + STALE_REEXEC_VALIDATION_TIMEOUT;
     loop {
@@ -433,8 +443,13 @@ fn validate_stale_reexec_candidate(
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
+                    #[cfg(unix)]
+                    unsafe {
+                        let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+                    }
+                    #[cfg(not(unix))]
                     let _ = child.kill();
-                    let output = child.wait_with_output().ok();
+                    let _ = child.wait();
                     return Err(CandidateValidationFailure {
                         path: path.to_path_buf(),
                         size,
@@ -443,14 +458,8 @@ fn validate_stale_reexec_candidate(
                             "timeout after {}ms",
                             STALE_REEXEC_VALIDATION_TIMEOUT.as_millis()
                         ),
-                        stdout: output
-                            .as_ref()
-                            .map(|o| bounded_output(&o.stdout))
-                            .unwrap_or_default(),
-                        stderr: output
-                            .as_ref()
-                            .map(|o| bounded_output(&o.stderr))
-                            .unwrap_or_default(),
+                        stdout: String::new(),
+                        stderr: String::new(),
                     });
                 }
                 std::thread::sleep(Duration::from_millis(25));
