@@ -338,7 +338,7 @@ mod tests {
         let (_d, bin) = shim(
             "#!/bin/sh\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\"}}'\n",
         );
-        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), bin);
         let schema = r#"{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}"#;
         let out = runner
             .spawn(
@@ -369,7 +369,7 @@ mod tests {
         // Telemetry is persisted by the caller (drive) before surfacing the error.
         let (_d, bin) =
             shim("#!/bin/sh\necho '{\"type\":\"message\",\"text\":\"done\"}'\nexit 0\n");
-        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), bin);
         let out = runner
             .spawn(
                 "planner",
