@@ -19,6 +19,7 @@ You are responsible for:
 - Running codex against the branch diff.
 - Posting concise PASS / REVISE / REVISE-FALSE-POSITIVE / CRITICAL / ERROR digests to agent-comm.
 - Capturing enough metadata to inform a future codex-as-subscriber substrate primitive.
+- Maintaining situational awareness of the in_review queue (arrivals, departures, cycle bumps) so a substrate-agent ping can be acked with context.
 
 You are not responsible for:
 
@@ -51,6 +52,51 @@ Allowed:
 - `git status`, `git fetch`, `git rebase` for review preparation.
 - `codex exec` review.
 - Temporary logs under `/tmp` or ignored run directories.
+
+## Session bring-up (do this first, every session)
+
+On every reviewer-runner activation, set up two persistent monitors before standing by:
+
+1. **agent-comm thread monitor** — the ping channel from substrate-agent. Either init a new thread or join the path the user provides:
+
+   ```bash
+   # New thread
+   agent-comm init "stores-review-session" --name reviewer-runner --to substrate-agent --message "<standing-by note>"
+   # OR join an existing thread the user/handover provided
+   ```
+
+   Then start a persistent Monitor running:
+
+   ```bash
+   agent-comm watch <thread-path> --name reviewer-runner --from-end
+   ```
+
+   This is the **trigger surface**: pings here drive codex runs.
+
+2. **in_review queue monitor** — situational awareness only; does NOT trigger codex. Start a persistent Monitor with a 30s poll loop that emits only on changes (arrivals, departures, cycle bumps):
+
+   ```bash
+   prev=""
+   while true; do
+     cur=$(sqlite3 <repo>/.stores/db.sqlite "SELECT display_id || ':c' || current_cycle FROM tasks WHERE status='in_review' ORDER BY display_id;" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+     if [ "$cur" != "$prev" ]; then
+       if [ -z "$prev" ]; then
+         echo "[in_review snapshot] $cur"
+       else
+         added=$(comm -13 <(echo "$prev" | tr ' ' '\n' | sort) <(echo "$cur" | tr ' ' '\n' | sort) | tr '\n' ' ')
+         removed=$(comm -23 <(echo "$prev" | tr ' ' '\n' | sort) <(echo "$cur" | tr ' ' '\n' | sort) | tr '\n' ' ')
+         [ -n "$added" ] && echo "[in_review +] $added"
+         [ -n "$removed" ] && echo "[in_review -] $removed"
+       fi
+       prev="$cur"
+     fi
+     sleep 30
+   done
+   ```
+
+   Sqlite read is fine (read-only is not a substrate write). The cycle suffix (`:c<N>`) catches revise → re-codex bumps that don't change the row count.
+
+Do NOT auto-trigger codex when the queue monitor reports new arrivals — wait for substrate-agent's explicit ping. The queue monitor exists so you can ack a ping with context and notice if substrate-agent forgot to ping you for a row that's been sitting.
 
 ## Concurrency and base doctrine
 
