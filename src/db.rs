@@ -54,8 +54,7 @@ fn open_inner(path: &Path) -> Result<Connection> {
     // ALTER TABLE on unrelated tables) fails if a view references a missing
     // base table.  The tasks store is installed separately from the substrate
     // tables, so we guard the CREATE VIEW with a table-existence check.
-    ensure_runs_view_if_tasks_exists(&conn)
-        .context("apply runs view DDL")?;
+    ensure_runs_view_if_tasks_exists(&conn).context("apply runs view DDL")?;
     // L134 / T050 Phase 1: typed-buffer migration + legacy backfill.
     // Idempotent; safe to run on every CLI verb that opens the DB.
     crate::handlers::agents_run::ensure_dispatch_locks_typed(&conn)
@@ -292,6 +291,26 @@ fields:
     fn count_history(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM transition_history", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn fresh_db_open_creates_engine_runner_tables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(&tmp.path().join("db.sqlite")).unwrap();
+        conn.execute(
+            "INSERT INTO engine_runner_heartbeats \
+             (iteration, started_at, saw_tasks, saw_intake, saw_observations, actionable, held, dispatched) \
+             VALUES (1, '2026-05-07T00:00:00Z', 0, 0, 0, 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO engine_runner_actions \
+             (store, row_id, classification, held_reason, dispatched, last_logged_at, updated_at) \
+             VALUES ('tasks', 1, 'held', 'needs_human', 0, NULL, '2026-05-07T00:00:00Z')",
+            [],
+        )
+        .unwrap();
     }
 
     #[test]
