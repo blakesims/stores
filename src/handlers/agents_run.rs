@@ -1025,8 +1025,14 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                         }
                     }
                     let cap = crate::flow::config::resolve_drive_max_parallel(config_path);
-                    let live = count_live_drive_pids(conn).unwrap_or(0);
-                    if live >= cap as usize {
+                    let now = crate::handlers::row::now_iso8601();
+                    let occupied = crate::flow::engine_runner::count_active_auto_drive_capacity(
+                        conn,
+                        &now,
+                        agent.claim_window_secs,
+                    )
+                    .unwrap_or(0);
+                    if occupied >= cap as usize {
                         continue;
                     }
                 }
@@ -1313,7 +1319,93 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
     ) {
         eprintln!("[daemon] drive watchdog sweep error: {}", e);
     }
+
+    // Panics inside the engine-runner iteration (e.g. in classification, DDL
+    // query, or heartbeat write) must not crash the daemon's main poll loop.
+    // Catch all panics here and log without payload content (payload may
+    // contain sensitive row data), then continue.
+    let iter_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_engine_runner_iteration(conn, agents, config_path, &policies.hash, dispatched as i64)
+    }));
+    match iter_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!("[engine-runner] actionability loop error: {}", e);
+        }
+        Err(_payload) => {
+            eprintln!("[engine-runner] iteration panicked; daemon continuing");
+        }
+    }
     Ok(dispatched)
+}
+
+fn run_engine_runner_iteration(
+    conn: &Connection,
+    agents: &AgentsYaml,
+    config_path: &Path,
+    policies_hash: &str,
+    base_dispatched: i64,
+) -> Result<()> {
+    for table in ["tasks", "intake", "observations"] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![table],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if exists == 0 {
+            return Ok(());
+        }
+    }
+    let tasks = crate::flow::builtins::load_tasks_schema()?;
+    let intake_yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "intake")
+        .map(|(_, y)| *y)
+        .ok_or_else(|| anyhow!("bundled intake schema missing"))?;
+    let observations_yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "observations")
+        .map(|(_, y)| *y)
+        .ok_or_else(|| anyhow!("bundled observations schema missing"))?;
+    let intake = crate::schema::Schema::from_yaml(intake_yaml)?;
+    let observations = crate::schema::Schema::from_yaml(observations_yaml)?;
+    let started_at = crate::handlers::row::now_iso8601();
+    let iteration: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(iteration), 0) + 1 FROM engine_runner_heartbeats",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(1);
+    // Pass base_dispatched so the persisted heartbeat row and the log line below
+    // both reflect the union of engine-runner redrives + daemon base dispatches.
+    let result = crate::flow::engine_runner::scan_record_and_redrive_tasks(
+        conn,
+        crate::flow::engine_runner::ScannerSchemas {
+            tasks: &tasks,
+            intake: &intake,
+            observations: &observations,
+        },
+        iteration,
+        &started_at,
+        agents,
+        config_path,
+        policies_hash,
+        base_dispatched,
+    )?;
+    eprintln!(
+        "[engine-runner] iter={} saw=tasks:{} intake:{} obs:{} actionable={} held={} dispatched={}",
+        result.summary.iteration,
+        result.summary.saw_tasks,
+        result.summary.saw_intake,
+        result.summary.saw_observations,
+        result.summary.actionable,
+        result.summary.held,
+        result.summary.dispatched
+    );
+    Ok(())
 }
 
 /// Starting-line seeder (T026 P1, refined for L116). For each agent declared
@@ -2423,17 +2515,6 @@ pub(crate) fn pid_is_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// Count tasks rows whose `drive_pid` is set to a still-running process.
-/// Used by the daemon's `poll_once` cap-check (Task 4.5).
-pub(crate) fn count_live_drive_pids(conn: &Connection) -> Result<usize> {
-    let mut stmt = conn.prepare("SELECT drive_pid FROM tasks WHERE drive_pid IS NOT NULL")?;
-    let pids: Vec<i64> = stmt
-        .query_map([], |r| r.get::<_, i64>(0))?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(pids.into_iter().filter(|p| pid_is_alive(*p as i32)).count())
-}
-
 /// Spawn `argv` as an orphaned grandchild detached from the daemon. Returns
 /// the grandchild PID. Stdout/stderr go to `log_path` (created/appended).
 /// `cwd` becomes the grandchild's working directory.
@@ -2660,6 +2741,31 @@ mod tests {
         std::path::PathBuf::from("/tmp/stores-test-nonexistent-config.yaml")
     }
 
+    fn fresh_engine_runner_db() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SUBSTRATE_DDL).unwrap();
+        let tasks = crate::flow::builtins::load_tasks_schema().unwrap();
+        let intake_yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "intake")
+            .map(|(_, y)| *y)
+            .unwrap();
+        let observations_yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "observations")
+            .map(|(_, y)| *y)
+            .unwrap();
+        let intake = crate::schema::Schema::from_yaml(intake_yaml).unwrap();
+        let observations = crate::schema::Schema::from_yaml(observations_yaml).unwrap();
+        c.execute_batch(&crate::codegen::ddl::ddl_for(&tasks))
+            .unwrap();
+        c.execute_batch(&crate::codegen::ddl::ddl_for(&intake))
+            .unwrap();
+        c.execute_batch(&crate::codegen::ddl::ddl_for(&observations))
+            .unwrap();
+        c
+    }
+
     fn insert_history(
         conn: &Connection,
         store: &str,
@@ -2732,6 +2838,32 @@ mod tests {
             right: serde_json::json!(""),
         });
         agent
+    }
+
+    #[test]
+    fn engine_runner_iteration_records_zero_row_heartbeat() {
+        let conn = fresh_engine_runner_db();
+        run_engine_runner_iteration(&conn, &AgentsYaml::default_empty(), &cfg_path(), "", 0)
+            .unwrap();
+
+        let row: (i64, i64, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT saw_tasks, saw_intake, saw_observations, actionable, held, dispatched \
+                 FROM engine_runner_heartbeats WHERE iteration=1",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, (0, 0, 0, 0, 0, 0));
     }
 
     #[test]

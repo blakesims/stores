@@ -16,10 +16,26 @@
 //! tests substitute a stub (`sleep 30`, etc.) without touching PATH.
 
 use std::path::{Path, PathBuf};
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde_json::Value;
+
+/// Test-only counter: incremented each time the CAS abort branch fires
+/// (drive_pid alive at re-read).  Only compiled in debug builds; unavailable
+/// in release.  Tests assert this counter to prove the race path executed.
+#[cfg(debug_assertions)]
+pub static CAS_ABORT_DRIVE_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only synchronization signal: set to `true` immediately when the
+/// CAS pre-spawn delay hook is entered (before the sleep begins).  Tests
+/// busy-wait on this flag before injecting a live drive_pid, guaranteeing
+/// the scanner is past its fast-path read and inside the delay window.
+/// Only compiled in debug builds; absent from release binaries.
+#[cfg(debug_assertions)]
+pub static CAS_DELAY_HOOK_ENTERED: AtomicBool = AtomicBool::new(false);
 
 use crate::flow::builtins::{
     dispatch_to_specialist, fire_mark_drive_failed, refresh_task_row, BuiltinResult, DispatchCtx,
@@ -75,10 +91,17 @@ fn mark_pending_handoff_lock(
 ) -> Result<()> {
     let now = now_iso8601();
     conn.execute(
-        "UPDATE dispatch_locks SET last_status = 'in_flight:pending_next', finished_at = NULL, \
-         terminal_reason = NULL, next_retry_at = NULL, claimed_at = ?1, pid = ?2 \
-         WHERE store = 'tasks' AND row_id = ?3 AND display_id = ?4 AND agent_name = 'auto-drive'",
-        rusqlite::params![now, pid as i64, row_id, display_id],
+        "INSERT INTO dispatch_locks \
+         (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, attempts, \
+          last_status, finished_at, daemon_epoch, claim_source, attempt, pid, terminal_reason, next_retry_at) \
+         VALUES ('tasks', ?1, ?2, 'auto-drive', NULL, ?3, 'engine-runner', 0, \
+                 'in_flight:pending_next', NULL, '', 'try_claim', 0, ?4, NULL, NULL) \
+         ON CONFLICT(store, row_id, agent_name) DO UPDATE SET \
+             claimed_at=excluded.claimed_at, claimed_by=excluded.claimed_by, \
+             last_status=excluded.last_status, finished_at=NULL, \
+             terminal_reason=NULL, next_retry_at=NULL, pid=excluded.pid, \
+             claim_source=excluded.claim_source",
+        rusqlite::params![row_id, display_id, now, pid as i64],
     )?;
     Ok(())
 }
@@ -121,6 +144,154 @@ fn redispatch_pending_drive(
         return Ok(true);
     }
     Ok(false)
+}
+
+pub(crate) fn redispatch_orphaned_next_agent(
+    conn: &Connection,
+    row_id: i64,
+    agents: &AgentsYaml,
+    config_path: &Path,
+    policies_hash: &str,
+) -> Result<Option<i32>> {
+    // Fast-path read: row existence + pending work check before taking a write lock.
+    let row_info: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT display_id, COALESCE(drive_pid, 0) FROM tasks WHERE id = ?1",
+            rusqlite::params![row_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let Some((display_id, _before_fast)) = row_info else {
+        return Ok(None);
+    };
+    if !has_pending_auto_drive_work(conn, &display_id)? {
+        return Ok(None);
+    }
+
+    // Test-only synchronization hook: STORES_TEST_CAS_PRE_SPAWN_DELAY_MS
+    // introduces a sleep between the fast-path scanner read and the BEGIN
+    // IMMEDIATE transaction so a test can inject a live drive_pid (or a live
+    // dispatch_locks owner row) inside the gap — simulating the race the CAS
+    // is built to defend against.  Gated on debug_assertions so release builds
+    // compile it out entirely; the env-var cannot leak into production binaries.
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(ms) = std::env::var("STORES_TEST_CAS_PRE_SPAWN_DELAY_MS") {
+            if let Ok(n) = ms.parse::<u64>() {
+                // Signal BEFORE the sleep so the injector thread can observe
+                // that the scanner is past its fast-path read and inside the
+                // delay window.  The test busy-waits on this flag before
+                // writing the live drive_pid, making the sync deterministic.
+                CAS_DELAY_HOOK_ENTERED.store(true, Ordering::Release);
+                eprintln!("[engine-runner::cas] {display_id}: pre-spawn delay start ({n}ms)");
+                if n > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(n));
+                }
+                eprintln!("[engine-runner::cas] {display_id}: pre-spawn delay end");
+            }
+        }
+    }
+
+    // Atomic CAS: BEGIN IMMEDIATE acquires a write-intent lock so no concurrent
+    // writer (another daemon iteration, an external `stores tasks drive`, or a
+    // race-reused OS PID) can interleave between the re-read and the spawn+UPDATE.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+
+    // Re-read inside the transaction — the authoritative check.
+    let reread: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT display_id, COALESCE(drive_pid, 0) FROM tasks WHERE id = ?1",
+            rusqlite::params![row_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let Some((display_id_tx, before)) = reread else {
+        // Row vanished between fast-path and lock.
+        tx.rollback()?;
+        return Ok(None);
+    };
+
+    // Verify drive_pid is still absent or dead.
+    if before > 0 && pid_is_alive(before as i32) {
+        eprintln!(
+            "[engine-runner] {display_id_tx}: raced; drive_pid={before} alive since scan; skipping redispatch"
+        );
+        // Test-only sentinel: increments the global counter and emits a
+        // greppable line so tests can assert the race path was actually
+        // exercised (not just that no spawn happened sequentially).
+        // Compiled out in release builds.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("STORES_TEST_CAS_PRE_SPAWN_DELAY_MS").is_some() {
+            CAS_ABORT_DRIVE_PID_COUNT.fetch_add(1, Ordering::Relaxed);
+            eprintln!("[engine-runner::cas-abort] {display_id_tx}: orphan no longer applicable; drive_pid={before} now alive");
+        }
+        tx.rollback()?;
+        return Ok(None);
+    }
+
+    // Verify no live auto-drive dispatch_lock appeared within the claim window
+    // since the scanner pass (another engine-runner instance could have claimed it).
+    let live_lock: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM dispatch_locks \
+             WHERE store='tasks' AND row_id=?1 AND agent_name='auto-drive' \
+               AND finished_at IS NULL AND COALESCE(pid, 0) > 0",
+            rusqlite::params![row_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if live_lock > 0 {
+        // Check whether that lock's PID is actually alive before aborting.
+        let lock_pid: i64 = tx
+            .query_row(
+                "SELECT COALESCE(pid, 0) FROM dispatch_locks \
+                 WHERE store='tasks' AND row_id=?1 AND agent_name='auto-drive' \
+                   AND finished_at IS NULL AND COALESCE(pid, 0) > 0 \
+                 LIMIT 1",
+                rusqlite::params![row_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if lock_pid > 0 && pid_is_alive(lock_pid as i32) {
+            eprintln!(
+                "[engine-runner] {display_id_tx}: raced; live auto-drive lock pid={lock_pid} appeared since scan; skipping redispatch"
+            );
+            tx.rollback()?;
+            return Ok(None);
+        }
+    }
+
+    // Still an orphan — perform the refresh and mutate drive_pid to Null so
+    // `run()` treats this as a fresh spawn (not an already-running drive).
+    let Some(mut row) = refresh_task_row(&tx, &display_id_tx) else {
+        tx.rollback()?;
+        return Ok(None);
+    };
+    if let Some(obj) = row.as_object_mut() {
+        obj.insert("drive_pid".to_string(), Value::Null);
+    }
+    let ctx = DispatchCtx {
+        conn: &tx,
+        agents,
+        config_path,
+        policies_hash,
+    };
+    if run(&row, &ctx)? != 0 {
+        tx.rollback()?;
+        return Ok(None);
+    }
+    let after: i64 = tx.query_row(
+        "SELECT COALESCE(drive_pid, 0) FROM tasks WHERE display_id = ?1",
+        rusqlite::params![&display_id_tx],
+        |r| r.get(0),
+    )?;
+    if after > 0 && after != before {
+        mark_pending_handoff_lock(&tx, row_id, &display_id_tx, after as i32)?;
+        tx.commit()?;
+        return Ok(Some(after as i32));
+    }
+    tx.rollback()?;
+    Ok(None)
 }
 
 fn drive_runner_configured() -> bool {
@@ -626,9 +797,7 @@ pub fn sweep_drive_watchdog(
                AND t.status = 'in_review' \
                AND COALESCE(t.drive_pid, 0) > 0",
         )?;
-        let it = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
         it.filter_map(|r| r.ok()).collect()
     };
     for (row_id, display_id) in pending_locks {
@@ -1128,7 +1297,10 @@ mod tests {
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
-        assert_eq!(acted, 1, "watchdog must act on dead-PID in_review open lock");
+        assert_eq!(
+            acted, 1,
+            "watchdog must act on dead-PID in_review open lock"
+        );
 
         // Row stays in_review (redispatch, not transition).
         let status: String = conn
@@ -1162,7 +1334,9 @@ mod tests {
             )
             .unwrap_or(0);
         if pid > 0 {
-            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
         }
         std::env::remove_var("STORES_DRIVE_CMD");
     }

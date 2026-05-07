@@ -121,6 +121,32 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
         ],
     },
     FrameworkTable {
+        name: "engine_runner_heartbeats",
+        columns: &[
+            FrameworkColumn { name: "iteration", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "iteration INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "started_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "started_at TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "saw_tasks", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "saw_tasks INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "saw_intake", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "saw_intake INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "saw_observations", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "saw_observations INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "actionable", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "actionable INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "held", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "held INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "dispatched", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "dispatched INTEGER NOT NULL", additive: false },
+        ],
+    },
+    FrameworkTable {
+        name: "engine_runner_actions",
+        columns: &[
+            FrameworkColumn { name: "store", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "store TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "row_id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "row_id INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "classification", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "classification TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "action", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "action TEXT", additive: true },
+            FrameworkColumn { name: "held_reason", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "held_reason TEXT", additive: false },
+            FrameworkColumn { name: "dispatched", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "dispatched INTEGER NOT NULL CHECK(dispatched IN (0,1))", additive: false },
+            FrameworkColumn { name: "last_logged_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "last_logged_at TEXT", additive: false },
+            FrameworkColumn { name: "updated_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "updated_at TEXT NOT NULL", additive: false },
+        ],
+    },
+    FrameworkTable {
         name: "substrate_migrations",
         columns: &[
             FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },
@@ -313,6 +339,28 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     tokens_out INTEGER,
     prompt_cache_hits INTEGER,
     transcript_path TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS engine_runner_heartbeats (
+    iteration INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    saw_tasks INTEGER NOT NULL,
+    saw_intake INTEGER NOT NULL,
+    saw_observations INTEGER NOT NULL,
+    actionable INTEGER NOT NULL,
+    held INTEGER NOT NULL,
+    dispatched INTEGER NOT NULL,
+    PRIMARY KEY(iteration, started_at)
+);
+CREATE TABLE IF NOT EXISTS engine_runner_actions (
+    store TEXT NOT NULL,
+    row_id INTEGER NOT NULL,
+    classification TEXT NOT NULL,
+    action TEXT,
+    held_reason TEXT,
+    dispatched INTEGER NOT NULL CHECK(dispatched IN (0,1)),
+    last_logged_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(store, row_id)
 );
 CREATE TABLE IF NOT EXISTS substrate_migrations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -855,9 +903,9 @@ fields:
                 if line.is_empty() {
                     continue;
                 }
-                // A column line begins with an identifier; UNIQUE(...) is
-                // a table constraint we skip.
-                if line.starts_with("UNIQUE") {
+                // A column line begins with an identifier; table constraints
+                // are skipped.
+                if line.starts_with("UNIQUE") || line.starts_with("PRIMARY KEY") {
                     continue;
                 }
                 let name = line.split_whitespace().next().unwrap_or("").to_string();
