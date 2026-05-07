@@ -82,6 +82,27 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
         ],
     },
     FrameworkTable {
+        name: "daemon_starts",
+        columns: &[
+            FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },
+            FrameworkColumn { name: "display_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "display_id TEXT UNIQUE NOT NULL", additive: false },
+            FrameworkColumn { name: "status", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "status TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "created_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "created_at TEXT", additive: false },
+            FrameworkColumn { name: "updated_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "updated_at TEXT", additive: false },
+            FrameworkColumn { name: "created_by", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "created_by TEXT", additive: false },
+            FrameworkColumn { name: "updated_by", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "updated_by TEXT", additive: false },
+            FrameworkColumn { name: "daemon_epoch", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "daemon_epoch INTEGER", additive: false },
+            FrameworkColumn { name: "pid", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "pid INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "started_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "started_at TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "binary_path", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "binary_path TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "binary_version", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "binary_version TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "git_sha", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "git_sha TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "argv", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "argv TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "log_file", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "log_file TEXT", additive: false },
+            FrameworkColumn { name: "cwd", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "cwd TEXT NOT NULL", additive: false },
+        ],
+    },
+    FrameworkTable {
         name: "substrate_migrations",
         columns: &[
             FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },
@@ -241,6 +262,24 @@ CREATE TABLE IF NOT EXISTS dispatch_locks (
     terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown')),
     next_retry_at TEXT,
     UNIQUE(store, row_id, agent_name)
+);
+CREATE TABLE IF NOT EXISTS daemon_starts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_id TEXT UNIQUE NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT,
+    updated_at TEXT,
+    created_by TEXT,
+    updated_by TEXT,
+    daemon_epoch INTEGER,
+    pid INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    binary_path TEXT NOT NULL,
+    binary_version TEXT NOT NULL,
+    git_sha TEXT NOT NULL,
+    argv TEXT NOT NULL,
+    log_file TEXT,
+    cwd TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS substrate_migrations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -767,6 +806,31 @@ fields:
             }
         }
         out
+    }
+
+    #[test]
+    fn daemon_starts_schema_contract_matches_expected_fields() {
+        let yaml = include_str!("../../stores/daemon_starts/schema.yaml");
+        let schema = Schema::from_yaml(yaml).expect("daemon_starts schema parses");
+        assert_eq!(schema.name, "daemon_starts");
+        let fields: std::collections::BTreeMap<&str, &FieldType> = schema
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), &f.ty))
+            .collect();
+        for (name, ty) in [
+            ("daemon_epoch", FieldType::Integer),
+            ("pid", FieldType::Integer),
+            ("started_at", FieldType::Timestamp),
+            ("binary_path", FieldType::Text),
+            ("binary_version", FieldType::Text),
+            ("git_sha", FieldType::Text),
+            ("argv", FieldType::Text),
+            ("log_file", FieldType::Text),
+            ("cwd", FieldType::Text),
+        ] {
+            assert_eq!(fields.get(name).copied(), Some(&ty), "field {name}");
+        }
     }
 
     #[test]

@@ -140,6 +140,100 @@ use crate::flow::{
 /// Exponential: `BASE * 2^(attempts-1)` (saturating).
 const BASE_BACKOFF_SECS: u64 = 30;
 
+pub fn daemon_binary_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+pub fn daemon_git_sha() -> &'static str {
+    option_env!("VERGEN_GIT_SHA").unwrap_or("unknown")
+}
+
+pub fn filter_daemon_argv<I, S>(args: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut filtered = Vec::new();
+    let mut skip_next = false;
+    for arg in args {
+        let arg = arg.as_ref();
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--approve-token" {
+            skip_next = true;
+            continue;
+        }
+        if arg.contains("--approve-token") {
+            continue;
+        }
+        if arg.contains("--secret-") {
+            if arg.starts_with("--secret-") && !arg.contains('=') {
+                skip_next = true;
+            }
+            continue;
+        }
+        filtered.push(arg.to_string());
+    }
+    filtered
+}
+
+fn daemon_starts_table_exists(conn: &Connection) -> Result<bool> {
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_starts'",
+            [],
+            |r| r.get(0),
+        )
+        .context("checking daemon_starts table existence")?;
+    Ok(exists > 0)
+}
+
+pub fn insert_daemon_startup<P: BinaryIdentityProvider>(
+    conn: &Connection,
+    args: &RunArgs,
+    daemon_epoch: &str,
+    exe_guard: &DaemonExeGuard<P>,
+) -> Result<()> {
+    if !daemon_starts_table_exists(conn)? {
+        return Ok(());
+    }
+    let daemon_epoch_i64 = daemon_epoch.parse::<i64>().ok();
+    let started_at = crate::handlers::row::now_iso8601();
+    let pid = i64::from(std::process::id());
+    let next_id: i64 = conn
+        .query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM daemon_starts", [], |r| r.get(0))
+        .context("allocating daemon_starts display_id")?;
+    let display_id = format!("D{next_id:03}");
+    let binary_path = exe_guard.launch_path().display().to_string();
+    let argv = serde_json::to_string(&filter_daemon_argv(std::env::args()))
+        .context("serializing filtered daemon argv")?;
+    let cwd = std::env::current_dir()
+        .context("resolving daemon cwd")?
+        .display()
+        .to_string();
+    conn.execute(
+        "INSERT INTO daemon_starts \
+         (display_id, status, created_at, updated_at, created_by, updated_by, daemon_epoch, pid, started_at, binary_path, binary_version, git_sha, argv, log_file, cwd) \
+         VALUES (?1, 'started', ?2, ?2, 'daemon', 'daemon', ?3, ?4, ?2, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            display_id,
+            started_at,
+            daemon_epoch_i64,
+            pid,
+            binary_path,
+            daemon_binary_version(),
+            daemon_git_sha(),
+            argv,
+            args.log_file.as_deref(),
+            cwd,
+        ],
+    )
+    .context("inserting daemon_starts audit row")?;
+    Ok(())
+}
+
 /// Args parsed from the CLI.
 pub struct RunArgs {
     pub poll_interval_ms: u64,
@@ -300,6 +394,8 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
 
     let db_path = crate::paths::db_path()?;
     let conn = crate::db::open(&db_path)?;
+    insert_daemon_startup(&conn, &args, &daemon_epoch, &exe_guard)
+        .context("recording daemon startup audit row")?;
     let claimer = format!("daemon-{}", std::process::id());
 
     // L134 / T050 Phase 1: ensure typed dispatch_locks columns + backfill
@@ -2080,6 +2176,43 @@ mod tests {
             right: serde_json::json!(""),
         });
         agent
+    }
+
+    #[test]
+    fn argv_filter_removes_approve_token_forms_and_keeps_safe_args() {
+        let filtered = filter_daemon_argv([
+            "stores",
+            "--approve-token",
+            "plain-token",
+            "agents",
+            "run",
+            "--approve-token=inline-token",
+            "--poll-interval",
+            "0.1",
+        ]);
+        assert_eq!(filtered, vec!["stores", "agents", "run", "--poll-interval", "0.1"]);
+        let joined = filtered.join(" ");
+        assert!(!joined.contains("--approve-token"));
+        assert!(!joined.contains("plain-token"));
+        assert!(!joined.contains("inline-token"));
+    }
+
+    #[test]
+    fn argv_filter_removes_secret_flags_values_and_contains_forms() {
+        let filtered = filter_daemon_argv([
+            "stores",
+            "--secret-token",
+            "secret-value",
+            "--safe",
+            "ok",
+            "--secret-key=inline",
+            "prefix--secret-redacted",
+        ]);
+        assert_eq!(filtered, vec!["stores", "--safe", "ok"]);
+        let joined = filtered.join(" ");
+        assert!(!joined.contains("--secret-"));
+        assert!(!joined.contains("secret-value"));
+        assert!(!joined.contains("inline"));
     }
 
     #[test]
