@@ -25,6 +25,11 @@ pub struct MetricsReport {
 pub struct WindowReport {
     pub requested: String,
     pub since: String,
+    /// Absolute UTC cutoff resolved at invocation time (RFC3339).
+    /// For duration windows like "1h", this is the computed timestamp; for
+    /// absolute inputs it equals `since`.  Always stable across reruns given
+    /// the same invocation moment.
+    pub since_resolved: String,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -121,6 +126,7 @@ fn parse_window(window: &str) -> Result<(WindowReport, String)> {
             WindowReport {
                 requested: window.to_string(),
                 since: window.to_string(),
+                since_resolved: window.to_string(),
             },
             window.to_string(),
         ));
@@ -129,12 +135,14 @@ fn parse_window(window: &str) -> Result<(WindowReport, String)> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
+    let resolved = format_epoch_utc(now - secs);
     Ok((
         WindowReport {
             requested: window.to_string(),
             since: format!("now-{window}"),
+            since_resolved: resolved.clone(),
         },
-        format_epoch_utc(now - secs),
+        resolved,
     ))
 }
 
@@ -273,6 +281,11 @@ fn revise_metrics(conn: &Connection, since_epoch: i64, window: &str) -> Result<R
 }
 
 /// Windowed REVISE rate derived from transition_history review verbs.
+///
+/// JOINs the `tasks` table (when present) by `display_id` to obtain
+/// `task_type` so each REVISE-rate row is keyed by `(phase, task_type)`.
+/// Falls back to `task_type = "unknown"` when the tasks table is absent
+/// or a given display_id has no matching task row.
 fn revise_metrics_from_transition_history(
     conn: &Connection,
     since_epoch: i64,
@@ -280,7 +293,7 @@ fn revise_metrics_from_transition_history(
     has_store: bool,
 ) -> Result<ReviseSection> {
     let store_filter = if has_store {
-        "AND store = 'tasks'"
+        "AND th.store = 'tasks'"
     } else {
         ""
     };
@@ -294,26 +307,50 @@ fn revise_metrics_from_transition_history(
             .map(|dt: DateTime<Utc>| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
             .unwrap_or_else(|| "0000-00-00".to_string())
     };
+
+    // Determine whether tasks table exists and which column holds task_type.
+    let tasks_type_expr = if table_exists(conn, "tasks")? {
+        let tasks_cols = table_columns(conn, "tasks")?;
+        if tasks_cols.iter().any(|c| c == "task_type") {
+            Some("COALESCE(t.task_type, 'unknown')")
+        } else if tasks_cols.iter().any(|c| c == "type") {
+            Some("COALESCE(t.type, 'unknown')")
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (join_clause, type_col) = if let Some(expr) = tasks_type_expr {
+        (
+            "LEFT JOIN tasks t ON t.display_id = th.display_id",
+            expr.to_string(),
+        )
+    } else {
+        ("", "'unknown'".to_string())
+    };
+
     let sql = format!(
-        "SELECT verb, to_status, occurred_at FROM transition_history \
-         WHERE verb IN ('submit-review','submit-plan-review') \
-         AND occurred_at >= ?1 \
+        "SELECT th.verb, th.to_status, {type_col} AS task_type \
+         FROM transition_history th \
+         {join_clause} \
+         WHERE th.verb IN ('submit-review','submit-plan-review') \
+         AND th.occurred_at >= ?1 \
          {store_filter}"
     );
     let mut stmt = conn.prepare(&sql)?;
-    // group by (phase, tier_hint="unknown", task_type="unknown") — transition_history
-    // does not carry tier/type; those come from tasks table if available but would
-    // require a join that may fail when tasks table is absent.  Use "unknown" for now;
-    // the grouping key is (phase, tier_hint, task_type).
+    // Group by (phase, tier_hint="unknown", task_type).
     let mut grouped: BTreeMap<(String, String, String), (usize, usize)> = BTreeMap::new();
     let rows = stmt.query_map([&since_str], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
         ))
     })?;
     for row in rows {
-        let (verb, to_status) = row?;
+        let (verb, to_status, task_type) = row?;
         let (phase, is_revise) = match (verb.as_str(), to_status.as_str()) {
             ("submit-plan-review", "ready") => ("plan_review".to_string(), false),
             ("submit-plan-review", _) => ("plan_review".to_string(), true),
@@ -322,7 +359,7 @@ fn revise_metrics_from_transition_history(
             _ => continue,
         };
         let entry = grouped
-            .entry((phase, "unknown".to_string(), "unknown".to_string()))
+            .entry((phase, "unknown".to_string(), task_type))
             .or_insert((0, 0));
         entry.1 += 1;
         if is_revise {
@@ -800,13 +837,28 @@ mod tests {
     }
 
     #[test]
-    fn duration_window_json_omits_volatile_clock_cutoff() {
+    fn duration_window_json_resolved_cutoff_is_absolute_timestamp() {
+        // Duration windows must resolve the cutoff to an absolute RFC3339
+        // timestamp in since_resolved (stable to the operator's invocation
+        // time, not literally "now-1h").
         let c = conn();
-        let a = render_json(&build_report(&c, "1h").unwrap()).unwrap();
-        let b = render_json(&build_report(&c, "1h").unwrap()).unwrap();
-        assert_eq!(a, b);
-        assert!(a.contains(r#""requested": "1h""#));
-        assert!(a.contains(r#""since": "now-1h""#));
+        let report = build_report(&c, "1h").unwrap();
+        assert_eq!(report.window.requested, "1h");
+        assert_eq!(report.window.since, "now-1h");
+        // since_resolved must be a parseable absolute timestamp (not a relative string)
+        assert!(
+            epoch_seconds(&report.window.since_resolved).is_some(),
+            "since_resolved must be an absolute RFC3339 timestamp; got: {}",
+            report.window.since_resolved
+        );
+        // It must be in the past (within the last ~2 hours given 1h window with some slack)
+        let resolved_epoch = epoch_seconds(&report.window.since_resolved).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let age = now - resolved_epoch;
+        assert!(age >= 3590 && age <= 7200, "resolved cutoff should be ~1h ago; age={age}s");
     }
 
     #[test]
@@ -1039,6 +1091,90 @@ mod tests {
             .expect("code_review row must exist");
         // Only the PASS inside window counts; REVISE before window excluded
         assert_eq!((code_row.revise_count, code_row.total_reviews), (0, 1));
+    }
+
+    // ── per-task-type REVISE from transition_history JOIN tasks ─────────────
+
+    /// Build a DB with transition_history+tasks where display_ids are linked.
+    fn conn_with_th_and_tasks() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE transition_history \
+             (store TEXT, display_id TEXT, from_status TEXT, to_status TEXT, \
+              occurred_at TEXT, verb TEXT); \
+             CREATE TABLE tasks (display_id TEXT, task_type TEXT);",
+        )
+        .unwrap();
+        c
+    }
+
+    fn ins_th_id(c: &Connection, id: &str, verb: &str, to: &str, ts: &str) {
+        c.execute(
+            "INSERT INTO transition_history VALUES ('tasks',?1,NULL,?2,?3,?4)",
+            (id, to, ts, verb),
+        )
+        .unwrap();
+    }
+
+    fn ins_task(c: &Connection, id: &str, task_type: &str) {
+        c.execute(
+            "INSERT INTO tasks (display_id, task_type) VALUES (?1, ?2)",
+            (id, task_type),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn revise_rate_per_task_type_groups_by_type() {
+        // Two task types: "feature" and "chore".
+        // feature task T1: 2 code-review REVISE, 1 PASS
+        // chore   task T2: 1 code-review PASS
+        let c = conn_with_th_and_tasks();
+        ins_task(&c, "T1", "feature");
+        ins_task(&c, "T2", "chore");
+        ins_th_id(&c, "T1", "submit-review", "executing", "2026-01-01T00:00:00Z");
+        ins_th_id(&c, "T1", "submit-review", "executing", "2026-01-01T01:00:00Z");
+        ins_th_id(&c, "T1", "submit-review", "complete",  "2026-01-01T02:00:00Z");
+        ins_th_id(&c, "T2", "submit-review", "complete",  "2026-01-01T03:00:00Z");
+
+        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+
+        let feature_row = r
+            .revise_rate
+            .rows
+            .iter()
+            .find(|m| m.phase == "code_review" && m.task_type == "feature")
+            .expect("feature code_review row must exist");
+        assert_eq!((feature_row.revise_count, feature_row.total_reviews), (2, 3));
+
+        let chore_row = r
+            .revise_rate
+            .rows
+            .iter()
+            .find(|m| m.phase == "code_review" && m.task_type == "chore")
+            .expect("chore code_review row must exist");
+        assert_eq!((chore_row.revise_count, chore_row.total_reviews), (0, 1));
+
+        // Exactly 2 rows for code_review (one per task type)
+        let code_rows: Vec<_> = r.revise_rate.rows.iter().filter(|m| m.phase == "code_review").collect();
+        assert_eq!(code_rows.len(), 2, "expected 2 code_review rows (one per task type)");
+    }
+
+    #[test]
+    fn revise_rate_per_task_type_unknown_when_no_tasks_table() {
+        // When tasks table is absent, task_type falls back to "unknown".
+        let c = conn_with_th_verbs(); // no tasks table
+        ins_th(&c, "submit-review", "executing", "2026-01-01T00:00:00Z");
+        ins_th(&c, "submit-review", "complete",  "2026-01-01T01:00:00Z");
+
+        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let code_row = r
+            .revise_rate
+            .rows
+            .iter()
+            .find(|m| m.phase == "code_review")
+            .expect("code_review row must exist");
+        assert_eq!(code_row.task_type, "unknown");
     }
 
     // ── --json flag reachable via metrics-local flag (MINOR fix) ─────────────
