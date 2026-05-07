@@ -275,6 +275,41 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .help("Override wall-clock 'now' for duration windows (RFC3339); makes output deterministic"),
                 ),
         )
+        // Runs transcript index/query surface
+        .subcommand(
+            Command::new("runs")
+                .about("List and show .stores/runs transcripts for a task")
+                .subcommand(
+                    Command::new("list")
+                        .about("List transcript JSON files for a task")
+                        .arg(Arg::new("display_id").help("Task display ID").required(true)),
+                )
+                .subcommand(
+                    Command::new("show")
+                        .about("Print one transcript JSON file")
+                        .arg(Arg::new("display_id").help("Task display ID").required(true))
+                        .arg(
+                            Arg::new("phase")
+                                .long("phase")
+                                .help("Phase number")
+                                .value_parser(clap::value_parser!(i64))
+                                .required(true),
+                        )
+                        .arg(
+                            Arg::new("cycle")
+                                .long("cycle")
+                                .help("Cycle number (optional; required only when ambiguous)")
+                                .value_parser(clap::value_parser!(i64))
+                                .required(false),
+                        )
+                        .arg(
+                            Arg::new("role")
+                                .long("role")
+                                .help("Agent role")
+                                .required(true),
+                        ),
+                ),
+        )
         // Watch subcommand — ratatui TUI (T028); --legacy falls back to ANSI POC
         .subcommand(
             Command::new("watch")

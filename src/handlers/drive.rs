@@ -1077,17 +1077,30 @@ fn drive_loop_with_role_runner(
 
         let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;
 
+        if let Some(session_id) = run_out.session_id.as_deref() {
+            let transcript_path = format!(".stores/runs/{session_id}.jsonl");
+            if let Err(e) = backlink_cycle_transcript(
+                schema,
+                conn,
+                display_id,
+                na.current_phase.as_i64().unwrap_or(1),
+                na.current_cycle.as_i64().unwrap_or(1),
+                &agent_role,
+                &transcript_path,
+            ) {
+                eprintln!("[{display_id}] transcript backlink failed (non-fatal): {e}");
+                let _ = std::io::stderr().flush();
+            }
+        }
+
         // T049: first successful submit ⇒ close the auto-drive dispatch_lock.
         // Up to this point the lock has been left open (by agents_run.rs's
         // post-spawn skip), so a drive subprocess that dies between spawn and
         // first submit remains visible to the watchdog as an open-lock zombie.
         if !auto_drive_lock_closed {
-            if let Err(e) =
-                crate::handlers::agents_run::close_auto_drive_lock_ok(conn, display_id)
+            if let Err(e) = crate::handlers::agents_run::close_auto_drive_lock_ok(conn, display_id)
             {
-                eprintln!(
-                    "[{display_id}] close_auto_drive_lock_ok failed (non-fatal): {e}"
-                );
+                eprintln!("[{display_id}] close_auto_drive_lock_ok failed (non-fatal): {e}");
                 let _ = std::io::stderr().flush();
             }
             auto_drive_lock_closed = true;
@@ -1155,6 +1168,68 @@ fn drive_loop_with_role_runner(
             bail!("max iterations exceeded ({max_iters}) for task {display_id}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Transcript backlink (T072)
+// ---------------------------------------------------------------------------
+
+fn backlink_cycle_transcript(
+    schema: &Schema,
+    conn: &Connection,
+    display_id: &str,
+    phase: i64,
+    cycle: i64,
+    role: &str,
+    transcript_path: &str,
+) -> Result<()> {
+    let subrecord = match role {
+        "executor" => "executor",
+        "code-reviewer" => "review",
+        _ => return Ok(()),
+    };
+
+    let cycles_field = schema
+        .workflow
+        .as_ref()
+        .and_then(|w| w.submit_targets.get("submit-execute"))
+        .map(|s| s.as_str())
+        .unwrap_or("cycles");
+    let (row_id, existing) = crate::handlers::row::read_row(schema, conn, display_id)?;
+    let mut cycles = existing
+        .get(cycles_field)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut changed = false;
+    for entry in &mut cycles {
+        let matches = entry.get("phase").and_then(|v| v.as_i64()) == Some(phase)
+            && entry.get("cycle").and_then(|v| v.as_i64()) == Some(cycle);
+        if !matches {
+            continue;
+        }
+        if let Some(obj) = entry.get_mut(subrecord).and_then(|v| v.as_object_mut()) {
+            if obj.get("transcript_path").and_then(|v| v.as_str()) != Some(transcript_path) {
+                obj.insert(
+                    "transcript_path".to_string(),
+                    serde_json::Value::String(transcript_path.to_string()),
+                );
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        let qtable = crate::codegen::ddl::quote_ident(&schema.name);
+        let qfield = crate::codegen::ddl::quote_ident(cycles_field);
+        let cycles_json = serde_json::to_string(&cycles)?;
+        conn.execute(
+            &format!("UPDATE {qtable} SET {qfield} = ?1 WHERE id = ?2"),
+            rusqlite::params![cycles_json, row_id],
+        )?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,9 +1301,7 @@ fn parse_envelope(
             // unrelated `{...}` object above the real envelope in prose cannot
             // shadow the true envelope and silently mis-parse.
             let candidates = crate::runner::sap::extract_all_json_objects(fm);
-            if let Some(picked) =
-                pick_best_sap_candidate(&candidates, agent_role_normalized)
-            {
+            if let Some(picked) = pick_best_sap_candidate(&candidates, agent_role_normalized) {
                 let mut candidate = picked.clone();
                 check_role_mismatch(peek_role(&candidate), agent_role_normalized, session_id)?;
                 if let serde_json::Value::Object(ref mut map) = &mut candidate {
@@ -1813,7 +1886,9 @@ mod tests {
             .build_choice(&rr.choice_for("plan_reviewer").unwrap())
             .err()
             .expect("model on non-claude runner should be rejected");
-        assert!(err.to_string().contains("model is only supported for claude-code"));
+        assert!(err
+            .to_string()
+            .contains("model is only supported for claude-code"));
     }
 
     #[test]
@@ -1905,11 +1980,9 @@ mod tests {
         );
 
         let row_id: i64 = conn
-            .query_row(
-                "SELECT id FROM tasks WHERE display_id='T801'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM tasks WHERE display_id='T801'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         // Open auto-drive dispatch_lock — mirrors the post-T049 invariant
         // where agents_run leaves the lock open when auto-drive spawn returns 0.
@@ -2042,7 +2115,10 @@ mod tests {
             .expect("blocked_reason must be set");
         let reason: serde_json::Value =
             serde_json::from_str(reason_str).expect("blocked_reason must be JSON");
-        assert_eq!(reason.get("kind").and_then(|v| v.as_str()), Some("runner_crash"));
+        assert_eq!(
+            reason.get("kind").and_then(|v| v.as_str()),
+            Some("runner_crash")
+        );
         assert_eq!(reason.get("exit_code").and_then(|v| v.as_i64()), Some(1));
 
         // transition_history must record the abort from the executing state
@@ -2108,7 +2184,10 @@ mod tests {
             .and_then(|v| v.as_str())
             .expect("blocked_reason must be set");
         let reason: serde_json::Value = serde_json::from_str(reason_str).unwrap();
-        assert_eq!(reason.get("kind").and_then(|v| v.as_str()), Some("rate_limit"));
+        assert_eq!(
+            reason.get("kind").and_then(|v| v.as_str()),
+            Some("rate_limit")
+        );
         assert_eq!(reason.get("exit_code").and_then(|v| v.as_i64()), Some(1));
         assert_eq!(
             reason.get("reset_at").and_then(|v| v.as_i64()),
@@ -3485,7 +3564,11 @@ mod tests {
         match env {
             AgentEnvelope::Planner { phases, .. } => {
                 let arr = phases.as_array().expect("phases must be array");
-                assert_eq!(arr.len(), 1, "phases must contain the real plan, not the leading object");
+                assert_eq!(
+                    arr.len(),
+                    1,
+                    "phases must contain the real plan, not the leading object"
+                );
             }
             other => panic!("expected Planner, got {other:?}"),
         }
@@ -3542,8 +3625,7 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("plan column must exist");
-        let plan: Value =
-            serde_json::from_str(&plan_str).expect("plan must be valid JSON");
+        let plan: Value = serde_json::from_str(&plan_str).expect("plan must be valid JSON");
         let phases = plan
             .get("phases")
             .and_then(|v| v.as_array())
@@ -3556,10 +3638,7 @@ mod tests {
         // insert_task() — distinct phase name proves the persistence path
         // actually overwrote the seed plan with the planner output.
         assert_eq!(
-            phases[0]
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or(""),
+            phases[0].get("name").and_then(|n| n.as_str()).unwrap_or(""),
             "T047-Persisted-Phase",
             "submit-plan must overwrite the seed plan with the planner envelope"
         );
