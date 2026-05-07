@@ -7,6 +7,7 @@ pub mod agents_yaml;
 pub mod builtins;
 pub mod checks;
 pub mod config;
+pub mod engine_runner;
 pub mod ntfy;
 pub mod policies_yaml;
 pub mod postconditions;
