@@ -10,6 +10,8 @@
 use jsonschema::JSONSchema;
 use serde_json::Value;
 use std::path::PathBuf;
+use stores::cli::dynamic::{BUNDLED_STORE_NAMES, BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+use stores::schema::{FieldType, Schema};
 
 fn project_root() -> PathBuf {
     // CARGO_MANIFEST_DIR is set by cargo test and points to the crate root.
@@ -36,6 +38,81 @@ fn schema_path(role: &str) -> PathBuf {
         .join("agents")
         .join("schemas")
         .join(format!("{role}.schema.json"))
+}
+
+#[test]
+fn architecture_reviews_schema_and_template_fixture_parse() {
+    let yaml =
+        std::fs::read_to_string(project_root().join("stores/architecture_reviews/schema.yaml"))
+            .expect("architecture_reviews schema fixture must be readable");
+    let schema = Schema::from_yaml(&yaml).expect("architecture_reviews schema fixture must parse");
+
+    assert_eq!(schema.name, "architecture_reviews");
+    assert_eq!(schema.id_format, "A{:03d}");
+    assert!(schema
+        .lifecycle
+        .states
+        .iter()
+        .any(|s| s == "awaiting_human_ratification"));
+
+    let kind = schema.fields.iter().find(|f| f.name == "kind").unwrap();
+    match &kind.ty {
+        FieldType::Enum(values) => {
+            assert_eq!(values, &vec!["interpret".to_string(), "amend".to_string()])
+        }
+        other => panic!("kind must be enum, got {other:?}"),
+    }
+
+    let verdict = schema.fields.iter().find(|f| f.name == "verdict").unwrap();
+    match &verdict.ty {
+        FieldType::Enum(values) => assert_eq!(values.len(), 7),
+        other => panic!("verdict must be enum, got {other:?}"),
+    }
+
+    assert!(schema
+        .fields
+        .iter()
+        .find(|f| f.name == "cascade_decisions")
+        .and_then(|f| f.required_when.as_ref())
+        .is_some());
+
+    let template = std::fs::read_to_string(
+        project_root().join("stores/architecture_reviews/templates/main.md.tpl"),
+    )
+    .expect("architecture_reviews main template fixture must be readable");
+    for needle in [
+        "{{display_id}}",
+        "{{kind}}",
+        "{{source_observation}}",
+        "{{status}}",
+    ] {
+        assert!(template.contains(needle), "template missing {needle}");
+    }
+}
+
+#[test]
+fn architecture_reviews_is_bundled_with_render_template() {
+    assert!(BUNDLED_STORE_NAMES.contains(&"architecture_reviews"));
+    let bundled_yaml = BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(name, _)| *name == "architecture_reviews")
+        .map(|(_, yaml)| *yaml)
+        .expect("architecture_reviews bundled schema missing");
+    let schema =
+        Schema::from_yaml(bundled_yaml).expect("bundled architecture_reviews schema parses");
+    assert_eq!(schema.name, "architecture_reviews");
+
+    let template = BUNDLED_STORE_TEMPLATES
+        .iter()
+        .find(|(name, _)| *name == "architecture_reviews")
+        .and_then(|(_, templates)| {
+            templates
+                .iter()
+                .find(|(path, _)| *path == "templates/main.md.tpl")
+        })
+        .map(|(_, content)| *content)
+        .expect("architecture_reviews bundled render template missing");
+    assert!(template.contains("# {{display_id}}: {{summary}}"));
 }
 
 struct RoleCase {

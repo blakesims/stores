@@ -16,6 +16,7 @@ pub static BUNDLED_STORE_NAMES: &[&str] = &[
     "tasks",
     "intake",
     "daemon_starts",
+    "architecture_reviews",
 ];
 
 /// Embedded schema.yaml content for each bundled store (same order as BUNDLED_STORE_NAMES).
@@ -33,6 +34,10 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
     (
         "daemon_starts",
         include_str!("../../stores/daemon_starts/schema.yaml"),
+    ),
+    (
+        "architecture_reviews",
+        include_str!("../../stores/architecture_reviews/schema.yaml"),
     ),
 ];
 
@@ -83,6 +88,13 @@ pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[
                 include_str!("../../stores/intake_items/templates/recon-brief.md.tpl"),
             ),
         ],
+    ),
+    (
+        "architecture_reviews",
+        &[(
+            "templates/main.md.tpl",
+            include_str!("../../stores/architecture_reviews/templates/main.md.tpl"),
+        )],
     ),
 ];
 

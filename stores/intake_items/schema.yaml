@@ -41,7 +41,7 @@ lifecycle:
       actor: ai_autonomous
       guard: "decision == 'normal_observation'"
 
-    # triaging → routed: architecture review candidate (tagged observation, no dedicated store yet)
+    # triaging → routed: architecture review candidate (dedicated architecture_reviews A### row)
     - from: triaging
       to: routed
       verb: route
@@ -163,7 +163,13 @@ fields:
     type: text
     required: false
     required_when: "decision IN ['normal_observation', 'arch_review_candidate']"
-    description: "Soft-FK to observations.display_id (L###) when decision=normal_observation or arch_review_candidate"
+    description: "Soft-FK to observations.display_id (L###) when decision=normal_observation or arch_review_candidate; arch_review_candidate rows are also linked to architecture_reviews A### via routed_to_arch_review"
+
+  - name: routed_to_arch_review
+    type: text
+    required: false
+    pattern: "^A[0-9]{3,}$"
+    description: "Soft-FK to architecture_reviews.display_id (A###) created for decision=arch_review_candidate"
 
   # --- Recon loop counter ---
   - name: recon_round

@@ -290,6 +290,36 @@ fields:
     required: false
     description: "How the observation was resolved"
 
+  - name: pending_architecture_review
+    type: bool
+    required: false
+    default: false
+    description: "True when a routed architecture_reviews A### ruling must clear this observation before U1 ratification."
+
+  - name: clearable_by_ruling
+    type: text
+    required: false
+    pattern: "^A[0-9]{3,}$"
+    description: "Soft-FK to architecture_reviews.display_id (A###) whose verdict can clear pending_architecture_review."
+
+  - name: reframe_acknowledged_against
+    type: text
+    required: false
+    pattern: "^A[0-9]{3,}$"
+    description: "Architecture ruling A### acknowledged by a reconciled intent contract after reframe_contract."
+
+  - name: merge_target_id
+    type: text
+    required: false
+    pattern: "^L[0-9]{3,}$"
+    description: "Target observation L### when this observation is merged into an architecture cluster."
+
+  - name: resolution_kind
+    type: enum
+    enum_values: [addressed_by_task, addressed_by_observation, addressed_by_commit, auto_resolved, merged_with_cluster]
+    required: false
+    description: "Typed resolution category; merged_with_cluster is reserved for architecture-review merge redirects."
+
   # --- Cross-store reference (soft-FK, plain text per D4) ---
   - name: task_id
     type: text
@@ -341,6 +371,11 @@ fields:
       - name: drafted_at
         type: timestamp
         description: "When the draft was written"
+
+      - name: updated_at
+        type: timestamp
+        required: false
+        description: "When the intent contract was last amended/reconciled for architecture reframe checks"
 
       # Core scope (required_when ready)
       - name: objective
