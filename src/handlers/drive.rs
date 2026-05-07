@@ -810,7 +810,24 @@ fn drive_loop_with_role_runner(
         // so we fall through and dispatch wrap again — next_agent IS the source of truth,
         // not wrap_log. wrap_log is durable history only, never a completion sentinel.
         // (pi ruling r3 strict-pi A1: if next_agent=wrap, dispatch wrap.)
+        //
+        // Lifecycle closure (pi ruling r5 fix): after a successful wrap dispatch in THIS
+        // run, force-close the auto-drive lock terminal-ok before exiting. The schema
+        // always yields next_agent=Some("wrap") for in_review (no when: guard), so the
+        // normal close_auto_drive_lock_ok path returns PendingNext and leaves the lock
+        // open — which triggers infinite daemon re-dispatch. force_close bypasses the
+        // has_pending_auto_drive_work check because current-cycle completion (not
+        // next_agent IS NULL) is the correct closure trigger here. A1 invariant is
+        // preserved: wrap_log is NOT consulted; the dispatched_wrap_this_run flag is the
+        // signal. Watchdog fallback remains: if drive dies before this exit, the watchdog
+        // redispatches a fresh drive (correct amend/re-entry semantics).
         if na.status == "in_review" && dispatched_wrap_this_run {
+            if let Err(e) =
+                crate::handlers::agents_run::force_close_auto_drive_lock_ok(conn, display_id)
+            {
+                eprintln!("[{display_id}] force_close_auto_drive_lock_ok failed (non-fatal): {e}");
+                let _ = std::io::stderr().flush();
+            }
             eprintln!(
                 "[{display_id}] in_review; brief written; awaiting `stores tasks accept | reject`"
             );
@@ -2340,6 +2357,111 @@ mod tests {
             last_status.as_deref(),
             Some("in_flight:pending_next"),
             "T067: pending handoff lock must carry last_status='in_flight:pending_next'"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T067 r5: auto-drive lock closes terminal-ok after wrap dispatch
+    //
+    // When the drive loop exits at the `in_review && dispatched_wrap_this_run`
+    // guard, it calls force_close_auto_drive_lock_ok before returning. This
+    // prevents the daemon watchdog from infinitely re-dispatching wrap on the
+    // next sweep (which it would do because the schema always yields
+    // next_agent=Some("wrap") for in_review — no when: guard exists).
+    //
+    // A1 invariant preserved: the decision to close is made by the current-cycle
+    // `dispatched_wrap_this_run` flag, NOT by inspecting wrap_log history.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn drive_loop_wrap_dispatch_closes_lock_terminal_ok() {
+        // Regression test for the infinite-wrap-redispatch bug (r4 A1-strict
+        // over-application): after a successful wrap submit, the drive loop must
+        // close the auto-drive lock with terminal_reason='ok' and finished_at
+        // non-null before exiting.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn,
+            &schema,
+            "T802",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+
+        let row_id: i64 = conn
+            .query_row("SELECT id FROM tasks WHERE display_id='T802'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        // Open auto-drive dispatch_lock (mirrors post-T049 invariant).
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, \
+              claimed_at, claimed_by) \
+             VALUES ('tasks', ?1, 'T802', 'auto-drive', 1, \
+                     '2026-05-04T00:00:00Z', 'test-claimer')",
+            rusqlite::params![row_id],
+        )
+        .unwrap();
+
+        // One wrap response — drive should consume it and exit Ok.
+        let wrap_out = make_run_output(wrap_fixture_json(), 0);
+        let runner = MockRunner::new(vec![wrap_out]);
+        drive_loop(&schema, &conn, "T802", &runner, 50)
+            .expect("wrap dispatch at in_review must succeed");
+
+        // Runner fully drained — wrap was consumed.
+        assert_eq!(runner.remaining_count(), 0, "wrap response must be consumed");
+
+        // T067 r5: lock must be closed terminal-ok (no infinite re-dispatch).
+        let (finished_at, last_status, terminal_reason): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT finished_at, last_status, terminal_reason FROM dispatch_locks \
+                 WHERE display_id='T802' AND agent_name='auto-drive'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            finished_at.is_some(),
+            "T067 r5: lock must be closed (finished_at non-null) after wrap dispatch; \
+             got finished_at=None (daemon would infinitely re-dispatch wrap)"
+        );
+        assert_eq!(
+            last_status.as_deref(),
+            Some("ok"),
+            "T067 r5: last_status must be 'ok' after wrap dispatch closes lock"
+        );
+        assert_eq!(
+            terminal_reason.as_deref(),
+            Some("ok"),
+            "T067 r5: terminal_reason must be 'ok' after wrap dispatch closes lock"
+        );
+
+        // A1 invariant: wrap_log is populated as provenance (not used as sentinel).
+        let wrap_log: Option<String> = conn
+            .query_row(
+                "SELECT wrap_log FROM tasks WHERE display_id='T802'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            wrap_log
+                .as_deref()
+                .unwrap_or("")
+                .contains("executive_summary"),
+            "wrap_log must be populated as provenance after wrap dispatch; got {wrap_log:?}"
         );
     }
 

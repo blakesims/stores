@@ -1494,6 +1494,45 @@ pub(crate) fn close_auto_drive_lock_ok(
     Ok(LockCloseOutcome::Closed)
 }
 
+/// Force-close the open auto-drive `dispatch_locks` row for `display_id`
+/// with `terminal_reason='ok'` and `finished_at` set, bypassing the
+/// `has_pending_auto_drive_work` check.
+///
+/// Called by the drive subprocess immediately before exiting after a successful
+/// wrap submission. At that point the row is still at `in_review` so
+/// `has_pending_auto_drive_work` always returns `true` (schema yields
+/// `next_agent=wrap` for every `in_review` row); skipping that check is
+/// correct and intentional here — the drive loop has already dispatched wrap
+/// and recorded the `wrap_log` entry, so no further work remains for THIS
+/// drive invocation.
+///
+/// A1 invariant is preserved: wrap_log is NOT consulted as a control-flow
+/// sentinel. The decision to close is made by the drive loop's
+/// `dispatched_wrap_this_run` flag (current-cycle completion state), not by
+/// inspecting historical wrap_log content.
+///
+/// Watchdog fallback: if the drive subprocess dies without calling this
+/// (e.g. process kill), the watchdog's `redispatch_pending_drive` path will
+/// re-spawn a fresh drive — correct amend/re-entry semantics.
+///
+/// Idempotent: the WHERE clause filters on `finished_at IS NULL`, so a
+/// second call is a no-op zero-row UPDATE.
+pub(crate) fn force_close_auto_drive_lock_ok(
+    conn: &Connection,
+    display_id: &str,
+) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = 'ok', finished_at = ?1, \
+                                  claimed_at = ?1, attempts = attempts + 1, \
+                                  terminal_reason = 'ok', next_retry_at = NULL \
+         WHERE store = 'tasks' AND display_id = ?2 AND agent_name = 'auto-drive' \
+           AND finished_at IS NULL",
+        rusqlite::params![now, display_id],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn mark_claim_finished(
     conn: &Connection,
     store: &str,

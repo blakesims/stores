@@ -113,9 +113,12 @@ pub fn task_workspace_exists(
 }
 
 /// True iff auto-drive may be stamped terminal-ok: `next_agent IS NULL` OR the
-/// row is terminal from auto-drive's perspective (including `in_review` only
-/// after a persisted `wrap_log` entry exists). A positive `drive_pid` alone is
-/// not sufficient while workflow next-action still has pending work.
+/// row is in a hard-terminal state (accepted, rejected, abandoned, …).
+/// A positive `drive_pid` alone is not sufficient while workflow next-action
+/// still has pending work. Note: for `in_review` rows, `next_agent` is always
+/// `Some("wrap")` (schema has no `when:` guard); the drive subprocess closes
+/// its own lock via `force_close_auto_drive_lock_ok` after a successful wrap
+/// dispatch rather than relying on this postcondition to gate closure.
 ///
 /// Args: `{"display_id": "T123"}`.
 pub fn drive_pid_recorded_or_terminal(
