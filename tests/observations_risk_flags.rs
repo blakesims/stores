@@ -6,9 +6,12 @@
 use std::collections::BTreeMap;
 
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
-use stores::schema::{actor::Actor, Schema};
-use stores::validate::{self, Op, ValidationError};
+use stores::schema::{
+    actor::{Actor, InvokerCtx},
+    Schema,
+};
 use stores::validate::error::RuleKind;
+use stores::validate::{self, Op, ValidationError};
 
 fn obs_schema() -> Schema {
     let yaml = BUNDLED_STORE_SCHEMAS
@@ -32,15 +35,44 @@ fn flag_array(flags: &[&str]) -> serde_json::Value {
     )
 }
 
+fn ready_contract() -> serde_json::Value {
+    serde_json::json!({
+        "contract_state": "ready",
+        "objective": "prove authority guard",
+        "type": "investigation",
+        "in_scope": ["schema validation"],
+        "out_of_scope": ["runtime dispatch"],
+        "acceptance": ["ai_autonomous rejected"],
+        "tier_hint": "T1",
+        "approved_by": "blake",
+        "approved_at": "2026-05-06T12:00:00Z"
+    })
+}
+
 /// Minimal valid observation entry (required fields satisfied).
 fn base_entry() -> BTreeMap<String, serde_json::Value> {
     let mut m = BTreeMap::new();
     m.insert("summary".to_string(), str_val("test observation"));
     m.insert("source".to_string(), str_val("dev"));
     m.insert("priority".to_string(), str_val("normal"));
-    m.insert("captured_at".to_string(), str_val("2026-05-06T12:00:00+00:00"));
+    m.insert(
+        "captured_at".to_string(),
+        str_val("2026-05-06T12:00:00+00:00"),
+    );
     m.insert("captured_week".to_string(), str_val("w19-d2"));
     m
+}
+
+fn entry_with_ready_contract() -> BTreeMap<String, serde_json::Value> {
+    let mut m = base_entry();
+    m.insert("intent_contract".to_string(), ready_contract());
+    m
+}
+
+fn diff_ready_contract() -> BTreeMap<String, serde_json::Value> {
+    let mut diff = BTreeMap::new();
+    diff.insert("intent_contract".to_string(), ready_contract());
+    diff
 }
 
 fn list_enum_errors(errs: &[ValidationError]) -> Vec<&ValidationError> {
@@ -50,8 +82,60 @@ fn list_enum_errors(errs: &[ValidationError]) -> Vec<&ValidationError> {
         .collect()
 }
 
+#[test]
+fn ai_autonomous_cannot_set_contract_state_ready() {
+    let schema = obs_schema();
+    let entry = entry_with_ready_contract();
+    let diff = diff_ready_contract();
+
+    let errs = validate::validate(
+        &schema,
+        &entry,
+        Op::Update(diff),
+        Actor::AiAutonomous.into(),
+    )
+    .expect_err("ai_autonomous must not ratify intent_contract.contract_state=ready");
+
+    assert!(
+        errs.iter().any(|e| {
+            e.field_path == vec!["intent_contract".to_string(), "contract_state".to_string()]
+                && e.rule == RuleKind::Actor
+                && e.message.contains("ai_with_human")
+        }),
+        "expected actor rejection for intent_contract.contract_state=ready; got: {errs:?}"
+    );
+}
+
+#[test]
+fn human_or_ai_with_human_with_approval_token_can_set_ready_contract_fields() {
+    let schema = obs_schema();
+    let entry = entry_with_ready_contract();
+
+    validate::validate(
+        &schema,
+        &entry,
+        Op::Update(diff_ready_contract()),
+        Actor::Human.into(),
+    )
+    .expect("human can write ready contract fields with required approval fields present");
+
+    validate::validate(
+        &schema,
+        &entry,
+        Op::Update(diff_ready_contract()),
+        InvokerCtx {
+            actor: Actor::AiWithHuman,
+            token_valid: true,
+        },
+    )
+    .expect("ai_with_human plus approval token can write ready contract fields");
+}
+
 /// Merge base_entry with diff, simulating what the update handler does.
-fn merge(base: &BTreeMap<String, serde_json::Value>, diff: &BTreeMap<String, serde_json::Value>) -> BTreeMap<String, serde_json::Value> {
+fn merge(
+    base: &BTreeMap<String, serde_json::Value>,
+    diff: &BTreeMap<String, serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
     let mut merged = base.clone();
     for (k, v) in diff {
         merged.insert(k.clone(), v.clone());
@@ -159,7 +243,9 @@ fn risk_flags_order_independent() {
             panic!(
                 "ordering {:?} must pass; errors: {:?}",
                 flags,
-                errs.iter().map(|e| e.field_path.join(".")).collect::<Vec<_>>()
+                errs.iter()
+                    .map(|e| e.field_path.join("."))
+                    .collect::<Vec<_>>()
             )
         });
     }

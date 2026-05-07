@@ -23,10 +23,13 @@
 use anyhow::{anyhow, Context, Result};
 use rusqlite::Connection;
 use serde_json::Value;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
-use crate::flow::builtins::{BuiltinResult, DispatchCtx};
-use crate::handlers::row::now_iso8601;
+use crate::flow::builtins::{
+    fire_framework_transition_for, load_store_schema, BuiltinResult, DispatchCtx,
+};
+use crate::validate::EntryMap;
 
 /// Forbidden top-level fields — presence of any rejects the envelope.
 const FORBIDDEN_FIELDS: &[&str] = &[
@@ -48,87 +51,187 @@ const REQUIRED_FIELDS: &[&str] = &[
 ];
 
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
-    let display_id = row
-        .get("display_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let display_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
     if display_id.is_empty() {
         eprintln!("[investigator] observation row missing display_id; skipping");
         return Ok(1);
     }
 
-    // Spawn the subagent (or test shim) and capture stdout.
-    let envelope_text = match invoke_subagent(display_id) {
+    let schema = match load_store_schema("observations") {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[investigator] {}: subagent invocation failed: {:#}", display_id, e);
-            return Ok(1);
-        }
-    };
-
-    let envelope: Value = match serde_json::from_str(&envelope_text) {
-        Ok(v) => v,
-        Err(e) => {
             eprintln!(
-                "[investigator] {}: envelope is not valid JSON: {}",
+                "[investigator] {}: load observations schema failed: {:#}",
                 display_id, e
             );
             return Ok(1);
         }
     };
 
-    if let Err(e) = validate_pull_envelope(&envelope) {
-        eprintln!("[investigator] {}: envelope rejected: {:#}", display_id, e);
+    if let Err(e) = fire_framework_transition_for(
+        ctx.conn,
+        &schema,
+        display_id,
+        "investigation-started",
+        EntryMap::new(),
+        ctx.policies_hash,
+        Some("builtin:investigator claimed row"),
+    ) {
+        eprintln!(
+            "[investigator] {}: could not start investigation from needs_investigation: {:#}",
+            display_id, e
+        );
         return Ok(1);
     }
 
-    // Status guard + persist as ONE atomic CAS UPDATE — the previous shape
-    // (SELECT status, then UPDATE without status predicate) had a TOCTOU race
-    // where a human transition between SELECT and UPDATE could clobber the
-    // row's new state. The CAS UPDATE includes WHERE status='needs_investigation';
-    // 0 rows affected ⇒ row moved on, persist is a no-op.
-    let affected = match persist_cas(ctx.conn, display_id, &envelope) {
-        Ok(n) => n,
+    let question = build_investigator_question(row);
+
+    let envelope_text = match invoke_subagent(display_id, &question) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("[investigator] {}: persist failed: {:#}", display_id, e);
-            return Ok(1);
+            return fail_investigation(
+                ctx,
+                &schema,
+                display_id,
+                &format!("subagent invocation failed: {e:#}"),
+            )
         }
     };
-    if affected == 0 {
-        eprintln!(
-            "[investigator] {}: status moved off 'needs_investigation' before persist; no-op",
-            display_id
+
+    let envelope: Value = match serde_json::from_str(&envelope_text) {
+        Ok(v) => v,
+        Err(e) => {
+            return fail_investigation(
+                ctx,
+                &schema,
+                display_id,
+                &format!(
+                    "envelope is not valid JSON: {e}; stdout tail: {}",
+                    tail(&envelope_text, 500)
+                ),
+            )
+        }
+    };
+
+    if let Err(e) = validate_pull_envelope(&envelope) {
+        return fail_investigation(
+            ctx,
+            &schema,
+            display_id,
+            &format!("envelope rejected: {e:#}"),
         );
-        return Ok(0);
     }
 
-    eprintln!("[investigator] {}: evidence persisted", display_id);
+    let mut diff = match investigation_success_diff(ctx.conn, display_id, &envelope) {
+        Ok(d) => d,
+        Err(e) => {
+            return fail_investigation(
+                ctx,
+                &schema,
+                display_id,
+                &format!("persist preparation failed: {e:#}"),
+            )
+        }
+    };
+    diff.insert("investigation_failure_reason".to_string(), Value::Null);
+    if let Err(e) = fire_framework_transition_for(
+        ctx.conn,
+        &schema,
+        display_id,
+        "investigation-succeeded",
+        diff,
+        ctx.policies_hash,
+        Some("builtin:investigator persisted report"),
+    ) {
+        return fail_investigation(
+            ctx,
+            &schema,
+            display_id,
+            &format!("persist/transition investigation-succeeded failed: {e:#}"),
+        );
+    }
+
+    eprintln!(
+        "[investigator] {}: report persisted; status investigated",
+        display_id
+    );
     Ok(0)
+}
+
+fn fail_investigation(
+    ctx: &DispatchCtx,
+    schema: &crate::schema::Schema,
+    display_id: &str,
+    reason: &str,
+) -> BuiltinResult {
+    eprintln!("[investigator] {}: {}", display_id, reason);
+    let mut diff = EntryMap::new();
+    diff.insert(
+        "investigation_failure_reason".to_string(),
+        Value::String(tail(reason, 4000)),
+    );
+    if let Err(e) = fire_framework_transition_for(
+        ctx.conn,
+        schema,
+        display_id,
+        "investigation-failed",
+        diff,
+        ctx.policies_hash,
+        Some("builtin:investigator failed"),
+    ) {
+        eprintln!(
+            "[investigator] {}: additionally failed to mark investigation_failed: {:#}",
+            display_id, e
+        );
+    }
+    Ok(1)
+}
+
+fn build_investigator_question(row: &Value) -> String {
+    let display_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
+    let summary = row.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+    let body = row.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    format!(
+        "Investigate observation {display_id}.\n\nSummary:\n{summary}\n\nBody:\n{body}\n\nReturn only the JSON envelope required by the investigator schema."
+    )
+}
+
+fn tail(s: &str, max_chars: usize) -> String {
+    let mut chars: Vec<char> = s.chars().rev().take(max_chars).collect();
+    chars.reverse();
+    chars.into_iter().collect()
 }
 
 /// Bundled investigator agent prompt. Used as the default system prompt when
 /// `STORES_INVESTIGATOR_CMD` is not set.
 const BUNDLED_INVESTIGATOR_PROMPT: &str = include_str!("../../../agents/investigator.md");
 
-/// Spawn the configured subagent command (or test shim) and return its
-/// stdout. Resolution order:
-///   1. `STORES_INVESTIGATOR_CMD` env var (test/prod override).
-///   2. Default: `claude-code` with the bundled `agents/investigator.md`
-///      prompt, given the row's display_id as the user message. Fails loud
-///      if `claude-code` is not on PATH.
-///
-/// The default closes the prior cycle's HIGH finding that `agents/investigator.md`
-/// was never invoked — without an env var override, the bundled prompt now
-/// drives the default subagent.
-fn invoke_subagent(display_id: &str) -> Result<String> {
+/// Spawn the configured subagent command (or test shim) and return stdout.
+/// `STORES_INVESTIGATOR_CMD` receives the structured question on stdin and in
+/// `STORES_INVESTIGATOR_QUESTION`; the default `claude` invocation prints that
+/// same question as the user message with `agents/investigator.md` as system
+/// prompt.
+fn invoke_subagent(display_id: &str, question: &str) -> Result<String> {
     if let Ok(cmd_str) = std::env::var("STORES_INVESTIGATOR_CMD") {
-        let output = Command::new("sh")
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(&cmd_str)
             .env("STORES_DISPLAY_ID", display_id)
             .env("STORES_STORE", "observations")
-            .output()
+            .env("STORES_INVESTIGATOR_QUESTION", question)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .with_context(|| format!("spawning STORES_INVESTIGATOR_CMD: {cmd_str}"))?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(question.as_bytes())
+                .context("writing investigator question to STORES_INVESTIGATOR_CMD stdin")?;
+        }
+        let output = child
+            .wait_with_output()
+            .context("waiting for STORES_INVESTIGATOR_CMD")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow!(
@@ -140,18 +243,14 @@ fn invoke_subagent(display_id: &str) -> Result<String> {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
 
-    // Default path: spawn `claude` (the same binary src/runner/claude_code.rs
-    // uses — `claude-code` is the *Cargo feature* name, not the binary) with
-    // the bundled investigator prompt. The user message is the row's
-    // display_id; the system prompt carries the pull-shape doctrine + envelope
-    // schema.
     let output = Command::new("claude")
         .arg("--append-system-prompt")
         .arg(BUNDLED_INVESTIGATOR_PROMPT)
         .arg("--print")
-        .arg(format!("Investigate observation {}", display_id))
+        .arg(question)
         .env("STORES_DISPLAY_ID", display_id)
         .env("STORES_STORE", "observations")
+        .env("STORES_INVESTIGATOR_QUESTION", question)
         .output()
         .with_context(|| {
             "spawning default investigator subagent (claude). \
@@ -209,10 +308,7 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
                 // only 'file'; line and snippet are optional. Parser must
                 // not be stricter than the schema contract.
                 if !o.contains_key("file") {
-                    return Err(anyhow!(
-                        "'evidence[{}]' object must have 'file' key",
-                        i
-                    ));
+                    return Err(anyhow!("'evidence[{}]' object must have 'file' key", i));
                 }
                 if !o["file"].is_string() {
                     return Err(anyhow!("'evidence[{}].file' must be a string", i));
@@ -268,9 +364,10 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
                 item
             )
         })?;
-        let l_id = o.get("l_id").and_then(|v| v.as_str()).ok_or_else(|| {
-            anyhow!("'duplicate_candidates[{}].l_id' must be a string", i)
-        })?;
+        let l_id = o
+            .get("l_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("'duplicate_candidates[{}].l_id' must be a string", i))?;
         if !regex::Regex::new(r"^L\d{3,}$").unwrap().is_match(l_id) {
             return Err(anyhow!(
                 "'duplicate_candidates[{}].l_id' must match /^L\\d{{3,}}$/; got '{}'",
@@ -352,15 +449,13 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
 ///     confidence, proposed_tier, grill_question (preserves any pre-existing
 ///     keys outside this set)
 /// No transition is fired; the human reviews evidence next.
-fn persist_cas(conn: &Connection, display_id: &str, envelope: &Value) -> Result<usize> {
-    let envelope_str =
-        serde_json::to_string(envelope).context("serialize investigator envelope")?;
+fn investigation_success_diff(
+    conn: &Connection,
+    display_id: &str,
+    envelope: &Value,
+) -> Result<EntryMap> {
+    let note = format_investigation_note(envelope)?;
 
-    // Merge into existing notes JSON (if any). Note: this read is outside the
-    // CAS, so a concurrent writer to `notes` could have its data merged in;
-    // the CAS UPDATE only protects `status`. For the investigator path that
-    // is acceptable: notes is owned by this subscriber while the row is at
-    // needs_investigation.
     let existing_notes: Option<String> = conn
         .query_row(
             "SELECT notes FROM observations WHERE display_id = ?1",
@@ -376,24 +471,84 @@ fn persist_cas(conn: &Connection, display_id: &str, envelope: &Value) -> Result<
             .unwrap_or_default(),
         _ => serde_json::Map::new(),
     };
-    for key in ["duplicate_candidates", "confidence", "proposed_tier", "grill_question"] {
+    for key in [
+        "duplicate_candidates",
+        "confidence",
+        "proposed_tier",
+        "grill_question",
+    ] {
         if let Some(v) = envelope.get(key) {
             notes_obj.insert(key.to_string(), v.clone());
         }
     }
-    let notes_str = serde_json::to_string(&Value::Object(notes_obj))
-        .context("serialize merged notes")?;
 
-    let now = now_iso8601();
-    let n = conn
-        .execute(
-            "UPDATE observations \
-             SET investigation_note = ?1, notes = ?2, updated_at = ?3, updated_by = 'ai_autonomous' \
-             WHERE display_id = ?4 AND status = 'needs_investigation'",
-            rusqlite::params![envelope_str, notes_str, now, display_id],
-        )
-        .context("UPDATE observations (investigator persist CAS)")?;
-    Ok(n)
+    let mut diff = EntryMap::new();
+    diff.insert("investigation_note".to_string(), Value::String(note));
+    diff.insert("notes".to_string(), Value::Object(notes_obj));
+    Ok(diff)
+}
+
+fn format_investigation_note(envelope: &Value) -> Result<String> {
+    let evidence = envelope
+        .get("evidence")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("validated envelope lost evidence array"))?;
+    let duplicates = envelope
+        .get("duplicate_candidates")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("validated envelope lost duplicate_candidates array"))?;
+    let confidence = envelope
+        .get("confidence")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let tier = envelope
+        .get("proposed_tier")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let grill = envelope
+        .get("grill_question")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let mut out = String::new();
+    out.push_str("Evidence:\n");
+    if evidence.is_empty() {
+        out.push_str("- none supplied\n");
+    } else {
+        for item in evidence {
+            match item {
+                Value::String(s) => out.push_str(&format!("- {s}\n")),
+                Value::Object(o) => {
+                    let file = o.get("file").and_then(|v| v.as_str()).unwrap_or("");
+                    let line = o.get("line").map(|v| format!(":{v}")).unwrap_or_default();
+                    let snippet = o.get("snippet").and_then(|v| v.as_str()).unwrap_or("");
+                    if snippet.is_empty() {
+                        out.push_str(&format!("- {file}{line}\n"));
+                    } else {
+                        out.push_str(&format!("- {file}{line} — {snippet}\n"));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out.push_str("\nDuplicate candidates:\n");
+    if duplicates.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for dup in duplicates {
+            let id = dup.get("l_id").and_then(|v| v.as_str()).unwrap_or("");
+            let why = dup
+                .get("similarity_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            out.push_str(&format!("- {id}: {why}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "\nConfidence: {confidence}\nProposed tier: {tier}\nGrill question: {grill}\n"
+    ));
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -427,9 +582,9 @@ mod tests {
     fn insert_obs(conn: &Connection, display_id: &str, status: &str) {
         conn.execute(
             "INSERT INTO observations \
-             (display_id, status, summary, source, priority, captured_at, captured_week, \
+             (display_id, status, summary, body, source, priority, captured_at, captured_week, \
               created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, ?2, 'test obs', 'dev', 'normal', ?3, 'w-test', ?3, ?3, 'ai_autonomous', 'ai_autonomous')",
+             VALUES (?1, ?2, 'test obs summary', 'test obs body with details', 'dev', 'normal', ?3, 'w-test', ?3, ?3, 'ai_autonomous', 'ai_autonomous')",
             rusqlite::params![display_id, status, "2026-05-06T00:00:00Z"],
         )
         .unwrap();
@@ -523,34 +678,45 @@ mod tests {
         let res = run(&row, &ctx).unwrap();
         assert_eq!(res, 0, "valid envelope must return Ok(0)");
 
-        let (note, notes_str): (Option<String>, Option<String>) = conn
+        let (status, note, notes_str): (String, Option<String>, Option<String>) = conn
             .query_row(
-                "SELECT investigation_note, notes FROM observations WHERE display_id='L001'",
+                "SELECT status, investigation_note, notes FROM observations WHERE display_id='L001'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
+        assert_eq!(status, "investigated");
         let note = note.expect("investigation_note must be set");
-        let parsed: Value = serde_json::from_str(&note).unwrap();
-        // Round-trip: every field present verbatim.
-        assert_eq!(parsed.get("confidence").and_then(|v| v.as_str()), Some("high"));
-        assert_eq!(parsed.get("proposed_tier").and_then(|v| v.as_str()), Some("T2"));
-        assert_eq!(
-            parsed.get("grill_question").and_then(|v| v.as_str()),
-            Some("Is the panic intentional for the bounded path?")
+        assert!(
+            note.contains("Evidence:"),
+            "note must be human-readable: {note}"
         );
-        let evidence = parsed.get("evidence").and_then(|v| v.as_array()).unwrap();
-        assert_eq!(evidence.len(), 2);
-        let dups = parsed
-            .get("duplicate_candidates")
-            .and_then(|v| v.as_array())
-            .unwrap();
-        assert_eq!(dups.len(), 1);
+        assert!(
+            note.contains("Confidence: high"),
+            "note must label confidence: {note}"
+        );
+        assert!(
+            note.contains("Proposed tier: T2"),
+            "note must label tier: {note}"
+        );
+        assert!(
+            note.contains("Grill question:"),
+            "note must label grill question: {note}"
+        );
+        assert!(
+            serde_json::from_str::<Value>(&note).is_err(),
+            "note must not be a raw JSON blob"
+        );
 
         // notes column also has the four merged keys.
         let notes_str = notes_str.expect("notes must be populated");
         let notes: Value = serde_json::from_str(&notes_str).unwrap();
-        for key in ["duplicate_candidates", "confidence", "proposed_tier", "grill_question"] {
+        for key in [
+            "duplicate_candidates",
+            "confidence",
+            "proposed_tier",
+            "grill_question",
+        ] {
             assert!(notes.get(key).is_some(), "notes must contain '{}'", key);
         }
     }
@@ -584,6 +750,73 @@ mod tests {
             )
             .unwrap();
         assert!(note.is_none(), "rejected envelope must not persist");
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, investigation_failure_reason FROM observations WHERE display_id='L002'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "investigation_failed");
+        assert!(reason.unwrap_or_default().contains("envelope rejected"));
+    }
+
+    #[test]
+    fn investigator_override_receives_question_on_stdin() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db();
+        insert_obs(&conn, "L004", "needs_investigation");
+        let env = valid_envelope();
+        let json = serde_json::to_string(&env).unwrap().replace('\'', r"'\''");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        let cmd = format!("cat > '{}'; printf '%s' '{}'", path, json);
+        std::env::set_var("STORES_INVESTIGATOR_CMD", cmd);
+        let _shim = CmdShim;
+
+        let row = obs_row_json(&conn, "L004");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let ctx = ctx_for(&conn, &agents, &cfg);
+        assert_eq!(run(&row, &ctx).unwrap(), 0);
+
+        let question = std::fs::read_to_string(path).unwrap();
+        assert!(
+            question.contains("test obs summary"),
+            "question missing summary: {question}"
+        );
+        assert!(
+            question.contains("test obs body with details"),
+            "question missing body: {question}"
+        );
+    }
+
+    #[test]
+    fn investigator_nonzero_stub_marks_failed() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db();
+        insert_obs(&conn, "L005", "needs_investigation");
+        std::env::set_var(
+            "STORES_INVESTIGATOR_CMD",
+            "printf 'rate_limit' >&2; exit 17",
+        );
+        let _shim = CmdShim;
+
+        let row = obs_row_json(&conn, "L005");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let ctx = ctx_for(&conn, &agents, &cfg);
+        assert_eq!(run(&row, &ctx).unwrap(), 1);
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, investigation_failure_reason FROM observations WHERE display_id='L005'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "investigation_failed");
+        assert!(reason.unwrap_or_default().contains("rate_limit"));
     }
 
     #[test]
@@ -602,7 +835,7 @@ mod tests {
         let ctx = ctx_for(&conn, &agents, &cfg);
 
         let res = run(&row, &ctx).unwrap();
-        assert_eq!(res, 0, "status-guard skip is Ok(0) (not a hard failure)");
+        assert_eq!(res, 1, "unexpected state must fail loud before clobbering");
 
         let note: Option<String> = conn
             .query_row(
@@ -634,8 +867,8 @@ mod tests {
         // that an investigator agent is registered with the right subscriber
         // shape (store=observations, transition open→needs_investigation,
         // command=builtin:investigator).
-        let agents_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/agents.yaml");
+        let agents_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
         let agents = crate::flow::agents_yaml::load_from_path(&agents_path)
             .expect("tests/fixtures/agents.yaml must parse");
 
@@ -660,6 +893,9 @@ mod tests {
         let ctx = ctx_for(&conn, &agents, &cfg);
         let row = serde_json::json!({"display_id": ""});
         let res = crate::flow::builtins::dispatch_builtin("investigator", &row, &ctx);
-        assert!(res.is_some(), "'investigator' keyword must resolve in dispatch_builtin");
+        assert!(
+            res.is_some(),
+            "'investigator' keyword must resolve in dispatch_builtin"
+        );
     }
 }

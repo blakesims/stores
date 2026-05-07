@@ -492,7 +492,17 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                     &policies.hash,
                     &row_json,
                 );
-                let (terminal_reason, status_str, code) = terminal_from_dispatch_result(exit_code);
+                let (terminal_reason, mut status_str, code) =
+                    terminal_from_dispatch_result(exit_code);
+                if code != 0 {
+                    status_str = enrich_investigator_failure_status(
+                        conn,
+                        &sub.store,
+                        &display_id,
+                        agent,
+                        &status_str,
+                    );
+                }
                 let _ = mark_claim_finished_typed(
                     conn,
                     &sub.store,
@@ -642,7 +652,16 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                 &policies.hash,
                 &row_json,
             );
-            let (terminal_reason, status_str, code) = terminal_from_dispatch_result(exit_code);
+            let (terminal_reason, mut status_str, code) = terminal_from_dispatch_result(exit_code);
+            if code != 0 {
+                status_str = enrich_investigator_failure_status(
+                    conn,
+                    &c.store,
+                    &c.display_id,
+                    agent,
+                    &status_str,
+                );
+            }
             let _ = mark_claim_finished_typed(
                 conn,
                 &c.store,
@@ -1097,6 +1116,34 @@ fn derive_last_status(terminal_reason: &str, detail: Option<&str>) -> String {
         ),
         "halted" => format!("halted:{}", detail.unwrap_or("policy")),
         other => other.to_string(),
+    }
+}
+
+fn enrich_investigator_failure_status(
+    conn: &Connection,
+    store: &str,
+    display_id: &str,
+    agent: &AgentEntry,
+    base_status: &str,
+) -> String {
+    if store != "observations" || agent.command != "builtin:investigator" {
+        return base_status.to_string();
+    }
+    let reason: Option<String> = conn
+        .query_row(
+            "SELECT investigation_failure_reason FROM observations WHERE display_id = ?1",
+            rusqlite::params![display_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    let Some(reason) = reason else {
+        return base_status.to_string();
+    };
+    if reason.trim().is_empty() {
+        base_status.to_string()
+    } else {
+        format!("{}: {}", base_status, reason.trim())
     }
 }
 

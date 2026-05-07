@@ -95,6 +95,7 @@ pub struct ObsRow {
     /// `intent_contract.contract_state`, when present.
     pub contract_state: Option<String>,
     pub tier_hint: Option<String>,
+    pub investigation_failure_reason: Option<String>,
 }
 
 impl Row {
@@ -147,7 +148,8 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         "SELECT display_id, status, COALESCE(priority, ''), COALESCE(summary, ''),
                 COALESCE(updated_at, ''),
                 json_extract(intent_contract, '$.contract_state'),
-                json_extract(intent_contract, '$.tier_hint')
+                json_extract(intent_contract, '$.tier_hint'),
+                investigation_failure_reason
          FROM observations",
     )?;
     let obs_iter = stmt.query_map([], |r| {
@@ -159,6 +161,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             updated_at: r.get(4)?,
             contract_state: r.get(5).ok(),
             tier_hint: r.get(6).ok(),
+            investigation_failure_reason: r.get(7).ok(),
         })
     })?;
     for r in obs_iter.flatten() {
@@ -296,7 +299,11 @@ pub fn blocked_reason_class(reason: Option<&str>) -> &'static str {
         }
     }
     let r = raw.to_lowercase();
-    if r.contains("rate limit") || r.contains("ratelimit") || r.contains("429") || r.contains("rate_limit") {
+    if r.contains("rate limit")
+        || r.contains("ratelimit")
+        || r.contains("429")
+        || r.contains("rate_limit")
+    {
         "rate_limit"
     } else if r.contains("retry") || r.contains("again") || r.contains("transient") {
         "retry"
@@ -420,6 +427,7 @@ mod tests {
             updated_at: String::new(),
             contract_state: contract.map(str::to_string),
             tier_hint: None,
+            investigation_failure_reason: None,
         })
     }
 

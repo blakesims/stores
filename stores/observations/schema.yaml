@@ -6,7 +6,7 @@ id_format: "L{:03d}"
 # resolved_at, priority_rank_at, locked_at, drafted_at, approved_at are all distinct.
 
 lifecycle:
-  states: [open, investigating, needs_investigation, confirmed, ready, needs_info, in_progress, resolved, wont_fix]
+  states: [open, needs_investigation, investigating, investigated, investigation_failed, confirmed, ready, needs_info, in_progress, resolved, wont_fix]
   initial_state: open
   transitions:
     # open → investigating: triage begins
@@ -18,14 +18,29 @@ lifecycle:
       verb: investigate
       actor: ai_autonomous
 
-    # open → needs_investigation: route to a dedicated investigator subagent
-    # (T038 — pull-shaped). The orchestrator-on-main flips the row here
-    # instead of inline-investigating; the investigator subscriber picks it up
-    # and emits evidence (NOT a contract) for the human to prune.
+    # open → needs_investigation: operator-pull route to the dedicated
+    # investigator subagent queue. A human-supervised AI flags specific rows;
+    # the framework subscriber performs the spawn and follow-up transitions.
     - from: open
       to: needs_investigation
-      verb: needs_investigation
-      actor: ai_autonomous
+      verb: request-investigation
+      actor: ai_with_human
+
+    # needs_investigation → investigating → investigated/investigation_failed:
+    # framework-only edges used by the investigator subscriber. Hidden from the
+    # operator CLI; direct observation creation remains status=open.
+    - from: needs_investigation
+      to: investigating
+      verb: investigation-started
+      actor: framework
+    - from: investigating
+      to: investigated
+      verb: investigation-succeeded
+      actor: framework
+    - from: investigating
+      to: investigation_failed
+      verb: investigation-failed
+      actor: framework
 
     # open → wont_fix: direct discard path (per 10.06 lifecycle diagram)
     - from: open
@@ -260,6 +275,11 @@ fields:
     required: false
     description: "Free-form notes accumulated during investigation"
 
+  - name: investigation_failure_reason
+    type: text
+    required: false
+    description: "Framework-captured investigator spawn/rate-limit/nonzero failure details"
+
   - name: resolved_at
     type: text
     required: false
@@ -311,7 +331,8 @@ fields:
       - name: contract_state
         type: enum
         enum_values: [draft, ready]
-        description: "draft = AI-authored; ready = Blake-approved"
+        actor: ai_with_human
+        description: "draft = AI-authored; ready = Blake-approved; ready requires human-supervised authority"
 
       - name: drafted_by
         type: text
