@@ -58,24 +58,14 @@ Ask Pi with: context, options, recommendation, blocking yes/no, task/obs ids. Wh
 
 Silent standing-by is a bug.
 
-Set a claude code `monitor` tool to watch for:
+Every 3–5 minutes during active sessions, post or act on:
 
 - review lane: `in_review next=wrap blocked=false` rows → dispatch reviewer-runner or state why not.
 - revise lane: codex REVISE rows → spawn executor or state blocker.
 - integration lane: PASS rows → accept one at a time or state blocker.
 - architecture lane: active Pi questions.
 
-Note: in the past you have had issues setting up the monitor correctly. 
-Silent changes go unoticed. I suggest you use the stores cli tool. 
-You should also set a monitor for 15 minutes to wake up and then you should check to see if the monitor is missing it's mark.
-Once you found a montir that works you MUST update this skill! 
-Ths is is for the next agent #TODO:
-
-```bash
-echo('monitor command goes here once confirmed')
-```
-
-If parked operational work exists and you are in an architecture thread for >5 minutes, post a queue-vs-architecture heartbeat or ask Blake/Pi to choose. This is a stopgap until a daemon-side engine-runner/actionability monitor ships.
+If parked operational work exists and you are in an architecture thread for >5 minutes, post a queue-vs-architecture heartbeat or ask Blake/Pi to choose. This chat heartbeat is a stopgap until a daemon-side engine-runner/actionability monitor ships.
 
 ## Priority source of truth
 
@@ -101,9 +91,6 @@ Default lane caps:
 - accept/integration: 1;
 - architecture-decision: 1.
 
-HOWEVER: you should try to push this until you find the breaking point. Update this as you go.
-What is the safe maximum? 
-
 T1 narrow contract: usually skip codex after in-cycle code_review PASS; rebase and accept.
 
 T2/T3 or broad risk: codex via reviewer-runner.
@@ -125,4 +112,15 @@ Before accept:
 - expect daemon self-reexec/stale-binary behavior.
 
 If accept/deploy blocks, report exact state and next recovery verb; do not improvise raw SQL.
+
+## Wind-down
+
+When Blake says wind down:
+
+- no new ratifications or widening unless Blake reverses;
+- do not spawn new Claude subagents except to preserve/finish already-active work;
+- let detached reviewer/codex continue only if reviewer-runner records PID/log/handoff;
+- write your own handover with `docs/worklog/new-note.sh --handover engine-controller`;
+- include active tasks, branches, worktrees, commits, subprocess/subagent PIDs, blockers, first next action;
+- create the next agent-comm thread only after all role handovers exist, then tell Blake the path.
 
