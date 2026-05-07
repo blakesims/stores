@@ -803,16 +803,14 @@ fn drive_loop_with_role_runner(
 
         // AC4.3: `in_review` exit guard.
         //
-        // Two paths exit here:
-        //   (a) wrap was dispatched in THIS run (dispatched_wrap_this_run flag set) →
-        //       same-run re-dispatch prevention; exit after one wrap per drive invocation.
-        //   (b) wrap_log is already populated from a prior run AND the schema's
-        //       `dispatch_agent: wrap` guard (`when: "wrap_log.length == 0"`) returns
-        //       next_agent=None → wrap is done; exit awaiting human accept/reject.
+        // Only path: wrap was dispatched in THIS run (dispatched_wrap_this_run flag set)
+        // → same-run re-dispatch prevention; exit after one wrap per drive invocation.
         //
-        // This makes next_agent the source of truth for "is there still wrap work to do?"
-        // (pi ruling r2 MAJOR 1). Both paths print the same human-review hint.
-        if na.status == "in_review" && (dispatched_wrap_this_run || na.next_agent.is_none()) {
+        // On re-entry (new drive call after amend), dispatched_wrap_this_run is false,
+        // so we fall through and dispatch wrap again — next_agent IS the source of truth,
+        // not wrap_log. wrap_log is durable history only, never a completion sentinel.
+        // (pi ruling r3 strict-pi A1: if next_agent=wrap, dispatch wrap.)
+        if na.status == "in_review" && dispatched_wrap_this_run {
             eprintln!(
                 "[{display_id}] in_review; brief written; awaiting `stores tasks accept | reject`"
             );
@@ -2603,19 +2601,15 @@ mod tests {
     }
 
     #[test]
-    fn in_review_re_entry_after_amend_exits_cleanly_when_wrap_log_populated() {
-        // AC4.3a (revised, pi ruling r2 MAJOR 1): A fresh drive invocation on a row
-        // at `in_review` with an existing wrap_log[] entry exits cleanly without
-        // redispatching wrap.
+    fn in_review_re_entry_after_amend_dispatches_fresh_wrap() {
+        // AC4.3a (pi ruling r3 strict-pi A1): A fresh drive invocation on a row
+        // at `in_review` with an existing wrap_log[] entry (from a prior wrap run)
+        // MUST dispatch wrap again. wrap_log is durable history evidence; it is NOT
+        // a sentinel that THIS cycle's wrap is complete.
         //
-        // The schema's `dispatch_agent: wrap` has a `when: "wrap_log.length == 0"` guard.
-        // When wrap_log is populated, next_agent returns None for in_review, and the
-        // drive loop's in_review guard exits with the "awaiting accept|reject" hint.
-        // This makes next_agent the source of truth (not a wrap_log check in Rust code).
-        //
-        // The daemon watchdog relies on this: after submit-wrap runs, next_agent=None
-        // signals that no further work is pending, so has_pending_auto_drive_work
-        // returns false and the lock closes.
+        // Amend/re-entry is exactly where historical evidence is UNSAFE for control
+        // flow: the wrap_log entry is from the prior cycle, not the current one.
+        // next_agent=wrap IS the source of truth. If next_agent=wrap, dispatch wrap.
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
 
@@ -2630,7 +2624,7 @@ mod tests {
             None,
             None,
         );
-        // Pre-seed wrap_log (simulating prior wrap cycle via compute_submit_wrap).
+        // Pre-seed wrap_log from a prior cycle (simulating prior wrap via compute_submit_wrap).
         conn.execute(
             &format!(
                 "UPDATE {} SET wrap_log = ?1 WHERE display_id = ?2",
@@ -2642,18 +2636,20 @@ mod tests {
             ],
         ).unwrap();
 
-        // No wrap responses queued — drive must exit without consuming any runner output.
-        let runner = MockRunner::new(vec![]);
+        // One wrap response queued — must be consumed (fresh dispatch regardless of existing wrap_log).
+        let wrap_out = make_run_output(wrap_fixture_json(), 0);
+        let runner = MockRunner::new(vec![wrap_out]);
 
-        // Drive must succeed (Ok) and exit cleanly; wrap is NOT redispatched.
+        // Drive must succeed and dispatch wrap even though wrap_log is non-empty.
         drive_loop(&schema, &conn, "T001", &runner, 50)
-            .expect("in_review with existing wrap_log must exit Ok without redispatching wrap");
+            .expect("in_review with existing wrap_log must still dispatch wrap on re-entry");
 
-        // Runner still empty — wrap was not redispatched.
+        // Assert the runner was fully drained — the fresh wrap response was consumed.
         assert_eq!(
             runner.remaining_count(),
             0,
-            "no wrap response should be consumed when wrap_log is already populated"
+            "wrap response must have been consumed on re-entry; {} responses remain",
+            runner.remaining_count()
         );
     }
 
@@ -3249,12 +3245,12 @@ mod tests {
     }
 
     #[test]
-    fn in_review_re_entry_after_amend_wrap_log_preserved() {
-        // Revised (pi ruling r2 MAJOR 1): when wrap_log is already populated, a fresh
-        // drive invocation exits cleanly without adding another wrap_log entry.
-        // The schema guard `when: "wrap_log.length == 0"` on dispatch_agent:wrap makes
-        // next_agent=None, so the drive loop's in_review guard exits immediately.
-        // wrap_log preserves the prior entry unchanged.
+    fn in_review_re_entry_after_amend_wrap_log_content() {
+        // Strengthen in_review_re_entry_after_amend_dispatches_fresh_wrap: assert
+        // wrap_log[] grows to 2 and the latest executive_summary == "stub".
+        //
+        // pi ruling r3 strict-pi A1: wrap_log is durable history. Re-entry dispatches
+        // a fresh wrap; the new cycle appends its entry to the existing list.
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
 
@@ -3282,25 +3278,31 @@ mod tests {
             ],
         ).unwrap();
 
-        // No wrap responses queued — drive exits without consuming runner output.
-        let runner = MockRunner::new(vec![]);
-        drive_loop(&schema, &conn, "T001", &runner, 50)
-            .expect("drive must exit Ok when wrap_log already populated");
+        let runner = MockRunner::new(vec![make_run_output(wrap_fixture_json(), 0)]);
+        drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive must succeed for re-entry");
 
-        // wrap_log stays at 1 entry (no second wrap appended).
+        assert_eq!(
+            runner.remaining_count(),
+            0,
+            "wrap response must be consumed on re-entry"
+        );
+
+        // AC4.7: wrap_log grows to 2 entries.
         let log = read_wrap_log_for(&conn, &schema, "T001");
         assert_eq!(
             log.len(),
-            1,
-            "wrap_log must remain at 1 entry when drive exits without re-dispatching wrap"
+            2,
+            "wrap_log must have 2 entries after re-entry wrap"
         );
 
-        // Original entry preserved.
+        // Latest (index 1) executive_summary == "stub".
         assert_eq!(
-            log[0].get("executive_summary").and_then(|v| v.as_str()),
-            Some("prior wrap"),
-            "prior wrap_log entry must be preserved unchanged"
+            log[1].get("executive_summary").and_then(|v| v.as_str()),
+            Some("stub"),
+            "latest wrap_log entry executive_summary must == 'stub'"
         );
+        let at = log[1].get("at").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(!at.is_empty(), "latest wrap_log entry at must be set");
     }
 
     // ---------------------------------------------------------------------------

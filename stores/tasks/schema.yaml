@@ -243,4 +243,3 @@ workflow:
       - transition_to: in_review
     in_review:
       - dispatch_agent: wrap
-        when: "wrap_log.length == 0"

@@ -52,14 +52,47 @@ const IN_CYCLE_STATUSES: &[&str] = &[
 
 /// Returns true when the task still has auto-drive work to do.
 ///
-/// Uses `next_agent` from `compute()` as the source of truth.  The
-/// `in_review` state's `dispatch_agent: wrap` carries a schema-level
-/// `when: "wrap_log.length == 0"` guard, so `next_agent` returns `Some("wrap")`
-/// only while wrap_log is empty — no separate wrap_log sentinel needed here.
+/// For most statuses, delegates to `next_agent` from `compute()`.
+///
+/// Special case — `in_review`: `dispatch_agent: wrap` has no schema-level
+/// guard (pi ruling r3 strict-pi A1), so `next_agent` is always `Some("wrap")`
+/// for in_review rows. The daemon uses wrap_log as the evidence of completion:
+/// if wrap_log is non-empty, wrap already ran this cycle and the task awaits
+/// human accept/reject — no further drive subprocess is needed.
+///
+/// This is distinct from the drive-loop's exit guard (which uses
+/// `dispatched_wrap_this_run` to prevent same-run re-dispatch). The daemon
+/// needs to know whether to re-spawn a *new* drive process; wrap_log answers
+/// "did the prior drive complete its wrap?" safely for that purpose.
 pub(crate) fn has_pending_auto_drive_work(conn: &Connection, display_id: &str) -> Result<bool> {
     let schema = crate::flow::builtins::load_tasks_schema()?;
     let out = crate::handlers::next_action::compute(&schema, conn, display_id)?;
+    if out.status == "in_review" {
+        let wrap_log: Option<String> = conn
+            .query_row(
+                "SELECT wrap_log FROM tasks WHERE display_id = ?1",
+                rusqlite::params![display_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        if wrap_log_has_entries(wrap_log.as_deref()) {
+            return Ok(false);
+        }
+    }
     Ok(out.next_agent.is_some())
+}
+
+fn wrap_log_has_entries(text: Option<&str>) -> bool {
+    let Some(text) = text else {
+        return false;
+    };
+    match serde_json::from_str::<Value>(text) {
+        Ok(Value::Array(a)) => !a.is_empty(),
+        Ok(Value::Null) => false,
+        Ok(_) => true,
+        Err(_) => !text.trim().is_empty(),
+    }
 }
 
 fn mark_pending_handoff_lock(
