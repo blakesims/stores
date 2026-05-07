@@ -1185,7 +1185,7 @@ fn backlink_cycle_transcript(
 ) -> Result<()> {
     let subrecord = match role {
         "executor" => "executor",
-        "code-reviewer" => "review",
+        "code-reviewer" | "code_reviewer" => "review",
         _ => return Ok(()),
     };
 
@@ -1686,6 +1686,65 @@ mod tests {
             session_id: None,
             structured_output_source: None,
         }
+    }
+
+    #[test]
+    fn backlink_accepts_schema_code_reviewer_role() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        insert_task(
+            &conn,
+            &schema,
+            "T072",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+
+        let cycles = serde_json::to_string(&json!([{
+            "phase": 1,
+            "cycle": 1,
+            "review": {"gate": "REVISE"}
+        }]))
+        .unwrap();
+        conn.execute(
+            &format!(
+                "UPDATE {name} SET cycles = ?1 WHERE display_id = ?2",
+                name = quote_ident(&schema.name)
+            ),
+            rusqlite::params![cycles, "T072"],
+        )
+        .unwrap();
+
+        backlink_cycle_transcript(
+            &schema,
+            &conn,
+            "T072",
+            1,
+            1,
+            "code_reviewer",
+            ".stores/runs/review-session.jsonl",
+        )
+        .unwrap();
+
+        let stored: String = conn
+            .query_row(
+                &format!(
+                    "SELECT cycles FROM {name} WHERE display_id = ?1",
+                    name = quote_ident(&schema.name)
+                ),
+                ["T072"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(
+            value[0]["review"]["transcript_path"],
+            ".stores/runs/review-session.jsonl"
+        );
     }
 
     // ---------------------------------------------------------------------------

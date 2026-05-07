@@ -360,7 +360,7 @@ mod tests {
     use crate::schema::Schema;
     use rusqlite::Connection;
     use std::process::Command;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     /// All builtin tests share the global notifier + STORES_NTFY_URL env;
     /// serialize them via the process-wide notifier lock so cross-module
