@@ -149,8 +149,8 @@ fn daemon_starts_concurrent_inserts_get_distinct_display_ids() {
     // Bootstrap schema directly — no `stores init` binary needed.
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(stores::codegen::ddl::SUBSTRATE_DDL).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        conn.execute_batch(stores::codegen::ddl::SUBSTRATE_DDL).unwrap();
     }
 
     // Shared counter that mimics DAEMON_START_SEQ; each thread gets its own
@@ -167,8 +167,10 @@ fn daemon_starts_concurrent_inserts_get_distinct_display_ids() {
     let make_insert = |db_path: std::path::PathBuf, pid: u32, ctr: Arc<AtomicU64>| {
         move || -> String {
             let conn = Connection::open(&db_path).unwrap();
-            // Give the other thread up to 2 s to release any write lock.
-            conn.busy_timeout(std::time::Duration::from_secs(2)).unwrap();
+            // Give the other thread up to 5 s to release any write lock. WAL is
+            // enabled during bootstrap so racing threads don't contend on the
+            // journal-mode transition itself.
+            conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
             let seq = ctr.fetch_add(1, Ordering::Relaxed);
             let pending = format!("__pending_{}_{}", pid, seq);
             conn.execute(
