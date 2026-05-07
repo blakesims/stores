@@ -8,6 +8,15 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 **The engine can now do real work, but throughput is capped by chat-shaped review/triage and crude concurrency.** The next geodesic is actionability visibility (T079), substrate-native final review (T083/L188), priority + file-overlap scheduling, then metrics that let runner/reviewer choices be made from evidence instead of vibes.
 
+## Read-this-first priority ladder
+
+1. **Finish T083 / L188 external review lane.** Make final review substrate-native (typed review records; codex/pi/claude-code runners; PASS/REVISE/TOOLING_FAILURE; U3 still human).
+2. **Ship L192 `stores watch` cockpit.** Blake needs to feel the engine: lane occupancy, priorities, held reasons, visual T2/T3 progress, and friendly drilldown.
+3. **Run an observation backlog hygiene sweep.** The 46 no-contract observations are not all real work; classify/close duplicates, addressed rows, stale rows, and draft only the real contracts.
+4. **Build priority + file-overlap scheduler.** Pick the highest-priority compatible row and hold conflicts with explicit reasons; do not raise WIP by blind active-count.
+5. **Add runner/review metrics.** Use T070/T072/T083 data to compare pi vs claude and codex/pi/claude review outcomes by role/tier/duration/cost.
+6. **Then expand adapters/domains.** CodeRabbit, richer conflict domains, L006 observation runner asymmetry, and L035 typed inter-agent refs come after the review/watch/scheduler substrate is legible.
+
 ## Status legend
 
 | icon | meaning |
