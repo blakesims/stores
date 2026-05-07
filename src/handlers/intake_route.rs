@@ -191,26 +191,25 @@ pub(crate) fn inject_pre_validation_fields(
         }
 
         "arch_review_candidate" => {
-            if is_absent(merged, "routed_to_observation") {
-                let summary = merged
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(intake arch review candidate)")
-                    .to_string();
-                let cluster_key = merged
-                    .get("cluster_key")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        merged
-                            .get("gatekeeper_decision_json")
-                            .and_then(|v| v.get("cluster_key"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    });
+            let summary = merged
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(intake arch review candidate)")
+                .to_string();
+            let cluster_key = merged
+                .get("cluster_key")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    merged
+                        .get("gatekeeper_decision_json")
+                        .and_then(|v| v.get("cluster_key"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
 
+            let obs_id = if is_absent(merged, "routed_to_observation") {
                 let notes = json!({ "gatekeeper_route": { "decision": "arch_review_candidate" } });
-
                 let obs_id = insert_observation_row(tx, &ObsFields {
                     summary: summary.clone(),
                     source: "intake".to_string(),
@@ -225,10 +224,20 @@ pub(crate) fn inject_pre_validation_fields(
                     cluster_key: cluster_key.clone(),
                     pending_architecture_review: true,
                 })?;
-
                 diff.insert("routed_to_observation".to_string(), Value::String(obs_id.clone()));
                 merged.insert("routed_to_observation".to_string(), Value::String(obs_id.clone()));
+                obs_id
+            } else {
+                let obs_id = merged
+                    .get("routed_to_observation")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                mark_observation_pending(tx, &obs_id)?;
+                obs_id
+            };
 
+            if is_absent(merged, "routed_to_arch_review") {
                 let intake_id = merged
                     .get("display_id")
                     .and_then(|v| v.as_str())
@@ -403,6 +412,19 @@ fn insert_architecture_review_row(tx: &Transaction, fields: &ArchReviewFields) -
     }
 
     super::add::add_row_in_tx(tx, &schema, entry, Actor::Framework)
+}
+
+fn mark_observation_pending(tx: &Transaction, display_id: &str) -> Result<()> {
+    let changed = tx
+        .execute(
+            "UPDATE observations SET pending_architecture_review = 1, updated_at = ?2, updated_by = 'framework' WHERE display_id = ?1",
+            rusqlite::params![display_id, super::row::now_iso8601()],
+        )
+        .context("mark source observation pending_architecture_review")?;
+    if changed == 0 {
+        anyhow::bail!("routed_to_observation '{display_id}' was supplied but no source observation row exists");
+    }
+    Ok(())
 }
 
 fn observations_schema() -> Result<Schema> {
