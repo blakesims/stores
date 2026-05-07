@@ -182,22 +182,26 @@ fn validate_observations_source_pair(
     }
 
     // Cleanup-invariant: when the canonical tuple (source_env + source_id) is
-    // fully populated, the old trio (origin_db, prod_source_id, sandbox_source_id)
-    // must all be null on the same row — mixed-state is invalid.
+    // fully populated, the legacy per-env source IDs must be null on the same
+    // row — canonical + raw IDs is always invalid.
+    //
+    // Pi ruling (msg_77a03121): `origin_db` is PRESERVED during the transition
+    // window (a row may have canonical tuple AND origin_db populated and that
+    // is the EXPECTED post-migration state). Only prod_source_id and
+    // sandbox_source_id are forbidden alongside the canonical pair.
     if env_present && id_present {
-        let old_fields = [
-            ("origin_db", entry.get("origin_db")),
+        let legacy_id_fields = [
             ("prod_source_id", entry.get("prod_source_id")),
             ("sandbox_source_id", entry.get("sandbox_source_id")),
         ];
-        for (field_name, value) in old_fields {
+        for (field_name, value) in legacy_id_fields {
             if value.is_some_and(|v| !v.is_null()) {
                 errors.push(ValidationError {
                     field_path: vec![field_name.to_string()],
                     rule: error::RuleKind::Required,
                     message: format!(
                         "field '{field_name}' must be null when canonical source tuple \
-                         (source_env + source_id) is populated; clear the old trio before writing the new pair"
+                         (source_env + source_id) is populated; clear the legacy ID before writing the new pair"
                     ),
                 });
             }
@@ -736,30 +740,41 @@ fields:
     type: integer
 "#;
 
-    /// When canonical tuple is fully populated AND origin_db is also set,
-    /// validator must reject with a clear error pointing at origin_db.
+    /// Pi ruling (msg_77a03121): canonical tuple + origin_db is the EXPECTED
+    /// post-migration state during the transition window — validator must ALLOW it.
     #[test]
-    fn t084_cleanup_invariant_rejects_canonical_plus_origin_db() {
+    fn t084_cleanup_invariant_allows_canonical_plus_origin_db() {
         let schema = Schema::from_yaml(OBS_CLEANUP_SCHEMA).unwrap();
         let entry = entry_from(&[
             ("source_env", str_val("prod")),
             ("source_id", str_val("123")),
-            ("origin_db", str_val("prod")), // must be null when canonical tuple is set
+            ("origin_db", str_val("prod")), // preserved during transition window — must be allowed
+        ]);
+        validate(&schema, &entry, Op::Add, Actor::Human.into())
+            .expect("canonical tuple + origin_db must be allowed during transition window");
+    }
+
+    /// Confirm that canonical tuple + prod_source_id is still rejected (canonical
+    /// pair and raw legacy ID coexisting is never valid).
+    #[test]
+    fn t084_cleanup_invariant_rejects_canonical_plus_prod_source_id_standalone() {
+        let schema = Schema::from_yaml(OBS_CLEANUP_SCHEMA).unwrap();
+        let entry = entry_from(&[
+            ("source_env", str_val("prod")),
+            ("source_id", str_val("123")),
+            ("origin_db", str_val("prod")),
+            ("prod_source_id", serde_json::Value::Number(123.into())),
         ]);
         let errs = validate(&schema, &entry, Op::Add, Actor::Human.into()).unwrap_err();
         let paths: Vec<String> = errs.iter().map(|e| e.field_path.join(".")).collect();
         assert!(
-            paths.contains(&"origin_db".to_string()),
-            "expected origin_db in errors; got: {paths:?}"
+            paths.contains(&"prod_source_id".to_string()),
+            "expected prod_source_id in errors; got: {paths:?}"
         );
-        let msg = errs
-            .iter()
-            .find(|e| e.field_path == vec!["origin_db"])
-            .map(|e| e.message.as_str())
-            .unwrap_or("");
+        // origin_db must NOT appear in errors
         assert!(
-            msg.contains("canonical source tuple") || msg.contains("null"),
-            "error message should mention canonical tuple: {msg}"
+            !paths.contains(&"origin_db".to_string()),
+            "origin_db must NOT be in errors during transition window; got: {paths:?}"
         );
     }
 
