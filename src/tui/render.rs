@@ -161,19 +161,31 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
             Span::raw(" "),
             Span::raw(truncate(&t.title, 60)),
         ],
-        Row::Obs(o) => vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("{:<6}", o.display_id),
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::styled(
-                format!("{:<24}", o.status),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(" "),
-            Span::raw(truncate(&o.summary, 60)),
-        ],
+        Row::Obs(o) => {
+            let status = if o.status == "investigation_failed" {
+                match o.investigation_failure_reason.as_deref() {
+                    Some(reason) if !reason.trim().is_empty() => {
+                        format!("investigation_failed:{}", truncate(reason.trim(), 40))
+                    }
+                    _ => "investigation_failed:unknown".to_string(),
+                }
+            } else {
+                o.status.clone()
+            };
+            vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("{:<6}", o.display_id),
+                    Style::default().fg(Color::Magenta),
+                ),
+                Span::styled(
+                    format!("{:<24}", status),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(" "),
+                Span::raw(truncate(&o.summary, 60)),
+            ]
+        }
     };
     if selected {
         let mut spans = base;
@@ -264,7 +276,7 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use crate::tui::app::{App, TuiOpts};
-    use crate::tui::data::{Row, TaskRow};
+    use crate::tui::data::{ObsRow, Row, TaskRow};
 
     fn line_text(line: Line<'static>) -> String {
         line.spans
@@ -302,7 +314,6 @@ mod tests {
     /// AC2.5: with 200 synthetic rows and viewport=10, only 10 row widgets
     /// are rendered into the list, and selection stays in view on PgDn.
     #[test]
-    #[test]
     fn task_terminal_and_blocked_status_labels_render_operator_actionably() {
         let closed = line_text(format_row_line(
             &task_row("closed_out_of_band", None),
@@ -322,6 +333,21 @@ mod tests {
         assert!(blocked.contains("blocked:rate_limit"));
         let unknown = line_text(format_row_line(&task_row("blocked", Some("opaque")), false));
         assert!(unknown.contains("blocked:unknown"));
+    }
+
+    #[test]
+    fn investigation_failed_observation_row_renders_reason() {
+        let row = Row::Obs(ObsRow {
+            display_id: "L065".to_string(),
+            status: "investigation_failed".to_string(),
+            priority: "high".to_string(),
+            summary: "investigator failed".to_string(),
+            investigation_failure_reason: Some("rate_limit: reset later".to_string()),
+            ..Default::default()
+        });
+        let text = line_text(format_row_line(&row, false));
+        assert!(text.contains("investigation_failed:rate_limit"), "{text}");
+        assert!(text.contains("investigator failed"), "{text}");
     }
 
     #[test]

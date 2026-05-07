@@ -65,8 +65,20 @@ fn format_text(row: &Row, cursor: usize, total: usize, now_secs: u64) -> String 
     } else {
         format!(" linked:{linked}")
     };
+    let failure_seg = match row {
+        Row::Obs(o) if o.status == "investigation_failed" => {
+            let reason = o
+                .investigation_failure_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .unwrap_or("unknown");
+            format!(" failure:{reason}")
+        }
+        _ => String::new(),
+    };
     format!(
-        "[{cur}/{total}] {id} {summary} · status:{status} tier:{tier}{linked_seg} · {rel}",
+        "[{cur}/{total}] {id} {summary} · status:{status} tier:{tier}{linked_seg}{failure_seg} · {rel}",
         cur = cursor + 1,
     )
 }
