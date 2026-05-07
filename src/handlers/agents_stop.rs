@@ -133,6 +133,53 @@ pub fn run_stop(opts: StopOptions) -> Result<()> {
 
     // Graceful timeout reached.
     if opts.force {
+        // Before escalating to SIGKILL, re-validate identity: the daemon may have
+        // exited gracefully during the timeout window and the OS may have reused
+        // its PID for an unrelated process.  SIGKILL-ing an innocent process would
+        // be catastrophic, so we re-read the pidfile and re-run the same identity
+        // check that guards SIGTERM.
+        if !pid_is_live_for_stop(pid) {
+            // Already exited while we were about to re-check — clean up and return.
+            remove_pidfile_if_ours(&pidfile, pid);
+            println!("daemon exited gracefully during timeout window; SIGKILL skipped");
+            return Ok(());
+        }
+        // Re-read the pidfile (it may have been removed by the daemon on exit).
+        let sigkill_ok = if pidfile.exists() {
+            match crate::handlers::agents_run::read_pidfile(&pidfile) {
+                Ok(fresh_entry) => {
+                    if pidfile_identity_matches(&fresh_entry) {
+                        true
+                    } else {
+                        // Identity no longer matches: daemon exited and PID was reused.
+                        eprintln!(
+                            "stale pidfile detected mid-stop (PID reuse during timeout window); \
+                             SIGKILL skipped"
+                        );
+                        remove_pidfile_if_ours(&pidfile, pid);
+                        false
+                    }
+                }
+                Err(_) => {
+                    // Unparseable pidfile — treat as stale/gone.
+                    eprintln!(
+                        "daemon exited gracefully during timeout window (pidfile unreadable); \
+                         SIGKILL skipped"
+                    );
+                    remove_pidfile_if_ours(&pidfile, pid);
+                    false
+                }
+            }
+        } else {
+            // Pidfile gone — daemon exited on its own during the graceful window.
+            eprintln!("daemon exited gracefully during timeout window; SIGKILL skipped");
+            false
+        };
+
+        if !sigkill_ok {
+            return Ok(());
+        }
+
         // Escalate to SIGKILL.
         let rc = unsafe { libc::kill(pid, libc::SIGKILL) };
         if rc != 0 {

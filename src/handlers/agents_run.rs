@@ -567,7 +567,24 @@ impl PidfileEntry {
     }
 }
 
-/// Read `/proc/self/stat` field 22 (start_time, clock ticks since boot) on Linux.
+/// Return the kernel's ticks-per-second (hz) via `sysconf(_SC_CLK_TCK)`.
+/// Returns 0 on failure (which will cause callers to return 0 / skip conversion).
+#[cfg(target_os = "linux")]
+fn clk_tck() -> u64 {
+    // SAFETY: sysconf is always safe to call with a valid name constant.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if hz <= 0 { 0 } else { hz as u64 }
+}
+
+/// Convert raw `/proc/<pid>/stat` starttime clock ticks to nanoseconds.
+/// Returns 0 if `hz` is 0 (prevents divide-by-zero; callers treat 0 as "unknown").
+#[cfg(target_os = "linux")]
+fn ticks_to_ns(ticks: u64, hz: u64) -> u64 {
+    if hz == 0 { return 0; }
+    ticks * (1_000_000_000 / hz)
+}
+
+/// Read `/proc/self/stat` field 22 (start_time) on Linux, converted to nanoseconds.
 /// Returns 0 on non-Linux or on any read/parse failure.
 #[cfg(target_os = "linux")]
 fn read_self_start_time() -> u64 {
@@ -579,7 +596,8 @@ fn read_self_start_time() -> u64 {
     0
 }
 
-/// Read `/proc/<pid>/stat` field 22 (start_time) for an arbitrary pid on Linux.
+/// Read `/proc/<pid>/stat` field 22 (start_time) for an arbitrary pid on Linux,
+/// converted to nanoseconds via `sysconf(_SC_CLK_TCK)`.
 /// Returns 0 on any failure (including non-Linux stub).
 #[cfg(target_os = "linux")]
 pub(crate) fn read_proc_start_time(pid: i32) -> u64 {
@@ -611,7 +629,8 @@ pub(crate) fn read_proc_start_time(pid: i32) -> u64 {
             return 0;
         }
     }
-    fields.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
+    let ticks = fields.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    ticks_to_ns(ticks, clk_tck())
 }
 
 #[cfg(not(target_os = "linux"))]
