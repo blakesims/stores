@@ -1,0 +1,30 @@
+name: daemon_starts
+id_format: "D{:03d}"
+lifecycle:
+  states: [started]
+  transitions: []
+fields:
+  - name: pid
+    type: integer
+    required: true
+  - name: started_at
+    type: timestamp
+    required: true
+  - name: binary_path
+    type: text
+    required: true
+  - name: binary_version
+    type: text
+    required: true
+  - name: git_sha
+    type: text
+    required: true
+  - name: argv
+    type: text
+    required: true
+  - name: log_file
+    type: text
+    required: false
+  - name: cwd
+    type: text
+    required: true

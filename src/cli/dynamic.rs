@@ -10,7 +10,13 @@ use crate::schema::{FieldType, Schema};
 // ---------------------------------------------------------------------------
 
 /// Names of bundled stores (the subdirectory name == schema name).
-pub static BUNDLED_STORE_NAMES: &[&str] = &["observations", "gate", "tasks", "intake"];
+pub static BUNDLED_STORE_NAMES: &[&str] = &[
+    "observations",
+    "gate",
+    "tasks",
+    "intake",
+    "daemon_starts",
+];
 
 /// Embedded schema.yaml content for each bundled store (same order as BUNDLED_STORE_NAMES).
 pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
@@ -23,6 +29,10 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
     (
         "intake",
         include_str!("../../stores/intake_items/schema.yaml"),
+    ),
+    (
+        "daemon_starts",
+        include_str!("../../stores/daemon_starts/schema.yaml"),
     ),
 ];
 
@@ -1343,6 +1353,18 @@ fn is_reserved(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_starts_schema_is_bundled_and_parseable() {
+        assert!(BUNDLED_STORE_NAMES.contains(&"daemon_starts"));
+        let yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "daemon_starts")
+            .map(|(_, yaml)| *yaml)
+            .expect("daemon_starts schema bundled");
+        let schema = crate::schema::Schema::from_yaml(yaml).unwrap();
+        assert_eq!(schema.name, "daemon_starts");
+    }
 
     #[test]
     fn intake_templates_are_bundled() {
