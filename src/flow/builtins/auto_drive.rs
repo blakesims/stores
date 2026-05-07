@@ -16,10 +16,18 @@
 //! tests substitute a stub (`sleep 30`, etc.) without touching PATH.
 
 use std::path::{Path, PathBuf};
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde_json::Value;
+
+/// Test-only counter: incremented each time the CAS abort branch fires
+/// (drive_pid alive at re-read).  Only compiled in debug builds; unavailable
+/// in release.  Tests assert this counter to prove the race path executed.
+#[cfg(debug_assertions)]
+pub static CAS_ABORT_DRIVE_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 use crate::flow::builtins::{
     dispatch_to_specialist, fire_mark_drive_failed, refresh_task_row, BuiltinResult, DispatchCtx,
@@ -152,6 +160,25 @@ pub(crate) fn redispatch_orphaned_next_agent(
         return Ok(None);
     }
 
+    // Test-only synchronization hook: STORES_TEST_CAS_PRE_SPAWN_DELAY_MS
+    // introduces a sleep between the fast-path scanner read and the BEGIN
+    // IMMEDIATE transaction so a test can inject a live drive_pid (or a live
+    // dispatch_locks owner row) inside the gap — simulating the race the CAS
+    // is built to defend against.  Gated on debug_assertions so release builds
+    // compile it out entirely; the env-var cannot leak into production binaries.
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(ms) = std::env::var("STORES_TEST_CAS_PRE_SPAWN_DELAY_MS") {
+            if let Ok(n) = ms.parse::<u64>() {
+                eprintln!("[engine-runner::cas] {display_id}: pre-spawn delay start ({n}ms)");
+                if n > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(n));
+                }
+                eprintln!("[engine-runner::cas] {display_id}: pre-spawn delay end");
+            }
+        }
+    }
+
     // Atomic CAS: BEGIN IMMEDIATE acquires a write-intent lock so no concurrent
     // writer (another daemon iteration, an external `stores tasks drive`, or a
     // race-reused OS PID) can interleave between the re-read and the spawn+UPDATE.
@@ -176,6 +203,15 @@ pub(crate) fn redispatch_orphaned_next_agent(
         eprintln!(
             "[engine-runner] {display_id_tx}: raced; drive_pid={before} alive since scan; skipping redispatch"
         );
+        // Test-only sentinel: increments the global counter and emits a
+        // greppable line so tests can assert the race path was actually
+        // exercised (not just that no spawn happened sequentially).
+        // Compiled out in release builds.
+        #[cfg(debug_assertions)]
+        if std::env::var_os("STORES_TEST_CAS_PRE_SPAWN_DELAY_MS").is_some() {
+            CAS_ABORT_DRIVE_PID_COUNT.fetch_add(1, Ordering::Relaxed);
+            eprintln!("[engine-runner::cas-abort] {display_id_tx}: orphan no longer applicable; drive_pid={before} now alive");
+        }
         tx.rollback()?;
         return Ok(None);
     }

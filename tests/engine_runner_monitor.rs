@@ -4,6 +4,7 @@ use stores::flow::engine_runner::{scan_record_and_redrive_tasks, ScannerSchemas}
 use stores::flow::AgentsYaml;
 use stores::schema::Schema;
 use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::Ordering;
 
 const TS: &str = "2026-05-07T00:00:00Z";
 
@@ -378,6 +379,159 @@ fn atomic_cas_prevents_double_spawn_on_same_orphan() {
     unsafe {
         libc::kill(pid_after_first as i32, libc::SIGTERM);
     }
+    std::env::remove_var("STORES_DRIVE_CMD");
+}
+
+// ─── Fix 1b: actual race — owner appears between scanner-read and CAS ────────
+
+/// Proves the CAS abort branch fires when a live `drive_pid` is injected into
+/// the gap between the scanner fast-path read and the BEGIN IMMEDIATE
+/// transaction.
+///
+/// Scenario:
+///   1. Task T982 has a dead drive_pid → orphan condition.
+///   2. Scanner thread starts; `STORES_TEST_CAS_PRE_SPAWN_DELAY_MS=150`
+///      introduces a delay after the fast-path read.
+///   3. Main thread waits 50 ms, then injects the current process PID as
+///      drive_pid — simulating "owner appears in the gap."
+///   4. Scanner thread resumes, opens BEGIN IMMEDIATE, re-reads, sees the now-
+///      live drive_pid, fires the CAS abort branch.
+///   5. Assertions:
+///      (a) No new process spawned (drive_pid equals the injected pid).
+///      (b) No new dispatch_lock row created.
+///      (c) `CAS_ABORT_DRIVE_PID_COUNT` incremented exactly once.
+#[cfg(debug_assertions)]
+#[test]
+fn cas_abort_branch_fires_when_owner_appears_in_gap() {
+    let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    // Reset the global sentinel counter before the test.
+    stores::flow::builtins::auto_drive::CAS_ABORT_DRIVE_PID_COUNT
+        .store(0, Ordering::SeqCst);
+
+    std::env::set_var("STORES_DRIVE_CMD", "sleep 60 #");
+    std::env::set_var("STORES_TEST_CAS_PRE_SPAWN_DELAY_MS", "150");
+
+    // File-based DB so a second connection (injector) can write concurrently.
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("db.sqlite");
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace_str = workspace.path().to_str().unwrap().to_owned();
+
+    let (tasks_schema, intake_schema, obs_schema) = schemas();
+
+    // Set up the DB: create schema + orphan task row.
+    let setup_conn = Connection::open(&db_path).unwrap();
+    setup_conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    setup_conn.execute_batch(SUBSTRATE_DDL).unwrap();
+    setup_conn.execute_batch(&ddl_for(&tasks_schema)).unwrap();
+    setup_conn.execute_batch(&ddl_for(&intake_schema)).unwrap();
+    setup_conn.execute_batch(&ddl_for(&obs_schema)).unwrap();
+
+    let task_id: i64 = {
+        setup_conn.execute(
+            "INSERT INTO tasks \
+             (display_id, status, created_at, updated_at, title, slug, current_phase, current_cycle, tier_hint, plan, workspace_path) \
+             VALUES ('T982', 'executing', ?1, ?1, 'Task', 'task', 1, 1, 'T2', ?2, ?3)",
+            rusqlite::params![TS, r#"{"phases":[{"name":"p1"}]}"#, &workspace_str],
+        ).unwrap();
+        // Dead drive_pid — the orphan condition.
+        let id = setup_conn.last_insert_rowid();
+        setup_conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![999_999_982_i64, id],
+        ).unwrap();
+        id
+    };
+    drop(setup_conn); // release before threads open their own connections
+
+    let cfg_tmp = cfg(5);
+    let cfg_path = cfg_tmp.path().join("config.yaml");
+
+    // The "live" pid we'll inject — current process is guaranteed alive.
+    let injected_pid = std::process::id() as i64;
+
+    // ── Scanner thread ────────────────────────────────────────────────────────
+    // Open its own connection; will pause inside the delay window.
+    let db_path_clone = db_path.clone();
+    let tasks_schema2 = tasks_schema.clone();
+    let intake_schema2 = intake_schema.clone();
+    let obs_schema2 = obs_schema.clone();
+    let cfg_path_clone = cfg_path.clone();
+
+    let scanner_handle = std::thread::spawn(move || {
+        let conn = Connection::open(&db_path_clone).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "busy_timeout", 5000i64).unwrap();
+        scan_record_and_redrive_tasks(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks_schema2,
+                intake: &intake_schema2,
+                observations: &obs_schema2,
+            },
+            1,
+            TS,
+            &AgentsYaml::default_empty(),
+            &cfg_path_clone,
+            "",
+            0,
+        )
+        .unwrap();
+    });
+
+    // ── Injector (main thread) ─────────────────────────────────────────────────
+    // Sleep 50 ms — inside the 150 ms delay window — then write a live pid.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    {
+        let inj_conn = Connection::open(&db_path).unwrap();
+        inj_conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        inj_conn.pragma_update(None, "busy_timeout", 5000i64).unwrap();
+        inj_conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![injected_pid, task_id],
+        ).unwrap();
+    }
+
+    scanner_handle.join().expect("scanner thread panicked");
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+    let verify_conn = Connection::open(&db_path).unwrap();
+
+    // (a) drive_pid must equal the injected pid — no new spawn overwrote it.
+    let final_pid: i64 = verify_conn
+        .query_row(
+            "SELECT COALESCE(drive_pid, 0) FROM tasks WHERE id=?1",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        final_pid, injected_pid,
+        "CAS abort must leave drive_pid == injected pid; no new spawn"
+    );
+
+    // (b) No dispatch_lock row must have been created by the aborted redispatch.
+    let lock_count: i64 = verify_conn
+        .query_row(
+            "SELECT COUNT(*) FROM dispatch_locks \
+             WHERE store='tasks' AND row_id=?1 AND agent_name='auto-drive'",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(lock_count, 0, "CAS abort must not create a dispatch_lock row");
+
+    // (c) The CAS abort sentinel counter must have been incremented exactly once.
+    let abort_count = stores::flow::builtins::auto_drive::CAS_ABORT_DRIVE_PID_COUNT
+        .load(Ordering::SeqCst);
+    assert_eq!(
+        abort_count, 1,
+        "CAS abort sentinel must fire exactly once; got {abort_count}"
+    );
+
+    std::env::remove_var("STORES_TEST_CAS_PRE_SPAWN_DELAY_MS");
     std::env::remove_var("STORES_DRIVE_CMD");
 }
 
