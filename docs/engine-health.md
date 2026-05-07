@@ -92,7 +92,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L150 | ⚪ T2 | halt/deploy-blocked subscriber files merge-conflict-shaped observations for rows that are merely `blocked` by drive failure (e.g. T034 silent-zombie / Pi-smoke failures). Needs typed event/terminal reason before templating operator-facing halt observations. |
 | L176 | ✅ T066 | self-reexec follow-up to L149: preserve daemon process by execing fresh binary after stale detection. Candidate-binary validation now lands via T075/L182 — the corrupted-stub-exec failure mode is closed. |
 | L181 | ⚪ T2 | `stores` CLI fail-silent: corrupted/stub binary returns exit 0 with empty stdout/stderr, violating substrate trust. |
-| L182 | ✅ T075 (D) | candidate-binary validation before self-reexec shipped (T075). Private install path (C) remains open as filed-but-not-yet-ratified follow-up. Session SOP forbids subagent cargo-install. Durable fix (D) closes the recurring stub-corruption-tricks-self-reexec class; (C) closes the corruption surface itself. |
+| L182 | ✅ T075 (D) | candidate-binary validation before self-reexec shipped (T075). The (C) half — private install path — split out as **L184** (open, ratifiable). Session SOP forbids subagent cargo-install. (D) closes the recurring stub-corruption-tricks-self-reexec class; (C)/L184 closes the corruption surface itself. |
+| L184 | ⚪ T2 | Private substrate install path: move daemon's runtime-owned binary off `~/.cargo/bin/stores` to a stores-specific location so subagent / operator `cargo install` cannot corrupt the daemon's launch path. (C) follow-up to L182. |
 | GAP | — | acceptance-time precheck for "task touches files with uncommitted main-side changes → accept-merge will fail" |
 
 ### Layer 5 — Discovery / observability
@@ -159,7 +160,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 Layers 1–4 are substantially solid after the batch. T075/L182 candidate-binary validation, T067/L178 handoff semantics, and T072/L059 runs SQL VIEW + atomic backlink all shipped today (post-handover). T070/L057 telemetry is in flight (codex re-running on rebased branch as of this update). Re-ranked picks (post-T067/T072/T075):
 
 1. **T070/L057 telemetry** — last operational-trust task to drain; ship-then-close. **(IN FLIGHT)**
-2. **Private substrate install path (L182/C)** — move runtime-owned binary away from global `~/.cargo/bin/stores` so subagents/operator installs cannot corrupt the daemon's launch path. Filed-but-not-yet-ratified follow-up to L182.
+2. **L184 — Private substrate install path** — move runtime-owned binary away from global `~/.cargo/bin/stores` so subagents/operator installs cannot corrupt the daemon's launch path. Filed-but-not-yet-ratified follow-up to L182 (the (C) half of L182's two-part fix; T075 already shipped (D) candidate validation).
 3. **L151 auto-investigator / queue drain** — after status/review surfaces are trustworthy.
 4. **L171 phase α — `architecture_reviews` typed store** — Heart/Architect direction. Contract reframed and Pi-blessed this session (msg_69855431); ratifiable shape held until T070 ships. **(QUEUED — sequenced behind T070)**
 5. **L172/L173 gatekeeper P4/P5** — deferred follow-ups; surface after L171 phase α lands.
