@@ -11,6 +11,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use std::ffi::{CString, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -173,6 +175,64 @@ fn install_sigterm_handler() {
     }
 }
 
+fn stale_reexec_attempt_line(path: &Path) -> String {
+    format!(
+        "daemon binary stale; reexecing into {} (was version {})",
+        path.display(),
+        crate::version::build_identity()
+    )
+}
+
+fn log_stale_reexec_attempt_once<P: BinaryIdentityProvider>(guard: &DaemonExeGuard<P>) {
+    if !STALE_HALTED.swap(true, Ordering::SeqCst) {
+        eprintln!("{}", stale_reexec_attempt_line(guard.launch_path()));
+    }
+}
+
+fn cstring_arg(arg: &std::ffi::OsStr) -> Result<CString> {
+    CString::new(arg.as_bytes()).context("daemon reexec argv contains interior NUL")
+}
+
+fn handle_stale_daemon_reexec<P: BinaryIdentityProvider>(
+    guard: &DaemonExeGuard<P>,
+    argv: &[OsString],
+) -> Result<()> {
+    log_stale_reexec_attempt_once(guard);
+    let path_c = match cstring_arg(guard.launch_path().as_os_str()) {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!(
+                "daemon binary stale reexec fallback: exec setup failed: {:#}; {}",
+                e, STALE_DAEMON_MESSAGE
+            );
+            bail!(STALE_DAEMON_MESSAGE);
+        }
+    };
+    let argv_c: Vec<CString> = match argv.iter().map(|a| cstring_arg(a.as_os_str())).collect() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!(
+                "daemon binary stale reexec fallback: exec setup failed: {:#}; {}",
+                e, STALE_DAEMON_MESSAGE
+            );
+            bail!(STALE_DAEMON_MESSAGE);
+        }
+    };
+    let mut argv_ptrs: Vec<*const libc::c_char> = argv_c.iter().map(|a| a.as_ptr()).collect();
+    argv_ptrs.push(std::ptr::null());
+    unsafe {
+        libc::execv(path_c.as_ptr(), argv_ptrs.as_ptr());
+    }
+    let err = std::io::Error::last_os_error();
+    eprintln!(
+        "daemon binary stale reexec fallback: execv failed for {}: {}; {}",
+        guard.launch_path().display(),
+        err,
+        STALE_DAEMON_MESSAGE
+    );
+    bail!(STALE_DAEMON_MESSAGE);
+}
+
 pub fn run_daemon(args: RunArgs) -> Result<()> {
     let stores_dir = crate::paths::stores_dir()?;
 
@@ -207,6 +267,7 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
         let _ = std::fs::write(&pidfile, std::process::id().to_string());
     }
 
+    let daemon_argv: Vec<OsString> = std::env::args_os().collect();
     let exe_guard =
         DaemonExeGuard::from_process().context("constructing daemon executable guard")?;
 
@@ -270,8 +331,8 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
             );
             break;
         }
-        if let Some(message) = exe_guard.check_stale()? {
-            bail!(message);
+        if exe_guard.check_stale()?.is_some() {
+            handle_stale_daemon_reexec(&exe_guard, &daemon_argv)?;
         }
         match poll_once_with_guard(
             &conn,
@@ -289,7 +350,7 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
                 // (exactly once via STALE_HALTED); propagate as a hard bail so
                 // the daemon exits rather than looping on a stale binary.
                 if e.to_string() == STALE_DAEMON_MESSAGE {
-                    bail!(e);
+                    handle_stale_daemon_reexec(&exe_guard, &daemon_argv)?;
                 }
                 eprintln!("[daemon] poll error: {}", e);
             }
@@ -429,9 +490,7 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                 if agent.command == "builtin:auto-drive" {
                     if let Some(guard) = exe_guard {
                         if guard.check_stale()?.is_some() {
-                            if !STALE_HALTED.swap(true, Ordering::SeqCst) {
-                                eprintln!("{}", STALE_DAEMON_MESSAGE);
-                            }
+                            log_stale_reexec_attempt_once(guard);
                             return Err(anyhow!(STALE_DAEMON_MESSAGE));
                         }
                     }
@@ -471,9 +530,7 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                 if agent.command == "builtin:auto-drive" {
                     if let Some(guard) = exe_guard {
                         if guard.check_stale()?.is_some() {
-                            if !STALE_HALTED.swap(true, Ordering::SeqCst) {
-                                eprintln!("{}", STALE_DAEMON_MESSAGE);
-                            }
+                            log_stale_reexec_attempt_once(guard);
                             return Err(anyhow!(STALE_DAEMON_MESSAGE));
                         }
                     }
@@ -621,9 +678,7 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
             if agent.command == "builtin:auto-drive" {
                 if let Some(guard) = exe_guard {
                     if guard.check_stale()?.is_some() {
-                        if !STALE_HALTED.swap(true, Ordering::SeqCst) {
-                            eprintln!("{}", STALE_DAEMON_MESSAGE);
-                        }
+                        log_stale_reexec_attempt_once(guard);
                         return Err(anyhow!(STALE_DAEMON_MESSAGE));
                     }
                 }
@@ -2093,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_stale_message_is_exact_fail_loud_line() {
+    fn daemon_stale_messages_keep_reexec_and_fail_loud_boundaries() {
         let guard = mock_guard(
             BinaryIdentity { dev: 1, ino: 2 },
             PathBuf::from("/tmp/stores"),
@@ -2103,6 +2158,13 @@ mod tests {
         assert_eq!(
             message,
             "daemon binary stale after cargo install; restart required"
+        );
+        assert_eq!(
+            stale_reexec_attempt_line(guard.launch_path()),
+            format!(
+                "daemon binary stale; reexecing into /tmp/stores (was version {})",
+                crate::version::build_identity()
+            )
         );
     }
 
