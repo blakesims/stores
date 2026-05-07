@@ -11,6 +11,11 @@ use super::app::{App, FlatRow, Mode};
 use super::data::{blocked_reason_class, cockpit_model, ExternalReviewState, Row};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    if app.mode == Mode::Detail {
+        draw_detail(f, app);
+        return;
+    }
+
     // Search-mode adds an extra 1-line input bar above the status bar.
     let search_bar = if app.mode == Mode::Search { 1 } else { 0 };
 
@@ -62,6 +67,45 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_help {
         super::help::render_popup(f, app);
     }
+}
+
+fn draw_detail(f: &mut Frame, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(f.area());
+
+    let title = app
+        .detail
+        .as_ref()
+        .map(|d| format!("stores watch · detail · {:?} {}", d.kind, d.display_id))
+        .unwrap_or_else(|| "stores watch · detail".to_string());
+    f.render_widget(
+        Paragraph::new(title).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        chunks[0],
+    );
+
+    let body = Paragraph::new(super::detail::selected_detail_lines(app))
+        .block(Block::default().borders(Borders::NONE));
+    f.render_widget(body, chunks[1]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            super::help::hint_for(app.mode),
+            Style::default().fg(Color::DarkGray),
+        ))),
+        chunks[2],
+    );
+    super::status_bar::render(f, app, chunks[3]);
 }
 
 fn draw_obs_draft_popup(f: &mut Frame, app: &App) {
@@ -157,13 +201,20 @@ fn cockpit_header_items(app: &App) -> Vec<ListItem<'static>> {
         super::daemon::Liveness::Dead => "daemon:DEAD".to_string(),
     };
     let external = match model.external_review {
-        ExternalReviewState::Available { rows } => format!("external review: available rows={rows}"),
+        ExternalReviewState::Available { rows } => {
+            format!("external review: available rows={rows}")
+        }
         ExternalReviewState::Unavailable { reason } => reason,
     };
     vec![
         ListItem::new(Line::from(Span::styled(
-            format!("{daemon} · cap active {}/{}", app.status_bar.cap.0, app.status_bar.cap.1),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            format!(
+                "{daemon} · cap active {}/{}",
+                app.status_bar.cap.0, app.status_bar.cap.1
+            ),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ))),
         ListItem::new(Line::from(Span::raw(format!(
             "lanes: execution={} review={} accept={} held={} active={} priority={}",
@@ -174,7 +225,11 @@ fn cockpit_header_items(app: &App) -> Vec<ListItem<'static>> {
     ]
 }
 
-fn format_row_line(row: &Row, selected: bool, external_review: &ExternalReviewState) -> Line<'static> {
+fn format_row_line(
+    row: &Row,
+    selected: bool,
+    external_review: &ExternalReviewState,
+) -> Line<'static> {
     let base = match row {
         Row::Task(t) => vec![
             Span::raw("  "),
@@ -259,7 +314,10 @@ fn format_row_line(row: &Row, selected: bool, external_review: &ExternalReviewSt
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(" "),
-            Span::raw(format!("priority:{} ", i.priority.as_deref().unwrap_or("normal"))),
+            Span::raw(format!(
+                "priority:{} ",
+                i.priority.as_deref().unwrap_or("normal")
+            )),
             Span::raw(truncate(&intake_snippet(i), 60)),
         ],
     };
@@ -288,7 +346,10 @@ fn task_status_label(t: &super::data::TaskRow) -> String {
         ),
         "deploy_blocked" => format!(
             "deploy:{}",
-            t.blocked_reason.as_deref().filter(|s| !s.is_empty()).unwrap_or("unknown")
+            t.blocked_reason
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("unknown")
         ),
         other => other.to_string(),
     }
@@ -450,7 +511,11 @@ mod tests {
         assert!(closed.contains("recovered/done"));
         assert!(!closed.contains("in flight"));
 
-        let rejected = line_text(format_row_line(&task_row("rejected", None), false, &ExternalReviewState::default()));
+        let rejected = line_text(format_row_line(
+            &task_row("rejected", None),
+            false,
+            &ExternalReviewState::default(),
+        ));
         assert!(rejected.contains("terminal-unless-amended"));
         assert!(!rejected.contains("in flight"));
 
@@ -460,7 +525,11 @@ mod tests {
             &ExternalReviewState::default(),
         ));
         assert!(blocked.contains("blocked:rate_limit"));
-        let unknown = line_text(format_row_line(&task_row("blocked", Some("opaque")), false, &ExternalReviewState::default()));
+        let unknown = line_text(format_row_line(
+            &task_row("blocked", Some("opaque")),
+            false,
+            &ExternalReviewState::default(),
+        ));
         assert!(unknown.contains("blocked:unknown"));
     }
 
@@ -482,8 +551,16 @@ mod tests {
             held_reason: Some("missing owner".to_string()),
             ..Default::default()
         });
-        let obs_text = line_text(format_row_line(&obs, false, &ExternalReviewState::default()));
-        let intake_text = line_text(format_row_line(&intake, false, &ExternalReviewState::default()));
+        let obs_text = line_text(format_row_line(
+            &obs,
+            false,
+            &ExternalReviewState::default(),
+        ));
+        let intake_text = line_text(format_row_line(
+            &intake,
+            false,
+            &ExternalReviewState::default(),
+        ));
         assert!(obs_text.contains("priority:high"), "{obs_text}");
         assert!(obs_text.contains("tier:T2"), "{obs_text}");
         assert!(intake_text.contains("priority:high"), "{intake_text}");
@@ -500,7 +577,11 @@ mod tests {
             investigation_failure_reason: Some("rate_limit: reset later".to_string()),
             ..Default::default()
         });
-        let text = line_text(format_row_line(&row, false, &ExternalReviewState::default()));
+        let text = line_text(format_row_line(
+            &row,
+            false,
+            &ExternalReviewState::default(),
+        ));
         assert!(text.contains("investigation_failed:rate_limit"), "{text}");
         assert!(text.contains("investigator failed"), "{text}");
     }

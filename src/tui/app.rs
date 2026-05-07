@@ -45,8 +45,25 @@ pub enum Mode {
     Normal,
     Filter,
     Search,
+    Detail,
     /// Confirm popup after an obs-drafting side-car returned with a draft.
     ObsDraftConfirm,
+}
+
+/// Row type captured when opening a read-only drilldown page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailKind {
+    Task,
+    Observation,
+    Intake,
+}
+
+/// Selected read-only drilldown target and page scroll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailSelection {
+    pub display_id: String,
+    pub kind: DetailKind,
+    pub scroll_offset: usize,
 }
 
 /// Pending obs-drafting decision: the side-car wrote a draft to disk and
@@ -101,6 +118,7 @@ pub struct App {
     pub sections: Vec<(Section, Vec<usize>)>,
     pub selection: Selection,
     pub mode: Mode,
+    pub detail: Option<DetailSelection>,
     pub sort: Sort,
     pub filter: FilterPredicate,
     pub filter_palette: Option<FilterPalette>,
@@ -272,6 +290,14 @@ impl App {
         out
     }
 
+    /// Return the row under the current cursor.
+    pub fn current_row(&self) -> Option<&Row> {
+        let flat = self.flat_rows();
+        let cursor = self.current_flat()?;
+        let fr = flat.get(cursor)?;
+        self.rows.get(fr.abs)
+    }
+
     /// Find the flat-row index of the current selection (or None when the
     /// selection has fallen out of view due to filter/collapse changes).
     pub fn current_flat(&self) -> Option<usize> {
@@ -379,6 +405,30 @@ impl App {
         }
     }
 
+    /// Open a read-only detail page for the selected task/observation/intake row.
+    pub fn open_detail_for_current(&mut self) {
+        let Some(row) = self.current_row() else {
+            return;
+        };
+        let kind = match row {
+            Row::Task(_) => DetailKind::Task,
+            Row::Obs(_) => DetailKind::Observation,
+            Row::Intake(_) => DetailKind::Intake,
+        };
+        self.detail = Some(DetailSelection {
+            display_id: row.display_id().to_string(),
+            kind,
+            scroll_offset: 0,
+        });
+        self.mode = Mode::Detail;
+    }
+
+    /// Leave the read-only detail page without changing substrate state.
+    pub fn close_detail(&mut self) {
+        self.detail = None;
+        self.mode = Mode::Normal;
+    }
+
     // ----------------------------------------------------------------------
 
     /// If filter/collapse made the current selection invalid, snap back to
@@ -400,7 +450,6 @@ impl App {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -440,7 +489,6 @@ mod tests {
         assert!(!is_terminal_task_status("executing"));
     }
 }
-
 
 fn local_clock_string() -> String {
     let secs = SystemTime::now()

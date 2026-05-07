@@ -9,8 +9,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
-use stores::tui::app::{App, Mode, Selection, TuiOpts};
-use stores::tui::data::{classify, ObsRow, Row, Section, TaskRow};
+use stores::tui::app::{App, DetailKind, Mode, Selection, TuiOpts};
+use stores::tui::data::{classify, IntakeRow, ObsRow, Row, Section, TaskRow};
 use stores::tui::filter::FilterPredicate;
 use stores::tui::sort::Sort;
 use stores::tui::{on_key, render, KeyOutcome};
@@ -66,6 +66,14 @@ fn fixtures() -> Vec<Row> {
         task("T011", "deploy_blocked", "2026-05-02"),
         obs("L001", Some("ready")),
         obs("L002", None),
+        Row::Intake(IntakeRow {
+            display_id: "I001".to_string(),
+            status: "needs_info".to_string(),
+            summary: "I001 summary".to_string(),
+            updated_at: "2026-05-01".to_string(),
+            held_reason: Some("missing evidence".to_string()),
+            ..Default::default()
+        }),
     ]
 }
 
@@ -192,6 +200,68 @@ fn saved_view_preset_2_filters_actionable_current_work() {
         let (sec, _) = app.sections[fr.section];
         assert_eq!(sec, Section::TasksActionableCurrentWork);
     }
+}
+
+#[test]
+fn enter_opens_detail_esc_returns_without_write_requests() {
+    let mut app = build_app(fixtures());
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.pending_spawn.is_none());
+    assert!(app.obs_draft_filing_request.is_none());
+
+    assert_eq!(on_key(&mut app, key(KeyCode::Enter)), KeyOutcome::Continue);
+    assert_eq!(app.mode, Mode::Detail);
+    let detail = app.detail.as_ref().expect("detail selection");
+    assert_eq!(detail.kind, DetailKind::Task);
+    assert!(detail.display_id.starts_with('T'));
+    assert!(
+        app.pending_spawn.is_none(),
+        "Enter must not request sidecar spawn"
+    );
+    assert!(
+        app.obs_draft_filing_request.is_none(),
+        "Enter must not request writes"
+    );
+
+    assert_eq!(on_key(&mut app, key(KeyCode::Esc)), KeyOutcome::Continue);
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.detail.is_none());
+}
+
+#[test]
+fn q_returns_from_detail_but_quits_from_normal() {
+    let mut app = build_app(fixtures());
+    on_key(&mut app, key(KeyCode::Enter));
+    assert_eq!(app.mode, Mode::Detail);
+    assert_eq!(
+        on_key(&mut app, key(KeyCode::Char('q'))),
+        KeyOutcome::Continue
+    );
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(on_key(&mut app, key(KeyCode::Char('q'))), KeyOutcome::Quit);
+}
+
+#[test]
+fn enter_opens_observation_and_intake_detail_by_selected_row() {
+    let mut app = build_app(fixtures());
+    let flat = app.flat_rows();
+    let obs_idx = flat
+        .iter()
+        .position(|fr| matches!(app.rows[fr.abs], Row::Obs(_)))
+        .expect("obs row");
+    app.jump_to_flat(obs_idx);
+    on_key(&mut app, key(KeyCode::Enter));
+    assert_eq!(app.detail.as_ref().unwrap().kind, DetailKind::Observation);
+    on_key(&mut app, key(KeyCode::Esc));
+
+    let flat = app.flat_rows();
+    let intake_idx = flat
+        .iter()
+        .position(|fr| matches!(app.rows[fr.abs], Row::Intake(_)))
+        .expect("intake row");
+    app.jump_to_flat(intake_idx);
+    on_key(&mut app, key(KeyCode::Enter));
+    assert_eq!(app.detail.as_ref().unwrap().kind, DetailKind::Intake);
 }
 
 #[test]

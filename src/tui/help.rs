@@ -21,6 +21,7 @@ const HELP_LINES: &[&str] = &[
     "  D                 start agents daemon (detached)",
     "  s / S             spawn per-row sidecar (resume / fresh)",
     "  g / o             general / obs-drafting sidecar",
+    "  Enter             open read-only row detail",
     "  ?                 toggle this help",
     "  q / Ctrl-C        quit",
 ];
@@ -52,6 +53,7 @@ pub fn hint_for(mode: Mode) -> &'static str {
         }
         Mode::Filter => "type k=v (state= priority= tier= since=)  Enter apply  Esc cancel",
         Mode::Search => "type to search  Enter accept  Esc cancel  n/N next/prev",
+        Mode::Detail => "read-only detail  j/k scroll  Esc/q back",
         Mode::ObsDraftConfirm => "y file obs  n discard  Esc discard",
     }
 }

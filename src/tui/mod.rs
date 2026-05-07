@@ -6,6 +6,7 @@
 pub mod app;
 pub mod daemon;
 pub mod data;
+pub mod detail;
 pub mod filter;
 pub mod footer;
 pub mod help;
@@ -145,10 +146,9 @@ fn handle_handoff<B: ratatui::backend::Backend>(
     match result {
         Ok(outcome) if outcome.status.success() => {
             app.record_sidecar_spawn();
-            if let (Some(body), Some(path)) = (outcome.obs_draft_body, outcome.obs_draft_path)
-            {
-                let summary = parse_draft_summary(&body)
-                    .unwrap_or_else(|| "(unparseable)".to_string());
+            if let (Some(body), Some(path)) = (outcome.obs_draft_body, outcome.obs_draft_path) {
+                let summary =
+                    parse_draft_summary(&body).unwrap_or_else(|| "(unparseable)".to_string());
                 app.obs_draft_pending = Some(app::ObsDraftConfirm {
                     draft_path: path,
                     summary,
