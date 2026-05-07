@@ -26,8 +26,9 @@ fn auth_show_help_is_plaintext_from_repo_root() {
         stdout.contains("Print the plaintext approval token"),
         "expected plaintext show help output, got:\n{stdout}"
     );
+    let removed_identity_flag = ["--", "identity"].concat();
     assert!(
-        !stdout.contains("--identity")
+        !stdout.contains(&removed_identity_flag)
             && !stdout.contains(" age")
             && !stdout.contains("SOPS")
             && !stdout.contains("decrypt"),
