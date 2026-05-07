@@ -294,7 +294,11 @@ pub fn dispatch(
                     handlers::status::run_status(args)?;
                 }
                 Some(("next-id", _sub)) => {
-                    handlers::next_id::run_next_id()?;
+                    if schema.name == "observations" {
+                        handlers::next_id::run_store_next_id(schema, &conn)?;
+                    } else {
+                        handlers::next_id::run_next_id()?;
+                    }
                 }
                 Some((verb, sub)) => {
                     // override-risk and override-policy are observations-only non-transition verbs

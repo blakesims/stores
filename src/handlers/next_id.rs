@@ -17,8 +17,12 @@
 /// Exactly `T{:03}` followed by a newline. No other output or side effects.
 use anyhow::Result;
 use regex::Regex;
+use rusqlite::Connection;
 use std::path::Path;
 use std::sync::OnceLock;
+
+use crate::codegen::ddl::quote_ident;
+use crate::{id_format, schema::Schema};
 
 /// Cached regex: matches `T` followed by 3+ digits, then either `-` or end-of-string.
 /// Captures the numeric portion in group 1.
@@ -27,10 +31,19 @@ fn task_id_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^T(\d{3,})(-|$)").expect("task_id_re is valid"))
 }
 
-/// Public entry point: resolve cwd + `tasks/`, delegate to pure inner function, print result.
+/// Public entry point for `tasks next-id`: resolve cwd + `tasks/`, delegate to pure inner
+/// function, print result.
 pub fn run_next_id() -> Result<()> {
     let root = std::env::current_dir()?.join("tasks");
     let next = next_id_for_root(&root)?;
+    println!("{}", next);
+    Ok(())
+}
+
+/// Public entry point for table-backed stores: scan existing `display_id` values in the
+/// store table and print max+1 according to the schema's `id_format`.
+pub fn run_store_next_id(schema: &Schema, conn: &Connection) -> Result<()> {
+    let next = next_id_for_store(schema, conn)?;
     println!("{}", next);
     Ok(())
 }
@@ -43,7 +56,7 @@ pub(crate) fn next_id_for_root(root: &Path) -> Result<String> {
     const CANONICAL_SUBDIRS: &[&str] = &["active", "planning", "paused", "completed", "archived"];
 
     let re = task_id_re();
-    let mut max: u32 = 0;
+    let mut max: i64 = 0;
 
     for subdir_name in CANONICAL_SUBDIRS {
         let subdir = root.join(subdir_name);
@@ -58,7 +71,7 @@ pub(crate) fn next_id_for_root(root: &Path) -> Result<String> {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if let Some(caps) = re.captures(&name_str) {
-                if let Ok(n) = caps[1].parse::<u32>() {
+                if let Ok(n) = caps[1].parse::<i64>() {
                     if n > max {
                         max = n;
                     }
@@ -67,14 +80,52 @@ pub(crate) fn next_id_for_root(root: &Path) -> Result<String> {
         }
     }
 
-    Ok(format!("T{:03}", max + 1))
+    Ok(id_format::render("T{:03d}", max + 1))
+}
+
+/// Pure inner function for DB-backed stores. Ignores malformed display IDs so a stray row
+/// cannot make the read-only helper fail; valid IDs determine max+1.
+pub(crate) fn next_id_for_store(schema: &Schema, conn: &Connection) -> Result<String> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT display_id FROM {} WHERE display_id IS NOT NULL",
+        quote_ident(&schema.name)
+    ))?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+
+    let mut max = 0_i64;
+    for row in rows {
+        let display_id = row?;
+        if let Ok(n) = id_format::parse(&schema.id_format, &display_id) {
+            if n > max {
+                max = n;
+            }
+        }
+    }
+
+    Ok(id_format::render(&schema.id_format, max + 1))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::next_id_for_root;
+    use super::{next_id_for_root, next_id_for_store};
+    use crate::schema::Schema;
+    use rusqlite::Connection;
     use std::fs;
     use tempfile::tempdir;
+
+    fn observations_schema() -> Schema {
+        Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap()
+    }
+
+    fn observations_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE observations (id INTEGER PRIMARY KEY AUTOINCREMENT, display_id TEXT)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
 
     fn make_dir(base: &std::path::Path, rel: &str) {
         fs::create_dir_all(base.join(rel)).expect("create_dir_all");
@@ -150,5 +201,24 @@ mod tests {
         // Only active/ has a real task at T002 — that becomes the max.
         make_dir(&tasks, "active/T002-real");
         assert_eq!(next_id_for_root(&tasks).unwrap(), "T003");
+    }
+
+    #[test]
+    fn observations_fresh_db_returns_l001() {
+        let schema = observations_schema();
+        let conn = observations_conn();
+        assert_eq!(next_id_for_store(&schema, &conn).unwrap(), "L001");
+    }
+
+    #[test]
+    fn observations_existing_rows_return_max_plus_one() {
+        let schema = observations_schema();
+        let conn = observations_conn();
+        conn.execute(
+            "INSERT INTO observations (display_id) VALUES ('L001'), ('L003'), ('L010')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(next_id_for_store(&schema, &conn).unwrap(), "L011");
     }
 }

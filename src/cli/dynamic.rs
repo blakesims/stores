@@ -570,9 +570,10 @@ fn build_store_command(schema: &Schema) -> Command {
         store_cmd = store_cmd.subcommand(build_guide_cmd());
     }
 
-    // override-risk and override-policy are observations-only.
+    // next-id, override-risk, and override-policy are observations-only non-workflow verbs.
     if schema.name == "observations" {
         store_cmd = store_cmd
+            .subcommand(build_next_id_cmd())
             .subcommand(build_override_risk_cmd())
             .subcommand(build_override_policy_cmd());
     }
@@ -947,12 +948,9 @@ fn build_status_cmd() -> Command {
 
 /// Build the `next-id` command.
 ///
-/// Read-only verb: scans `tasks/{active,planning,paused,completed,archived}/` for the
-/// highest `T###` directory and prints the next available ID formatted as `T{:03}`.
-/// No flags in v0.3 — callers consume the single-line output via shell substitution.
+/// Read-only verb: prints the next available display ID as a single line.
 fn build_next_id_cmd() -> Command {
-    Command::new("next-id")
-        .about("Print the next available task ID by scanning tasks/{active,planning,paused,completed,archived}/")
+    Command::new("next-id").about("Print the next available display ID")
 }
 
 /// Build the `guide` command.
