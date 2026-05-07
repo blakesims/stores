@@ -58,6 +58,12 @@ fn format_text(row: &Row, cursor: usize, total: usize, now_secs: u64) -> String 
             String::new(),
             o.updated_at.as_str(),
         ),
+        Row::Review(r) => (
+            r.status.as_str(),
+            "review",
+            format!("task:{} runner:{}", r.task_id, r.runner),
+            r.next_retry_at.as_deref().unwrap_or(""),
+        ),
     };
     let rel = relative_time(updated_at, now_secs);
     let linked_seg = if linked.is_empty() {
