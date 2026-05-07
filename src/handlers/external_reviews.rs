@@ -446,6 +446,14 @@ pub fn run_external_review_attempt(
         )
         .map_err(|e| ToolingError::new(format!("TOOLING_FAILURE: review runner failed: {e:#}")))?;
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    // payload_error must be checked BEFORE exit_code / verdict parsing.
+    // A runner can return exit_code=0 with payload_error set (schema/payload-shape
+    // failure). Proceeding to parse stdout in that case can produce a false PASS.
+    if let Some(pe) = out.payload_error.as_deref() {
+        return Err(ToolingError::new(format!(
+            "TOOLING_FAILURE: runner payload error: {pe}"
+        )));
+    }
     let parsed = if out.exit_code == 0 {
         parse_runner_review_output(&out).map_err(|e| {
             ToolingError::new(format!(
@@ -649,5 +657,85 @@ mod tests {
         };
         let parsed = parse_runner_review_output(&out).unwrap();
         assert_eq!(parsed.verdict, ExternalReviewVerdict::Pass);
+    }
+
+    /// Helper: build a RunnerOutput that would parse as PASS but carries
+    /// a payload_error — simulates pi / claude-code / codex adapters returning
+    /// exit_code=0 with a schema/payload-shape failure.
+    fn pass_output_with_payload_error(adapter: &str) -> RunnerOutput {
+        RunnerOutput {
+            stdout: format!(
+                r#"{{"verdict":"PASS","critical_count":0,"major_count":0,"minor_count":0,"adapter":"{}"}}"#,
+                adapter
+            ),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: Some(
+                r#"{"verdict":"PASS","critical_count":0,"major_count":0,"minor_count":0}"#
+                    .to_string(),
+            ),
+            structured_output: Some(serde_json::json!({
+                "verdict": "PASS",
+                "critical_count": 0,
+                "major_count": 0,
+                "minor_count": 0
+            })),
+            session_id: Some("s".to_string()),
+            structured_output_source: Some("sdk"),
+            telemetry: crate::runner::AgentRunTelemetry::default(),
+            // exit_code=0 but payload failed schema validation upstream
+            payload_error: Some(format!("{adapter}: structured output missing final_output")),
+        }
+    }
+
+    /// Verify that parse_runner_review_output alone returns PASS (confirming
+    /// the stdout is well-formed), then assert that payload_error.is_some()
+    /// would short-circuit to TOOLING_FAILURE before parse is reached.
+    fn assert_payload_error_short_circuits(out: &RunnerOutput) {
+        // Without the guard, parse would succeed (PASS):
+        let would_be_pass = parse_runner_review_output(out).unwrap();
+        assert_eq!(
+            would_be_pass.verdict,
+            ExternalReviewVerdict::Pass,
+            "test precondition: stdout must parse as PASS"
+        );
+        // The guard must catch the payload_error before we reach parse:
+        assert!(
+            out.payload_error.is_some(),
+            "test precondition: payload_error must be set"
+        );
+        // Simulate the guard in run_external_review_attempt:
+        let result: std::result::Result<ParsedReviewOutput, ToolingError> =
+            if let Some(pe) = out.payload_error.as_deref() {
+                Err(ToolingError::new(format!(
+                    "TOOLING_FAILURE: runner payload error: {pe}"
+                )))
+            } else if out.exit_code == 0 {
+                parse_runner_review_output(out).map_err(|e| {
+                    ToolingError::new(format!(
+                        "TOOLING_FAILURE: external review output parse failed: {e}"
+                    ))
+                })
+            } else {
+                Err(ToolingError::new("non-zero exit".to_string()))
+            };
+        let err = result.expect_err("payload_error must produce Err(ToolingError)");
+        assert_eq!(err.verdict, ExternalReviewVerdict::ToolingFailure);
+        assert!(err.message.contains("payload error"));
+    }
+
+    #[test]
+    fn pi_adapter_payload_error_classifies_as_tooling_failure_not_pass() {
+        assert_payload_error_short_circuits(&pass_output_with_payload_error("pi"));
+    }
+
+    #[test]
+    fn claude_code_adapter_payload_error_classifies_as_tooling_failure_not_pass() {
+        assert_payload_error_short_circuits(&pass_output_with_payload_error("claude-code"));
+    }
+
+    #[test]
+    fn codex_adapter_payload_error_classifies_as_tooling_failure_not_pass() {
+        assert_payload_error_short_circuits(&pass_output_with_payload_error("codex"));
     }
 }

@@ -41,6 +41,11 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
 
     ensure_runtime_columns(ctx.conn).with_context(|| "external-review runtime columns")?;
 
+    // Before the pending guard: promote any tooling_held rows whose retry
+    // window has elapsed back to pending so they are re-tried on this or a
+    // subsequent daemon iteration.
+    promote_elapsed_tooling_held(ctx.conn)?;
+
     let Some(review_row) = load_review_row(ctx.conn, display_id)? else {
         eprintln!("[external-review] {display_id}: row disappeared; skipping");
         return Ok(1);
@@ -198,6 +203,49 @@ fn mark_running(conn: &Connection, row: &ReviewRow) -> Result<()> {
         Some(REVIEW_AGENT_NAME),
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Scan for `tooling_held` rows whose `next_retry_at` has elapsed and
+/// transition them back to `pending` so they are picked up on the next
+/// daemon iteration.  Called at the top of `run()` before the pending guard.
+fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
+    let now = now_iso8601();
+    // Collect rows that are past their retry window.
+    let candidates: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, display_id FROM external_reviews \
+             WHERE status='tooling_held' AND next_retry_at IS NOT NULL AND next_retry_at <= ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![now], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    for (row_id, did) in candidates {
+        conn.execute(
+            "UPDATE external_reviews SET status='pending', held_reason=NULL, next_retry_at=NULL, updated_at=?2 WHERE display_id=?1 AND status='tooling_held'",
+            params![did, now],
+        )?;
+        let tx = conn.unchecked_transaction()?;
+        crate::db::insert_transition_history(
+            &tx,
+            "external_reviews",
+            row_id,
+            &did,
+            "tooling_held",
+            "pending",
+            "retry-after-tooling-held",
+            "framework",
+            None,
+            None,
+            Some(REVIEW_AGENT_NAME),
+        )?;
+        tx.commit()?;
+        eprintln!(
+            "[external-review] {did}: tooling_held → pending (retry window elapsed)"
+        );
+    }
     Ok(())
 }
 

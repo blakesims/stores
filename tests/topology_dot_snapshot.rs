@@ -45,6 +45,9 @@ fn build_trio() -> (Manifest, HashMap<String, Schema>) {
 
 #[test]
 fn ac2_4_dot_snapshot_matches() {
+    // Remove NO_COLOR so the snapshot is always the colored variant,
+    // regardless of the operator shell environment (fixes topology flake I003).
+    std::env::remove_var("NO_COLOR");
     let (manifest, schemas) = build_trio();
     let opts = Opts {
         format: Format::Dot,

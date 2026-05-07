@@ -182,6 +182,44 @@ fn external_review_daemon_tooling_failure_holds_with_retry_and_refs() {
     assert!(log.unwrap().contains("codex"));
 }
 
+/// `tooling_held` rows with an elapsed `next_retry_at` are promoted back to
+/// `pending` at the top of `run()` so they are re-tried on the same iteration.
+#[test]
+fn external_review_daemon_tooling_failure_retries_after_next_retry_at() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "in_review");
+    // Pre-insert a tooling_held row with a next_retry_at that is already in the past.
+    insert_review(&conn, "ER010", "T900", "tooling_held", 1);
+    // Ensure the runtime columns exist (normally created by run()), then set the
+    // past retry timestamp and verdict directly.
+    external_review::visible_status_rows(&conn).unwrap();
+    conn.execute(
+        "UPDATE external_reviews SET next_retry_at='2000-01-01T00:00:00Z', held_reason='prev tooling failure', verdict='TOOLING_FAILURE' WHERE display_id='ER010'",
+        [],
+    ).unwrap();
+
+    // Dispatch run() for ER010. promote_elapsed_tooling_held() fires first,
+    // transitions ER010 → pending, then load_review_row() sees pending and
+    // the normal path executes with the PASS shim.
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
+    let cfg = cfg(tmp.path(), &sh, 1);
+    let a = agents();
+    let row = json!({"display_id": "ER010"});
+    external_review::run(&row, &ctx(&conn, &a, &cfg)).unwrap();
+
+    let (status, verdict): (String, String) = conn.query_row(
+        "SELECT status, verdict FROM external_reviews WHERE display_id='ER010'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    // After retry: promoted to pending, then ran to completion with PASS.
+    assert_eq!(verdict, "PASS");
+    assert_eq!(status, "passed");
+}
+
 #[test]
 fn external_review_daemon_pass_and_revise_update_status_and_revise_routes_task() {
     for (id, verdict, expected_status, expected_task) in [
