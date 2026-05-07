@@ -73,13 +73,13 @@ fn issue_verdict_in_tx(
     }
 
     let mut diff = cli_diff(schema, matches)?;
-    let kind = required_str(&diff, "kind", "issue-verdict requires --kind")?;
-    let verdict = required_str(&diff, "verdict", "issue-verdict requires --verdict")?;
+    let kind = required_str(&diff, "kind", "issue-verdict requires --kind")?.to_string();
+    let verdict = required_str(&diff, "verdict", "issue-verdict requires --verdict")?.to_string();
     if !diff.contains_key("rationale") {
         bail!("issue-verdict requires --rationale");
     }
 
-    match kind {
+    match kind.as_str() {
         "interpret" => {
             if verdict == "propose_doctrine_update" {
                 bail!("interpret architecture_reviews cannot use verdict=propose_doctrine_update");
@@ -100,6 +100,18 @@ fn issue_verdict_in_tx(
 
     let mut merged = existing.clone();
     merge_diff(&mut merged, &diff);
+    if verdict == "merge_with_cluster" {
+        required_str(
+            &merged,
+            "source_observation",
+            "merge_with_cluster requires --source-observation",
+        )?;
+        required_str(
+            &merged,
+            "merge_target_id",
+            "merge_with_cluster requires --merge-target-id",
+        )?;
+    }
     let transition = select_transition(
         &schema.lifecycle.transitions,
         current_status,
@@ -139,6 +151,13 @@ fn issue_verdict_in_tx(
     {
         mark_superseded_if_present(tx, schema, supersedes, invoker.actor)?;
     }
+
+    super::observation_arch_gate::apply_merge_with_cluster_verdict(
+        tx,
+        display_id,
+        &merged,
+        invoker.actor,
+    )?;
 
     println!(
         "Transitioned {display_id}: {} → {}",
@@ -400,6 +419,8 @@ mod tests {
                     .action(ArgAction::Append),
             )
             .arg(Arg::new("supersedes").long("supersedes"))
+            .arg(Arg::new("source-observation").long("source-observation"))
+            .arg(Arg::new("merge-target-id").long("merge-target-id"))
     }
 
     fn ratify_cmd() -> Command {
@@ -552,6 +573,50 @@ mod tests {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .ends_with('Z'));
+    }
+
+    #[test]
+    fn merge_with_cluster_issue_resolves_source_observation() {
+        let (schema, conn) = setup();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+        conn.execute("INSERT INTO observations (display_id,status,created_at,updated_at,created_by,updated_by,summary,source,priority,captured_at,captured_week,pending_architecture_review) VALUES ('L001','confirmed','now','now','human','human','s','dev','normal','2026-05-07','w19-d4',1)", []).unwrap();
+        insert_row(&conn, "A001", "in_review", "interpret");
+        conn.execute(
+            "UPDATE architecture_reviews SET source_observation='L001' WHERE display_id='A001'",
+            [],
+        )
+        .unwrap();
+        let m = issue_cmd().get_matches_from([
+            "issue-verdict",
+            "A001",
+            "--kind",
+            "interpret",
+            "--verdict",
+            "merge_with_cluster",
+            "--rationale",
+            "x",
+            "--merge-target-id",
+            "L999",
+        ]);
+        run_issue_verdict(&schema, &conn, &m, Actor::AiWithHuman.into()).unwrap();
+        let row: (String, i64, String, String, String) = conn.query_row(
+            "SELECT status,pending_architecture_review,resolved_by,merge_target_id,resolution_kind FROM observations WHERE display_id='L001'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).unwrap();
+        assert_eq!(
+            row,
+            (
+                "resolved".into(),
+                0,
+                "A001".into(),
+                "L999".into(),
+                "merged_with_cluster".into()
+            )
+        );
     }
 
     #[test]

@@ -302,6 +302,12 @@ fields:
     pattern: "^A[0-9]{3,}$"
     description: "Soft-FK to architecture_reviews.display_id (A###) whose verdict can clear pending_architecture_review."
 
+  - name: resolved_by
+    type: text
+    required: false
+    pattern: "^A[0-9]{3,}$"
+    description: "Architecture review A### that resolved this observation through merge_with_cluster."
+
   - name: reframe_acknowledged_against
     type: text
     required: false
