@@ -221,6 +221,19 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
                 80,
             )),
         ],
+        Row::Intake(i) => vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{:<6}", i.display_id),
+                Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!("{:<24}", i.status),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" "),
+            Span::raw(truncate(&i.summary, 60)),
+        ],
     };
     if selected {
         let mut spans = base;

@@ -414,6 +414,7 @@ mod tests {
             linked_observations: Vec::new(),
             blocked_reason: None,
             blocked_reason_class: None,
+            ..Default::default()
         })
     }
 

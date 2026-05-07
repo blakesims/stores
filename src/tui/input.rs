@@ -33,6 +33,7 @@ fn current_display_id(app: &App) -> Option<String> {
         Row::Task(t) => t.display_id.clone(),
         Row::Obs(o) => o.display_id.clone(),
         Row::Review(r) => r.display_id.clone(),
+        Row::Intake(i) => i.display_id.clone(),
     })
 }
 

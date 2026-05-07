@@ -74,6 +74,7 @@ fn render_snapshot(show_all_history: bool) -> String {
                 obs_idxs.extend(idxs)
             }
             Section::ExternalReviewLane => task_idxs.extend(idxs),
+            Section::IntakeOpen | Section::IntakeHeld | Section::IntakeRouted => {}
         }
     }
     task_idxs.sort_by_key(|i| match &rows[*i] {

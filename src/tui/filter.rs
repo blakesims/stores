@@ -39,6 +39,11 @@ impl FilterPredicate {
                 Row::Task(_) | Row::Review(_) => {
                     // Tasks/reviews are unfiltered by priority (no field loaded).
                 }
+                Row::Intake(i) => {
+                    if i.priority.as_deref() != Some(p.as_str()) {
+                        return false;
+                    }
+                }
             }
         }
         // tier / since: predicate is recorded but data is best-effort
@@ -65,6 +70,7 @@ fn state_matches(state: &str, row: &Row, section: Section) -> bool {
             Row::Task(t) => t.status == other,
             Row::Obs(o) => o.status == other,
             Row::Review(r) => r.status == other || other == "external_review",
+            Row::Intake(i) => i.status == other,
         },
     }
 }
