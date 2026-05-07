@@ -33,8 +33,8 @@ fn task(id: &str, tier: &str, status: &str, phase: i64, total: i64, cycle: i64) 
         branch: Some(format!("feat/{id}")),
         workspace_path: Some(format!("/tmp/{id}")),
         artifact_pointers: vec![ArtifactPointer {
-            label: "branch".to_string(),
-            value: format!("feat/{id}"),
+            label: "run log".to_string(),
+            value: format!("runs/{id}.log"),
         }],
         recent_events: vec![event(id)],
         ..Default::default()

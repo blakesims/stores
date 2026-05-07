@@ -30,7 +30,7 @@ Artifact pointers
   plan review log: 0 item(s)
   cycles: 0 item(s)
   wrap log: 0 item(s)
-  branch: feat/T701
+  run log: runs/T701.log
 ---
 Task detail · T702
 
@@ -64,7 +64,7 @@ Artifact pointers
   plan review log: 0 item(s)
   cycles: 0 item(s)
   wrap log: 0 item(s)
-  branch: feat/T702
+  run log: runs/T702.log
 ---
 Task detail · T703
 
@@ -98,4 +98,4 @@ Artifact pointers
   plan review log: 0 item(s)
   cycles: 0 item(s)
   wrap log: 0 item(s)
-  branch: feat/T703
+  run log: runs/T703.log

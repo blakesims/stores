@@ -526,19 +526,6 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         let branch: Option<String> = r.get(19).ok().flatten();
         let workspace_path: Option<String> = r.get(20).ok().flatten();
         let display_id: String = r.get(0)?;
-        let mut artifact_pointers = Vec::new();
-        if let Some(b) = branch.as_deref().filter(|s| !s.is_empty()) {
-            artifact_pointers.push(ArtifactPointer {
-                label: "branch".to_string(),
-                value: b.to_string(),
-            });
-        }
-        if let Some(w) = workspace_path.as_deref().filter(|s| !s.is_empty()) {
-            artifact_pointers.push(ArtifactPointer {
-                label: "workspace".to_string(),
-                value: w.to_string(),
-            });
-        }
         Ok(TaskRow {
             display_id: display_id.clone(),
             status: r.get(1)?,
@@ -568,7 +555,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             ),
             branch,
             workspace_path,
-            artifact_pointers,
+            artifact_pointers: Vec::new(),
             recent_events: Vec::new(),
         })
     })?;
@@ -1405,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn fixture_t3_task_loads_phase_counts_and_artifacts() {
+    fn fixture_t3_task_loads_phase_counts_and_first_class_locations() {
         let conn = cockpit_conn();
         conn.execute(
             "INSERT INTO tasks (display_id,status,title,updated_at,tier_hint,linked_observations,current_phase,current_cycle,plan_source,contract,plan,branch,workspace_path) VALUES (?1,?2,?3,?4,?5,'[]',?6,?7,?8,?9,?10,?11,?12)",
@@ -1424,14 +1411,9 @@ mod tests {
         assert_eq!(task.current_phase, Some(2));
         assert_eq!(task.current_cycle, Some(3));
         assert_eq!(task.tier_hint.as_deref(), Some("T3"));
-        assert!(task
-            .artifact_pointers
-            .iter()
-            .any(|p| p.label == "branch" && p.value == "feat/T003"));
-        assert!(task
-            .artifact_pointers
-            .iter()
-            .any(|p| p.label == "workspace" && p.value == "/tmp/T003"));
+        assert_eq!(task.branch.as_deref(), Some("feat/T003"));
+        assert_eq!(task.workspace_path.as_deref(), Some("/tmp/T003"));
+        assert!(task.artifact_pointers.is_empty());
     }
 
     #[test]
