@@ -115,7 +115,20 @@ fn ensure_private_daemon_binary(
     provider: &FsBinaryIdentityProvider,
 ) -> Result<PathBuf> {
     let private_path = crate::paths::ensure_daemon_binary_parent()?;
+
+    // Existence shortcut: validate the existing binary before trusting it.
+    // A partial write from a previous crashed seed would otherwise be returned
+    // without any integrity check.
     if private_path.exists() {
+        validate_stale_reexec_candidate(&private_path)
+            .map_err(|f| anyhow!(private_candidate_validation_message(&f)))
+            .with_context(|| {
+                format!(
+                    "existing private daemon binary {} failed validation; \
+                     remove it manually to re-seed",
+                    private_path.display()
+                )
+            })?;
         return Ok(private_path);
     }
 
@@ -125,30 +138,77 @@ fn ensure_private_daemon_binary(
     } else {
         current_exe.to_path_buf()
     };
-    std::fs::copy(&source, &private_path).with_context(|| {
+
+    // Atomic seed: copy to a unique temp file in the same directory, validate
+    // it, then rename into place.  Using the same directory guarantees the
+    // rename is atomic (same filesystem / mount point).  A process-id +
+    // pseudo-random suffix ensures concurrent seeders don't collide on the
+    // temp path itself.
+    let parent = private_path
+        .parent()
+        .ok_or_else(|| anyhow!("private daemon binary path has no parent directory"))?;
+    let tmp_name = format!(
+        "stores.tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    );
+    let tmp_path = parent.join(&tmp_name);
+
+    std::fs::copy(&source, &tmp_path).with_context(|| {
         format!(
-            "seeding private daemon binary {} from {}",
+            "seeding private daemon binary {} from {} (via temp {})",
             private_path.display(),
-            source.display()
+            source.display(),
+            tmp_path.display()
         )
     })?;
     if let Ok(md) = std::fs::metadata(&source) {
-        let _ = std::fs::set_permissions(&private_path, md.permissions());
+        let _ = std::fs::set_permissions(&tmp_path, md.permissions());
     }
-    validate_stale_reexec_candidate(&private_path)
+    validate_stale_reexec_candidate(&tmp_path)
         .map_err(|f| anyhow!(private_candidate_validation_message(&f)))?;
+
+    match std::fs::rename(&tmp_path, &private_path) {
+        Ok(()) => {
+            // We won the race; private_path now contains our validated copy.
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another concurrent daemon seeder won; discard our temp and
+            // validate the winner before trusting it.
+            let _ = std::fs::remove_file(&tmp_path);
+            validate_stale_reexec_candidate(&private_path)
+                .map_err(|f| anyhow!(private_candidate_validation_message(&f)))
+                .with_context(|| {
+                    format!(
+                        "concurrent-seeded private daemon binary {} failed validation",
+                        private_path.display()
+                    )
+                })?;
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e).with_context(|| {
+                format!(
+                    "renaming seeded temp {} to {}",
+                    tmp_path.display(),
+                    private_path.display()
+                )
+            });
+        }
+    }
+
     let _ = provider.identity(&private_path)?;
     Ok(private_path)
 }
 
 fn private_candidate_validation_message(f: &CandidateValidationFailure) -> String {
-    format!(
-        "private daemon binary validation failed: path={} reason={} stderr='{}' stdout='{}'",
-        f.path.display(),
-        f.reason,
-        f.stderr,
-        f.stdout
-    )
+    // Use the same rich format as candidate_validation_error_message so that
+    // callers (tests and log consumers) see a consistent diagnostic shape:
+    // path, size, command, exit_status, reason, stdout, stderr.
+    candidate_validation_error_message(f)
 }
 
 pub fn resolve_launch_path_from_env() -> Result<PathBuf> {

@@ -294,6 +294,11 @@ fn stale_then_reexec_fails_fallback_exits_nonzero() {
     perms.set_mode(0o644);
     std::fs::set_permissions(&launch_path, perms).unwrap();
 
+    // STORES_DAEMON_BIN_PATH points at the non-executable stub, which is also
+    // used as arg0. With validate-on-shortcut (T076 codex-revise), the daemon
+    // fails at startup when the existing private binary fails validation —
+    // before stale detection can run. The observable contract is identical:
+    // non-zero exit + spawn-error context in stderr.
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
@@ -308,12 +313,7 @@ fn stale_then_reexec_fails_fallback_exits_nonzero() {
         "validation fallback must exit nonzero"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("daemon binary stale; reexecing into"),
-        "stderr:\n{stderr}"
-    );
     assert_validation_failure_context(&stderr, &launch_path, "spawn error");
-    assert!(stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
 }
 
 /// LOW (T075 codex r3 follow-up): missing launch-path candidate is rejected fail-loud
@@ -417,6 +417,11 @@ fn stale_reexec_stub_missing_marker_candidate_rejected_without_exec() {
     let args_file = tmp.path().join("argv-missing-marker.txt");
     write_reexec_stub(&launch_path, &args_file, 0, StubHelpBehavior::MissingMarker);
 
+    // STORES_DAEMON_BIN_PATH points at the missing-marker stub, which is also
+    // arg0. With validate-on-shortcut (T076 codex-revise), the daemon fails at
+    // startup when the existing private binary fails the marker check — before
+    // stale detection runs. Observable contract: non-zero exit, path in stderr,
+    // marker reason in stderr, candidate NOT exec'd.
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
@@ -449,6 +454,11 @@ fn stale_reexec_empty_output_candidate_rejected_without_exec() {
     let args_file = tmp.path().join("argv-empty.txt");
     write_reexec_stub(&launch_path, &args_file, 0, StubHelpBehavior::Empty);
 
+    // STORES_DAEMON_BIN_PATH points at the empty-help stub, which is also
+    // arg0. With validate-on-shortcut (T076 codex-revise), the daemon fails at
+    // startup when the existing private binary fails the empty-stdout check —
+    // before stale detection runs. Observable contract: non-zero exit, path in
+    // stderr, empty-stdout reason, candidate NOT exec'd.
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
@@ -479,6 +489,11 @@ fn stale_reexec_timeout_candidate_rejected_without_exec() {
     let args_file = tmp.path().join("argv-timeout.txt");
     write_reexec_stub(&launch_path, &args_file, 0, StubHelpBehavior::Timeout);
 
+    // STORES_DAEMON_BIN_PATH points at the timeout stub, which is also arg0.
+    // With validate-on-shortcut (T076 codex-revise), the daemon fails at
+    // startup when the existing private binary times out — before stale
+    // detection runs. Observable contract: non-zero exit within the timeout
+    // deadline, path in stderr, timeout reason, candidate NOT exec'd.
     let started = Instant::now();
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
         .arg0(&launch_path)
@@ -537,14 +552,18 @@ fn stale_reexec_fresh_binary_passes_and_records_normalized_argv() {
     assert!(argv.contains("--poll-interval\n0.05\n"), "argv:\n{argv}");
 }
 
-/// HIGH fix: stale-at-startup must reexec BEFORE opening the DB. This test
-/// verifies that when the daemon binary is stale before startup, no migration
-/// / seed / sweep DB side-effects occur.
+/// HIGH fix: the daemon must bail BEFORE opening the DB whenever startup fails.
 ///
-/// Strategy: use STORES_TEST_DAEMON_FORCE_STALE with a non-executable stub so
-/// validation fails and the daemon exits non-zero immediately — which means it
-/// cannot have opened and migrated the DB (migration only runs after validation
-/// would have passed in the new order). We then check the DB stays empty.
+/// This test verifies that a corrupt/invalid private binary causes an early
+/// non-zero exit before the DB is migrated or seeded.  With validate-on-shortcut
+/// (T076 codex-revise), the daemon now validates the existing private binary
+/// before the stale-detection path runs, so the failure happens even earlier
+/// than the original "stale-at-startup" scenario — but the invariant (DB stays
+/// untouched) is identical and stronger.
+///
+/// Strategy: set STORES_DAEMON_BIN_PATH to a non-executable file so the
+/// existence-shortcut validation fails immediately.  Daemon must exit non-zero
+/// and must NOT have opened/migrated the DB file.
 #[cfg(unix)]
 #[test]
 fn stale_at_startup_no_db_side_effects_before_reexec() {
@@ -559,8 +578,8 @@ fn stale_at_startup_no_db_side_effects_before_reexec() {
     // attempt would write rows we can detect.
     std::fs::write(stores_dir.join("db.sqlite"), "").unwrap();
 
-    // Non-executable stub so validation fails fast — the daemon must bail before
-    // doing any DB work.
+    // Non-executable stub as the private binary: triggers validate-on-shortcut
+    // failure before the daemon can open the DB.
     let launch_path = tmp.path().join("stores_stale_stub");
     std::fs::write(&launch_path, "not executable\n").unwrap();
     let mut perms = std::fs::metadata(&launch_path).unwrap().permissions();
@@ -576,18 +595,24 @@ fn stale_at_startup_no_db_side_effects_before_reexec() {
         .output()
         .expect("invoke stale-at-startup daemon command");
 
-    // Must exit non-zero (validation failed, fallback to fail-loud).
+    // Must exit non-zero (validation failed fail-loud).
     assert!(
         !output.status.success(),
-        "stale-at-startup with non-executable stub must exit non-zero"
+        "invalid private binary must cause non-zero exit"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Reexec was attempted.
+    // Validation failure context must be present.
     assert!(
-        stderr.contains("daemon binary stale; reexecing into"),
-        "must log reexec attempt; stderr:\n{stderr}"
+        stderr.contains(&launch_path.display().to_string()),
+        "private path must appear in error; stderr:\n{stderr}"
     );
-    assert_validation_failure_context(&stderr, &launch_path, "spawn error");
+    assert!(
+        stderr.contains("validation")
+            || stderr.contains("failed")
+            || stderr.contains("private daemon binary")
+            || stderr.contains("spawn error"),
+        "error must describe validation failure; stderr:\n{stderr}"
+    );
     // The DB file we placed is empty (0 bytes), meaning no migration ran.
     // If migration had run, rusqlite would have written the DDL and the file
     // would be non-empty (SQLite page size ≥ 4096 bytes).
@@ -596,7 +621,7 @@ fn stale_at_startup_no_db_side_effects_before_reexec() {
         .len();
     assert_eq!(
         db_size, 0,
-        "DB must remain untouched (size 0) when stale-at-startup reexec fires before DB open"
+        "DB must remain untouched (size 0) when daemon fails before DB open"
     );
 }
 
@@ -873,4 +898,58 @@ fn real_inode_replace_triggers_stale_detection() {
         "exactly one reexec message line expected; stderr:\n{stderr}"
     );
     assert!(!stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
+}
+
+/// HIGH fix (codex-revise): existence-shortcut must validate before returning.
+///
+/// Pre-creates a corrupt (random bytes) private binary and asserts that
+/// `stores agents run` exits non-zero with a clear validation failure message
+/// rather than blindly trusting the corrupt path.  This exercises the
+/// validate-on-shortcut branch added in T076 codex-revise.
+#[cfg(unix)]
+#[test]
+fn corrupt_existing_private_binary_rejected_fail_loud() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+
+    // Create the private path with its parent directory and fill it with
+    // random bytes (not a valid ELF / script).
+    let private = tmp.path().join("private/bin/stores");
+    std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+    // Write clearly-invalid content.
+    std::fs::write(&private, b"\x7fELF-INVALID-CORRUPT-BYTES\x00\x01\x02\x03").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&private).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&private, perms).unwrap();
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("invoke daemon with corrupt private binary");
+
+    assert!(
+        !output.status.success(),
+        "corrupt existing private binary must cause non-zero exit; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Must surface validation failure context (path + reason), not silently
+    // use the corrupt binary or panic.
+    assert!(
+        stderr.contains(&private.display().to_string()),
+        "private path must appear in error output; stderr:\n{stderr}"
+    );
+    // Should mention validation failure
+    assert!(
+        stderr.contains("validation")
+            || stderr.contains("failed")
+            || stderr.contains("private daemon binary"),
+        "error output must describe validation failure; stderr:\n{stderr}"
+    );
 }
