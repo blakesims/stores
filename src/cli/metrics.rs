@@ -189,13 +189,17 @@ fn parse_duration_seconds(window: &str) -> Result<i64> {
     let n: i64 = num
         .parse()
         .with_context(|| format!("invalid --window '{window}'"))?;
-    match unit {
-        "s" => Ok(n),
-        "m" => Ok(n * 60),
-        "h" => Ok(n * 3600),
-        "d" => Ok(n * 86400),
+    let secs = match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86400,
         _ => bail!("invalid --window '{window}'; use duration like 1h or RFC3339 timestamp"),
+    };
+    if secs <= 0 {
+        bail!("window must be positive (got '{window}')");
     }
+    Ok(secs)
 }
 
 fn load_transition_rows(conn: &Connection) -> Result<Vec<TransitionRow>> {
@@ -282,15 +286,43 @@ fn ratification_metric(rows: &[TransitionRow], since_epoch: i64) -> PercentileMe
     }
     let mut vals = Vec::new();
     for (_item, mut rs) in by_item {
-        rs.sort_by_key(|r| (&r.occurred_at, r.occurred_epoch));
-        let open = rs
-            .iter()
-            .find(|r| r.to_status == "open")
-            .or_else(|| rs.iter().find(|r| r.from_status.as_deref() == Some("open")));
-        let ready = rs.iter().find(|r| r.to_status == "ready");
-        if let (Some(o), Some(r)) = (open, ready) {
-            if r.occurred_epoch >= since_epoch && r.occurred_epoch >= o.occurred_epoch {
-                vals.push(r.occurred_epoch - o.occurred_epoch);
+        rs.sort_by_key(|r| (r.occurred_epoch, r.occurred_at.clone()));
+        // Collect 'open' rows in chronological order.
+        // Prefer rows where to_status == "open" (explicit arrival in open state).
+        // Fall back to rows where from_status == "open" (departure from open state)
+        // only when no to_status=="open" rows exist — this matches the original
+        // single-cycle heuristic for stores that log open→ready but not the
+        // initial (create)→open transition.
+        let open_rows: Vec<&TransitionRow> = {
+            let direct: Vec<&TransitionRow> =
+                rs.iter().copied().filter(|r| r.to_status == "open").collect();
+            if direct.is_empty() {
+                rs.iter()
+                    .copied()
+                    .filter(|r| r.from_status.as_deref() == Some("open"))
+                    .collect()
+            } else {
+                direct
+            }
+        };
+        // Walk open rows in order; for each, find the first 'ready' AT OR AFTER
+        // the open's timestamp that hasn't been consumed by a prior open.
+        let mut consumed_ready_idx: Option<usize> = None;
+        for open_row in open_rows {
+            let candidate = rs
+                .iter()
+                .enumerate()
+                .filter(|(idx, r)| {
+                    r.to_status == "ready"
+                        && r.occurred_epoch >= open_row.occurred_epoch
+                        && consumed_ready_idx.map(|c| *idx > c).unwrap_or(true)
+                })
+                .min_by_key(|(_, r)| r.occurred_epoch);
+            if let Some((idx, ready_row)) = candidate {
+                if ready_row.occurred_epoch >= since_epoch {
+                    vals.push(ready_row.occurred_epoch - open_row.occurred_epoch);
+                }
+                consumed_ready_idx = Some(idx);
             }
         }
     }
@@ -842,6 +874,100 @@ mod tests {
                 p95_seconds: Some(1170)
             }
         );
+    }
+
+    #[test]
+    fn ratification_two_cycles_paired_correctly() {
+        // Item with two complete open→ready cycles. Verifies at-or-after pairing:
+        // cycle1: open1 (T=0) → ready1 (T=600) = 600s
+        // cycle2: open2 (T=900) → ready2 (T=1800) = 900s
+        let c = conn();
+        ins(&c, "obs", "L1", None, "open", "2026-01-01T00:00:00Z");
+        ins(
+            &c,
+            "obs",
+            "L1",
+            Some("open"),
+            "ready",
+            "2026-01-01T00:10:00Z",
+        );
+        ins(
+            &c,
+            "obs",
+            "L1",
+            Some("ready"),
+            "open",
+            "2026-01-01T00:15:00Z",
+        );
+        ins(
+            &c,
+            "obs",
+            "L1",
+            Some("open"),
+            "ready",
+            "2026-01-01T00:30:00Z",
+        );
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
+        // cycle1 = 600s, cycle2 = 900s → count=2, p50=750, p95=885
+        assert_eq!(
+            r.ratification_cycle_time.open_to_ready,
+            PercentileMetric {
+                count: 2,
+                p50_seconds: Some(750),
+                p95_seconds: Some(885),
+            }
+        );
+    }
+
+    #[test]
+    fn ratification_orphan_ready_before_open_not_paired() {
+        // Degenerate: ready occurs before open (fixture noise / orphan).
+        // The orphan ready must NOT be paired; the subsequent open has no
+        // matching ready so contributes 0 cycles.
+        let c = conn();
+        // ready at T=0 (no prior open → orphan)
+        ins(&c, "obs", "L2", None, "ready", "2026-01-01T00:00:00Z");
+        // open at T=600 (no subsequent ready → no pair)
+        ins(
+            &c,
+            "obs",
+            "L2",
+            Some("ready"),
+            "open",
+            "2026-01-01T00:10:00Z",
+        );
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
+        assert_eq!(
+            r.ratification_cycle_time.open_to_ready,
+            PercentileMetric {
+                count: 0,
+                p50_seconds: None,
+                p95_seconds: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_duration_rejects_zero() {
+        let err = parse_duration_seconds("0h").unwrap_err();
+        assert!(
+            err.to_string().contains("window must be positive"),
+            "expected positive-error for '0h'; got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_duration_rejects_negative() {
+        let err = parse_duration_seconds("-5h").unwrap_err();
+        assert!(
+            err.to_string().contains("window must be positive"),
+            "expected positive-error for '-5h'; got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_duration_accepts_positive() {
+        assert_eq!(parse_duration_seconds("1h").unwrap(), 3600);
     }
 
     #[test]
