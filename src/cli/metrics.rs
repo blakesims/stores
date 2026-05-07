@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
@@ -10,6 +10,9 @@ pub struct MetricsArgs {
     pub window: String,
     pub text: bool,
     pub json: bool,
+    /// Override wall-clock "now" for duration windows; RFC3339 string.
+    /// When absent, actual wall clock is used.  Supplied by --now flag or tests.
+    pub now: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -96,7 +99,7 @@ struct TransitionRow {
 pub fn run(args: MetricsArgs) -> Result<()> {
     let db_path = crate::paths::db_path()?;
     let conn = crate::db::open(&db_path).context("open .stores/db.sqlite")?;
-    let report = build_report(&conn, &args.window)?;
+    let report = build_report(&conn, &args.window, args.now.as_deref())?;
     if args.text && !args.json {
         print!("{}", render_text(&report));
     } else {
@@ -105,9 +108,20 @@ pub fn run(args: MetricsArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn build_report(conn: &Connection, window: &str) -> Result<MetricsReport> {
-    let (window_report, since) = parse_window(window)?;
+/// Build a metrics report.
+///
+/// `now_override`: when `Some`, uses this RFC3339 timestamp as "now" for
+/// resolving duration windows (e.g. "1h").  When `None`, uses actual wall
+/// clock.  Supplying a fixed value makes output deterministic across reruns.
+pub fn build_report(conn: &Connection, window: &str, now_override: Option<&str>) -> Result<MetricsReport> {
+    let (window_report, since) = parse_window(window, now_override)?;
     let since_epoch = epoch_seconds(&since).unwrap_or(i64::MIN);
+    // Normalize the since cutoff to canonical UTC RFC3339 for SQL text comparison.
+    // parse_window returns UTC strings for duration windows already; for absolute
+    // RFC3339 inputs with non-UTC offsets (e.g. -08:00) we must convert to UTC
+    // so SQLite's lexicographic >= works correctly against stored UTC timestamps.
+    let normalized_utc_cutoff = normalize_to_utc(&since)
+        .unwrap_or_else(|| since.clone());
     let rows = load_transition_rows(conn)?;
     Ok(MetricsReport {
         window: window_report,
@@ -116,26 +130,34 @@ pub fn build_report(conn: &Connection, window: &str) -> Result<MetricsReport> {
             open_to_ready: ratification_metric(&rows, since_epoch),
         },
         revise_rate: revise_metrics(conn, since_epoch, window)?,
-        agent_runs: agent_run_metrics(conn, &since)?,
+        agent_runs: agent_run_metrics(conn, &normalized_utc_cutoff)?,
     })
 }
 
-fn parse_window(window: &str) -> Result<(WindowReport, String)> {
+fn parse_window(window: &str, now_override: Option<&str>) -> Result<(WindowReport, String)> {
     if epoch_seconds(window).is_some() {
+        // Absolute RFC3339 input: normalize to UTC for consistent display.
+        let resolved = normalize_to_utc(window).unwrap_or_else(|| window.to_string());
         return Ok((
             WindowReport {
                 requested: window.to_string(),
                 since: window.to_string(),
-                since_resolved: window.to_string(),
+                since_resolved: resolved.clone(),
             },
-            window.to_string(),
+            resolved,
         ));
     }
     let secs = parse_duration_seconds(window)?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    let resolved = format_epoch_utc(now - secs);
+    // Resolve "now": use caller-supplied override (for tests / --now flag) or actual wall clock.
+    let now_epoch: i64 = if let Some(override_str) = now_override {
+        epoch_seconds(override_str)
+            .with_context(|| format!("--now value is not a valid RFC3339 timestamp: '{override_str}'"))?
+    } else {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64
+    };
+    let resolved = format_epoch_utc(now_epoch - secs);
     Ok((
         WindowReport {
             requested: window.to_string(),
@@ -653,6 +675,28 @@ pub fn render_text(report: &MetricsReport) -> String {
     out
 }
 
+/// Normalize an RFC3339 timestamp to canonical UTC form `YYYY-MM-DDTHH:MM:SSZ`.
+///
+/// Handles any valid RFC3339 offset (Z, +00:00, -08:00, etc.) and returns the
+/// equivalent UTC instant.  Returns `None` for malformed input.
+/// This is used to ensure SQL text comparisons against stored UTC timestamps
+/// are correct regardless of the offset in the caller-supplied window.
+fn normalize_to_utc(s: &str) -> Option<String> {
+    let normalised;
+    let s = if s.contains(' ') && !s.contains('T') {
+        normalised = s.replacen(' ', "T", 1);
+        &normalised
+    } else {
+        s
+    };
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| {
+            dt.with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Secs, true)
+        })
+}
+
 /// Parse an RFC3339 timestamp string to Unix epoch seconds (UTC).
 ///
 /// Handles all valid RFC3339 forms:
@@ -721,7 +765,7 @@ mod tests {
             "plan_review",
             "2026-01-01T00:04:00Z",
         );
-        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
         let edge = r
             .per_edge
             .iter()
@@ -757,7 +801,7 @@ mod tests {
             "ready",
             "2026-01-01T00:20:00Z",
         );
-        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
         // Linear interpolation: [600, 1200], n=2
         //   p50: index = 0.50 * 1 = 0.5 → 600 + 0.5 * (1200 - 600) = 900
         //   p95: index = 0.95 * 1 = 0.95 → 600 + 0.95 * (1200 - 600) = 1170
@@ -777,7 +821,7 @@ mod tests {
         c.execute_batch("CREATE TABLE tasks (display_id TEXT, tier_hint TEXT, cycles TEXT);")
             .unwrap();
         c.execute("INSERT INTO tasks VALUES ('T1','T1',?1)", [r#"[{"phase":1,"cycle":1,"review":{"gate":"PASS"}},{"phase":1,"cycle":2,"review":{"gate":"REVISE"}},{"phase":2,"cycle":1,"review":{"gate":"PASS"}}]"#]).unwrap();
-        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
         let row = r
             .revise_rate
             .rows
@@ -799,7 +843,7 @@ mod tests {
     #[test]
     fn agent_runs_absent_and_minimal_shape() {
         let c = conn();
-        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
         assert!(r
             .agent_runs
             .notes
@@ -815,7 +859,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
         assert_eq!(
             r.agent_runs.rows[0],
             AgentRunMetric {
@@ -831,8 +875,8 @@ mod tests {
     fn json_shape_stable_across_reruns() {
         let c = conn();
         ins(&c, "tasks", "T1", None, "planning", "2026-01-01T00:00:00Z");
-        let a = render_json(&build_report(&c, "2025-12-31T00:00:00Z").unwrap()).unwrap();
-        let b = render_json(&build_report(&c, "2025-12-31T00:00:00Z").unwrap()).unwrap();
+        let a = render_json(&build_report(&c, "2025-12-31T00:00:00Z", None).unwrap()).unwrap();
+        let b = render_json(&build_report(&c, "2025-12-31T00:00:00Z", None).unwrap()).unwrap();
         assert_eq!(a, b);
     }
 
@@ -842,7 +886,7 @@ mod tests {
         // timestamp in since_resolved (stable to the operator's invocation
         // time, not literally "now-1h").
         let c = conn();
-        let report = build_report(&c, "1h").unwrap();
+        let report = build_report(&c, "1h", None).unwrap();
         assert_eq!(report.window.requested, "1h");
         assert_eq!(report.window.since, "now-1h");
         // since_resolved must be a parseable absolute timestamp (not a relative string)
@@ -873,7 +917,7 @@ mod tests {
             "ready",
             "2026-01-01T00:05:00Z",
         );
-        let txt = render_text(&build_report(&c, "2025-12-31T00:00:00Z").unwrap());
+        let txt = render_text(&build_report(&c, "2025-12-31T00:00:00Z", None).unwrap());
         assert!(txt.contains("per_edge"));
         assert!(txt.contains("store=tasks edge=open -> ready count=1"));
         assert!(txt.contains("ratification_cycle_time.open_to_ready count=1"));
@@ -928,7 +972,7 @@ mod tests {
     fn revise_rate_always_carries_window_note() {
         // Even when tasks table is absent the window-caveat note must be present.
         let c = conn(); // no tasks table
-        let r = build_report(&c, "1h").unwrap();
+        let r = build_report(&c, "1h", None).unwrap();
         assert!(
             r.revise_rate.notes.iter().any(|n| n.contains("unwindowed")),
             "revise_rate.notes must include unwindowed caveat; got: {:?}",
@@ -941,7 +985,7 @@ mod tests {
         let c = conn();
         c.execute_batch("CREATE TABLE tasks (display_id TEXT, tier_hint TEXT, cycles TEXT);")
             .unwrap();
-        let r = build_report(&c, "30m").unwrap();
+        let r = build_report(&c, "30m", None).unwrap();
         let note = r
             .revise_rate
             .notes
@@ -1048,7 +1092,7 @@ mod tests {
         ins_th(&c, "submit-plan-review", "planning", "2026-01-01T03:00:00Z");
         ins_th(&c, "submit-plan-review", "ready", "2026-01-01T04:00:00Z");
 
-        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
 
         let code_row = r
             .revise_rate
@@ -1082,7 +1126,7 @@ mod tests {
         ins_th(&c, "submit-review", "executing", "2025-06-01T00:00:00Z"); // before window
         ins_th(&c, "submit-review", "complete", "2026-06-01T00:00:00Z");  // inside window
         // Window: 2026-01-01 onward
-        let r = build_report(&c, "2026-01-01T00:00:00Z").unwrap();
+        let r = build_report(&c, "2026-01-01T00:00:00Z", None).unwrap();
         let code_row = r
             .revise_rate
             .rows
@@ -1137,7 +1181,7 @@ mod tests {
         ins_th_id(&c, "T1", "submit-review", "complete",  "2026-01-01T02:00:00Z");
         ins_th_id(&c, "T2", "submit-review", "complete",  "2026-01-01T03:00:00Z");
 
-        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
 
         let feature_row = r
             .revise_rate
@@ -1167,7 +1211,7 @@ mod tests {
         ins_th(&c, "submit-review", "executing", "2026-01-01T00:00:00Z");
         ins_th(&c, "submit-review", "complete",  "2026-01-01T01:00:00Z");
 
-        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
         let code_row = r
             .revise_rate
             .rows
@@ -1183,7 +1227,7 @@ mod tests {
     fn json_output_is_valid_json() {
         let c = conn();
         ins(&c, "tasks", "T1", None, "planning", "2026-01-01T00:00:00Z");
-        let report = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let report = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
         let json_str = render_json(&report).unwrap();
         let parsed: serde_json::Value =
             serde_json::from_str(&json_str).expect("render_json must produce valid JSON");
@@ -1199,5 +1243,101 @@ mod tests {
             parsed.get("revise_rate").is_some(),
             "JSON must contain 'revise_rate' key"
         );
+    }
+
+    // ── MAJOR 1: UTC normalization of RFC3339 window inputs ──────────────────
+
+    #[test]
+    fn normalize_to_utc_z_suffix_unchanged() {
+        // Z-suffix is already UTC; normalized form must be canonical Z form.
+        let n = normalize_to_utc("2026-01-01T05:00:00Z").unwrap();
+        assert_eq!(n, "2026-01-01T05:00:00Z");
+    }
+
+    #[test]
+    fn normalize_to_utc_plus_zero_offset_becomes_z() {
+        // +00:00 is equivalent to Z; normalized form must be Z.
+        let n = normalize_to_utc("2026-01-01T05:00:00+00:00").unwrap();
+        assert_eq!(n, "2026-01-01T05:00:00Z");
+    }
+
+    #[test]
+    fn normalize_to_utc_negative_offset_translates_correctly() {
+        // -08:00 means wall clock is 8h behind UTC; UTC equivalent is +8h.
+        // 2026-01-01T00:00:00-08:00 == 2026-01-01T08:00:00Z
+        let n = normalize_to_utc("2026-01-01T00:00:00-08:00").unwrap();
+        assert_eq!(n, "2026-01-01T08:00:00Z");
+    }
+
+    #[test]
+    fn agent_run_metrics_utc_normalized_cutoff_filters_correctly() {
+        // agent_run_metrics must use a UTC-normalized cutoff string so that
+        // SQLite text comparison works against stored UTC timestamps.
+        // Input: -08:00 window → UTC +8h.  Row at 2026-01-01T09:00:00Z (after)
+        // and at 2026-01-01T07:00:00Z (before) should be separated correctly.
+        let c = conn();
+        c.execute_batch(
+            "CREATE TABLE agent_runs \
+             (role TEXT, occurred_at TEXT, input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER);",
+        )
+        .unwrap();
+        // Normalized cutoff: 2026-01-01T08:00:00Z (from -08:00 input)
+        // Row before cutoff: 2026-01-01T07:00:00Z  → excluded
+        c.execute(
+            "INSERT INTO agent_runs VALUES ('executor','2026-01-01T07:00:00Z',5,5,10)",
+            [],
+        )
+        .unwrap();
+        // Row after cutoff: 2026-01-01T09:00:00Z  → included
+        c.execute(
+            "INSERT INTO agent_runs VALUES ('executor','2026-01-01T09:00:00Z',10,20,30)",
+            [],
+        )
+        .unwrap();
+        // Window: 2026-01-01T00:00:00-08:00 → UTC 2026-01-01T08:00:00Z
+        let r = build_report(&c, "2026-01-01T00:00:00-08:00", None).unwrap();
+        // Only the 09:00Z row should be included.
+        assert_eq!(r.agent_runs.rows.len(), 1);
+        assert_eq!(
+            r.agent_runs.rows[0],
+            AgentRunMetric {
+                role: "executor".into(),
+                input_tokens: 10,
+                output_tokens: 20,
+                total_tokens: 30,
+            }
+        );
+    }
+
+    // ── MAJOR 2: --now override makes duration-window output deterministic ────
+
+    #[test]
+    fn duration_window_with_now_override_is_deterministic() {
+        // Calling build_report twice with the same --now override must produce
+        // identical JSON output (no wall-clock dependency).
+        let c = conn();
+        ins(&c, "tasks", "T1", None, "planning", "2026-01-01T00:00:00Z");
+        let fixed_now = "2026-05-07T12:00:00Z";
+        let a = render_json(&build_report(&c, "1h", Some(fixed_now)).unwrap()).unwrap();
+        let b = render_json(&build_report(&c, "1h", Some(fixed_now)).unwrap()).unwrap();
+        assert_eq!(a, b, "output must be identical across reruns with fixed --now");
+    }
+
+    #[test]
+    fn duration_window_now_override_resolves_correct_cutoff() {
+        // With --now 2026-05-07T12:00:00Z and --window 1h,
+        // since_resolved must be 2026-05-07T11:00:00Z.
+        let c = conn();
+        let report = build_report(&c, "1h", Some("2026-05-07T12:00:00Z")).unwrap();
+        assert_eq!(report.window.since_resolved, "2026-05-07T11:00:00Z");
+    }
+
+    #[test]
+    fn duration_window_now_override_non_utc_resolves_correct_cutoff() {
+        // --now with -05:00 offset: 2026-05-07T07:00:00-05:00 == 12:00:00Z.
+        // --window 1h → since_resolved = 2026-05-07T11:00:00Z
+        let c = conn();
+        let report = build_report(&c, "1h", Some("2026-05-07T07:00:00-05:00")).unwrap();
+        assert_eq!(report.window.since_resolved, "2026-05-07T11:00:00Z");
     }
 }

@@ -267,6 +267,12 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .long("text")
                         .action(ArgAction::SetTrue)
                         .help("Render stable text output instead of JSON"),
+                )
+                .arg(
+                    Arg::new("now")
+                        .long("now")
+                        .value_hint(ValueHint::Other)
+                        .help("Override wall-clock 'now' for duration windows (RFC3339); makes output deterministic"),
                 ),
         )
         // Watch subcommand — ratatui TUI (T028); --legacy falls back to ANSI POC

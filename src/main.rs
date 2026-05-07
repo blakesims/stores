@@ -150,6 +150,7 @@ fn main() -> Result<()> {
                 // Accept metrics-local --json or global --json flag.
                 json: *sub.get_one::<bool>("json").unwrap_or(&false)
                     || matches.get_flag("json"),
+                now: sub.get_one::<String>("now").cloned(),
             };
             cli::metrics::run(args)?;
         }
