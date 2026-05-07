@@ -5,7 +5,9 @@ use std::process::Command;
 #[test]
 fn topology_help_lists_documented_flags() {
     let bin = env!("CARGO_BIN_EXE_stores");
+    let tmp = tempfile::tempdir().expect("tmpdir");
     let output = Command::new(bin)
+        .current_dir(tmp.path())
         .args(["topology", "--help"])
         .output()
         .expect("failed to invoke stores binary");
