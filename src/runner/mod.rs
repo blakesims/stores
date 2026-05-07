@@ -36,8 +36,11 @@
 /// 4. Gate behind a Cargo feature if the runner has heavy dependencies.
 use anyhow::{bail, Result};
 
+pub mod codex;
 pub mod mock;
 pub mod sap;
+
+pub use codex::CodexRunner;
 
 #[cfg(feature = "runner-claude-code")]
 pub mod claude_code;
@@ -217,6 +220,7 @@ pub trait Runner: Send {
 fn available_runners() -> String {
     [
         Some("mock"),
+        Some("codex"),
         #[cfg(feature = "runner-claude-code")]
         Some("claude-code"),
         #[cfg(feature = "runner-pi")]
@@ -242,6 +246,7 @@ fn available_runners() -> String {
 pub fn select(name: &str) -> Result<Box<dyn Runner>> {
     match name {
         "mock" => Ok(Box::new(mock::MockRunner::new(vec![]))),
+        "codex" => Ok(Box::new(codex::CodexRunner::new())),
         "claude-code" => {
             #[cfg(feature = "runner-claude-code")]
             {
@@ -287,6 +292,12 @@ mod tests {
     }
 
     #[test]
+    fn select_codex() {
+        let runner = select("codex").expect("codex runner should always be available");
+        assert_eq!(runner.name(), "codex");
+    }
+
+    #[test]
     fn select_unknown() {
         let err = select("does-not-exist")
             .err()
@@ -321,5 +332,23 @@ mod tests {
         let runner =
             select("claude-code").expect("claude-code runner should be available with feature");
         assert_eq!(runner.name(), "claude-code");
+    }
+
+    #[test]
+    #[cfg(not(feature = "runner-pi"))]
+    fn select_pi_without_feature() {
+        let err = select("pi").err().expect("should error without feature");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("runner-pi"),
+            "expected feature name in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "runner-pi")]
+    fn select_pi_with_feature() {
+        let runner = select("pi").expect("pi runner should be available with feature");
+        assert_eq!(runner.name(), "pi");
     }
 }

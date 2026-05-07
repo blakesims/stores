@@ -16,6 +16,10 @@ pub struct StoresConfig {
     pub scaffold: Option<ScaffoldCfg>,
     #[serde(default)]
     pub drive: Option<DriveCfg>,
+    #[serde(default)]
+    pub review: Option<ReviewCfg>,
+    #[serde(default)]
+    pub codex: Option<CodexCfg>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -45,8 +49,68 @@ pub struct DriveRoleCfg {
     pub model: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReviewCfg {
+    #[serde(default = "default_review_runner")]
+    pub runner: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default = "default_review_max_parallel")]
+    pub max_parallel: u32,
+    #[serde(default = "default_review_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for ReviewCfg {
+    fn default() -> Self {
+        Self {
+            runner: default_review_runner(),
+            model: None,
+            max_parallel: default_review_max_parallel(),
+            timeout_secs: default_review_timeout_secs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CodexCfg {
+    #[serde(default = "default_codex_command")]
+    pub command: String,
+    #[serde(default = "default_codex_args")]
+    pub args: Vec<String>,
+}
+
+impl Default for CodexCfg {
+    fn default() -> Self {
+        Self {
+            command: default_codex_command(),
+            args: default_codex_args(),
+        }
+    }
+}
+
 fn default_drive_max_parallel() -> u32 {
     1
+}
+
+fn default_review_runner() -> String {
+    "codex".to_string()
+}
+
+fn default_review_max_parallel() -> u32 {
+    1
+}
+
+fn default_review_timeout_secs() -> u64 {
+    1800
+}
+
+fn default_codex_command() -> String {
+    "codex".to_string()
+}
+
+fn default_codex_args() -> Vec<String> {
+    crate::runner::codex::default_codex_args()
 }
 
 /// Default location: `<.stores>/config.yaml` resolved against the worktree's
@@ -94,6 +158,20 @@ pub fn resolve_drive_max_parallel(config_path: &Path) -> u32 {
         }
     }
     1
+}
+
+pub fn resolve_review_config(config_path: &Path) -> ReviewCfg {
+    if let Ok(Some(cfg)) = load(config_path) {
+        return cfg.review.unwrap_or_default();
+    }
+    ReviewCfg::default()
+}
+
+pub fn resolve_codex_config(config_path: &Path) -> CodexCfg {
+    if let Ok(Some(cfg)) = load(config_path) {
+        return cfg.codex.unwrap_or_default();
+    }
+    CodexCfg::default()
 }
 
 #[cfg(test)]
@@ -157,12 +235,13 @@ mod tests {
     fn parses_scaffold_command() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
-        std::fs::write(&path, "scaffold:\n  command: \"./dev scaffold {display_id}\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "scaffold:\n  command: \"./dev scaffold {display_id}\"\n",
+        )
+        .unwrap();
         let cfg = load(&path).unwrap().unwrap();
-        assert_eq!(
-            cfg.scaffold.unwrap().command,
-            "./dev scaffold {display_id}"
-        );
+        assert_eq!(cfg.scaffold.unwrap().command, "./dev scaffold {display_id}");
     }
 
     #[test]
@@ -214,6 +293,53 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("does-not-exist.yaml");
         assert_eq!(resolve_drive_max_parallel(&path), 1);
+    }
+
+    #[test]
+    fn review_config_parses_runners_and_defaults_to_codex() {
+        for runner in ["codex", "pi", "claude-code"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("config.yaml");
+            std::fs::write(
+                &path,
+                format!("review:\n  runner: {runner}\n  model: test-model\n  max_parallel: 2\n  timeout_secs: 77\n"),
+            )
+            .unwrap();
+            let cfg = load(&path).unwrap().unwrap();
+            let review = cfg.review.unwrap();
+            assert_eq!(review.runner, runner);
+            assert_eq!(review.model.as_deref(), Some("test-model"));
+            assert_eq!(review.max_parallel, 2);
+            assert_eq!(review.timeout_secs, 77);
+            assert_eq!(resolve_review_config(&path).runner, runner);
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(&path, "ntfy:\n  url: https://x\n").unwrap();
+        assert_eq!(resolve_review_config(&path).runner, "codex");
+    }
+
+    #[test]
+    fn parses_codex_command_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "codex:\n  command: /bin/codex-shim\n  args: [exec, --color, never]\n",
+        )
+        .unwrap();
+        let cfg = load(&path).unwrap().unwrap();
+        let codex = cfg.codex.unwrap();
+        assert_eq!(codex.command, "/bin/codex-shim");
+        assert_eq!(codex.args, vec!["exec", "--color", "never"]);
+
+        let missing = tmp.path().join("missing.yaml");
+        let defaulted = resolve_codex_config(&missing);
+        assert_eq!(defaulted.command, "codex");
+        assert!(defaulted
+            .args
+            .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
     }
 
     #[test]

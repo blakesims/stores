@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
+
+use crate::flow::config::{CodexCfg, ReviewCfg};
+use crate::runner::{Runner, RunnerOutput};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExternalReviewVerdict {
@@ -335,5 +339,190 @@ pub fn mark_attempt_tooling_failure_ready(
         "UPDATE external_reviews SET verdict='TOOLING_FAILURE', findings=?2 WHERE display_id=?1",
         params![display_id, payload],
     )?;
+    Ok(())
+}
+
+pub fn build_review_runner(review: &ReviewCfg, codex: &CodexCfg) -> Result<Box<dyn Runner>> {
+    match review.runner.as_str() {
+        "codex" => Ok(Box::new(crate::runner::CodexRunner::with_config(
+            codex.command.clone(),
+            codex.args.clone(),
+            review.model.clone(),
+            review.timeout_secs,
+        ))),
+        "pi" | "claude-code" => crate::runner::select(&review.runner),
+        other => {
+            anyhow::bail!("unknown review.runner '{other}'; expected codex, pi, or claude-code")
+        }
+    }
+}
+
+pub fn run_external_review_attempt(
+    conn: &Connection,
+    review_display_id: &str,
+    task_id: &str,
+    review: &ReviewCfg,
+    codex: &CodexCfg,
+    workspace_override: Option<&Path>,
+    base_override: Option<&str>,
+    head_override: Option<&str>,
+) -> std::result::Result<ParsedReviewOutput, ToolingError> {
+    let bundle = load_review_input_bundle(
+        conn,
+        task_id,
+        workspace_override,
+        base_override,
+        head_override,
+    )?;
+    let prompt = render_codex_prompt(&bundle);
+    let runner =
+        build_review_runner(review, codex).map_err(|e| ToolingError::new(e.to_string()))?;
+    let started = Instant::now();
+    let out = runner
+        .spawn(
+            "external-review",
+            "",
+            &prompt,
+            None,
+            Some(&bundle.workspace_path.to_string_lossy()),
+        )
+        .map_err(|e| ToolingError::new(format!("TOOLING_FAILURE: review runner failed: {e:#}")))?;
+    let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let parsed = if out.exit_code == 0 {
+        parse_codex_review_output(review_output_text(&out)).map_err(|e| {
+            ToolingError::new(format!(
+                "TOOLING_FAILURE: external review output parse failed: {e}"
+            ))
+        })?
+    } else {
+        ParsedReviewOutput {
+            verdict: ExternalReviewVerdict::ToolingFailure,
+            counts: FindingCounts {
+                critical: 0,
+                major: 0,
+                minor: 0,
+            },
+        }
+    };
+    persist_review_runner_result(
+        conn,
+        review_display_id,
+        &bundle,
+        review,
+        codex,
+        &out,
+        &parsed,
+        duration_ms,
+    )
+    .map_err(|e| {
+        ToolingError::new(format!(
+            "TOOLING_FAILURE: persist review result failed: {e}"
+        ))
+    })?;
+    Ok(parsed)
+}
+
+fn review_output_text(out: &RunnerOutput) -> &str {
+    out.final_message.as_deref().unwrap_or(&out.stdout)
+}
+
+fn external_review_columns(conn: &Connection) -> Result<std::collections::BTreeSet<String>> {
+    let mut stmt = conn.prepare("PRAGMA table_info(external_reviews)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    rows.collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_review_runner_result(
+    conn: &Connection,
+    review_display_id: &str,
+    bundle: &ReviewInputBundle,
+    review: &ReviewCfg,
+    codex: &CodexCfg,
+    out: &RunnerOutput,
+    parsed: &ParsedReviewOutput,
+    duration_ms: i64,
+) -> Result<()> {
+    let cols = external_review_columns(conn)?;
+    let mut updates: Vec<(&str, String)> = Vec::new();
+    let verdict = parsed.verdict.as_str().to_string();
+    let critical = parsed.counts.critical.to_string();
+    let major = parsed.counts.major.to_string();
+    let minor = parsed.counts.minor.to_string();
+    let metadata = serde_json::json!({
+        "runner": review.runner,
+        "configured_model": review.model,
+        "harness_id": out.telemetry.harness_id,
+        "session_id": out.session_id,
+        "structured_output_source": out.structured_output_source,
+        "exit_code": out.exit_code,
+        "payload_error": out.payload_error,
+        "codex_command": codex.command,
+        "codex_args": codex.args,
+    })
+    .to_string();
+    let findings = review_output_text(out).to_string();
+    let started_at = out.telemetry.started_at.clone().unwrap_or_default();
+    let completed_at = out.telemetry.ended_at.clone().unwrap_or_default();
+    let duration = duration_ms.to_string();
+    let transcript_path = out.telemetry.transcript_path.clone().unwrap_or_default();
+    let model_id = out.telemetry.model_id.clone().unwrap_or_default();
+    let base_sha = bundle.base_sha.clone();
+    let head_sha = bundle.head_sha.clone();
+
+    let candidates = [
+        ("adapter", "external_review".to_string()),
+        ("runner", review.runner.clone()),
+        ("model_id", model_id),
+        ("model_metadata", metadata),
+        ("base_sha", base_sha),
+        ("head_sha", head_sha),
+        ("verdict", verdict),
+        ("critical_count", critical),
+        ("major_count", major),
+        ("minor_count", minor),
+        ("started_at", started_at),
+        ("completed_at", completed_at),
+        ("duration_ms", duration),
+        ("log_path", transcript_path.clone()),
+        ("transcript_path", transcript_path),
+        ("contract_ref", format!("tasks/{}/contract", bundle.task_id)),
+        ("plan_ref", format!("tasks/{}/plan", bundle.task_id)),
+        ("wrap_log_ref", format!("tasks/{}/wrap_log", bundle.task_id)),
+        (
+            "diff_ref",
+            format!("{}..{}", bundle.base_sha, bundle.head_sha),
+        ),
+        (
+            "prior_review_ref",
+            format!("external_reviews/task/{}", bundle.task_id),
+        ),
+        ("findings", findings),
+    ];
+    for (col, val) in candidates {
+        if cols.contains(col) {
+            updates.push((col, val));
+        }
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let set_sql = updates
+        .iter()
+        .enumerate()
+        .map(|(idx, (col, _))| format!("{col}=?{}", idx + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "UPDATE external_reviews SET {set_sql} WHERE display_id=?{}",
+        updates.len() + 1
+    );
+    let mut values: Vec<&dyn rusqlite::ToSql> = updates
+        .iter()
+        .map(|(_, v)| v as &dyn rusqlite::ToSql)
+        .collect();
+    values.push(&review_display_id);
+    conn.execute(&sql, values.as_slice())?;
     Ok(())
 }

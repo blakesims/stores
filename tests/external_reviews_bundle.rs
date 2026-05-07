@@ -1,7 +1,11 @@
 use rusqlite::Connection;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+use stores::flow::config::{CodexCfg, ReviewCfg};
 use stores::handlers::external_reviews::{
     load_review_input_bundle, mark_attempt_tooling_failure_ready, parse_codex_review_output,
-    render_codex_prompt, tooling_failure_ready_json, ExternalReviewVerdict,
+    render_codex_prompt, run_external_review_attempt, tooling_failure_ready_json,
+    ExternalReviewVerdict,
 };
 use tempfile::TempDir;
 
@@ -71,6 +75,15 @@ fn git(repo: &std::path::Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[cfg(unix)]
+fn codex_shim(script: &str) -> (TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("codex-shim.sh");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (dir, path)
 }
 
 fn temp_git_repo() -> (TempDir, String, String) {
@@ -153,4 +166,122 @@ fn codex_output_parser_maps_verdicts_and_finding_counts() {
         parse_codex_review_output("VERDICT=TOOLING_FAILURE\n[minor] diagnostic\n").unwrap();
     assert_eq!(tooling.verdict, ExternalReviewVerdict::ToolingFailure);
     assert_eq!(tooling.counts.minor, 1);
+}
+
+#[test]
+#[cfg(unix)]
+fn codex_shim_invocation_persists_runner_metadata() {
+    let (repo, base, head) = temp_git_repo();
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE tasks (
+            display_id TEXT PRIMARY KEY,
+            contract TEXT,
+            plan TEXT,
+            cycles TEXT,
+            wrap_log TEXT,
+            workspace_path TEXT,
+            branch TEXT
+        );
+        CREATE TABLE external_reviews (
+            display_id TEXT PRIMARY KEY,
+            task_id TEXT,
+            attempt INTEGER,
+            adapter TEXT,
+            runner TEXT,
+            model_id TEXT,
+            model_metadata TEXT,
+            base_sha TEXT,
+            head_sha TEXT,
+            verdict TEXT,
+            critical_count INTEGER,
+            major_count INTEGER,
+            minor_count INTEGER,
+            started_at TEXT,
+            completed_at TEXT,
+            duration_ms INTEGER,
+            log_path TEXT,
+            transcript_path TEXT,
+            contract_ref TEXT,
+            plan_ref TEXT,
+            wrap_log_ref TEXT,
+            diff_ref TEXT,
+            prior_review_ref TEXT,
+            findings TEXT
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO tasks (display_id, contract, plan, cycles, wrap_log, workspace_path, branch)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        (
+            "T083",
+            r#"{"done_when":"review me"}"#,
+            r#"{"phases":[{"name":"Phase"}]}"#,
+            "[]",
+            r#"[{"executive_summary":"wrapped"}]"#,
+            repo.path().to_str().unwrap(),
+            "feature/external-review",
+        ),
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO external_reviews (display_id, task_id, attempt) VALUES ('ER900', 'T083', 1)",
+        [],
+    )
+    .unwrap();
+
+    let runs = tempfile::tempdir().unwrap();
+    let old_runs = std::env::var_os("STORES_RUNS_DIR");
+    std::env::set_var("STORES_RUNS_DIR", runs.path());
+    let (_shim_dir, shim) = codex_shim(
+        "#!/bin/sh\nstdin=$(cat)\nprintf '%s' \"$stdin\" | grep -q 'Review task T083' || exit 9\necho 'VERDICT: PASS'\necho '[minor] note'\n",
+    );
+    let review = ReviewCfg {
+        runner: "codex".to_string(),
+        model: Some("shim-model".to_string()),
+        max_parallel: 1,
+        timeout_secs: 10,
+    };
+    let codex = CodexCfg {
+        command: shim.to_string_lossy().to_string(),
+        args: Vec::new(),
+    };
+    let parsed = run_external_review_attempt(
+        &conn,
+        "ER900",
+        "T083",
+        &review,
+        &codex,
+        None,
+        Some(&base),
+        Some(&head),
+    )
+    .unwrap();
+    assert_eq!(parsed.verdict, ExternalReviewVerdict::Pass);
+
+    let (runner, model_id, verdict, transcript_path, metadata): (
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT runner, model_id, verdict, transcript_path, model_metadata FROM external_reviews WHERE display_id='ER900'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(runner, "codex");
+    assert_eq!(model_id, "shim-model");
+    assert_eq!(verdict, "PASS");
+    assert!(std::path::Path::new(&transcript_path).exists());
+    assert!(transcript_path.starts_with(runs.path().to_str().unwrap()));
+    assert!(metadata.contains("session_id"));
+
+    match old_runs {
+        Some(v) => std::env::set_var("STORES_RUNS_DIR", v),
+        None => std::env::remove_var("STORES_RUNS_DIR"),
+    }
 }
