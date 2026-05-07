@@ -125,24 +125,75 @@ Silent standing-by is a bug. **Drive PID alive ≠ task progressing.** A drive s
 
 ### Required: substrate-state monitor
 
-On every session start, arm a Monitor that diffs actionable substrate state and emits on change:
+On every session start, arm a Monitor that diffs actionable substrate state across THREE surfaces (tasks, external_reviews, daemon held-reasons) and emits on change. The narrow tasks-only monitor (used in earlier sessions) misses the post-T083 external_reviews lane entirely AND misses the post-accept ceremony states (`accepted`, `cargo_installed`) where transitions can stall the same way.
 
 ```bash
-prev=""
+prev_t=""
+prev_e=""
+prev_h=""
 while true; do
-  now=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
-    | jq -r '.[] | select(.status | IN("in_review","ready","planning","plan_review","executing","code_review","blocked","deploy_blocked","accepted")) | "\(.display_id)|\(.status)|\(.next_agent // "-")|\(.blocked)|\(.drive_pid // "-")|cycle=\(.current_cycle):phase=\(.current_phase)"' \
+  # tasks: actionable + ceremony states (excludes terminal schema_migrated)
+  now_t=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
+    | jq -r '.[] | select(.status | IN("in_review","ready","planning","plan_review","executing","code_review","blocked","deploy_blocked","accepted","cargo_installed")) | "T:\(.display_id)|status=\(.status)|tier=\(.tier_hint // "-")|next=\(.next_agent // "-")|drive_pid=\(.drive_pid // "-")|wrap=\(.wrap_log | length // 0)|blocked_reason=\(.blocked_reason // "-" | .[0:60])"' \
     | sort)
-  if [ "$now" != "$prev" ]; then
-    [ -z "$prev" ] && echo "[init]" || comm -13 <(echo "$prev") <(echo "$now") | sed 's/^/+ /'
-    [ -n "$prev" ] && comm -23 <(echo "$prev") <(echo "$now") | sed 's/^/- /'
-    prev=$now
+  # external_reviews: any non-terminal status (T083+ lane visibility)
+  now_e=$(sqlite3 .stores/db.sqlite "SELECT 'ER:' || display_id || '|task=' || COALESCE(task_id,'-') || '|status=' || status || '|verdict=' || COALESCE(verdict,'-') || '|runner=' || COALESCE(NULLIF(runner,''),'unknown') || '|attempt=' || COALESCE(attempt,0) FROM external_reviews WHERE status IN ('pending','running','tooling_held') ORDER BY id;" 2>/dev/null | sort)
+  # latest engine-runner held-reason snapshot (5-line tail when changed)
+  now_h=$(tail -50 logs/agents-daemon.log 2>/dev/null \
+    | grep -E "row store=|external-review task_id=|drive failed|deploy_blocked" \
+    | tail -5 | sed 's/^/HELD: /')
+  combined="$now_t
+---
+$now_e
+---
+$now_h"
+  if [ "$combined" != "${prev_t}${prev_e}${prev_h}" ]; then
+    if [ -z "${prev_t}${prev_e}${prev_h}" ]; then
+      echo "[init $(date +%H:%M:%S)]"; echo "$now_t"; echo "$now_e"; echo "$now_h"
+    else
+      [ "$now_t" != "$prev_t" ] && { comm -13 <(echo "$prev_t") <(echo "$now_t") | sed 's/^/+ /'; comm -23 <(echo "$prev_t") <(echo "$now_t") | sed 's/^/- /'; }
+      [ "$now_e" != "$prev_e" ] && { comm -13 <(echo "$prev_e") <(echo "$now_e") | sed 's/^/+ /'; comm -23 <(echo "$prev_e") <(echo "$now_e") | sed 's/^/- /'; }
+      [ "$now_h" != "$prev_h" ] && echo "$now_h" | tail -3
+    fi
+    prev_t=$now_t; prev_e=$now_e; prev_h=$now_h
   fi
-  sleep 30
+  sleep 20
 done
 ```
 
-This catches transitions you'd otherwise miss: tasks landing in `in_review` (wrap done — must dispatch codex or accept), drives dying on actionable rows (orphan re-drive needed), and lane-cap saturation. Poll cadence 30s avoids API thrash; output is one line per change.
+What this catches that the narrow filter missed:
+- Tasks at `accepted` / `cargo_installed` whose post-accept ceremony stalled (subscriber-transition-miss, same bug class as the T086 deploy-gap).
+- `external_reviews` rows stuck at `pending` (no runner dispatch) or `tooling_held` (waiting retry) — the T083 lane's daily failure mode.
+- Engine-runner `held_reason` changes (e.g. `no_autonomous_reviewer_runner`, `live_drive_owner`, `cap-held`) — the daemon's classifier output that explains WHY a row isn't dispatching.
+
+Poll cadence 20s: API-thrash-safe, fast enough to catch a wrap → in_review within one tick.
+
+### Required: 10-minute backup scan (belt-and-suspenders)
+
+The diff-on-change monitor above is the primary signal, but diffs only fire on CHANGE. If a row is stuck — pending, in_review awaiting external_review, accepted-but-no-ceremony — it produces no diff event and the engine-controller stays blind. Blake has called this out multiple times this session ("lots in review, are you missing them?"). The fix is a SECOND monitor that emits a full snapshot every ~10 minutes regardless of change:
+
+```bash
+while true; do
+  echo "=== BACKUP SCAN $(date +%H:%M:%S) ==="
+  ir=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
+    | jq -r '.[] | select(.status=="in_review") | "T:\(.display_id) tier=\(.tier_hint // "-") wrap=\(.wrap_log | length // 0) drive_pid=\(.drive_pid // "-")"')
+  [ -n "$ir" ] && { echo "IN_REVIEW (action: codex if no ER PASS / accept if PASS):"; echo "$ir" | sed 's/^/  /'; } || echo "IN_REVIEW: <empty>"
+  bl=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
+    | jq -r '.[] | select(.status=="blocked" or .status=="deploy_blocked") | "T:\(.display_id) status=\(.status) reason=\(.blocked_reason // "-" | .[0:80])"')
+  [ -n "$bl" ] && { echo "BLOCKED (action: triage / resume):"; echo "$bl" | sed 's/^/  /'; }
+  er=$(sqlite3 .stores/db.sqlite "SELECT 'ER:' || display_id || ' task=' || COALESCE(task_id,'-') || ' status=' || status || ' verdict=' || COALESCE(verdict,'-') || ' runner=' || COALESCE(NULLIF(runner,''),'unknown') FROM external_reviews WHERE status IN ('pending','running','tooling_held') ORDER BY id;" 2>/dev/null)
+  [ -n "$er" ] && { echo "EXTERNAL_REVIEWS (action: dispatch / accept / retry):"; echo "$er" | sed 's/^/  /'; }
+  st=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
+    | jq -r '.[] | select(.status=="accepted" or .status=="cargo_installed") | "T:\(.display_id) status=\(.status) tier=\(.tier_hint // "-")"' | head -10)
+  [ -n "$st" ] && { echo "POST-ACCEPT CEREMONY STALL (first 10):"; echo "$st" | sed 's/^/  /'; }
+  echo "(next scan in 10 min)"
+  sleep 600
+done
+```
+
+**Both monitors are mandatory** at session start. The diff monitor catches transitions in real-time; the backup scan re-surfaces stuck rows that produce no transitions. Together they close the "silent stuck" failure mode that has wasted multiple sessions.
+
+When the backup scan emits, treat the output as a triage list: every IN_REVIEW row needs codex-or-accept; every BLOCKED row needs resume-or-triage; every ER pending needs runner-dispatch; every ceremony stall needs investigation.
 
 ### Action checklist when a task lands at `in_review`
 
