@@ -98,6 +98,19 @@ cp "$FIXTURE_POLICIES" .stores/policies.yaml
 NOW="2026-05-03T00:00:00Z"
 CONTRACT='{"done_when":"x","scope_in":"y","scope_out":"z"}'
 
+# Draw the daemon starting-line for accept-merge before the live accept below.
+# Otherwise a first daemon run after T001's transition treats that pre-existing
+# transition as historical backlog and records skip-historical.
+sqlite3 .stores/db.sqlite <<SQL
+INSERT INTO transition_history (store, row_id, display_id, from_status, to_status, verb, invoker, occurred_at)
+VALUES ('tasks', 9000, 'T900', 'in_review', 'accepted', 'accept', 'human', '$NOW');
+SQL
+stores agents run --once --poll-interval 0.1 > "$TMP/seed-daemon.log" 2>&1 \
+    || fail "setup: seed daemon failed: $(cat "$TMP/seed-daemon.log")"
+SEED_LOCK=$(sqlite3 .stores/db.sqlite "SELECT last_status FROM dispatch_locks WHERE display_id='T900' AND agent_name='accept-merge'")
+[[ "$SEED_LOCK" == "skip-historical" ]] \
+    || fail "setup: expected accept-merge seed lock skip-historical; got: $SEED_LOCK"
+
 # ---------------------------------------------------------------------------
 # Test (a): seed in_review row → accept → daemon dispatches accept-merge
 # ---------------------------------------------------------------------------

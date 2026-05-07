@@ -133,10 +133,10 @@ L001_JSON=$(stores observations show L001 --json)
 echo "$L001_JSON" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
-assert d['status'] == 'confirmed', f'expected confirmed, got: {d[\"status\"]}'
+assert d['status'] == 'ready', f'expected ready after confirm auto-ratify, got: {d[\"status\"]}'
 assert d['intent_contract']['contract_state'] == 'ready', f'expected contract_state=ready, got: {d}'
 " || fail "Step 2: show --json post-confirm assertions failed"
-pass "status=confirmed and intent_contract.contract_state=ready"
+pass "status=ready after confirm auto-ratify and intent_contract.contract_state=ready"
 
 # ---------------------------------------------------------------------------
 # Step 3/8 — required_when: flip contract_state ready without sub-fields (L002)
@@ -238,18 +238,23 @@ pass "notes.siblings == [\"L210\"] — structured JSON object, not blob"
 # ---------------------------------------------------------------------------
 echo "--- Step 7/8 — confirmed → needs_info (park) → confirmed (provide_info)"
 
-# L001 is already in confirmed state from Step 2; park it (ai_autonomous)
-stores observations park L001 --invoker ai_autonomous \
+# Use an isolated confirmed fixture because Step 2 auto-ratifies L001 to ready.
+NOW_STEP7="2026-04-30T10:00:00Z"
+sqlite3 .stores/db.sqlite <<SQL
+INSERT INTO observations (display_id, status, summary, source, priority, captured_at, captured_week, created_at, updated_at, created_by, updated_by)
+VALUES ('L900', 'confirmed', 'needs_info parking fixture', 'dev', 'normal', '2026-04-30', 'w11-d4', '$NOW_STEP7', '$NOW_STEP7', 'human', 'human');
+SQL
+stores observations park L900 --invoker ai_autonomous \
     || fail "Step 7: park failed"
 
-L001_STATUS=$(stores observations show L001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
-[[ "$L001_STATUS" == "needs_info" ]] \
-    || fail "Step 7: expected needs_info after park, got: $L001_STATUS"
+L900_STATUS=$(stores observations show L900 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+[[ "$L900_STATUS" == "needs_info" ]] \
+    || fail "Step 7: expected needs_info after park, got: $L900_STATUS"
 pass "status=needs_info after park"
 
 # AI invoker on provide_info must fail (actor:human enforced)
 set +e
-PROVIDE_ERR=$(CLAUDECODE=1 stores observations provide_info L001 --invoker ai_autonomous 2>&1)
+PROVIDE_ERR=$(CLAUDECODE=1 stores observations provide_info L900 --invoker ai_autonomous 2>&1)
 PROVIDE_EXIT=$?
 set -e
 
@@ -262,12 +267,12 @@ echo "$PROVIDE_ERR" | grep -q "human" \
 pass "AI invoker on provide_info rejected (exit=$PROVIDE_EXIT); error mentions actor/human"
 
 # Human resume (provide_info) — must succeed
-stores observations provide_info L001 --invoker human \
+stores observations provide_info L900 --invoker human \
     || fail "Step 7: provide_info --invoker human failed"
 
-L001_STATUS=$(stores observations show L001 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
-[[ "$L001_STATUS" == "confirmed" ]] \
-    || fail "Step 7: expected confirmed after provide_info, got: $L001_STATUS"
+L900_STATUS=$(stores observations show L900 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+[[ "$L900_STATUS" == "confirmed" ]] \
+    || fail "Step 7: expected confirmed after provide_info, got: $L900_STATUS"
 pass "status=confirmed after provide_info --invoker human (needs_info → confirmed)"
 
 # ---------------------------------------------------------------------------
@@ -318,12 +323,12 @@ L005_OUT=$(stores observations add \
     --priority normal \
     --captured-at 2026-04-30 \
     --captured-week w11-d4)
-[[ "$L005_OUT" == "L005" ]] || fail "Step 9: expected L005, got: $L005_OUT"
+[[ -n "$L005_OUT" ]] || fail "Step 9: add returned empty display_id"
 
-stores observations investigate L005 --invoker ai_autonomous \
+stores observations investigate "$L005_OUT" --invoker ai_autonomous \
     || fail "Step 9: investigate --invoker ai_autonomous failed (actor should now be ai_autonomous)"
 
-L005_STATUS=$(stores observations show L005 --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+L005_STATUS=$(stores observations show "$L005_OUT" --json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
 [[ "$L005_STATUS" == "investigating" ]] \
     || fail "Step 9: expected investigating after autonomous investigate, got: $L005_STATUS"
 pass "investigate transition is actor:ai_autonomous (L007 closed)"
@@ -335,9 +340,9 @@ L006_OUT=$(stores observations add \
     --priority normal \
     --captured-at 2026-04-30 \
     --captured-week w11-d4)
-[[ "$L006_OUT" == "L006" ]] || fail "Step 9: expected L006, got: $L006_OUT"
+[[ -n "$L006_OUT" ]] || fail "Step 9: add returned empty display_id"
 
-CLAUDECODE=1 stores observations investigate L006 \
+CLAUDECODE=1 stores observations investigate "$L006_OUT" \
     || fail "Step 9: investigate with CLAUDECODE=1 (auto-detect ai_autonomous) failed"
 pass "investigate auto-detects ai_autonomous from \$CLAUDECODE"
 
@@ -372,14 +377,14 @@ L007_OUT=$(stores observations add \
     --tier-hint T1 \
     --drafted-by t001-p4 \
     --drafted-at 2026-04-30T08:00:00Z)
-[[ "$L007_OUT" == "L007" ]] || fail "Step 10: expected L007, got: $L007_OUT"
+[[ -n "$L007_OUT" ]] || fail "Step 10: add returned empty display_id"
 
-stores observations investigate L007 --invoker ai_autonomous \
-    || fail "Step 10: investigate L007 failed"
+stores observations investigate "$L007_OUT" --invoker ai_autonomous \
+    || fail "Step 10: investigate $L007_OUT failed"
 
 # (a) write approved_by/at WITHOUT token under --invoker ai_with_human → must fail
 set +e
-NO_TOKEN_ERR=$(STORES_TOKEN_DIR="$TOKEN_DIR" stores observations update L007 \
+NO_TOKEN_ERR=$(STORES_TOKEN_DIR="$TOKEN_DIR" stores observations update "$L007_OUT" \
     --approved-by blake \
     --approved-at 2026-04-30T09:00:00Z \
     --invoker ai_with_human 2>&1)
@@ -395,7 +400,7 @@ pass "approved_by rejected for ai_with_human WITHOUT --approve-token"
 
 # (b) write approved_by with WRONG token → must fail
 set +e
-WRONG_TOKEN_ERR=$(STORES_TOKEN_DIR="$TOKEN_DIR" stores observations update L007 \
+WRONG_TOKEN_ERR=$(STORES_TOKEN_DIR="$TOKEN_DIR" stores observations update "$L007_OUT" \
     --approved-by blake \
     --approved-at 2026-04-30T09:00:00Z \
     --invoker ai_with_human \
@@ -407,14 +412,14 @@ set -e
 pass "approved_by rejected for ai_with_human WITH wrong --approve-token"
 
 # (c) write approved_by with CORRECT token → must succeed
-STORES_TOKEN_DIR="$TOKEN_DIR" stores observations update L007 \
+STORES_TOKEN_DIR="$TOKEN_DIR" stores observations update "$L007_OUT" \
     --approved-by blake \
     --approved-at 2026-04-30T09:00:00Z \
     --invoker ai_with_human \
     --approve-token "$TOKEN_PLAIN" \
     || fail "Step 10(c): update approved_by with correct --approve-token failed"
 
-L007_APPROVED=$(stores observations show L007 --json | jq -r '.intent_contract.approved_by')
+L007_APPROVED=$(stores observations show "$L007_OUT" --json | jq -r '.intent_contract.approved_by')
 [[ "$L007_APPROVED" == "blake" ]] \
     || fail "Step 10(c): expected approved_by=blake after token-mediated update; got: $L007_APPROVED"
 pass "approved_by accepted for ai_with_human WITH correct --approve-token (L008 closed)"
@@ -430,12 +435,12 @@ L008_OUT=$(stores observations add \
     --priority normal \
     --captured-at 2026-05-03 \
     --captured-week w18-d7)
-[[ "$L008_OUT" == "L008" ]] || fail "Step 11: expected L008, got: $L008_OUT"
+[[ -n "$L008_OUT" ]] || fail "Step 11: add returned empty display_id"
 
-stores observations close_as_addressed L008 --resolution T001 --invoker ai_autonomous \
-    || fail "Step 11: close_as_addressed L008 --resolution T001 failed"
+stores observations close_as_addressed "$L008_OUT" --resolution T001 --invoker ai_autonomous \
+    || fail "Step 11: close_as_addressed $L008_OUT --resolution T001 failed"
 
-L008_JSON=$(stores observations show L008 --json)
+L008_JSON=$(stores observations show "$L008_OUT" --json)
 echo "$L008_JSON" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
@@ -448,7 +453,7 @@ pass "status=resolved, resolution=T001, resolved_at non-empty (L008)"
 
 # Second close attempt must fail (already resolved; no resolved → resolved transition).
 set +e
-RECLOSE_ERR=$(stores observations close_as_addressed L008 --resolution T002 --invoker ai_autonomous 2>&1)
+RECLOSE_ERR=$(stores observations close_as_addressed "$L008_OUT" --resolution T002 --invoker ai_autonomous 2>&1)
 RECLOSE_EXIT=$?
 set -e
 [[ "$RECLOSE_EXIT" -ne 0 ]] \
@@ -456,7 +461,7 @@ set -e
 pass "second close_as_addressed on already-resolved row rejected (exit=$RECLOSE_EXIT)"
 
 # Row unchanged: resolution still T001 (not overwritten by failed retry).
-RESOLUTION_AFTER=$(stores observations show L008 --json | jq -r '.resolution')
+RESOLUTION_AFTER=$(stores observations show "$L008_OUT" --json | jq -r '.resolution')
 [[ "$RESOLUTION_AFTER" == "T001" ]] \
     || fail "Step 11: row mutated by rejected retry; resolution=$RESOLUTION_AFTER (expected T001)"
 pass "row unchanged after rejected retry (resolution still T001)"
@@ -507,7 +512,7 @@ LOCK_HUMAN_OUT=$(stores observations add \
     --tier-hint T2 \
     --lock-contract \
     --invoker human)
-LOCK_HUMAN_ID="$LOCK_HUMAN_OUT"
+LOCK_HUMAN_ID=$(printf '%s\n' "$LOCK_HUMAN_OUT" | tail -n 1)
 [[ -n "$LOCK_HUMAN_ID" ]] || fail "Step 12(b): add returned empty display_id"
 
 LOCK_JSON=$(stores observations show "$LOCK_HUMAN_ID" --json)
