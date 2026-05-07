@@ -54,37 +54,29 @@ Gatekeeper rollout stance:
 
 ## Agent-comm protocol
 
-Use the active shared thread for the session. Current stores thread:
+Use the active shared thread for the session. The thread path in older handovers or examples may be stale; verify the active path from Blake/session handover before sending. If uncertain, ask or read the thread header/recent messages first. Do not assume a hardcoded `stores-thread` path is current.
+
+Example watch command once the active path is confirmed:
 
 ```text
-/home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md
-```
-
-Older context thread:
-
-```text
-/home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md
-```
-
-Pi should watch the thread in this session:
-
-```text
-/agent-comm-watch /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md --name pi
+/agent-comm-watch <active-thread-path> --name pi
 ```
 
 If slash commands are unavailable:
 
 ```bash
-agent-comm watch /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md --name pi --from-end
+agent-comm watch <active-thread-path> --name pi --from-end
 ```
 
 When responding over agent-comm, Pi should include:
 
 - Clear decision.
-- Architectural rationale.
+- Architectural rationale when the call is novel or non-obvious; if the direction is already documented, prefer terse yes/redirect with citations instead of re-deriving the whole argument.
 - Scope guardrails.
 - Whether engine controller may proceed.
 - Any follow-up observation/doc update needed.
+
+Echo only what is new. If prior messages already established the rationale, cite the prior msg id or doc path rather than restating it. Use explicit prefixes when helpful: `DECISION`, `FYI`, `BLOCKER`, `PASS-READY`, `HALT:`.
 
 For urgent live corrections, send a high-priority blocking message whose first word is `HALT:`. The engine controller treats that as stop-current-action-before-commit if seen in time.
 
@@ -127,6 +119,8 @@ One Pi architectural ruling cascades to downstream mechanical edits/tests until 
 When concurrency itself causes rebase-race churn, Pi should lower WIP / quiesce integration rather than blindly preserve an active-count target. Treat lane saturation as an architectural signal, not a productivity failure.
 
 A good non-blocking phrase from the engine controller is: “I think this is a cascading consequence of your prior ruling on X; proceeding unless you object.”
+
+When starting or continuing a deep architecture conversation, Pi should ensure the operational lane is not silently starving. Pi is not the engine controller and should not poll every few minutes; however, if substrate-visible actionable work exists (for example `in_review next=wrap blocked=false`) and all agents are standing by, or if the engine controller posts no heartbeat for more than 5 minutes during an active session, Pi should issue one priority/actionability ruling and require the engine controller to dispatch the next action or state the blocker. After an architecture ruling, explicitly say whether the topic is parked and which operational lane should resume.
 
 ## When to push back
 
