@@ -101,8 +101,36 @@ layer (`.stores/policies.yaml`), and runs registered subscribers
 (`.stores/agents.yaml`). The first builtin subscriber, `accept-merge`,
 fast-merges a task's branch into main when it transitions
 `in_review → accepted`; conflicts flip the row to `deploy_blocked` and
-fire `ntfy`. See [`docs/agents-and-policies.md`](./docs/agents-and-policies.md)
-for the full schema reference and runbook.
+fire `ntfy`. T2/T3 rows also get a typed `external_reviews` lane after wrap;
+`tasks accept` refuses them until the current head has an external review
+`PASS` (T1 stays lightweight by default). Configure the review lane in
+`.stores/config.yaml`:
+
+```yaml
+review:
+  runner: codex        # codex | pi | claude-code
+  max_parallel: 1      # external-review concurrency cap
+  timeout_secs: 1800
+  model: gpt-5-codex   # optional; runner-specific
+
+codex:
+  command: codex
+  args: ["review", "--stdin"]
+```
+
+Pi / Claude Code variants only change `review.runner` (and optional model):
+
+```yaml
+review: { runner: pi, max_parallel: 1, timeout_secs: 1800, model: pi-review }
+# or
+review: { runner: claude-code, max_parallel: 1, timeout_secs: 1800, model: sonnet }
+```
+
+`TOOLING_FAILURE` records `tooling_held` with a retryable held reason visible
+in `stores agents run` / `stores watch`; `REVISE` routes the task back to the
+executor; `PASS` unblocks human accept. See
+[`docs/agents-and-policies.md`](./docs/agents-and-policies.md) for the full
+schema reference and runbook.
 
 ## Usage
 
