@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -83,6 +83,32 @@ pub fn db_path() -> Result<PathBuf> {
 
 pub fn manifest_path() -> Result<PathBuf> {
     Ok(stores_dir()?.join("manifest.yaml"))
+}
+
+/// Stores-private daemon binary path.
+///
+/// Default: `$HOME/.local/share/stores/bin/stores`.
+/// Tests may set `STORES_DAEMON_BIN_PATH` to keep migration/promotion out of
+/// the real home directory.
+pub fn daemon_binary_path() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("STORES_DAEMON_BIN_PATH") {
+        return Ok(PathBuf::from(p));
+    }
+    Ok(home_dir()?
+        .join(".local")
+        .join("share")
+        .join("stores")
+        .join("bin")
+        .join("stores"))
+}
+
+pub fn ensure_daemon_binary_parent() -> Result<PathBuf> {
+    let path = daemon_binary_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating daemon binary parent {}", parent.display()))?;
+    }
+    Ok(path)
 }
 
 /// Check that `.stores/` has been initialized (db + manifest both present).
@@ -394,10 +420,7 @@ mod tests {
 
         let err = result.expect_err("must error when .stores/ missing");
         let msg = err.to_string();
-        assert!(
-            msg.contains(".stores"),
-            "error must mention .stores: {msg}"
-        );
+        assert!(msg.contains(".stores"), "error must mention .stores: {msg}");
     }
 
     #[test]

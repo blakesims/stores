@@ -1,11 +1,11 @@
 [package]
-name = "cargo-install-noop"
+name = "stores"
 version = "0.0.1"
 edition = "2021"
 publish = false
 
 [[bin]]
-name = "cargo-install-noop"
+name = "stores"
 path = "src/main.rs"
 
 [features]

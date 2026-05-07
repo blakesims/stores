@@ -96,18 +96,189 @@ impl DaemonExeGuard<FsBinaryIdentityProvider> {
     pub fn from_process() -> Result<Self> {
         let provider = FsBinaryIdentityProvider;
         let current_exe = std::env::current_exe().context("resolving current_exe")?;
+        let private_path = ensure_private_daemon_binary(&current_exe, &provider)?;
         let mut startup_identity = provider.identity(&current_exe)?;
-        let launch_path = resolve_launch_path_from_env()?;
         #[cfg(debug_assertions)]
         if std::env::var_os("STORES_TEST_DAEMON_FORCE_STALE").is_some() {
-            let launch_identity = provider.identity(&launch_path)?;
+            let private_identity = provider.identity(&private_path)?;
             startup_identity = BinaryIdentity {
-                dev: launch_identity.dev,
-                ino: launch_identity.ino.saturating_add(1),
+                dev: private_identity.dev,
+                ino: private_identity.ino.saturating_add(1),
             };
         }
-        Ok(Self::new(startup_identity, launch_path, provider))
+        Ok(Self::new(startup_identity, private_path, provider))
     }
+}
+
+fn ensure_private_daemon_binary(
+    current_exe: &Path,
+    provider: &FsBinaryIdentityProvider,
+) -> Result<PathBuf> {
+    let private_path = crate::paths::ensure_daemon_binary_parent()?;
+
+    // Existence shortcut: validate the existing binary before trusting it.
+    // A partial write from a previous crashed seed would otherwise be returned
+    // without any integrity check.
+    if private_path.exists() {
+        validate_stale_reexec_candidate(&private_path)
+            .map_err(|f| anyhow!(private_candidate_validation_message(&f)))
+            .with_context(|| {
+                format!(
+                    "existing private daemon binary {} failed validation; \
+                     remove it manually to re-seed",
+                    private_path.display()
+                )
+            })?;
+        return Ok(private_path);
+    }
+
+    let source = resolve_launch_path_from_env().unwrap_or_else(|_| current_exe.to_path_buf());
+    let source = if source.exists() {
+        source
+    } else {
+        current_exe.to_path_buf()
+    };
+
+    // Atomic seed: copy to a unique temp file in the same directory, validate
+    // it, then rename into place.  Using the same directory guarantees the
+    // rename is atomic (same filesystem / mount point).  A process-id +
+    // pseudo-random suffix ensures concurrent seeders don't collide on the
+    // temp path itself.
+    let parent = private_path
+        .parent()
+        .ok_or_else(|| anyhow!("private daemon binary path has no parent directory"))?;
+    let tmp_name = format!(
+        "stores.tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    );
+    let tmp_path = parent.join(&tmp_name);
+
+    // Drop guard: if we exit this function with an error before the temp has
+    // been consumed (renamed / hard-linked into place or explicitly removed),
+    // the guard removes it so we never accumulate stale stores.tmp.<pid>.<nanos>
+    // files in the private binary directory.  Call `guard.disarm()` once the
+    // temp is no longer our responsibility.
+    struct TmpGuard(Option<PathBuf>);
+    impl TmpGuard {
+        fn disarm(&mut self) {
+            self.0 = None;
+        }
+    }
+    impl Drop for TmpGuard {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    let mut guard = TmpGuard(Some(tmp_path.clone()));
+
+    std::fs::copy(&source, &tmp_path).with_context(|| {
+        format!(
+            "seeding private daemon binary {} from {} (via temp {})",
+            private_path.display(),
+            source.display(),
+            tmp_path.display()
+        )
+    })?;
+    if let Ok(md) = std::fs::metadata(&source) {
+        let _ = std::fs::set_permissions(&tmp_path, md.permissions());
+    }
+    validate_stale_reexec_candidate(&tmp_path)
+        .map_err(|f| anyhow!(private_candidate_validation_message(&f)))?;
+
+    // Test-only synchronization hook: STORES_TEST_SEED_RACE_DELAY_MS introduces
+    // a sleep between the existence-shortcut and the hard_link so both
+    // concurrent seeders are guaranteed to pass the shortcut before either
+    // attempts the link.  Gated on debug_assertions so release builds compile
+    // it out entirely — the env-var cannot leak into production release
+    // binaries.
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(ms) = std::env::var("STORES_TEST_SEED_RACE_DELAY_MS") {
+            if let Ok(n) = ms.parse::<u64>() {
+                // Emit a greppable sentinel before the sleep+link so the
+                // concurrent-seeders test can assert both seeders reached this
+                // point (not just that the loser fired the AlreadyExists arm).
+                eprintln!("stores::agents_run::seed_race: reached pre-link");
+                if n > 0 {
+                    std::thread::sleep(Duration::from_millis(n));
+                }
+            }
+        }
+    }
+
+    // Use hard_link (not rename) as the install primitive so that concurrent
+    // seeders are detectable.  On POSIX, rename(2) silently replaces the
+    // destination if it already exists, making the AlreadyExists arm below dead
+    // code on Linux/macOS.  hard_link(2) returns EEXIST when the destination
+    // exists, so two concurrent seeders racing here will have one win (link
+    // succeeds) and one lose (link returns AlreadyExists) — the race-handling
+    // arm now actually fires.  Both tmp and dest are in the same directory
+    // (same filesystem / mount point), so cross-device failures cannot occur.
+    match std::fs::hard_link(&tmp_path, &private_path) {
+        Ok(()) => {
+            // We won the race; private_path now contains our validated copy.
+            // Remove the temp first (guard still armed so drop retries on
+            // failure), then disarm only on success.  If unlink fails the
+            // guard remains armed and runs its own idempotent remove_file on
+            // drop — that is the safety net for the failure path.
+            std::fs::remove_file(&tmp_path).with_context(|| {
+                format!("removing seed temp file {}", tmp_path.display())
+            })?;
+            guard.disarm();
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another concurrent daemon seeder won; discard our temp (guard
+            // handles it on drop) and validate the winner before trusting it.
+            // Unlink first while guard is still armed so drop retries on
+            // failure; disarm only on success — the guard's idempotent
+            // remove_file is the safety net when unlink fails.
+            // Test-only sentinel (debug_assertions builds only): emit a
+            // greppable line so the concurrent-seeders test can assert the
+            // AlreadyExists arm actually fired.
+            #[cfg(debug_assertions)]
+            if std::env::var_os("STORES_TEST_SEED_RACE_DELAY_MS").is_some() {
+                eprintln!("stores::agents_run::seed_race: loser observed AlreadyExists; validating winner");
+            }
+            std::fs::remove_file(&tmp_path).with_context(|| {
+                format!("removing seed temp file (loser) {}", tmp_path.display())
+            })?;
+            guard.disarm();
+            validate_stale_reexec_candidate(&private_path)
+                .map_err(|f| anyhow!(private_candidate_validation_message(&f)))
+                .with_context(|| {
+                    format!(
+                        "concurrent-seeded private daemon binary {} failed validation",
+                        private_path.display()
+                    )
+                })?;
+        }
+        Err(e) => {
+            // guard will clean up tmp_path on drop.
+            return Err(e).with_context(|| {
+                format!(
+                    "linking seeded temp {} to {}",
+                    tmp_path.display(),
+                    private_path.display()
+                )
+            });
+        }
+    }
+
+    let _ = provider.identity(&private_path)?;
+    Ok(private_path)
+}
+
+fn private_candidate_validation_message(f: &CandidateValidationFailure) -> String {
+    // Use the same rich format as candidate_validation_error_message so that
+    // callers (tests and log consumers) see a consistent diagnostic shape:
+    // path, size, command, exit_status, reason, stdout, stderr.
+    candidate_validation_error_message(f)
 }
 
 pub fn resolve_launch_path_from_env() -> Result<PathBuf> {
@@ -366,6 +537,11 @@ fn bounded_output(bytes: &[u8]) -> String {
     out.replace('\n', "\\n")
 }
 
+pub(crate) fn validate_stores_binary_candidate(path: &Path) -> Result<()> {
+    validate_stale_reexec_candidate(path)
+        .map_err(|f| anyhow!(candidate_validation_error_message(&f)))
+}
+
 fn validate_stale_reexec_candidate(
     path: &Path,
 ) -> std::result::Result<(), CandidateValidationFailure> {
@@ -495,6 +671,19 @@ fn validate_stale_reexec_candidate(
             }
         }
     }
+}
+
+fn candidate_validation_error_message(f: &CandidateValidationFailure) -> String {
+    format!(
+        "candidate stores binary failed validation: path={} size={} command='{}' exit_status={} reason={} stdout='{}' stderr='{}'",
+        f.path.display(),
+        f.size.map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string()),
+        f.command,
+        f.exit_status.as_deref().unwrap_or("unknown"),
+        f.reason,
+        f.stdout,
+        f.stderr
+    )
 }
 
 fn log_candidate_validation_failure(f: &CandidateValidationFailure) {
@@ -1528,10 +1717,7 @@ pub(crate) fn close_auto_drive_lock_ok(
 ///
 /// Idempotent: the WHERE clause filters on `finished_at IS NULL`, so a
 /// second call is a no-op zero-row UPDATE.
-pub(crate) fn force_close_auto_drive_lock_ok(
-    conn: &Connection,
-    display_id: &str,
-) -> Result<()> {
+pub(crate) fn force_close_auto_drive_lock_ok(conn: &Connection, display_id: &str) -> Result<()> {
     let now = crate::handlers::row::now_iso8601();
     conn.execute(
         "UPDATE dispatch_locks SET last_status = 'ok:wrap_completed', finished_at = ?1, \
@@ -2560,7 +2746,10 @@ mod tests {
             "--poll-interval",
             "0.1",
         ]);
-        assert_eq!(filtered, vec!["stores", "agents", "run", "--poll-interval", "0.1"]);
+        assert_eq!(
+            filtered,
+            vec!["stores", "agents", "run", "--poll-interval", "0.1"]
+        );
         let joined = filtered.join(" ");
         assert!(!joined.contains("--approve-token"));
         assert!(!joined.contains("plain-token"));
@@ -2639,7 +2828,15 @@ mod tests {
         ]);
         assert_eq!(
             filtered,
-            vec!["stores", "agents", "run", "--poll-interval", "500", "--log-file", "/tmp/daemon.log"]
+            vec![
+                "stores",
+                "agents",
+                "run",
+                "--poll-interval",
+                "500",
+                "--log-file",
+                "/tmp/daemon.log"
+            ]
         );
     }
 
@@ -2664,7 +2861,10 @@ mod tests {
         assert!(!joined.contains("tkn-abc"), "token leaked");
         assert!(!joined.contains("hunter2"), "db-key leaked");
         assert!(!joined.contains("bearer-xyz"), "bearer leaked");
-        assert!(joined.contains("--poll-interval"), "--poll-interval dropped");
+        assert!(
+            joined.contains("--poll-interval"),
+            "--poll-interval dropped"
+        );
         assert!(joined.contains("1000"), "1000 dropped");
         assert!(joined.contains("--log-file"), "--log-file dropped");
     }
@@ -2695,13 +2895,15 @@ mod tests {
                          'daemon', 'daemon', 1, '2026-01-01T00:00:00Z', '/bin/stores', \
                          '0.1.0', 'deadbeef', '[]', '/tmp')",
                 rusqlite::params![pending],
-            ).unwrap();
+            )
+            .unwrap();
             let rowid = conn.last_insert_rowid();
             let display_id = format!("D{rowid:03}");
             conn.execute(
                 "UPDATE daemon_starts SET display_id = ?1 WHERE id = ?2",
                 rusqlite::params![display_id, rowid],
-            ).unwrap();
+            )
+            .unwrap();
             display_id
         };
 
@@ -2715,8 +2917,13 @@ mod tests {
 
         // Confirm stored values match derived display_ids.
         let stored: Vec<String> = {
-            let mut stmt = conn.prepare("SELECT display_id FROM daemon_starts ORDER BY id").unwrap();
-            stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+            let mut stmt = conn
+                .prepare("SELECT display_id FROM daemon_starts ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
         };
         assert_eq!(stored, vec!["D001", "D002"]);
     }

@@ -1,23 +1,11 @@
-//! `builtin:cargo-install` — refresh the `stores` binary after a task is
-//! merged into main.
+//! `builtin:cargo-install` — refresh the stores-private daemon binary after a task is merged.
 //!
-//! Subscribes to the post-accept-merge transition (row=accepted, branch
-//! merged). Runs `cargo install --path <main_repo> --features <csv> --quiet`
-//! from the main working tree. On success fires `mark_cargo_installed`
-//! (framework actor) so the chain can advance to `builtin:schema-migrate`.
-//! On failure flips the row to `deploy_blocked` with the tail of cargo's
-//! stderr captured in `blocked_reason`, fires `ntfy`, and dispatches the
-//! row to the configured `deployment_specialist`.
-//!
-//! Stale-workspace fallback (L145): when `workspace_path` is missing or
-//! unusable (worktree cleaned after merge), fall back to the daemon's cwd
-//! for the cargo install path. The cwd MUST be a git repo or the fallback
-//! fails loudly with guidance rather than silently installing from the wrong
-//! place. Mirrors accept-merge's `resolve_main_repo_for_check` pattern.
+//! Builds into an isolated cargo install root, validates the candidate `stores`
+//! binary, then atomically promotes it to the private daemon binary path.
 
 use anyhow::{bail, Context};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::flow::builtins::{
@@ -55,6 +43,10 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     };
 
     let features = features_for_entry(ctx);
+    let install_root = tempfile::Builder::new()
+        .prefix("stores-cargo-install-root-")
+        .tempdir()
+        .context("creating isolated cargo install root")?;
 
     let install = Command::new("cargo")
         .args([
@@ -63,62 +55,104 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             main_repo.to_str().unwrap_or("."),
             "--features",
             &features,
+            "--root",
+            install_root.path().to_str().unwrap_or("."),
             "--quiet",
         ])
         .output()
         .with_context(|| format!("spawning cargo install for {}", display_id))?;
 
-    if install.status.success() {
-        eprintln!(
-            "[cargo-install] {}: ok ({} features={})",
-            display_id,
-            main_repo.display(),
-            features
-        );
-        fire_framework_transition(
-            ctx.conn,
-            display_id,
-            "mark_cargo_installed",
-            std::collections::BTreeMap::new(),
-            ctx.policies_hash,
-        )
-        .with_context(|| format!("firing mark_cargo_installed for {}", display_id))?;
+    if !install.status.success() {
+        let stderr = String::from_utf8_lossy(&install.stderr).to_string();
+        let blocked_reason = format_cargo_blocked_reason(&main_repo, &features, &stderr);
+        block_deploy(row, ctx, display_id, blocked_reason)?;
         return Ok(0);
     }
 
-    let stderr = String::from_utf8_lossy(&install.stderr).to_string();
+    let candidate = install_root.path().join("bin").join("stores");
+    if let Err(e) = crate::handlers::agents_run::validate_stores_binary_candidate(&candidate) {
+        let blocked_reason = format!(
+            "cargo install --path {} --features {} produced invalid stores candidate at {}:\n{:#}",
+            main_repo.display(),
+            features,
+            candidate.display(),
+            e
+        );
+        block_deploy(row, ctx, display_id, blocked_reason)?;
+        return Ok(0);
+    }
+
+    let private_path = crate::paths::ensure_daemon_binary_parent()?;
+    let promote_path = private_path.with_extension(format!("candidate.{}", std::process::id()));
+    std::fs::copy(&candidate, &promote_path).with_context(|| {
+        format!(
+            "copying validated candidate {} to promotion path {}",
+            candidate.display(),
+            promote_path.display()
+        )
+    })?;
+    if let Ok(md) = std::fs::metadata(&candidate) {
+        let _ = std::fs::set_permissions(&promote_path, md.permissions());
+    }
+    std::fs::rename(&promote_path, &private_path).with_context(|| {
+        format!(
+            "promoting validated stores candidate to private daemon path {}",
+            private_path.display()
+        )
+    })?;
+
+    eprintln!(
+        "[cargo-install] {}: ok ({} features={} private_path={})",
+        display_id,
+        main_repo.display(),
+        features,
+        private_path.display()
+    );
+    fire_framework_transition(
+        ctx.conn,
+        display_id,
+        "mark_cargo_installed",
+        std::collections::BTreeMap::new(),
+        ctx.policies_hash,
+    )
+    .with_context(|| format!("firing mark_cargo_installed for {}", display_id))?;
+    Ok(0)
+}
+
+fn format_cargo_blocked_reason(main_repo: &Path, features: &str, stderr: &str) -> String {
     let tail: Vec<&str> = stderr.lines().collect();
     let start = tail.len().saturating_sub(20);
     let tail_joined = tail[start..].join("\n");
-    let blocked_reason = format!(
+    format!(
         "cargo install --path {} --features {} failed:\n{}",
         main_repo.display(),
         features,
         tail_joined.trim()
-    );
+    )
+}
 
+fn block_deploy(
+    row: &Value,
+    ctx: &DispatchCtx,
+    display_id: &str,
+    blocked_reason: String,
+) -> anyhow::Result<()> {
     fire_mark_deploy_blocked(ctx.conn, display_id, &blocked_reason, ctx.policies_hash)
         .with_context(|| format!("flipping {} to deploy_blocked", display_id))?;
 
     let event = NotifyEvent {
         row_id: display_id.to_string(),
         transition_attempted: "tasks: accepted→deploy_blocked".to_string(),
-        policy_id_or_actor_halt: "cargo-install: build failure".to_string(),
+        policy_id_or_actor_halt: "cargo-install: build/candidate failure".to_string(),
         summary: blocked_reason.clone(),
     };
     let _ = crate::flow::notify_with_path(ctx.config_path, event);
 
     dispatch_to_specialist(row, ctx, display_id, "cargo-install");
-
-    Ok(0)
+    Ok(())
 }
 
 /// Resolve a main-repo path via the daemon's current working directory.
-///
-/// Validates that cwd is a git repo (via `git rev-parse --git-common-dir`) AND
-/// that the Cargo.toml at cwd belongs to the `stores` crate. Both checks must
-/// pass; failing either causes a loud bail with actionable guidance rather than
-/// silently installing from the wrong place.
 fn resolve_main_repo_via_cwd(display_id: &str) -> anyhow::Result<PathBuf> {
     let cwd = std::env::current_dir().with_context(|| {
         format!(
@@ -127,7 +161,6 @@ fn resolve_main_repo_via_cwd(display_id: &str) -> anyhow::Result<PathBuf> {
         )
     })?;
 
-    // Gate 1: cwd must be a git repository.
     let out = Command::new("git")
         .args([
             "-C",
@@ -153,10 +186,6 @@ fn resolve_main_repo_via_cwd(display_id: &str) -> anyhow::Result<PathBuf> {
         );
     }
 
-    // Gate 2: cwd must be the stores crate, not just any git/Cargo repo.
-    // Read Cargo.toml and extract the [package] name field with a simple
-    // line-scan (no extra toml dep needed — the guard is correct for any
-    // realistic Cargo.toml layout).
     let cargo_toml_path = cwd.join("Cargo.toml");
     let cargo_toml = std::fs::read_to_string(&cargo_toml_path).map_err(|_| {
         anyhow::anyhow!(
@@ -195,14 +224,10 @@ fn resolve_main_repo_via_cwd(display_id: &str) -> anyhow::Result<PathBuf> {
     Ok(cwd)
 }
 
-/// Extract the `name` field from the `[package]` section of a Cargo.toml
-/// string using a simple line-scan. Returns `None` if the section or field is
-/// absent or unparseable. Does not depend on a toml-parsing crate.
 fn extract_cargo_package_name(toml: &str) -> Option<String> {
     let mut in_package = false;
     for line in toml.lines() {
         let trimmed = line.trim();
-        // Section header detection.
         if trimmed.starts_with('[') {
             in_package = trimmed == "[package]";
             continue;
@@ -210,10 +235,6 @@ fn extract_cargo_package_name(toml: &str) -> Option<String> {
         if !in_package {
             continue;
         }
-        // Match `name = "..."` (with optional whitespace around `=`,
-        // tolerant of a trailing inline comment like `name = "stores" # crate`).
-        // Guard against false-matching `namespace = ...` etc. by requiring the
-        // char after "name" to be whitespace or '='.
         if let Some(rest) = trimmed.strip_prefix("name") {
             if !rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
                 continue;
@@ -232,9 +253,6 @@ fn extract_cargo_package_name(toml: &str) -> Option<String> {
     None
 }
 
-/// Look up the `cargo-install` agent entry in agents.yaml and read its
-/// `command_args.features` (string or sequence). Falls back to
-/// `DEFAULT_FEATURES` when absent.
 fn features_for_entry(ctx: &DispatchCtx) -> String {
     let entry = ctx.agents.agents.iter().find(|a| {
         a.command

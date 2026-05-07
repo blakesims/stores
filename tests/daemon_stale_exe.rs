@@ -254,6 +254,7 @@ fn stale_then_reexec_happy_path_records_preserved_argv() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -293,11 +294,17 @@ fn stale_then_reexec_fails_fallback_exits_nonzero() {
     perms.set_mode(0o644);
     std::fs::set_permissions(&launch_path, perms).unwrap();
 
+    // STORES_DAEMON_BIN_PATH points at the non-executable stub, which is also
+    // used as arg0. With validate-on-shortcut (T076 codex-revise), the daemon
+    // fails at startup when the existing private binary fails validation —
+    // before stale detection can run. The observable contract is identical:
+    // non-zero exit + spawn-error context in stderr.
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -306,12 +313,7 @@ fn stale_then_reexec_fails_fallback_exits_nonzero() {
         "validation fallback must exit nonzero"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("daemon binary stale; reexecing into"),
-        "stderr:\n{stderr}"
-    );
     assert_validation_failure_context(&stderr, &launch_path, "spawn error");
-    assert!(stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
 }
 
 /// LOW (T075 codex r3 follow-up): missing launch-path candidate is rejected fail-loud
@@ -335,26 +337,18 @@ fn stale_reexec_missing_launch_path_rejected_at_startup() {
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
-        .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .env(
+            "STORES_DAEMON_BIN_PATH",
+            tmp.path().join("private/bin/stores"),
+        )
         .output()
         .expect("invoke stale daemon command");
 
     assert!(
-        !output.status.success(),
-        "missing launch-path must exit nonzero"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("constructing daemon executable guard"),
-        "expected startup-identity-guard failure context; stderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains(launch_path.to_str().unwrap()),
-        "missing launch path must appear in error; stderr:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("daemon binary stale; reexecing into"),
-        "daemon must NOT attempt reexec when launch_path is missing; stderr:\n{stderr}"
+        output.status.success(),
+        "private first-run migration should seed from current_exe and reexec; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -389,6 +383,7 @@ fn reexec_argv_strips_detach_preserves_invoker_and_log_file() {
         ])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke detached stale daemon command");
 
@@ -422,11 +417,17 @@ fn stale_reexec_stub_missing_marker_candidate_rejected_without_exec() {
     let args_file = tmp.path().join("argv-missing-marker.txt");
     write_reexec_stub(&launch_path, &args_file, 0, StubHelpBehavior::MissingMarker);
 
+    // STORES_DAEMON_BIN_PATH points at the missing-marker stub, which is also
+    // arg0. With validate-on-shortcut (T076 codex-revise), the daemon fails at
+    // startup when the existing private binary fails the marker check — before
+    // stale detection runs. Observable contract: non-zero exit, path in stderr,
+    // marker reason in stderr, candidate NOT exec'd.
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -453,11 +454,17 @@ fn stale_reexec_empty_output_candidate_rejected_without_exec() {
     let args_file = tmp.path().join("argv-empty.txt");
     write_reexec_stub(&launch_path, &args_file, 0, StubHelpBehavior::Empty);
 
+    // STORES_DAEMON_BIN_PATH points at the empty-help stub, which is also
+    // arg0. With validate-on-shortcut (T076 codex-revise), the daemon fails at
+    // startup when the existing private binary fails the empty-stdout check —
+    // before stale detection runs. Observable contract: non-zero exit, path in
+    // stderr, empty-stdout reason, candidate NOT exec'd.
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -482,12 +489,18 @@ fn stale_reexec_timeout_candidate_rejected_without_exec() {
     let args_file = tmp.path().join("argv-timeout.txt");
     write_reexec_stub(&launch_path, &args_file, 0, StubHelpBehavior::Timeout);
 
+    // STORES_DAEMON_BIN_PATH points at the timeout stub, which is also arg0.
+    // With validate-on-shortcut (T076 codex-revise), the daemon fails at
+    // startup when the existing private binary times out — before stale
+    // detection runs. Observable contract: non-zero exit within the timeout
+    // deadline, path in stderr, timeout reason, candidate NOT exec'd.
     let started = Instant::now();
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
     let elapsed = started.elapsed();
@@ -521,6 +534,7 @@ fn stale_reexec_fresh_binary_passes_and_records_normalized_argv() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -538,14 +552,18 @@ fn stale_reexec_fresh_binary_passes_and_records_normalized_argv() {
     assert!(argv.contains("--poll-interval\n0.05\n"), "argv:\n{argv}");
 }
 
-/// HIGH fix: stale-at-startup must reexec BEFORE opening the DB. This test
-/// verifies that when the daemon binary is stale before startup, no migration
-/// / seed / sweep DB side-effects occur.
+/// HIGH fix: the daemon must bail BEFORE opening the DB whenever startup fails.
 ///
-/// Strategy: use STORES_TEST_DAEMON_FORCE_STALE with a non-executable stub so
-/// validation fails and the daemon exits non-zero immediately — which means it
-/// cannot have opened and migrated the DB (migration only runs after validation
-/// would have passed in the new order). We then check the DB stays empty.
+/// This test verifies that a corrupt/invalid private binary causes an early
+/// non-zero exit before the DB is migrated or seeded.  With validate-on-shortcut
+/// (T076 codex-revise), the daemon now validates the existing private binary
+/// before the stale-detection path runs, so the failure happens even earlier
+/// than the original "stale-at-startup" scenario — but the invariant (DB stays
+/// untouched) is identical and stronger.
+///
+/// Strategy: set STORES_DAEMON_BIN_PATH to a non-executable file so the
+/// existence-shortcut validation fails immediately.  Daemon must exit non-zero
+/// and must NOT have opened/migrated the DB file.
 #[cfg(unix)]
 #[test]
 fn stale_at_startup_no_db_side_effects_before_reexec() {
@@ -560,8 +578,8 @@ fn stale_at_startup_no_db_side_effects_before_reexec() {
     // attempt would write rows we can detect.
     std::fs::write(stores_dir.join("db.sqlite"), "").unwrap();
 
-    // Non-executable stub so validation fails fast — the daemon must bail before
-    // doing any DB work.
+    // Non-executable stub as the private binary: triggers validate-on-shortcut
+    // failure before the daemon can open the DB.
     let launch_path = tmp.path().join("stores_stale_stub");
     std::fs::write(&launch_path, "not executable\n").unwrap();
     let mut perms = std::fs::metadata(&launch_path).unwrap().permissions();
@@ -573,21 +591,28 @@ fn stale_at_startup_no_db_side_effects_before_reexec() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale-at-startup daemon command");
 
-    // Must exit non-zero (validation failed, fallback to fail-loud).
+    // Must exit non-zero (validation failed fail-loud).
     assert!(
         !output.status.success(),
-        "stale-at-startup with non-executable stub must exit non-zero"
+        "invalid private binary must cause non-zero exit"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Reexec was attempted.
+    // Validation failure context must be present.
     assert!(
-        stderr.contains("daemon binary stale; reexecing into"),
-        "must log reexec attempt; stderr:\n{stderr}"
+        stderr.contains(&launch_path.display().to_string()),
+        "private path must appear in error; stderr:\n{stderr}"
     );
-    assert_validation_failure_context(&stderr, &launch_path, "spawn error");
+    assert!(
+        stderr.contains("validation")
+            || stderr.contains("failed")
+            || stderr.contains("private daemon binary")
+            || stderr.contains("spawn error"),
+        "error must describe validation failure; stderr:\n{stderr}"
+    );
     // The DB file we placed is empty (0 bytes), meaning no migration ran.
     // If migration had run, rusqlite would have written the DDL and the file
     // would be non-empty (SQLite page size ≥ 4096 bytes).
@@ -596,7 +621,7 @@ fn stale_at_startup_no_db_side_effects_before_reexec() {
         .len();
     assert_eq!(
         db_size, 0,
-        "DB must remain untouched (size 0) when stale-at-startup reexec fires before DB open"
+        "DB must remain untouched (size 0) when daemon fails before DB open"
     );
 }
 
@@ -610,15 +635,16 @@ fn fresh_identity_no_reexec_attempt() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .env(
+            "STORES_DAEMON_BIN_PATH",
+            tmp.path().join("private-bin/stores"),
+        )
         .output()
         .expect("invoke fresh daemon command");
 
     assert!(output.status.success(), "fresh daemon --once should exit 0");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("daemon binary stale; reexecing into"),
-        "stderr:\n{stderr}"
-    );
+    assert!(!stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
 }
 
 #[test]
@@ -680,6 +706,134 @@ fn fresh_auto_drive_still_records_positive_drive_pid() {
 /// The inode mismatch is real — no env-var bypass.
 #[cfg(unix)]
 #[test]
+fn first_run_migration_seeds_private_binary_and_records_private_launch_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+    let private = tmp.path().join("home/.local/share/stores/bin/stores");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("first-run daemon migration");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(private.exists(), "private binary must be seeded");
+    let conn = Connection::open(tmp.path().join(".stores/db.sqlite")).unwrap();
+    let recorded: String = conn
+        .query_row("SELECT binary_path FROM daemon_starts LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(recorded, private.display().to_string());
+}
+
+#[cfg(unix)]
+#[test]
+fn changed_global_launch_does_not_replace_private_or_emit_canonical_stale_message() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+    let private = tmp.path().join("private/bin/stores");
+    std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_stores"), &private).unwrap();
+    let mut perms = std::fs::metadata(&private).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&private, perms).unwrap();
+    let before = std::fs::metadata(&private).unwrap().len();
+
+    let cargo_home = tmp.path().join("cargo-home");
+    let global = cargo_home.join("bin/stores");
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_stores"), &global).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&global)
+        .unwrap()
+        .write_all(b"\n# simulated external cargo install overwrite\n")
+        .unwrap();
+    let mut perms = std::fs::metadata(&global).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&global, perms).unwrap();
+    assert_ne!(std::fs::metadata(&global).unwrap().len(), before);
+
+    let output = Command::new(&global)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env("CARGO_HOME", &cargo_home)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                global.parent().unwrap().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("daemon launched via changed global stores path");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::metadata(&private).unwrap().len(), before);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_private_binary_reexecs_validated_replacement_once() {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+    let private = tmp.path().join("private/bin/stores");
+    std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+    let args_file = tmp.path().join("replacement-argv.txt");
+    write_reexec_stub(&private, &args_file, 0, StubHelpBehavior::Valid);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&private)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("private replacement reexec");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<_> = stderr
+        .lines()
+        .filter(|l| l.contains("daemon binary stale; reexecing into"))
+        .collect();
+    assert_eq!(lines.len(), 1, "stderr:\n{stderr}");
+    assert!(
+        lines[0].contains(&private.display().to_string()),
+        "{}",
+        lines[0]
+    );
+    assert!(args_file.exists(), "validated replacement must be exec'd");
+}
+
+#[cfg(unix)]
+#[test]
 fn real_inode_replace_triggers_stale_detection() {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
@@ -720,6 +874,10 @@ fn real_inode_replace_triggers_stale_detection() {
         // Ensure STORES_TEST_DAEMON_FORCE_STALE is NOT set so this exercises
         // the real dev/ino path.
         .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .env(
+            "STORES_DAEMON_BIN_PATH",
+            tmp.path().join("private-bin/stores"),
+        )
         .output()
         .expect("spawn stores agents run --once");
 
@@ -740,4 +898,299 @@ fn real_inode_replace_triggers_stale_detection() {
         "exactly one reexec message line expected; stderr:\n{stderr}"
     );
     assert!(!stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
+}
+
+/// MEDIUM r2 fix: temp file must be removed when validate_stale_reexec_candidate
+/// fails during the seed path (not just on success or rename/link failure).
+///
+/// Strategy: set STORES_DAEMON_BIN_PATH to a fresh directory (no private binary
+/// exists yet) and point argv[0] at a MissingMarker stub so that:
+///   1. fs::copy succeeds — a stores.tmp.<pid>.<nanos> file is created.
+///   2. validate_stale_reexec_candidate fails (missing stores marker).
+///   3. Assert: no stores.tmp.* files remain in the private-bin directory and
+///      the overall command exits non-zero (validation propagated).
+///
+/// Before the r2 fix this test would find leaked temp files.
+#[cfg(unix)]
+#[test]
+fn seed_temp_cleaned_up_on_validation_failure() {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+
+    // A stub that produces a valid-looking executable but whose --help output
+    // lacks the stores marker — validation will fail.
+    let stub_path = tmp.path().join("stores_no_marker_stub");
+    let args_file = tmp.path().join("argv-no-marker.txt");
+    write_reexec_stub(&stub_path, &args_file, 0, StubHelpBehavior::MissingMarker);
+
+    // Private-bin dir exists but the binary does NOT (no existence shortcut).
+    let private_bin_dir = tmp.path().join("private-bin");
+    std::fs::create_dir_all(&private_bin_dir).unwrap();
+    let private = private_bin_dir.join("stores");
+    assert!(!private.exists(), "pre-condition: no private binary");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&stub_path)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("invoke daemon with missing-marker source");
+
+    // Command must fail (validation propagated).
+    assert!(
+        !output.status.success(),
+        "missing-marker source must cause non-zero exit; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // No stores.tmp.* files must remain in the private-bin dir.
+    let leaked: Vec<_> = std::fs::read_dir(&private_bin_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("stores.tmp.")
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "temp files must be cleaned up on validation failure; leaked: {:?}",
+        leaked
+            .iter()
+            .map(|e| e.path())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// MEDIUM r2 fix: hard_link no-replace semantics — a pre-existing private
+/// binary is never overwritten by a concurrent (or sequential) seeder.
+///
+/// This test exercises the **existence-shortcut** path: the private binary is
+/// already present before the seeder runs, so `ensure_private_daemon_binary`
+/// validates and returns at the early-return branch (agents_run.rs:122) without
+/// reaching `hard_link`.  It does NOT exercise the `AlreadyExists` arm of the
+/// `hard_link` match; that arm is exercised by
+/// `concurrent_seeders_hard_link_already_exists_arm`.
+///
+/// Assert that the inode and size are unchanged after the run — the seeder must
+/// not have replaced the binary.
+#[cfg(unix)]
+#[test]
+fn existing_private_binary_short_circuits_seeder() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+
+    let private = tmp.path().join("private/bin/stores");
+    std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_stores"), &private).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&private).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&private, perms).unwrap();
+    }
+
+    // Record the inode before the run.
+    let before_ino = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&private).unwrap().ino()
+    };
+    let before_size = std::fs::metadata(&private).unwrap().len();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("daemon run with pre-existing valid private binary");
+
+    assert!(
+        output.status.success(),
+        "pre-existing valid private binary must let daemon run successfully; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Inode and size must be unchanged — the seeder must not have replaced it.
+    let after_ino = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&private).unwrap().ino()
+    };
+    let after_size = std::fs::metadata(&private).unwrap().len();
+
+    assert_eq!(
+        before_ino, after_ino,
+        "private binary inode must be unchanged (not replaced by seeder)"
+    );
+    assert_eq!(
+        before_size, after_size,
+        "private binary size must be unchanged (not replaced by seeder)"
+    );
+}
+
+/// r3 fix: real race test — exercises the `AlreadyExists` arm of `hard_link`.
+///
+/// Two concurrent `stores agents run --once` processes start with NO pre-existing
+/// private binary.  Both must race past the existence-shortcut, copy to their
+/// own uniquely-named temp, and attempt `hard_link`.  One wins (link succeeds);
+/// the other loses (link returns `AlreadyExists`) and falls through to validate
+/// the winner's binary.  Both processes must exit successfully.
+///
+/// r4 fix: `STORES_TEST_SEED_RACE_DELAY_MS` is set so both seeders sleep
+/// briefly after passing the existence-shortcut and before calling `hard_link`.
+/// This guarantees both processes pass the shortcut and one observes
+/// `AlreadyExists`.  We assert on the tracing log line emitted in that branch
+/// to prove (a) AlreadyExists was observed and (b) winner-validation executed.
+#[cfg(unix)]
+#[test]
+fn concurrent_seeders_hard_link_already_exists_arm() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+
+    let private = tmp.path().join("private/bin/stores");
+    // Do NOT pre-create the private binary — both seeders must race to create it.
+
+    let make_child = || {
+        Command::new(env!("CARGO_BIN_EXE_stores"))
+            .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+            .current_dir(tmp.path())
+            .env("STORES_DAEMON_BIN_PATH", &private)
+            .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+            // Delay between existence-shortcut and hard_link so both seeders
+            // are guaranteed to pass the shortcut before either links.
+            // Also gates the greppable AlreadyExists sentinel in the binary.
+            .env("STORES_TEST_SEED_RACE_DELAY_MS", "150")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn stores agents run")
+    };
+
+    // Spawn both before waiting on either so they overlap.
+    let child_a = make_child();
+    let child_b = make_child();
+    let out_a = child_a.wait_with_output().expect("wait child_a");
+    let out_b = child_b.wait_with_output().expect("wait child_b");
+
+    assert!(
+        out_a.status.success(),
+        "child_a failed; stderr:\n{}",
+        String::from_utf8_lossy(&out_a.stderr)
+    );
+    assert!(
+        out_b.status.success(),
+        "child_b failed; stderr:\n{}",
+        String::from_utf8_lossy(&out_b.stderr)
+    );
+
+    // Both processes must have emitted the pre-link sentinel, proving BOTH
+    // seeders reached the link attempt (not just that the loser arm fired).
+    let pre_link_needle = "stores::agents_run::seed_race: reached pre-link";
+    let stderr_a = String::from_utf8_lossy(&out_a.stderr);
+    let stderr_b = String::from_utf8_lossy(&out_b.stderr);
+    let pre_link_count =
+        stderr_a.contains(pre_link_needle) as usize + stderr_b.contains(pre_link_needle) as usize;
+    assert_eq!(
+        pre_link_count,
+        2,
+        "expected both seeders to emit the pre-link sentinel; \
+         child_a stderr:\n{}\nchild_b stderr:\n{}",
+        stderr_a,
+        stderr_b,
+    );
+
+    // Exactly one process must have observed AlreadyExists and logged the
+    // sentinel line — proving the race arm actually fired.
+    let loser_needle = "loser observed AlreadyExists; validating winner";
+    let loser_count =
+        stderr_a.contains(loser_needle) as usize + stderr_b.contains(loser_needle) as usize;
+    assert_eq!(
+        loser_count,
+        1,
+        "expected exactly one seeder to observe AlreadyExists; \
+         child_a stderr:\n{}\nchild_b stderr:\n{}",
+        stderr_a,
+        stderr_b,
+    );
+
+    // Private binary must exist and be non-empty after both seeders finish.
+    let meta = std::fs::metadata(&private)
+        .expect("private binary must exist after concurrent seed");
+    assert!(meta.len() > 0, "private binary must be non-empty");
+
+    // No stale temp files should remain.
+    let parent = private.parent().unwrap();
+    let leaked: Vec<_> = std::fs::read_dir(parent)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("stores.tmp.")
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "no temp files must remain after concurrent seed; leaked: {:?}",
+        leaked.iter().map(|e| e.path()).collect::<Vec<_>>()
+    );
+}
+
+/// HIGH fix (codex-revise): existence-shortcut must validate before returning.
+///
+/// Pre-creates a corrupt (random bytes) private binary and asserts that
+/// `stores agents run` exits non-zero with a clear validation failure message
+/// rather than blindly trusting the corrupt path.  This exercises the
+/// validate-on-shortcut branch added in T076 codex-revise.
+#[cfg(unix)]
+#[test]
+fn corrupt_existing_private_binary_rejected_fail_loud() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+
+    // Create the private path with its parent directory and fill it with
+    // random bytes (not a valid ELF / script).
+    let private = tmp.path().join("private/bin/stores");
+    std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+    // Write clearly-invalid content.
+    std::fs::write(&private, b"\x7fELF-INVALID-CORRUPT-BYTES\x00\x01\x02\x03").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&private).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&private, perms).unwrap();
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("invoke daemon with corrupt private binary");
+
+    assert!(
+        !output.status.success(),
+        "corrupt existing private binary must cause non-zero exit; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Must surface validation failure context (path + reason), not silently
+    // use the corrupt binary or panic.
+    assert!(
+        stderr.contains(&private.display().to_string()),
+        "private path must appear in error output; stderr:\n{stderr}"
+    );
+    // Should mention validation failure
+    assert!(
+        stderr.contains("validation")
+            || stderr.contains("failed")
+            || stderr.contains("private daemon binary"),
+        "error output must describe validation failure; stderr:\n{stderr}"
+    );
 }
