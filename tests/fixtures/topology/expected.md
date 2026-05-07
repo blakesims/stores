@@ -52,6 +52,7 @@ stateDiagram-v2
   cargo_installed --> schema_migrated :  F mark_schema_migrated
   cargo_installed --> deploy_blocked :  F mark_deploy_blocked
   complete --> in_review :  F request_review
+  in_review --> executing :  F submit-external-review [REVISE]
   in_review --> accepted :  H! accept
   in_review --> rejected :  H! reject
   rejected --> planning :  H+ amend
