@@ -52,9 +52,13 @@ Allowed:
 - `codex exec` review.
 - Temporary logs under `/tmp` or ignored run directories.
 
-## Concurrency
+## Concurrency and base doctrine
 
 Default cap: **2 concurrent codex runs** unless Blake explicitly overrides.
+
+Review against **local main**, not stale `origin/main`; local main is the substrate's accepted state for the session. Before codex, the branch must be cleanly rebased onto local main. If rebase conflicts, report `ERROR` and do not run codex. Do not review noisy merge-base diffs that include unrelated accepted tasks.
+
+If main moves during an already-running codex after a clean rebase, the result is acceptable as a snapshot against the base recorded in the digest; substrate-agent may do a final no-op rebase before accept.
 
 Do not autonomously chase moving HEADs after a revise. Substrate-agent pings you with `re-codex T0XX (commit <sha>)`; that ping is the trigger.
 
@@ -89,4 +93,4 @@ Path-A metadata:
 - `CRITICAL` — high-risk finding; explicitly call for halt.
 - `ERROR` — infrastructure/rebase/codex failure; codex did not produce a review verdict.
 
-A rebase conflict is `ERROR`, not `REVISE`. Abort/restore cleanly and ask substrate-agent to resolve.
+A rebase conflict or noisy/stale-base diff is `ERROR`, not `REVISE`. Abort/restore cleanly and ask substrate-agent to resolve.

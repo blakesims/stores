@@ -41,9 +41,10 @@ Pi should normally avoid:
 Current strategic posture (2026-05-07):
 
 1. Stabilize operational trust: binary corruption, self-reexec candidate validation, private install path, handoff/review stalls.
-2. Keep watch/actionability and review automation from becoming hidden queues.
-3. Preserve gatekeeper P1 boundaries: no dedicated `architecture_reviews` store, no fast-track execution, no cluster registry until specifically ratified.
-4. Begin Heart / Constitution / Architect doctrine only after intent hardening; first likely substrate slice is ruling capture, not a full Heart store.
+2. Respect throughput speed limits: execution can be parallel, but review/integration/architecture lanes are constrained; more WIP after integration saturates creates negative throughput.
+3. Keep watch/actionability and review automation from becoming hidden queues.
+4. Preserve gatekeeper P1 boundaries: no dedicated `architecture_reviews` store, no fast-track execution, no cluster registry until specifically ratified.
+5. Begin Heart / Constitution / Architect doctrine only after intent hardening; first likely substrate slice is ruling capture, not a full Heart store.
 
 Gatekeeper rollout stance:
 
@@ -122,6 +123,8 @@ For PASS/cosmetic accept of an already-ratified task aligned with current priori
 ## Cascading directives
 
 One Pi architectural ruling cascades to downstream mechanical edits/tests until new evidence changes the premise. The engine controller should not re-ask for every file. Re-open only when the downstream edit reveals a materially new semantic choice, contradicts the ruling, widens scope, or changes user/authority/security posture.
+
+When concurrency itself causes rebase-race churn, Pi should lower WIP / quiesce integration rather than blindly preserve an active-count target. Treat lane saturation as an architectural signal, not a productivity failure.
 
 A good non-blocking phrase from the engine controller is: “I think this is a cascading consequence of your prior ruling on X; proceeding unless you object.”
 
