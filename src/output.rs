@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Print a single entry as human-readable text.
 /// Nested Records are indented under their key. For observations, a non-null
@@ -170,7 +171,7 @@ pub fn list_table_text_with_width(entries: &[BTreeMap<String, Value>], width: us
     ];
     for row in &rows {
         for i in 0..4 {
-            widths[i] = widths[i].max(row[i].chars().count());
+            widths[i] = widths[i].max(UnicodeWidthStr::width(row[i].as_str()));
         }
     }
 
@@ -178,33 +179,39 @@ pub fn list_table_text_with_width(entries: &[BTreeMap<String, Value>], width: us
     let summary_width = width.saturating_sub(fixed_width).max(1);
 
     let mut out = String::new();
-    out.push_str(&format!(
-        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}\n",
-        HEADERS[0],
-        HEADERS[1],
-        HEADERS[2],
-        HEADERS[3],
-        HEADERS[4],
-        w0 = widths[0],
-        w1 = widths[1],
-        w2 = widths[2],
-        w3 = widths[3]
-    ));
-    for row in rows {
-        out.push_str(&format!(
-            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}\n",
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            truncate_to_width(&row[4], summary_width),
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2],
-            w3 = widths[3]
-        ));
+    push_table_row(
+        &mut out,
+        &[
+            HEADERS[0].to_string(),
+            HEADERS[1].to_string(),
+            HEADERS[2].to_string(),
+            HEADERS[3].to_string(),
+            HEADERS[4].to_string(),
+        ],
+        &widths,
+    );
+    for mut row in rows {
+        row[4] = truncate_to_width(&row[4], summary_width);
+        push_table_row(&mut out, &row, &widths);
     }
     out
+}
+
+fn push_table_row(out: &mut String, row: &[String; 5], widths: &[usize; 4]) {
+    for i in 0..4 {
+        push_padded_cell(out, &row[i], widths[i]);
+        out.push_str("  ");
+    }
+    out.push_str(&row[4]);
+    out.push('\n');
+}
+
+fn push_padded_cell(out: &mut String, cell: &str, width: usize) {
+    out.push_str(cell);
+    let cell_width = UnicodeWidthStr::width(cell);
+    for _ in 0..width.saturating_sub(cell_width) {
+        out.push(' ');
+    }
 }
 
 fn terminal_width() -> usize {
@@ -248,14 +255,24 @@ fn one_line(s: &str) -> String {
 }
 
 fn truncate_to_width(s: &str, width: usize) -> String {
-    let len = s.chars().count();
-    if len <= width {
+    if UnicodeWidthStr::width(s) <= width {
         return s.to_string();
     }
     if width == 1 {
         return "…".to_string();
     }
-    let mut out: String = s.chars().take(width - 1).collect();
+
+    let content_width = width - 1;
+    let mut used = 0;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > content_width {
+            break;
+        }
+        used += ch_width;
+        out.push(ch);
+    }
     out.push('…');
     out
 }
@@ -370,6 +387,25 @@ mod tests {
 
         let text = list_table_text_with_width(&entries, 120);
         assert!(text.contains("task title fallback"));
+    }
+
+    #[test]
+    fn wide_summary_truncates_by_terminal_cells_not_char_count() {
+        let entries = vec![entry(&[
+            ("display_id", Value::String("L001".into())),
+            ("status", Value::String("new".into())),
+            ("priority", Value::String("high".into())),
+            ("source", Value::String("cli".into())),
+            ("summary", Value::String("漢字漢字漢字tail".into())),
+        ])];
+
+        let text = list_table_text_with_width(&entries, 46);
+        let data = text.lines().nth(1).unwrap();
+        assert!(
+            data.ends_with("漢字漢…"),
+            "data line should be cell-truncated: {data}"
+        );
+        assert!(!data.contains("漢字漢字漢字tail"));
     }
 
     #[test]
