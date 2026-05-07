@@ -44,6 +44,8 @@ fn build_trio() -> (Manifest, HashMap<String, Schema>) {
 }
 
 /// RAII guard that saves `NO_COLOR` on construction and restores it on drop.
+/// The expected DOT fixture intentionally includes colored `color=`/`fontcolor=`
+/// attributes; the prior flake was ambient `NO_COLOR` removing those attributes.
 /// Prevents env mutation from leaking into later tests in the same process.
 struct NoColorGuard {
     saved: Option<std::ffi::OsString>,
@@ -68,8 +70,8 @@ impl Drop for NoColorGuard {
 
 #[test]
 fn ac2_4_dot_snapshot_matches() {
-    // Remove NO_COLOR so the snapshot is always the colored variant,
-    // regardless of the operator shell environment (fixes topology flake I003).
+    // Remove NO_COLOR so the snapshot is always the fixture's colored variant;
+    // the prior flake was ambient NO_COLOR stripping color/fontcolor DOT attrs.
     // The guard restores the previous value (or removes the var) on test exit.
     let _guard = NoColorGuard::new();
     let (manifest, schemas) = build_trio();
