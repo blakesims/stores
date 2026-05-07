@@ -28,13 +28,18 @@ pub struct MetricsReport {
 pub struct WindowReport {
     pub requested: String,
     pub since: String,
-    /// Absolute UTC cutoff resolved at invocation time (RFC3339).
-    /// Present only when the window was an absolute timestamp OR when the caller
-    /// supplied an explicit --now override.  Omitted for bare duration windows
-    /// (e.g. "1h") where the value would shift with wall-clock, making the
-    /// output volatile across reruns.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub since_resolved: Option<String>,
+    /// Absolute UTC cutoff resolved at invocation start (RFC3339).
+    /// Always populated for all window forms so reruns can reproduce the exact
+    /// cutoff by passing since_resolved as an absolute `--since`.
+    pub since_resolved: String,
+    /// True when the cutoff was derived from wall-clock time (bare duration
+    /// window without --now).  Consecutive runs with a bare duration window
+    /// will have the same data but differing since_resolved values.
+    ///
+    /// False when the cutoff is deterministic: absolute `--since` input OR
+    /// duration + `--now` override.  Stable-output acceptance applies only to
+    /// volatile_window=false runs.
+    pub volatile_window: bool,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -144,31 +149,36 @@ fn parse_window(window: &str, now_override: Option<&str>) -> Result<(WindowRepor
             WindowReport {
                 requested: window.to_string(),
                 since: window.to_string(),
-                // Absolute input → always emit since_resolved (it equals since, normalized).
-                since_resolved: Some(resolved.clone()),
+                since_resolved: resolved.clone(),
+                // Absolute --since is always deterministic.
+                volatile_window: false,
             },
             resolved,
         ));
     }
     let secs = parse_duration_seconds(window)?;
-    // Resolve "now": use caller-supplied override (for tests / --now flag) or actual wall clock.
-    let now_epoch: i64 = if let Some(override_str) = now_override {
-        epoch_seconds(override_str)
-            .with_context(|| format!("--now value is not a valid RFC3339 timestamp: '{override_str}'"))?
+    // Resolve "now" ONCE at invocation start — either from the caller-supplied
+    // override (deterministic) or the actual wall clock (volatile).
+    let (now_epoch, volatile) = if let Some(override_str) = now_override {
+        let e = epoch_seconds(override_str)
+            .with_context(|| format!("--now value is not a valid RFC3339 timestamp: '{override_str}'"))?;
+        (e, false)
     } else {
-        std::time::SystemTime::now()
+        let e = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs() as i64
+            .as_secs() as i64;
+        (e, true)
     };
+    // Absolute cutoff resolved once — used for all SQL filtering in this invocation.
     let resolved = format_epoch_utc(now_epoch - secs);
     Ok((
         WindowReport {
             requested: window.to_string(),
             since: format!("now-{window}"),
-            // Duration window without explicit --now: omit since_resolved from output so
-            // the JSON is stable across reruns (wall-clock is not embedded in the output).
-            // Duration window WITH --now: emit it so the caller can verify the cutoff.
-            since_resolved: now_override.map(|_| resolved.clone()),
+            // Always emit since_resolved so the caller can reproduce this exact
+            // cutoff by passing it as absolute --since.
+            since_resolved: resolved.clone(),
+            volatile_window: volatile,
         },
         resolved,
     ))
@@ -214,6 +224,19 @@ fn per_edge_metrics(rows: &[TransitionRow], since_epoch: i64) -> Vec<EdgeMetric>
     let mut grouped: BTreeMap<(String, String), Vec<i64>> = BTreeMap::new();
     let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     for row in rows {
+        // Skip no-op audit rows: from_status == to_status are audit events that
+        // carry no lifecycle meaning.  They must NOT count toward edge counts or
+        // edge latencies, and must NOT advance the "previous row" cursor so that
+        // subsequent real lifecycle edges compute latency against the last REAL row.
+        let is_noop = row
+            .from_status
+            .as_deref()
+            .map(|f| f == row.to_status.as_str())
+            .unwrap_or(false);
+        if is_noop {
+            continue;
+        }
+
         let edge = format!(
             "{} -> {}",
             row.from_status.as_deref().unwrap_or("(create)"),
@@ -887,24 +910,32 @@ mod tests {
     }
 
     #[test]
-    fn duration_window_bare_omits_since_resolved() {
-        // Bare duration windows (no --now) must NOT include since_resolved in
-        // the output.  Emitting a wall-clock-derived timestamp makes the JSON
-        // volatile across reruns, which breaks the stability acceptance criterion.
+    fn duration_window_bare_emits_since_resolved_and_volatile_true() {
+        // Bare duration windows (no --now) MUST include since_resolved (always populated)
+        // and volatile_window=true so the caller knows the cutoff is wall-clock-derived.
+        // The rerun stability guarantee is: pass since_resolved as absolute --since to get
+        // identical output; the bare form is intentionally volatile but auditable.
         let c = conn();
         let report = build_report(&c, "1h", None).unwrap();
         assert_eq!(report.window.requested, "1h");
         assert_eq!(report.window.since, "now-1h");
         assert!(
-            report.window.since_resolved.is_none(),
-            "since_resolved must be absent for bare duration windows; got: {:?}",
-            report.window.since_resolved
+            !report.window.since_resolved.is_empty(),
+            "since_resolved must always be populated; got empty string"
         );
-        // Confirm JSON does not contain since_resolved key at all.
+        assert!(
+            report.window.volatile_window,
+            "volatile_window must be true for bare duration windows"
+        );
+        // Confirm JSON contains both since_resolved and volatile_window keys.
         let json = render_json(&report).unwrap();
         assert!(
-            !json.contains("since_resolved"),
-            "JSON must not contain since_resolved for bare --window 1h; got: {json}"
+            json.contains("since_resolved"),
+            "JSON must contain since_resolved for bare --window 1h; got: {json}"
+        );
+        assert!(
+            json.contains("volatile_window"),
+            "JSON must contain volatile_window for bare --window 1h; got: {json}"
         );
     }
 
@@ -1224,6 +1255,123 @@ mod tests {
         assert_eq!(code_row.task_type, "unknown");
     }
 
+    // ── Option B: volatile_window semantics ────────────────────────────────────
+
+    #[test]
+    fn absolute_since_has_volatile_false_and_since_resolved_equals_input() {
+        // Absolute --since: volatile_window=false, since_resolved == normalized input.
+        let c = conn();
+        let report = build_report(&c, "2026-05-07T05:00:00Z", None).unwrap();
+        assert!(!report.window.volatile_window, "absolute --since must be non-volatile");
+        assert_eq!(report.window.since_resolved, "2026-05-07T05:00:00Z");
+    }
+
+    #[test]
+    fn absolute_since_stability_identical_on_two_calls() {
+        // Two calls with the same absolute --since must produce identical JSON.
+        let c = conn();
+        ins(&c, "tasks", "T1", None, "planning", "2026-05-07T06:00:00Z");
+        let a = render_json(&build_report(&c, "2026-05-07T05:00:00Z", None).unwrap()).unwrap();
+        let b = render_json(&build_report(&c, "2026-05-07T05:00:00Z", None).unwrap()).unwrap();
+        assert_eq!(a, b, "absolute --since must produce stable output");
+    }
+
+    #[test]
+    fn duration_plus_now_stability_identical_on_two_calls() {
+        // duration + --now: volatile_window=false, two calls produce identical JSON.
+        let c = conn();
+        ins(&c, "tasks", "T1", None, "planning", "2026-05-07T06:00:00Z");
+        let fixed_now = "2026-05-07T12:00:00Z";
+        let a = render_json(&build_report(&c, "1h", Some(fixed_now)).unwrap()).unwrap();
+        let b = render_json(&build_report(&c, "1h", Some(fixed_now)).unwrap()).unwrap();
+        assert_eq!(a, b, "duration+--now must produce stable output");
+    }
+
+    #[test]
+    fn bare_duration_has_volatile_true_and_since_resolved_present() {
+        // Bare duration: volatile_window=true, since_resolved always populated.
+        // Two consecutive calls may differ in since_resolved (wall-clock drift)
+        // but both must have volatile_window=true and a non-empty since_resolved.
+        let c = conn();
+        let report = build_report(&c, "1h", None).unwrap();
+        assert!(report.window.volatile_window, "bare duration must be volatile");
+        assert!(!report.window.since_resolved.is_empty(), "since_resolved must be populated");
+        // since_resolved must be a parseable RFC3339 timestamp.
+        assert!(
+            epoch_seconds(&report.window.since_resolved).is_some(),
+            "since_resolved must be a valid RFC3339 timestamp; got: {}",
+            report.window.since_resolved
+        );
+    }
+
+    // ── MAJOR 2: no-op audit row exclusion ─────────────────────────────────────
+
+    #[test]
+    fn per_edge_skips_noop_audit_rows_in_counts() {
+        // A no-op audit row (from_status == to_status) must not appear in edge counts.
+        let c = conn();
+        // Real transition: None -> planning
+        ins(&c, "tasks", "T1", None, "planning", "2026-01-01T00:00:00Z");
+        // No-op audit row: planning -> planning (same status)
+        ins(&c, "tasks", "T1", Some("planning"), "planning", "2026-01-01T00:01:00Z");
+        // Real transition: planning -> plan_review
+        ins(&c, "tasks", "T1", Some("planning"), "plan_review", "2026-01-01T00:02:00Z");
+
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
+
+        // "planning -> planning" edge must NOT appear
+        let noop_edge = r
+            .per_edge
+            .iter()
+            .find(|e| e.edge == "planning -> planning");
+        assert!(noop_edge.is_none(), "no-op audit edge must be excluded; found: {:?}", noop_edge);
+
+        // Real edges must still appear with correct counts
+        let create_edge = r
+            .per_edge
+            .iter()
+            .find(|e| e.store == "tasks" && e.edge == "(create) -> planning")
+            .expect("(create) -> planning edge must exist");
+        assert_eq!(create_edge.count, 1);
+
+        let plan_edge = r
+            .per_edge
+            .iter()
+            .find(|e| e.store == "tasks" && e.edge == "planning -> plan_review")
+            .expect("planning -> plan_review edge must exist");
+        assert_eq!(plan_edge.count, 1);
+    }
+
+    #[test]
+    fn per_edge_noop_row_does_not_corrupt_latency_chain() {
+        // A no-op audit row must not update the "previous row" cursor.
+        // The latency for "planning -> plan_review" must be computed against
+        // the last REAL lifecycle row ((create) -> planning at T+0), NOT the
+        // no-op at T+60s.  Expected latency: 120s (00:02:00 - 00:00:00).
+        let c = conn();
+        // (create) -> planning at T+0
+        ins(&c, "tasks", "T1", None, "planning", "2026-01-01T00:00:00Z");
+        // no-op audit at T+60s  — must NOT advance the prev cursor
+        ins(&c, "tasks", "T1", Some("planning"), "planning", "2026-01-01T00:01:00Z");
+        // planning -> plan_review at T+120s
+        ins(&c, "tasks", "T1", Some("planning"), "plan_review", "2026-01-01T00:02:00Z");
+
+        let r = build_report(&c, "2025-12-31T00:00:00Z", None).unwrap();
+
+        let plan_edge = r
+            .per_edge
+            .iter()
+            .find(|e| e.store == "tasks" && e.edge == "planning -> plan_review")
+            .expect("planning -> plan_review edge must exist");
+        // Latency must be 120s (2 min), not 60s (1 min from no-op timestamp).
+        assert_eq!(
+            plan_edge.p50_seconds,
+            Some(120),
+            "latency must be measured against last real lifecycle row, not no-op; got: {:?}",
+            plan_edge.p50_seconds
+        );
+    }
+
     // ── --json flag reachable via metrics-local flag (MINOR fix) ─────────────
 
     #[test]
@@ -1329,24 +1477,20 @@ mod tests {
     #[test]
     fn duration_window_now_override_resolves_correct_cutoff() {
         // With --now 2026-05-07T12:00:00Z and --window 1h,
-        // since_resolved must be Some("2026-05-07T11:00:00Z").
+        // since_resolved must be "2026-05-07T11:00:00Z" and volatile_window=false.
         let c = conn();
         let report = build_report(&c, "1h", Some("2026-05-07T12:00:00Z")).unwrap();
-        assert_eq!(
-            report.window.since_resolved.as_deref(),
-            Some("2026-05-07T11:00:00Z")
-        );
+        assert_eq!(report.window.since_resolved, "2026-05-07T11:00:00Z");
+        assert!(!report.window.volatile_window, "volatile_window must be false when --now is supplied");
     }
 
     #[test]
     fn duration_window_now_override_non_utc_resolves_correct_cutoff() {
         // --now with -05:00 offset: 2026-05-07T07:00:00-05:00 == 12:00:00Z.
-        // --window 1h → since_resolved = Some("2026-05-07T11:00:00Z")
+        // --window 1h → since_resolved = "2026-05-07T11:00:00Z", volatile_window=false.
         let c = conn();
         let report = build_report(&c, "1h", Some("2026-05-07T07:00:00-05:00")).unwrap();
-        assert_eq!(
-            report.window.since_resolved.as_deref(),
-            Some("2026-05-07T11:00:00Z")
-        );
+        assert_eq!(report.window.since_resolved, "2026-05-07T11:00:00Z");
+        assert!(!report.window.volatile_window, "volatile_window must be false when --now is supplied");
     }
 }
