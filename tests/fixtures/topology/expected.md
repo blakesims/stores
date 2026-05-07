@@ -41,7 +41,6 @@ stateDiagram-v2
   code_review --> blocked :  A submit-review [FAIL]
   blocked --> planning :  H+ resume
   blocked --> ready :  H+ resume
-  blocked --> planning :  H+ resume
   planning --> blocked :  F mark_drive_failed
   plan_review --> blocked :  F mark_drive_failed
   ready --> blocked :  F mark_drive_failed
@@ -64,6 +63,7 @@ stateDiagram-v2
   blocked --> abandoned :  H! abandon
   in_review --> abandoned :  H! abandon
   deploy_blocked --> abandoned :  H! abandon
+  complete --> abandoned :  H! abandon
 ```
 
 ---
@@ -74,7 +74,10 @@ stateDiagram-v2
 stateDiagram-v2
   [*] --> open
   open --> investigating :  A investigate
-  open --> needs_investigation :  A needs_investigation
+  open --> needs_investigation :  H+ request-investigation
+  needs_investigation --> investigating :  F investigation-started
+  investigating --> investigated :  F investigation-succeeded
+  investigating --> investigation_failed :  F investigation-failed
   open --> wont_fix :  H+ wont_fix
   open --> resolved :  A close_as_addressed
   investigating --> confirmed :  H+ confirm

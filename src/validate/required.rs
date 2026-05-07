@@ -1,4 +1,4 @@
-use crate::schema::{Field, RequiredWhenExpr};
+use crate::schema::Field;
 use crate::validate::error::RuleKind;
 use crate::validate::{EntryMap, ValidationError};
 use serde_json::Value;
@@ -52,16 +52,15 @@ pub fn check_required(
     }
 
     // --- required_when ---
-    if let Some(RequiredWhenExpr {
-        lhs_path,
-        rhs_literal,
-    }) = &field.required_when
-    {
-        let lhs_value = lookup(entry, lhs_path);
-        let triggered = lhs_value.and_then(|v| v.as_str()) == Some(rhs_literal.as_str());
+    if let Some(rw) = &field.required_when {
+        let lhs_value = lookup(entry, &rw.lhs_path);
+        let triggered = lhs_value
+            .and_then(|v| v.as_str())
+            .map(|value| rw.matches_literal(value))
+            .unwrap_or(false);
 
         if triggered && is_absent {
-            let condition = format!("{} == '{}'", lhs_path.join("."), rhs_literal);
+            let condition = rw.condition_string();
             errors.push(ValidationError {
                 field_path: field_path.to_vec(),
                 rule: RuleKind::RequiredWhen {
@@ -141,6 +140,64 @@ mod tests {
             }
             other => panic!("expected RequiredWhen, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn required_when_in_triggers_when_any_member_matches() {
+        let field = text_field(
+            "routed_to_observation",
+            false,
+            Some("decision IN ['normal_observation', 'arch_review_candidate']"),
+        );
+        let mut entry: EntryMap = BTreeMap::new();
+        entry.insert(
+            "decision".into(),
+            serde_json::Value::String("arch_review_candidate".into()),
+        );
+
+        let mut errors = vec![];
+        check_required(
+            &field,
+            &["routed_to_observation".to_string()],
+            &entry,
+            &mut errors,
+        );
+        assert_eq!(errors.len(), 1);
+        match &errors[0].rule {
+            RuleKind::RequiredWhen { expr } => {
+                assert_eq!(
+                    expr,
+                    "decision IN ['normal_observation', 'arch_review_candidate']"
+                );
+            }
+            other => panic!("expected RequiredWhen, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn required_when_in_silent_when_no_member_matches() {
+        let field = text_field(
+            "routed_to_observation",
+            false,
+            Some("decision IN ['normal_observation', 'arch_review_candidate']"),
+        );
+        let mut entry: EntryMap = BTreeMap::new();
+        entry.insert(
+            "decision".into(),
+            serde_json::Value::String("duplicate".into()),
+        );
+
+        let mut errors = vec![];
+        check_required(
+            &field,
+            &["routed_to_observation".to_string()],
+            &entry,
+            &mut errors,
+        );
+        assert!(
+            errors.is_empty(),
+            "should be silent for non-member decision"
+        );
     }
 
     #[test]

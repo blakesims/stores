@@ -178,10 +178,16 @@ fn obs_draft_handoff_succeeds_without_substrate_session_id_argv() {
             .expect("obs-draft handoff Ok");
             assert!(outcome.status.success());
             assert_eq!(
-                outcome.obs_draft_body, None,
-                "claude argv no longer carries substrate session id to the child"
+                outcome.obs_draft_body.as_deref(),
+                Some(r#"{"summary":"draft sum","body":"draft body","priority":"normal"}"#),
+                "obs draft body is collected from STORES_OBS_DRAFT_PATH, not argv"
             );
-            assert_eq!(outcome.obs_draft_path, None);
+            assert!(outcome.obs_draft_path.is_some());
+            let argv = read_argv(outdir.path());
+            assert!(
+                argv.iter().all(|arg| !arg.contains("obs-draft-")),
+                "claude argv no longer carries substrate session id to the child: {argv:?}"
+            );
         },
     );
 }
@@ -206,7 +212,9 @@ fn token_round_trip_through_chat_context_not_env() {
             assert!(outcome.status.success());
 
             let argv = read_argv(outdir.path());
-            let message = argv.last().expect("positional initial message must be present");
+            let message = argv
+                .last()
+                .expect("positional initial message must be present");
             assert!(
                 message.contains("tok-roundtrip-zzz"),
                 "token must be carried by positional initial message, got: {:?}",

@@ -152,11 +152,8 @@ fn dispatch<F: FnOnce(&str, &NotifyEvent) -> Result<()>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
     fn env_lock() -> &'static Mutex<()> {
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(()))
+        crate::paths::test_notifier_lock()
     }
 
     fn ev() -> NotifyEvent {
@@ -170,7 +167,7 @@ mod tests {
 
     #[test]
     fn mock_captures_event_verbatim() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("STORES_NTFY_URL", "https://ntfy.test/topic");
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml"); // absent
@@ -186,7 +183,7 @@ mod tests {
 
     #[test]
     fn env_url_used_when_no_config() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
         std::env::set_var("STORES_NTFY_URL", "https://env-only");
@@ -200,7 +197,7 @@ mod tests {
 
     #[test]
     fn no_url_anywhere_returns_ok_and_writes_stderr() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("STORES_NTFY_URL");
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml"); // absent
@@ -212,7 +209,7 @@ mod tests {
 
     #[test]
     fn config_yaml_url_used_when_present() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("STORES_NTFY_URL");
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
@@ -233,7 +230,6 @@ mod tests {
         let _g = crate::paths::test_notifier_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _e = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
         std::fs::write(&path, "ntfy:\n  url: https://global-test\n").unwrap();

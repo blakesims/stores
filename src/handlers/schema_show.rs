@@ -71,11 +71,7 @@ fn print_field_text(field: &Field, indent: &str) {
     }
 
     if let Some(ref rw) = field.required_when {
-        println!(
-            "{indent}  required_when: {} == '{}'",
-            rw.lhs_path.join("."),
-            rw.rhs_literal
-        );
+        println!("{indent}  required_when: {}", rw.condition_string());
     }
 
     if let Some(ref ev) = field.enum_values {
@@ -169,7 +165,7 @@ fn field_to_json(field: &Field) -> Value {
     }
 
     if let Some(ref rw) = field.required_when {
-        obj["required_when"] = json!(format!("{} == '{}'", rw.lhs_path.join("."), rw.rhs_literal));
+        obj["required_when"] = json!(rw.condition_string());
     }
 
     if let Some(ref a) = field.actor {
