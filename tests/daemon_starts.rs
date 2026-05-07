@@ -151,6 +151,7 @@ fn daemon_starts_concurrent_inserts_get_distinct_display_ids() {
         let conn = Connection::open(&db_path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
         conn.execute_batch(stores::codegen::ddl::SUBSTRATE_DDL).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
     }
 
     // Shared counter that mimics DAEMON_START_SEQ; each thread gets its own
