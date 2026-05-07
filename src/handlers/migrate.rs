@@ -123,7 +123,7 @@ pub fn apply_with(
     if plan.additive.is_empty() {
         return Ok(report);
     }
-    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len());
+    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len() + 1);
     for (store, col) in &plan.additive {
         sql_lines.push(format!(
             "ALTER TABLE {} ADD COLUMN {};",
@@ -133,6 +133,9 @@ pub fn apply_with(
         report
             .applied_columns
             .push((store.clone(), col.name.clone()));
+    }
+    if observations_source_tuple_added(&plan) {
+        sql_lines.push(observations_source_tuple_backfill_sql("observations"));
     }
     let batch = format!("BEGIN;\n{}\nCOMMIT;", sql_lines.join("\n"));
     conn.execute_batch(&batch)
@@ -148,6 +151,19 @@ pub fn apply_with(
     backfill_defaults(conn, schemas, manifest, &plan)?;
 
     Ok(report)
+}
+
+fn observations_source_tuple_added(plan: &MigrationPlan) -> bool {
+    plan.additive.iter().any(|(store, col)| {
+        store == "observations" && matches!(col.name.as_str(), "source_env" | "source_id")
+    })
+}
+
+fn observations_source_tuple_backfill_sql(table: &str) -> String {
+    format!(
+        "UPDATE {} SET source_env = origin_db, source_id = COALESCE(prod_source_id, sandbox_source_id) WHERE source_env IS NULL AND origin_db IS NOT NULL;",
+        quote_ident(table)
+    )
 }
 
 /// Defensive UPDATE pass after ALTER TABLE ADD COLUMN (T052 P1).
@@ -281,13 +297,16 @@ pub fn run_migrate(apply: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len());
+    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len() + 1);
     for (store, col) in &plan.additive {
         sql_lines.push(format!(
             "ALTER TABLE {} ADD COLUMN {};",
             quote_ident(store),
             col.full_def
         ));
+    }
+    if observations_source_tuple_added(&plan) {
+        sql_lines.push(observations_source_tuple_backfill_sql("observations"));
     }
 
     for line in &sql_lines {
@@ -641,6 +660,84 @@ mod tests {
         );
         assert_eq!(live.get("risk_flags").map(|s| s.as_str()), Some("TEXT"));
         assert_eq!(live.get("cluster_key").map(|s| s.as_str()), Some("TEXT"));
+    }
+
+
+    fn drop_t084_source_env(conn: &Connection) {
+        conn.execute_batch("ALTER TABLE \"observations\" DROP COLUMN \"source_env\";").unwrap();
+    }
+
+    fn insert_pre_t084_source_row(
+        conn: &Connection,
+        display_id: &str,
+        origin_db: &str,
+        prod_source_id: Option<i64>,
+        sandbox_source_id: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO observations (display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week, origin_db, prod_source_id, sandbox_source_id) \
+             VALUES (?1, 'open', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', 'human', 'human', ?2, 'dashboard', 'normal', '2026-05-01T00:00:00Z', 'w18-d1', ?3, ?4, ?5)",
+            rusqlite::params![display_id, display_id, origin_db, prod_source_id, sandbox_source_id],
+        ).unwrap();
+    }
+
+    #[test]
+    fn t084_migrate_backfills_prod_source_tuple() {
+        let (schemas, manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        install_all(&conn, &schemas);
+        drop_t084_source_env(&conn);
+        insert_pre_t084_source_row(&conn, "L901", "prod", Some(123), None);
+
+        let report = apply_with(&conn, &schemas, &manifest).unwrap();
+        assert!(report.applied_columns.iter().any(|(s, c)| s == "observations" && c == "source_env"));
+        let got: (Option<String>, Option<String>) = conn.query_row(
+            "SELECT source_env, source_id FROM observations WHERE display_id = 'L901'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(got, (Some("prod".into()), Some("123".into())));
+    }
+
+    #[test]
+    fn t084_migrate_backfills_sandbox_source_tuple() {
+        let (schemas, manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        install_all(&conn, &schemas);
+        drop_t084_source_env(&conn);
+        insert_pre_t084_source_row(&conn, "L902", "sandbox", None, Some(456));
+
+        apply_with(&conn, &schemas, &manifest).unwrap();
+        let got: (Option<String>, Option<String>) = conn.query_row(
+            "SELECT source_env, source_id FROM observations WHERE display_id = 'L902'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(got, (Some("sandbox".into()), Some("456".into())));
+    }
+
+    #[test]
+    fn t084_migrate_origin_db_without_id_remains_readable() {
+        let (schemas, manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        install_all(&conn, &schemas);
+        drop_t084_source_env(&conn);
+        insert_pre_t084_source_row(&conn, "L903", "prod", None, None);
+
+        apply_with(&conn, &schemas, &manifest).unwrap();
+        let got: (Option<String>, Option<String>) = conn.query_row(
+            "SELECT source_env, source_id FROM observations WHERE display_id = 'L903'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(got, (Some("prod".into()), None));
+
+        let schema = schemas.get("observations").unwrap();
+        let update_cmd = clap::Command::new("update")
+            .arg(clap::Arg::new("display_id").required(true))
+            .arg(clap::Arg::new("summary").long("summary"));
+        let matches = update_cmd.get_matches_from(["update", "L903", "--summary", "changed"]);
+        crate::handlers::update::run(schema, &conn, &matches, crate::schema::actor::Actor::Human.into()).unwrap();
     }
 
     /// Type comparison is case-insensitive on the bare token.

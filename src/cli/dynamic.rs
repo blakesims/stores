@@ -1407,18 +1407,49 @@ fn build_list_cmd(schema: &Schema) -> Command {
                 .required(false),
         );
 
-    // Observations-only: --risk-flag <FLAG> (repeatable, AND semantics)
+    // Observations-only: source tuple filters + --risk-flag <FLAG> (repeatable, AND semantics)
     if schema.name == "observations" {
-        cmd = cmd.arg(
-            Arg::new("risk-flag")
-                .long("risk-flag")
-                .action(ArgAction::Append)
-                .help(
-                    "Filter rows whose risk_flags array contains FLAG (repeatable; multiple = AND). \
-                     Must be one of the 13 canonical risk flag values.",
-                )
-                .required(false),
-        );
+        cmd = cmd
+            .arg(
+                Arg::new("source-env")
+                    .long("source-env")
+                    .help("Filter by canonical source_env (prod|sandbox); pair with --source-id when selecting one source row")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("source-id")
+                    .long("source-id")
+                    .help("Filter by canonical source_id; pair with --source-env when selecting one source row")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("prod-source-id")
+                    .long("prod-source-id")
+                    .help("DEPRECATED filter alias for --source-env prod --source-id <ID>")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("sandbox-source-id")
+                    .long("sandbox-source-id")
+                    .help("DEPRECATED filter alias for --source-env sandbox --source-id <ID>")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("origin-db")
+                    .long("origin-db")
+                    .help("DEPRECATED filter alias for --source-env <prod|sandbox>")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("risk-flag")
+                    .long("risk-flag")
+                    .action(ArgAction::Append)
+                    .help(
+                        "Filter rows whose risk_flags array contains FLAG (repeatable; multiple = AND). \
+                         Must be one of the 13 canonical risk flag values.",
+                    )
+                    .required(false),
+            );
     }
 
     cmd
@@ -1607,6 +1638,27 @@ mod tests {
             "{help}"
         );
         assert!(help.contains("escape commas/backslashes"), "{help}");
+    }
+
+    #[test]
+    fn t084_observations_add_update_help_exposes_canonical_and_deprecated_source_flags() {
+        let observations_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "observations")
+            .map(|(_, yaml)| *yaml)
+            .expect("observations schema bundled");
+        let schema = crate::schema::Schema::from_yaml(observations_yaml).unwrap();
+        let mut cmd = build_store_command(&schema);
+        for verb in ["add", "update"] {
+            let sub = cmd.find_subcommand_mut(verb).unwrap();
+            let help = sub.render_long_help().to_string();
+            assert!(help.contains("--source-env"), "{verb}: {help}");
+            assert!(help.contains("--source-id"), "{verb}: {help}");
+            assert!(help.contains("--prod-source-id"), "{verb}: {help}");
+            assert!(help.contains("--sandbox-source-id"), "{verb}: {help}");
+            assert!(help.contains("--origin-db"), "{verb}: {help}");
+            assert!(help.contains("DEPRECATED"), "{verb}: {help}");
+        }
     }
 
     #[test]

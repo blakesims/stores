@@ -106,6 +106,8 @@ pub fn validate_with_authority(
         }
     }
 
+    validate_observations_source_pair(schema, entry, &op, &mut errors);
+
     // Walk all fields recursively. Required/enum/pattern checks run against the
     // full merged entry; actor checks run against actor_entry (diff-only for
     // Transition/Update, full entry for Add).
@@ -126,6 +128,41 @@ pub fn validate_with_authority(
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn validate_observations_source_pair(
+    schema: &Schema,
+    entry: &EntryMap,
+    op: &Op,
+    errors: &mut Vec<ValidationError>,
+) {
+    if schema.name != "observations" {
+        return;
+    }
+
+    let should_check = match op {
+        Op::Add => entry.contains_key("source_env") || entry.contains_key("source_id"),
+        Op::Update(diff)
+        | Op::Transition(_, diff)
+        | Op::SubmitPlan(diff)
+        | Op::SubmitExecute(diff) => diff.contains_key("source_env") || diff.contains_key("source_id"),
+        Op::SubmitPlanReview(_, diff) | Op::SubmitReview(_, diff) => {
+            diff.contains_key("source_env") || diff.contains_key("source_id")
+        }
+    };
+    if !should_check {
+        return;
+    }
+
+    let env_present = entry.get("source_env").is_some_and(|v| !v.is_null());
+    let id_present = entry.get("source_id").is_some_and(|v| !v.is_null());
+    if env_present != id_present {
+        errors.push(ValidationError {
+            field_path: vec!["source_env".to_string(), "source_id".to_string()],
+            rule: error::RuleKind::Required,
+            message: "source_env/source_id must be supplied as a required clean pair; use --source-env with --source-id".to_string(),
+        });
     }
 }
 
@@ -590,6 +627,52 @@ fields:
         let s = schema();
         let entry = entry_from(&[("summary", str_val("hello")), ("priority", str_val("high"))]);
         validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap();
+    }
+
+
+
+    #[test]
+    fn t084_observations_source_env_without_source_id_rejected() {
+        let schema = Schema::from_yaml(r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: source_env
+    type: enum
+    enum_values: [prod, sandbox]
+  - name: source_id
+    type: text
+"#).unwrap();
+        let entry = entry_from(&[("source_env", str_val("prod"))]);
+        let errs = validate(&schema, &entry, Op::Add, Actor::Human.into()).unwrap_err();
+        let msg = pretty_print(&errs);
+        assert!(msg.contains("source_env/source_id"), "{msg}");
+        assert!(msg.contains("clean pair"), "{msg}");
+    }
+
+    #[test]
+    fn t084_observations_source_id_without_source_env_rejected() {
+        let schema = Schema::from_yaml(r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: source_env
+    type: enum
+    enum_values: [prod, sandbox]
+  - name: source_id
+    type: text
+"#).unwrap();
+        let entry = entry_from(&[("source_id", str_val("P123"))]);
+        let errs = validate(&schema, &entry, Op::Add, Actor::Human.into()).unwrap_err();
+        let msg = pretty_print(&errs);
+        assert!(msg.contains("source_env/source_id"), "{msg}");
+        assert!(msg.contains("clean pair"), "{msg}");
     }
 
     // ---- pattern rule ----

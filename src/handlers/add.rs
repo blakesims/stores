@@ -57,6 +57,10 @@ pub fn run(
         }
     })?;
 
+    if schema.name == "observations" {
+        super::observations_source::normalize_cli_source_tuple(matches, &mut entry)?;
+    }
+
     // T013 P2: --lock-contract finalisation. Reject ai_autonomous up front
     // (the lock implies human grounding); then set contract_state=ready and
     // auto-fill drafted_at / approved_at / approved_by where the invoker is

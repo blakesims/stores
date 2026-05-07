@@ -167,26 +167,32 @@ fields:
     required: true
     description: "Where this observation originated"
 
-  - name: source_id
-    type: integer
+  - name: source_env
+    type: enum
+    enum_values: [prod, sandbox]
     required: false
-    description: "Primary key in the source system (dashboard row id, etc.)"
+    description: "Canonical source environment for source_id"
+
+  - name: source_id
+    type: text
+    required: false
+    description: "Canonical source-system identifier paired with source_env"
 
   - name: prod_source_id
     type: integer
     required: false
-    description: "Production environment source id (dashboard sync)"
+    description: "DEPRECATED read-compat alias for source_env=prod plus source_id; use --source-env/--source-id"
 
   - name: sandbox_source_id
     type: integer
     required: false
-    description: "Sandbox environment source id (dashboard sync)"
+    description: "DEPRECATED read-compat alias for source_env=sandbox plus source_id; use --source-env/--source-id"
 
   - name: origin_db
     type: enum
     enum_values: [prod, sandbox]
     required: false
-    description: "Which database the source record lives in"
+    description: "DEPRECATED read-compat alias for source_env; use --source-env/--source-id"
 
   # --- Priority / scheduling ---
   - name: priority
