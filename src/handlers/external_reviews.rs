@@ -349,23 +349,44 @@ fn parse_verdict(output: &str) -> Result<ExternalReviewVerdict> {
         if upper == "PASS"
             || upper.starts_with("VERDICT: PASS")
             || upper.starts_with("VERDICT=PASS")
+            || upper.starts_with("RESULT: PASS")
+            || upper.starts_with("RESULT=PASS")
         {
             return Ok(ExternalReviewVerdict::Pass);
         }
         if upper == "REVISE"
             || upper.starts_with("VERDICT: REVISE")
             || upper.starts_with("VERDICT=REVISE")
+            || upper.starts_with("RESULT: REVISE")
+            || upper.starts_with("RESULT=REVISE")
         {
             return Ok(ExternalReviewVerdict::Revise);
         }
         if upper == "TOOLING_FAILURE"
             || upper.starts_with("VERDICT: TOOLING_FAILURE")
             || upper.starts_with("VERDICT=TOOLING_FAILURE")
+            || upper.starts_with("RESULT: TOOLING_FAILURE")
+            || upper.starts_with("RESULT=TOOLING_FAILURE")
         {
             return Ok(ExternalReviewVerdict::ToolingFailure);
         }
     }
-    anyhow::bail!("external review output missing PASS/REVISE/TOOLING_FAILURE verdict")
+
+    if has_revise_finding_marker(output) {
+        return Ok(ExternalReviewVerdict::Revise);
+    }
+
+    if output.trim().is_empty() {
+        anyhow::bail!("external review output missing PASS/REVISE/TOOLING_FAILURE verdict")
+    }
+    anyhow::bail!("parse-fallback-needed")
+}
+
+fn has_revise_finding_marker(output: &str) -> bool {
+    output.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("[p1]") || lower.contains("[major]") || lower.contains("[critical]")
+    })
 }
 
 fn count_severity(output: &str, severity: &str) -> usize {
@@ -631,6 +652,42 @@ fn persist_review_runner_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_output_starting_with_revise_word_parses_revise() {
+        let parsed = parse_codex_review_output("REVISE\n[major] blocking issue\n").unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Revise);
+        assert_eq!(parsed.counts.major, 1);
+    }
+
+    #[test]
+    fn codex_prose_with_revise_finding_markers_infers_revise() {
+        for marker in ["[P1]", "[major]", "[critical]"] {
+            let output = format!("Review summary: changes required.\n{marker} fix this\n");
+            let parsed = parse_codex_review_output(&output).unwrap();
+            assert_eq!(
+                parsed.verdict,
+                ExternalReviewVerdict::Revise,
+                "marker {marker} should infer REVISE"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_prose_with_result_pass_line_infers_pass() {
+        let parsed = parse_codex_review_output(
+            "Review summary: no blocking findings.\n\nResult: PASS\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Pass);
+    }
+
+    #[test]
+    fn codex_nonempty_without_markers_needs_parse_fallback() {
+        let err = parse_codex_review_output("Review summary: inconclusive prose only.\n")
+            .expect_err("unmarked non-empty prose should request parse fallback");
+        assert_eq!(err.to_string(), "parse-fallback-needed");
+    }
 
     #[test]
     fn structured_review_output_parses_flat_counts() {
