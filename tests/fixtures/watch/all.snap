@@ -1,4 +1,4 @@
-TASKS 13 actionable / 13 total (use --all)
+TASKS 7 actionable / 13 total (use --all)
 T001 blocked silent_zombie
 T002 blocked drive_failed:silent_zombie_pid_dead
 T003 cargo_installed accept_installed_inert
@@ -12,7 +12,7 @@ T022 deploy_blocked retry-deploy-recoverable
 T023 deploy_blocked opaque
 T024 blocked unknown
 T030 accepted terminal
-OBSERVATIONS 3 actionable / 3 total (use --all)
+OBSERVATIONS 1 actionable / 3 total (use --all)
 L001 deploy-blocked: task T003 merge conflict
 L002 deploy-blocked: task T999 merge conflict
 L003 operator note

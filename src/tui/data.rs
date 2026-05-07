@@ -18,6 +18,7 @@ pub enum Section {
     TasksActionableCurrentWork,
     TasksBlockedNeedsAction,
     TasksDeployRecovery,
+    TasksNeedsTriage,
     TasksRecentlyTerminal,
     ObsRatifiable,
     ObsOpenNoContract,
@@ -30,6 +31,7 @@ impl Section {
             Section::TasksActionableCurrentWork => "TASKS · ACTIONABLE CURRENT WORK",
             Section::TasksBlockedNeedsAction => "TASKS · BLOCKED NEEDS ACTION",
             Section::TasksDeployRecovery => "TASKS · DEPLOY RECOVERY",
+            Section::TasksNeedsTriage => "TASKS · NEEDS TRIAGE",
             Section::TasksRecentlyTerminal => "TASKS · RECENTLY TERMINAL",
             Section::ObsRatifiable => "OBS · RATIFIABLE",
             Section::ObsOpenNoContract => "OBS · OPEN-NO-CONTRACT",
@@ -37,10 +39,11 @@ impl Section {
         }
     }
 
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 8] = [
         Section::TasksActionableCurrentWork,
         Section::TasksBlockedNeedsAction,
         Section::TasksDeployRecovery,
+        Section::TasksNeedsTriage,
         Section::TasksRecentlyTerminal,
         Section::ObsRatifiable,
         Section::ObsOpenNoContract,
@@ -130,8 +133,7 @@ pub fn task_visibility_class(t: &TaskRow) -> VisibilityClass {
     let reason = t.blocked_reason.as_deref().unwrap_or("").to_ascii_lowercase();
     let reason_class = blocked_reason_class(t.blocked_reason.as_deref());
     if reason.starts_with("silent_zombie")
-        || reason.contains("silent_zombie")
-        || reason.contains("drive_failed:silent_zombie_pid_dead")
+        || reason.starts_with("drive_failed:silent_zombie")
     {
         return VisibilityClass::HistoricalNoise;
     }
@@ -193,15 +195,25 @@ pub fn is_in_flight_task_status(s: &str) -> bool {
     matches!(s, "executing" | "plan_review" | "code_review" | "in_review" | "planning" | "ready")
 }
 
-pub fn surface_counts(rows: &[Row], show_all_history: bool) -> ((usize, usize), (usize, usize)) {
+pub fn surface_counts(rows: &[Row], _show_all_history: bool) -> ((usize, usize), (usize, usize)) {
     let ctx = task_status_by_id(rows);
     let mut task = (0, 0);
     let mut obs = (0, 0);
     for row in rows {
-        let hidden = !show_all_history && row_visibility_class(row, &ctx) == VisibilityClass::HistoricalNoise;
+        let class = row_visibility_class(row, &ctx);
         match row {
-            Row::Task(_) => { task.1 += 1; if !hidden { task.0 += 1; } }
-            Row::Obs(_) => { obs.1 += 1; if !hidden { obs.0 += 1; } }
+            Row::Task(_) => {
+                task.1 += 1;
+                if class == VisibilityClass::ActionableRecovery {
+                    task.0 += 1;
+                }
+            }
+            Row::Obs(_) => {
+                obs.1 += 1;
+                if class == VisibilityClass::ActionableRecovery {
+                    obs.0 += 1;
+                }
+            }
         }
     }
     (task, obs)
@@ -349,8 +361,20 @@ fn section_for(row: &Row) -> Option<Section> {
             "planning" | "ready" | "executing" | "plan_review" | "code_review" | "in_review" => {
                 Some(Section::TasksActionableCurrentWork)
             }
-            "blocked" => Some(Section::TasksBlockedNeedsAction),
-            "deploy_blocked" => Some(Section::TasksDeployRecovery),
+            "blocked" => {
+                if task_visibility_class(t) == VisibilityClass::NeedsTriage {
+                    Some(Section::TasksNeedsTriage)
+                } else {
+                    Some(Section::TasksBlockedNeedsAction)
+                }
+            }
+            "deploy_blocked" => {
+                if task_visibility_class(t) == VisibilityClass::NeedsTriage {
+                    Some(Section::TasksNeedsTriage)
+                } else {
+                    Some(Section::TasksDeployRecovery)
+                }
+            }
             "closed_out_of_band" | "accepted" | "complete" | "cargo_installed"
             | "schema_migrated" | "rejected" | "abandoned" => Some(Section::TasksRecentlyTerminal),
             _ => Some(Section::TasksActionableCurrentWork),
@@ -544,48 +568,61 @@ mod tests {
 
     #[test]
     fn section_classification() {
+        // blocked/deploy_blocked with no blocked_reason → unknown class → NeedsTriage section.
         let rows = vec![
-            task("plan_review"),
-            task("blocked"),
-            task("deploy_blocked"),
-            task("accepted"),
-            obs("open", Some("ready")),
-            obs("open", None),
-            obs("resolved", None),
+            task("plan_review"),      // idx 0 → TasksActionableCurrentWork
+            task("blocked"),          // idx 1 → TasksNeedsTriage (no reason → unknown)
+            task("deploy_blocked"),   // idx 2 → TasksNeedsTriage (no reason → unknown)
+            task("accepted"),         // idx 3 → TasksRecentlyTerminal
+            obs("open", Some("ready")), // idx 4 → ObsRatifiable
+            obs("open", None),        // idx 5 → ObsOpenNoContract
+            obs("resolved", None),    // idx 6 → ObsOther
         ];
         let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
-        assert_eq!(buckets.len(), 7);
+        assert_eq!(buckets.len(), 8);
         assert_eq!(
             buckets.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
             Section::ALL.to_vec()
         );
-        for (i, (_, indices)) in buckets.iter().enumerate() {
-            assert_eq!(indices, &vec![i], "section {i} should hold row {i}");
-        }
+        let b = |sec: Section| -> Vec<usize> {
+            buckets.iter().find(|(s, _)| *s == sec).unwrap().1.clone()
+        };
+        assert_eq!(b(Section::TasksActionableCurrentWork), vec![0usize]);
+        assert_eq!(b(Section::TasksBlockedNeedsAction), Vec::<usize>::new());
+        assert_eq!(b(Section::TasksDeployRecovery), Vec::<usize>::new());
+        assert_eq!(b(Section::TasksNeedsTriage), vec![1usize, 2]);
+        assert_eq!(b(Section::TasksRecentlyTerminal), vec![3usize]);
+        assert_eq!(b(Section::ObsRatifiable), vec![4usize]);
+        assert_eq!(b(Section::ObsOpenNoContract), vec![5usize]);
+        assert_eq!(b(Section::ObsOther), vec![6usize]);
     }
 
     #[test]
     fn task_status_mapping_is_exhaustive() {
-        let mappings: &[(&str, Section)] = &[
-            ("planning", Section::TasksActionableCurrentWork),
-            ("plan_review", Section::TasksActionableCurrentWork),
-            ("ready", Section::TasksActionableCurrentWork),
-            ("executing", Section::TasksActionableCurrentWork),
-            ("code_review", Section::TasksActionableCurrentWork),
-            ("blocked", Section::TasksBlockedNeedsAction),
-            ("complete", Section::TasksRecentlyTerminal),
-            ("in_review", Section::TasksActionableCurrentWork),
-            ("accepted", Section::TasksRecentlyTerminal),
-            ("rejected", Section::TasksRecentlyTerminal),
-            ("deploy_blocked", Section::TasksDeployRecovery),
-            ("closed_out_of_band", Section::TasksRecentlyTerminal),
-            ("cargo_installed", Section::TasksRecentlyTerminal),
-            ("schema_migrated", Section::TasksRecentlyTerminal),
-            ("abandoned", Section::TasksRecentlyTerminal),
+        // blocked/deploy_blocked with no reason → unknown class → TasksNeedsTriage.
+        // Use an explicit recoverable reason to get TasksBlockedNeedsAction / TasksDeployRecovery.
+        let mappings: &[(&str, Option<&str>, Section)] = &[
+            ("planning", None, Section::TasksActionableCurrentWork),
+            ("plan_review", None, Section::TasksActionableCurrentWork),
+            ("ready", None, Section::TasksActionableCurrentWork),
+            ("executing", None, Section::TasksActionableCurrentWork),
+            ("code_review", None, Section::TasksActionableCurrentWork),
+            ("blocked", Some("rate_limit 429"), Section::TasksBlockedNeedsAction),
+            ("blocked", None, Section::TasksNeedsTriage),
+            ("complete", None, Section::TasksRecentlyTerminal),
+            ("in_review", None, Section::TasksActionableCurrentWork),
+            ("accepted", None, Section::TasksRecentlyTerminal),
+            ("rejected", None, Section::TasksRecentlyTerminal),
+            ("deploy_blocked", Some("retry-deploy-recoverable"), Section::TasksDeployRecovery),
+            ("deploy_blocked", None, Section::TasksNeedsTriage),
+            ("closed_out_of_band", None, Section::TasksRecentlyTerminal),
+            ("cargo_installed", None, Section::TasksRecentlyTerminal),
+            ("schema_migrated", None, Section::TasksRecentlyTerminal),
+            ("abandoned", None, Section::TasksRecentlyTerminal),
         ];
-        for (status, expected) in mappings {
-            let r = task(status);
-            assert_eq!(section_for(&r), Some(*expected), "task status {status}");
+        for (status, reason, expected) in mappings {
+            let r = task_at(status, NOW.to_string(), *reason);
+            assert_eq!(section_for(&r), Some(*expected), "task status {status} reason {reason:?}");
         }
     }
 
@@ -615,6 +652,7 @@ mod tests {
             Section::TasksActionableCurrentWork,
             Section::TasksBlockedNeedsAction,
             Section::TasksDeployRecovery,
+            Section::TasksNeedsTriage,
             Section::TasksRecentlyTerminal,
         ] {
             assert_eq!(bucket(&buckets, sec).len(), if sec == Section::TasksRecentlyTerminal { 6 } else { 0 }, "{sec:?} visibility");

@@ -69,16 +69,20 @@ fn tui_watch_classification_classifies_actionable_recovery_and_needs_triage_patt
 #[test]
 fn tui_watch_classification_default_hides_historical_noise_and_all_history_shows_it() {
     let rows = vec![
-        task("T001", "blocked", Some("silent_zombie")),
-        task("T002", "blocked", Some("rate_limit 429")),
-        task("T003", "deploy_blocked", Some("opaque")),
+        task("T001", "blocked", Some("silent_zombie")),    // HistoricalNoise → hidden in default
+        task("T002", "blocked", Some("rate_limit 429")),   // ActionableRecovery → TasksBlockedNeedsAction
+        task("T003", "deploy_blocked", Some("opaque")),    // NeedsTriage → TasksNeedsTriage
     ];
     let default = classify_with_options(&rows, WatchClassifyOptions::default());
-    assert_eq!(bucket(&default, Section::TasksBlockedNeedsAction), vec![1]);
-    assert_eq!(bucket(&default, Section::TasksDeployRecovery), vec![2]);
+    // T001 hidden; T002 in blocked-needs-action; T003 in needs-triage (not deploy-recovery)
+    assert_eq!(bucket(&default, Section::TasksBlockedNeedsAction), vec![1usize]);
+    assert_eq!(bucket(&default, Section::TasksDeployRecovery), Vec::<usize>::new());
+    assert_eq!(bucket(&default, Section::TasksNeedsTriage), vec![2usize]);
 
     let all = classify_with_options(&rows, WatchClassifyOptions { show_all_history: true, ..Default::default() });
+    // T001 HistoricalNoise shown in --all; section_for sees HistoricalNoise (not NeedsTriage) → TasksBlockedNeedsAction
     assert_eq!(bucket(&all, Section::TasksBlockedNeedsAction), vec![0, 1]);
+    assert_eq!(bucket(&all, Section::TasksNeedsTriage), vec![2usize]);
 }
 
 #[test]
@@ -102,8 +106,18 @@ fn tui_watch_classification_surface_counts_report_actionable_and_total() {
         task("T002", "blocked", Some("rate_limit 429")),
         obs("L001", "deploy-blocked: task T001 merge conflict"),
     ];
+    // T001: HistoricalNoise (closed_out_of_band + accept_installed_inert... actually
+    // closed_out_of_band status is NOT in the accept_installed_inert terminal list,
+    // but silent_zombie makes it HistoricalNoise regardless.
+    // T002: ActionableRecovery → counted as actionable
+    // L001: task T001 is in rows but no task_status_by_id; we must pass task_status_by_id
+    //   which surface_counts builds internally. T001 status is "closed_out_of_band" → terminal
+    //   → L001 is HistoricalNoise.
+    // actionable tasks: T002 = 1 / total = 2
+    // actionable obs: 0 (L001 is HistoricalNoise) / total = 1
     assert_eq!(surface_counts(&rows, false), ((1, 2), (0, 1)));
-    assert_eq!(surface_counts(&rows, true), ((2, 2), (1, 1)));
+    // --all changes visibility but NOT the actionable count: still only T002 is ActionableRecovery
+    assert_eq!(surface_counts(&rows, true), ((1, 2), (0, 1)));
 }
 
 #[test]

@@ -58,6 +58,7 @@ fn render_snapshot(show_all_history: bool) -> String {
             Section::TasksActionableCurrentWork
             | Section::TasksBlockedNeedsAction
             | Section::TasksDeployRecovery
+            | Section::TasksNeedsTriage
             | Section::TasksRecentlyTerminal => task_idxs.extend(idxs),
             Section::ObsRatifiable | Section::ObsOpenNoContract | Section::ObsOther => obs_idxs.extend(idxs),
         }
@@ -86,16 +87,20 @@ fn tui_watch_visibility_snapshots_default_actionable_view() {
     assert_eq!(got, include_str!("fixtures/watch/default.snap"));
     assert!(!got.contains("T001 blocked silent_zombie"));
     assert!(!got.contains("L001 deploy-blocked"));
-    assert!(got.contains("TASKS 9 actionable / 13 total (use --all)"));
-    assert!(got.contains("OBSERVATIONS 2 actionable / 3 total (use --all)"));
+    // 7 ActionableRecovery tasks (T010,T011,T012,T020,T021,T022,T030); 13 total
+    assert!(got.contains("TASKS 7 actionable / 13 total (use --all)"));
+    // 1 ActionableRecovery obs (L003); 3 total
+    assert!(got.contains("OBSERVATIONS 1 actionable / 3 total (use --all)"));
 }
 
 #[test]
 fn tui_watch_visibility_snapshots_all_view_reveals_every_fixture_row() {
     let got = render_snapshot(true);
     assert_eq!(got, include_str!("fixtures/watch/all.snap"));
-    assert!(got.contains("TASKS 13 actionable / 13 total (use --all)"));
-    assert!(got.contains("OBSERVATIONS 3 actionable / 3 total (use --all)"));
+    // Actionable = ActionableRecovery only: 7 tasks, not 13
+    assert!(got.contains("TASKS 7 actionable / 13 total (use --all)"));
+    // 1 ActionableRecovery obs (L003); 3 total
+    assert!(got.contains("OBSERVATIONS 1 actionable / 3 total (use --all)"));
     assert!(got.contains("T001 blocked silent_zombie"));
     assert!(got.contains("L001 deploy-blocked: task T003 merge conflict"));
 }

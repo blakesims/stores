@@ -58,6 +58,7 @@ fn state_matches(state: &str, row: &Row, section: Section) -> bool {
         "actionable_current_work" | "in_flight" => section == Section::TasksActionableCurrentWork,
         "deploy_recovery" | "deploy_blocked" => section == Section::TasksDeployRecovery,
         "blocked_needs_action" => section == Section::TasksBlockedNeedsAction,
+        "needs_triage" => section == Section::TasksNeedsTriage,
         "recently_terminal" => section == Section::TasksRecentlyTerminal,
         // Otherwise match the raw status field.
         other => match row {
