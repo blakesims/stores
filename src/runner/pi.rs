@@ -10,7 +10,7 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Command;
 
 use super::{Runner, RunnerOutput};
 
@@ -92,21 +92,6 @@ fn validate_payload(schema: &str, payload: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-fn output_with_etxtbsy_retry(cmd: &mut Command) -> std::io::Result<Output> {
-    let mut last_err = None;
-    for _ in 0..5 {
-        match cmd.output() {
-            Ok(output) => return Ok(output),
-            Err(e) if e.raw_os_error() == Some(26) => {
-                last_err = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last_err.expect("ETXTBSY retry loop records last error"))
-}
-
 impl Runner for PiRunner {
     fn name(&self) -> &str {
         "pi"
@@ -149,7 +134,7 @@ impl Runner for PiRunner {
         if let Some(p) = &schema_path {
             cmd.arg("--schema").arg(p);
         }
-        let output = output_with_etxtbsy_retry(&mut cmd).context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
+        let output = cmd.output().context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let exit_code = output.status.code().unwrap_or(-1);

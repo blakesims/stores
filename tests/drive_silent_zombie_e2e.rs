@@ -41,9 +41,7 @@ fn install_store_ddl(conn: &Connection, name: &str) {
 #[test]
 fn agents_run_once_flag_exists_and_succeeds() {
     // AC4.3: `stores agents run --once --help` exits 0; `--once` flag is documented.
-    let tmp = tempfile::tempdir().expect("tmpdir");
     let help = Command::new(bin())
-        .current_dir(tmp.path())
         .args(["agents", "run", "--help"])
         .output()
         .expect("invoke help");

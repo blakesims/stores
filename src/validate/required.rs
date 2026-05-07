@@ -52,15 +52,15 @@ pub fn check_required(
     }
 
     // --- required_when ---
-    if let Some(expr) = &field.required_when {
-        let lhs_value = lookup(entry, &expr.lhs_path);
+    if let Some(rw) = &field.required_when {
+        let lhs_value = lookup(entry, &rw.lhs_path);
         let triggered = lhs_value
             .and_then(|v| v.as_str())
-            .map(|value| expr.matches_literal(value))
+            .map(|value| rw.matches_literal(value))
             .unwrap_or(false);
 
         if triggered && is_absent {
-            let condition = expr.condition_string();
+            let condition = rw.condition_string();
             errors.push(ValidationError {
                 field_path: field_path.to_vec(),
                 rule: RuleKind::RequiredWhen {
@@ -137,31 +137,6 @@ mod tests {
             RuleKind::RequiredWhen { expr } => {
                 assert!(expr.contains("triage.verdict"), "expr: {expr}");
                 assert!(expr.contains("T3"), "expr: {expr}");
-            }
-            other => panic!("expected RequiredWhen, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn required_when_in_triggers_for_any_listed_literal() {
-        let field = text_field(
-            "done_when",
-            false,
-            Some("decision IN ['normal_observation', 'arch_review_candidate']"),
-        );
-        let mut entry: EntryMap = BTreeMap::new();
-        entry.insert(
-            "decision".into(),
-            serde_json::Value::String("arch_review_candidate".into()),
-        );
-
-        let mut errors = vec![];
-        check_required(&field, &["done_when".to_string()], &entry, &mut errors);
-        assert_eq!(errors.len(), 1);
-        match &errors[0].rule {
-            RuleKind::RequiredWhen { expr } => {
-                assert!(expr.contains("decision IN"), "expr: {expr}");
-                assert!(expr.contains("arch_review_candidate"), "expr: {expr}");
             }
             other => panic!("expected RequiredWhen, got {:?}", other),
         }

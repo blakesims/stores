@@ -127,45 +127,12 @@ fn cwd_lock() -> &'static std::sync::Mutex<()> {
     L.get_or_init(|| Mutex::new(()))
 }
 
-/// Process-wide environment lock for cargo-install/schema-migrate tests.
-/// These tests mutate CARGO_HOME, CARGO_TARGET_DIR, and STORES_BIN; serialize
-/// and restore them so full-suite parallelism cannot leak values across tests.
-fn env_lock() -> &'static std::sync::Mutex<()> {
+fn cargo_env_lock() -> &'static std::sync::Mutex<()> {
     use std::sync::{Mutex, OnceLock};
     static L: OnceLock<Mutex<()>> = OnceLock::new();
     L.get_or_init(|| Mutex::new(()))
 }
 
-struct EnvGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    saved: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvGuard {
-    fn set(vars: &[(&'static str, &Path)]) -> Self {
-        let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let mut saved = Vec::new();
-        for (key, value) in vars {
-            saved.push((*key, std::env::var(key).ok()));
-            std::env::set_var(key, value);
-        }
-        Self {
-            _guard: guard,
-            saved,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, value) in self.saved.drain(..).rev() {
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-}
 fn fresh_db_with_substrate() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(SUBSTRATE_DDL).unwrap();
@@ -288,22 +255,19 @@ fn ac4_2_post_accept_chain_fixture_parses() {
 /// accept-merge link and does not prevent T100 from completing.
 #[test]
 fn ac4_1_chain_isolation_failure_does_not_block_peer() {
+    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     // Independent tempdir CARGO_HOME / target dir so the test does not
     // pollute the developer's shared cargo cache.
     let cargo_home = tempfile::tempdir().unwrap();
     let target_dir = tempfile::tempdir().unwrap();
+    std::env::set_var("CARGO_HOME", cargo_home.path());
+    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
     // T031 P1: schema-migrate now spawns a subprocess. Point it at the
     // test-built binary so it picks up this branch's bundled schemas.
-    let _env_g = EnvGuard::set(&[
-        ("CARGO_HOME", cargo_home.path()),
-        ("CARGO_TARGET_DIR", target_dir.path()),
-        ("STORES_BIN", Path::new(env!("CARGO_BIN_EXE_stores"))),
-    ]);
+    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
 
     let (_t100_tmp, t100_repo) = setup_chain_repo("feat/t100", "t100-only");
     let (_t101_tmp, t101_repo) = setup_conflict_repo("feat/t101");
-
-    let _cwd_g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());
 
     let conn = fresh_db_with_substrate();
     insert_accepted_task(&conn, "T100", "feat/t100", t100_repo.to_str().unwrap());
@@ -380,19 +344,21 @@ fn ac4_1_chain_isolation_failure_does_not_block_peer() {
         1,
         "T101 must have one mark_deploy_blocked history row"
     );
+
+    std::env::remove_var("CARGO_HOME");
+    std::env::remove_var("CARGO_TARGET_DIR");
 }
 
 /// retry-deploy writes deploy_blocked→accepted; daemon polling observes that
 /// edge and re-runs the normal accept-merge/cargo-install/schema-migrate chain.
 #[test]
 fn retry_deploy_daemon_poll_retries_post_accept_chain() {
+    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let cargo_home = tempfile::tempdir().unwrap();
     let target_dir = tempfile::tempdir().unwrap();
-    let _env_g = EnvGuard::set(&[
-        ("CARGO_HOME", cargo_home.path()),
-        ("CARGO_TARGET_DIR", target_dir.path()),
-        ("STORES_BIN", Path::new(env!("CARGO_BIN_EXE_stores"))),
-    ]);
+    std::env::set_var("CARGO_HOME", cargo_home.path());
+    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
 
     let (_tmp, repo) = setup_chain_repo("feat/retry", "retry-only");
     let conn = fresh_db_with_substrate();
@@ -441,6 +407,9 @@ fn retry_deploy_daemon_poll_retries_post_accept_chain() {
         )
         .unwrap();
     assert_eq!(workflow_dispatches, 0);
+
+    std::env::remove_var("CARGO_HOME");
+    std::env::remove_var("CARGO_TARGET_DIR");
 }
 
 /// T061 codex-revise round 2: stale-workspace retry-deploy chain.
@@ -458,13 +427,12 @@ fn retry_deploy_daemon_poll_retries_post_accept_chain() {
 ///   - transition_history shows mark_cargo_installed with invoker='framework'.
 #[test]
 fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
+    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let cargo_home = tempfile::tempdir().unwrap();
     let target_dir = tempfile::tempdir().unwrap();
-    let _env_g = EnvGuard::set(&[
-        ("CARGO_HOME", cargo_home.path()),
-        ("CARGO_TARGET_DIR", target_dir.path()),
-        ("STORES_BIN", Path::new(env!("CARGO_BIN_EXE_stores"))),
-    ]);
+    std::env::set_var("CARGO_HOME", cargo_home.path());
+    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
 
     // Build a valid cargo repo + git repo that has the branch already merged.
     let (tmp, repo) = setup_chain_repo("feat/T997-stale", "t997-stale-unique");
@@ -590,6 +558,9 @@ fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
         invoker, "framework",
         "mark_cargo_installed must be fired by framework actor"
     );
+
+    std::env::remove_var("CARGO_HOME");
+    std::env::remove_var("CARGO_TARGET_DIR");
 }
 
 /// T061 codex-revise round 3: cwd fallback must reject non-stores Cargo crates.

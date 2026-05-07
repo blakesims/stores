@@ -127,11 +127,7 @@ fn main() -> Result<()> {
                         .map(std::path::PathBuf::from),
                     force: *isub.get_one::<bool>("force").unwrap_or(&false),
                 },
-                Some(("show", ssub)) => AuthCmd::Show {
-                    identity: ssub
-                        .get_one::<String>("identity")
-                        .map(std::path::PathBuf::from),
-                },
+                Some(("show", _)) => AuthCmd::Show,
                 _ => {
                     let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
                     if let Some(auth_cmd) = cmd2.find_subcommand_mut("auth") {

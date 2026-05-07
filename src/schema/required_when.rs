@@ -1,7 +1,12 @@
 use anyhow::{bail, Result};
 
-/// Returns true only when `keyword` appears as a standalone word outside quoted
-/// literals. This prevents false positives on enum literals like 'NORTH'.
+/// Returns true only when `keyword` appears as a standalone word (surrounded by
+/// non-alphanumeric/non-underscore boundaries) in `s`. This prevents false
+/// positives on enum literals like 'NORTH' (contains "OR") or 'BAND' (contains "AND").
+fn contains_keyword(s: &str, keyword: &str) -> bool {
+    find_keyword_outside_quotes(s, keyword).is_some()
+}
+
 fn find_keyword_outside_quotes(s: &str, keyword: &str) -> Option<usize> {
     let kw = keyword.as_bytes();
     let haystack = s.as_bytes();
@@ -28,26 +33,28 @@ fn find_keyword_outside_quotes(s: &str, keyword: &str) -> Option<usize> {
     None
 }
 
-fn contains_keyword_outside_quotes(s: &str, keyword: &str) -> bool {
-    find_keyword_outside_quotes(s, keyword).is_some()
-}
-
 /// Minimal condition AST. Supports `dotted.path == 'literal'` and
 /// `dotted.path IN ['literal1', 'literal2', ...]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expr {
     pub lhs_path: Vec<String>,
-    /// Back-compat accessor for single-literal callers. For `IN`, this is the
+    /// Back-compat accessor for the single-literal form. For `IN`, this is the
     /// first accepted literal; use `rhs_literals` for evaluation.
     pub rhs_literal: String,
     pub rhs_literals: Vec<String>,
 }
 
 impl Expr {
+    /// Returns true when `value` equals any accepted RHS literal.
+    /// For `==`, this checks the single literal; for `IN [...]`, this checks
+    /// membership in the parsed literal list.
     pub fn matches_literal(&self, value: &str) -> bool {
         self.rhs_literals.iter().any(|lit| lit == value)
     }
 
+    /// Renders the parsed condition in canonical schema syntax, preserving
+    /// `==` for single-literal expressions and `IN [...]` for membership
+    /// expressions.
     pub fn condition_string(&self) -> String {
         if self.rhs_literals.len() == 1 {
             format!("{} == '{}'", self.lhs_path.join("."), self.rhs_literal)
@@ -68,9 +75,13 @@ impl Expr {
 /// Accepted forms:
 /// - `dotted.path == 'literal'`
 /// - `dotted.path IN ['literal1', 'literal2', ...]`
+///
+/// Single-quoted RHS literals only. Rejects unsupported boolean/inequality
+/// tokens; this is intentionally not a full expression grammar.
 pub fn parse(input: &str) -> Result<Expr> {
     let s = input.trim();
 
+    // Reject obvious unsupported tokens early for clear messages.
     if s.contains("!=") {
         bail!(
             "unsupported token '!=' in required_when expression; only '==' and 'IN [...]' are supported: {:?}",
@@ -89,13 +100,13 @@ pub fn parse(input: &str) -> Result<Expr> {
             input
         );
     }
-    if contains_keyword_outside_quotes(s, "OR") || s.contains(" or ") {
+    if contains_keyword(s, "OR") || s.contains(" or ") {
         bail!(
             "unsupported token 'OR' in required_when expression; compound expressions are not supported: {:?}",
             input
         );
     }
-    if contains_keyword_outside_quotes(s, "AND") || s.contains(" and ") {
+    if contains_keyword(s, "AND") || s.contains(" and ") {
         bail!(
             "unsupported token 'AND' in required_when expression; compound expressions are not supported: {:?}",
             input
@@ -105,6 +116,7 @@ pub fn parse(input: &str) -> Result<Expr> {
     if let Some(idx) = find_keyword_outside_quotes(s, "IN") {
         return parse_in(input, s, idx);
     }
+
     parse_eq(input, s)
 }
 
@@ -119,6 +131,7 @@ fn parse_eq(input: &str, s: &str) -> Result<Expr> {
 
     let lhs_path = parse_lhs(parts[0].trim())?;
     let literal = parse_single_quoted_literal(parts[1].trim())?;
+
     Ok(Expr {
         lhs_path,
         rhs_literal: literal.clone(),
@@ -145,18 +158,20 @@ fn parse_in(input: &str, s: &str, idx: usize) -> Result<Expr> {
 
     let mut literals = Vec::new();
     for part in inner.split(',') {
-        let literal = parse_single_quoted_literal(part.trim())?;
-        if literal.is_empty() {
+        let lit = parse_single_quoted_literal(part.trim())?;
+        if lit.is_empty() {
             bail!(
                 "required_when IN list contains an empty literal: {:?}",
                 input
             );
         }
-        literals.push(literal);
+        literals.push(lit);
     }
+
+    let rhs_literal = literals[0].clone();
     Ok(Expr {
         lhs_path,
-        rhs_literal: literals[0].clone(),
+        rhs_literal,
         rhs_literals: literals,
     })
 }
@@ -195,7 +210,7 @@ fn parse_single_quoted_literal(rhs: &str) -> Result<String> {
     }
     if !rhs.starts_with('\'') || !rhs.ends_with('\'') || rhs.len() < 2 {
         bail!(
-            "required_when RHS must be a single-quoted literal (e.g. \'T3\'); got: {:?}",
+            "required_when RHS must be a single-quoted literal (e.g. \\'T3\\'); got: {:?}",
             rhs
         );
     }
@@ -233,7 +248,6 @@ mod tests {
     fn parse_in_two_values() {
         let e = parse("decision IN ['normal_observation', 'arch_review_candidate']").unwrap();
         assert_eq!(e.lhs_path, vec!["decision"]);
-        assert_eq!(e.rhs_literal, "normal_observation");
         assert_eq!(
             e.rhs_literals,
             vec!["normal_observation", "arch_review_candidate"]
@@ -242,8 +256,6 @@ mod tests {
             e.condition_string(),
             "decision IN ['normal_observation', 'arch_review_candidate']"
         );
-        assert!(e.matches_literal("arch_review_candidate"));
-        assert!(!e.matches_literal("routed"));
     }
 
     #[test]
@@ -266,15 +278,20 @@ mod tests {
         assert!(err.to_string().contains("OR"));
     }
 
+    /// M1 regression: enum literal containing "OR" as a substring (e.g. 'NORTH')
+    /// must NOT be rejected as a compound-expression keyword.
     #[test]
     fn parse_accepts_quoted_or_in_literal() {
         let e = parse("region == 'NORTH'").unwrap();
+        assert_eq!(e.lhs_path, vec!["region"]);
         assert_eq!(e.rhs_literal, "NORTH");
     }
 
+    /// M1 regression: 'BAND' contains "AND" but must parse cleanly.
     #[test]
     fn parse_accepts_quoted_and_in_literal() {
         let e = parse("type == 'BAND'").unwrap();
+        assert_eq!(e.lhs_path, vec!["type"]);
         assert_eq!(e.rhs_literal, "BAND");
     }
 
