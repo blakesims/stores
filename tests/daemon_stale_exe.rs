@@ -15,6 +15,16 @@ use stores::handlers::agents_run::{
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Parse PID from either legacy bare-PID format or new key=value pidfile format.
+fn parse_pid_from_pidfile(text: &str) -> Option<i32> {
+    for line in text.lines() {
+        if let Some(val) = line.strip_prefix("PID=") {
+            return val.parse().ok();
+        }
+    }
+    text.trim().parse().ok()
+}
+
 #[derive(Clone)]
 struct MockIdentityProvider {
     identities: HashMap<PathBuf, BinaryIdentity>,
@@ -397,10 +407,9 @@ fn reexec_argv_strips_detach_preserves_invoker_and_log_file() {
     while (!args_file.exists() || !pidfile.exists()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    let pidfile_pid: i32 = std::fs::read_to_string(&pidfile)
-        .expect("detached stale reexec preserves agents pidfile")
-        .trim()
-        .parse()
+    let pidfile_text = std::fs::read_to_string(&pidfile)
+        .expect("detached stale reexec preserves agents pidfile");
+    let pidfile_pid: i32 = parse_pid_from_pidfile(&pidfile_text)
         .expect("pidfile contains numeric pid");
     assert_eq!(pidfile_pid, detached_pid, "pidfile must contain detached child pid");
     let argv = std::fs::read_to_string(&args_file).unwrap();

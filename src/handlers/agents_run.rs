@@ -492,20 +492,157 @@ fn install_sigterm_handler() {
     }
 }
 
-pub(crate) fn read_pidfile(path: &Path) -> Result<i32> {
+/// Identity fields stored alongside the PID to detect PID reuse on stop.
+///
+/// Format (key=value, one per line, store-defined/opaque):
+/// ```text
+/// PID=12345
+/// START_TIME_NS=1234567890   (Linux: /proc/self/stat field 22 in clock ticks;
+///                             set to 0 on non-Linux)
+/// EXE=/path/to/stores        (from /proc/self/exe or std::env::current_exe)
+/// CWD=/path/to/project       (from std::env::current_dir; best-effort)
+/// ```
+///
+/// This format is not user-facing; only `stores agents stop` reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PidfileEntry {
+    pub(crate) pid: i32,
+    /// Linux: /proc/self/stat field 22 (clock ticks since boot).
+    /// Zero on non-Linux (fallback to bare-PID semantics).
+    pub(crate) start_time: u64,
+    /// Absolute path of the stores executable. Empty string if unavailable.
+    pub(crate) exe: String,
+    /// Working directory at daemon start. Empty string if unavailable.
+    pub(crate) cwd: String,
+}
+
+impl PidfileEntry {
+    /// Build a `PidfileEntry` for the **current** process.
+    fn for_current_process() -> Self {
+        let pid = std::process::id() as i32;
+        let start_time = read_self_start_time();
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        Self { pid, start_time, exe, cwd }
+    }
+
+    /// Serialize to the on-disk key=value format.
+    fn serialize(&self) -> String {
+        format!(
+            "PID={}\nSTART_TIME_NS={}\nEXE={}\nCWD={}\n",
+            self.pid, self.start_time, self.exe, self.cwd
+        )
+    }
+
+    /// Deserialize from the on-disk key=value format.
+    /// Returns `Err` only if the PID field is missing/unparseable.
+    fn deserialize(text: &str) -> Result<Self> {
+        let mut pid: Option<i32> = None;
+        let mut start_time: u64 = 0;
+        let mut exe = String::new();
+        let mut cwd = String::new();
+        for line in text.lines() {
+            if let Some(val) = line.strip_prefix("PID=") {
+                pid = Some(
+                    val.parse::<i32>()
+                        .context("parsing PID field in agents pidfile")?,
+                );
+            } else if let Some(val) = line.strip_prefix("START_TIME_NS=") {
+                start_time = val.parse::<u64>().unwrap_or(0);
+            } else if let Some(val) = line.strip_prefix("EXE=") {
+                exe = val.to_string();
+            } else if let Some(val) = line.strip_prefix("CWD=") {
+                cwd = val.to_string();
+            }
+        }
+        let pid = pid.with_context(|| "PID field missing from agents pidfile")?;
+        if pid <= 0 {
+            bail!("agents daemon pid file contains non-positive pid: {pid}");
+        }
+        Ok(Self { pid, start_time, exe, cwd })
+    }
+}
+
+/// Read `/proc/self/stat` field 22 (start_time, clock ticks since boot) on Linux.
+/// Returns 0 on non-Linux or on any read/parse failure.
+#[cfg(target_os = "linux")]
+fn read_self_start_time() -> u64 {
+    read_proc_start_time(std::process::id() as i32)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_self_start_time() -> u64 {
+    0
+}
+
+/// Read `/proc/<pid>/stat` field 22 (start_time) for an arbitrary pid on Linux.
+/// Returns 0 on any failure (including non-Linux stub).
+#[cfg(target_os = "linux")]
+pub(crate) fn read_proc_start_time(pid: i32) -> u64 {
+    if pid <= 0 {
+        return 0;
+    }
+    let contents = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    // /proc/<pid>/stat: "pid (comm) state ..." — comm can contain spaces/parens.
+    // Field 22 (1-indexed) is start_time; skip past the closing ')' first.
+    let after_comm = match contents.rfind(')') {
+        Some(i) => &contents[i + 1..],
+        None => return 0,
+    };
+    // /proc/pid/stat field numbers (1-indexed from the start of the line):
+    //   1: pid  2: (comm)  3: state  4: ppid  5: pgroup  6: session
+    //   7: tty_nr  8: tpgid  9: flags  10: minflt  11: cminflt  12: majflt
+    //  13: cmajflt  14: utime  15: stime  16: cutime  17: cstime  18: priority
+    //  19: nice  20: num_threads  21: itrealvalue  22: starttime
+    //
+    // After stripping `pid (comm)`, the remaining fields start at field 3 (state).
+    // starttime (field 22) is at 0-based index (22 - 3) = 19 in the remaining tokens.
+    let mut fields = after_comm.split_whitespace();
+    // Skip 19 tokens (fields 3–21) to land on field 22 (starttime).
+    for _ in 0..19 {
+        if fields.next().is_none() {
+            return 0;
+        }
+    }
+    fields.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn read_proc_start_time(_pid: i32) -> u64 {
+    0
+}
+
+/// Read and parse the pidfile, returning a `PidfileEntry`.
+///
+/// Supports both the legacy bare-PID format (`"12345\n"`) and the current
+/// key=value format for backward compatibility during upgrades.
+pub(crate) fn read_pidfile(path: &Path) -> Result<PidfileEntry> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading agents daemon pid file {}", path.display()))?;
-    let pid: i32 = text
-        .trim()
-        .parse()
-        .with_context(|| format!("parsing agents daemon pid file {}", path.display()))?;
-    if pid <= 0 {
-        bail!(
-            "agents daemon pid file {} contains non-positive pid: {pid}",
-            path.display()
-        );
+    // Legacy bare-PID format: the entire trimmed content is a number.
+    if text.trim().chars().all(|c| c.is_ascii_digit() || c == '-') {
+        let pid: i32 = text
+            .trim()
+            .parse()
+            .with_context(|| format!("parsing agents daemon pid file {}", path.display()))?;
+        if pid <= 0 {
+            bail!(
+                "agents daemon pid file {} contains non-positive pid: {pid}",
+                path.display()
+            );
+        }
+        // Legacy format: start_time=0 (no identity check).
+        return Ok(PidfileEntry { pid, start_time: 0, exe: String::new(), cwd: String::new() });
     }
-    Ok(pid)
+    PidfileEntry::deserialize(&text)
+        .with_context(|| format!("parsing agents daemon pid file {}", path.display()))
 }
 
 /// Atomically claim the pidfile slot before forking.
@@ -555,17 +692,19 @@ fn prepare_detached_pidfile(path: &Path) -> Result<()> {
     // A zombie PID is treated as "not live" — it has exited even though
     // kill(pid, 0) returns 0. Use pid_is_zombie to detect that case.
     match read_pidfile(path) {
-        Ok(pid) if pid_is_alive(pid) && !pid_is_zombie(pid) => {
+        Ok(entry) if pid_is_alive(entry.pid) && !pid_is_zombie(entry.pid) => {
             bail!(
-                "agents daemon already running for this project: live pid {pid} in {}",
+                "agents daemon already running for this project: live pid {} in {}",
+                entry.pid,
                 path.display()
             );
         }
-        Ok(pid) => {
+        Ok(entry) => {
             // Dead or zombie — stale pidfile.
             eprintln!(
-                "warning: removing stale agents daemon pid file {} (pid {pid} is not live)",
-                path.display()
+                "warning: removing stale agents daemon pid file {} (pid {} is not live)",
+                path.display(),
+                entry.pid
             );
             std::fs::remove_file(path).with_context(|| {
                 format!("removing stale agents daemon pid file {}", path.display())
@@ -584,7 +723,7 @@ fn prepare_detached_pidfile(path: &Path) -> Result<()> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Another concurrent caller won the retry race — they have a live daemon.
-            let pid = read_pidfile(path).unwrap_or(-1);
+            let pid = read_pidfile(path).map(|e| e.pid).unwrap_or(-1);
             bail!(
                 "agents daemon already running for this project: live pid {pid} in {} (lost atomic claim retry)",
                 path.display()
@@ -610,12 +749,13 @@ struct PidfileGuard {
 
 impl PidfileGuard {
     fn write_current(path: PathBuf) -> Result<Self> {
-        let pid = std::process::id() as i32;
+        let entry = PidfileEntry::for_current_process();
+        let pid = entry.pid;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        std::fs::write(&path, format!("{pid}\n"))
+        std::fs::write(&path, entry.serialize())
             .with_context(|| format!("writing agents daemon pid file {}", path.display()))?;
         Ok(Self { path, pid })
     }
@@ -623,8 +763,8 @@ impl PidfileGuard {
 
 impl Drop for PidfileGuard {
     fn drop(&mut self) {
-        if let Ok(pid) = read_pidfile(&self.path) {
-            if pid == self.pid {
+        if let Ok(entry) = read_pidfile(&self.path) {
+            if entry.pid == self.pid {
                 let _ = std::fs::remove_file(&self.path);
             }
         }
@@ -633,7 +773,7 @@ impl Drop for PidfileGuard {
 
 fn current_process_owns_pidfile(path: &Path) -> bool {
     read_pidfile(path)
-        .map(|pid| pid == std::process::id() as i32)
+        .map(|entry| entry.pid == std::process::id() as i32)
         .unwrap_or(false)
 }
 

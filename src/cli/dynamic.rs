@@ -384,7 +384,16 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .subcommand(Command::new("list").about("List available bundled agents"))
                 .subcommand(
                     Command::new("stop")
-                        .about("Stop the detached agents daemon for this project"),
+                        .about("Stop the detached agents daemon for this project")
+                        .arg(
+                            Arg::new("force")
+                                .long("force")
+                                .action(ArgAction::SetTrue)
+                                .help(
+                                    "If the daemon does not exit within the graceful timeout, \
+                                     escalate to SIGKILL. Default: error on timeout without killing.",
+                                ),
+                        ),
                 )
                 .subcommand(
                     Command::new("install")

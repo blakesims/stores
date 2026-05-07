@@ -264,8 +264,9 @@ fn main() -> Result<()> {
                 handlers::agents_backfill::run_backfill()?;
                 return Ok(());
             }
-            if let Some(("stop", _)) = sub.subcommand() {
-                handlers::agents_stop::run_stop()?;
+            if let Some(("stop", stop_sub)) = sub.subcommand() {
+                let force = *stop_sub.get_one::<bool>("force").unwrap_or(&false);
+                handlers::agents_stop::run_stop(handlers::agents_stop::StopOptions { force })?;
                 return Ok(());
             }
             let cmd = match sub.subcommand() {
