@@ -29,10 +29,12 @@ pub struct WindowReport {
     pub requested: String,
     pub since: String,
     /// Absolute UTC cutoff resolved at invocation time (RFC3339).
-    /// For duration windows like "1h", this is the computed timestamp; for
-    /// absolute inputs it equals `since`.  Always stable across reruns given
-    /// the same invocation moment.
-    pub since_resolved: String,
+    /// Present only when the window was an absolute timestamp OR when the caller
+    /// supplied an explicit --now override.  Omitted for bare duration windows
+    /// (e.g. "1h") where the value would shift with wall-clock, making the
+    /// output volatile across reruns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_resolved: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -142,7 +144,8 @@ fn parse_window(window: &str, now_override: Option<&str>) -> Result<(WindowRepor
             WindowReport {
                 requested: window.to_string(),
                 since: window.to_string(),
-                since_resolved: resolved.clone(),
+                // Absolute input → always emit since_resolved (it equals since, normalized).
+                since_resolved: Some(resolved.clone()),
             },
             resolved,
         ));
@@ -162,7 +165,10 @@ fn parse_window(window: &str, now_override: Option<&str>) -> Result<(WindowRepor
         WindowReport {
             requested: window.to_string(),
             since: format!("now-{window}"),
-            since_resolved: resolved.clone(),
+            // Duration window without explicit --now: omit since_resolved from output so
+            // the JSON is stable across reruns (wall-clock is not embedded in the output).
+            // Duration window WITH --now: emit it so the caller can verify the cutoff.
+            since_resolved: now_override.map(|_| resolved.clone()),
         },
         resolved,
     ))
@@ -881,28 +887,25 @@ mod tests {
     }
 
     #[test]
-    fn duration_window_json_resolved_cutoff_is_absolute_timestamp() {
-        // Duration windows must resolve the cutoff to an absolute RFC3339
-        // timestamp in since_resolved (stable to the operator's invocation
-        // time, not literally "now-1h").
+    fn duration_window_bare_omits_since_resolved() {
+        // Bare duration windows (no --now) must NOT include since_resolved in
+        // the output.  Emitting a wall-clock-derived timestamp makes the JSON
+        // volatile across reruns, which breaks the stability acceptance criterion.
         let c = conn();
         let report = build_report(&c, "1h", None).unwrap();
         assert_eq!(report.window.requested, "1h");
         assert_eq!(report.window.since, "now-1h");
-        // since_resolved must be a parseable absolute timestamp (not a relative string)
         assert!(
-            epoch_seconds(&report.window.since_resolved).is_some(),
-            "since_resolved must be an absolute RFC3339 timestamp; got: {}",
+            report.window.since_resolved.is_none(),
+            "since_resolved must be absent for bare duration windows; got: {:?}",
             report.window.since_resolved
         );
-        // It must be in the past (within the last ~2 hours given 1h window with some slack)
-        let resolved_epoch = epoch_seconds(&report.window.since_resolved).unwrap();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let age = now - resolved_epoch;
-        assert!(age >= 3590 && age <= 7200, "resolved cutoff should be ~1h ago; age={age}s");
+        // Confirm JSON does not contain since_resolved key at all.
+        let json = render_json(&report).unwrap();
+        assert!(
+            !json.contains("since_resolved"),
+            "JSON must not contain since_resolved for bare --window 1h; got: {json}"
+        );
     }
 
     #[test]
@@ -1326,18 +1329,24 @@ mod tests {
     #[test]
     fn duration_window_now_override_resolves_correct_cutoff() {
         // With --now 2026-05-07T12:00:00Z and --window 1h,
-        // since_resolved must be 2026-05-07T11:00:00Z.
+        // since_resolved must be Some("2026-05-07T11:00:00Z").
         let c = conn();
         let report = build_report(&c, "1h", Some("2026-05-07T12:00:00Z")).unwrap();
-        assert_eq!(report.window.since_resolved, "2026-05-07T11:00:00Z");
+        assert_eq!(
+            report.window.since_resolved.as_deref(),
+            Some("2026-05-07T11:00:00Z")
+        );
     }
 
     #[test]
     fn duration_window_now_override_non_utc_resolves_correct_cutoff() {
         // --now with -05:00 offset: 2026-05-07T07:00:00-05:00 == 12:00:00Z.
-        // --window 1h → since_resolved = 2026-05-07T11:00:00Z
+        // --window 1h → since_resolved = Some("2026-05-07T11:00:00Z")
         let c = conn();
         let report = build_report(&c, "1h", Some("2026-05-07T07:00:00-05:00")).unwrap();
-        assert_eq!(report.window.since_resolved, "2026-05-07T11:00:00Z");
+        assert_eq!(
+            report.window.since_resolved.as_deref(),
+            Some("2026-05-07T11:00:00Z")
+        );
     }
 }
