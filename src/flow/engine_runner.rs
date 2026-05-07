@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 use crate::codegen::ddl::quote_ident;
+use crate::handlers::agents_run::pid_is_alive;
 use crate::handlers::next_action::find_next_agent;
 use crate::schema::Schema;
 use crate::validate::EntryMap;
@@ -203,8 +204,11 @@ fn scan_tasks(conn: &Connection, schema: &Schema) -> Result<Vec<ClassifiedRow>> 
         entry.insert("plan".into(), parse_json_text(plan));
 
         let next_agent = workflow.and_then(|wf| find_next_agent(wf, &status, &entry));
+        let live_drive_owner = drive_pid
+            .and_then(|pid| i32::try_from(pid).ok())
+            .is_some_and(pid_is_alive);
         let (classification, held_reason) = if let Some(agent) = next_agent {
-            if drive_pid.is_some() {
+            if live_drive_owner {
                 ("held".to_string(), Some("live_drive_owner".to_string()))
             } else if has_live_dispatch_lock(conn, &schema.name, row_id, &agent)? {
                 ("held".to_string(), Some("live_dispatch_lock".to_string()))
@@ -281,11 +285,11 @@ fn scan_observations(conn: &Connection, schema: &Schema) -> Result<Vec<Classifie
         let approved_at = contract.get("approved_at").and_then(Value::as_str);
         let arch_surface = risk_class.as_deref() == Some("architecture")
             || approval_policy.as_deref() == Some("architecture");
+        let awaiting_human_contract =
+            contract_state == "draft" || approved_by.is_none() || approved_at.is_none();
         let (classification, held_reason) = if arch_surface {
             ("held".to_string(), Some("needs_architect".to_string()))
-        } else if status == "investigating"
-            && (contract_state == "draft" || approved_by.is_none() || approved_at.is_none())
-        {
+        } else if awaiting_human_contract {
             ("held".to_string(), Some("needs_human".to_string()))
         } else if matches!(status.as_str(), "investigated" | "confirmed" | "ready") {
             ("held".to_string(), Some("needs_human".to_string()))
@@ -500,6 +504,62 @@ mod tests {
     }
 
     #[test]
+    fn scanner_treats_stale_drive_pid_as_orphaned_task_redrive() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let task_id = insert_task(&conn, "T905", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![999_999_999_i64, task_id],
+        )
+        .unwrap();
+
+        let result = scan_and_record_actionability(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            5,
+            "2026-05-07T00:04:00Z",
+        )
+        .unwrap();
+
+        assert!(result.rows.iter().any(|r| r.store == "tasks"
+            && r.row_id == task_id
+            && r.classification == "actionable_task_redrive"
+            && r.held_reason.is_none()));
+    }
+
+    #[test]
+    fn scanner_holds_live_drive_pid_as_owner() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let task_id = insert_task(&conn, "T906", "code_review");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![std::process::id() as i64, task_id],
+        )
+        .unwrap();
+
+        let result = scan_and_record_actionability(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            6,
+            "2026-05-07T00:05:00Z",
+        )
+        .unwrap();
+
+        assert!(result.rows.iter().any(|r| r.store == "tasks"
+            && r.row_id == task_id
+            && r.classification == "held"
+            && r.held_reason.as_deref() == Some("live_drive_owner")));
+    }
+
+    #[test]
     fn scanner_holds_u_moment_observation_without_lifecycle_writes() {
         let (conn, tasks, intake, observations) = open_scanner_db();
         let original_contract = r#"{"contract_state":"draft","approved_by":null,"approved_at":null,"objective":"draft"}"#;
@@ -539,6 +599,55 @@ mod tests {
         assert_eq!(row.1, original_contract);
         assert_eq!(row.2, "normal");
         assert_eq!(row.3, "human");
+
+        let forbidden: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history WHERE verb IN ('accept','reject','resume','amend','abandon','confirm','ratify') OR verb LIKE 'architecture%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(forbidden, 0);
+    }
+
+    #[test]
+    fn scanner_holds_non_investigating_draft_contract_as_needs_human() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let original_contract = r#"{"contract_state":"draft","approved_by":null,"approved_at":null,"objective":"draft"}"#;
+        let obs_id = insert_observation(
+            &conn,
+            "L904",
+            "open",
+            original_contract,
+            "normal",
+            "human",
+        );
+
+        let result = scan_and_record_actionability(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            7,
+            "2026-05-07T00:06:00Z",
+        )
+        .unwrap();
+
+        assert!(result.rows.iter().any(|r| r.store == "observations"
+            && r.row_id == obs_id
+            && r.classification == "held"
+            && r.held_reason.as_deref() == Some("needs_human")));
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT status, intent_contract FROM observations WHERE id=?1",
+                rusqlite::params![obs_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "open");
+        assert_eq!(row.1, original_contract);
 
         let forbidden: i64 = conn
             .query_row(
