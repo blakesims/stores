@@ -11,6 +11,7 @@ pub mod footer;
 pub mod help;
 pub mod input;
 pub mod priming;
+pub mod progress;
 pub mod render;
 pub mod search;
 pub mod sidecar;

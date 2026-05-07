@@ -1,23 +1,23 @@
 daemon:DEAD
-lanes: execution=1 review=1 accept=3 held=8 active=7 priority=2
+lanes: execution=1 review=1 accept=3 held=8 active=7 priority=3
 external review: unavailable / not installed
-ACTIVE WORK (2)
-T010 executing [P2/3 C1/3] in-flight
-T012 ready [P2/3 C1/3] in-flight
+ACTIVE WORK (1)
+T010 executing ▮▱ ··· in-flight
 HELD (2)
-T020 blocked [P2/3 C1/3] rate_limit reason:rate_limit
-T021 blocked [P2/3 C1/3] transient_infra reason:transient_infra
+T020 blocked rate_limit reason:rate_limit
+T021 blocked transient_infra reason:transient_infra
 HELD (1)
-T022 deploy_blocked [P2/3 C1/3] retry-deploy-recoverable reason:retry-deploy-recoverable
+T022 deploy_blocked retry-deploy-recoverable reason:retry-deploy-recoverable
 HELD (2)
-T023 deploy_blocked [P2/3 C1/3] opaque reason:opaque
-T024 blocked [P2/3 C1/3] unknown reason:unknown
+T023 deploy_blocked opaque reason:opaque
+T024 blocked unknown reason:unknown
 ACCEPT (1)
-T030 accepted [P2/3 C1/3] terminal reason:terminal
+T030 accepted ✓ accepted terminal reason:terminal
 REVIEW (1)
-T011 plan_review [P2/3 C1/3] in-flight
-PRIORITY (1)
+T011 code_review ▰◐▱ ●●· in-flight
+PRIORITY (2)
 L002 open priority:high deploy-blocked: task T999 merge conflict
+T012 ready in-flight
 OBSERVATIONS/INTAKE (1)
 L003 open priority:normal operator note
 OBSERVATIONS/INTAKE (0)

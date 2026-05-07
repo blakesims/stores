@@ -128,7 +128,11 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
         }
         let absolute_idx = app.scroll_offset + i;
         let selected = cursor == Some(absolute_idx);
-        items.push(ListItem::new(format_row_line(&app.rows[fr.abs], selected)));
+        items.push(ListItem::new(format_row_line(
+            &app.rows[fr.abs],
+            selected,
+            &app.external_review,
+        )));
     }
 
     if items.is_empty() {
@@ -170,7 +174,7 @@ fn cockpit_header_items(app: &App) -> Vec<ListItem<'static>> {
     ]
 }
 
-fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
+fn format_row_line(row: &Row, selected: bool, external_review: &ExternalReviewState) -> Line<'static> {
     let base = match row {
         Row::Task(t) => vec![
             Span::raw("  "),
@@ -183,7 +187,7 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(" "),
-            Span::raw(format!("{} ", task_progress(t))),
+            Span::raw(format!("{}", task_progress_text(t, external_review))),
             Span::raw(truncate(&task_snippet(t), 60)),
         ],
         Row::Obs(o) => {
@@ -290,11 +294,12 @@ fn task_status_label(t: &super::data::TaskRow) -> String {
     }
 }
 
-fn task_progress(t: &super::data::TaskRow) -> String {
-    match (t.current_phase, t.total_phases, t.current_cycle) {
-        (Some(p), Some(n), Some(c)) if n > 0 => format!("[P{p}/{n} C{c}/3]"),
-        (Some(p), None, Some(c)) => format!("[P{p}/? C{c}/3]"),
-        _ => "[P?]".to_string(),
+fn task_progress_text(t: &super::data::TaskRow, external_review: &ExternalReviewState) -> String {
+    let progress = super::progress::task_progress(t, external_review);
+    if progress.text == t.status {
+        String::new()
+    } else {
+        format!("{} ", progress.text)
     }
 }
 
@@ -440,20 +445,22 @@ mod tests {
         let closed = line_text(format_row_line(
             &task_row("closed_out_of_band", None),
             false,
+            &ExternalReviewState::default(),
         ));
         assert!(closed.contains("recovered/done"));
         assert!(!closed.contains("in flight"));
 
-        let rejected = line_text(format_row_line(&task_row("rejected", None), false));
+        let rejected = line_text(format_row_line(&task_row("rejected", None), false, &ExternalReviewState::default()));
         assert!(rejected.contains("terminal-unless-amended"));
         assert!(!rejected.contains("in flight"));
 
         let blocked = line_text(format_row_line(
             &task_row("blocked", Some("rate limit 429")),
             false,
+            &ExternalReviewState::default(),
         ));
         assert!(blocked.contains("blocked:rate_limit"));
-        let unknown = line_text(format_row_line(&task_row("blocked", Some("opaque")), false));
+        let unknown = line_text(format_row_line(&task_row("blocked", Some("opaque")), false, &ExternalReviewState::default()));
         assert!(unknown.contains("blocked:unknown"));
     }
 
@@ -475,8 +482,8 @@ mod tests {
             held_reason: Some("missing owner".to_string()),
             ..Default::default()
         });
-        let obs_text = line_text(format_row_line(&obs, false));
-        let intake_text = line_text(format_row_line(&intake, false));
+        let obs_text = line_text(format_row_line(&obs, false, &ExternalReviewState::default()));
+        let intake_text = line_text(format_row_line(&intake, false, &ExternalReviewState::default()));
         assert!(obs_text.contains("priority:high"), "{obs_text}");
         assert!(obs_text.contains("tier:T2"), "{obs_text}");
         assert!(intake_text.contains("priority:high"), "{intake_text}");
@@ -493,7 +500,7 @@ mod tests {
             investigation_failure_reason: Some("rate_limit: reset later".to_string()),
             ..Default::default()
         });
-        let text = line_text(format_row_line(&row, false));
+        let text = line_text(format_row_line(&row, false, &ExternalReviewState::default()));
         assert!(text.contains("investigation_failed:rate_limit"), "{text}");
         assert!(text.contains("investigator failed"), "{text}");
     }

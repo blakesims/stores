@@ -1,27 +1,27 @@
 daemon:DEAD
-lanes: execution=1 review=1 accept=3 held=8 active=7 priority=2
+lanes: execution=1 review=1 accept=3 held=8 active=7 priority=3
 external review: unavailable / not installed
-ACTIVE WORK (2)
-T010 executing [P2/3 C1/3] in-flight
-T012 ready [P2/3 C1/3] in-flight
+ACTIVE WORK (1)
+T010 executing ▮▱ ··· in-flight
 HELD (4)
-T001 blocked [P2/3 C1/3] silent_zombie reason:silent_zombie
-T002 blocked [P2/3 C1/3] drive_failed:silent_zombie_pid_dead reason:drive_failed:silent_zombie_pid_dead
-T020 blocked [P2/3 C1/3] rate_limit reason:rate_limit
-T021 blocked [P2/3 C1/3] transient_infra reason:transient_infra
+T001 blocked silent_zombie reason:silent_zombie
+T002 blocked drive_failed:silent_zombie_pid_dead reason:drive_failed:silent_zombie_pid_dead
+T020 blocked rate_limit reason:rate_limit
+T021 blocked transient_infra reason:transient_infra
 HELD (1)
-T022 deploy_blocked [P2/3 C1/3] retry-deploy-recoverable reason:retry-deploy-recoverable
+T022 deploy_blocked retry-deploy-recoverable reason:retry-deploy-recoverable
 HELD (2)
-T023 deploy_blocked [P2/3 C1/3] opaque reason:opaque
-T024 blocked [P2/3 C1/3] unknown reason:unknown
+T023 deploy_blocked opaque reason:opaque
+T024 blocked unknown reason:unknown
 ACCEPT (3)
-T003 cargo_installed [P2/3 C1/3] accept_installed_inert reason:accept_installed_inert
-T004 schema_migrated [P2/3 C1/3] accept_installed_inert reason:accept_installed_inert
-T030 accepted [P2/3 C1/3] terminal reason:terminal
+T003 cargo_installed ✓ deploy accept_installed_inert reason:accept_installed_inert
+T004 schema_migrated ✓ deploy accept_installed_inert reason:accept_installed_inert
+T030 accepted ✓ accepted terminal reason:terminal
 REVIEW (1)
-T011 plan_review [P2/3 C1/3] in-flight
-PRIORITY (1)
+T011 code_review ▰◐▱ ●●· in-flight
+PRIORITY (2)
 L002 open priority:high deploy-blocked: task T999 merge conflict
+T012 ready in-flight
 OBSERVATIONS/INTAKE (2)
 L001 open priority:normal deploy-blocked: task T003 merge conflict
 L003 open priority:normal operator note

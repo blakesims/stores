@@ -3,17 +3,18 @@ use stores::tui::data::{
     ObsRow, Row, TaskRow, WatchClassifyOptions,
 };
 
-fn task(id: &str, status: &str, reason: Option<&str>) -> Row {
+fn task(id: &str, tier: &str, status: &str, phase: i64, cycle: i64, total: i64, reason: Option<&str>) -> Row {
     Row::Task(TaskRow {
         display_id: id.to_string(),
         status: status.to_string(),
         title: reason.unwrap_or("in-flight").to_string(),
         updated_at: "1700000000".to_string(),
+        tier_hint: Some(tier.to_string()),
         blocked_reason: reason.map(str::to_string),
         blocked_reason_class: Some(blocked_reason_class(reason).to_string()),
-        current_phase: Some(2),
-        current_cycle: Some(1),
-        total_phases: Some(3),
+        current_phase: Some(phase),
+        current_cycle: Some(cycle),
+        total_phases: Some(total),
         ..Default::default()
     })
 }
@@ -31,23 +32,19 @@ fn obs(id: &str, priority: &str, summary: &str) -> Row {
 
 fn fixture_rows() -> Vec<Row> {
     vec![
-        task("T001", "blocked", Some("silent_zombie")),
-        task(
-            "T002",
-            "blocked",
-            Some("drive_failed:silent_zombie_pid_dead"),
-        ),
-        task("T003", "cargo_installed", Some("accept_installed_inert")),
-        task("T004", "schema_migrated", Some("accept_installed_inert")),
-        task("T010", "executing", None),
-        task("T011", "plan_review", None),
-        task("T012", "ready", None),
-        task("T020", "blocked", Some("rate_limit")),
-        task("T021", "blocked", Some("transient_infra")),
-        task("T022", "deploy_blocked", Some("retry-deploy-recoverable")),
-        task("T023", "deploy_blocked", Some("opaque")),
-        task("T024", "blocked", Some("unknown")),
-        task("T030", "accepted", Some("terminal")),
+        task("T001", "T2", "blocked", 2, 1, 3, Some("silent_zombie")),
+        task("T002", "T2", "blocked", 2, 1, 3, Some("drive_failed:silent_zombie_pid_dead")),
+        task("T003", "T2", "cargo_installed", 2, 1, 3, Some("accept_installed_inert")),
+        task("T004", "T2", "schema_migrated", 2, 1, 3, Some("accept_installed_inert")),
+        task("T010", "T2", "executing", 1, 1, 2, None),
+        task("T011", "T3", "code_review", 2, 3, 3, None),
+        task("T012", "T1", "ready", 1, 1, 1, None),
+        task("T020", "T2", "blocked", 2, 1, 3, Some("rate_limit")),
+        task("T021", "T2", "blocked", 2, 1, 3, Some("transient_infra")),
+        task("T022", "T2", "deploy_blocked", 2, 1, 3, Some("retry-deploy-recoverable")),
+        task("T023", "T2", "deploy_blocked", 2, 1, 3, Some("opaque")),
+        task("T024", "T2", "blocked", 2, 1, 3, Some("unknown")),
+        task("T030", "T2", "accepted", 2, 1, 2, Some("terminal")),
         obs("L001", "normal", "deploy-blocked: task T003 merge conflict"),
         obs("L002", "high", "deploy-blocked: task T999 merge conflict"),
         obs("L003", "normal", "operator note"),
@@ -64,16 +61,18 @@ fn fixture_rows() -> Vec<Row> {
 
 fn row_line(row: &Row) -> String {
     match row {
-        Row::Task(t) => format!(
-            "{} {} [P{}/{} C{}/3] {}{}",
-            t.display_id,
-            t.status,
-            t.current_phase.unwrap_or_default(),
-            t.total_phases.unwrap_or_default(),
-            t.current_cycle.unwrap_or_default(),
-            t.title,
-            t.blocked_reason.as_deref().map(|r| format!(" reason:{r}")).unwrap_or_default()
-        ),
+        Row::Task(t) => {
+            let progress = stores::tui::progress::task_progress(t, &ExternalReviewState::default());
+            let progress = if progress.text == t.status { String::new() } else { format!(" {}", progress.text) };
+            format!(
+                "{} {}{} {}{}",
+                t.display_id,
+                t.status,
+                progress,
+                t.title,
+                t.blocked_reason.as_deref().map(|r| format!(" reason:{r}")).unwrap_or_default()
+            )
+        },
         Row::Obs(o) => format!("{} {} priority:{} {}", o.display_id, o.status, o.priority, o.summary),
         Row::Intake(i) => format!(
             "{} {} priority:{} {} held:{}",
@@ -115,8 +114,12 @@ fn tui_watch_visibility_snapshots_default_actionable_view() {
     assert_eq!(got, include_str!("fixtures/watch/default.snap"));
     assert!(!got.contains("T001 blocked"));
     assert!(!got.contains("L001 deploy-blocked"));
-    assert!(got.contains("PRIORITY (1)\nL002 open priority:high"));
+    assert!(got.contains("PRIORITY (2)\nL002 open priority:high"));
     assert!(got.contains("HELD (2)\nT020 blocked"));
+    assert!(got.contains("T010 executing ▮▱ ···"));
+    assert!(got.contains("T011 code_review ▰◐▱ ●●·"));
+    assert!(got.contains("T012 ready in-flight"));
+    assert!(!got.contains("T012 ready ▮"));
     assert!(got.contains("reason:rate_limit"));
 }
 
