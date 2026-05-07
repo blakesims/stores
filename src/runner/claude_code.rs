@@ -775,6 +775,9 @@ mod tests {
     /// path equal to std::env::current_dir()?.canonicalize()?.
     #[test]
     fn cwd_canonicalised_before_spawn() {
+        let _cwd_guard = crate::paths::test_cwd_lock()
+            .lock()
+            .expect("cwd lock poisoned");
         let expected = std::env::current_dir().unwrap().canonicalize().unwrap();
         let got = resolve_cwd().unwrap();
         assert_eq!(

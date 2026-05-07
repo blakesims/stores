@@ -277,6 +277,19 @@ mod tests {
         mock
     }
 
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!(
+            "stores-auto-resolve-{tag}-{}-{ns}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
     fn fresh_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SUBSTRATE_DDL).unwrap();
@@ -380,12 +393,13 @@ mod tests {
         let _g = crate::paths::test_notifier_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("STORES_NTFY_URL", "https://test.local");
         let mock = install_mock();
         let conn = fresh_db();
         insert_obs(&conn, "L001", "open", None);
         let agents = AgentsYaml::default_empty();
-        let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
+        let cfg_dir = unique_dir("orphan-ntfy");
+        let cfg = cfg_dir.join("config.yaml");
+        std::fs::write(&cfg, "ntfy:\n  url: https://test.local\n").unwrap();
 
         let code = run(
             &row(serde_json::json!(["L001", "L999"]), "abc1234"),
@@ -405,7 +419,6 @@ mod tests {
         assert!(mock.events().iter().any(|(_, e)| {
             e.row_id == "T020" && e.summary.contains("L999") && e.summary.contains("no matching")
         }));
-        std::env::remove_var("STORES_NTFY_URL");
     }
 
     #[test]

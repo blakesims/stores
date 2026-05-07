@@ -269,6 +269,8 @@ fn ac4_1_chain_isolation_failure_does_not_block_peer() {
     let (_t100_tmp, t100_repo) = setup_chain_repo("feat/t100", "t100-only");
     let (_t101_tmp, t101_repo) = setup_conflict_repo("feat/t101");
 
+    let _cwd_g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());
+
     let conn = fresh_db_with_substrate();
     insert_accepted_task(&conn, "T100", "feat/t100", t100_repo.to_str().unwrap());
     insert_accepted_task(&conn, "T101", "feat/t101", t101_repo.to_str().unwrap());

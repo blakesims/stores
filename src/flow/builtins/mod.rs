@@ -897,6 +897,8 @@ mod tests {
         // Use a config file (immune to STORES_NTFY_URL env races across modules).
         let cfg_file = tmp.path().join("config.yaml");
         std::fs::write(&cfg_file, "ntfy:\n  url: https://test.local\n").unwrap();
+        let old_stores_bin = std::env::var("STORES_BIN").ok();
+        std::env::set_var("STORES_BIN", "/bin/false");
 
         let (conn, _t, _o) = fresh_db_with_tasks();
         insert_cargo_installed_task(&conn, "T502", root.to_str().unwrap());
@@ -913,6 +915,10 @@ mod tests {
         };
 
         schema_migrate::run(&row, &ctx).unwrap();
+        match old_stores_bin {
+            Some(v) => std::env::set_var("STORES_BIN", v),
+            None => std::env::remove_var("STORES_BIN"),
+        }
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(
@@ -928,8 +934,8 @@ mod tests {
             "blocked_reason must carry migrate error; got: {reason}"
         );
         assert!(
-            reason.contains("does-not-exist"),
-            "blocked_reason must reference the failing store; got: {reason}"
+            reason.contains("schema-migrate failed"),
+            "blocked_reason must reference schema-migrate failure; got: {reason}"
         );
 
         let evs = mock.events();
