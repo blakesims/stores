@@ -56,17 +56,53 @@ fn resolve_cwd(workspace_path: Option<&str>) -> Result<PathBuf> {
     }
 }
 
-fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> Option<PathBuf> {
+/// Write the JSONL transcript to `<runs_dir>/<session_id>.jsonl`.
+///
+/// **Never returns `None`**: if the primary write fails, a small error-stub
+/// is written at `<runs_dir>/<session_id>-error.json` (or system temp as a
+/// last resort) so the caller always receives a real filesystem path and
+/// `insert_agent_run` is never given `None` for the required `transcript_path`.
+fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> PathBuf {
     let runs_dir = std::env::var_os("STORES_RUNS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.join(".stores").join("runs"));
-    if fs::create_dir_all(&runs_dir).is_ok() {
+
+    let runs_dir_ok = fs::create_dir_all(&runs_dir).is_ok();
+
+    if runs_dir_ok {
         let path = runs_dir.join(format!("{session_id}.jsonl"));
-        if fs::write(&path, stdout).is_ok() {
-            return Some(path);
+        match fs::write(&path, stdout) {
+            Ok(()) => return path,
+            Err(e) => {
+                eprintln!(
+                    "warning: pi runner could not write transcript {}: {e}; writing error stub",
+                    path.display()
+                );
+                let stub_path = runs_dir.join(format!("{session_id}-error.json"));
+                let stub_content = format!(
+                    "{{\"error\":\"transcript write failed\",\"reason\":\"{}\"}}\n",
+                    e.to_string().replace('"', "'")
+                );
+                if fs::write(&stub_path, &stub_content).is_ok() {
+                    return stub_path;
+                }
+            }
         }
+    } else {
+        eprintln!(
+            "warning: pi runner could not create runs dir {}; writing error stub to tempdir",
+            runs_dir.display()
+        );
     }
-    None
+
+    // Last resort: write stub to system temp dir.
+    let tmp_stub = std::env::temp_dir().join(format!("{session_id}-error.json"));
+    let stub_content = format!(
+        "{{\"error\":\"transcript write failed\",\"reason\":\"could not access {}\"}}\n",
+        runs_dir.display()
+    );
+    let _ = fs::write(&tmp_stub, &stub_content);
+    tmp_stub
 }
 
 fn extract_pi_telemetry(stdout: &str) -> (Option<String>, Option<i64>, Option<i64>, Option<i64>) {
@@ -168,9 +204,20 @@ impl Runner for PiRunner {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let exit_code = output.status.code().unwrap_or(-1);
-        let transcript_path =
-            write_transcript(&cwd, &session_id, &stdout).map(|p| p.to_string_lossy().to_string());
-        let (model_id, tokens_in, tokens_out, prompt_cache_hits) = extract_pi_telemetry(&stdout);
+        // write_transcript always returns a real filesystem path — never None.
+        let transcript_path = Some(
+            write_transcript(&cwd, &session_id, &stdout)
+                .to_string_lossy()
+                .to_string(),
+        );
+        let (raw_model_id, tokens_in, tokens_out, prompt_cache_hits) =
+            extract_pi_telemetry(&stdout);
+        // Pi runner MUST emit a deterministic model_id at the source layer so
+        // insert_agent_run never receives None. If the child transcript carries a
+        // model string, prefer it; otherwise fall back to the deterministic sentinel
+        // "pi:default". The DB contract is required = non-None, non-empty; the
+        // source layer (here) satisfies it — db.rs never provides defaults.
+        let model_id = raw_model_id.or_else(|| Some("pi:default".to_string()));
 
         // Build telemetry from invocation-level data regardless of payload
         // validity — telemetry belongs to the invocation, not the payload.

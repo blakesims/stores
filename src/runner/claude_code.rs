@@ -299,29 +299,58 @@ pub fn resolve_cwd() -> Result<PathBuf> {
 /// `STORES_RUNS_DIR` if set — tests use this to redirect transcripts to a
 /// tempdir so they don't pollute the project's `.stores/runs/`.
 ///
-/// Creates the dir if it does not exist. Failures are non-fatal and are
-/// logged to stderr rather than propagated.
-fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> Option<PathBuf> {
+/// Creates the dir if it does not exist. **Never returns `None`**: if the
+/// primary write fails, a small error-stub file is created at
+/// `<runs_dir>/<session_id>-error.json` and that path is returned instead.
+/// Callers always receive a durable, filesystem-backed transcript path so
+/// `insert_agent_run` is never given a `None` for this required field.
+fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> PathBuf {
     let runs_dir = match std::env::var_os("STORES_RUNS_DIR") {
         Some(p) => PathBuf::from(p),
         None => cwd.join(".stores").join("runs"),
     };
-    if let Err(e) = fs::create_dir_all(&runs_dir) {
+
+    // Attempt to create the runs directory. On failure, fall through to the
+    // stub-under-system-temp path so we still return a real file path.
+    let runs_dir_ok = fs::create_dir_all(&runs_dir).is_ok();
+
+    if runs_dir_ok {
+        let path = runs_dir.join(format!("{session_id}.jsonl"));
+        match fs::write(&path, stdout) {
+            Ok(()) => return path,
+            Err(e) => {
+                eprintln!(
+                    "warning: could not write transcript {}: {e}; writing error stub",
+                    path.display()
+                );
+                // Fall through to stub creation below.
+                let stub_path = runs_dir.join(format!("{session_id}-error.json"));
+                let stub_content = format!(
+                    "{{\"error\":\"transcript write failed\",\"reason\":\"{}\"}}\n",
+                    e.to_string().replace('"', "'")
+                );
+                if fs::write(&stub_path, &stub_content).is_ok() {
+                    return stub_path;
+                }
+                // If even the stub fails, fall through to tempdir stub.
+            }
+        }
+    } else {
         eprintln!(
-            "warning: could not create runs dir {}: {e}",
+            "warning: could not create runs dir {}; writing error stub to tempdir",
             runs_dir.display()
         );
-        return None;
     }
-    let path = runs_dir.join(format!("{session_id}.jsonl"));
-    if let Err(e) = fs::write(&path, stdout) {
-        eprintln!(
-            "warning: could not write transcript {}: {e}",
-            path.display()
-        );
-        return None;
-    }
-    Some(path)
+
+    // Last resort: write stub to system temp dir. This is always writable and
+    // guarantees we return a real filesystem path.
+    let tmp_stub = std::env::temp_dir().join(format!("{session_id}-error.json"));
+    let stub_content = format!(
+        "{{\"error\":\"transcript write failed\",\"reason\":\"could not access {}\"}}\n",
+        runs_dir.display()
+    );
+    let _ = fs::write(&tmp_stub, &stub_content);
+    tmp_stub
 }
 
 pub fn extract_telemetry_from_stream_json(
@@ -447,9 +476,13 @@ impl Runner for ClaudeCodeRunner {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let exit_code = output.status.code().unwrap_or(-1);
 
-        // Write the full stream-json transcript.
-        let transcript_path =
-            write_transcript(&cwd, &session_id, &stdout).map(|p| p.to_string_lossy().to_string());
+        // Write the full stream-json transcript. write_transcript always returns a
+        // real filesystem path — never None — so transcript_path is always Some.
+        let transcript_path = Some(
+            write_transcript(&cwd, &session_id, &stdout)
+                .to_string_lossy()
+                .to_string(),
+        );
         let (model_id, tokens_in, tokens_out, prompt_cache_hits) =
             extract_telemetry_from_stream_json(&stdout, self.model.as_deref());
 
@@ -576,8 +609,7 @@ mod tests {
             &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             "telemetry-test",
             stdout,
-        )
-        .expect("transcript path");
+        );
         assert!(path.exists(), "transcript exists: {}", path.display());
         assert!(path.starts_with(runs.path()), "under STORES_RUNS_DIR");
 

@@ -68,22 +68,36 @@ impl AgentRunTelemetry {
     /// Fully-populated telemetry for mock/test use.
     ///
     /// All required fields (`model_id`, `harness_id`, `started_at`, `ended_at`,
-    /// `transcript_path`) are set to sentinel mock values so that tests that
-    /// construct `RunnerOutput` directly and call `drive_loop` pass
-    /// `insert_agent_run`'s required-field validation without needing to spin
-    /// up real transcript files.
+    /// `transcript_path`) are populated. `transcript_path` is a REAL file written
+    /// to a temp directory under `.stores/runs/` so that `insert_agent_run`'s
+    /// required-field validation (non-None, non-empty, resolves to a real path)
+    /// is satisfied without spinning up a full runner.
+    ///
+    /// The `mock://` scheme is NOT acceptable — transcript_path must be a real
+    /// filesystem path. The stub file written here satisfies that contract.
     ///
     /// For tests that assert specific field values (e.g. `happy_path_one_phase_mock`),
     /// replace the telemetry on the returned `RunnerOutput` with a
     /// fully-specified `AgentRunTelemetry` that points at real synthesized files.
     pub fn with_mock_defaults() -> Self {
         let now = crate::handlers::row::now_iso8601();
+        // Create a real stub transcript file so transcript_path is a valid
+        // filesystem path, not a synthetic scheme like "mock://transcript".
+        // The stub lives in system temp to avoid polluting .stores/runs/.
+        let stub_id = uuid::Uuid::new_v4();
+        let stub_path = std::env::temp_dir()
+            .join(".stores")
+            .join("runs")
+            .join(format!("mock-{stub_id}.json"));
+        let _ = std::fs::create_dir_all(stub_path.parent().unwrap());
+        let _ = std::fs::write(&stub_path, b"{\"model\":\"mock-model\"}\n");
+        let transcript_path = Some(stub_path.to_string_lossy().into_owned());
         Self {
             model_id: Some("mock-model".to_string()),
             harness_id: Some("mock".to_string()),
             started_at: Some(now.clone()),
             ended_at: Some(now),
-            transcript_path: Some("mock://transcript".to_string()),
+            transcript_path,
             ..Self::default()
         }
     }
