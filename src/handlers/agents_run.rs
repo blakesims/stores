@@ -581,7 +581,7 @@ fn clk_tck() -> u64 {
 #[cfg(target_os = "linux")]
 fn ticks_to_ns(ticks: u64, hz: u64) -> u64 {
     if hz == 0 { return 0; }
-    ticks * (1_000_000_000 / hz)
+    ((ticks as u128) * 1_000_000_000u128 / (hz as u128)).min(u64::MAX as u128) as u64
 }
 
 /// Read `/proc/self/stat` field 22 (start_time) on Linux, converted to nanoseconds.
@@ -5018,5 +5018,44 @@ policies:
             "sleep_interruptible should return promptly when SHUTDOWN flips; elapsed={:?}",
             elapsed
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    mod ticks_to_ns_tests {
+        use super::super::ticks_to_ns;
+
+        #[test]
+        fn hz_zero_returns_zero() {
+            assert_eq!(ticks_to_ns(12345, 0), 0);
+        }
+
+        #[test]
+        fn hz_100_standard_linux() {
+            // 12345 ticks * 10_000_000 ns/tick = 123_450_000_000 ns
+            assert_eq!(ticks_to_ns(12345, 100), 123_450_000_000u64);
+        }
+
+        #[test]
+        fn hz_300_precision() {
+            // 300 ticks / 300 hz = 1 second = 1_000_000_000 ns exactly
+            assert_eq!(ticks_to_ns(300, 300), 1_000_000_000u64);
+        }
+
+        #[test]
+        fn hz_1_large_ticks_no_panic() {
+            // ticks = u64::MAX / 1_000_000_000; result should not panic and saturates to u64::MAX
+            let ticks = u64::MAX / 1_000_000_000;
+            let result = ticks_to_ns(ticks, 1);
+            // result = ticks * 1e9 / 1; must be <= u64::MAX
+            assert!(result <= u64::MAX);
+        }
+
+        #[test]
+        fn hz_gt_1_billion_no_zero() {
+            // Verify high-hz platforms don't collapse to zero (old bug: 1e9/hz == 0 when hz > 1e9)
+            // With hz=2_000_000_000, 2 ticks => 1 ns (floor), not 0
+            let result = ticks_to_ns(2, 2_000_000_000);
+            assert_eq!(result, 1u64);
+        }
     }
 }
