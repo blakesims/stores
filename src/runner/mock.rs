@@ -15,7 +15,7 @@ use super::{Runner, RunnerOutput};
 ///
 /// # Example
 /// ```rust
-/// use stores::runner::{RunnerOutput, mock::MockRunner, Runner};
+/// use stores::runner::{AgentRunTelemetry, RunnerOutput, mock::MockRunner, Runner};
 ///
 /// let queue = vec![RunnerOutput {
 ///     stdout: "output".to_string(),
@@ -25,6 +25,7 @@ use super::{Runner, RunnerOutput};
 ///     structured_output: None,
 ///     session_id: None,
 ///     structured_output_source: None,
+///     telemetry: AgentRunTelemetry::with_mock_defaults(),
 /// }];
 /// let runner = MockRunner::new(queue);
 /// let out = runner.spawn("planner", "sys", "brief", None, None).unwrap();
