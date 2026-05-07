@@ -44,6 +44,7 @@ fn make_run_output(stdout: &str) -> RunnerOutput {
         structured_output: None,
         session_id: None,
         structured_output_source: None,
+        telemetry: stores::runner::AgentRunTelemetry::with_mock_defaults(),
     }
 }
 
@@ -155,7 +156,10 @@ fn t3_full_five_stage_cycle_runs() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(plan_count, 1, "T3 must record exactly one submit-plan transition");
+    assert_eq!(
+        plan_count, 1,
+        "T3 must record exactly one submit-plan transition"
+    );
 
     let plan_review_count: i64 = conn
         .query_row(

@@ -51,6 +51,7 @@ fn make_run_output(stdout: &str) -> RunnerOutput {
         structured_output: None,
         session_id: None,
         structured_output_source: None,
+        telemetry: stores::runner::AgentRunTelemetry::with_mock_defaults(),
     }
 }
 
@@ -202,13 +203,16 @@ fn t1_drive_skips_planner_and_plan_reviewer() {
         )
         .unwrap();
     let plan_str = plan_str.expect("T1 row must carry a synthesized plan, not NULL");
-    let plan: serde_json::Value =
-        serde_json::from_str(&plan_str).expect("plan must be valid JSON");
+    let plan: serde_json::Value = serde_json::from_str(&plan_str).expect("plan must be valid JSON");
     let phases = plan
         .get("phases")
         .and_then(|v| v.as_array())
         .expect("synthesized plan must have phases array");
-    assert_eq!(phases.len(), 1, "T1 synthesized plan must have exactly one phase");
+    assert_eq!(
+        phases.len(),
+        1,
+        "T1 synthesized plan must have exactly one phase"
+    );
     assert_eq!(
         plan_source.as_deref(),
         Some("contract_synthesized"),

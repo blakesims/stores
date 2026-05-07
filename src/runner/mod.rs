@@ -51,6 +51,31 @@ pub mod pi;
 #[cfg(feature = "runner-pi")]
 pub use pi::PiRunner;
 
+/// Per-agent invocation telemetry emitted by a runner at source.
+#[derive(Debug, Clone, Default)]
+pub struct AgentRunTelemetry {
+    pub model_id: Option<String>,
+    pub harness_id: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub prompt_cache_hits: Option<i64>,
+    pub transcript_path: Option<String>,
+}
+
+impl AgentRunTelemetry {
+    pub fn with_mock_defaults() -> Self {
+        let now = crate::handlers::row::now_iso8601();
+        Self {
+            harness_id: Some("mock".to_string()),
+            started_at: Some(now.clone()),
+            ended_at: Some(now),
+            ..Self::default()
+        }
+    }
+}
+
 /// The output produced by a single `Runner::spawn` call.
 #[derive(Debug, Clone)]
 pub struct RunnerOutput {
@@ -93,6 +118,8 @@ pub struct RunnerOutput {
     /// Used for postmortem logging (Phase 2 AC2.9). Mock runner always returns
     /// `None` unless tests explicitly set it.
     pub structured_output_source: Option<&'static str>,
+    /// Runner/source telemetry for persistence in `agent_runs`.
+    pub telemetry: AgentRunTelemetry,
 }
 
 /// A synchronous, blocking agent runner.

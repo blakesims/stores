@@ -159,6 +159,7 @@ fn build_runner_from_args(
                 structured_output: None,
                 session_id: None,
                 structured_output_source: None,
+                telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
             })
             .collect();
         return Ok(Box::new(MockRunner::new(outputs)));
@@ -761,6 +762,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         }
     }
 
@@ -1187,6 +1189,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![runner_out]);
 
@@ -1237,6 +1240,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![runner_out]);
 

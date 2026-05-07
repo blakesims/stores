@@ -50,7 +50,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::{Runner, RunnerOutput};
+use super::{AgentRunTelemetry, Runner, RunnerOutput};
 
 use super::sap::{extract_all_json_objects, pick_best_sap_candidate};
 
@@ -301,7 +301,7 @@ pub fn resolve_cwd() -> Result<PathBuf> {
 ///
 /// Creates the dir if it does not exist. Failures are non-fatal and are
 /// logged to stderr rather than propagated.
-fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) {
+fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> Option<PathBuf> {
     let runs_dir = match std::env::var_os("STORES_RUNS_DIR") {
         Some(p) => PathBuf::from(p),
         None => cwd.join(".stores").join("runs"),
@@ -311,7 +311,7 @@ fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) {
             "warning: could not create runs dir {}: {e}",
             runs_dir.display()
         );
-        return;
+        return None;
     }
     let path = runs_dir.join(format!("{session_id}.jsonl"));
     if let Err(e) = fs::write(&path, stdout) {
@@ -319,7 +319,50 @@ fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) {
             "warning: could not write transcript {}: {e}",
             path.display()
         );
+        return None;
     }
+    Some(path)
+}
+
+pub fn extract_telemetry_from_stream_json(
+    stdout: &str,
+    configured_model: Option<&str>,
+) -> (Option<String>, Option<i64>, Option<i64>, Option<i64>) {
+    let mut model_id = configured_model.map(|s| s.to_string());
+    let mut tokens_in = None;
+    let mut tokens_out = None;
+    let mut prompt_cache_hits = None;
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if model_id.is_none() {
+            model_id = v
+                .get("model")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    v.get("message")
+                        .and_then(|m| m.get("model"))
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                });
+        }
+        let usage = v
+            .get("usage")
+            .or_else(|| v.get("message").and_then(|m| m.get("usage")));
+        if let Some(u) = usage {
+            tokens_in = tokens_in.or_else(|| u.get("input_tokens").and_then(|x| x.as_i64()));
+            tokens_out = tokens_out.or_else(|| u.get("output_tokens").and_then(|x| x.as_i64()));
+            let cache = u
+                .get("cache_read_input_tokens")
+                .and_then(|x| x.as_i64())
+                .or_else(|| u.get("prompt_cache_hits").and_then(|x| x.as_i64()))
+                .or_else(|| u.get("cache_hit_input_tokens").and_then(|x| x.as_i64()));
+            prompt_cache_hits = prompt_cache_hits.or(cache);
+        }
+    }
+    (model_id, tokens_in, tokens_out, prompt_cache_hits)
 }
 
 impl Runner for ClaudeCodeRunner {
@@ -393,17 +436,22 @@ impl Runner for ClaudeCodeRunner {
             }
         }
 
+        let started_at = crate::handlers::row::now_iso8601();
         let output = cmd
             .arg(brief)
             .output()
             .context("failed to launch `claude`; ensure it is installed and on PATH")?;
+        let ended_at = crate::handlers::row::now_iso8601();
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let exit_code = output.status.code().unwrap_or(-1);
 
         // Write the full stream-json transcript.
-        write_transcript(&cwd, &session_id, &stdout);
+        let transcript_path =
+            write_transcript(&cwd, &session_id, &stdout).map(|p| p.to_string_lossy().to_string());
+        let (model_id, tokens_in, tokens_out, prompt_cache_hits) =
+            extract_telemetry_from_stream_json(&stdout, self.model.as_deref());
 
         // Extract structured output and final_message from the stream-json result event.
         let (sdk_structured_output, stream_final_message, error_subtype) =
@@ -469,6 +517,16 @@ impl Runner for ClaudeCodeRunner {
             structured_output,
             session_id: Some(session_id),
             structured_output_source,
+            telemetry: AgentRunTelemetry {
+                model_id,
+                harness_id: Some("claude-code".to_string()),
+                started_at: Some(started_at),
+                ended_at: Some(ended_at),
+                tokens_in,
+                tokens_out,
+                prompt_cache_hits,
+                transcript_path,
+            },
         })
     }
 }
@@ -493,6 +551,32 @@ mod tests {
         // Safe to set unconditionally — all tests redirect to the same path,
         // so concurrent set_var calls converge on the same value.
         std::env::set_var("STORES_RUNS_DIR", &runs_dir);
+    }
+
+    #[test]
+    fn stream_json_telemetry_extraction_and_transcript_path() {
+        let runs = tempfile::tempdir().unwrap();
+        std::env::set_var("STORES_RUNS_DIR", runs.path());
+        let stdout = concat!(
+            "{\"type\":\"system\",\"model\":\"claude-system\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-3-5-sonnet\",\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"cache_read_input_tokens\":5}}}\n",
+            "{\"type\":\"result\",\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"cache_read_input_tokens\":5},\"result\":\"ok\"}\n"
+        );
+        let (model_id, tokens_in, tokens_out, prompt_cache_hits) =
+            extract_telemetry_from_stream_json(stdout, None);
+        assert_eq!(model_id.as_deref(), Some("claude-system"));
+        assert_eq!(tokens_in, Some(11));
+        assert_eq!(tokens_out, Some(7));
+        assert_eq!(prompt_cache_hits, Some(5));
+
+        let path = write_transcript(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            "telemetry-test",
+            stdout,
+        )
+        .expect("transcript path");
+        assert!(path.exists(), "transcript exists: {}", path.display());
+        assert!(path.starts_with(runs.path()), "under STORES_RUNS_DIR");
     }
 
     /// Module-level shim directory, created once for the lifetime of the test binary.

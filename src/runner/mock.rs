@@ -114,6 +114,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         }
     }
 
@@ -198,6 +199,7 @@ mod tests {
             structured_output: Some(structured.clone()),
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![output]);
         // schema arg is ignored by mock

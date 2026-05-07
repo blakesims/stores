@@ -12,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::{Runner, RunnerOutput};
+use super::{AgentRunTelemetry, Runner, RunnerOutput};
 
 pub struct PiRunner {
     node_bin: PathBuf,
@@ -56,13 +56,41 @@ fn resolve_cwd(workspace_path: Option<&str>) -> Result<PathBuf> {
     }
 }
 
-fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) {
+fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> Option<PathBuf> {
     let runs_dir = std::env::var_os("STORES_RUNS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.join(".stores").join("runs"));
     if fs::create_dir_all(&runs_dir).is_ok() {
-        let _ = fs::write(runs_dir.join(format!("{session_id}.jsonl")), stdout);
+        let path = runs_dir.join(format!("{session_id}.jsonl"));
+        if fs::write(&path, stdout).is_ok() {
+            return Some(path);
+        }
     }
+    None
+}
+
+fn extract_pi_telemetry(stdout: &str) -> (Option<String>, Option<i64>, Option<i64>, Option<i64>) {
+    let mut model_id = None;
+    let mut tokens_in = None;
+    let mut tokens_out = None;
+    let mut prompt_cache_hits = None;
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        model_id = model_id.or_else(|| {
+            v.get("model")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        });
+        if let Some(u) = v.get("usage") {
+            tokens_in = tokens_in.or_else(|| u.get("input_tokens").and_then(|x| x.as_i64()));
+            tokens_out = tokens_out.or_else(|| u.get("output_tokens").and_then(|x| x.as_i64()));
+            prompt_cache_hits =
+                prompt_cache_hits.or_else(|| u.get("prompt_cache_hits").and_then(|x| x.as_i64()));
+        }
+    }
+    (model_id, tokens_in, tokens_out, prompt_cache_hits)
 }
 
 pub fn extract_final_output(stdout: &str) -> Option<serde_json::Value> {
@@ -134,11 +162,15 @@ impl Runner for PiRunner {
         if let Some(p) = &schema_path {
             cmd.arg("--schema").arg(p);
         }
+        let started_at = crate::handlers::row::now_iso8601();
         let output = cmd.output().context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
+        let ended_at = crate::handlers::row::now_iso8601();
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let exit_code = output.status.code().unwrap_or(-1);
-        write_transcript(&cwd, &session_id, &stdout);
+        let transcript_path =
+            write_transcript(&cwd, &session_id, &stdout).map(|p| p.to_string_lossy().to_string());
+        let (model_id, tokens_in, tokens_out, prompt_cache_hits) = extract_pi_telemetry(&stdout);
 
         let payload = extract_final_output(&stdout);
         if exit_code == 0 && payload.is_none() {
@@ -155,6 +187,16 @@ impl Runner for PiRunner {
             structured_output: payload,
             session_id: Some(session_id),
             structured_output_source: Some("pi-tool"),
+            telemetry: AgentRunTelemetry {
+                model_id,
+                harness_id: Some("pi".to_string()),
+                started_at: Some(started_at),
+                ended_at: Some(ended_at),
+                tokens_in,
+                tokens_out,
+                prompt_cache_hits,
+                transcript_path,
+            },
         })
     }
 }

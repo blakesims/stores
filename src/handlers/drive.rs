@@ -206,6 +206,22 @@ pub struct MockFixtureItem {
     pub stderr: String,
     pub exit_code: i32,
     pub final_message: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub harness_id: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    #[serde(default)]
+    pub tokens_in: Option<i64>,
+    #[serde(default)]
+    pub tokens_out: Option<i64>,
+    #[serde(default)]
+    pub prompt_cache_hits: Option<i64>,
+    #[serde(default)]
+    pub transcript_path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,14 +399,34 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
         })?;
         let outputs: Vec<RunnerOutput> = items
             .into_iter()
-            .map(|item| RunnerOutput {
-                stdout: item.stdout,
-                stderr: item.stderr,
-                exit_code: item.exit_code,
-                final_message: item.final_message,
-                structured_output: None,
-                session_id: None,
-                structured_output_source: None,
+            .map(|item| {
+                let mut telemetry = crate::runner::AgentRunTelemetry::with_mock_defaults();
+                if item.model_id.is_some() {
+                    telemetry.model_id = item.model_id;
+                }
+                if item.harness_id.is_some() {
+                    telemetry.harness_id = item.harness_id;
+                }
+                if item.started_at.is_some() {
+                    telemetry.started_at = item.started_at;
+                }
+                if item.ended_at.is_some() {
+                    telemetry.ended_at = item.ended_at;
+                }
+                telemetry.tokens_in = item.tokens_in;
+                telemetry.tokens_out = item.tokens_out;
+                telemetry.prompt_cache_hits = item.prompt_cache_hits;
+                telemetry.transcript_path = item.transcript_path;
+                RunnerOutput {
+                    stdout: item.stdout,
+                    stderr: item.stderr,
+                    exit_code: item.exit_code,
+                    final_message: item.final_message,
+                    structured_output: None,
+                    session_id: None,
+                    structured_output_source: None,
+                    telemetry,
+                }
             })
             .collect();
         return Ok(Box::new(MockRunner::new(outputs)));
@@ -1002,6 +1038,15 @@ fn drive_loop_with_role_runner(
             &brief_markdown,
             schema_text,
             workspace_path,
+        )?;
+        db::insert_agent_run(
+            conn,
+            display_id,
+            phase_for_log,
+            cycle_for_log,
+            &agent_name_normalized,
+            run_out.exit_code,
+            &run_out.telemetry,
         )?;
         let spawn_elapsed = spawn_start.elapsed();
         eprintln!(
@@ -1757,6 +1802,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         }
     }
 
@@ -2116,6 +2162,41 @@ mod tests {
         ]);
 
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
+
+        let rows: Vec<(String, i64, i64, String, String, String, String, i64)> = conn
+            .prepare(
+                "SELECT display_id, phase, cycle, role, harness_id, started_at, ended_at, exit_code \
+                 FROM agent_runs ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows.len(),
+            5,
+            "one agent_runs row per consumed mock response"
+        );
+        assert_eq!(
+            rows.iter().map(|r| r.3.as_str()).collect::<Vec<_>>(),
+            vec![
+                "planner",
+                "plan-reviewer",
+                "executor",
+                "code-reviewer",
+                "wrap"
+            ]
+        );
+        for row in rows {
+            assert_eq!(row.0, "T001");
+            assert!(row.1 >= 0, "phase populated");
+            assert!(row.2 >= 0, "cycle populated");
+            assert_eq!(row.4, "mock");
+            assert!(!row.5.is_empty(), "started_at populated");
+            assert!(!row.6.is_empty(), "ended_at populated");
+            assert_eq!(row.7, 0);
+        }
 
         // Verify final status: in_review (drive exits after wrap dispatch, row awaits human)
         let na = compute_next_action(&schema, &conn, "T001").unwrap();
@@ -2638,6 +2719,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![fail_out]);
 
@@ -2648,6 +2730,15 @@ mod tests {
             "error must mention non-zero exit: {}",
             err
         );
+
+        let persisted_exit: i64 = conn
+            .query_row(
+                "SELECT exit_code FROM agent_runs WHERE display_id='T001' AND role='executor'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("agent_runs row must be inserted before blocking transition");
+        assert_eq!(persisted_exit, 1);
 
         let (_, after) = crate::handlers::row::read_row(&schema, &conn, "T001").unwrap();
         assert_eq!(
@@ -2714,6 +2805,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![fail_out]);
 
@@ -2931,6 +3023,7 @@ mod tests {
             structured_output: Some(valid_envelope),
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (env, source) =
             parse_envelope(&out, "planner").expect("should succeed via structured_output");
@@ -2975,6 +3068,7 @@ mod tests {
             structured_output: None,
             session_id: Some("test-uuid".to_string()),
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![fail_out]);
 
@@ -3007,6 +3101,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (env, source) =
             parse_envelope(&out, "planner").expect("should parse with commentary above");
@@ -3070,6 +3165,7 @@ mod tests {
             structured_output: Some(fixture_val),
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (env, source) = parse_envelope(&out, "wrap").expect("wrap fixture should parse");
         assert_eq!(
@@ -3142,6 +3238,7 @@ mod tests {
             structured_output: None,
             session_id: Some("wrap-mismatch-session".to_string()),
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![misrouted]);
 
@@ -3207,6 +3304,7 @@ mod tests {
             final_message: Some(fenced_text.to_string()),
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
 
         let (env, source) = parse_envelope(&out, "planner")
@@ -3241,6 +3339,7 @@ mod tests {
             final_message: Some("garbage {{{{ not json".to_string()),
             session_id: None,
             structured_output_source: Some("sdk"),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (_, source) = parse_envelope(&out, "executor").expect("sdk layer must succeed");
         assert_eq!(source, "sdk");
@@ -3259,6 +3358,7 @@ mod tests {
             final_message: Some(fenced.to_string()),
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (_, source) = parse_envelope(&out, "executor").expect("sap layer must succeed");
         assert_eq!(source, "sap");
@@ -3281,6 +3381,7 @@ mod tests {
             final_message: None, // No final_message → skip Layers 2+3 final_message paths.
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (_, source) =
             parse_envelope(&out, "executor").expect("legacy last-line scan must succeed");
@@ -3319,6 +3420,7 @@ mod tests {
             structured_output: None,
             session_id: Some("smoke-session-uuid".to_string()),
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![misrouted]);
 
@@ -4114,6 +4216,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (env, source) =
             parse_envelope(&out, "planner").expect("SAP must pick the right candidate");
@@ -4167,6 +4270,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         }]);
 
         // Run a single iteration — drive_loop will exit after the first submit
