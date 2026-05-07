@@ -237,6 +237,7 @@ impl Runner for PiRunner {
             tokens_out,
             prompt_cache_hits,
             transcript_path,
+            stderr_log_path: None,
         };
 
         // Payload-level failures are surfaced via `payload_error` so that
@@ -254,9 +255,7 @@ impl Runner for PiRunner {
                 session_id: Some(session_id),
                 structured_output_source: None,
                 telemetry,
-                payload_error: Some(
-                    "pi helper exited 0 but did not emit final_output".to_string(),
-                ),
+                payload_error: Some("pi helper exited 0 but did not emit final_output".to_string()),
             });
         }
         if let (Some(s), Some(p)) = (schema, payload.as_ref()) {
@@ -350,7 +349,10 @@ mod tests {
             )
             .unwrap();
         // exit_code reflects the REAL child process exit status (0 here).
-        assert_eq!(out.exit_code, 0, "payload failure preserves real child exit_code");
+        assert_eq!(
+            out.exit_code, 0,
+            "payload failure preserves real child exit_code"
+        );
         // payload_error carries the validation message, separate from exit_code.
         let payload_err = out.payload_error.as_deref().unwrap_or("");
         assert!(
@@ -380,7 +382,10 @@ mod tests {
             )
             .unwrap();
         // exit_code reflects the REAL child process exit status (0 here).
-        assert_eq!(out.exit_code, 0, "missing final_output preserves real child exit_code");
+        assert_eq!(
+            out.exit_code, 0,
+            "missing final_output preserves real child exit_code"
+        );
         // payload_error carries the explanation, separate from exit_code.
         let payload_err = out.payload_error.as_deref().unwrap_or("");
         assert!(

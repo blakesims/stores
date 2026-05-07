@@ -39,6 +39,26 @@ pub struct ParsedReviewOutput {
     pub counts: FindingCounts,
 }
 
+const EXTERNAL_REVIEW_OUTPUT_SCHEMA: &str = r#"{
+  "type": "object",
+  "required": ["verdict"],
+  "properties": {
+    "verdict": {"enum": ["PASS", "REVISE", "TOOLING_FAILURE"]},
+    "critical_count": {"type": "integer", "minimum": 0},
+    "major_count": {"type": "integer", "minimum": 0},
+    "minor_count": {"type": "integer", "minimum": 0},
+    "counts": {
+      "type": "object",
+      "properties": {
+        "critical": {"type": "integer", "minimum": 0},
+        "major": {"type": "integer", "minimum": 0},
+        "minor": {"type": "integer", "minimum": 0}
+      }
+    },
+    "findings": {}
+  }
+}"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolingError {
     pub verdict: ExternalReviewVerdict,
@@ -285,6 +305,44 @@ pub fn parse_codex_review_output(output: &str) -> Result<ParsedReviewOutput> {
     Ok(ParsedReviewOutput { verdict, counts })
 }
 
+fn parse_runner_review_output(out: &RunnerOutput) -> Result<ParsedReviewOutput> {
+    if let Some(value) = out.structured_output.as_ref() {
+        parse_structured_review_output(value)
+    } else {
+        parse_codex_review_output(review_output_text(out))
+    }
+}
+
+fn parse_structured_review_output(value: &Value) -> Result<ParsedReviewOutput> {
+    let verdict = match value.get("verdict").and_then(Value::as_str) {
+        Some("PASS") => ExternalReviewVerdict::Pass,
+        Some("REVISE") => ExternalReviewVerdict::Revise,
+        Some("TOOLING_FAILURE") => ExternalReviewVerdict::ToolingFailure,
+        Some(other) => anyhow::bail!("unknown structured external review verdict '{other}'"),
+        None => anyhow::bail!("structured external review output missing verdict"),
+    };
+    let counts_obj = value.get("counts");
+    let count = |flat: &str, nested: &str| -> usize {
+        value
+            .get(flat)
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                counts_obj
+                    .and_then(|c| c.get(nested))
+                    .and_then(Value::as_u64)
+            })
+            .unwrap_or(0) as usize
+    };
+    Ok(ParsedReviewOutput {
+        verdict,
+        counts: FindingCounts {
+            critical: count("critical_count", "critical"),
+            major: count("major_count", "major"),
+            minor: count("minor_count", "minor"),
+        },
+    })
+}
+
 fn parse_verdict(output: &str) -> Result<ExternalReviewVerdict> {
     for line in output.lines() {
         let upper = line.trim().to_ascii_uppercase();
@@ -383,13 +441,13 @@ pub fn run_external_review_attempt(
             "external-review",
             "",
             &prompt,
-            None,
+            Some(EXTERNAL_REVIEW_OUTPUT_SCHEMA),
             Some(&bundle.workspace_path.to_string_lossy()),
         )
         .map_err(|e| ToolingError::new(format!("TOOLING_FAILURE: review runner failed: {e:#}")))?;
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
     let parsed = if out.exit_code == 0 {
-        parse_codex_review_output(review_output_text(&out)).map_err(|e| {
+        parse_runner_review_output(&out).map_err(|e| {
             ToolingError::new(format!(
                 "TOOLING_FAILURE: external review output parse failed: {e}"
             ))
@@ -458,15 +516,26 @@ fn persist_review_runner_result(
         "structured_output_source": out.structured_output_source,
         "exit_code": out.exit_code,
         "payload_error": out.payload_error,
+        "transcript_path": out.telemetry.transcript_path,
+        "stderr_log_path": out.telemetry.stderr_log_path,
         "codex_command": codex.command,
         "codex_args": codex.args,
     })
     .to_string();
-    let findings = review_output_text(out).to_string();
+    let findings = out
+        .structured_output
+        .as_ref()
+        .map(|v| serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()))
+        .unwrap_or_else(|| review_output_text(out).to_string());
     let started_at = out.telemetry.started_at.clone().unwrap_or_default();
     let completed_at = out.telemetry.ended_at.clone().unwrap_or_default();
     let duration = duration_ms.to_string();
     let transcript_path = out.telemetry.transcript_path.clone().unwrap_or_default();
+    let log_path = out
+        .telemetry
+        .stderr_log_path
+        .clone()
+        .unwrap_or_else(|| transcript_path.clone());
     let model_id = out.telemetry.model_id.clone().unwrap_or_default();
     let base_sha = bundle.base_sha.clone();
     let head_sha = bundle.head_sha.clone();
@@ -485,7 +554,7 @@ fn persist_review_runner_result(
         ("started_at", started_at),
         ("completed_at", completed_at),
         ("duration_ms", duration),
-        ("log_path", transcript_path.clone()),
+        ("log_path", log_path),
         ("transcript_path", transcript_path),
         ("contract_ref", format!("tasks/{}/contract", bundle.task_id)),
         ("plan_ref", format!("tasks/{}/plan", bundle.task_id)),
@@ -525,4 +594,60 @@ fn persist_review_runner_result(
     values.push(&review_display_id);
     conn.execute(&sql, values.as_slice())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_review_output_parses_flat_counts() {
+        let value = serde_json::json!({
+            "verdict": "REVISE",
+            "critical_count": 1,
+            "major_count": 2,
+            "minor_count": 3,
+            "findings": [{"severity":"major","message":"fix"}]
+        });
+        let parsed = parse_structured_review_output(&value).unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Revise);
+        assert_eq!(parsed.counts.critical, 1);
+        assert_eq!(parsed.counts.major, 2);
+        assert_eq!(parsed.counts.minor, 3);
+    }
+
+    #[test]
+    fn structured_review_output_parses_nested_counts() {
+        let value = serde_json::json!({
+            "verdict": "PASS",
+            "counts": {"critical": 0, "major": 0, "minor": 1}
+        });
+        let parsed = parse_structured_review_output(&value).unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Pass);
+        assert_eq!(parsed.counts.critical, 0);
+        assert_eq!(parsed.counts.major, 0);
+        assert_eq!(parsed.counts.minor, 1);
+    }
+
+    #[test]
+    fn runner_review_output_prefers_structured_output() {
+        let out = RunnerOutput {
+            stdout: "not parseable text".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: None,
+            structured_output: Some(serde_json::json!({
+                "verdict": "PASS",
+                "critical_count": 0,
+                "major_count": 0,
+                "minor_count": 0
+            })),
+            session_id: Some("s".to_string()),
+            structured_output_source: Some("pi-tool"),
+            telemetry: crate::runner::AgentRunTelemetry::default(),
+            payload_error: None,
+        };
+        let parsed = parse_runner_review_output(&out).unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Pass);
+    }
 }
