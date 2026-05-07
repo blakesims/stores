@@ -68,7 +68,7 @@ fn db_open_and_migrate_create_daemon_starts_table() {
 }
 
 #[test]
-fn daemon_startup_inserts_exactly_one_audit_row_with_filtered_argv() {
+fn daemon_starts_startup_inserts_exactly_one_audit_row_with_filtered_argv() {
     let tmp = tempfile::tempdir().unwrap();
     let bin = stores_bin();
     let init = Command::new(&bin).current_dir(tmp.path()).arg("init").output().unwrap();

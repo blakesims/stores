@@ -140,15 +140,15 @@ use crate::flow::{
 /// Exponential: `BASE * 2^(attempts-1)` (saturating).
 const BASE_BACKOFF_SECS: u64 = 30;
 
-pub fn daemon_binary_version() -> &'static str {
+fn daemon_binary_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-pub fn daemon_git_sha() -> &'static str {
+fn daemon_git_sha() -> &'static str {
     option_env!("VERGEN_GIT_SHA").unwrap_or("unknown")
 }
 
-pub fn filter_daemon_argv<I, S>(args: I) -> Vec<String>
+fn filter_daemon_argv<I, S>(args: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -190,7 +190,7 @@ fn daemon_starts_table_exists(conn: &Connection) -> Result<bool> {
     Ok(exists > 0)
 }
 
-pub fn insert_daemon_startup<P: BinaryIdentityProvider>(
+fn insert_daemon_startup<P: BinaryIdentityProvider>(
     conn: &Connection,
     args: &RunArgs,
     daemon_epoch: &str,
