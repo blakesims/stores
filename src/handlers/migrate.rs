@@ -123,6 +123,15 @@ pub fn apply_with(
     schemas: &HashMap<String, Schema>,
     manifest: &Manifest,
 ) -> Result<MigrateReport> {
+    apply_with_inner(conn, schemas, manifest, false)
+}
+
+fn apply_with_inner(
+    conn: &mut Connection,
+    schemas: &HashMap<String, Schema>,
+    manifest: &Manifest,
+    inject_post_ddl_failure: bool,
+) -> Result<MigrateReport> {
     let plan = compute_plan(conn, schemas, manifest)?;
     let mut report = MigrateReport {
         applied_columns: Vec::new(),
@@ -203,16 +212,16 @@ pub fn apply_with(
     // list:text JSON cells (DEFAULT '[]') and any path where the SQLite
     // version / pragma state elides the implicit backfill must still
     // materialise as the declared default rather than SQL NULL.
-    #[cfg(test)]
-    if std::env::var("STORES_TEST_FAIL_POST_DDL").as_deref() == Ok("1") {
-        bail!("injected post-DDL failure for atomicity test (STORES_TEST_FAIL_POST_DDL=1)");
+    if inject_post_ddl_failure {
+        bail!("injected post-DDL failure for atomicity test");
     }
     if !plan.additive.is_empty() {
         backfill_defaults(&tx, schemas, manifest, &plan)?;
     }
 
     // Commit — all steps succeeded.
-    tx.commit().context("failed to commit migration transaction")?;
+    tx.commit()
+        .context("failed to commit migration transaction")?;
 
     Ok(report)
 }
@@ -1160,8 +1169,10 @@ mod tests {
         // source_env is present (unlike install_pre_t084_all), so no additive
         // columns are pending — only the type mismatch remains.
         conn.execute_batch(&ddl_for(&pre_half)).unwrap();
-        conn.execute_batch(&ddl_for(schemas.get("gate").unwrap())).unwrap();
-        conn.execute_batch(&ddl_for(schemas.get("tasks").unwrap())).unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("gate").unwrap()))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("tasks").unwrap()))
+            .unwrap();
 
         let pre_live = read_table_info(&conn, "observations").unwrap();
         assert_eq!(
@@ -1249,7 +1260,8 @@ mod tests {
             (r930.0.as_deref(), r930.1.as_deref()),
             (None, None),
             "origin-only row L930 must have canonical (NULL, NULL); got {:?}/{:?}",
-            r930.0, r930.1,
+            r930.0,
+            r930.1,
         );
         assert_eq!(
             r930.2.as_deref(),
@@ -1279,7 +1291,11 @@ mod tests {
             .unwrap();
         assert_eq!(r932.0.as_deref(), Some("sandbox"), "L932 source_env");
         assert_eq!(r932.1.as_deref(), Some("99"), "L932 source_id");
-        assert_eq!(r932.2.as_deref(), Some("sandbox"), "L932 origin_db preserved");
+        assert_eq!(
+            r932.2.as_deref(),
+            Some("sandbox"),
+            "L932 origin_db preserved"
+        );
     }
 
     /// Atomicity: when preflight fails (cross-env row present), the DB must
@@ -1297,12 +1313,22 @@ mod tests {
         insert_pre_t084_source_row(&conn, "L951", "prod", Some(2), Some(3));
 
         let pre_live = read_table_info(&conn, "observations").unwrap();
-        assert!(!pre_live.contains_key("source_env"), "pre-condition: no source_env column");
-        assert_eq!(pre_live.get("source_id").map(|s| s.as_str()), Some("INTEGER"), "pre-condition: INTEGER source_id");
+        assert!(
+            !pre_live.contains_key("source_env"),
+            "pre-condition: no source_env column"
+        );
+        assert_eq!(
+            pre_live.get("source_id").map(|s| s.as_str()),
+            Some("INTEGER"),
+            "pre-condition: INTEGER source_id"
+        );
 
         // Migration must fail because of L951.
         let err = apply_with(&mut conn, &schemas, &manifest).unwrap_err();
-        assert!(format!("{err:#}").contains("L951"), "error must mention L951");
+        assert!(
+            format!("{err:#}").contains("L951"),
+            "error must mention L951"
+        );
 
         // Post-failure: DB must be unchanged — no source_env column added, source_id still INTEGER.
         let post_live = read_table_info(&conn, "observations").unwrap();
@@ -1319,7 +1345,7 @@ mod tests {
 
     /// Atomicity (post-DDL failure path, Finding 2): when a failure occurs AFTER
     /// additive DDL is applied but before the transaction commits (injected via
-    /// `STORES_TEST_FAIL_POST_DDL=1`), the entire TX must roll back — no additive
+    /// the test-only apply_with_inner flag), the entire TX must roll back — no additive
     /// columns must remain in the schema.
     ///
     /// This covers the case preflight-only atomicity cannot: a partial migration
@@ -1345,11 +1371,12 @@ mod tests {
         );
 
         // Inject failure AFTER DDL executes but before commit.
-        std::env::set_var("STORES_TEST_FAIL_POST_DDL", "1");
-        let result = apply_with(&mut conn, &schemas, &manifest);
-        std::env::remove_var("STORES_TEST_FAIL_POST_DDL");
+        let result = apply_with_inner(&mut conn, &schemas, &manifest, true);
 
-        assert!(result.is_err(), "apply_with must fail with injected post-DDL error");
+        assert!(
+            result.is_err(),
+            "apply_with must fail with injected post-DDL error"
+        );
         let msg = format!("{:#}", result.unwrap_err());
         assert!(
             msg.contains("injected post-DDL failure"),
