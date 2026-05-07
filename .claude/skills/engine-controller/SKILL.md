@@ -84,16 +84,48 @@ Ask Pi with: context, options, recommendation, blocking yes/no, task/obs ids. Wh
 
 ## Heartbeat / actionability
 
-Silent standing-by is a bug.
+Silent standing-by is a bug. **Drive PID alive ≠ task progressing.** A drive subprocess can be alive but idle (cycle complete, awaiting external action) — the task may have been sitting at `in_review` for minutes while you assumed wrap was in progress. Always read `status`, `next_agent`, `wrap_log`, and `drive_pid` independently; never collapse them.
 
-Every 3–5 minutes during active sessions, post or act on:
+### Required: substrate-state monitor
 
-- review lane: `in_review next=wrap blocked=false` rows → dispatch reviewer-runner or state why not.
-- revise lane: codex REVISE rows → spawn executor or state blocker.
-- integration lane: PASS rows → accept one at a time or state blocker.
+On every session start, arm a Monitor that diffs actionable substrate state and emits on change:
+
+```bash
+prev=""
+while true; do
+  now=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
+    | jq -r '.[] | select(.status | IN("in_review","ready","planning","plan_review","executing","code_review","blocked","deploy_blocked","accepted")) | "\(.display_id)|\(.status)|\(.next_agent // "-")|\(.blocked)|\(.drive_pid // "-")|cycle=\(.current_cycle):phase=\(.current_phase)"' \
+    | sort)
+  if [ "$now" != "$prev" ]; then
+    [ -z "$prev" ] && echo "[init]" || comm -13 <(echo "$prev") <(echo "$now") | sed 's/^/+ /'
+    [ -n "$prev" ] && comm -23 <(echo "$prev") <(echo "$now") | sed 's/^/- /'
+    prev=$now
+  fi
+  sleep 30
+done
+```
+
+This catches transitions you'd otherwise miss: tasks landing in `in_review` (wrap done — must dispatch codex or accept), drives dying on actionable rows (orphan re-drive needed), and lane-cap saturation. Poll cadence 30s avoids API thrash; output is one line per change.
+
+### Action checklist when a task lands at `in_review`
+
+1. Confirm `wrap_log` has a fresh entry (`json_array_length(wrap_log) > prior count`). If empty, wrap did NOT fire — nudge.
+2. Read `tier_hint`:
+   - **T1**: skip codex per CLAUDE.md doctrine; propose `tasks accept` to Blake (U3, requires token).
+   - **T2/T3**: dispatch codex via reviewer-runner (composed brief, branch/HEAD/base/diff/Pi-rulings).
+3. Check rebase: if branch base lags current main, dispatch normal codex (reviewer-runner rebases) — never `RE-REBASE-ONLY-NO-CODEX` on a first-cycle codex run.
+4. Track the dispatch in your head/notes; do NOT re-dispatch the same task on a stale state.
+
+### Heartbeat cadence
+
+Every 3–5 minutes during active sessions OR on any monitor event, post or act on:
+
+- review lane: `in_review` rows → dispatch codex or propose accept (depending on tier).
+- revise lane: codex REVISE → spawn `task-workflow:executor` (background) or state blocker.
+- integration lane: PASS rows → propose accept (one at a time) or state blocker.
 - architecture lane: active Pi questions.
 
-If parked operational work exists and you are in an architecture thread for >5 minutes, post a queue-vs-architecture heartbeat or ask Blake/Pi to choose. This chat heartbeat is a stopgap until a daemon-side engine-runner/actionability monitor ships.
+If parked operational work exists and you are in an architecture thread for >5 minutes, post a queue-vs-architecture heartbeat or ask Blake/Pi to choose. Chat heartbeat + this monitor are stopgaps until L186/T079 ships.
 
 ## Priority source of truth
 
