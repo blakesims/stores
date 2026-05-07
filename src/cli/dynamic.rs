@@ -997,19 +997,31 @@ fn build_leaf_cmd_owned(
             leaf.field.ty,
             FieldType::List(_) | FieldType::ListFk { .. } | FieldType::ListRecord(_)
         );
+        let is_plain_list = matches!(leaf.field.ty, FieldType::List(_));
+
+        let mut help = leaf
+            .field
+            .description
+            .clone()
+            .unwrap_or_else(|| leaf.cli_name.clone());
+        if is_plain_list {
+            help.push_str(
+                " (repeat flag or comma-separate values; escape commas/backslashes with backslash; empty value sets [])",
+            );
+        } else if is_list {
+            help.push_str(" (repeat flag for multiple values)");
+        }
 
         let mut arg = Arg::new(leaf.cli_name.clone())
             .long(leaf.cli_name.clone())
-            .help(
-                leaf.field
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| leaf.cli_name.clone()),
-            )
+            .help(help)
             .required(false);
 
         if is_list {
             arg = arg.action(ArgAction::Append);
+        }
+        if is_plain_list {
+            arg = arg.value_name("VALUE[,VALUE]");
         }
 
         cmd = cmd.arg(arg);
@@ -1110,19 +1122,32 @@ fn build_leaf_cmd(
             FieldType::List(_) | FieldType::ListFk { .. } | FieldType::ListRecord(_)
         );
 
+        let is_plain_list = matches!(leaf.field.ty, FieldType::List(_));
+
         // Main arg — clone the String into a Box<str> to satisfy Into<Id>
+        let mut help = leaf
+            .field
+            .description
+            .clone()
+            .unwrap_or_else(|| leaf.cli_name.clone());
+        if is_plain_list {
+            help.push_str(
+                " (repeat flag or comma-separate values; escape commas/backslashes with backslash; empty value sets [])",
+            );
+        } else if is_list {
+            help.push_str(" (repeat flag for multiple values)");
+        }
+
         let mut arg = Arg::new(leaf.cli_name.clone())
             .long(leaf.cli_name.clone())
-            .help(
-                leaf.field
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| leaf.cli_name.clone()),
-            )
+            .help(help)
             .required(false);
 
         if is_list {
             arg = arg.action(ArgAction::Append);
+        }
+        if is_plain_list {
+            arg = arg.value_name("VALUE[,VALUE]");
         }
 
         cmd = cmd.arg(arg);
@@ -1258,7 +1283,7 @@ fn build_override_risk_cmd() -> Command {
             Arg::new("risk-flags")
                 .long("risk-flags")
                 .action(ArgAction::Append)
-                .help("Risk flag to add (repeat for multiple; canonical values from docs/risk-and-cluster-taxonomy.md)")
+                .help("Risk flag to add (repeat flag or comma-separate values; escape commas/backslashes with backslash; canonical values from docs/risk-and-cluster-taxonomy.md)")
                 .required(false),
         )
         .arg(
@@ -1379,6 +1404,25 @@ mod tests {
                 "rendered gatekeeper brief missing `{expected}`:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn observations_update_help_describes_list_multi_value_input() {
+        let observations_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "observations")
+            .map(|(_, yaml)| *yaml)
+            .expect("observations schema bundled");
+        let schema = crate::schema::Schema::from_yaml(observations_yaml).unwrap();
+        let mut cmd = build_store_command(&schema);
+        let update = cmd.find_subcommand_mut("update").unwrap();
+        let help = update.render_long_help().to_string();
+        assert!(help.contains("--risk-flags <VALUE[,VALUE]>"), "{help}");
+        assert!(
+            help.contains("repeat flag or comma-separate values"),
+            "{help}"
+        );
+        assert!(help.contains("escape commas/backslashes"), "{help}");
     }
 
     #[test]
