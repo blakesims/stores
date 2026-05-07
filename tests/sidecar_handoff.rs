@@ -186,7 +186,12 @@ fn obs_draft_handoff_succeeds_without_substrate_session_id_argv() {
             let argv = read_argv(outdir.path());
             assert!(
                 argv.iter().all(|arg| !arg.contains("obs-draft-")),
-                "claude argv no longer carries substrate session id to the child: {argv:?}"
+                "claude argv no longer carries obs-draft path to the child: {argv:?}"
+            );
+            assert!(
+                !argv.iter().any(|arg| arg == "--session-id"),
+                "claude argv no longer carries substrate session id to the child: {:?}",
+                argv
             );
         },
     );

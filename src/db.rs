@@ -95,7 +95,6 @@ pub fn open_no_autoapply(path: &Path) -> Result<Connection> {
 /// `policy_ref` / `policies_hash` are `None` for manual transitions; the
 /// autonomous flow daemon fills them when it dispatches policy-mediated writes.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn insert_agent_run(
     conn: &Connection,
     display_id: &str,

@@ -556,7 +556,9 @@ mod tests {
     #[test]
     fn stream_json_telemetry_extraction_and_transcript_path() {
         let runs = tempfile::tempdir().unwrap();
+        let previous_runs_dir = std::env::var_os("STORES_RUNS_DIR");
         std::env::set_var("STORES_RUNS_DIR", runs.path());
+
         let stdout = concat!(
             "{\"type\":\"system\",\"model\":\"claude-system\"}\n",
             "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-3-5-sonnet\",\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"cache_read_input_tokens\":5}}}\n",
@@ -577,6 +579,11 @@ mod tests {
         .expect("transcript path");
         assert!(path.exists(), "transcript exists: {}", path.display());
         assert!(path.starts_with(runs.path()), "under STORES_RUNS_DIR");
+
+        match previous_runs_dir {
+            Some(value) => std::env::set_var("STORES_RUNS_DIR", value),
+            None => std::env::remove_var("STORES_RUNS_DIR"),
+        }
     }
 
     /// Module-level shim directory, created once for the lifetime of the test binary.

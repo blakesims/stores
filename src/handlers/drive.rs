@@ -2126,6 +2126,10 @@ mod tests {
     fn happy_path_one_phase_mock() {
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
+        let runs_dir = _dir.path().join(".stores").join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        let planner_transcript = runs_dir.join("planner.jsonl");
+        std::fs::write(&planner_transcript, "{}\n").unwrap();
 
         // Insert task in planning state, phase=0 (not yet started)
         insert_task(
@@ -2145,7 +2149,8 @@ mod tests {
         // (same tx → in_review). Drive then dispatches wrap agent; after wrap
         // submits, drive exits with "awaiting human review" hint.
         // T072 r6: executor and code-reviewer must have session_id (MINOR 1).
-        let planner_out = make_run_output(planner_fixture_json(), 0);
+        let mut planner_out = make_run_output(planner_fixture_json(), 0);
+        planner_out.telemetry.transcript_path = Some(planner_transcript.display().to_string());
         let plan_reviewer_out = make_run_output(plan_reviewer_fixture_json(), 0);
         let executor_out =
             make_run_output_with_session(executor_fixture_json(), 0, "happy-exec-session");
@@ -2163,13 +2168,13 @@ mod tests {
 
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
 
-        let rows: Vec<(String, i64, i64, String, String, String, String, i64)> = conn
+        let rows: Vec<(String, i64, i64, String, String, String, String, i64, Option<String>)> = conn
             .prepare(
-                "SELECT display_id, phase, cycle, role, harness_id, started_at, ended_at, exit_code \
+                "SELECT display_id, phase, cycle, role, harness_id, started_at, ended_at, exit_code, transcript_path \
                  FROM agent_runs ORDER BY id",
             )
             .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -2188,7 +2193,7 @@ mod tests {
                 "wrap"
             ]
         );
-        for row in rows {
+        for row in &rows {
             assert_eq!(row.0, "T001");
             assert!(row.1 >= 0, "phase populated");
             assert!(row.2 >= 0, "cycle populated");
@@ -2197,6 +2202,21 @@ mod tests {
             assert!(!row.6.is_empty(), "ended_at populated");
             assert_eq!(row.7, 0);
         }
+        let persisted_transcript = rows
+            .iter()
+            .find(|row| row.3 == "planner")
+            .and_then(|row| row.8.as_ref())
+            .expect("planner transcript_path persisted");
+        let persisted_transcript = std::path::Path::new(persisted_transcript);
+        assert!(
+            persisted_transcript.exists(),
+            "persisted transcript_path resolves: {}",
+            persisted_transcript.display()
+        );
+        assert!(
+            persisted_transcript.starts_with(&runs_dir),
+            "persisted transcript_path is under runs dir"
+        );
 
         // Verify final status: in_review (drive exits after wrap dispatch, row awaits human)
         let na = compute_next_action(&schema, &conn, "T001").unwrap();

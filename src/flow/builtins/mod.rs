@@ -1076,6 +1076,20 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        let stores_bin = root.join("stores-migrate-fails.sh");
+        std::fs::write(
+            &stores_bin,
+            "#!/usr/bin/env bash\necho 'schema path bundled:does-not-exist not found' >&2\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stores_bin, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let prev_stores_bin = std::env::var_os("STORES_BIN");
+        std::env::set_var("STORES_BIN", &stores_bin);
         let stores_dir = root.join(".stores");
         std::fs::create_dir_all(&stores_dir).unwrap();
         let fake_stores = tmp.path().join("stores-fail.sh");
@@ -1126,7 +1140,10 @@ mod tests {
         };
 
         schema_migrate::run(&row, &ctx).unwrap();
-        std::env::remove_var("STORES_BIN");
+        match prev_stores_bin {
+            Some(value) => std::env::set_var("STORES_BIN", value),
+            None => std::env::remove_var("STORES_BIN"),
+        }
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(
