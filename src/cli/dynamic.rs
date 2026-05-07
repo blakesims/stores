@@ -266,10 +266,16 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .required(false),
                 )
                 .arg(
+                    Arg::new("all")
+                        .long("all")
+                        .action(ArgAction::SetTrue)
+                        .help("Show the full watch surface, including historical noise"),
+                )
+                .arg(
                     Arg::new("all-history")
                         .long("all-history")
                         .action(ArgAction::SetTrue)
-                        .help("Show complete task history instead of the default actionable/capped view"),
+                        .help("Show the full watch surface, including historical noise (legacy alias)"),
                 )
                 .arg(
                     Arg::new("legacy")

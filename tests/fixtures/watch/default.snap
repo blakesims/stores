@@ -1,0 +1,13 @@
+TASKS 7 actionable / 13 total (use --all)
+T010 executing in-flight
+T011 plan_review in-flight
+T012 ready in-flight
+T020 blocked rate_limit
+T021 blocked transient_infra
+T022 deploy_blocked retry-deploy-recoverable
+T023 deploy_blocked opaque
+T024 blocked unknown
+T030 accepted terminal
+OBSERVATIONS 1 actionable / 3 total (use --all)
+L002 deploy-blocked: task T999 merge conflict
+L003 operator note

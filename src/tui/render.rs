@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use super::app::{App, FlatRow, Mode};
-use super::data::{blocked_reason_class, Row};
+use super::data::{blocked_reason_class, surface_counts, Row};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Search-mode adds an extra 1-line input bar above the status bar.
@@ -138,10 +138,13 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
         ))));
     }
 
+    let ((ta, tt), (oa, ot)) = surface_counts(&app.rows, app.opts.all_history);
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::NONE)
-            .title("stores watch"),
+            .title(format!(
+                "stores watch · TASKS {ta} actionable / {tt} total (use --all) · OBSERVATIONS {oa} actionable / {ot} total (use --all)"
+            )),
     );
     f.render_widget(list, area);
 }

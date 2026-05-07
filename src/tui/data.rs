@@ -8,6 +8,7 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SECS_PER_DAY: i64 = 86_400;
@@ -17,6 +18,7 @@ pub enum Section {
     TasksActionableCurrentWork,
     TasksBlockedNeedsAction,
     TasksDeployRecovery,
+    TasksNeedsTriage,
     TasksRecentlyTerminal,
     ObsRatifiable,
     ObsOpenNoContract,
@@ -29,6 +31,7 @@ impl Section {
             Section::TasksActionableCurrentWork => "TASKS · ACTIONABLE CURRENT WORK",
             Section::TasksBlockedNeedsAction => "TASKS · BLOCKED NEEDS ACTION",
             Section::TasksDeployRecovery => "TASKS · DEPLOY RECOVERY",
+            Section::TasksNeedsTriage => "TASKS · NEEDS TRIAGE",
             Section::TasksRecentlyTerminal => "TASKS · RECENTLY TERMINAL",
             Section::ObsRatifiable => "OBS · RATIFIABLE",
             Section::ObsOpenNoContract => "OBS · OPEN-NO-CONTRACT",
@@ -36,10 +39,11 @@ impl Section {
         }
     }
 
-    pub const ALL: [Section; 7] = [
+    pub const ALL: [Section; 8] = [
         Section::TasksActionableCurrentWork,
         Section::TasksBlockedNeedsAction,
         Section::TasksDeployRecovery,
+        Section::TasksNeedsTriage,
         Section::TasksRecentlyTerminal,
         Section::ObsRatifiable,
         Section::ObsOpenNoContract,
@@ -96,6 +100,131 @@ pub struct ObsRow {
     pub contract_state: Option<String>,
     pub tier_hint: Option<String>,
     pub investigation_failure_reason: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VisibilityClass {
+    ActionableRecovery,
+    HistoricalNoise,
+    NeedsTriage,
+}
+
+impl VisibilityClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VisibilityClass::ActionableRecovery => "actionable_recovery",
+            VisibilityClass::HistoricalNoise => "historical_noise",
+            VisibilityClass::NeedsTriage => "needs_triage",
+        }
+    }
+}
+
+pub fn row_visibility_class(row: &Row, task_status_by_id: &HashMap<String, String>) -> VisibilityClass {
+    match row {
+        Row::Task(t) => task_visibility_class(t),
+        Row::Obs(o) => obs_visibility_class(o, task_status_by_id),
+    }
+}
+
+pub fn task_visibility_class(t: &TaskRow) -> VisibilityClass {
+    if is_in_flight_task_status(&t.status) {
+        return VisibilityClass::ActionableRecovery;
+    }
+    let reason = t.blocked_reason.as_deref().unwrap_or("").to_ascii_lowercase();
+    let reason_class = blocked_reason_class(t.blocked_reason.as_deref());
+    if reason.starts_with("silent_zombie")
+        || reason.starts_with("drive_failed:silent_zombie")
+    {
+        return VisibilityClass::HistoricalNoise;
+    }
+    if reason.contains("accept_installed_inert")
+        && matches!(t.status.as_str(), "cargo_installed" | "schema_migrated" | "accepted" | "complete" | "closed_out_of_band" | "abandoned")
+    {
+        return VisibilityClass::HistoricalNoise;
+    }
+    if t.status == "deploy_blocked" {
+        if is_recoverable_deploy_reason(&reason) {
+            return VisibilityClass::ActionableRecovery;
+        }
+        return VisibilityClass::NeedsTriage;
+    }
+    if t.status == "blocked" {
+        return match reason_class {
+            "rate_limit" | "retry" | "dependency" | "user" | "deploy" => VisibilityClass::ActionableRecovery,
+            "unknown" => VisibilityClass::NeedsTriage,
+            _ => VisibilityClass::ActionableRecovery,
+        };
+    }
+    VisibilityClass::ActionableRecovery
+}
+
+pub fn obs_visibility_class(o: &ObsRow, task_status_by_id: &HashMap<String, String>) -> VisibilityClass {
+    let lower = o.summary.to_ascii_lowercase();
+    if lower.starts_with("deploy-blocked:") {
+        if let Some(task_id) = extract_task_id(&o.summary) {
+            if task_status_by_id
+                .get(&task_id)
+                .map(|s| is_terminal_task_status(s))
+                .unwrap_or(false)
+            {
+                return VisibilityClass::HistoricalNoise;
+            }
+        }
+        if lower.contains("retry-deploy-recoverable") || lower.contains("recoverable") {
+            return VisibilityClass::ActionableRecovery;
+        }
+        return VisibilityClass::NeedsTriage;
+    }
+    VisibilityClass::ActionableRecovery
+}
+
+fn is_recoverable_deploy_reason(reason: &str) -> bool {
+    reason.contains("retry-deploy-recoverable") || reason.contains("recoverable")
+}
+
+fn extract_task_id(s: &str) -> Option<String> {
+    for word in s.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if word.len() >= 2 && word.starts_with('T') && word[1..].chars().all(|c| c.is_ascii_digit()) {
+            return Some(word.to_string());
+        }
+    }
+    None
+}
+
+pub fn is_in_flight_task_status(s: &str) -> bool {
+    matches!(s, "executing" | "plan_review" | "code_review" | "in_review" | "planning" | "ready")
+}
+
+pub fn surface_counts(rows: &[Row], _show_all_history: bool) -> ((usize, usize), (usize, usize)) {
+    let ctx = task_status_by_id(rows);
+    let mut task = (0, 0);
+    let mut obs = (0, 0);
+    for row in rows {
+        let class = row_visibility_class(row, &ctx);
+        match row {
+            Row::Task(_) => {
+                task.1 += 1;
+                if class == VisibilityClass::ActionableRecovery {
+                    task.0 += 1;
+                }
+            }
+            Row::Obs(_) => {
+                obs.1 += 1;
+                if class == VisibilityClass::ActionableRecovery {
+                    obs.0 += 1;
+                }
+            }
+        }
+    }
+    (task, obs)
+}
+
+fn task_status_by_id(rows: &[Row]) -> HashMap<String, String> {
+    rows.iter().filter_map(|r| match r {
+        Row::Task(t) => Some((t.display_id.clone(), t.status.clone())),
+        Row::Obs(_) => None,
+    }).collect()
 }
 
 impl Row {
@@ -193,8 +322,12 @@ fn classify_with_options_at(
     let mut buckets: Vec<(Section, Vec<usize>)> =
         Section::ALL.iter().map(|s| (*s, Vec::new())).collect();
     let mut terminal = Vec::new();
+    let task_ctx = task_status_by_id(rows);
 
     for (i, row) in rows.iter().enumerate() {
+        if !opts.show_all_history && row_visibility_class(row, &task_ctx) == VisibilityClass::HistoricalNoise {
+            continue;
+        }
         match section_for(row) {
             Some(Section::TasksRecentlyTerminal) => terminal.push(i),
             Some(sec) => push_bucket(&mut buckets, sec, i),
@@ -209,19 +342,8 @@ fn classify_with_options_at(
             .then_with(|| rows[*a].display_id().cmp(rows[*b].display_id()))
     });
 
-    let cutoff = now - (opts.recent_terminal_days as i64 * SECS_PER_DAY);
-    let visible_terminal = terminal.into_iter().filter(|idx| {
-        opts.show_all_history
-            || task_updated_epoch(&rows[*idx])
-                .map(|ts| ts >= cutoff)
-                .unwrap_or(false)
-    });
-    let visible_terminal: Vec<usize> = if opts.show_all_history {
-        visible_terminal.collect()
-    } else {
-        visible_terminal.take(opts.recent_terminal_limit).collect()
-    };
-    for idx in visible_terminal {
+    let _ = now;
+    for idx in terminal {
         push_bucket(&mut buckets, Section::TasksRecentlyTerminal, idx);
     }
 
@@ -242,8 +364,20 @@ fn section_for(row: &Row) -> Option<Section> {
             "planning" | "ready" | "executing" | "plan_review" | "code_review" | "in_review" => {
                 Some(Section::TasksActionableCurrentWork)
             }
-            "blocked" => Some(Section::TasksBlockedNeedsAction),
-            "deploy_blocked" => Some(Section::TasksDeployRecovery),
+            "blocked" => {
+                if task_visibility_class(t) == VisibilityClass::NeedsTriage {
+                    Some(Section::TasksNeedsTriage)
+                } else {
+                    Some(Section::TasksBlockedNeedsAction)
+                }
+            }
+            "deploy_blocked" => {
+                if task_visibility_class(t) == VisibilityClass::NeedsTriage {
+                    Some(Section::TasksNeedsTriage)
+                } else {
+                    Some(Section::TasksDeployRecovery)
+                }
+            }
             "closed_out_of_band" | "accepted" | "complete" | "cargo_installed"
             | "schema_migrated" | "rejected" | "abandoned" => Some(Section::TasksRecentlyTerminal),
             _ => Some(Section::TasksActionableCurrentWork),
@@ -442,48 +576,61 @@ mod tests {
 
     #[test]
     fn section_classification() {
+        // blocked/deploy_blocked with no blocked_reason → unknown class → NeedsTriage section.
         let rows = vec![
-            task("plan_review"),
-            task("blocked"),
-            task("deploy_blocked"),
-            task("accepted"),
-            obs("open", Some("ready")),
-            obs("open", None),
-            obs("resolved", None),
+            task("plan_review"),      // idx 0 → TasksActionableCurrentWork
+            task("blocked"),          // idx 1 → TasksNeedsTriage (no reason → unknown)
+            task("deploy_blocked"),   // idx 2 → TasksNeedsTriage (no reason → unknown)
+            task("accepted"),         // idx 3 → TasksRecentlyTerminal
+            obs("open", Some("ready")), // idx 4 → ObsRatifiable
+            obs("open", None),        // idx 5 → ObsOpenNoContract
+            obs("resolved", None),    // idx 6 → ObsOther
         ];
         let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
-        assert_eq!(buckets.len(), 7);
+        assert_eq!(buckets.len(), 8);
         assert_eq!(
             buckets.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
             Section::ALL.to_vec()
         );
-        for (i, (_, indices)) in buckets.iter().enumerate() {
-            assert_eq!(indices, &vec![i], "section {i} should hold row {i}");
-        }
+        let b = |sec: Section| -> Vec<usize> {
+            buckets.iter().find(|(s, _)| *s == sec).unwrap().1.clone()
+        };
+        assert_eq!(b(Section::TasksActionableCurrentWork), vec![0usize]);
+        assert_eq!(b(Section::TasksBlockedNeedsAction), Vec::<usize>::new());
+        assert_eq!(b(Section::TasksDeployRecovery), Vec::<usize>::new());
+        assert_eq!(b(Section::TasksNeedsTriage), vec![1usize, 2]);
+        assert_eq!(b(Section::TasksRecentlyTerminal), vec![3usize]);
+        assert_eq!(b(Section::ObsRatifiable), vec![4usize]);
+        assert_eq!(b(Section::ObsOpenNoContract), vec![5usize]);
+        assert_eq!(b(Section::ObsOther), vec![6usize]);
     }
 
     #[test]
     fn task_status_mapping_is_exhaustive() {
-        let mappings: &[(&str, Section)] = &[
-            ("planning", Section::TasksActionableCurrentWork),
-            ("plan_review", Section::TasksActionableCurrentWork),
-            ("ready", Section::TasksActionableCurrentWork),
-            ("executing", Section::TasksActionableCurrentWork),
-            ("code_review", Section::TasksActionableCurrentWork),
-            ("blocked", Section::TasksBlockedNeedsAction),
-            ("complete", Section::TasksRecentlyTerminal),
-            ("in_review", Section::TasksActionableCurrentWork),
-            ("accepted", Section::TasksRecentlyTerminal),
-            ("rejected", Section::TasksRecentlyTerminal),
-            ("deploy_blocked", Section::TasksDeployRecovery),
-            ("closed_out_of_band", Section::TasksRecentlyTerminal),
-            ("cargo_installed", Section::TasksRecentlyTerminal),
-            ("schema_migrated", Section::TasksRecentlyTerminal),
-            ("abandoned", Section::TasksRecentlyTerminal),
+        // blocked/deploy_blocked with no reason → unknown class → TasksNeedsTriage.
+        // Use an explicit recoverable reason to get TasksBlockedNeedsAction / TasksDeployRecovery.
+        let mappings: &[(&str, Option<&str>, Section)] = &[
+            ("planning", None, Section::TasksActionableCurrentWork),
+            ("plan_review", None, Section::TasksActionableCurrentWork),
+            ("ready", None, Section::TasksActionableCurrentWork),
+            ("executing", None, Section::TasksActionableCurrentWork),
+            ("code_review", None, Section::TasksActionableCurrentWork),
+            ("blocked", Some("rate_limit 429"), Section::TasksBlockedNeedsAction),
+            ("blocked", None, Section::TasksNeedsTriage),
+            ("complete", None, Section::TasksRecentlyTerminal),
+            ("in_review", None, Section::TasksActionableCurrentWork),
+            ("accepted", None, Section::TasksRecentlyTerminal),
+            ("rejected", None, Section::TasksRecentlyTerminal),
+            ("deploy_blocked", Some("retry-deploy-recoverable"), Section::TasksDeployRecovery),
+            ("deploy_blocked", None, Section::TasksNeedsTriage),
+            ("closed_out_of_band", None, Section::TasksRecentlyTerminal),
+            ("cargo_installed", None, Section::TasksRecentlyTerminal),
+            ("schema_migrated", None, Section::TasksRecentlyTerminal),
+            ("abandoned", None, Section::TasksRecentlyTerminal),
         ];
-        for (status, expected) in mappings {
-            let r = task(status);
-            assert_eq!(section_for(&r), Some(*expected), "task status {status}");
+        for (status, reason, expected) in mappings {
+            let r = task_at(status, NOW.to_string(), *reason);
+            assert_eq!(section_for(&r), Some(*expected), "task status {status} reason {reason:?}");
         }
     }
 
@@ -498,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_rows_older_than_48_hours_hidden_by_default() {
+    fn terminal_rows_remain_visible_unless_historical_noise() {
         let old = NOW - 49 * 3600;
         let rows = vec![
             task_with_id("T-schema", "schema_migrated", old),
@@ -513,21 +660,22 @@ mod tests {
             Section::TasksActionableCurrentWork,
             Section::TasksBlockedNeedsAction,
             Section::TasksDeployRecovery,
+            Section::TasksNeedsTriage,
             Section::TasksRecentlyTerminal,
         ] {
-            assert!(bucket(&buckets, sec).is_empty(), "{sec:?} should be empty");
+            assert_eq!(bucket(&buckets, sec).len(), if sec == Section::TasksRecentlyTerminal { 6 } else { 0 }, "{sec:?} visibility");
         }
     }
 
     #[test]
-    fn recent_terminal_default_cap_and_all_history_escape_hatch() {
+    fn terminal_rows_are_uncapped_by_default_and_all_history_matches() {
         let rows: Vec<Row> = (0..7)
             .map(|i| task_with_id(&format!("T{i}"), "accepted", NOW - i * 60))
             .collect();
         let default_buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
         assert_eq!(
             bucket(&default_buckets, Section::TasksRecentlyTerminal),
-            vec![0, 1, 2, 3, 4]
+            vec![0, 1, 2, 3, 4, 5, 6]
         );
 
         let all_buckets = classify_with_options_at(

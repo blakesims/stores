@@ -34,7 +34,7 @@ const ANSI_CYAN: &str = "\x1b[36m";
 const ANSI_MAGENTA: &str = "\x1b[35m";
 
 /// Run the watch loop. Blocks until Ctrl-C.
-pub fn run(interval_ms: u64) -> Result<()> {
+pub fn run(interval_ms: u64, show_all_history: bool) -> Result<()> {
     let db = db_path()?;
     if !db.exists() {
         bail!(
@@ -54,7 +54,7 @@ pub fn run(interval_ms: u64) -> Result<()> {
 
     loop {
         let frame_start = Instant::now();
-        let frame = render_frame(&conn, &db, interval_ms)?;
+        let frame = render_frame(&conn, &db, interval_ms, show_all_history)?;
         // Write the whole frame in one shot to minimise tearing.
         write!(stdout, "{ANSI_CLEAR_HOME}{frame}")?;
         stdout.flush()?;
@@ -66,7 +66,7 @@ pub fn run(interval_ms: u64) -> Result<()> {
     }
 }
 
-fn render_frame(conn: &Connection, db: &Path, interval_ms: u64) -> Result<String> {
+fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history: bool) -> Result<String> {
     let mut out = String::with_capacity(4096);
 
     let now = local_clock_string();
@@ -76,62 +76,72 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64) -> Result<String
     ));
 
     // ---- TASKS -----------------------------------------------------------
-    let tasks = query_tasks(conn).unwrap_or_default();
-    let active_count = tasks
-        .iter()
-        .filter(|t| !is_terminal_task_status(&t.status))
-        .count();
+    let rows = crate::tui::data::load_rows(conn).unwrap_or_default();
+    let ((task_visible, task_total), (obs_visible, obs_total)) = crate::tui::data::surface_counts(&rows, show_all_history);
+    let sections = crate::tui::data::classify_with_options(
+        &rows,
+        crate::tui::data::WatchClassifyOptions { show_all_history, ..Default::default() },
+    );
+
+    let mut task_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {
+        crate::tui::data::Section::TasksActionableCurrentWork
+        | crate::tui::data::Section::TasksBlockedNeedsAction
+        | crate::tui::data::Section::TasksDeployRecovery
+        | crate::tui::data::Section::TasksNeedsTriage
+        | crate::tui::data::Section::TasksRecentlyTerminal => idxs.clone(),
+        _ => Vec::new(),
+    }).collect();
+    task_indices.sort_by_key(|&i| match &rows[i] {
+        crate::tui::data::Row::Task(t) => (task_status_rank(&t.status), t.display_id.clone()),
+        _ => (u8::MAX, String::new()),
+    });
     out.push_str(&format!(
-        "{ANSI_BOLD}TASKS{ANSI_RESET} {ANSI_DIM}({} active · {} total){ANSI_RESET}\n",
-        active_count,
-        tasks.len()
+        "{ANSI_BOLD}TASKS{ANSI_RESET} {ANSI_DIM}({task_visible} actionable / {task_total} total (use --all)){ANSI_RESET}\n"
     ));
 
-    if tasks.is_empty() {
+    if task_indices.is_empty() {
         out.push_str(&format!("  {ANSI_DIM}(no rows){ANSI_RESET}\n"));
     } else {
-        // Active first (in workflow order), terminal at the bottom.
-        let mut sorted: Vec<&TaskRow> = tasks.iter().collect();
-        sorted.sort_by_key(|t| (task_status_rank(&t.status), t.display_id.clone()));
-        for t in sorted.iter().take(20) {
-            out.push_str(&render_task_line(t));
+        for idx in task_indices.iter().take(20) {
+            if let crate::tui::data::Row::Task(t) = &rows[*idx] {
+                out.push_str(&render_tui_task_line(t));
+            }
         }
-        if tasks.len() > 20 {
-            out.push_str(&format!(
-                "  {ANSI_DIM}... {} more{ANSI_RESET}\n",
-                tasks.len() - 20
-            ));
+        if task_indices.len() > 20 {
+            out.push_str(&format!("  {ANSI_DIM}... {} more{ANSI_RESET}\n", task_indices.len() - 20));
         }
     }
 
     // ---- OBSERVATIONS ----------------------------------------------------
     out.push('\n');
-    let obs = query_observations(conn).unwrap_or_default();
-    let open_count = obs.iter().filter(|o| o.status == "open").count();
-    out.push_str(&format!(
-        "{ANSI_BOLD}OBSERVATIONS{ANSI_RESET} {ANSI_DIM}({} open · {} total){ANSI_RESET}\n",
-        open_count,
-        obs.len()
-    ));
-
-    if obs.is_empty() {
-        out.push_str(&format!("  {ANSI_DIM}(no rows){ANSI_RESET}\n"));
-    } else {
-        let mut sorted: Vec<&ObsRow> = obs.iter().collect();
-        // Open first, then by updated_at desc.
-        sorted.sort_by(|a, b| {
+    let mut obs_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {
+        crate::tui::data::Section::ObsRatifiable
+        | crate::tui::data::Section::ObsOpenNoContract
+        | crate::tui::data::Section::ObsOther => idxs.clone(),
+        _ => Vec::new(),
+    }).collect();
+    obs_indices.sort_by(|&a, &b| match (&rows[a], &rows[b]) {
+        (crate::tui::data::Row::Obs(a), crate::tui::data::Row::Obs(b)) => {
             let ra = if a.status == "open" { 0 } else { 1 };
             let rb = if b.status == "open" { 0 } else { 1 };
             ra.cmp(&rb).then_with(|| b.updated_at.cmp(&a.updated_at))
-        });
-        for o in sorted.iter().take(10) {
-            out.push_str(&render_obs_line(o));
         }
-        if obs.len() > 10 {
-            out.push_str(&format!(
-                "  {ANSI_DIM}... {} more{ANSI_RESET}\n",
-                obs.len() - 10
-            ));
+        _ => std::cmp::Ordering::Equal,
+    });
+    out.push_str(&format!(
+        "{ANSI_BOLD}OBSERVATIONS{ANSI_RESET} {ANSI_DIM}({obs_visible} actionable / {obs_total} total (use --all)){ANSI_RESET}\n"
+    ));
+
+    if obs_indices.is_empty() {
+        out.push_str(&format!("  {ANSI_DIM}(no rows){ANSI_RESET}\n"));
+    } else {
+        for idx in obs_indices.iter().take(10) {
+            if let crate::tui::data::Row::Obs(o) = &rows[*idx] {
+                out.push_str(&render_tui_obs_line(o));
+            }
+        }
+        if obs_indices.len() > 10 {
+            out.push_str(&format!("  {ANSI_DIM}... {} more{ANSI_RESET}\n", obs_indices.len() - 10));
         }
     }
 
@@ -149,6 +159,7 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64) -> Result<String
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
+#[cfg(test)]
 struct TaskRow {
     display_id: String,
     status: String,
@@ -162,14 +173,21 @@ struct TaskRow {
 
 /// Schema-declared limit (`max_revise_cycles: 3` in stores/tasks/schema.yaml).
 /// Hardcoded here for the POC; promote to a schema read when this graduates.
+#[cfg(test)]
 const MAX_CYCLES_DISPLAY: i64 = 3;
 
 // T015 P1: phase-box + cycle-dot glyphs.
+#[cfg(test)]
 const GLYPH_DONE: char = '▰';
+#[cfg(test)]
 const GLYPH_CURRENT_EXEC: char = '▮';
+#[cfg(test)]
 const GLYPH_CURRENT_REVIEW: char = '◐';
+#[cfg(test)]
 const GLYPH_FUTURE: char = '▱';
+#[cfg(test)]
 const GLYPH_DOT_BURNED: char = '●';
+#[cfg(test)]
 const GLYPH_DOT_AVAILABLE: char = '·';
 
 /// Visible-column budget for the status column. Fits 6 boxes + spacer + 3 dots
@@ -177,6 +195,7 @@ const GLYPH_DOT_AVAILABLE: char = '·';
 const STATUS_COL_WIDTH: usize = 16;
 
 #[derive(Debug)]
+#[cfg(test)]
 struct ObsRow {
     display_id: String,
     status: String,
@@ -185,6 +204,7 @@ struct ObsRow {
     updated_at: String,
 }
 
+#[cfg(test)]
 fn query_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
     let mut stmt = conn.prepare(
         "SELECT display_id, status, COALESCE(title, ''), claimed_by, COALESCE(updated_at, ''),
@@ -207,6 +227,7 @@ fn query_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+#[cfg(test)]
 fn query_observations(conn: &Connection) -> Result<Vec<ObsRow>> {
     let mut stmt = conn.prepare(
         "SELECT display_id, status, COALESCE(priority, ''), COALESCE(summary, ''), COALESCE(updated_at, '')
@@ -228,6 +249,41 @@ fn query_observations(conn: &Connection) -> Result<Vec<ObsRow>> {
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
+fn render_tui_task_line(t: &crate::tui::data::TaskRow) -> String {
+    let claimed = t
+        .claimed_by
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|c| format!(" {ANSI_DIM}· {c}{ANSI_RESET}"))
+        .unwrap_or_default();
+    let title = truncate(&t.title, 50);
+    let updated = clock_suffix(&t.updated_at);
+    let status_str = format!("{}{}{}", task_status_color(&t.status), t.status, ANSI_RESET);
+    let pad = STATUS_COL_WIDTH.saturating_sub(visible_width(&status_str));
+    let pad_str = " ".repeat(pad);
+    format!(
+        "  {ANSI_CYAN}{:<5}{ANSI_RESET} {status_str}{pad_str} {:<50}{claimed} {ANSI_DIM}{updated}{ANSI_RESET}\n",
+        t.display_id, title
+    )
+}
+
+fn render_tui_obs_line(o: &crate::tui::data::ObsRow) -> String {
+    let status_color = obs_status_color(&o.status);
+    let priority_color = match o.priority.as_str() {
+        "high" => ANSI_RED,
+        "normal" => ANSI_YELLOW,
+        "low" => ANSI_DIM,
+        _ => ANSI_DIM,
+    };
+    let summary = truncate(&o.summary, 60);
+    let updated = clock_suffix(&o.updated_at);
+    format!(
+        "  {ANSI_MAGENTA}{:<5}{ANSI_RESET} {status_color}{:<11}{ANSI_RESET} {priority_color}{:<6}{ANSI_RESET} {:<60} {ANSI_DIM}{updated}{ANSI_RESET}\n",
+        o.display_id, o.status, o.priority, summary
+    )
+}
+
+#[cfg(test)]
 fn render_task_line(t: &TaskRow) -> String {
     let claimed = t
         .claimed_by
@@ -253,6 +309,7 @@ fn render_task_line(t: &TaskRow) -> String {
 /// other boxes/dots remain default-color). Falls back to the legacy text
 /// format when phase data is partial, and to a bare colored state name
 /// otherwise.
+#[cfg(test)]
 fn format_task_status(t: &TaskRow) -> String {
     let bare_color = task_status_color(&t.status);
     let wrap = |s: &str| format!("{bare_color}{s}{ANSI_RESET}");
@@ -283,6 +340,7 @@ fn format_task_status(t: &TaskRow) -> String {
 /// Render the phase-box row. `current_phase` is 1-indexed. Only the current
 /// box is wrapped in ANSI color; other boxes use the terminal default.
 /// For total_phases > 6, truncates to `<3 boxes>…<current><next?>`.
+#[cfg(test)]
 fn render_phase_boxes(
     current_phase: i64,
     total_phases: i64,
@@ -338,6 +396,7 @@ fn render_phase_boxes(
 
 /// Render the cycle-dot row: `max_cycles` chars total, one ● per cycle past 1
 /// (clamped to max_cycles), · for remaining slots.
+#[cfg(test)]
 fn render_cycle_dots(current_cycle: i64, max_cycles: i64) -> String {
     let burned = (current_cycle - 1).clamp(0, max_cycles);
     let mut out = String::new();
@@ -354,6 +413,7 @@ fn render_cycle_dots(current_cycle: i64, max_cycles: i64) -> String {
 /// Color for the CURRENT box. The blocked/in_review branch is currently dead
 /// (those statuses don't enter the cycling renderer) but kept to honor the
 /// done-when wording so future flag-flips Just Work.
+#[cfg(test)]
 fn current_box_color(task_status: &str, current_cycle: i64) -> &'static str {
     if current_cycle > MAX_CYCLES_DISPLAY {
         ANSI_RED
@@ -384,6 +444,7 @@ fn visible_width(s: &str) -> usize {
     count
 }
 
+#[cfg(test)]
 fn render_obs_line(o: &ObsRow) -> String {
     let status_color = obs_status_color(&o.status);
     let priority_color = match o.priority.as_str() {
@@ -433,6 +494,7 @@ fn obs_status_color(s: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn is_terminal_task_status(s: &str) -> bool {
     matches!(s, "complete" | "rejected")
 }
