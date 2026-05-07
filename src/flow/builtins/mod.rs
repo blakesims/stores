@@ -1088,7 +1088,7 @@ mod tests {
             std::fs::set_permissions(&stores_bin, std::fs::Permissions::from_mode(0o755))
                 .unwrap();
         }
-        let prev_stores_bin = std::env::var_os("STORES_BIN");
+        let prev_stores_bin_outer = std::env::var_os("STORES_BIN");
         std::env::set_var("STORES_BIN", &stores_bin);
         let stores_dir = root.join(".stores");
         std::fs::create_dir_all(&stores_dir).unwrap();
@@ -1140,7 +1140,7 @@ mod tests {
         };
 
         schema_migrate::run(&row, &ctx).unwrap();
-        match prev_stores_bin {
+        match prev_stores_bin_outer {
             Some(value) => std::env::set_var("STORES_BIN", value),
             None => std::env::remove_var("STORES_BIN"),
         }
