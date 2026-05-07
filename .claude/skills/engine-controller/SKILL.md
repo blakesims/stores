@@ -18,10 +18,11 @@ You are responsible for:
 
 - Driving tasks through the stores workflow.
 - Managing daemon state, runner config, worktrees, rebases, and deploy recovery.
-- Running codex review at `in_review` gates.
+- Running or coordinating codex review at `in_review` gates, including reviewer-runner when active.
 - Making local/mechanical implementation decisions.
-- Filing observations for friction.
+- Filing observations for friction and engine-health issues surfaced during execution.
 - Keeping the pipeline moving.
+- Keeping `docs/engine-health.md` current for shipped/live mechanical status, while coordinating priority framing with Pi.
 - Asking Pi when a decision becomes architectural.
 
 You may decide without Pi when:
@@ -99,7 +100,13 @@ Ask Pi before:
 
 ## Agent-comm protocol
 
-Use the shared thread:
+Use the active shared thread for the session. Current stores thread:
+
+```text
+/home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md
+```
+
+Older context thread:
 
 ```text
 /home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md
@@ -108,7 +115,7 @@ Use the shared thread:
 Watch as substrate-agent:
 
 ```bash
-agent-comm watch /home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md --name substrate-agent --from-end
+agent-comm watch /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md --name substrate-agent --from-end
 ```
 
 Ask Pi with this shape:
@@ -134,7 +141,7 @@ Why: distinct primitives, smallest scope.
 Send pattern:
 
 ```bash
-agent-comm send /home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md \
+agent-comm send /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md \
   "<context/options/recommendation>" \
   --name substrate-agent --to pi --priority high --blocking --response-requested --task T050/L134
 ```
@@ -155,18 +162,15 @@ I think this is a cascading consequence of your prior ruling on X; proceeding un
 
 ## Current priority doctrine
 
-Unless Pi or `docs/engine-health.md` says otherwise:
+`docs/engine-health.md` and live Pi rulings are the source of truth. Keep priority snippets in this skill durable, not session-noisy.
 
-1. `T050 / L134` — typed dispatch lifecycle.
-2. `T054 / L133` — T1 synthesized canonical plan.
-3. `T052 / L143` — risk metadata.
-4. `T053 / L142` — gatekeeper Router seam, only after L143 lands.
-
-Do not resume T053 before L143 lands.
+Current posture (2026-05-07): stabilize operational trust first — binary corruption, self-reexec candidate validation, private install path, handoff/review stalls, watch/actionability — while preserving gatekeeper scope boundaries.
 
 ## Codex / review gate doctrine
 
 Codex is a tier-gated review tool, not a universal one. Run it where the architectural blast radius justifies the latency; skip it where the in-cycle `code_reviewer` agent's PASS/REVISE/FAIL gate is sufficient.
+
+When reviewer-runner is active, delegate codex sensing to it. Substrate-agent pings reviewer-runner after each revise commit; reviewer-runner does not chase moving HEADs autonomously.
 
 **T1 (contract-is-plan, narrow scope):** skip codex. Trust the in-cycle code_reviewer's gate. When the task reaches `in_review`, rebase the branch onto current main and accept directly with the valid human/session token. The contract is small enough that codex is overhead, not insurance.
 
@@ -200,9 +204,16 @@ If Pi sends a high-priority blocking agent-comm message whose first word is `HAL
 
 Recurring coordination failures should be codified into skills/CLAUDE/docs after the immediate issue is resolved. Codex/review/engine-health catching architectural drift later is fallback only, not the intended control loop.
 
-## Engine-health and worklog cadence
+## Engine-health, observation, and worklog cadence
 
-You own `docs/engine-health.md` for shipped state, live statuses, and recently shipped rows. Pi owns or participates in architectural framing when priorities/layers drift. Commit quickly and ping Pi if you touch framing language.
+You own `docs/engine-health.md` for shipped state, live statuses, and recently shipped rows. Pi owns or participates in architectural framing when priorities/layers drift. Commit quickly and ping Pi if you touch framing language. Keep engine-health concise and glanceable; detailed session churn belongs in worklog/agent-comm.
+
+Observation SOP:
+
+- File operational engine-health friction as observations/intake when it surfaces.
+- If Pi names a systemic issue, respond with the existing L###/I###, file one, or explain why it is intentionally not filed.
+- Reviewer-runner never files; it labels observation-worthy findings for you to file.
+- Do not let serious engine pain remain only in chat.
 
 Write worklog notes for end-of-day handoff, context-window risk, substrate-down escape, or major architectural inflection. Do not write markdown summaries for ordinary task progress unless handoff/risk warrants it.
 
@@ -215,6 +226,16 @@ When substrate friction surfaces mid-task:
 - Use `stores observations add --invoker ai_autonomous ...`.
 - Keep investigations bounded unless the task explicitly owns the investigation.
 - Route architectural interpretation to Pi when needed.
+
+## Session safety SOP: no subagent cargo install
+
+Until the substrate-side binary-corruption fixes ship, no subagent or reviewer-runner may run:
+
+- `cargo install` with any flags/path,
+- writes to `/home/blake/.cargo/bin/stores`,
+- commands that trigger install side effects.
+
+Allowed: `cargo test`, `cargo build`, `cargo check`, read-only `stores` commands, codex, agent-comm. If a test needs an installed-style binary, use the worktree's `target/release/stores` directly. The accept-merge ceremony is the only authorized writer to `/home/blake/.cargo/bin/stores`.
 
 ## Operational patterns
 

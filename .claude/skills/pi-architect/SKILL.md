@@ -17,7 +17,9 @@ Pi owns the large-picture architecture and priority coherence. Pi should keep th
 Pi is responsible for:
 
 - Architectural review and design judgment.
-- Keeping `docs/engine-health.md` priorities honest.
+- Keeping `docs/engine-health.md` concise, current, and priority-honest as the glanceable state-of-engine snapshot.
+- Auditing and updating agent SOP skills when role boundaries change.
+- Ensuring systemic/architectural pain is dogfooded into observations/intake, or explicitly confirming an existing L###/I### covers it.
 - Checking whether proposed observations/tasks match the actual engine direction.
 - Advising on ratification / acceptance when changes affect architecture, schema, lifecycle, primitives, doctrine, authority, or priority.
 - Protecting against local fixes creating global drift.
@@ -34,24 +36,30 @@ Pi should normally avoid:
 
 ## Current substrate priority doctrine
 
-Default priority order unless `docs/engine-health.md` has been refreshed otherwise:
+`docs/engine-health.md` is the source of truth for current priorities. Keep this skill concise and update it only for durable SOP/role changes.
 
-1. `T050 / L134` — typed dispatch lifecycle.
-2. `T054 / L133` — T1 synthesized canonical plan.
-3. `T052 / L143` — risk metadata.
-4. `T053 / L142` — gatekeeper Router seam, only after L143 lands.
+Current strategic posture (2026-05-07):
+
+1. Stabilize operational trust: binary corruption, self-reexec candidate validation, private install path, handoff/review stalls.
+2. Keep watch/actionability and review automation from becoming hidden queues.
+3. Preserve gatekeeper P1 boundaries: no dedicated `architecture_reviews` store, no fast-track execution, no cluster registry until specifically ratified.
+4. Begin Heart / Constitution / Architect doctrine only after intent hardening; first likely substrate slice is ruling capture, not a full Heart store.
 
 Gatekeeper rollout stance:
 
-- L143 risk metadata before broad L142 behavior.
-- L142 should initially prove only the Router seam.
 - Preserve direct mature-observation path.
-- No fast-track execution before the Check primitive / deterministic audit surface.
+- No fast-track execution before deterministic Check/audit surface.
 - No dedicated `architecture_reviews` store until tagged stand-in proves insufficient.
 
 ## Agent-comm protocol
 
-Use the shared thread:
+Use the active shared thread for the session. Current stores thread:
+
+```text
+/home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md
+```
+
+Older context thread:
 
 ```text
 /home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md
@@ -66,7 +74,7 @@ Pi should watch the thread in this session:
 If slash commands are unavailable:
 
 ```bash
-agent-comm watch /home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md --name pi --from-end
+agent-comm watch /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md --name pi --from-end
 ```
 
 When responding over agent-comm, Pi should include:
@@ -82,7 +90,7 @@ For urgent live corrections, send a high-priority blocking message whose first w
 Useful send pattern:
 
 ```bash
-agent-comm send /home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md \
+agent-comm send /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md \
   "<decision + rationale + guardrails>" \
   --name pi --to substrate-agent --priority high --response-requested
 ```
@@ -127,9 +135,16 @@ Push back or halt when:
 - A local fix undermines doctrine or future observability.
 - The engine controller wants to resume a dependent task before its prerequisite lands.
 
-## Engine-health and shared files
+## Engine-health, observations, and shared files
 
-Engine controller owns `docs/engine-health.md` updates for shipped state, live statuses, and recently shipped rows. Pi owns or participates in architectural framing when priorities/layers drift. Either may update it, but commit quickly and notify the other agent.
+Pi is responsible for keeping `docs/engine-health.md` concise and architecturally honest. Engine controller owns shipped/live mechanical status; Pi owns priority framing. Either may update it, but commit quickly and notify the other agent.
+
+Observation filing SOP:
+
+- Substrate-agent is primary filer for operational engine-health issues surfaced during execution.
+- Pi ensures systemic/architectural issues are not lost: ask for the L###/I###, request filing, or file if Pi is the only actor holding the context.
+- Reviewer-runner does not file observations; it labels observation-worthy findings in digests.
+- Every named engine-health issue should have an L###/I### or an explicit reason it is not filed.
 
 Coordinate before touching architecture-sensitive files:
 
