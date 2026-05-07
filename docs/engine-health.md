@@ -2,11 +2,11 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-07 (T077/L171 phase α docs refresh) — The engine is now running a three-role operating model: substrate-agent as engine controller, Pi as architect, and reviewer-runner as read-only codex sensor. This improved throughput and surfaced the next trust boundary: shared global binary corruption (`~/.cargo/bin/stores` overwritten by subagent-side installs) can make the CLI fail-silent and can trick T066-style self-reexec into execing a stub. Session SOP now forbids subagents/reviewer-runner from running `cargo install`; filed **L181** (fail-silent CLI) and **L182** (recurring binary corruption). Current stabilization queue: **T067/L178** handoff semantics, **T069/L011** daemon_starts (codex PASS, awaiting accept), **T070/L057** agent_runs telemetry, **T071/L058** metrics, plus next urgent follow-up **candidate-binary validation before self-reexec** (D) and then **private substrate install path** (C). Constitutional direction is captured in **`docs/heart-and-architect.md`**: **L171 phase α shipped via T077** (`architecture_reviews` with interpret/amend split, pending-architecture-review gate, and no typed Heart yet).
+**Last updated:** 2026-05-07 (PM priority realignment) — The engine is now productive across a three-role operating model (substrate-agent engine controller, Pi architect, reviewer-runner external reviewer), but too much of its operating system still lives in chat. Runtime trust is largely closed or closing (T076 private install path PASS; T081 provenance PASS; T077 architecture_reviews PASS). The live priority is now structural throughput: finish the current PASS/near-PASS pile, ship **T079/L186** actionability visibility, then **T083/L188** substrate-native external review lane, then priority/file-overlap scheduling, then metrics over runner/review outcomes. Keep Gatekeeper/Router (classification), Scheduler (next compatible executable work), Architect (shape), and Reviewer (implementation correctness) separate; do not merge them into one mushy triage brain.
 
 ## The picture in one sentence
 
-**The engine is productive but still operationally hot: throughput works, but operator trust now depends on hardening shared binary/runtime boundaries and making review/health signals first-class.** The next geodesic is candidate-binary validation before self-reexec, private install-path doctrine, handoff/review automation, concise watch/actionability, then the post-T077 Heart/Architect follow-ups (`architecture_reviews` phase α shipped; no typed Heart store yet).
+**The engine can now do real work, but throughput is capped by chat-shaped review/triage and crude concurrency.** The next geodesic is actionability visibility (T079), substrate-native final review (T083/L188), priority + file-overlap scheduling, then metrics that let runner/reviewer choices be made from evidence instead of vibes.
 
 ## Status legend
 
@@ -159,23 +159,18 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Highest-leverage next picks
 
-Operator-trust layer fully closed (T067 / T070 / T072 / T075 all shipped 2026-05-07 AM). Pipeline 2026-05-07 PM:
+Operator-trust layer is largely closed or closing (T076/L184 PASS; T077/L171 PASS; T081/L053 PASS). The remaining bottleneck is no longer "can the daemon run work?" but "can the engine choose, review, and integrate work without chat-shaped glue?"
 
-**In flight right now:**
+1. **Drain/merge current PASS or near-PASS work** — reduce integration pressure before widening further. Current PM pile includes T076/L184, T077/L171, T081/L053, T082/L077, plus in-flight T079/T080/T083. More WIP before review/merge drains creates rebase churn, not throughput.
+2. **T079 / L186 — Engine-runner actionability monitor** — heartbeat + held reasons + orphan/autonomous redispatch for existing autonomous edges. Narrow phase-1 only: visibility/redispatch, no new policy semantics, no U-moment automation.
+3. **T083 / L188 — Substrate-native external review lane** — typed post-wrap external review records for T2/T3; preserve current codex review behavior while allowing codex/pi/claude-code review runners; emit typed PASS/REVISE/TOOLING_FAILURE; enforce review lane caps/liveness; block T2/T3 U3 accept until required external review PASS exists. Metrics-capable data is in scope; metrics reports and CodeRabbit adapter are follow-ups.
+4. **Priority + file-overlap scheduler (GAP / file next)** — choose the highest-priority compatible row, not just the oldest or next active slot. Phase 1 should use expected/actual touched-file overlap plus current priority fields (`priority`, `priority_rank`, `scheduled_for`) and write held reasons like `held: overlaps active T083 on src/cli/dynamic.rs`. Conflict domains can come later if file-only routing misses semantic conflicts.
+5. **Metrics over runner/review outcomes** — once T083 stores typed review records, report pi-vs-claude planner/executor/reviewer effectiveness, codex/pi/claude review PASS/REVISE/TOOLING_FAILURE rates, duration, and cost. This is runner-selection feedback, not vanity analytics.
+6. **Gatekeeper/Router autonomy follow-through** — T053/L142 classifies intake; it should not become the scheduler. Keep roles separate: Gatekeeper classifies new input, Scheduler chooses next compatible executable work, Architect governs coherence, Reviewer checks implementation.
+7. **I002 — sqlite-raw-byte review false-positive doctrine fix** — forbid `grep`/`strings` against `.sqlite` files as evidence of live substrate state; use `sqlite3 SELECT` or substrate CLI verbs.
+8. **L172/L173 / CodeRabbit / richer conflict domains** — follow after the typed review lane and scheduler prove the shape.
 
-1. **T076 / L184 — Private substrate install path** — daemon binary off `~/.cargo/bin/stores` to a private path (`STORES_DAEMON_BIN_PATH` or `~/.local/share/stores/bin/stores`); cargo-install validates/promotes into private; cold-start isolation test. Codex r1 REVISE on `ensure_private_daemon_binary` non-atomic seed — executor-revised to atomic temp+validate+rename + validate-on-shortcut; codex r2 dispatched. Pi: AC1.1 satisfied as written, do not widen (msg_ae95684b/msg_6e449b4e).
-2. **T077 / L171 — `architecture_reviews` typed store (phase α)** — Heart/Architect direction. Drive PID alive at phase 6/6.
-3. **T078 / L185 — SOPS+age → plaintext+0600** — auth doctrine relaxation. Resumed (U4) after a 3-cycle in-cycle code-reviewer FAIL turned out to be sqlite-raw-byte false positives (see I002 doctrine fix below). Executing.
-4. **T079 / L186 — Engine-runner actionability monitor (NEW this session)** — daemon-side actionability loop + heartbeat + orphan re-drive on existing autonomous edges. Pi-blessed phase-1 shape: visibility + redispatch only; no new policy. Auto-driven (drive pid 326953).
-
-**Queued behind in-flight:**
-
-5. **L053 — tier-A actor check bypass** — security/authority gap; should jump to next-pick after T076–T079 land.
-6. **I002 — sqlite-raw-byte review false-positive doctrine fix** — file the SOP edit + validator that forbids `grep`/`strings` against `.sqlite` files in code-reviewer/reviewer-runner output.
-7. **L172/L173 gatekeeper P4/P5** — deferred follow-ups; surface after L171 phase α lands.
-8. **I001 / L005 schema ergonomics** — small schema-language and list-input improvements as filler tasks.
-
-Current picture: operator-trust layer fully closed; the architectural surface (Heart/Architect via T077/L171) and the engine's "drives itself without operator nudge" property (T079/L186) are in flight in the same session. After this PM cluster lands, the dominant remaining bottleneck is auto-investigator / contract-drafter (L151 successor) — the engine's ability to draft contracts on its own input queue.
+Current picture: the engine's next throughput gains come from making actionability, final review, and scheduling substrate-visible. Raising the active-task cap without priority + file-overlap routing will mostly create rebase debt.
 
 
 ## Recently shipped
