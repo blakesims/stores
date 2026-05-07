@@ -540,6 +540,7 @@ pub(crate) fn run_in_tx(
         super::observation_arch_gate::enforce_u1_architecture_gate(
             tx,
             display_id,
+            &existing,
             &mut merged,
             &mut diff,
         )?;
@@ -625,6 +626,7 @@ pub(crate) fn run_in_tx(
             row_id,
             display_id,
             &merged,
+            Some(&existing),
             pref.as_deref(),
             phash.as_deref(),
         )?;
@@ -643,6 +645,7 @@ pub(crate) fn maybe_auto_ratify_observation(
     row_id: i64,
     display_id: &str,
     merged: &crate::validate::EntryMap,
+    persisted_for_gate: Option<&crate::validate::EntryMap>,
     policy_ref: Option<&str>,
     policies_hash: Option<&str>,
 ) -> Result<()> {
@@ -676,9 +679,11 @@ pub(crate) fn maybe_auto_ratify_observation(
     // both maps so pending_architecture_review=false is persisted atomically.
     let mut ratify_diff: crate::validate::EntryMap = std::collections::BTreeMap::new();
     let mut ratify_merged = merged.clone();
+    let persisted_for_gate = persisted_for_gate.unwrap_or(merged);
     super::observation_arch_gate::enforce_u1_architecture_gate(
         tx,
         display_id,
+        persisted_for_gate,
         &mut ratify_merged,
         &mut ratify_diff,
     )?;

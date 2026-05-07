@@ -26,14 +26,15 @@ struct RulingRow {
 pub(crate) fn enforce_u1_architecture_gate(
     tx: &Transaction,
     observation_id: &str,
+    persisted: &EntryMap,
     merged: &mut EntryMap,
     diff: &mut EntryMap,
 ) -> Result<()> {
-    let pending = merged
+    let persisted_pending = persisted
         .get("pending_architecture_review")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if !pending {
+    if !persisted_pending {
         return Ok(());
     }
 
@@ -257,7 +258,9 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut merged = pending_entry(None);
         let mut diff = EntryMap::new();
-        let err = enforce_u1_architecture_gate(&tx, "L001", &mut merged, &mut diff).unwrap_err();
+        let err =
+            enforce_u1_architecture_gate(&tx, "L001", &merged.clone(), &mut merged, &mut diff)
+                .unwrap_err();
         assert!(err.to_string().contains("pending_architecture_review"));
         assert!(err.to_string().contains("architecture review"));
     }
@@ -276,7 +279,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
+        let persisted = pending_entry(None);
         let mut merged = pending_entry(None);
+        // Regression: a confirm diff may try to clear this field before the
+        // post-confirm auto-ratify hook. The gate must use persisted=true.
+        merged.insert("pending_architecture_review".into(), Value::Bool(false));
         merged.insert(
             "intent_contract".into(),
             json!({
@@ -287,9 +294,31 @@ mod tests {
             }),
         );
         let err = crate::handlers::transition::maybe_auto_ratify_observation(
-            &tx, &obs, row_id, "L001", &merged, None, None,
+            &tx,
+            &obs,
+            row_id,
+            "L001",
+            &merged,
+            Some(&persisted),
+            None,
+            None,
         )
         .unwrap_err();
+        assert!(err.to_string().contains("pending_architecture_review"));
+        assert!(err.to_string().contains("architecture review"));
+    }
+
+    #[test]
+    fn persisted_pending_true_cannot_be_bypassed_by_same_diff_clear() {
+        let conn = setup();
+        let tx = conn.unchecked_transaction().unwrap();
+        let persisted = pending_entry(None);
+        let mut merged = pending_entry(None);
+        merged.insert("pending_architecture_review".into(), Value::Bool(false));
+        let mut diff = EntryMap::new();
+        diff.insert("pending_architecture_review".into(), Value::Bool(false));
+        let err = enforce_u1_architecture_gate(&tx, "L001", &persisted, &mut merged, &mut diff)
+            .unwrap_err();
         assert!(err.to_string().contains("pending_architecture_review"));
         assert!(err.to_string().contains("architecture review"));
     }
@@ -308,14 +337,17 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut merged = pending_entry(Some("A001"));
         let mut diff = EntryMap::new();
-        assert!(enforce_u1_architecture_gate(&tx, "L001", &mut merged, &mut diff).is_err());
+        assert!(
+            enforce_u1_architecture_gate(&tx, "L001", &merged.clone(), &mut merged, &mut diff)
+                .is_err()
+        );
         tx.commit().unwrap();
 
         conn.execute("UPDATE architecture_reviews SET status='verdict_issued', verdict_issued_at='2026-05-07T09:00:00Z' WHERE display_id='A001'", []).unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         let mut merged = pending_entry(Some("A001"));
         let mut diff = EntryMap::new();
-        enforce_u1_architecture_gate(&tx, "L001", &mut merged, &mut diff).unwrap();
+        enforce_u1_architecture_gate(&tx, "L001", &merged.clone(), &mut merged, &mut diff).unwrap();
         assert_eq!(
             diff.get("pending_architecture_review"),
             Some(&Value::Bool(false))
@@ -336,14 +368,17 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut merged = pending_entry(Some("A002"));
         let mut diff = EntryMap::new();
-        assert!(enforce_u1_architecture_gate(&tx, "L001", &mut merged, &mut diff).is_err());
+        assert!(
+            enforce_u1_architecture_gate(&tx, "L001", &merged.clone(), &mut merged, &mut diff)
+                .is_err()
+        );
         tx.commit().unwrap();
 
         conn.execute("UPDATE architecture_reviews SET status='verdict_issued', ratified_by='human', ratified_at='2026-05-07T09:00:00Z', verdict_issued_at='2026-05-07T09:00:00Z' WHERE display_id='A002'", []).unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         let mut merged = pending_entry(Some("A002"));
         let mut diff = EntryMap::new();
-        enforce_u1_architecture_gate(&tx, "L001", &mut merged, &mut diff).unwrap();
+        enforce_u1_architecture_gate(&tx, "L001", &merged.clone(), &mut merged, &mut diff).unwrap();
         assert_eq!(
             diff.get("pending_architecture_review"),
             Some(&Value::Bool(false))
@@ -364,7 +399,10 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut merged = pending_entry(Some("A003"));
         let mut diff = EntryMap::new();
-        assert!(enforce_u1_architecture_gate(&tx, "L001", &mut merged, &mut diff).is_err());
+        assert!(
+            enforce_u1_architecture_gate(&tx, "L001", &merged.clone(), &mut merged, &mut diff)
+                .is_err()
+        );
 
         merged.insert(
             "reframe_acknowledged_against".into(),
@@ -374,13 +412,16 @@ mod tests {
             "intent_contract".into(),
             json!({"updated_at":"2026-05-07T09:00:00Z"}),
         );
-        assert!(enforce_u1_architecture_gate(&tx, "L001", &mut merged, &mut diff).is_err());
+        assert!(
+            enforce_u1_architecture_gate(&tx, "L001", &merged.clone(), &mut merged, &mut diff)
+                .is_err()
+        );
 
         merged.insert(
             "intent_contract".into(),
             json!({"updated_at":"2026-05-07T09:00:01Z"}),
         );
-        enforce_u1_architecture_gate(&tx, "L001", &mut merged, &mut diff).unwrap();
+        enforce_u1_architecture_gate(&tx, "L001", &merged.clone(), &mut merged, &mut diff).unwrap();
     }
 
     #[test]
