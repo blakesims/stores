@@ -281,12 +281,12 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .about("List and show .stores/runs transcripts for a task")
                 .subcommand(
                     Command::new("list")
-                        .about("List transcript JSON files for a task")
+                        .about("List cycle-linked transcripts for a task")
                         .arg(Arg::new("display_id").help("Task display ID").required(true)),
                 )
                 .subcommand(
                     Command::new("show")
-                        .about("Print one transcript JSON file")
+                        .about("Print one cycle-linked transcript")
                         .arg(Arg::new("display_id").help("Task display ID").required(true))
                         .arg(
                             Arg::new("phase")

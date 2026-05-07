@@ -1078,12 +1078,21 @@ mod tests {
         let root = tmp.path();
         let stores_dir = root.join(".stores");
         std::fs::create_dir_all(&stores_dir).unwrap();
-        // Manifest references a store whose schema cannot be loaded → load_schemas errors.
+        let fake_stores = tmp.path().join("stores-fail.sh");
         std::fs::write(
-            stores_dir.join("manifest.yaml"),
-            "stores:\n  - name: tasks\n    schema_path: bundled:does-not-exist\n    installed_at: 2026-05-03T00:00:00Z\n    table_name: tasks\n    scope: worktree\n",
+            &fake_stores,
+            "#!/usr/bin/env bash\necho 'bundled store does-not-exist not found' >&2\nexit 1\n",
         )
         .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_stores).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_stores, perms).unwrap();
+        }
+        let prev_stores_bin = std::env::var("STORES_BIN").ok();
+        std::env::set_var("STORES_BIN", &fake_stores);
         // Use a config file (immune to STORES_NTFY_URL env races across modules).
         let cfg_file = tmp.path().join("config.yaml");
         std::fs::write(&cfg_file, "ntfy:\n  url: https://test.local\n").unwrap();
@@ -1144,6 +1153,10 @@ mod tests {
             "expected deploy_blocked ntfy event; got: {:?}",
             evs
         );
+        match prev_stores_bin {
+            Some(v) => std::env::set_var("STORES_BIN", v),
+            None => std::env::remove_var("STORES_BIN"),
+        }
 
         let phash: Option<String> = conn
             .query_row(

@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,9 +13,7 @@ pub struct RunTranscript {
 }
 
 pub enum RunsCmd {
-    List {
-        display_id: String,
-    },
+    List { display_id: String },
     Show {
         display_id: String,
         phase: i64,
@@ -26,7 +25,8 @@ pub enum RunsCmd {
 pub fn run(cmd: RunsCmd) -> Result<()> {
     match cmd {
         RunsCmd::List { display_id } => {
-            let rows = list_for_task(&crate::paths::stores_dir()?, &display_id)?;
+            let stores_dir = crate::paths::stores_dir()?;
+            let rows = list_for_task(&stores_dir, &display_id)?;
             println!("phase\tcycle\trole\ttranscript_path");
             for row in rows {
                 println!(
@@ -45,15 +45,16 @@ pub fn run(cmd: RunsCmd) -> Result<()> {
             cycle,
             role,
         } => {
-            let row = find_transcript(
-                &crate::paths::stores_dir()?,
-                &display_id,
-                phase,
-                cycle,
-                &role,
-            )?;
-            let body = fs::read_to_string(&row.path)
-                .with_context(|| format!("failed to read transcript {}", row.path.display()))?;
+            let stores_dir = crate::paths::stores_dir()?;
+            let row = find_transcript(&stores_dir, &display_id, phase, cycle, &role)?;
+            let read_path = resolve_transcript_path(&stores_dir, &row.path);
+            let body = fs::read_to_string(&read_path).with_context(|| {
+                format!(
+                    "failed to read transcript {} (resolved to {})",
+                    row.path.display(),
+                    read_path.display()
+                )
+            })?;
             println!("{body}");
             Ok(())
         }
@@ -61,37 +62,41 @@ pub fn run(cmd: RunsCmd) -> Result<()> {
 }
 
 pub fn list_for_task(stores_dir: &Path, display_id: &str) -> Result<Vec<RunTranscript>> {
-    let task_dir = stores_dir.join("runs").join(display_id);
-    if !task_dir.exists() {
-        bail!(
-            "no transcripts found for {display_id}: {} does not exist",
-            task_dir.display()
-        );
-    }
-    if !task_dir.is_dir() {
-        bail!(
-            "runs path for {display_id} is not a directory: {}",
-            task_dir.display()
-        );
-    }
+    let db_path = stores_dir.join("db.sqlite");
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open substrate DB {}", db_path.display()))?;
+    let cycles_json: String = conn
+        .query_row(
+            "SELECT cycles FROM tasks WHERE display_id = ?1",
+            [display_id],
+            |row| row.get(0),
+        )
+        .with_context(|| format!("task {display_id} not found in substrate DB"))?;
+
+    let cycles: serde_json::Value = serde_json::from_str(&cycles_json)
+        .with_context(|| format!("task {display_id} cycles JSON is invalid"))?;
+    let cycles = cycles
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("task {display_id} cycles field is not an array"))?;
 
     let mut rows = Vec::new();
-    for entry in fs::read_dir(&task_dir)
-        .with_context(|| format!("failed to read runs directory {}", task_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        rows.push(row_from_path(display_id, &path)?);
+    for entry in cycles {
+        let phase = entry.get("phase").and_then(|v| v.as_i64()).unwrap_or(1);
+        let cycle = entry.get("cycle").and_then(|v| v.as_i64()).unwrap_or(1);
+        collect_role_transcript(stores_dir, display_id, phase, cycle, entry, "executor", &mut rows)?;
+        collect_role_transcript(
+            stores_dir,
+            display_id,
+            phase,
+            cycle,
+            entry,
+            "code-reviewer",
+            &mut rows,
+        )?;
     }
 
     if rows.is_empty() {
-        bail!(
-            "no transcript JSON files found for {display_id} in {}",
-            task_dir.display()
-        );
+        bail!("no transcript backlinks found for {display_id} in tasks.cycles");
     }
 
     rows.sort_by(|a, b| {
@@ -131,82 +136,151 @@ pub fn find_transcript(
     }
 }
 
-fn row_from_path(display_id: &str, path: &Path) -> Result<RunTranscript> {
-    let body = fs::read_to_string(path)
-        .with_context(|| format!("failed to read transcript {}", path.display()))?;
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .with_context(|| format!("transcript is not valid JSON: {}", path.display()))?;
+fn collect_role_transcript(
+    stores_dir: &Path,
+    display_id: &str,
+    phase: i64,
+    cycle: i64,
+    entry: &serde_json::Value,
+    role: &str,
+    rows: &mut Vec<RunTranscript>,
+) -> Result<()> {
+    let subrecord = match role {
+        "executor" => "executor",
+        "code-reviewer" => "review",
+        _ => role,
+    };
+    let Some(path_str) = entry
+        .get(subrecord)
+        .and_then(|v| v.get("transcript_path"))
+        .and_then(|v| v.as_str())
+    else {
+        return Ok(());
+    };
 
-    let phase = first_i64(&json, &["phase", "phase_number", "current_phase"]).unwrap_or(1);
-    let cycle = first_i64(&json, &["cycle", "cycle_number", "current_cycle"]).unwrap_or(1);
-    let role = first_str(&json, &["role", "agent_role", "agent"])
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
+    let path = PathBuf::from(path_str);
+    let read_path = resolve_transcript_path(stores_dir, &path);
+    if !read_path.exists() {
+        bail!(
+            "missing transcript for {display_id} phase {phase} cycle {cycle} role {role}: {} does not exist (resolved to {})",
+            path.display(),
+            read_path.display()
+        );
+    }
 
-    Ok(RunTranscript {
+    rows.push(RunTranscript {
         display_id: display_id.to_string(),
         phase,
         cycle,
-        role,
-        path: path.to_path_buf(),
-    })
+        role: role.to_string(),
+        path,
+    });
+    Ok(())
 }
 
-fn first_i64(v: &serde_json::Value, keys: &[&str]) -> Option<i64> {
-    keys.iter().find_map(|k| v.get(*k).and_then(|x| x.as_i64()))
-}
-
-fn first_str<'a>(v: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|k| v.get(*k).and_then(|x| x.as_str()))
+fn resolve_transcript_path(stores_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Ok(stripped) = path.strip_prefix(".stores") {
+        if let Some(root) = stores_dir.parent() {
+            return root.join(".stores").join(stripped);
+        }
+    }
+    stores_dir.join(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
 
     fn fixture() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join(".stores/runs/T999");
-        fs::create_dir_all(&dir).unwrap();
+        let stores = tmp.path().join(".stores");
+        fs::create_dir_all(stores.join("runs")).unwrap();
         fs::write(
-            dir.join("executor.json"),
-            r#"{"role":"executor","phase":2,"cycle":1,"summary":"done"}"#,
+            stores.join("runs/executor-session.jsonl"),
+            r#"{"role":"executor","summary":"fixture executor"}"#,
         )
         .unwrap();
         fs::write(
-            dir.join("code-reviewer.json"),
-            r#"{"role":"code-reviewer","phase_number":2,"cycle_number":1,"gate":"PASS"}"#,
+            stores.join("runs/review-session.jsonl"),
+            r#"{"role":"code-reviewer","gate":"PASS"}"#,
         )
         .unwrap();
-        fs::write(dir.join("notes.txt"), "ignored").unwrap();
+        let conn = Connection::open(stores.join("db.sqlite")).unwrap();
+        conn.execute(
+            "CREATE TABLE tasks (display_id TEXT UNIQUE NOT NULL, cycles TEXT)",
+            [],
+        )
+        .unwrap();
+        let cycles = serde_json::json!([
+            {
+                "phase": 2,
+                "cycle": 2,
+                "executor": {"transcript_path": ".stores/runs/executor-session.jsonl"}
+            },
+            {
+                "phase": 2,
+                "cycle": 1,
+                "executor": {"transcript_path": ".stores/runs/executor-session.jsonl"},
+                "review": {"transcript_path": ".stores/runs/review-session.jsonl"}
+            }
+        ]);
+        conn.execute(
+            "INSERT INTO tasks (display_id, cycles) VALUES (?1, ?2)",
+            params!["T999", serde_json::to_string(&cycles).unwrap()],
+        )
+        .unwrap();
         tmp
     }
 
     #[test]
-    fn list_outputs_deterministic_order() {
+    fn list_outputs_deterministic_order_from_cycle_backlinks() {
         let tmp = fixture();
         let rows = list_for_task(&tmp.path().join(".stores"), "T999").unwrap();
         let keys: Vec<_> = rows
             .iter()
-            .map(|r| (r.phase, r.cycle, r.role.as_str()))
+            .map(|r| (r.phase, r.cycle, r.role.as_str(), r.path.to_string_lossy().to_string()))
             .collect();
-        assert_eq!(keys, vec![(2, 1, "code-reviewer"), (2, 1, "executor")]);
+        assert_eq!(
+            keys,
+            vec![
+                (
+                    2,
+                    1,
+                    "code-reviewer",
+                    ".stores/runs/review-session.jsonl".to_string()
+                ),
+                (
+                    2,
+                    1,
+                    "executor",
+                    ".stores/runs/executor-session.jsonl".to_string()
+                ),
+                (
+                    2,
+                    2,
+                    "executor",
+                    ".stores/runs/executor-session.jsonl".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
-    fn show_finds_existing_transcript() {
+    fn show_finds_existing_transcript_backlink() {
         let tmp = fixture();
-        let row =
-            find_transcript(&tmp.path().join(".stores"), "T999", 2, None, "executor").unwrap();
-        assert_eq!(
-            row.path.file_name().and_then(|s| s.to_str()),
-            Some("executor.json")
-        );
+        let row = find_transcript(
+            &tmp.path().join(".stores"),
+            "T999",
+            2,
+            Some(1),
+            "executor",
+        )
+        .unwrap();
+        assert_eq!(row.path, PathBuf::from(".stores/runs/executor-session.jsonl"));
     }
 
     #[test]
@@ -217,5 +291,15 @@ mod tests {
         assert!(err
             .to_string()
             .contains("missing transcript for T999 phase 3 role executor"));
+    }
+
+    #[test]
+    fn missing_linked_file_errors_cleanly() {
+        let tmp = fixture();
+        fs::remove_file(tmp.path().join(".stores/runs/review-session.jsonl")).unwrap();
+        let err = list_for_task(&tmp.path().join(".stores"), "T999").unwrap_err();
+        assert!(err.to_string().contains(
+            "missing transcript for T999 phase 2 cycle 1 role code-reviewer"
+        ));
     }
 }
