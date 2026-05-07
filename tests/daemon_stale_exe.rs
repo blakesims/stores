@@ -90,6 +90,28 @@ fn auto_drive_agent() -> AgentEntry {
     }
 }
 
+fn init_empty_stores_dir(root: &Path) {
+    let stores_dir = root.join(".stores");
+    std::fs::create_dir_all(&stores_dir).unwrap();
+    std::fs::write(stores_dir.join("manifest.yaml"), "stores: []\n").unwrap();
+    let db = Connection::open(stores_dir.join("db.sqlite")).unwrap();
+    db.execute_batch(SUBSTRATE_DDL).unwrap();
+}
+
+#[cfg(unix)]
+fn write_reexec_stub(path: &Path, args_file: &Path, exit_code: i32) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > {}\nexit {}\n",
+        args_file.display(),
+        exit_code
+    );
+    std::fs::write(path, script).unwrap();
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
 fn insert_candidate(conn: &Connection, id: i64, display_id: &str, workspace_path: &Path) {
     conn.execute(
         "INSERT INTO tasks (id, display_id, status, tier_hint, branch, workspace_path)
@@ -174,34 +196,205 @@ fn stale_auto_drive_leaves_drive_pid_null_and_no_claim() {
     assert_eq!(guard.check_stale().unwrap(), Some(STALE_DAEMON_MESSAGE));
 }
 
+#[cfg(unix)]
 #[test]
-fn stale_daemon_command_exits_nonzero_and_emits_one_message_line() {
+fn stale_then_reexec_happy_path_records_preserved_argv() {
+    use std::os::unix::process::CommandExt;
+
     let tmp = tempfile::tempdir().unwrap();
-    let stores_dir = tmp.path().join(".stores");
-    std::fs::create_dir_all(&stores_dir).unwrap();
-    std::fs::write(stores_dir.join("manifest.yaml"), "stores: []\n").unwrap();
-    let db = Connection::open(stores_dir.join("db.sqlite")).unwrap();
-    db.execute_batch(SUBSTRATE_DDL).unwrap();
-    drop(db);
+    init_empty_stores_dir(tmp.path());
+    let launch_path = tmp.path().join("stores_launch_stub");
+    let args_file = tmp.path().join("argv.txt");
+    write_reexec_stub(&launch_path, &args_file, 0);
 
     let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
         .output()
         .expect("invoke stale daemon command");
 
-    assert!(!output.status.success(), "stale daemon must exit nonzero");
+    assert!(output.status.success(), "reexec stub should exit 0");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let matching_lines: Vec<&str> = stderr
+    let attempt_lines: Vec<&str> = stderr
         .lines()
-        .filter(|line| line.contains(STALE_DAEMON_MESSAGE))
+        .filter(|line| line.contains("daemon binary stale; reexecing into"))
         .collect();
-    assert_eq!(
-        matching_lines.len(),
-        1,
-        "stderr must contain exactly one stale message line; stderr:\n{stderr}"
+    assert_eq!(attempt_lines.len(), 1, "stderr:\n{stderr}");
+    assert!(
+        attempt_lines[0].contains(&format!(
+            "daemon binary stale; reexecing into {} (was version {})",
+            launch_path.display(),
+            env!("CARGO_PKG_VERSION")
+        )),
+        "line: {}",
+        attempt_lines[0]
     );
+    let argv = std::fs::read_to_string(&args_file).unwrap();
+    assert!(argv.contains("agents\nrun\n"), "argv:\n{argv}");
+    assert!(argv.contains("--once\n"), "argv:\n{argv}");
+    assert!(argv.contains("--poll-interval\n0.05\n"), "argv:\n{argv}");
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_then_reexec_fails_fallback_exits_nonzero() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+    let launch_path = tmp.path().join("stores_not_executable");
+    std::fs::write(&launch_path, "not executable\n").unwrap();
+    let mut perms = std::fs::metadata(&launch_path).unwrap().permissions();
+    perms.set_mode(0o644);
+    std::fs::set_permissions(&launch_path, perms).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&launch_path)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .output()
+        .expect("invoke stale daemon command");
+
+    assert!(!output.status.success(), "exec fallback must exit nonzero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("daemon binary stale; reexecing into"), "stderr:\n{stderr}");
+    assert!(stderr.contains("execv failed"), "stderr:\n{stderr}");
+    assert!(stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
+}
+
+/// MEDIUM fix (Pi Option A): --detach must be stripped from reexec argv so the
+/// daemon does not attempt to re-daemonize on self-reexec. --invoker and
+/// --log-file must be preserved.
+#[cfg(unix)]
+#[test]
+fn reexec_argv_strips_detach_preserves_invoker_and_log_file() {
+    use std::os::unix::process::CommandExt;
+    use std::time::{Duration, Instant};
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+    let launch_path = tmp.path().join("stores_launch_stub_detach");
+    let args_file = tmp.path().join("argv-detach.txt");
+    let log_file = tmp.path().join("daemon.log");
+    write_reexec_stub(&launch_path, &args_file, 0);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&launch_path)
+        .args([
+            "--invoker",
+            "human",
+            "agents",
+            "run",
+            "--detach",
+            "--log-file",
+            log_file.to_str().unwrap(),
+            "--poll-interval",
+            "0.05",
+        ])
+        .current_dir(tmp.path())
+        .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .output()
+        .expect("invoke detached stale daemon command");
+
+    assert!(output.status.success(), "detach parent should exit 0");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !args_file.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let argv = std::fs::read_to_string(&args_file).unwrap();
+    // --invoker and --log-file must survive the reexec.
+    assert!(argv.contains("--invoker\nhuman\n"), "argv:\n{argv}");
+    assert!(argv.contains(&format!("--log-file\n{}\n", log_file.display())), "argv:\n{argv}");
+    // --detach must be stripped so the reexec-ed daemon does not re-daemonize.
+    assert!(!argv.contains("--detach\n"), "--detach must be stripped from reexec argv:\n{argv}");
+}
+
+/// HIGH fix: stale-at-startup must reexec BEFORE opening the DB. This test
+/// verifies that when the daemon binary is stale before startup, no migration
+/// / seed / sweep DB side-effects occur.
+///
+/// Strategy: use STORES_TEST_DAEMON_FORCE_STALE with a non-executable stub so
+/// execv fails and the daemon exits non-zero immediately — which means it
+/// cannot have opened and migrated the DB (migration only runs after execv
+/// would have been called in the new order). We then check the DB stays empty.
+#[cfg(unix)]
+#[test]
+fn stale_at_startup_no_db_side_effects_before_reexec() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let stores_dir = tmp.path().join(".stores");
+    std::fs::create_dir_all(&stores_dir).unwrap();
+    std::fs::write(stores_dir.join("manifest.yaml"), "stores: []\n").unwrap();
+    // Create the DB file but leave it empty (no DDL) so any migration/seed
+    // attempt would write rows we can detect.
+    std::fs::write(stores_dir.join("db.sqlite"), "").unwrap();
+
+    // Non-executable stub so execv fails fast — the daemon must bail before
+    // doing any DB work.
+    let launch_path = tmp.path().join("stores_stale_stub");
+    std::fs::write(&launch_path, "not executable\n").unwrap();
+    let mut perms = std::fs::metadata(&launch_path).unwrap().permissions();
+    perms.set_mode(0o644);
+    std::fs::set_permissions(&launch_path, perms).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&launch_path)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .output()
+        .expect("invoke stale-at-startup daemon command");
+
+    // Must exit non-zero (execv failed, fallback to fail-loud).
+    assert!(
+        !output.status.success(),
+        "stale-at-startup with non-executable stub must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Reexec was attempted.
+    assert!(
+        stderr.contains("daemon binary stale; reexecing into"),
+        "must log reexec attempt; stderr:\n{stderr}"
+    );
+    // execv failed (not executable).
+    assert!(
+        stderr.contains("execv failed"),
+        "must log execv failure; stderr:\n{stderr}"
+    );
+    // The DB file we placed is empty (0 bytes), meaning no migration ran.
+    // If migration had run, rusqlite would have written the DDL and the file
+    // would be non-empty (SQLite page size ≥ 4096 bytes).
+    let db_size = std::fs::metadata(stores_dir.join("db.sqlite"))
+        .unwrap()
+        .len();
+    assert_eq!(
+        db_size, 0,
+        "DB must remain untouched (size 0) when stale-at-startup reexec fires before DB open"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_identity_no_reexec_attempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("invoke fresh daemon command");
+
+    assert!(output.status.success(), "fresh daemon --once should exit 0");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("daemon binary stale; reexecing into"), "stderr:\n{stderr}");
 }
 
 #[test]
@@ -258,7 +451,7 @@ fn fresh_auto_drive_still_records_positive_drive_pid() {
 ///      argv[0] overridden to path A via `Command::arg0`. The daemon resolves:
 ///        - current_exe (startup_identity)  = CARGO_BIN_EXE_stores inode
 ///        - launch_path = path A            = inode B  (≠ startup_identity)
-///   4. Assert: exits non-zero, exactly one stale message line on stderr.
+///   4. Assert: self-reexecs successfully and emits one reexec line on stderr.
 ///
 /// The inode mismatch is real — no env-var bypass.
 #[cfg(unix)]
@@ -306,20 +499,21 @@ fn real_inode_replace_triggers_stale_detection() {
         .output()
         .expect("spawn stores agents run --once");
 
-    // Step 4: assert stale detection.
+    // Step 4: assert stale detection self-reexeced into path_a.
     assert!(
-        !output.status.success(),
-        "stale daemon (real inode replace) must exit nonzero; stderr:\n{}",
+        output.status.success(),
+        "stale daemon (real inode replace) must self-reexec then exit 0; stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     let matching: Vec<&str> = stderr
         .lines()
-        .filter(|l| l.contains(STALE_DAEMON_MESSAGE))
+        .filter(|l| l.contains("daemon binary stale; reexecing into"))
         .collect();
     assert_eq!(
         matching.len(),
         1,
-        "exactly one stale message line expected; stderr:\n{stderr}"
+        "exactly one reexec message line expected; stderr:\n{stderr}"
     );
+    assert!(!stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
 }

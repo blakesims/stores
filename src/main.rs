@@ -12,6 +12,7 @@ pub mod render;
 pub mod runner;
 pub mod schema;
 pub mod validate;
+mod version;
 
 use anyhow::Result;
 use std::collections::HashMap;

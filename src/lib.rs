@@ -16,3 +16,4 @@ pub mod runner;
 pub mod schema;
 pub mod tui;
 pub mod validate;
+pub mod version;
