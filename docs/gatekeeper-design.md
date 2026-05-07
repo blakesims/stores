@@ -1,7 +1,7 @@
 # Gatekeeper Design
 
 **Path:** `docs/gatekeeper-design.md`
-**Status:** design doc (T045 phase 2) describing the FULL gatekeeper vision (P1–P5). Sections referencing `escalated`, `escalate-arch-review`, `routed_to_arch_review`, or a dedicated `architecture_reviews` typed store describe the post-P1 design (L171/L172/L173 follow-ups), NOT the current executable contract. **What ships in P1 (T053/L142):** the five-state lifecycle (`draft`/`triaging`/`needs_info`/`routed`/`dropped`) plus the single `route` verb covering all six decisions, with `arch_review_candidate` producing a tagged-observation stand-in (tag `arch-review-candidate`) stored in `routed_to_observation`. The `escalated` state, `escalate-arch-review` verb, `routed_to_arch_review` field, and `architecture_reviews` store are deferred — read those sections as design intent for L171, not as P1 contract.
+**Status:** design doc (T045 phase 2) plus shipped P1/P3 operational contract. **Current executable contract after T077/L171:** the P1 `intake_items` router still uses the five-state lifecycle (`draft`/`triaging`/`needs_info`/`routed`/`dropped`) and the single `route` verb. For `arch_review_candidate`, `route` now writes an `architecture_reviews` A### row and sets the downstream observation's top-level `pending_architecture_review = true` in the same transaction; `routed_to_arch_review` points at the A### row. The T053/L142 tagged-observation stand-in is historical only. Later ideas such as an `escalated` intake state, separate `escalate-arch-review` verb, auto-fire architect subscribers, periodic sweeps, and cluster-threshold automation remain deferred design context.
 **Companion doctrine:** `docs/architecture-coherence.md` (T045 phase 1).
 **Companion taxonomy:** `docs/risk-and-cluster-taxonomy.md` (T045 phase 3) — canonical definitions for `risk_flags`, `cluster_key` conventions, and the orthogonal (size_tier, risk_class, approval_policy) triple referenced throughout this doc.
 **Brainstorm seed:** `docs/worklog/2026-05-06/06-gatekeeper-architecture-observability.md`.
@@ -32,18 +32,18 @@ It does not specify the gatekeeper agent's prompt, the architecture-review agent
 | `draft`      | `triaging`    | `intake claim-triage`                 | `ai_autonomous`        | One row at a time per gatekeeper instance (advisory, not enforced).   |
 | `triaging`  | `needs_info`   | `intake route --decision needs_info`  | `ai_autonomous`        | `gatekeeper_decision_json` set and `missing_info_question` non-empty. |
 | `needs_info` | `triaging`    | `intake recon-return`                 | `ai_autonomous`        | `evidence` updated since `needs_info` entry; bumps `recon_round`.     |
-| `triaging`  | `routed`       | `intake route --decision <D>`         | `ai_autonomous`        | `D ∈ {duplicate, fast_track, normal_observation}` and side-effect rows (observation / merge target) created in same transaction. `arch_review_candidate` does NOT route here — it routes to `escalated` (see below). |
+| `triaging`  | `routed`       | `intake route --decision <D>`         | `ai_autonomous`        | `D ∈ {duplicate, fast_track, normal_observation, arch_review_candidate}` and side-effect rows are created in the same transaction. `arch_review_candidate` creates an A### `architecture_reviews` row, sets `routed_to_arch_review`, and sets the downstream observation's `pending_architecture_review = true`. |
 | `triaging`  | `dropped`      | `intake route --decision reject_noise`| `ai_autonomous`        | `rationale` non-empty; rejection is final unless `intake reopen` (below) fires. |
 | `dropped`    | `draft`        | `intake reopen`                       | `ai_with_human`         | Human disagrees with a `reject_noise` decision; rare escape hatch.    |
-| `triaging`  | `escalated`    | `intake escalate-arch-review`         | `ai_autonomous`        | Decision is `arch_review_candidate` per its full precondition (any `touches_*` flag, OR `introduces_new_primitive` / `changes_boundary` / `security_sensitive` / `authority_surface_drift` / `contradicts_prior_decision`, OR cluster threshold crossed); produces an `architecture_reviews` row (or tagged-observation stand-in until that store exists). |
+| — | — | `intake escalate-arch-review` / `escalated` state | — | Deferred design context only; not part of the current T077 executable contract. |
 
 State semantics:
 
 - **`draft`** — local agent's raw filing. Not yet seen by the gatekeeper. May contain a `suggested_fix` but is treated as data, not policy.
 - **`triaging`** — the gatekeeper has claimed the row and is producing a structured decision. Short-lived.
 - **`needs_info`** — gatekeeper has asked a recon agent to gather missing evidence; row holds until evidence returns.
-- **`routed`** — terminal-success state. The row points at exactly one downstream artifact (observation row, fast-track resolution row, duplicate target, or arch-review candidate). A `routed` row is read-only history.
-- **`escalated`** — synonym sub-state of `routed` for `arch_review_candidate` decisions; kept distinct so dashboards can count architecture pressure separately from normal flow.
+- **`routed`** — terminal-success state. The row points at exactly one downstream artifact (observation row, fast-track resolution row, duplicate target, or A### architecture-review candidate). A `routed` row is read-only history.
+- **`escalated`** — deferred synonym sub-state of `routed` for future architecture-pressure dashboards; not shipped in T077.
 - **`dropped`** — terminal-noise state. The row is preserved for audit; nothing downstream is created.
 
 Guards summary: every transition out of `triaging` requires a complete `gatekeeper_decision_json` payload (see § *Gatekeeper output schema*) and any same-transaction side-effects the decision implies. The substrate's existing transition-history hook captures the actor, invoker, timestamp, and decision blob automatically.
@@ -109,7 +109,7 @@ intake_items:
     type: text
     required: false
     actor: ai_autonomous
-  routed_to_arch_review:      # soft-FK to architecture_reviews.display_id (or tag id) when escalated
+  routed_to_arch_review:      # soft-FK to architecture_reviews.display_id (A###) when arch_review_candidate routes
     type: text
     required: false
     actor: ai_autonomous
@@ -160,7 +160,7 @@ The gatekeeper emits exactly one of six decisions. Each has a precondition (when
 - the gatekeeper observes that `cluster_key` count has crossed the architecture-review threshold (cluster threshold default: 3, configurable),
 - `risk_flags` contains `security_sensitive` or `authority_surface_drift`,
 - `risk_flags` contains `contradicts_prior_decision` (the suggested fix directly contradicts a previously ratified observation contract or accepted task outcome — that is itself an architectural-coherence question).
-**Downstream effect:** row transitions `triaging → escalated`, an `architecture_reviews` candidate row is produced (or, until that store ships, a tagged observation with reserved tag `arch-review-candidate`), and `routed_to_arch_review` points at it. A normal observation MAY also be created in parallel so local-fix work is not blocked, but its contract carries a `pending_architecture_review = true` field that prevents U1 ratification until the architecture review returns `allow_local_fix` or `reframe_contract`.
+**Downstream effect:** row transitions `triaging → routed`; an `architecture_reviews` candidate row is produced with display id `A###`, and `routed_to_arch_review` points at it. The downstream observation created in the same transaction carries top-level `pending_architecture_review = true`, preventing U1 ratification until the architecture review returns a clearing verdict. T077 clearing behavior includes `allow_local_fix`, `reframe_contract` after intent-contract reconciliation, `merge_with_cluster`, and `propose_doctrine_update` after amendment ratification. The T053/L142 tagged observation with reserved tag `arch-review-candidate` is historical backfill input only.
 
 ### 6. `reject_noise`
 **Precondition:** the row is a re-symptom of a fully-resolved observation, an artifact of a known-broken local environment, or otherwise not actionable substrate signal. `rationale` must explain which of these applies.
@@ -288,12 +288,12 @@ The architecture-review agent is the coherence gate. It does not fire on every r
 **Threshold:** 1 (the flag itself is the trigger).
 **Effect:** the ratification verb is rejected fail-loud until architecture review returns one of `allow_local_fix`, `reframe_contract`, `merge_with_cluster`, or `propose_doctrine_update`. This is the hard gate that prevents locally-correct fixes from accumulating before coherence has been checked.
 
-### Trigger 4: `periodic-sweep` (scheduled, cluster-wide)
+### Trigger 4: `periodic-sweep` (scheduled, cluster-wide; deferred)
 **Fires when:** a scheduled job runs (default cadence: weekly) over the open `intake_items` and `observations` populations and identifies clusters whose count is `≥ 5` over the trailing 90 days but which have *no* `architecture_reviews` row.
 **Threshold:** count `≥ 5` per cluster_key over 90 days AND `architecture_reviews.count_for(cluster_key) == 0`.
 **Effect:** a `periodic-sweep` review row is created for each unreviewed cluster; the sweep is the safety net for clusters that crept past Trigger 2 because no single triage saw the threshold cross (e.g., the registry threshold was raised after some rows already routed).
 
-### Trigger 5: `post-accept-batch` (retrospective, post-merge)
+### Trigger 5: `post-accept-batch` (retrospective, post-merge; deferred)
 **Fires when:** a batch of `≥ 3` `tasks` rows reaches `accepted` state within a 14-day window AND the union of their `linked_observations`' `cluster_key` values overlaps in `≥ 2` distinct clusters.
 **Threshold:** task count `≥ 3` in 14 days; cluster overlap `≥ 2`.
 **Effect:** an architecture-review row is created with `kind = retrospective` and `evidence = list of accepted task display_ids`. Retrospectives can return `propose_doctrine_update` or `create_primitive_task`; they cannot block already-accepted tasks (those are terminal), but they can ratify a doctrine entry or seed a primitive task that prevents the next round of drift.
@@ -428,6 +428,6 @@ Both observations cite `docs/gatekeeper-design.md`, `docs/risk-and-cluster-taxon
 
 T053/P1 shipped the Router seam only. Phase 3-5 rollout work is deferred into substrate observations cross-linked here:
 
-- **L171 — Implement dedicated architecture_reviews typed store (P3 of T045 design)** — replaces the P1 tagged-observation stand-in for `arch_review_candidate` routing with the dedicated typed store described in § *Architecture-review outputs*.
+- **L171 / T077 — Implement dedicated architecture_reviews typed store (P3 of T045 design)** — shipped. Replaced the T053/L142 tagged-observation stand-in for `arch_review_candidate` routing with the dedicated typed store described in § *Architecture-review outputs*.
 - **L172 — Implement fast-track auto-execution + L135 Check primitive (P4 of T045 design)** — implements the deferred fast-track execution/check audit shape from § *Fast-track policy* and § *Required audit trail for every fast-track*.
 - **L173 — Curated cluster_key registry + watch/observability dashboards (P5 of T045 design)** — implements registry curation and observability from § *Open questions* and § *Abuse case 2: Cluster-key collision*.
