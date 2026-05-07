@@ -106,6 +106,52 @@ Operands that start with `$` reference row fields (e.g. `$tier_hint`,
 
 ---
 
+## External review lane
+
+T2/T3 tasks create a typed `external_reviews` row after wrap. The
+`external-review` subscriber consumes contract, plan, wrap log, diff
+`base_sha`/`head_sha`, and prior external-review findings. `PASS` leaves the
+task in `in_review` and satisfies the human-accept precheck; `REVISE` routes
+the task back to `executing` for the executor; `TOOLING_FAILURE` marks the
+review `tooling_held` with `held_reason`, `next_retry_at`, log/transcript refs,
+and no acceptance bypass.
+
+`.stores/config.yaml` examples:
+
+```yaml
+review:
+  runner: codex
+  max_parallel: 1
+  timeout_secs: 1800
+  model: gpt-5-codex
+codex:
+  command: codex
+  args: ["review", "--stdin"]
+```
+
+```yaml
+review:
+  runner: pi
+  max_parallel: 1
+  timeout_secs: 1800
+  model: pi-review
+```
+
+```yaml
+review:
+  runner: claude-code
+  max_parallel: 1
+  timeout_secs: 1800
+  model: sonnet
+```
+
+`review.max_parallel` caps concurrent review rows. Cap-held rows stay pending
+with `held_reason=cap-held`; tooling failures stay `tooling_held` until retried
+(`tooling_held → pending`). Both states are printed by `stores agents run` and
+surfaced in `stores watch` review rows.
+
+---
+
 ## Runbook
 
 ### Start the daemon

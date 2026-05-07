@@ -163,3 +163,17 @@ deployment_specialist: user-escalation
 #   runner: codex      # codex, pi, or claude-code. Default: codex.
 #   max_parallel: 1    # external-review lane concurrency cap. Default: 1.
 #   timeout_secs: 1800
+#   model: gpt-5-codex # optional runner/model metadata persisted on review rows.
+# codex:
+#   command: codex
+#   args: ["review", "--stdin"]
+#
+# Pi review runner example:
+# review: { runner: pi, max_parallel: 1, timeout_secs: 1800, model: pi-review }
+#
+# Claude Code review runner example:
+# review: { runner: claude-code, max_parallel: 1, timeout_secs: 1800, model: sonnet }
+#
+# T2/T3 accept precheck: a current-head external_reviews PASS is required.
+# REVISE routes back to executor; TOOLING_FAILURE becomes tooling_held with
+# held_reason/next_retry_at visible to agents-run/watch logs.
