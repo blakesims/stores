@@ -435,7 +435,7 @@ fn read_notes_from_file(sub: &ArgMatches) -> Option<String> {
     }
 }
 
-/// Detect invoker: check --invoker flag first, then fall back to $CLAUDECODE env var.
+/// Detect invoker: check --invoker flag first, then fall back to AI-runtime env detection.
 ///
 /// Returns `Err` if `--invoker` was explicitly supplied with an unrecognised value (including
 /// the empty string).  If the flag is absent, env-detection runs and always succeeds.
@@ -443,7 +443,14 @@ fn detect_actor(matches: &ArgMatches) -> Result<Actor> {
     // --invoker explicit override
     if let Some(inv) = matches.get_one::<String>("invoker") {
         return match inv.as_str() {
-            "human" => Ok(Actor::Human),
+            "human" => {
+                if Actor::ai_runtime_detected() {
+                    bail!(
+                        "human provenance is unavailable from an AI runtime; use --invoker ai_with_human --approve-token <T> for token-mediated U-moments, or rerun from a non-AI shell for true human provenance"
+                    );
+                }
+                Ok(Actor::Human)
+            }
             "ai_autonomous" => Ok(Actor::AiAutonomous),
             "ai_with_human" => Ok(Actor::AiWithHuman),
             "framework" => bail!(
@@ -545,8 +552,17 @@ mod tests {
 
     #[test]
     fn invoker_flag_accepts_human() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_stores = std::env::var("STORES_AI_RUNTIME").ok();
+        let prev_claude = std::env::var("CLAUDECODE").ok();
+        set_env("STORES_AI_RUNTIME", None);
+        set_env("CLAUDECODE", None);
+
         let m = matches_with_invoker(Some("human"));
         assert_eq!(detect_actor(&m).unwrap(), Actor::Human);
+
+        restore_env("STORES_AI_RUNTIME", prev_stores);
+        restore_env("CLAUDECODE", prev_claude);
     }
 
     #[test]
@@ -607,14 +623,76 @@ mod tests {
         p
     }
 
+    fn set_env(name: &str, value: Option<&str>) {
+        match value {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+    }
+
+    fn restore_env(name: &str, value: Option<String>) {
+        match value {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+    }
+
+    #[test]
+    fn ai_runtime_rejects_explicit_human_invoker_with_remedy() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_stores = std::env::var("STORES_AI_RUNTIME").ok();
+        let prev_claude = std::env::var("CLAUDECODE").ok();
+        set_env("STORES_AI_RUNTIME", Some("claude-code"));
+        set_env("CLAUDECODE", None);
+
+        let m = matches_with_invoker(Some("human"));
+        let err = detect_actor(&m).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("human provenance is unavailable from an AI runtime"), "msg: {msg}");
+        assert!(
+            msg.contains("--invoker ai_with_human --approve-token <T>"),
+            "msg: {msg}"
+        );
+        assert!(
+            msg.contains("rerun from a non-AI shell for true human provenance"),
+            "msg: {msg}"
+        );
+
+        restore_env("STORES_AI_RUNTIME", prev_stores);
+        restore_env("CLAUDECODE", prev_claude);
+    }
+
+    #[test]
+    fn non_ai_runtime_accepts_explicit_human_invoker() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_stores = std::env::var("STORES_AI_RUNTIME").ok();
+        let prev_claude = std::env::var("CLAUDECODE").ok();
+        set_env("STORES_AI_RUNTIME", None);
+        set_env("CLAUDECODE", None);
+
+        let m = matches_with_invoker(Some("human"));
+        assert_eq!(detect_actor(&m).unwrap(), Actor::Human);
+
+        restore_env("STORES_AI_RUNTIME", prev_stores);
+        restore_env("CLAUDECODE", prev_claude);
+    }
+
     /// AC2.5: `--approve-token` absent → token_valid=false; behaviour identical to today.
     #[test]
     fn approve_token_absent_yields_token_valid_false() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_stores = std::env::var("STORES_AI_RUNTIME").ok();
+        let prev_claude = std::env::var("CLAUDECODE").ok();
+        set_env("STORES_AI_RUNTIME", None);
+        set_env("CLAUDECODE", None);
+
         let m = matches_with_token(Some("human"), None);
         let ctx = detect_invoker(&m).unwrap();
         assert_eq!(ctx.actor, Actor::Human);
         assert!(!ctx.token_valid);
+
+        restore_env("STORES_AI_RUNTIME", prev_stores);
+        restore_env("CLAUDECODE", prev_claude);
     }
 
     /// AC2.2: valid token → token_valid=true, no error from the token check.
@@ -637,6 +715,54 @@ mod tests {
             Some(v) => std::env::set_var("STORES_TOKEN_DIR", v),
             None => std::env::remove_var("STORES_TOKEN_DIR"),
         }
+    }
+
+    #[test]
+    fn ai_runtime_ai_with_human_valid_token_yields_token_valid_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tdir = unique_token_dir("ai-valid");
+        let prev_token = std::env::var("STORES_TOKEN_DIR").ok();
+        let prev_stores = std::env::var("STORES_AI_RUNTIME").ok();
+        let prev_claude = std::env::var("CLAUDECODE").ok();
+        std::env::set_var("STORES_TOKEN_DIR", &tdir);
+        set_env("STORES_AI_RUNTIME", Some("claude-code"));
+        set_env("CLAUDECODE", None);
+
+        let plaintext = "the-ai-runtime-token-xyz";
+        write_hash_for(&tdir, plaintext);
+
+        let m = matches_with_token(Some("ai_with_human"), Some(plaintext));
+        let ctx = detect_invoker(&m).unwrap();
+        assert_eq!(ctx.actor, Actor::AiWithHuman);
+        assert!(ctx.token_valid);
+
+        restore_env("STORES_TOKEN_DIR", prev_token);
+        restore_env("STORES_AI_RUNTIME", prev_stores);
+        restore_env("CLAUDECODE", prev_claude);
+    }
+
+    #[test]
+    fn ai_runtime_ai_autonomous_valid_token_remains_ai_autonomous_with_token_valid_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tdir = unique_token_dir("ai-auto-valid");
+        let prev_token = std::env::var("STORES_TOKEN_DIR").ok();
+        let prev_stores = std::env::var("STORES_AI_RUNTIME").ok();
+        let prev_claude = std::env::var("CLAUDECODE").ok();
+        std::env::set_var("STORES_TOKEN_DIR", &tdir);
+        set_env("STORES_AI_RUNTIME", Some("claude-code"));
+        set_env("CLAUDECODE", None);
+
+        let plaintext = "the-autonomous-token-xyz";
+        write_hash_for(&tdir, plaintext);
+
+        let m = matches_with_token(Some("ai_autonomous"), Some(plaintext));
+        let ctx = detect_invoker(&m).unwrap();
+        assert_eq!(ctx.actor, Actor::AiAutonomous);
+        assert!(ctx.token_valid);
+
+        restore_env("STORES_TOKEN_DIR", prev_token);
+        restore_env("STORES_AI_RUNTIME", prev_stores);
+        restore_env("CLAUDECODE", prev_claude);
     }
 
     /// AC2.1: invalid token → bail with `invalid approval token` in the error.
