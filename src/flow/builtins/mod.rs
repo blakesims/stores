@@ -123,7 +123,9 @@ pub(crate) fn refresh_task_row(conn: &Connection, display_id: &str) -> Option<Va
                 Value::from(serde_json::Number::from_f64(f).unwrap_or(0.into()))
             }
             rusqlite::types::Value::Text(s) => Value::String(s),
-            rusqlite::types::Value::Blob(b) => Value::String(String::from_utf8_lossy(&b).to_string()),
+            rusqlite::types::Value::Blob(b) => {
+                Value::String(String::from_utf8_lossy(&b).to_string())
+            }
         };
         obj.insert(name.clone(), jv);
     }
@@ -156,7 +158,15 @@ pub(crate) fn fire_framework_transition(
     policies_hash: &str,
 ) -> Result<()> {
     let schema = load_tasks_schema()?;
-    fire_framework_transition_for(conn, &schema, display_id, verb, diff_extra, policies_hash, None)
+    fire_framework_transition_for(
+        conn,
+        &schema,
+        display_id,
+        verb,
+        diff_extra,
+        policies_hash,
+        None,
+    )
 }
 
 /// Generic framework-actor transition firing for any store schema. Identical
@@ -873,6 +883,8 @@ mod tests {
         let target_dir = tempfile::tempdir().unwrap();
         std::env::set_var("CARGO_HOME", cargo_home.path());
         std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+        let private_bin = cargo_home.path().join("private-daemon/bin/stores");
+        std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
 
         let (conn, _t, _o) = fresh_db_with_tasks();
         insert_accepted_task(&conn, "T400", "feat/x", repo.to_str().unwrap());
@@ -908,9 +920,16 @@ mod tests {
             .unwrap();
         assert_eq!(verb, "mark_cargo_installed");
         assert_eq!(invoker, "framework");
+        assert!(
+            private_bin.exists(),
+            "cargo-install must promote to private daemon binary path"
+        );
+        crate::handlers::agents_run::validate_stores_binary_candidate(&private_bin)
+            .expect("promoted private daemon binary must validate");
 
         std::env::remove_var("CARGO_HOME");
         std::env::remove_var("CARGO_TARGET_DIR");
+        std::env::remove_var("STORES_DAEMON_BIN_PATH");
     }
 
     /// AC2.3 / test (j): cargo-install fails on a fixture with a deliberate
@@ -927,6 +946,11 @@ mod tests {
         let target_dir = tempfile::tempdir().unwrap();
         std::env::set_var("CARGO_HOME", cargo_home.path());
         std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+        let private_bin = cargo_home.path().join("private-daemon/bin/stores");
+        std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
+        std::fs::create_dir_all(private_bin.parent().unwrap()).unwrap();
+        std::fs::write(&private_bin, "existing-private-binary\n").unwrap();
+        let existing_private = std::fs::read(&private_bin).unwrap();
 
         let (conn, _t, _o) = fresh_db_with_tasks();
         insert_accepted_task(&conn, "T401", "feat/y", repo.to_str().unwrap());
@@ -962,11 +986,17 @@ mod tests {
             reason.contains(repo.to_str().unwrap()) || reason.contains("cargo-install-broken"),
             "blocked_reason must reference the failing crate path; got: {reason}"
         );
+        assert_eq!(
+            std::fs::read(&private_bin).unwrap(),
+            existing_private,
+            "cargo/candidate failure must not promote over existing private binary"
+        );
 
         let evs = mock.events();
         assert!(
-            evs.iter().any(|(_, e)| e.row_id == "T401"
-                && e.transition_attempted.contains("deploy_blocked")),
+            evs.iter()
+                .any(|(_, e)| e.row_id == "T401"
+                    && e.transition_attempted.contains("deploy_blocked")),
             "expected deploy_blocked ntfy event; got: {:?}",
             evs
         );
@@ -974,6 +1004,71 @@ mod tests {
         std::env::remove_var("STORES_NTFY_URL");
         std::env::remove_var("CARGO_HOME");
         std::env::remove_var("CARGO_TARGET_DIR");
+        std::env::remove_var("STORES_DAEMON_BIN_PATH");
+    }
+
+    #[test]
+    fn cargo_install_bad_candidate_does_not_promote_and_blocks() {
+        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().to_path_buf();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[package]\nname = \"stores\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
+             [[bin]]\nname = \"stores\"\npath = \"src/main.rs\"\n\
+             [features]\ndefault = []\nrunner-claude-code = []\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+        assert!(git(&repo, &["init", "-b", "main"]).status.success());
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "init"]);
+
+        let cargo_home = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let private_bin = cargo_home.path().join("private-daemon/bin/stores");
+        std::fs::create_dir_all(private_bin.parent().unwrap()).unwrap();
+        std::fs::write(&private_bin, "existing-private-binary\n").unwrap();
+        let existing_private = std::fs::read(&private_bin).unwrap();
+        std::env::set_var("CARGO_HOME", cargo_home.path());
+        std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+        std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
+
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        insert_accepted_task(&conn, "T402", "feat/z", repo.to_str().unwrap());
+        let row = task_row_json(&conn, "T402");
+        let agents = AgentsYaml {
+            agents: vec![],
+            deployment_specialist: None,
+        };
+        let cfg = cfg_path();
+        let ctx = DispatchCtx {
+            conn: &conn,
+            agents: &agents,
+            config_path: &cfg,
+            policies_hash: "",
+        };
+
+        cargo_install::run(&row, &ctx).unwrap();
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T402'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "deploy_blocked");
+        assert!(reason
+            .unwrap_or_default()
+            .contains("invalid stores candidate"));
+        assert_eq!(std::fs::read(&private_bin).unwrap(), existing_private);
+
+        std::env::remove_var("CARGO_HOME");
+        std::env::remove_var("CARGO_TARGET_DIR");
+        std::env::remove_var("STORES_DAEMON_BIN_PATH");
     }
 
     /// AC6.4 / test (l): user-escalation files exactly one observation row
@@ -1085,8 +1180,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&stores_bin, std::fs::Permissions::from_mode(0o755))
-                .unwrap();
+            std::fs::set_permissions(&stores_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let prev_stores_bin_outer = std::env::var_os("STORES_BIN");
         std::env::set_var("STORES_BIN", &stores_bin);
@@ -1165,8 +1259,9 @@ mod tests {
 
         let evs = mock.events();
         assert!(
-            evs.iter().any(|(_, e)| e.row_id == "T502"
-                && e.transition_attempted.contains("deploy_blocked")),
+            evs.iter()
+                .any(|(_, e)| e.row_id == "T502"
+                    && e.transition_attempted.contains("deploy_blocked")),
             "expected deploy_blocked ntfy event; got: {:?}",
             evs
         );
@@ -1284,7 +1379,10 @@ mod tests {
         git(&repo, &["add", "ff.txt"]);
         git(&repo, &["commit", "-m", "ff change"]);
         git(&repo, &["checkout", "main"]);
-        let m = git(&repo, &["merge", "--no-ff", "--no-edit", "feat/already-merged"]);
+        let m = git(
+            &repo,
+            &["merge", "--no-ff", "--no-edit", "feat/already-merged"],
+        );
         assert!(m.status.success(), "pre-merge into main failed: {:?}", m);
 
         // Move daemon cwd into the live main repo BEFORE accept_merge::run.
@@ -1294,12 +1392,7 @@ mod tests {
         // Stale workspace_path: worktree was cleaned up after the merge.
         let gone = tmp.path().join("worktrees/T999-gone");
         let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(
-            &conn,
-            "T999",
-            "feat/already-merged",
-            gone.to_str().unwrap(),
-        );
+        insert_accepted_task(&conn, "T999", "feat/already-merged", gone.to_str().unwrap());
         let row = task_row_json(&conn, "T999");
         let agents = empty_agents_yaml();
         let cfg = cfg_path();

@@ -254,6 +254,7 @@ fn stale_then_reexec_happy_path_records_preserved_argv() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -298,6 +299,7 @@ fn stale_then_reexec_fails_fallback_exits_nonzero() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -335,26 +337,18 @@ fn stale_reexec_missing_launch_path_rejected_at_startup() {
         .arg0(&launch_path)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
-        .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .env(
+            "STORES_DAEMON_BIN_PATH",
+            tmp.path().join("private/bin/stores"),
+        )
         .output()
         .expect("invoke stale daemon command");
 
     assert!(
-        !output.status.success(),
-        "missing launch-path must exit nonzero"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("constructing daemon executable guard"),
-        "expected startup-identity-guard failure context; stderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains(launch_path.to_str().unwrap()),
-        "missing launch path must appear in error; stderr:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("daemon binary stale; reexecing into"),
-        "daemon must NOT attempt reexec when launch_path is missing; stderr:\n{stderr}"
+        output.status.success(),
+        "private first-run migration should seed from current_exe and reexec; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -389,6 +383,7 @@ fn reexec_argv_strips_detach_preserves_invoker_and_log_file() {
         ])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke detached stale daemon command");
 
@@ -427,6 +422,7 @@ fn stale_reexec_stub_missing_marker_candidate_rejected_without_exec() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -458,6 +454,7 @@ fn stale_reexec_empty_output_candidate_rejected_without_exec() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -488,6 +485,7 @@ fn stale_reexec_timeout_candidate_rejected_without_exec() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
     let elapsed = started.elapsed();
@@ -521,6 +519,7 @@ fn stale_reexec_fresh_binary_passes_and_records_normalized_argv() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale daemon command");
 
@@ -573,6 +572,7 @@ fn stale_at_startup_no_db_side_effects_before_reexec() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .env("STORES_DAEMON_BIN_PATH", &launch_path)
         .output()
         .expect("invoke stale-at-startup daemon command");
 
@@ -610,15 +610,16 @@ fn fresh_identity_no_reexec_attempt() {
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .env(
+            "STORES_DAEMON_BIN_PATH",
+            tmp.path().join("private-bin/stores"),
+        )
         .output()
         .expect("invoke fresh daemon command");
 
     assert!(output.status.success(), "fresh daemon --once should exit 0");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("daemon binary stale; reexecing into"),
-        "stderr:\n{stderr}"
-    );
+    assert!(!stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
 }
 
 #[test]
@@ -680,6 +681,120 @@ fn fresh_auto_drive_still_records_positive_drive_pid() {
 /// The inode mismatch is real — no env-var bypass.
 #[cfg(unix)]
 #[test]
+fn first_run_migration_seeds_private_binary_and_records_private_launch_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+    let private = tmp.path().join("home/.local/share/stores/bin/stores");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("first-run daemon migration");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(private.exists(), "private binary must be seeded");
+    let conn = Connection::open(tmp.path().join(".stores/db.sqlite")).unwrap();
+    let recorded: String = conn
+        .query_row("SELECT binary_path FROM daemon_starts LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(recorded, private.display().to_string());
+}
+
+#[cfg(unix)]
+#[test]
+fn changed_global_launch_does_not_replace_private_or_emit_canonical_stale_message() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+    let private = tmp.path().join("private/bin/stores");
+    std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_stores"), &private).unwrap();
+    let mut perms = std::fs::metadata(&private).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&private, perms).unwrap();
+    let before = std::fs::metadata(&private).unwrap().len();
+
+    let cargo_home = tmp.path().join("cargo-home");
+    let global = cargo_home.join("bin/stores");
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(&global, "#!/bin/sh\necho corrupted\n").unwrap();
+    let mut perms = std::fs::metadata(&global).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&global, perms).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&global)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env("CARGO_HOME", &cargo_home)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("daemon via changed global argv0");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::metadata(&private).unwrap().len(), before);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_private_binary_reexecs_validated_replacement_once() {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+    let private = tmp.path().join("private/bin/stores");
+    std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+    let args_file = tmp.path().join("replacement-argv.txt");
+    write_reexec_stub(&private, &args_file, 0, StubHelpBehavior::Valid);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&private)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("private replacement reexec");
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<_> = stderr
+        .lines()
+        .filter(|l| l.contains("daemon binary stale; reexecing into"))
+        .collect();
+    assert_eq!(lines.len(), 1, "stderr:\n{stderr}");
+    assert!(
+        lines[0].contains(&private.display().to_string()),
+        "{}",
+        lines[0]
+    );
+    assert!(args_file.exists(), "validated replacement must be exec'd");
+}
+
+#[cfg(unix)]
+#[test]
 fn real_inode_replace_triggers_stale_detection() {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::CommandExt;
@@ -720,6 +835,10 @@ fn real_inode_replace_triggers_stale_detection() {
         // Ensure STORES_TEST_DAEMON_FORCE_STALE is NOT set so this exercises
         // the real dev/ino path.
         .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .env(
+            "STORES_DAEMON_BIN_PATH",
+            tmp.path().join("private-bin/stores"),
+        )
         .output()
         .expect("spawn stores agents run --once");
 

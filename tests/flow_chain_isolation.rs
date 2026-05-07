@@ -262,6 +262,8 @@ fn ac4_1_chain_isolation_failure_does_not_block_peer() {
     let target_dir = tempfile::tempdir().unwrap();
     std::env::set_var("CARGO_HOME", cargo_home.path());
     std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    let private_bin = cargo_home.path().join("private-daemon/bin/stores");
+    std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
     // T031 P1: schema-migrate now spawns a subprocess. Point it at the
     // test-built binary so it picks up this branch's bundled schemas.
     std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
@@ -347,6 +349,7 @@ fn ac4_1_chain_isolation_failure_does_not_block_peer() {
 
     std::env::remove_var("CARGO_HOME");
     std::env::remove_var("CARGO_TARGET_DIR");
+    std::env::remove_var("STORES_DAEMON_BIN_PATH");
 }
 
 /// retry-deploy writes deploy_blocked→accepted; daemon polling observes that
@@ -358,6 +361,8 @@ fn retry_deploy_daemon_poll_retries_post_accept_chain() {
     let target_dir = tempfile::tempdir().unwrap();
     std::env::set_var("CARGO_HOME", cargo_home.path());
     std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    let private_bin = cargo_home.path().join("private-daemon/bin/stores");
+    std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
     std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
 
     let (_tmp, repo) = setup_chain_repo("feat/retry", "retry-only");
@@ -410,6 +415,7 @@ fn retry_deploy_daemon_poll_retries_post_accept_chain() {
 
     std::env::remove_var("CARGO_HOME");
     std::env::remove_var("CARGO_TARGET_DIR");
+    std::env::remove_var("STORES_DAEMON_BIN_PATH");
 }
 
 /// T061 codex-revise round 2: stale-workspace retry-deploy chain.
@@ -432,6 +438,8 @@ fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
     let target_dir = tempfile::tempdir().unwrap();
     std::env::set_var("CARGO_HOME", cargo_home.path());
     std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    let private_bin = cargo_home.path().join("private-daemon/bin/stores");
+    std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
     std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
 
     // Build a valid cargo repo + git repo that has the branch already merged.
@@ -561,6 +569,7 @@ fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
 
     std::env::remove_var("CARGO_HOME");
     std::env::remove_var("CARGO_TARGET_DIR");
+    std::env::remove_var("STORES_DAEMON_BIN_PATH");
 }
 
 /// T061 codex-revise round 3: cwd fallback must reject non-stores Cargo crates.
