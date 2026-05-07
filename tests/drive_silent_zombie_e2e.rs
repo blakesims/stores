@@ -571,11 +571,24 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
     );
     // (c) task stays in_review — awaiting human accept/reject.
     assert_eq!(status, "in_review");
-    // (d) A1-strict: dispatch_lock stays in-flight (next_agent IS NOT NULL →
-    // daemon keeps re-dispatching; lock does NOT close with 'ok' while in_review).
+    // (d) Stub-path lock state: the watchdog re-dispatched via STORES_DRIVE_CMD
+    // (not the real `stores tasks drive` binary), so force_close_auto_drive_lock_ok
+    // was NOT called. After mark_pending_handoff_lock the lock is in_flight
+    // (finished_at=NULL, terminal_reason=NULL). The stub (submit-wrap) does not
+    // close the lock, so it remains open.
+    //
+    // Note: r6 design explicitly allows `terminal_reason='ok'` + `finished_at IS NOT NULL`
+    // on in_review rows when force_close_auto_drive_lock_ok fires (real `tasks drive` path).
+    // That case is distinct from this stub path and is tested separately in the
+    // `wrap_force_close_watchdog_no_redispatch` integration test.
     assert!(
-        terminal_reason.as_deref() != Some("ok") || finished_at.is_none(),
-        "A1-strict: lock must not reach terminal_reason='ok' while task is still in_review \
-         (next_agent IS NOT NULL; completion requires transitioning out of in_review)"
+        finished_at.is_none(),
+        "stub path: lock must stay in-flight (finished_at=None) after watchdog re-dispatch \
+         via STORES_DRIVE_CMD stub; got finished_at={finished_at:?}"
+    );
+    assert!(
+        terminal_reason.is_none(),
+        "stub path: lock terminal_reason must be NULL (in_flight:pending_next) after watchdog \
+         re-dispatch; got terminal_reason={terminal_reason:?}"
     );
 }

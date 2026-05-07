@@ -1506,14 +1506,25 @@ pub(crate) fn close_auto_drive_lock_ok(
 /// and recorded the `wrap_log` entry, so no further work remains for THIS
 /// drive invocation.
 ///
+/// **Watchdog discriminator:** this function writes `last_status='ok:wrap_completed'`
+/// (rather than plain `'ok'`). The watchdog's pending-handoff sweep filters out
+/// `last_status='ok:wrap_completed'` rows to avoid re-dispatching wrap after the
+/// drive subprocess has already handed it off. Plain `'ok'` closed locks (from
+/// old handoffs whose drive subprocess died before calling this function) are
+/// still eligible for re-dispatch. The `terminal_reason` column remains `'ok'`
+/// (its CHECK constraint cannot be broadened without table recreation; `last_status`
+/// is free-text and serves as the typed discriminator here).
+///
 /// A1 invariant is preserved: wrap_log is NOT consulted as a control-flow
 /// sentinel. The decision to close is made by the drive loop's
 /// `dispatched_wrap_this_run` flag (current-cycle completion state), not by
 /// inspecting historical wrap_log content.
 ///
 /// Watchdog fallback: if the drive subprocess dies without calling this
-/// (e.g. process kill), the watchdog's `redispatch_pending_drive` path will
-/// re-spawn a fresh drive — correct amend/re-entry semantics.
+/// (e.g. process kill), the `last_status` stays as whatever the prior in-flight
+/// value was (`in_flight:pending_next` or similar, NOT `ok:wrap_completed`),
+/// so the watchdog's pending-handoff sweep will correctly re-dispatch a fresh
+/// drive — correct amend/re-entry semantics.
 ///
 /// Idempotent: the WHERE clause filters on `finished_at IS NULL`, so a
 /// second call is a no-op zero-row UPDATE.
@@ -1523,7 +1534,7 @@ pub(crate) fn force_close_auto_drive_lock_ok(
 ) -> Result<()> {
     let now = crate::handlers::row::now_iso8601();
     conn.execute(
-        "UPDATE dispatch_locks SET last_status = 'ok', finished_at = ?1, \
+        "UPDATE dispatch_locks SET last_status = 'ok:wrap_completed', finished_at = ?1, \
                                   claimed_at = ?1, attempts = attempts + 1, \
                                   terminal_reason = 'ok', next_retry_at = NULL \
          WHERE store = 'tasks' AND display_id = ?2 AND agent_name = 'auto-drive' \

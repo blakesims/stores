@@ -362,12 +362,16 @@ fn ratify_promote_scaffold_drive_happy_path() {
         "auto-drive must have recorded a drive_pid"
     );
 
-    // A1-strict (pi ruling): auto-drive lock does NOT close with finished_at
-    // non-null while task is still in_review. next_agent IS NOT NULL for
-    // in_review means the daemon keeps re-dispatching wrap; the lock stays
-    // in-flight (pending_next) until the task transitions out of in_review
-    // (human accept/reject). AC7.1 is updated to assert A1-strict semantics:
-    // drive completed (stub ran, status reached in_review), lock is in-flight.
+    // AC7.1: stub-path lock state. This test uses STORES_DRIVE_CMD (a stub that
+    // calls `stores tasks submit-wrap`), not the real `stores tasks drive` binary.
+    // The stub does NOT invoke force_close_auto_drive_lock_ok, so the lock stays
+    // in-flight (finished_at=NULL) while task is in_review.
+    //
+    // Note: r6 design allows `finished_at IS NOT NULL` on in_review locks when
+    // the REAL `tasks drive` binary calls force_close_auto_drive_lock_ok after a
+    // successful wrap submit (last_status='ok:wrap_completed'). That path is
+    // exercised separately in the `wrap_force_close_watchdog_no_redispatch`
+    // integration test. This stub-path assertion remains correct for the stub.
     let (finished_at, wrap_log): (Option<String>, Option<String>) = conn
         .query_row(
             "SELECT dl.finished_at, t.wrap_log \
@@ -377,17 +381,15 @@ fn ratify_promote_scaffold_drive_happy_path() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    // AC7.1 A1-strict: lock stays in-flight (not closed) while status=in_review.
-    // wrap_log populated by stub proves wrap ran (provenance assertion — valid under A1).
+    // AC7.1: wrap_log populated by stub proves wrap ran (provenance assertion — valid under A1).
     assert!(
         wrap_log.as_deref().is_some_and(|w| !w.is_empty()),
         "AC7.1: wrap_log must be populated by stub drive (wrap ran); got {wrap_log:?}"
     );
-    // Lock must NOT be closed with terminal_reason='ok' while task is in_review
-    // (A1-strict: daemon faithfully re-dispatches until human accept/reject).
+    // Stub path: lock stays in-flight (not force-closed) while in_review.
     assert!(
         finished_at.is_none(),
-        "AC7.1 A1-strict: lock must stay in-flight (not closed) while in_review; \
+        "AC7.1 stub path: lock must stay in-flight (finished_at=None) after stub drive; \
          got finished_at={finished_at:?}"
     );
 

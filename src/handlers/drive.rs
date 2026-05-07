@@ -1206,6 +1206,22 @@ fn drive_loop_with_role_runner(
         // ── Step 2g: iter counter / max-iters (AC3.5) ────────────────────
         iter += 1;
         if iter >= max_iters {
+            // T067 r7 MEDIUM fix: if wrap was dispatched in this iteration and
+            // max-iters fires before the next loop-top guard runs, force-close
+            // the auto-drive lock now so the daemon watchdog does not re-dispatch
+            // wrap again. Without this, the lock stays in_flight:pending_next
+            // and the watchdog treats it as a stale handoff needing re-dispatch.
+            if dispatched_wrap_this_run {
+                if let Err(e) =
+                    crate::handlers::agents_run::force_close_auto_drive_lock_ok(conn, display_id)
+                {
+                    eprintln!(
+                        "[{display_id}] force_close_auto_drive_lock_ok (max-iters path) \
+                         failed (non-fatal): {e}"
+                    );
+                    let _ = std::io::stderr().flush();
+                }
+            }
             // Re-read state for summary.
             let na2 = compute_next_action(schema, conn, display_id)?;
             eprintln!(
@@ -2439,8 +2455,8 @@ mod tests {
         );
         assert_eq!(
             last_status.as_deref(),
-            Some("ok"),
-            "T067 r5: last_status must be 'ok' after wrap dispatch closes lock"
+            Some("ok:wrap_completed"),
+            "T067 r7: last_status must be 'ok:wrap_completed' after force_close (watchdog discriminator)"
         );
         assert_eq!(
             terminal_reason.as_deref(),
@@ -2498,6 +2514,93 @@ mod tests {
         assert!(
             msg.contains("max iterations exceeded"),
             "error must mention max iterations: {msg}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T067 r7 MEDIUM: max-iters fires after wrap dispatch → force-close must run
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn max_iters_after_wrap_dispatch_force_closes_lock() {
+        // Regression: if max-iters fires immediately after a successful wrap submit,
+        // the loop bails before reaching the loop-top `in_review && dispatched_wrap_this_run`
+        // guard. Without the r7 fix, the lock stays in_flight:pending_next and the
+        // daemon watchdog re-dispatches wrap again. With the fix, force_close fires
+        // before the bail and the lock reaches last_status='ok:wrap_completed'.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn,
+            &schema,
+            "T803",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+
+        let row_id: i64 = conn
+            .query_row("SELECT id FROM tasks WHERE display_id='T803'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        // Open auto-drive dispatch_lock.
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, \
+              claimed_at, claimed_by) \
+             VALUES ('tasks', ?1, 'T803', 'auto-drive', 1, \
+                     '2026-05-04T00:00:00Z', 'test-claimer')",
+            rusqlite::params![row_id],
+        )
+        .unwrap();
+
+        // One wrap response — max_iters=1 means the loop fires wrap in iter 0,
+        // increments iter to 1, and bails on the max-iters check before reaching
+        // the next loop-top guard.
+        let wrap_out = make_run_output(wrap_fixture_json(), 0);
+        let runner = MockRunner::new(vec![wrap_out]);
+        // drive_loop returns Err (max-iters exceeded).
+        let err = drive_loop(&schema, &conn, "T803", &runner, 1)
+            .expect_err("max_iters=1 must abort after wrap dispatch");
+        assert!(
+            err.to_string().contains("max iterations exceeded"),
+            "error must mention max iterations: {err}"
+        );
+
+        // T067 r7: lock must be force-closed (finished_at non-null,
+        // last_status='ok:wrap_completed') even though the bail path fired.
+        let (finished_at, last_status, terminal_reason): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT finished_at, last_status, terminal_reason FROM dispatch_locks \
+                 WHERE display_id='T803' AND agent_name='auto-drive'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            finished_at.is_some(),
+            "T067 r7: lock must be force-closed (finished_at non-null) even on max-iters bail \
+             after wrap dispatch; daemon would re-dispatch wrap otherwise"
+        );
+        assert_eq!(
+            last_status.as_deref(),
+            Some("ok:wrap_completed"),
+            "T067 r7: last_status must be 'ok:wrap_completed' after max-iters force-close; \
+             got {last_status:?}"
+        );
+        assert_eq!(
+            terminal_reason.as_deref(),
+            Some("ok"),
+            "terminal_reason must be 'ok'; got {terminal_reason:?}"
         );
     }
 

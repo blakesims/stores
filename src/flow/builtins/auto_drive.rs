@@ -603,12 +603,26 @@ pub fn sweep_drive_watchdog(
     // must NOT be swept here. next_agent is computed dynamically by
     // has_pending_auto_drive_work below; the SQL gate narrows to the
     // structural condition observable in the DB.
+    //
+    // T067 r7 HIGH fix: exclude locks written by force_close_auto_drive_lock_ok
+    // (which sets last_status='ok:wrap_completed'). Those locks represent
+    // current-cycle wrap dispatch that already completed; re-dispatching them
+    // would fire wrap again, defeating the r5/r6 lifecycle-closure design.
+    // Plain last_status='ok' (old handoff that died before force-close) remains
+    // eligible for re-dispatch (correct amend/re-entry semantics).
+    //
+    // Why last_status rather than a typed terminal_reason variant: the
+    // terminal_reason column carries a CHECK constraint
+    // (ok|exit_nonzero|error|silent_zombie|timeout|halted|legacy_unknown) that
+    // cannot be broadened on existing DBs without table recreation. last_status
+    // is free-text and is the designated typed discriminator for this case.
     let pending_locks: Vec<(i64, String)> = {
         let mut stmt = conn.prepare(
             "SELECT dl.row_id, dl.display_id \
              FROM dispatch_locks dl JOIN tasks t ON t.id = dl.row_id \
              WHERE dl.store = 'tasks' AND dl.agent_name = 'auto-drive' \
                AND dl.terminal_reason = 'ok' \
+               AND dl.last_status != 'ok:wrap_completed' \
                AND t.status = 'in_review' \
                AND COALESCE(t.drive_pid, 0) > 0",
         )?;
@@ -1242,6 +1256,88 @@ mod tests {
             )
             .unwrap();
         assert!(finished.is_some(), "lock must be closed after sweep");
+    }
+
+    // -----------------------------------------------------------------
+    // T067 r7 HIGH: force_close discriminator — watchdog must NOT re-dispatch
+    // -----------------------------------------------------------------
+
+    /// Insert a lock in the state written by `force_close_auto_drive_lock_ok`:
+    /// `terminal_reason='ok'`, `last_status='ok:wrap_completed'`, `finished_at` SET.
+    /// This simulates the real `tasks drive` binary calling force-close after wrap dispatch.
+    fn insert_lock_force_closed(conn: &Connection, row_id: i64, display_id: &str) {
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, \
+              last_status, finished_at, terminal_reason) \
+             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, '2026-05-03T00:00:00Z', 'test-claimer', \
+                     'ok:wrap_completed', '2026-05-03T00:00:01Z', 'ok')",
+            rusqlite::params![row_id, display_id],
+        )
+        .unwrap();
+    }
+
+    /// T067 r7 HIGH: after `force_close_auto_drive_lock_ok` fires (lock closed with
+    /// `last_status='ok:wrap_completed'`), the watchdog pending-handoff sweep must
+    /// NOT re-dispatch wrap. The closed lock proves the drive subprocess already handed
+    /// wrap off; re-dispatch would fire wrap a second time.
+    ///
+    /// Contrast with `watchdog_dead_pid_in_review_pending_wrap_redispatches` which
+    /// uses `last_status='ok'` (old handoff, drive died before force-close) and
+    /// MUST re-dispatch.
+    #[test]
+    fn watchdog_force_closed_wrap_lock_no_redispatch() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("STORES_DRIVE_CMD", "sleep 5 #");
+        let conn = fresh_db_with_obs();
+        let tmp = temp_cwd();
+        let row_id = insert_task_full(&conn, "T723F", "in_review", Some(dead_pid()));
+        conn.execute(
+            "UPDATE tasks SET workspace_path=?1, drive_started_at='2026-01-01T00:00:00Z' \
+             WHERE display_id='T723F'",
+            rusqlite::params![tmp.path().to_str().unwrap()],
+        )
+        .unwrap();
+        // Insert a force-closed lock (last_status='ok:wrap_completed') — this is the
+        // state produced by force_close_auto_drive_lock_ok after wrap dispatch.
+        insert_lock_force_closed(&conn, row_id, "T723F");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+        // Watchdog must not act on force-closed locks.
+        assert_eq!(
+            acted, 0,
+            "watchdog must NOT re-dispatch a force-closed (ok:wrap_completed) lock; \
+             re-dispatch would fire wrap a second time"
+        );
+        // Lock must remain closed (finished_at still set, last_status unchanged).
+        let (finished_at, last_status, terminal_reason): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT finished_at, last_status, terminal_reason FROM dispatch_locks \
+                 WHERE display_id='T723F' AND agent_name='auto-drive'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            finished_at.is_some(),
+            "force-closed lock must remain closed (finished_at non-null); got None"
+        );
+        assert_eq!(
+            last_status.as_deref(),
+            Some("ok:wrap_completed"),
+            "last_status must stay 'ok:wrap_completed'; got {last_status:?}"
+        );
+        assert_eq!(
+            terminal_reason.as_deref(),
+            Some("ok"),
+            "terminal_reason must stay 'ok'; got {terminal_reason:?}"
+        );
+        std::env::remove_var("STORES_DRIVE_CMD");
     }
 
     // -----------------------------------------------------------------
