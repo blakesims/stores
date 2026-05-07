@@ -456,7 +456,7 @@ pub fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
                 &did,
                 "tooling_held",
                 "pending",
-                "retry-after-tooling-held",
+                "retry-review",
                 "framework",
                 None,
                 None,
