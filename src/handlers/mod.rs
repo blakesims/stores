@@ -2,6 +2,7 @@ pub mod add;
 pub mod agents_backfill;
 pub mod agents_run;
 pub mod architecture_reviews;
+pub mod architecture_reviews_backfill;
 pub mod brief;
 pub mod drive;
 pub mod framework_migrate;

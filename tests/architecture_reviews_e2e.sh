@@ -48,3 +48,16 @@ stores architecture_reviews issue-verdict A003 --kind interpret --verdict allow_
 stores architecture_reviews show A001 --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["status"]=="superseded"'
 stores architecture_reviews show A003 --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["status"]=="verdict_issued"'
 pass "supersedes marks prior only"
+
+sqlite3 .stores/db.sqlite "INSERT INTO observations (id, display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week, tags, pending_architecture_review) VALUES (901, 'L901', 'open', 'now', 'now', 'ai_with_human', 'ai_with_human', 'legacy tagged arch candidate', 'dev', 'normal', 'now', 'w19-d2', '[\"arch-review-candidate\"]', 0)"
+BEFORE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews WHERE source_observation='L901'")
+[[ "$BEFORE" == "0" ]] || fail "legacy seed unexpectedly had architecture review"
+stores migrate --apply >/dev/null
+AFTER_ONE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews WHERE source_observation='L901'")
+PENDING_ONE=$(sqlite3 .stores/db.sqlite "SELECT pending_architecture_review FROM observations WHERE display_id='L901'")
+stores migrate --apply >/dev/null
+AFTER_TWO=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews WHERE source_observation='L901'")
+[[ "$AFTER_ONE" == "1" ]] || fail "backfill first run should create one A###; got $AFTER_ONE"
+[[ "$PENDING_ONE" == "1" ]] || fail "backfill should set pending_architecture_review; got $PENDING_ONE"
+[[ "$AFTER_TWO" == "1" ]] || fail "backfill second run should not duplicate; got $AFTER_TWO"
+pass "idempotent backfill rerun creates one A### total"
