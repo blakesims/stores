@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::ArgMatches;
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 
 use crate::codegen::ddl::quote_ident;
@@ -458,6 +458,108 @@ pub fn run_abandon(
 }
 
 
+fn enforce_external_review_accept_precheck(
+    tx: &Transaction,
+    display_id: &str,
+    existing: &crate::validate::EntryMap,
+) -> Result<()> {
+    let tier = existing
+        .get("tier_hint")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if tier != "T2" && tier != "T3" {
+        return Ok(());
+    }
+
+    let table_exists: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='external_reviews'",
+        [],
+        |row| row.get(0),
+    )?;
+    if table_exists == 0 {
+        anyhow::bail!("external review PASS required for {display_id}: no external_reviews table");
+    }
+
+    let held_expr = if external_review_has_column(tx, "held_reason")? {
+        "COALESCE(held_reason,'')"
+    } else {
+        "''"
+    };
+    let sql = format!(
+        "SELECT display_id, COALESCE(status,''), COALESCE(verdict,''), COALESCE(head_sha,''), {held_expr} \
+         FROM external_reviews \
+         WHERE task_id=?1 AND COALESCE(status,'') != 'superseded' \
+         ORDER BY attempt DESC, id DESC LIMIT 1"
+    );
+    let latest = tx
+        .query_row(&sql, [display_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .optional()?;
+
+    let Some((review_id, status, verdict, head_sha, held_reason)) = latest else {
+        anyhow::bail!("external review PASS required for {display_id}: no non-superseded external review attempt found");
+    };
+
+    if verdict == "TOOLING_FAILURE" || status == "tooling_held" {
+        anyhow::bail!(
+            "external review PASS required for {display_id}: attempt {review_id} is TOOLING_FAILURE/held; retry or inspect held external review attempt {review_id} ({held_reason})"
+        );
+    }
+    if !(status == "passed" && verdict == "PASS") {
+        anyhow::bail!(
+            "external review PASS required for {display_id}: latest external review attempt {review_id} has status={status} verdict={verdict}"
+        );
+    }
+
+    let current_head = resolve_accept_head(existing)?;
+    if head_sha != current_head {
+        anyhow::bail!(
+            "stale external review head for {display_id}: attempt {review_id} reviewed head {head_sha}, current head is {current_head}"
+        );
+    }
+
+    Ok(())
+}
+
+fn external_review_has_column(tx: &Transaction, name: &str) -> Result<bool> {
+    let mut stmt = tx.prepare("PRAGMA table_info(external_reviews)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let col: String = row.get(1)?;
+        if col == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn resolve_accept_head(existing: &crate::validate::EntryMap) -> Result<String> {
+    let workspace = existing
+        .get("workspace_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(".");
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .with_context(|| format!("resolve current HEAD in {workspace}"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "external review PASS required but current head could not be resolved in {workspace}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Transaction-agnostic core.  All DB access uses `tx` (which is `Deref<Target=Connection>`).
 /// Called by `run` (single-call CLI path) and by submit handlers that pass their own `tx`
 /// for atomic multi-step operations (Phase 5 / task 5.7).
@@ -480,6 +582,10 @@ pub(crate) fn run_in_tx(
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    if schema.name == "tasks" && verb == "accept" {
+        enforce_external_review_accept_precheck(tx, display_id, &existing)?;
+    }
 
     // Build diff entry from CLI args
     let mut diff = build_entry_map(schema, |cli_name| {
