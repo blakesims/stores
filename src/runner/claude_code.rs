@@ -574,6 +574,7 @@ impl Runner for ClaudeCodeRunner {
                 tokens_out,
                 prompt_cache_hits,
                 transcript_path,
+                stderr_log_path: None,
             },
             payload_error: None,
         })

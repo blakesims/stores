@@ -260,7 +260,8 @@ fn codex_shim_invocation_persists_runner_metadata() {
     .unwrap();
     assert_eq!(parsed.verdict, ExternalReviewVerdict::Pass);
 
-    let (runner, model_id, verdict, transcript_path, metadata): (
+    let (runner, model_id, verdict, transcript_path, log_path, metadata): (
+        String,
         String,
         String,
         String,
@@ -268,17 +269,23 @@ fn codex_shim_invocation_persists_runner_metadata() {
         String,
     ) = conn
         .query_row(
-            "SELECT runner, model_id, verdict, transcript_path, model_metadata FROM external_reviews WHERE display_id='ER900'",
+            "SELECT runner, model_id, verdict, transcript_path, log_path, model_metadata FROM external_reviews WHERE display_id='ER900'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         )
         .unwrap();
     assert_eq!(runner, "codex");
     assert_eq!(model_id, "shim-model");
     assert_eq!(verdict, "PASS");
     assert!(std::path::Path::new(&transcript_path).exists());
+    assert!(std::path::Path::new(&log_path).exists());
+    assert_ne!(log_path, transcript_path);
     assert!(transcript_path.starts_with(runs.path().to_str().unwrap()));
+    assert!(log_path.starts_with(runs.path().to_str().unwrap()));
+    assert!(transcript_path.ends_with(".codex.transcript.log"));
+    assert!(log_path.ends_with(".codex.stderr.log"));
     assert!(metadata.contains("session_id"));
+    assert!(metadata.contains("stderr_log_path"));
 
     match old_runs {
         Some(v) => std::env::set_var("STORES_RUNS_DIR", v),

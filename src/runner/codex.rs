@@ -115,6 +115,17 @@ fn wait_with_timeout(
     }
 }
 
+fn read_pipe_thread<R>(mut pipe: R) -> thread::JoinHandle<Result<Vec<u8>>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
 impl Runner for CodexRunner {
     fn name(&self) -> &str {
         "codex"
@@ -157,18 +168,18 @@ impl Runner for CodexRunner {
             .write_all(prompt.as_bytes())?;
         drop(child.stdin.take());
 
+        let stdout_handle = child.stdout.take().map(read_pipe_thread);
+        let stderr_handle = child.stderr.take().map(read_pipe_thread);
         let status = wait_with_timeout(&mut child, Duration::from_secs(self.timeout_secs))?;
         let ended_at = crate::handlers::row::now_iso8601();
-        let mut stdout_bytes = Vec::new();
-        let mut stderr_bytes = Vec::new();
-        if let Some(mut stdout) = child.stdout.take() {
-            use std::io::Read as _;
-            stdout.read_to_end(&mut stdout_bytes)?;
-        }
-        if let Some(mut stderr) = child.stderr.take() {
-            use std::io::Read as _;
-            stderr.read_to_end(&mut stderr_bytes)?;
-        }
+        let stdout_bytes = stdout_handle
+            .map(|h| h.join().unwrap_or_else(|_| Ok(Vec::new())))
+            .transpose()?
+            .unwrap_or_default();
+        let stderr_bytes = stderr_handle
+            .map(|h| h.join().unwrap_or_else(|_| Ok(Vec::new())))
+            .transpose()?
+            .unwrap_or_default();
         let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
         let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
         let transcript_path = write_run_file(&cwd, &session_id, ".codex.transcript.log", &stdout)?;
@@ -192,12 +203,10 @@ impl Runner for CodexRunner {
                 started_at: Some(started_at),
                 ended_at: Some(ended_at),
                 transcript_path: Some(transcript_path.to_string_lossy().to_string()),
-                // Store the stderr log in the closest telemetry field available
-                // to the generic RunnerOutput; external review persistence also
-                // records it in model_metadata/log_path.
                 prompt_cache_hits: None,
                 tokens_in: None,
                 tokens_out: None,
+                stderr_log_path: Some(log_path.to_string_lossy().to_string()),
             },
             payload_error: if status.success() {
                 None

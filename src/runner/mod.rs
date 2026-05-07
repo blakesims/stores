@@ -65,6 +65,7 @@ pub struct AgentRunTelemetry {
     pub tokens_out: Option<i64>,
     pub prompt_cache_hits: Option<i64>,
     pub transcript_path: Option<String>,
+    pub stderr_log_path: Option<String>,
 }
 
 impl AgentRunTelemetry {

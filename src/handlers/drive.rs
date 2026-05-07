@@ -488,7 +488,8 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
             .map(|(idx, item)| {
                 // Required fields: caller/fixture supplies them; synthesize only as
                 // last resort for transcript_path when fixture omits it entirely.
-                let mut telemetry = crate::runner::AgentRunTelemetry::with_mock_defaults(&synthetic_runs_dir);
+                let mut telemetry =
+                    crate::runner::AgentRunTelemetry::with_mock_defaults(&synthetic_runs_dir);
                 if item.model_id.is_some() {
                     telemetry.model_id = item.model_id;
                 }
@@ -2227,7 +2228,11 @@ mod tests {
         .expect("first submit-execute must succeed");
 
         let cycles = read_cycles_for(&conn, &schema, "T001");
-        assert_eq!(cycles.len(), 1, "first submit must produce exactly one cycle entry");
+        assert_eq!(
+            cycles.len(),
+            1,
+            "first submit must produce exactly one cycle entry"
+        );
         assert_eq!(
             cycles[0]["executor"]["transcript_path"].as_str(),
             Some(tp.as_str()),
@@ -2319,10 +2324,19 @@ mod tests {
         // pi runner → pi:default
         assert_eq!(derive_spawn_fail_model_id("pi"), "pi:default");
         // claude-code with model suffix → preserve as claude_code:<model>
-        assert_eq!(derive_spawn_fail_model_id("claude-code:opus"), "claude_code:opus");
-        assert_eq!(derive_spawn_fail_model_id("claude-code:sonnet"), "claude_code:sonnet");
+        assert_eq!(
+            derive_spawn_fail_model_id("claude-code:opus"),
+            "claude_code:opus"
+        );
+        assert_eq!(
+            derive_spawn_fail_model_id("claude-code:sonnet"),
+            "claude_code:sonnet"
+        );
         // claude-code without model suffix → claude_code:unknown
-        assert_eq!(derive_spawn_fail_model_id("claude-code"), "claude_code:unknown");
+        assert_eq!(
+            derive_spawn_fail_model_id("claude-code"),
+            "claude_code:unknown"
+        );
         // unknown runner → <name>:unknown
         assert_eq!(derive_spawn_fail_model_id("custom"), "custom:unknown");
     }
@@ -2341,7 +2355,13 @@ mod tests {
 
         // Pre-create per-role transcript files so transcript_path is a real
         // existing path for every submit row (Finding 3).
-        let role_names = ["planner", "plan_reviewer", "executor", "code_reviewer", "wrap"];
+        let role_names = [
+            "planner",
+            "plan_reviewer",
+            "executor",
+            "code_reviewer",
+            "wrap",
+        ];
         for role in &role_names {
             let p = runs_dir.join(format!("{role}.jsonl"));
             std::fs::write(&p, "{}\n").unwrap();
@@ -2377,9 +2397,8 @@ mod tests {
             tokens_in: Some(10),
             tokens_out: Some(20),
             prompt_cache_hits: Some(0),
-            transcript_path: Some(
-                runs_dir.join(format!("{role}.jsonl")).display().to_string(),
-            ),
+            transcript_path: Some(runs_dir.join(format!("{role}.jsonl")).display().to_string()),
+            stderr_log_path: None,
         };
 
         let mut planner_out = make_run_output(planner_fixture_json(), 0);
@@ -2388,10 +2407,12 @@ mod tests {
         let mut plan_reviewer_out = make_run_output(plan_reviewer_fixture_json(), 0);
         plan_reviewer_out.telemetry = make_telemetry("plan_reviewer");
 
-        let mut executor_out = make_run_output_with_session(executor_fixture_json(), 0, "happy-exec-session");
+        let mut executor_out =
+            make_run_output_with_session(executor_fixture_json(), 0, "happy-exec-session");
         executor_out.telemetry = make_telemetry("executor");
 
-        let mut code_reviewer_out = make_run_output_with_session(code_reviewer_fixture_json(), 0, "happy-review-session");
+        let mut code_reviewer_out =
+            make_run_output_with_session(code_reviewer_fixture_json(), 0, "happy-review-session");
         code_reviewer_out.telemetry = make_telemetry("code_reviewer");
 
         let mut wrap_out = make_run_output(wrap_fixture_json(), 0);
@@ -2458,7 +2479,10 @@ mod tests {
             assert!(row.1 >= 0, "phase populated: {role}");
             assert!(row.2 >= 0, "cycle populated: {role}");
             assert!(!row.4.is_empty(), "model_id non-empty: {role}");
-            assert_ne!(row.4, "legacy_unknown", "model_id not fallback for new rows: {role}");
+            assert_ne!(
+                row.4, "legacy_unknown",
+                "model_id not fallback for new rows: {role}"
+            );
             assert_eq!(row.5, "mock", "harness_id: {role}");
             assert!(!row.6.is_empty(), "started_at populated: {role}");
             assert!(!row.7.is_empty(), "ended_at populated: {role}");
@@ -2813,7 +2837,11 @@ mod tests {
             .expect("wrap dispatch at in_review must succeed");
 
         // Runner fully drained — wrap was consumed.
-        assert_eq!(runner.remaining_count(), 0, "wrap response must be consumed");
+        assert_eq!(
+            runner.remaining_count(),
+            0,
+            "wrap response must be consumed"
+        );
 
         // T067 r5: lock must be closed terminal-ok (no infinite re-dispatch).
         let (finished_at, last_status, terminal_reason): (
@@ -3111,18 +3139,24 @@ mod tests {
         );
 
         // Synthetic agent_runs row must exist with exit_code = LAUNCH_ERROR_EXIT_CODE (-1).
-        let (exit_code, model_id, harness_id, transcript_path): (i64, String, String, String) = conn
-            .query_row(
+        let (exit_code, model_id, harness_id, transcript_path): (i64, String, String, String) =
+            conn.query_row(
                 "SELECT exit_code, model_id, harness_id, transcript_path \
                  FROM agent_runs WHERE display_id='T001' AND role='planner'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .expect("synthetic agent_runs row must be inserted on spawn failure");
-        assert_eq!(exit_code, -1, "exit_code must be LAUNCH_ERROR_EXIT_CODE (-1)");
+        assert_eq!(
+            exit_code, -1,
+            "exit_code must be LAUNCH_ERROR_EXIT_CODE (-1)"
+        );
         assert!(!model_id.is_empty(), "model_id must be non-empty");
         assert!(!harness_id.is_empty(), "harness_id must be non-empty");
-        assert!(!transcript_path.is_empty(), "transcript_path must be non-empty");
+        assert!(
+            !transcript_path.is_empty(),
+            "transcript_path must be non-empty"
+        );
 
         // Transcript file must exist and contain the error content.
         let tp = std::path::Path::new(&transcript_path);
@@ -3137,8 +3171,8 @@ mod tests {
             tp.display()
         );
         let content = std::fs::read_to_string(tp).expect("transcript must be readable");
-        let json: serde_json::Value = serde_json::from_str(&content)
-            .expect("spawn-error transcript must be valid JSON");
+        let json: serde_json::Value =
+            serde_json::from_str(&content).expect("spawn-error transcript must be valid JSON");
         assert_eq!(
             json.get("error").and_then(|v| v.as_str()),
             Some("spawn failed"),

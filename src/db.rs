@@ -349,6 +349,7 @@ fields:
             tokens_out: Some(20),
             prompt_cache_hits: Some(3),
             transcript_path: Some("/tmp/run.jsonl".to_string()),
+            stderr_log_path: None,
         };
         insert_agent_run(&conn, "T001", 1, 2, "executor", 7, &telemetry).unwrap();
         let row: (String, i64, i64, String, String, i64, i64, i64, String) = conn
