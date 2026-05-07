@@ -1,11 +1,11 @@
 //! Engine-runner observability substrate.
 //!
-//! Phase 1 only records per-iteration heartbeats and per-row actionability
-//! state. These helpers intentionally write only `engine_runner_*` tables and
-//! never mutate task lifecycle, transition history, or dispatch locks.
+//! Records per-iteration heartbeats and per-row actionability state, and
+//! reconciles state invariants owned by the engine runner. It does not mutate
+//! task lifecycle states or dispatch locks.
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -73,6 +73,15 @@ pub struct ClassifiedRow {
 pub struct ScannerResult {
     pub summary: HeartbeatSummary,
     pub rows: Vec<ClassifiedRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalReviewBackfill {
+    pub task_row_id: i64,
+    pub task_display_id: String,
+    pub review_row_id: i64,
+    pub review_display_id: String,
+    pub reason: String,
 }
 
 /// Insert one durable heartbeat row for a poll iteration.
@@ -268,6 +277,113 @@ pub fn scan_and_record_actionability(
     Ok(ScannerResult { summary, rows })
 }
 
+/// Reconcile the external_reviews lane invariant for T2/T3 in_review tasks.
+pub fn reconcile_external_reviews_for_in_review_tasks(
+    conn: &Connection,
+) -> Result<Vec<ExternalReviewBackfill>> {
+    if !table_exists(conn, "tasks")? || !table_exists(conn, "external_reviews")? {
+        return Ok(Vec::new());
+    }
+
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let candidates: Vec<(i64, String, Option<String>)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, display_id, wrap_log FROM tasks \
+             WHERE status='in_review' AND tier_hint IN ('T2','T3') \
+             ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let mut minted = Vec::new();
+    for (task_row_id, task_display_id, wrap_log) in candidates {
+        let active: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM external_reviews \
+             WHERE task_id=?1 \
+               AND status IN ('pending','running','passed','revise','tooling_held')",
+            rusqlite::params![task_display_id],
+            |r| r.get(0),
+        )?;
+        if active > 0 {
+            continue;
+        }
+
+        let next_attempt: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(attempt), 0) + 1 FROM external_reviews WHERE task_id=?1",
+            rusqlite::params![task_display_id],
+            |r| r.get(0),
+        )?;
+        let next_id: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(id), 0) + 1 FROM external_reviews",
+            [],
+            |r| r.get(0),
+        )?;
+        let review_display_id = format!("ER{next_id:03}");
+        let now = crate::handlers::row::now_iso8601();
+        let wrap_len = wrap_log
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| v.as_array().map(Vec::len))
+            .unwrap_or(0);
+        let wrap_ref = if wrap_len == 0 {
+            format!("tasks:{task_display_id}:wrap_log")
+        } else {
+            format!("tasks:{task_display_id}:wrap_log[{}]", wrap_len - 1)
+        };
+        tx.execute(
+            "INSERT INTO external_reviews \
+             (display_id, status, created_at, updated_at, created_by, updated_by, \
+              task_id, attempt, adapter, contract_ref, plan_ref, wrap_log_ref, diff_ref, prior_review_ref) \
+             VALUES (?1, 'pending', ?2, ?2, 'framework', 'framework', \
+                     ?3, ?4, 'external_review', ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                review_display_id,
+                now,
+                task_display_id,
+                next_attempt,
+                format!("tasks:{task_display_id}:contract"),
+                format!("tasks:{task_display_id}:plan"),
+                wrap_ref,
+                format!("tasks:{task_display_id}:diff"),
+                format!("tasks:{task_display_id}:cycles"),
+            ],
+        )
+        .context("engine-runner: create pending external_review backfill")?;
+        let review_row_id = tx.last_insert_rowid();
+        let reason = format!("external_review backfilled for {task_display_id} (wrap pre-deploy)");
+        crate::db::insert_transition_history(
+            &tx,
+            "external_reviews",
+            review_row_id,
+            &review_display_id,
+            "",
+            "pending",
+            "create-external-review",
+            "framework",
+            None,
+            None,
+            Some(&format!(
+                "source=engine_runner_reconcile task_row_id={task_row_id} task_display_id={task_display_id} reason={reason}"
+            )),
+        )?;
+        minted.push(ExternalReviewBackfill {
+            task_row_id,
+            task_display_id,
+            review_row_id,
+            review_display_id,
+            reason,
+        });
+    }
+    tx.commit()?;
+    for row in &minted {
+        eprintln!("[engine-runner] {}", row.reason);
+    }
+    Ok(minted)
+}
+
 /// Scan and execute only existing autonomous task re-drive edges. Non-task
 /// actionable rows remain observation-only for this phase.
 pub fn scan_record_and_redrive_tasks(
@@ -283,7 +399,17 @@ pub fn scan_record_and_redrive_tasks(
     base_dispatched: i64,
 ) -> Result<ScannerResult> {
     let claim_window_secs = auto_drive_claim_window_secs(agents);
+    let backfilled = reconcile_external_reviews_for_in_review_tasks(conn)?;
     let mut rows = scan_rows(conn, schemas, started_at, claim_window_secs)?;
+    for backfill in &backfilled {
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|r| r.store == "tasks" && r.row_id == backfill.task_row_id)
+        {
+            row.classification = "held".to_string();
+            row.held_reason = Some(backfill.reason.clone());
+        }
+    }
     let cap = crate::flow::config::resolve_drive_max_parallel(config_path) as usize;
     let mut dispatched = 0_i64;
 
@@ -460,7 +586,7 @@ fn scan_tasks(
         entry.insert("status".into(), json!(status));
         entry.insert("current_phase".into(), opt_i64_value(current_phase));
         entry.insert("current_cycle".into(), opt_i64_value(current_cycle));
-        entry.insert("tier_hint".into(), opt_string_value(tier_hint));
+        entry.insert("tier_hint".into(), opt_string_value(tier_hint.clone()));
         entry.insert("blocked_reason".into(), opt_string_value(blocked_reason));
         entry.insert("plan".into(), parse_json_text(plan));
 
@@ -498,6 +624,12 @@ fn scan_tasks(
         } else {
             ("held".to_string(), Some("no_next_agent".to_string()))
         };
+        let held_reason =
+            if status == "in_review" && matches!(tier_hint.as_deref(), Some("T2") | Some("T3")) {
+                external_review_backfill_reason(conn, row_id)?.or(held_reason)
+            } else {
+                held_reason
+            };
         out.push(ClassifiedRow {
             store: schema.name.clone(),
             row_id,
@@ -506,6 +638,36 @@ fn scan_tasks(
         });
     }
     Ok(out)
+}
+
+fn external_review_backfill_reason(conn: &Connection, task_row_id: i64) -> Result<Option<String>> {
+    if !table_exists(conn, "external_reviews")? {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT 'external_review backfilled for ' || t.display_id || ' (wrap pre-deploy)' \
+         FROM tasks t \
+         JOIN external_reviews er ON er.task_id=t.display_id \
+         JOIN transition_history th ON th.store='external_reviews' \
+          AND th.row_id=er.id \
+          AND th.verb='create-external-review' \
+          AND th.invoker='framework' \
+         WHERE t.id=?1 AND er.status='pending' \
+         ORDER BY er.attempt DESC, er.id DESC LIMIT 1",
+        rusqlite::params![task_row_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .context("lookup external_review backfill actionability reason")
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        rusqlite::params![table],
+        |r| r.get(0),
+    )?;
+    Ok(exists > 0)
 }
 
 fn scan_intake(conn: &Connection, schema: &Schema) -> Result<Vec<ClassifiedRow>> {

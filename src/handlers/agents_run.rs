@@ -1713,6 +1713,8 @@ fn run_engine_runner_iteration(
         .unwrap_or(1);
     // Pass base_dispatched so the persisted heartbeat row and the log line below
     // both reflect the union of engine-runner redrives + daemon base dispatches.
+    // scan_record_and_redrive_tasks starts with state-driven external-review
+    // reconciliation, so every daemon poll tick enforces the T2/T3 in_review lane invariant.
     let result = crate::flow::engine_runner::scan_record_and_redrive_tasks(
         conn,
         crate::flow::engine_runner::ScannerSchemas {

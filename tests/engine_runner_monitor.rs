@@ -1,10 +1,13 @@
 use rusqlite::Connection;
+use std::sync::atomic::Ordering;
+use std::sync::{Mutex, OnceLock};
+use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
-use stores::flow::engine_runner::{scan_record_and_redrive_tasks, ScannerSchemas};
+use stores::flow::engine_runner::{
+    reconcile_external_reviews_for_in_review_tasks, scan_record_and_redrive_tasks, ScannerSchemas,
+};
 use stores::flow::AgentsYaml;
 use stores::schema::Schema;
-use std::sync::{Mutex, OnceLock};
-use std::sync::atomic::Ordering;
 
 const TS: &str = "2026-05-07T00:00:00Z";
 
@@ -32,10 +35,21 @@ fn db() -> (Connection, Schema, Schema, Schema) {
     conn.execute_batch(&ddl_for(&tasks)).unwrap();
     conn.execute_batch(&ddl_for(&intake)).unwrap();
     conn.execute_batch(&ddl_for(&observations)).unwrap();
+    let external_reviews_yaml = BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "external_reviews")
+        .map(|(_, y)| *y)
+        .unwrap();
+    conn.execute_batch(&ddl_for(&Schema::from_yaml(external_reviews_yaml).unwrap()))
+        .unwrap();
     (conn, tasks, intake, observations)
 }
 
-fn scanner<'a>(tasks: &'a Schema, intake: &'a Schema, observations: &'a Schema) -> ScannerSchemas<'a> {
+fn scanner<'a>(
+    tasks: &'a Schema,
+    intake: &'a Schema,
+    observations: &'a Schema,
+) -> ScannerSchemas<'a> {
     ScannerSchemas {
         tasks,
         intake,
@@ -138,7 +152,12 @@ fn orphan_redrive_live_stub_process_is_dispatched_and_cleaned_up() {
     std::env::set_var("STORES_DRIVE_CMD", "sleep 30 #");
     let (conn, tasks, intake, observations) = db();
     let workspace = tempfile::tempdir().unwrap();
-    let task_id = insert_task(&conn, "T970", "executing", workspace.path().to_str().unwrap());
+    let task_id = insert_task(
+        &conn,
+        "T970",
+        "executing",
+        workspace.path().to_str().unwrap(),
+    );
     conn.execute(
         "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
         rusqlite::params![999_999_970_i64, task_id],
@@ -191,7 +210,11 @@ fn held_unsupported_edges_record_structured_reasons_and_throttled_display_log_sh
         ("intake", intake_recon, "no_built_in_entrypoint"),
         ("observations", obs_investigator, "no_built_in_entrypoint"),
         ("observations", obs_contract_drafter, "needs_human"),
-        ("tasks", review_absent, "no_autonomous_reviewer_runner"),
+        (
+            "tasks",
+            review_absent,
+            "external_review backfilled for T971 (wrap pre-deploy)",
+        ),
     ] {
         let (held_reason, last_logged_at): (Option<String>, Option<String>) = conn
             .query_row(
@@ -201,7 +224,11 @@ fn held_unsupported_edges_record_structured_reasons_and_throttled_display_log_sh
             )
             .unwrap();
         assert_eq!(held_reason.as_deref(), Some(reason), "{store}/{row_id}");
-        assert_eq!(last_logged_at.as_deref(), Some(TS), "store/display_id/reason log throttle input persisted for {store}/{row_id}/{reason}");
+        assert_eq!(
+            last_logged_at.as_deref(),
+            Some(TS),
+            "store/display_id/reason log throttle input persisted for {store}/{row_id}/{reason}"
+        );
     }
 }
 
@@ -254,7 +281,14 @@ fn u_moment_guard_writes_no_forbidden_states_or_transition_history_verbs() {
     )
     .unwrap();
     let draft_contract = r#"{"contract_state":"draft","approved_by":null,"approved_at":null}"#;
-    let obs = insert_observation(&conn, "L972", "investigating", draft_contract, "architecture", "architecture");
+    let obs = insert_observation(
+        &conn,
+        "L972",
+        "investigating",
+        draft_contract,
+        "architecture",
+        "architecture",
+    );
     let ready_task = insert_task(&conn, "T974", "ready", "/tmp");
 
     run_monitor(&conn, &tasks, &intake, &observations, 5);
@@ -307,7 +341,12 @@ fn atomic_cas_prevents_double_spawn_on_same_orphan() {
     std::env::set_var("STORES_DRIVE_CMD", "sleep 60 #");
     let (conn, tasks, intake, observations) = db();
     let workspace = tempfile::tempdir().unwrap();
-    let task_id = insert_task(&conn, "T980", "executing", workspace.path().to_str().unwrap());
+    let task_id = insert_task(
+        &conn,
+        "T980",
+        "executing",
+        workspace.path().to_str().unwrap(),
+    );
     // Stale / dead drive_pid — orphan condition.
     conn.execute(
         "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
@@ -339,7 +378,10 @@ fn atomic_cas_prevents_double_spawn_on_same_orphan() {
         )
         .unwrap();
     assert!(pid_after_first > 0 && pid_after_first != 999_999_980_i64);
-    assert!(pid_is_alive(pid_after_first as i32), "first spawn must be alive");
+    assert!(
+        pid_is_alive(pid_after_first as i32),
+        "first spawn must be alive"
+    );
 
     // Second iteration: drive_pid is now live → CAS must abort redispatch.
     scan_record_and_redrive_tasks(
@@ -406,10 +448,8 @@ fn cas_abort_branch_fires_when_owner_appears_in_gap() {
     let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 
     // Reset global sentinels before the test.
-    stores::flow::builtins::auto_drive::CAS_ABORT_DRIVE_PID_COUNT
-        .store(0, Ordering::SeqCst);
-    stores::flow::builtins::auto_drive::CAS_DELAY_HOOK_ENTERED
-        .store(false, Ordering::SeqCst);
+    stores::flow::builtins::auto_drive::CAS_ABORT_DRIVE_PID_COUNT.store(0, Ordering::SeqCst);
+    stores::flow::builtins::auto_drive::CAS_DELAY_HOOK_ENTERED.store(false, Ordering::SeqCst);
 
     std::env::set_var("STORES_DRIVE_CMD", "sleep 60 #");
     std::env::set_var("STORES_TEST_CAS_PRE_SPAWN_DELAY_MS", "150");
@@ -424,7 +464,9 @@ fn cas_abort_branch_fires_when_owner_appears_in_gap() {
 
     // Set up the DB: create schema + orphan task row.
     let setup_conn = Connection::open(&db_path).unwrap();
-    setup_conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    setup_conn
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
     setup_conn.execute_batch(SUBSTRATE_DDL).unwrap();
     setup_conn.execute_batch(&ddl_for(&tasks_schema)).unwrap();
     setup_conn.execute_batch(&ddl_for(&intake_schema)).unwrap();
@@ -439,10 +481,12 @@ fn cas_abort_branch_fires_when_owner_appears_in_gap() {
         ).unwrap();
         // Dead drive_pid — the orphan condition.
         let id = setup_conn.last_insert_rowid();
-        setup_conn.execute(
-            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
-            rusqlite::params![999_999_982_i64, id],
-        ).unwrap();
+        setup_conn
+            .execute(
+                "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+                rusqlite::params![999_999_982_i64, id],
+            )
+            .unwrap();
         id
     };
     drop(setup_conn); // release before threads open their own connections
@@ -491,9 +535,7 @@ fn cas_abort_branch_fires_when_owner_appears_in_gap() {
     {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if stores::flow::builtins::auto_drive::CAS_DELAY_HOOK_ENTERED
-                .load(Ordering::Acquire)
-            {
+            if stores::flow::builtins::auto_drive::CAS_DELAY_HOOK_ENTERED.load(Ordering::Acquire) {
                 break;
             }
             assert!(
@@ -507,11 +549,15 @@ fn cas_abort_branch_fires_when_owner_appears_in_gap() {
     {
         let inj_conn = Connection::open(&db_path).unwrap();
         inj_conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-        inj_conn.pragma_update(None, "busy_timeout", 5000i64).unwrap();
-        inj_conn.execute(
-            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
-            rusqlite::params![injected_pid, task_id],
-        ).unwrap();
+        inj_conn
+            .pragma_update(None, "busy_timeout", 5000i64)
+            .unwrap();
+        inj_conn
+            .execute(
+                "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+                rusqlite::params![injected_pid, task_id],
+            )
+            .unwrap();
     }
 
     scanner_handle.join().expect("scanner thread panicked");
@@ -541,11 +587,14 @@ fn cas_abort_branch_fires_when_owner_appears_in_gap() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(lock_count, 0, "CAS abort must not create a dispatch_lock row");
+    assert_eq!(
+        lock_count, 0,
+        "CAS abort must not create a dispatch_lock row"
+    );
 
     // (c) The CAS abort sentinel counter must have been incremented exactly once.
-    let abort_count = stores::flow::builtins::auto_drive::CAS_ABORT_DRIVE_PID_COUNT
-        .load(Ordering::SeqCst);
+    let abort_count =
+        stores::flow::builtins::auto_drive::CAS_ABORT_DRIVE_PID_COUNT.load(Ordering::SeqCst);
     assert_eq!(
         abort_count, 1,
         "CAS abort sentinel must fire exactly once; got {abort_count}"
@@ -590,7 +639,12 @@ fn heartbeat_dispatched_includes_base_dispatched() {
     std::env::set_var("STORES_DRIVE_CMD", "sleep 60 #");
     let (conn, tasks, intake, observations) = db();
     let workspace = tempfile::tempdir().unwrap();
-    let task_id = insert_task(&conn, "T981", "executing", workspace.path().to_str().unwrap());
+    let task_id = insert_task(
+        &conn,
+        "T981",
+        "executing",
+        workspace.path().to_str().unwrap(),
+    );
     conn.execute(
         "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
         rusqlite::params![999_999_981_i64, task_id],
@@ -615,7 +669,10 @@ fn heartbeat_dispatched_includes_base_dispatched() {
 
     // The in-memory ScannerResult summary must reflect the full union.
     // The engine-runner spawned 1 redrive; base contributes 3 → total 4.
-    assert_eq!(result.summary.dispatched, 4, "summary must include base+redrive");
+    assert_eq!(
+        result.summary.dispatched, 4,
+        "summary must include base+redrive"
+    );
 
     // The persisted heartbeat row must also reflect the union.
     let persisted: i64 = conn
@@ -625,7 +682,10 @@ fn heartbeat_dispatched_includes_base_dispatched() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(persisted, 4, "persisted heartbeat must include base+redrive");
+    assert_eq!(
+        persisted, 4,
+        "persisted heartbeat must include base+redrive"
+    );
 
     // Kill the spawned child.
     let pid: i64 = conn
@@ -636,7 +696,126 @@ fn heartbeat_dispatched_includes_base_dispatched() {
         )
         .unwrap();
     if pid > 0 {
-        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
     }
     std::env::remove_var("STORES_DRIVE_CMD");
+}
+
+#[test]
+fn external_review_backfill_pre_deploy_wrap_mints_once_and_records_actionability() {
+    let (conn, tasks, intake, observations) = db();
+    let task_id = insert_task(&conn, "T986", "in_review", "/tmp");
+    conn.execute(
+        "UPDATE tasks SET wrap_log=?1 WHERE id=?2",
+        rusqlite::params![r#"[{"executive_summary":"wrapped"}]"#, task_id],
+    )
+    .unwrap();
+
+    run_monitor(&conn, &tasks, &intake, &observations, 5);
+    let second = reconcile_external_reviews_for_in_review_tasks(&conn).unwrap();
+    assert!(second.is_empty());
+
+    let (count, status, task, adapter, attempt, wrap_ref): (i64, String, String, String, i64, String) = conn
+        .query_row(
+            "SELECT COUNT(*), MIN(status), MIN(task_id), MIN(adapter), MIN(attempt), MIN(wrap_log_ref) \
+             FROM external_reviews WHERE task_id='T986' AND status!='superseded'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(status, "pending");
+    assert_eq!(task, "T986");
+    assert_eq!(adapter, "external_review");
+    assert_eq!(attempt, 1);
+    assert_eq!(wrap_ref, "tasks:T986:wrap_log[0]");
+
+    let history_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM transition_history th \
+             JOIN external_reviews er ON er.id=th.row_id AND th.store='external_reviews' \
+             WHERE er.task_id='T986' AND th.verb='create-external-review' AND th.invoker='framework'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(history_count, 1);
+
+    let held: String = conn
+        .query_row(
+            "SELECT held_reason FROM engine_runner_actions WHERE store='tasks' AND row_id=?1",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        held.contains("external_review backfilled for T986"),
+        "{held}"
+    );
+}
+
+#[test]
+fn external_review_backfill_superseded_and_active_status_idempotency_matrix() {
+    for active_status in ["pending", "running", "passed", "revise", "tooling_held"] {
+        let (conn, tasks, intake, observations) = db();
+        insert_task(&conn, "T987", "in_review", "/tmp");
+        conn.execute(
+            "INSERT INTO external_reviews (display_id,status,task_id,attempt,adapter,created_at,updated_at,created_by,updated_by) \
+             VALUES ('ER001',?1,'T987',1,'external_review',?2,?2,'test','test')",
+            rusqlite::params![active_status, TS],
+        )
+        .unwrap();
+        run_monitor(&conn, &tasks, &intake, &observations, 5);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_reviews WHERE task_id='T987'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "active_status={active_status}");
+    }
+
+    let (conn, tasks, intake, observations) = db();
+    insert_task(&conn, "T988", "in_review", "/tmp");
+    conn.execute(
+        "INSERT INTO external_reviews (display_id,status,task_id,attempt,adapter,created_at,updated_at,created_by,updated_by) \
+         VALUES ('ER001','superseded','T988',4,'external_review',?1,?1,'test','test')",
+        rusqlite::params![TS],
+    )
+    .unwrap();
+    run_monitor(&conn, &tasks, &intake, &observations, 5);
+    let (pending, attempt): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), MAX(attempt) FROM external_reviews WHERE task_id='T988' AND status='pending'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(pending, 1);
+    assert_eq!(attempt, 5);
+}
+
+#[test]
+fn external_review_backfill_skips_t1_in_review() {
+    let (conn, tasks, intake, observations) = db();
+    let task_id = insert_task(&conn, "T989", "in_review", "/tmp");
+    conn.execute(
+        "UPDATE tasks SET tier_hint='T1' WHERE id=?1",
+        rusqlite::params![task_id],
+    )
+    .unwrap();
+
+    run_monitor(&conn, &tasks, &intake, &observations, 5);
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM external_reviews WHERE task_id='T989'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
 }
