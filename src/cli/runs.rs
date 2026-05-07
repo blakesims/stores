@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -125,23 +125,84 @@ pub fn find_transcript(
     cycle: Option<i64>,
     role: &str,
 ) -> Result<RunTranscript> {
-    let matches: Vec<RunTranscript> = list_for_task(stores_dir, display_id)?
-        .into_iter()
-        .filter(|r| {
-            r.phase == phase && r.role == role && cycle.map(|c| r.cycle == c).unwrap_or(true)
-        })
-        .collect();
+    let db_path = stores_dir.join("db.sqlite");
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open substrate DB {}", db_path.display()))?;
 
-    match matches.len() {
+    conn.execute_batch(crate::codegen::ddl::RUNS_VIEW_DDL)
+        .context("apply runs view DDL")?;
+
+    // Query only the specific (display_id, phase, role[, cycle]) row from the
+    // VIEW.  This avoids validating every transcript in the task — a missing
+    // sibling transcript must not prevent showing a different, existing one.
+    let (sql, row_count_sql): (&str, &str) = if cycle.is_some() {
+        (
+            "SELECT phase, cycle, role, transcript_path \
+             FROM runs \
+             WHERE display_id = ?1 AND phase = ?2 AND role = ?3 AND cycle = ?4",
+            "SELECT COUNT(*) FROM runs \
+             WHERE display_id = ?1 AND phase = ?2 AND role = ?3 AND cycle = ?4",
+        )
+    } else {
+        (
+            "SELECT phase, cycle, role, transcript_path \
+             FROM runs \
+             WHERE display_id = ?1 AND phase = ?2 AND role = ?3 \
+             ORDER BY cycle",
+            "SELECT COUNT(*) FROM runs \
+             WHERE display_id = ?1 AND phase = ?2 AND role = ?3",
+        )
+    };
+
+    // Check count first to give a clear "multiple" error when --cycle is omitted.
+    let count: i64 = if let Some(c) = cycle {
+        conn.query_row(row_count_sql, params![display_id, phase, role, c], |r| {
+            r.get(0)
+        })
+    } else {
+        conn.query_row(row_count_sql, params![display_id, phase, role], |r| r.get(0))
+    }
+    .context("count matching runs rows")?;
+
+    match count {
         0 => bail!(
             "missing transcript for {display_id} phase {phase} role {role}{}",
             cycle.map(|c| format!(" cycle {c}")).unwrap_or_default()
         ),
-        1 => Ok(matches.into_iter().next().unwrap()),
-        _ => bail!(
+        n if n > 1 => bail!(
             "multiple transcripts for {display_id} phase {phase} role {role}; pass --cycle to disambiguate"
         ),
+        _ => {}
     }
+
+    let (p, c, r, path_str): (i64, i64, String, String) = if let Some(cyc) = cycle {
+        conn.query_row(sql, params![display_id, phase, role, cyc], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+    } else {
+        conn.query_row(sql, params![display_id, phase, role], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+    }
+    .context("fetch matching runs row")?;
+
+    let path = PathBuf::from(&path_str);
+    let read_path = resolve_transcript_path(stores_dir, &path);
+    if !read_path.exists() {
+        bail!(
+            "missing transcript for {display_id} phase {p} cycle {c} role {r}: {} does not exist (resolved to {})",
+            path.display(),
+            read_path.display()
+        );
+    }
+
+    Ok(RunTranscript {
+        display_id: display_id.to_string(),
+        phase: p,
+        cycle: c,
+        role: r,
+        path,
+    })
 }
 
 
