@@ -169,6 +169,25 @@ fn codex_output_parser_maps_verdicts_and_finding_counts() {
 }
 
 #[test]
+fn codex_output_parser_fallback_fixture_covers_codex_prose_cases() {
+    let revise_keyword = parse_codex_review_output("REVISE\n[major] fix required\n").unwrap();
+    assert_eq!(revise_keyword.verdict, ExternalReviewVerdict::Revise);
+
+    for marker in ["[P1]", "[major]", "[critical]"] {
+        let output = format!("Review summary: needs changes.\n{marker} blocking finding\n");
+        let parsed = parse_codex_review_output(&output).unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Revise);
+    }
+
+    let pass = parse_codex_review_output("Review summary: clean.\nResult: PASS\n").unwrap();
+    assert_eq!(pass.verdict, ExternalReviewVerdict::Pass);
+
+    let err = parse_codex_review_output("Review summary: prose without verdict markers.\n")
+        .expect_err("non-empty unmarked prose should request fallback");
+    assert_eq!(err.to_string(), "parse-fallback-needed");
+}
+
+#[test]
 #[cfg(unix)]
 fn codex_shim_invocation_persists_runner_metadata() {
     let (repo, base, head) = temp_git_repo();
