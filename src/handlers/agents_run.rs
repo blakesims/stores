@@ -2728,6 +2728,31 @@ mod tests {
         std::path::PathBuf::from("/tmp/stores-test-nonexistent-config.yaml")
     }
 
+    fn fresh_engine_runner_db() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(SUBSTRATE_DDL).unwrap();
+        let tasks = crate::flow::builtins::load_tasks_schema().unwrap();
+        let intake_yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "intake")
+            .map(|(_, y)| *y)
+            .unwrap();
+        let observations_yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "observations")
+            .map(|(_, y)| *y)
+            .unwrap();
+        let intake = crate::schema::Schema::from_yaml(intake_yaml).unwrap();
+        let observations = crate::schema::Schema::from_yaml(observations_yaml).unwrap();
+        c.execute_batch(&crate::codegen::ddl::ddl_for(&tasks))
+            .unwrap();
+        c.execute_batch(&crate::codegen::ddl::ddl_for(&intake))
+            .unwrap();
+        c.execute_batch(&crate::codegen::ddl::ddl_for(&observations))
+            .unwrap();
+        c
+    }
+
     fn insert_history(
         conn: &Connection,
         store: &str,
@@ -2800,6 +2825,32 @@ mod tests {
             right: serde_json::json!(""),
         });
         agent
+    }
+
+    #[test]
+    fn engine_runner_iteration_records_zero_row_heartbeat() {
+        let conn = fresh_engine_runner_db();
+        run_engine_runner_iteration(&conn, &AgentsYaml::default_empty(), &cfg_path(), "", 0)
+            .unwrap();
+
+        let row: (i64, i64, i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT saw_tasks, saw_intake, saw_observations, actionable, held, dispatched \
+                 FROM engine_runner_heartbeats WHERE iteration=1",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, (0, 0, 0, 0, 0, 0));
     }
 
     #[test]

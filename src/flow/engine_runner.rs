@@ -41,6 +41,17 @@ pub struct ActionabilityRecord<'a> {
     pub last_logged_at: Option<&'a str>,
 }
 
+const ACTION_LOG_THROTTLE_SECS: u64 = 300;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExistingActionability {
+    classification: String,
+    action: Option<String>,
+    held_reason: Option<String>,
+    dispatched: bool,
+    last_logged_at: Option<String>,
+}
+
 /// Schemas scanned by one engine-runner poll.
 pub struct ScannerSchemas<'a> {
     pub tasks: &'a Schema,
@@ -95,6 +106,39 @@ pub fn upsert_actionability(
     record: ActionabilityRecord<'_>,
     updated_at: &str,
 ) -> Result<()> {
+    write_actionability(conn, record, updated_at)
+}
+
+fn existing_actionability(
+    conn: &Connection,
+    store: &str,
+    row_id: i64,
+) -> Result<Option<ExistingActionability>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT classification, action, held_reason, dispatched, last_logged_at \
+             FROM engine_runner_actions WHERE store=?1 AND row_id=?2",
+        )
+        .context("prepare existing engine_runner_actions lookup")?;
+    let mut rows = stmt.query(rusqlite::params![store, row_id])?;
+    if let Some(r) = rows.next()? {
+        Ok(Some(ExistingActionability {
+            classification: r.get(0)?,
+            action: r.get(1)?,
+            held_reason: r.get(2)?,
+            dispatched: r.get::<_, i64>(3)? != 0,
+            last_logged_at: r.get(4)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn write_actionability(
+    conn: &Connection,
+    record: ActionabilityRecord<'_>,
+    updated_at: &str,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO engine_runner_actions \
          (store, row_id, classification, action, held_reason, dispatched, last_logged_at, updated_at) \
@@ -121,6 +165,67 @@ pub fn upsert_actionability(
     Ok(())
 }
 
+fn should_log_actionability(
+    existing: Option<&ExistingActionability>,
+    record: &ActionabilityRecord<'_>,
+    updated_at: &str,
+) -> bool {
+    let Some(existing) = existing else {
+        return true;
+    };
+    if existing.classification != record.classification
+        || existing.action.as_deref() != record.action
+        || existing.held_reason.as_deref() != record.held_reason
+        || existing.dispatched != record.dispatched
+    {
+        return true;
+    }
+    existing
+        .last_logged_at
+        .as_deref()
+        .and_then(parse_iso8601_to_epoch)
+        .zip(parse_iso8601_to_epoch(updated_at))
+        .is_none_or(|(last, now)| now.saturating_sub(last) >= ACTION_LOG_THROTTLE_SECS as i64)
+}
+
+fn log_actionability(record: &ActionabilityRecord<'_>) {
+    eprintln!(
+        "[engine-runner] row store={} row_id={} classification={} action={} held_reason={} dispatched={}",
+        record.store,
+        record.row_id,
+        record.classification,
+        record.action.unwrap_or("none"),
+        record.held_reason.unwrap_or("none"),
+        if record.dispatched { 1 } else { 0 }
+    );
+}
+
+fn upsert_actionability_throttled_log(
+    conn: &Connection,
+    record: ActionabilityRecord<'_>,
+    updated_at: &str,
+) -> Result<bool> {
+    let existing = existing_actionability(conn, record.store, record.row_id)?;
+    let log = should_log_actionability(existing.as_ref(), &record, updated_at);
+    let last_logged_at = if log {
+        Some(updated_at)
+    } else {
+        existing.as_ref().and_then(|e| e.last_logged_at.as_deref())
+    };
+    write_actionability(
+        conn,
+        ActionabilityRecord {
+            last_logged_at,
+            ..record
+        },
+        updated_at,
+    )?;
+    if log {
+        log_actionability(&record);
+    }
+    Ok(log)
+}
+
 /// Scan active rows, classify actionability, and persist one heartbeat plus
 /// per-row latest actionability records. This function is lifecycle read-only:
 /// it writes only `engine_runner_heartbeats` and `engine_runner_actions`.
@@ -135,7 +240,7 @@ pub fn scan_and_record_actionability(
 
     record_heartbeat(conn, summary, started_at)?;
     for row in &rows {
-        upsert_actionability(
+        upsert_actionability_throttled_log(
             conn,
             ActionabilityRecord {
                 store: &row.store,
@@ -181,7 +286,7 @@ pub fn scan_record_and_redrive_tasks(
         if occupied >= cap {
             row.classification = "held".to_string();
             row.held_reason = Some("lane_cap_full".to_string());
-            upsert_actionability(
+            upsert_actionability_throttled_log(
                 conn,
                 ActionabilityRecord {
                     store: &row.store,
@@ -207,7 +312,7 @@ pub fn scan_record_and_redrive_tasks(
             Some(_) => {
                 row.classification = "dispatched_task_redrive".to_string();
                 dispatched += 1;
-                upsert_actionability(
+                upsert_actionability_throttled_log(
                     conn,
                     ActionabilityRecord {
                         store: &row.store,
@@ -224,7 +329,7 @@ pub fn scan_record_and_redrive_tasks(
             None => {
                 row.classification = "held".to_string();
                 row.held_reason = Some("redrive_noop".to_string());
-                upsert_actionability(
+                upsert_actionability_throttled_log(
                     conn,
                     ActionabilityRecord {
                         store: &row.store,
@@ -245,7 +350,7 @@ pub fn scan_record_and_redrive_tasks(
         .iter()
         .filter(|r| !(r.store == "tasks" && processed_task_rows.contains(&r.row_id)))
     {
-        upsert_actionability(
+        upsert_actionability_throttled_log(
             conn,
             ActionabilityRecord {
                 store: &row.store,
@@ -710,6 +815,102 @@ mod tests {
                 "2026-05-07T00:01:01Z".to_string(),
             )
         );
+    }
+
+    #[test]
+    fn throttled_actionability_log_preserves_last_logged_before_window() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+
+        let first_logged = upsert_actionability_throttled_log(
+            &conn,
+            ActionabilityRecord {
+                store: "tasks",
+                row_id: 8,
+                classification: "held",
+                action: None,
+                held_reason: Some("needs_human"),
+                dispatched: false,
+                last_logged_at: None,
+            },
+            "2026-05-07T00:00:00Z",
+        )
+        .unwrap();
+        let second_logged = upsert_actionability_throttled_log(
+            &conn,
+            ActionabilityRecord {
+                store: "tasks",
+                row_id: 8,
+                classification: "held",
+                action: None,
+                held_reason: Some("needs_human"),
+                dispatched: false,
+                last_logged_at: None,
+            },
+            "2026-05-07T00:04:59Z",
+        )
+        .unwrap();
+
+        assert!(first_logged);
+        assert!(!second_logged);
+        let row: (Option<String>, String) = conn
+            .query_row(
+                "SELECT last_logged_at, updated_at FROM engine_runner_actions WHERE store='tasks' AND row_id=8",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0.as_deref(), Some("2026-05-07T00:00:00Z"));
+        assert_eq!(row.1, "2026-05-07T00:04:59Z");
+    }
+
+    #[test]
+    fn actionability_state_change_logs_and_updates_last_logged() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+
+        upsert_actionability_throttled_log(
+            &conn,
+            ActionabilityRecord {
+                store: "tasks",
+                row_id: 9,
+                classification: "held",
+                action: None,
+                held_reason: Some("lane_cap_full"),
+                dispatched: false,
+                last_logged_at: None,
+            },
+            "2026-05-07T00:00:00Z",
+        )
+        .unwrap();
+        let changed_logged = upsert_actionability_throttled_log(
+            &conn,
+            ActionabilityRecord {
+                store: "tasks",
+                row_id: 9,
+                classification: "dispatched_task_redrive",
+                action: Some("redispatched"),
+                held_reason: None,
+                dispatched: true,
+                last_logged_at: None,
+            },
+            "2026-05-07T00:00:01Z",
+        )
+        .unwrap();
+
+        assert!(changed_logged);
+        let row: (String, Option<String>, Option<String>, i64, Option<String>) = conn
+            .query_row(
+                "SELECT classification, action, held_reason, dispatched, last_logged_at FROM engine_runner_actions WHERE store='tasks' AND row_id=9",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "dispatched_task_redrive");
+        assert_eq!(row.1.as_deref(), Some("redispatched"));
+        assert_eq!(row.2, None);
+        assert_eq!(row.3, 1);
+        assert_eq!(row.4.as_deref(), Some("2026-05-07T00:00:01Z"));
     }
 
     fn scanner_schemas() -> (Schema, Schema, Schema) {
