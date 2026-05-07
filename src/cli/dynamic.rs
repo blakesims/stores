@@ -511,8 +511,7 @@ fn build_store_command(schema: &Schema) -> Command {
             .disable_help_subcommand(true)
             .subcommand(add_cmd)
             .subcommand(list_cmd)
-            .subcommand(show_cmd)
-            .subcommand(build_render_cmd());
+            .subcommand(show_cmd);
     } else {
         store_cmd = store_cmd
             .subcommand(add_cmd)
@@ -636,6 +635,10 @@ fn build_store_command(schema: &Schema) -> Command {
             );
         }
         store_cmd = store_cmd.subcommand(transition_cmd);
+    }
+
+    if schema.name == "architecture_reviews" {
+        store_cmd = store_cmd.subcommand(build_render_cmd());
     }
 
     store_cmd
