@@ -188,10 +188,20 @@ fn should_log_actionability(
         .is_none_or(|(last, now)| now.saturating_sub(last) >= ACTION_LOG_THROTTLE_SECS as i64)
 }
 
-fn log_actionability(record: &ActionabilityRecord<'_>) {
+fn display_id_for(conn: &Connection, store: &str, row_id: i64) -> Option<String> {
+    let table = quote_ident(store);
+    let sql = format!("SELECT display_id FROM {table} WHERE id=?1");
+    conn.query_row(&sql, rusqlite::params![row_id], |r| r.get(0))
+        .ok()
+}
+
+fn log_actionability(conn: &Connection, record: &ActionabilityRecord<'_>) {
+    let display_id = display_id_for(conn, record.store, record.row_id)
+        .unwrap_or_else(|| record.row_id.to_string());
     eprintln!(
-        "[engine-runner] row store={} row_id={} classification={} action={} held_reason={} dispatched={}",
+        "[engine-runner] row store={} display_id={} row_id={} classification={} action={} reason={} dispatched={}",
         record.store,
+        display_id,
         record.row_id,
         record.classification,
         record.action.unwrap_or("none"),
@@ -221,7 +231,7 @@ fn upsert_actionability_throttled_log(
         updated_at,
     )?;
     if log {
-        log_actionability(&record);
+        log_actionability(conn, &record);
     }
     Ok(log)
 }
@@ -454,7 +464,12 @@ fn scan_tasks(
             .and_then(|pid| i32::try_from(pid).ok())
             .is_some_and(pid_is_alive);
         let (classification, held_reason) = if let Some(_agent) = next_agent {
-            if live_drive_owner {
+            if status == "in_review" {
+                (
+                    "held".to_string(),
+                    Some("no_autonomous_reviewer_runner".to_string()),
+                )
+            } else if live_drive_owner {
                 ("held".to_string(), Some("live_drive_owner".to_string()))
             } else if has_live_dispatch_lock(
                 conn,
@@ -493,7 +508,6 @@ fn scan_intake(conn: &Connection, schema: &Schema) -> Result<Vec<ClassifiedRow>>
         let entry: EntryMap = BTreeMap::new();
         let next_agent = workflow.and_then(|wf| find_next_agent(wf, &status, &entry));
         let (classification, held_reason) = match next_agent.as_deref() {
-            Some("gatekeeper") | Some("recon") => ("actionable_intake_builtin".to_string(), None),
             Some(_) => (
                 "held".to_string(),
                 Some("no_built_in_entrypoint".to_string()),
@@ -547,7 +561,10 @@ fn scan_observations(conn: &Connection, schema: &Schema) -> Result<Vec<Classifie
         } else if matches!(status.as_str(), "investigated" | "confirmed" | "ready") {
             ("held".to_string(), Some("needs_human".to_string()))
         } else if status == "needs_investigation" {
-            ("actionable_observation_investigator".to_string(), None)
+            (
+                "held".to_string(),
+                Some("no_built_in_entrypoint".to_string()),
+            )
         } else {
             (
                 "held".to_string(),
