@@ -58,7 +58,10 @@ fn agents_run_once_flag_exists_and_succeeds() {
 #[test]
 fn silent_zombie_lock_already_closed_e2e() {
     let bin = bin();
-    assert!(bin.exists(), "CARGO_BIN_EXE_stores must point at a built binary");
+    assert!(
+        bin.exists(),
+        "CARGO_BIN_EXE_stores must point at a built binary"
+    );
 
     let tmp = tempfile::tempdir().expect("tmpdir");
     let workspace = tmp.path();
@@ -172,7 +175,10 @@ fn silent_zombie_lock_already_closed_e2e() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(cnt, 1, "exactly one to_status='blocked' history row must land");
+    assert_eq!(
+        cnt, 1,
+        "exactly one to_status='blocked' history row must land"
+    );
 }
 
 /// L141 -> L134: end-to-end regression for the closed-ok-lock dead-PID detection path.
@@ -200,7 +206,10 @@ fn silent_zombie_lock_already_closed_e2e() {
 #[test]
 fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
     let bin = bin();
-    assert!(bin.exists(), "CARGO_BIN_EXE_stores must point at a built binary");
+    assert!(
+        bin.exists(),
+        "CARGO_BIN_EXE_stores must point at a built binary"
+    );
 
     let tmp = tempfile::tempdir().expect("tmpdir");
     let workspace = tmp.path();
@@ -351,9 +360,7 @@ fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
     // Brief wait for the kernel to reap. The watchdog uses kill(pid, 0)
     // (`pid_is_alive`); after SIGKILL + reaping, that returns ESRCH.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while std::time::Instant::now() < deadline
-        && unsafe { libc::kill(pid as i32, 0) } == 0
-    {
+    while std::time::Instant::now() < deadline && unsafe { libc::kill(pid as i32, 0) } == 0 {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
@@ -421,5 +428,167 @@ fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
         terminal_reason_after.as_deref(),
         Some("silent_zombie"),
         "L141 -> L134: watchdog updates terminal_reason to 'silent_zombie' after flip"
+    );
+}
+
+/// T067 A1-strict: dead auto-drive handoff at in_review with pending
+/// next_agent=wrap is re-dispatched by the daemon watchdog; wrap_log is
+/// populated via the real compute_submit_wrap path, NOT via direct DB mutation.
+///
+/// A1-strict semantics (pi ruling): wrap_log is provenance, NOT a sentinel.
+/// next_agent IS NOT NULL is the sole "pending work" signal. For in_review,
+/// the schema always yields next_agent=Some("wrap") until the task transitions
+/// out of in_review (human accept/reject). Therefore:
+///
+/// - The daemon faithfully re-dispatches wrap on every sweep while the task
+///   remains in_review (next_agent IS NOT NULL).
+/// - The dispatch_lock does NOT close with terminal_reason='ok' while the
+///   task is still in_review — it stays in_flight (re-opened each cycle).
+/// - The lock only reaches terminal_reason='ok' after the task leaves
+///   in_review (accepted/rejected), at which point next_agent IS NULL.
+///
+/// This test proves:
+///   (a) wrap fires at least once (wrap_log contains the submitted summary).
+///   (b) drive_pid is updated (new drive was spawned by watchdog).
+///   (c) task stays in_review (awaiting human accept/reject).
+///   (d) dispatch_lock is in-flight (NOT closed) — daemon keeps sweeping.
+///
+/// (pi ruling r2 MAJOR 2: wrap_log must be populated via compute_submit_wrap,
+/// not direct DB mutation. wrap_log provenance assertion remains valid; only
+/// the "terminal_reason='ok'" assertion is removed as incompatible with A1.)
+#[test]
+fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let workspace = tmp.path();
+    let stores_dir = workspace.join(".stores");
+    std::fs::create_dir_all(&stores_dir).unwrap();
+    let db_path = stores_dir.join("db.sqlite");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        install_store_ddl(&conn, "tasks");
+        install_store_ddl(&conn, "observations");
+    }
+    // Write a manifest that registers the bundled tasks store so that the
+    // subprocess `stores tasks submit-wrap` can resolve the schema.
+    std::fs::write(
+        stores_dir.join("manifest.yaml"),
+        "stores:\n- name: tasks\n  schema_path: bundled:tasks\n  installed_at: 2026-01-01T00:00:00Z\n  table_name: tasks\n  scope: repo\n",
+    )
+    .unwrap();
+
+    let stale = "2026-01-01T00:00:00Z";
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, slug, branch, tier_hint, workspace_path, \
+                            contract, drive_pid, drive_started_at, wrap_log, \
+                            created_at, updated_at, created_by, updated_by) \
+         VALUES ('T967', 'in_review', 'pending-wrap', 'pending-wrap', 'feat/wrap', 'T2', ?1, \
+                 '{\"done_when\":\"x\",\"scope_in\":\"y\",\"scope_out\":\"z\"}', \
+                 ?2, ?3, NULL, ?3, ?3, 'framework', 'framework')",
+        rusqlite::params![workspace.to_str().unwrap(), dead_pid(), stale],
+    )
+    .unwrap();
+    let row_id: i64 = conn
+        .query_row("SELECT id FROM tasks WHERE display_id='T967'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    conn.execute(
+        "INSERT INTO dispatch_locks \
+         (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, \
+          last_status, finished_at, terminal_reason, postcondition_id, postcondition_args) \
+         VALUES ('tasks', ?1, 'T967', 'auto-drive', 1, ?2, 'dead-drive', \
+                 'ok', ?2, 'ok', 'drive_pid_recorded_or_terminal', \
+                 '{\"display_id\":\"T967\",\"store\":\"tasks\"}')",
+        rusqlite::params![row_id, stale],
+    )
+    .unwrap();
+    drop(conn);
+
+    // STORES_DRIVE_CMD: invokes the real `stores tasks submit-wrap` verb so that
+    // wrap_log is populated via compute_submit_wrap (NOT via direct DB mutation).
+    // Uses a mktemp file to pass the summary because the detached grandchild has
+    // stdin closed (spawn_detached_drive calls libc::close(STDIN_FILENO)).
+    // The script receives the display_id as $1 via the auto-drive-stub wrapper.
+    let bin_path = bin.to_str().expect("bin path is UTF-8");
+    let drive_cmd = format!(
+        r#"f=$(mktemp) && printf 'auto wrap' > "$f" && {bin_path} tasks submit-wrap "$1" --summary-from-file "$f"; rm -f "$f" #"#
+    );
+    // Use enough iterations and poll-interval for the detached subprocess (a full
+    // `stores` binary invocation) to complete before Pass 2 checks the PID.
+    let output = Command::new(&bin)
+        .args([
+            "agents",
+            "run",
+            "--max-iters",
+            "10",
+            "--poll-interval",
+            "0.2",
+        ])
+        .current_dir(workspace)
+        .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
+        .env("STORES_DRIVE_CMD", &drive_cmd)
+        .output()
+        .expect("invoke daemon");
+    assert!(
+        output.status.success(),
+        "agents run --max-iters 10 failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A1-strict ACs (pi ruling): next_agent IS NOT NULL is the sole pending-work
+    // signal; wrap_log is provenance only.
+    let conn = Connection::open(&db_path).unwrap();
+    let (status, terminal_reason, finished_at, pid, wrap_log): (
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT t.status, dl.terminal_reason, dl.finished_at, t.drive_pid, t.wrap_log \
+         FROM tasks t JOIN dispatch_locks dl ON dl.row_id=t.id \
+         WHERE t.display_id='T967' AND dl.agent_name='auto-drive'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    // (a) wrap_log populated via compute_submit_wrap (provenance assertion — valid under A1).
+    assert!(
+        wrap_log
+            .as_deref()
+            .unwrap_or("")
+            .contains("auto wrap"),
+        "wrap_log must be populated via compute_submit_wrap after wrap fires; got {wrap_log:?}"
+    );
+    // (b) new drive_pid was recorded (watchdog re-dispatched).
+    assert!(
+        pid > 0 && pid != dead_pid(),
+        "watchdog must record a new drive_pid; got pid={pid}"
+    );
+    // (c) task stays in_review — awaiting human accept/reject.
+    assert_eq!(status, "in_review");
+    // (d) Stub-path lock state: the watchdog re-dispatched via STORES_DRIVE_CMD
+    // (not the real `stores tasks drive` binary), so force_close_auto_drive_lock_ok
+    // was NOT called. After mark_pending_handoff_lock the lock is in_flight
+    // (finished_at=NULL, terminal_reason=NULL). The stub (submit-wrap) does not
+    // close the lock, so it remains open.
+    //
+    // Note: r6 design explicitly allows `terminal_reason='ok'` + `finished_at IS NOT NULL`
+    // on in_review rows when force_close_auto_drive_lock_ok fires (real `tasks drive` path).
+    // That case is distinct from this stub path and is tested separately in the
+    // `wrap_force_close_watchdog_no_redispatch` integration test.
+    assert!(
+        finished_at.is_none(),
+        "stub path: lock must stay in-flight (finished_at=None) after watchdog re-dispatch \
+         via STORES_DRIVE_CMD stub; got finished_at={finished_at:?}"
+    );
+    assert!(
+        terminal_reason.is_none(),
+        "stub path: lock terminal_reason must be NULL (in_flight:pending_next) after watchdog \
+         re-dispatch; got terminal_reason={terminal_reason:?}"
     );
 }

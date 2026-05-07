@@ -901,15 +901,32 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                         &status_str,
                     );
                 }
-                let _ = mark_claim_finished_typed(
-                    conn,
-                    &sub.store,
-                    row_id,
-                    &display_id,
-                    agent,
-                    &terminal_reason,
-                    &status_str,
-                );
+                if agent.name == "auto-drive"
+                    && terminal_reason == "ok"
+                    && crate::flow::builtins::auto_drive::has_pending_auto_drive_work(
+                        conn,
+                        &display_id,
+                    )
+                    .unwrap_or(false)
+                {
+                    let _ = mark_auto_drive_pending_handoff(
+                        conn,
+                        &sub.store,
+                        row_id,
+                        &display_id,
+                        agent,
+                    );
+                } else {
+                    let _ = mark_claim_finished_typed(
+                        conn,
+                        &sub.store,
+                        row_id,
+                        &display_id,
+                        agent,
+                        &terminal_reason,
+                        &status_str,
+                    );
+                }
                 if code != 0 {
                     route_failure_to_deploy_blocked(
                         conn,
@@ -1058,15 +1075,27 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                     &status_str,
                 );
             }
-            let _ = mark_claim_finished_typed(
-                conn,
-                &c.store,
-                c.row_id,
-                &c.display_id,
-                agent,
-                &terminal_reason,
-                &status_str,
-            );
+            if agent.name == "auto-drive"
+                && terminal_reason == "ok"
+                && crate::flow::builtins::auto_drive::has_pending_auto_drive_work(
+                    conn,
+                    &c.display_id,
+                )
+                .unwrap_or(false)
+            {
+                let _ =
+                    mark_auto_drive_pending_handoff(conn, &c.store, c.row_id, &c.display_id, agent);
+            } else {
+                let _ = mark_claim_finished_typed(
+                    conn,
+                    &c.store,
+                    c.row_id,
+                    &c.display_id,
+                    agent,
+                    &terminal_reason,
+                    &status_str,
+                );
+            }
             if code != 0 {
                 route_failure_to_deploy_blocked(
                     conn,
@@ -1409,18 +1438,105 @@ pub(crate) fn route_failure_to_deploy_blocked(
     }
 }
 
+/// Precise outcome from [`close_auto_drive_lock_ok`].
+///
+/// * `Closed` — the lock was written with `terminal_reason='ok'` and
+///   `finished_at` set; the drive cycle is fully terminal.
+/// * `PendingNext` — the task still has work outstanding (`next_agent` is
+///   non-null and wrap_log not yet populated); the lock was left open with
+///   `last_status='in_flight:pending_next'` for the daemon to re-dispatch.
+/// * `Failed` — reserved for callers that map `Err` to a non-fatal outcome;
+///   `close_auto_drive_lock_ok` itself never returns this variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockCloseOutcome {
+    Closed,
+    PendingNext,
+    Failed,
+}
+
 /// T049: close the open auto-drive `dispatch_locks` row for `display_id`
 /// with `last_status='ok'`. Called from inside the drive subprocess on its
 /// first successful `compute_submit_*` call so a drive that dies between
 /// spawn and first submit leaves the lock open for the watchdog.
 ///
+/// Returns a [`LockCloseOutcome`] distinguishing the actually-closed case
+/// from the pending-next case. Callers must not treat `PendingNext` as a
+/// successful close — the lock is still in-flight.
+///
 /// Idempotent: the WHERE clause filters on `finished_at IS NULL`, so a
 /// second call is a no-op zero-row UPDATE.
-pub(crate) fn close_auto_drive_lock_ok(conn: &Connection, display_id: &str) -> Result<()> {
+pub(crate) fn close_auto_drive_lock_ok(
+    conn: &Connection,
+    display_id: &str,
+) -> Result<LockCloseOutcome> {
     let now = crate::handlers::row::now_iso8601();
+    if crate::flow::builtins::auto_drive::has_pending_auto_drive_work(conn, display_id)
+        .unwrap_or(false)
+    {
+        conn.execute(
+            "UPDATE dispatch_locks SET last_status = 'in_flight:pending_next', finished_at = NULL, \
+                                      claimed_at = ?1, attempts = attempts + 1, \
+                                      terminal_reason = NULL, next_retry_at = NULL \
+             WHERE store = 'tasks' AND display_id = ?2 AND agent_name = 'auto-drive' \
+               AND finished_at IS NULL",
+            rusqlite::params![now, display_id],
+        )?;
+        return Ok(LockCloseOutcome::PendingNext);
+    }
     conn.execute(
         "UPDATE dispatch_locks SET last_status = 'ok', finished_at = ?1, \
-                                  claimed_at = ?1, attempts = attempts + 1 \
+                                  claimed_at = ?1, attempts = attempts + 1, \
+                                  terminal_reason = 'ok', next_retry_at = NULL \
+         WHERE store = 'tasks' AND display_id = ?2 AND agent_name = 'auto-drive' \
+           AND finished_at IS NULL",
+        rusqlite::params![now, display_id],
+    )?;
+    Ok(LockCloseOutcome::Closed)
+}
+
+/// Force-close the open auto-drive `dispatch_locks` row for `display_id`
+/// with `terminal_reason='ok'` and `finished_at` set, bypassing the
+/// `has_pending_auto_drive_work` check.
+///
+/// Called by the drive subprocess immediately before exiting after a successful
+/// wrap submission. At that point the row is still at `in_review` so
+/// `has_pending_auto_drive_work` always returns `true` (schema yields
+/// `next_agent=wrap` for every `in_review` row); skipping that check is
+/// correct and intentional here — the drive loop has already dispatched wrap
+/// and recorded the `wrap_log` entry, so no further work remains for THIS
+/// drive invocation.
+///
+/// **Watchdog discriminator:** this function writes `last_status='ok:wrap_completed'`
+/// (rather than plain `'ok'`). The watchdog's pending-handoff sweep filters out
+/// `last_status='ok:wrap_completed'` rows to avoid re-dispatching wrap after the
+/// drive subprocess has already handed it off. Plain `'ok'` closed locks (from
+/// old handoffs whose drive subprocess died before calling this function) are
+/// still eligible for re-dispatch. The `terminal_reason` column remains `'ok'`
+/// (its CHECK constraint cannot be broadened without table recreation; `last_status`
+/// is free-text and serves as the typed discriminator here).
+///
+/// A1 invariant is preserved: wrap_log is NOT consulted as a control-flow
+/// sentinel. The decision to close is made by the drive loop's
+/// `dispatched_wrap_this_run` flag (current-cycle completion state), not by
+/// inspecting historical wrap_log content.
+///
+/// Watchdog fallback: if the drive subprocess dies without calling this
+/// (e.g. process kill), the `last_status` stays as whatever the prior in-flight
+/// value was (`in_flight:pending_next` or similar, NOT `ok:wrap_completed`),
+/// so the watchdog's pending-handoff sweep will correctly re-dispatch a fresh
+/// drive — correct amend/re-entry semantics.
+///
+/// Idempotent: the WHERE clause filters on `finished_at IS NULL`, so a
+/// second call is a no-op zero-row UPDATE.
+pub(crate) fn force_close_auto_drive_lock_ok(
+    conn: &Connection,
+    display_id: &str,
+) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = 'ok:wrap_completed', finished_at = ?1, \
+                                  claimed_at = ?1, attempts = attempts + 1, \
+                                  terminal_reason = 'ok', next_retry_at = NULL \
          WHERE store = 'tasks' AND display_id = ?2 AND agent_name = 'auto-drive' \
            AND finished_at IS NULL",
         rusqlite::params![now, display_id],
@@ -1676,6 +1792,32 @@ fn next_retry_at_for(
     } else {
         None
     }
+}
+
+fn mark_auto_drive_pending_handoff(
+    conn: &Connection,
+    store: &str,
+    row_id: i64,
+    display_id: &str,
+    agent: &AgentEntry,
+) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    let completed_attempt = conn
+        .query_row(
+            "SELECT COALESCE(attempts, 0) + 1 FROM dispatch_locks \
+             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
+            rusqlite::params![store, row_id, &agent.name],
+            |r| r.get::<_, u32>(0),
+        )
+        .unwrap_or(1);
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = 'in_flight:pending_next', finished_at = NULL, \
+         attempts = attempts + 1, attempt = ?1, terminal_reason = NULL, next_retry_at = NULL \
+         WHERE store = ?2 AND row_id = ?3 AND agent_name = ?4",
+        rusqlite::params![completed_attempt, store, row_id, &agent.name],
+    )?;
+    let _ = (display_id, now);
+    Ok(())
 }
 
 fn mark_claim_finished_typed(

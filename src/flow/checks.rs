@@ -120,6 +120,58 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(|v| v.as_str())
 }
 
+fn auto_drive_terminal_ok(conn: &Connection, display_id: &str) -> Result<bool> {
+    let schema = crate::flow::builtins::load_tasks_schema()?;
+    let out = match crate::handlers::next_action::compute(&schema, conn, display_id) {
+        Ok(out) => out,
+        Err(_) => {
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM tasks WHERE display_id = ?1",
+                    rusqlite::params![display_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            return Ok(status.as_deref().is_some_and(|s| {
+                matches!(
+                    s,
+                    "accepted"
+                        | "rejected"
+                        | "blocked"
+                        | "deploy_blocked"
+                        | "cargo_installed"
+                        | "schema_migrated"
+                        | "closed_out_of_band"
+                        | "abandoned"
+                )
+            }));
+        }
+    };
+    // A1-strict (pi ruling): next_agent IS NULL is the sole terminal-ok signal.
+    // wrap_log is durable history and MUST NOT be consulted for control flow.
+    //
+    // next_agent IS NULL: no agent work pending — covers hard-terminal states
+    // (accepted, rejected, abandoned, …) and any state whose schema dispatch_agent
+    // conditions are all false.
+    //
+    // next_agent IS NOT NULL: work still pending regardless of what wrap_log
+    // contains. For in_review rows the schema always yields next_agent=Some("wrap")
+    // until the task transitions out of in_review; that transition (not wrap_log)
+    // is the completion signal.
+    Ok(out.next_agent.is_none()
+        || matches!(
+            out.status.as_str(),
+            "accepted"
+                | "rejected"
+                | "blocked"
+                | "deploy_blocked"
+                | "cargo_installed"
+                | "schema_migrated"
+                | "closed_out_of_band"
+                | "abandoned"
+        ))
+}
+
 impl Check for DrivePidRecordedOrTerminal {
     fn id(&self) -> &'static str {
         DRIVE_PID_RECORDED_OR_TERMINAL
@@ -140,23 +192,14 @@ impl Check for DrivePidRecordedOrTerminal {
                 json!({"message":"missing arg: display_id"}),
             ));
         };
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM tasks \
-             WHERE display_id = ?1 AND ( \
-               (drive_pid IS NOT NULL AND drive_pid > 0) \
-               OR status IN ('blocked','accepted','deploy_blocked','schema_migrated') \
-             )",
-            rusqlite::params![display_id],
-            |r| r.get(0),
-        )?;
-        if n > 0 {
+        if auto_drive_terminal_ok(conn, display_id)? {
             Ok(CheckResult::pass(self.id(), args))
         } else {
             Ok(CheckResult::fail(
                 self.id(),
                 args,
                 json!({"message": format!(
-                    "task {display_id} has no positive drive_pid and is not terminal from drive perspective"
+                    "auto-drive terminal-ok requires next_agent IS NULL OR row in terminal state for task {display_id}"
                 )}),
             ))
         }
@@ -250,8 +293,8 @@ mod tests {
         let now = "2026-05-06T00:00:00Z";
         let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
         conn.execute(
-            "INSERT INTO tasks (display_id, status, title, slug, branch, drive_pid, contract, created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, ?2, 'test', 't', 'feat/x', ?3, ?4, ?5, ?5, 'framework', 'framework')",
+            "INSERT INTO tasks (display_id, status, title, slug, branch, tier_hint, drive_pid, contract, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, ?2, 'test', 't', 'feat/x', 'T2', ?3, ?4, ?5, ?5, 'framework', 'framework')",
             rusqlite::params![display_id, status, drive_pid, contract, now],
         )
         .unwrap();
@@ -283,7 +326,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.check_id, DRIVE_PID_RECORDED_OR_TERMINAL);
         assert_eq!(result.args, args);
-        assert_eq!(result.outcome, CheckOutcome::Pass);
+        assert_eq!(result.outcome, CheckOutcome::Fail);
 
         let args = json!({"gatekeeper_decision_json":{
             "decision":"reject_noise", "confidence":"high", "rationale":"local noise"
@@ -320,7 +363,68 @@ mod tests {
             .as_ref()
             .unwrap()
             .to_string()
-            .contains("drive_pid"));
+            .contains("terminal-ok"));
+    }
+
+    /// A1-strict: in_review + next_agent IS NOT NULL → NOT terminal-ok.
+    /// wrap_log content must not affect this result.
+    #[test]
+    fn auto_drive_terminal_ok_in_review_next_agent_not_null_fails() {
+        let conn = fresh_db();
+        insert_task(&conn, "T303", "in_review", Some(123));
+        let args = json!({"display_id":"T303"});
+
+        // Without wrap_log: still Fail (next_agent IS NOT NULL for in_review).
+        let result = evaluate(
+            DRIVE_PID_RECORDED_OR_TERMINAL,
+            CheckCtx::with_conn(&conn),
+            &args,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.outcome, CheckOutcome::Fail);
+
+        // With non-empty wrap_log: STILL Fail — wrap_log is not the sentinel.
+        conn.execute(
+            "UPDATE tasks SET wrap_log = ?1 WHERE display_id = 'T303'",
+            rusqlite::params![r#"[{"executive_summary":"done"}]"#],
+        )
+        .unwrap();
+        let result = evaluate(
+            DRIVE_PID_RECORDED_OR_TERMINAL,
+            CheckCtx::with_conn(&conn),
+            &args,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            result.outcome,
+            CheckOutcome::Fail,
+            "wrap_log must not flip terminal-ok; next_agent IS NULL is the sole signal"
+        );
+    }
+
+    /// A1-strict: terminal-ok for in_review is achieved by transitioning OUT of
+    /// in_review (accepted/rejected). At that point next_agent IS NULL → Pass.
+    #[test]
+    fn auto_drive_terminal_ok_accepted_passes_regardless_of_wrap_log() {
+        let conn = fresh_db();
+        insert_task(&conn, "T304", "accepted", Some(123));
+        // Set a wrap_log to confirm it does not interfere.
+        conn.execute(
+            "UPDATE tasks SET wrap_log = ?1 WHERE display_id = 'T304'",
+            rusqlite::params![r#"[{"executive_summary":"done"}]"#],
+        )
+        .unwrap();
+        let args = json!({"display_id":"T304"});
+        let result = evaluate(
+            DRIVE_PID_RECORDED_OR_TERMINAL,
+            CheckCtx::with_conn(&conn),
+            &args,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.outcome, CheckOutcome::Pass);
     }
 
     #[test]

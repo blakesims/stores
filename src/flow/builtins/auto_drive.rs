@@ -50,6 +50,79 @@ const IN_CYCLE_STATUSES: &[&str] = &[
     "code_review",
 ];
 
+/// Returns true when the task still has auto-drive work to do.
+///
+/// Delegates entirely to `next_agent` from `compute()`. Pending work means
+/// `next_agent IS NOT NULL`; no further work means `next_agent IS NULL`.
+///
+/// A1-strict (pi ruling): wrap_log is durable history, NOT a completion
+/// sentinel. The daemon MUST NOT consult wrap_log to decide whether to
+/// re-spawn a drive process. For in_review rows the schema always yields
+/// `next_agent=Some("wrap")` (no `when:` guard); once wrap runs and the task
+/// transitions to accepted/rejected the status leaves in_review and
+/// `next_agent` becomes None. That is the sole completion signal.
+pub(crate) fn has_pending_auto_drive_work(conn: &Connection, display_id: &str) -> Result<bool> {
+    let schema = crate::flow::builtins::load_tasks_schema()?;
+    let out = crate::handlers::next_action::compute(&schema, conn, display_id)?;
+    Ok(out.next_agent.is_some())
+}
+
+fn mark_pending_handoff_lock(
+    conn: &Connection,
+    row_id: i64,
+    display_id: &str,
+    pid: i32,
+) -> Result<()> {
+    let now = now_iso8601();
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = 'in_flight:pending_next', finished_at = NULL, \
+         terminal_reason = NULL, next_retry_at = NULL, claimed_at = ?1, pid = ?2 \
+         WHERE store = 'tasks' AND row_id = ?3 AND display_id = ?4 AND agent_name = 'auto-drive'",
+        rusqlite::params![now, pid as i64, row_id, display_id],
+    )?;
+    Ok(())
+}
+
+fn redispatch_pending_drive(
+    conn: &Connection,
+    row_id: i64,
+    display_id: &str,
+    agents: &AgentsYaml,
+    config_path: &Path,
+    policies_hash: &str,
+) -> Result<bool> {
+    let Some(row) = refresh_task_row(conn, display_id) else {
+        return Ok(false);
+    };
+    if !has_pending_auto_drive_work(conn, display_id)? {
+        return Ok(false);
+    }
+    let before = row.get("drive_pid").and_then(|v| v.as_i64()).unwrap_or(0);
+    let ctx = DispatchCtx {
+        conn,
+        agents,
+        config_path,
+        policies_hash,
+    };
+    let code = run(&row, &ctx)?;
+    if code != 0 {
+        return Ok(false);
+    }
+    let after: i64 = conn.query_row(
+        "SELECT COALESCE(drive_pid, 0) FROM tasks WHERE display_id = ?1",
+        rusqlite::params![display_id],
+        |r| r.get(0),
+    )?;
+    if after > 0 && after != before {
+        mark_pending_handoff_lock(conn, row_id, display_id, after as i32)?;
+        eprintln!(
+            "[auto-drive-watchdog] {display_id}: re-dispatched pending auto-drive work pid={after}"
+        );
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 fn drive_runner_configured() -> bool {
     let Ok(path) = crate::flow::config::default_config_path() else {
         return false;
@@ -60,7 +133,8 @@ fn drive_runner_configured() -> bool {
     let Some(drive) = cfg.drive else {
         return false;
     };
-    drive.default_runner
+    drive
+        .default_runner
         .as_deref()
         .is_some_and(|s| !s.is_empty())
         || !drive.roles.is_empty()
@@ -137,10 +211,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         if !drive_runner_configured() {
             argv.push("--claude-code".to_string());
         }
-        argv.extend([
-            "--invoker".to_string(),
-            "ai_autonomous".to_string(),
-        ]);
+        argv.extend(["--invoker".to_string(), "ai_autonomous".to_string()]);
         argv
     };
 
@@ -467,6 +538,18 @@ pub fn sweep_drive_watchdog(
         }
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
         if status == "in_review" {
+            if redispatch_pending_drive(
+                conn,
+                row_id,
+                &display_id,
+                agents,
+                config_path,
+                policies_hash,
+            )? {
+                acted += 1;
+                handled.insert(display_id.clone());
+                continue;
+            }
             let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "ok");
             acted += 1;
             handled.insert(display_id.clone());
@@ -506,6 +589,72 @@ pub fn sweep_drive_watchdog(
                     display_id, e
                 );
             }
+        }
+    }
+
+    // Pending-next handoff pass: terminal-ok closed locks whose task is still
+    // in_review with pending work (next_agent IS NOT NULL) and whose drive
+    // subprocess is dead are re-dispatched so wrap fires without manual
+    // intervention.
+    //
+    // NARROW predicate (pi ruling, MAJOR 3): only sweep locks where
+    // terminal_reason='ok' AND t.status='in_review'. Non-ok locks (error,
+    // retry, silent_zombie) belong to the L134/L135 retry/error lifecycle and
+    // must NOT be swept here. next_agent is computed dynamically by
+    // has_pending_auto_drive_work below; the SQL gate narrows to the
+    // structural condition observable in the DB.
+    //
+    // T067 r7 HIGH fix: exclude locks written by force_close_auto_drive_lock_ok
+    // (which sets last_status='ok:wrap_completed'). Those locks represent
+    // current-cycle wrap dispatch that already completed; re-dispatching them
+    // would fire wrap again, defeating the r5/r6 lifecycle-closure design.
+    // Plain last_status='ok' (old handoff that died before force-close) remains
+    // eligible for re-dispatch (correct amend/re-entry semantics).
+    //
+    // Why last_status rather than a typed terminal_reason variant: the
+    // terminal_reason column carries a CHECK constraint
+    // (ok|exit_nonzero|error|silent_zombie|timeout|halted|legacy_unknown) that
+    // cannot be broadened on existing DBs without table recreation. last_status
+    // is free-text and is the designated typed discriminator for this case.
+    let pending_locks: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT dl.row_id, dl.display_id \
+             FROM dispatch_locks dl JOIN tasks t ON t.id = dl.row_id \
+             WHERE dl.store = 'tasks' AND dl.agent_name = 'auto-drive' \
+               AND dl.terminal_reason = 'ok' \
+               AND dl.last_status != 'ok:wrap_completed' \
+               AND t.status = 'in_review' \
+               AND COALESCE(t.drive_pid, 0) > 0",
+        )?;
+        let it = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        it.filter_map(|r| r.ok()).collect()
+    };
+    for (row_id, display_id) in pending_locks {
+        if handled.contains(&display_id) {
+            continue;
+        }
+        let pid: i64 = conn
+            .query_row(
+                "SELECT COALESCE(drive_pid, 0) FROM tasks WHERE display_id = ?1",
+                rusqlite::params![&display_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if pid <= 0 || pid_is_alive(pid as i32) {
+            continue;
+        }
+        if redispatch_pending_drive(
+            conn,
+            row_id,
+            &display_id,
+            agents,
+            config_path,
+            policies_hash,
+        )? {
+            acted += 1;
+            handled.insert(display_id);
         }
     }
 
@@ -599,8 +748,8 @@ mod tests {
         let now = "2026-05-03T00:00:00Z";
         let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
         conn.execute(
-            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, 'planning', 'test', 'tslug', 'feat/tslug', ?2, ?3, ?4, ?4, 'ai_autonomous', 'ai_autonomous')",
+            "INSERT INTO tasks (display_id, status, title, slug, branch, tier_hint, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'planning', 'test', 'tslug', 'feat/tslug', 'T2', ?2, ?3, ?4, ?4, 'ai_autonomous', 'ai_autonomous')",
             rusqlite::params![display_id, workspace_path, contract, now],
         ).unwrap();
     }
@@ -914,7 +1063,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "blocked");
-        assert_eq!(reason.as_deref(), Some("drive_failed:silent_zombie_pid_dead"));
+        assert_eq!(
+            reason.as_deref(),
+            Some("drive_failed:silent_zombie_pid_dead")
+        );
 
         let (obs_count, obs_task_id): (i64, String) = conn
             .query_row(
@@ -948,20 +1100,37 @@ mod tests {
         );
     }
 
-    /// AC5.1 (iii): dead PID + status='in_review' → drive succeeded; row not
-    /// flipped, lock marked finished='ok'.
+    /// A1-strict AC5.1 (iii): dead PID + status='in_review' + open lock →
+    /// wrap_log is IGNORED; next_agent IS NOT NULL means work is still pending,
+    /// so the watchdog REDISPATCHES rather than marking ok.
+    ///
+    /// wrap_log content (even non-empty) must not suppress redispatch.
     #[test]
-    fn watchdog_dead_pid_in_review_marks_ok() {
+    fn watchdog_dead_pid_in_review_redispatches_regardless_of_wrap_log() {
         let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("STORES_DRIVE_CMD", "sleep 5 #");
         let conn = fresh_db_with_obs();
+        let tmp = temp_cwd();
         let row_id = insert_task_full(&conn, "T722", "in_review", Some(dead_pid()));
+        // Set workspace_path so redispatch can succeed, and set non-empty wrap_log
+        // to confirm it does NOT suppress the redispatch.
+        conn.execute(
+            "UPDATE tasks SET workspace_path=?1, drive_started_at='2026-01-01T00:00:00Z', \
+             wrap_log=?2 WHERE display_id='T722'",
+            rusqlite::params![
+                tmp.path().to_str().unwrap(),
+                r#"[{"executive_summary":"prior-run"}]"#
+            ],
+        )
+        .unwrap();
         insert_lock(&conn, row_id, "T722");
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
-        assert_eq!(acted, 1);
+        assert_eq!(acted, 1, "watchdog must act on dead-PID in_review open lock");
 
+        // Row stays in_review (redispatch, not transition).
         let status: String = conn
             .query_row(
                 "SELECT status FROM tasks WHERE display_id='T722'",
@@ -971,6 +1140,7 @@ mod tests {
             .unwrap();
         assert_eq!(status, "in_review");
 
+        // Lock is in-flight (pending_next), NOT closed as 'ok'.
         let last: String = conn
             .query_row(
                 "SELECT last_status FROM dispatch_locks WHERE row_id=?1",
@@ -978,7 +1148,53 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(last, "ok");
+        assert_eq!(
+            last, "in_flight:pending_next",
+            "non-empty wrap_log must not suppress redispatch; next_agent IS NOT NULL is the signal"
+        );
+
+        // Clean up spawned process.
+        let pid: i64 = conn
+            .query_row(
+                "SELECT COALESCE(drive_pid, 0) FROM tasks WHERE display_id='T722'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if pid > 0 {
+            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+        }
+        std::env::remove_var("STORES_DRIVE_CMD");
+    }
+
+    /// A1-strict: in_review + dead PID + closed lock (terminal_reason='ok') +
+    /// next_agent IS NOT NULL → redispatches. wrap_log state is irrelevant.
+    #[test]
+    fn watchdog_dead_pid_in_review_pending_wrap_redispatches() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("STORES_DRIVE_CMD", "sleep 5 #");
+        let conn = fresh_db_with_obs();
+        let tmp = temp_cwd();
+        let row_id = insert_task_full(&conn, "T723W", "in_review", Some(dead_pid()));
+        conn.execute("UPDATE tasks SET workspace_path=?1, drive_started_at='2026-01-01T00:00:00Z' WHERE display_id='T723W'", rusqlite::params![tmp.path().to_str().unwrap()]).unwrap();
+        insert_lock_closed(&conn, row_id, "T723W");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+        assert_eq!(acted, 1);
+        let (status, terminal_reason, finished_at, pid): (String, Option<String>, Option<String>, i64) = conn.query_row(
+            "SELECT t.status, dl.terminal_reason, dl.finished_at, t.drive_pid FROM tasks t JOIN dispatch_locks dl ON dl.row_id=t.id WHERE t.display_id='T723W'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+        assert_eq!(status, "in_review");
+        assert!(terminal_reason.is_none());
+        assert!(finished_at.is_none());
+        assert!(pid > 0 && pid != dead_pid());
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        std::env::remove_var("STORES_DRIVE_CMD");
     }
 
     /// AC5.4: daemon-restart simulation — set up state on disk, drop the
@@ -1028,7 +1244,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(reason.as_deref(), Some("drive_failed:silent_zombie_pid_dead"));
+        assert_eq!(
+            reason.as_deref(),
+            Some("drive_failed:silent_zombie_pid_dead")
+        );
         let finished: Option<String> = conn2
             .query_row(
                 "SELECT finished_at FROM dispatch_locks WHERE display_id='T723'",
@@ -1040,16 +1259,100 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // T067 r7 HIGH: force_close discriminator — watchdog must NOT re-dispatch
+    // -----------------------------------------------------------------
+
+    /// Insert a lock in the state written by `force_close_auto_drive_lock_ok`:
+    /// `terminal_reason='ok'`, `last_status='ok:wrap_completed'`, `finished_at` SET.
+    /// This simulates the real `tasks drive` binary calling force-close after wrap dispatch.
+    fn insert_lock_force_closed(conn: &Connection, row_id: i64, display_id: &str) {
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, \
+              last_status, finished_at, terminal_reason) \
+             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, '2026-05-03T00:00:00Z', 'test-claimer', \
+                     'ok:wrap_completed', '2026-05-03T00:00:01Z', 'ok')",
+            rusqlite::params![row_id, display_id],
+        )
+        .unwrap();
+    }
+
+    /// T067 r7 HIGH: after `force_close_auto_drive_lock_ok` fires (lock closed with
+    /// `last_status='ok:wrap_completed'`), the watchdog pending-handoff sweep must
+    /// NOT re-dispatch wrap. The closed lock proves the drive subprocess already handed
+    /// wrap off; re-dispatch would fire wrap a second time.
+    ///
+    /// Contrast with `watchdog_dead_pid_in_review_pending_wrap_redispatches` which
+    /// uses `last_status='ok'` (old handoff, drive died before force-close) and
+    /// MUST re-dispatch.
+    #[test]
+    fn watchdog_force_closed_wrap_lock_no_redispatch() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("STORES_DRIVE_CMD", "sleep 5 #");
+        let conn = fresh_db_with_obs();
+        let tmp = temp_cwd();
+        let row_id = insert_task_full(&conn, "T723F", "in_review", Some(dead_pid()));
+        conn.execute(
+            "UPDATE tasks SET workspace_path=?1, drive_started_at='2026-01-01T00:00:00Z' \
+             WHERE display_id='T723F'",
+            rusqlite::params![tmp.path().to_str().unwrap()],
+        )
+        .unwrap();
+        // Insert a force-closed lock (last_status='ok:wrap_completed') — this is the
+        // state produced by force_close_auto_drive_lock_ok after wrap dispatch.
+        insert_lock_force_closed(&conn, row_id, "T723F");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+        // Watchdog must not act on force-closed locks.
+        assert_eq!(
+            acted, 0,
+            "watchdog must NOT re-dispatch a force-closed (ok:wrap_completed) lock; \
+             re-dispatch would fire wrap a second time"
+        );
+        // Lock must remain closed (finished_at still set, last_status unchanged).
+        let (finished_at, last_status, terminal_reason): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT finished_at, last_status, terminal_reason FROM dispatch_locks \
+                 WHERE display_id='T723F' AND agent_name='auto-drive'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            finished_at.is_some(),
+            "force-closed lock must remain closed (finished_at non-null); got None"
+        );
+        assert_eq!(
+            last_status.as_deref(),
+            Some("ok:wrap_completed"),
+            "last_status must stay 'ok:wrap_completed'; got {last_status:?}"
+        );
+        assert_eq!(
+            terminal_reason.as_deref(),
+            Some("ok"),
+            "terminal_reason must stay 'ok'; got {terminal_reason:?}"
+        );
+        std::env::remove_var("STORES_DRIVE_CMD");
+    }
+
+    // -----------------------------------------------------------------
     // T030 Phase 1: silent-zombie reproductions (these MUST FAIL on main)
     // -----------------------------------------------------------------
 
-    /// Insert a closed lock — `finished_at` is SET, simulating
-    /// `mark_claim_finished` already ran post-spawn (the L062 shape).
+    /// Insert a closed lock — `finished_at` is SET and `terminal_reason='ok'`,
+    /// simulating `mark_claim_finished` already ran post-spawn (the L062 shape).
     fn insert_lock_closed(conn: &Connection, row_id: i64, display_id: &str) {
         conn.execute(
             "INSERT INTO dispatch_locks \
-             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, last_status, finished_at) \
-             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, '2026-05-03T00:00:00Z', 'test-claimer', 'ok', '2026-05-03T00:00:01Z')",
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, \
+              last_status, finished_at, terminal_reason) \
+             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, '2026-05-03T00:00:00Z', 'test-claimer', \
+                     'ok', '2026-05-03T00:00:01Z', 'ok')",
             rusqlite::params![row_id, display_id],
         )
         .unwrap();
@@ -1396,7 +1699,8 @@ mod tests {
 
         let rows = scan_zombie_tasks(&conn, "2026-05-02T00:00:00Z");
         assert!(
-            rows.iter().all(|(_, display_id, _, _, _)| display_id != "T754"),
+            rows.iter()
+                .all(|(_, display_id, _, _, _)| display_id != "T754"),
             "already-marked silent_zombie locks must be excluded from watchdog scan"
         );
     }
@@ -1627,11 +1931,9 @@ mod tests {
         let tmp = temp_cwd();
         insert_planning_task(&conn, "T780", tmp.path().to_str().unwrap());
         let row_id: i64 = conn
-            .query_row(
-                "SELECT id FROM tasks WHERE display_id='T780'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM tasks WHERE display_id='T780'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         // History row that fires the ''→'planning' subscription.
         conn.execute(
@@ -1676,9 +1978,9 @@ mod tests {
             .expect("poll_once must succeed");
         assert_eq!(n, 1, "exactly one auto-drive dispatch must fire");
 
-        // L141 -> L134 invariant: the lock CLOSES typed-clean because the
-        // drive_pid_recorded_or_terminal postcondition passed (drive_pid is
-        // recorded on the tasks row by the spawn).
+        // T067/L134 invariant: initial auto-drive spawn leaves a pending
+        // next_agent (planner) and therefore the lock stays in-flight rather
+        // than terminal_reason='ok'.
         let (finished_at, last_status, terminal_reason, postcondition_id, drive_pid): (
             Option<String>,
             Option<String>,
@@ -1695,19 +1997,18 @@ mod tests {
             )
             .unwrap();
         assert!(
-            finished_at.is_some(),
-            "L134: auto-drive lock must close once postcondition passes (got finished_at={:?})",
+            finished_at.is_none(),
+            "T067: pending next_agent must keep auto-drive lock in-flight (got finished_at={:?})",
             finished_at
         );
         assert_eq!(
             last_status.as_deref(),
-            Some("ok"),
-            "L134: last_status='ok' on a typed-clean close",
+            Some("in_flight:pending_next"),
+            "T067: last_status records pending handoff",
         );
-        assert_eq!(
-            terminal_reason.as_deref(),
-            Some("ok"),
-            "L134: terminal_reason='ok' when drive_pid_recorded_or_terminal passes",
+        assert!(
+            terminal_reason.is_none(),
+            "T067: terminal_reason must remain NULL while next_agent is pending",
         );
         assert_eq!(
             postcondition_id.as_deref(),

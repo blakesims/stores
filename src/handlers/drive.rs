@@ -801,14 +801,33 @@ fn drive_loop_with_role_runner(
             );
         }
 
-        // AC4.3: `in_review` exit guard — only short-circuit if wrap was already
-        // dispatched in THIS run. On first observation (dispatched_wrap_this_run ==
-        // false), fall through to dispatch wrap (eager auto-fire per Decision (b)
-        // and AC4.3a). On second observation (flag set), exit with the human-review
-        // hint. This allows fresh wrap dispatch on every new drive invocation
-        // (covers re-entry after reject → amend → re-complete), while preventing
-        // same-run re-dispatch.
+        // AC4.3: `in_review` exit guard.
+        //
+        // Only path: wrap was dispatched in THIS run (dispatched_wrap_this_run flag set)
+        // → same-run re-dispatch prevention; exit after one wrap per drive invocation.
+        //
+        // On re-entry (new drive call after amend), dispatched_wrap_this_run is false,
+        // so we fall through and dispatch wrap again — next_agent IS the source of truth,
+        // not wrap_log. wrap_log is durable history only, never a completion sentinel.
+        // (pi ruling r3 strict-pi A1: if next_agent=wrap, dispatch wrap.)
+        //
+        // Lifecycle closure (pi ruling r5 fix): after a successful wrap dispatch in THIS
+        // run, force-close the auto-drive lock terminal-ok before exiting. The schema
+        // always yields next_agent=Some("wrap") for in_review (no when: guard), so the
+        // normal close_auto_drive_lock_ok path returns PendingNext and leaves the lock
+        // open — which triggers infinite daemon re-dispatch. force_close bypasses the
+        // has_pending_auto_drive_work check because current-cycle completion (not
+        // next_agent IS NULL) is the correct closure trigger here. A1 invariant is
+        // preserved: wrap_log is NOT consulted; the dispatched_wrap_this_run flag is the
+        // signal. Watchdog fallback remains: if drive dies before this exit, the watchdog
+        // redispatches a fresh drive (correct amend/re-entry semantics).
         if na.status == "in_review" && dispatched_wrap_this_run {
+            if let Err(e) =
+                crate::handlers::agents_run::force_close_auto_drive_lock_ok(conn, display_id)
+            {
+                eprintln!("[{display_id}] force_close_auto_drive_lock_ok failed (non-fatal): {e}");
+                let _ = std::io::stderr().flush();
+            }
             eprintln!(
                 "[{display_id}] in_review; brief written; awaiting `stores tasks accept | reject`"
             );
@@ -1112,13 +1131,28 @@ fn drive_loop_with_role_runner(
         // Up to this point the lock has been left open (by agents_run.rs's
         // post-spawn skip), so a drive subprocess that dies between spawn and
         // first submit remains visible to the watchdog as an open-lock zombie.
+        //
+        // `auto_drive_lock_closed` tracks only the actually-closed case
+        // (LockCloseOutcome::Closed). PendingNext means the lock is still
+        // in-flight awaiting the daemon's handoff re-dispatch; the flag stays
+        // false so the next iteration re-evaluates whether the lock can close.
         if !auto_drive_lock_closed {
-            if let Err(e) = crate::handlers::agents_run::close_auto_drive_lock_ok(conn, display_id)
-            {
-                eprintln!("[{display_id}] close_auto_drive_lock_ok failed (non-fatal): {e}");
-                let _ = std::io::stderr().flush();
+            match crate::handlers::agents_run::close_auto_drive_lock_ok(conn, display_id) {
+                Ok(crate::handlers::agents_run::LockCloseOutcome::Closed) => {
+                    auto_drive_lock_closed = true;
+                }
+                Ok(crate::handlers::agents_run::LockCloseOutcome::PendingNext) => {
+                    // Lock is still in-flight; daemon will re-dispatch once
+                    // the current work lands. Do not set auto_drive_lock_closed.
+                }
+                Ok(crate::handlers::agents_run::LockCloseOutcome::Failed) => {
+                    // Unreachable via this code path; treat as no-op.
+                }
+                Err(e) => {
+                    eprintln!("[{display_id}] close_auto_drive_lock_ok failed (non-fatal): {e}");
+                    let _ = std::io::stderr().flush();
+                }
             }
-            auto_drive_lock_closed = true;
         }
 
         // AC4.3 flag: wrap dispatches when na.status == "in_review" (the row is in
@@ -1172,6 +1206,22 @@ fn drive_loop_with_role_runner(
         // ── Step 2g: iter counter / max-iters (AC3.5) ────────────────────
         iter += 1;
         if iter >= max_iters {
+            // T067 r7 MEDIUM fix: if wrap was dispatched in this iteration and
+            // max-iters fires before the next loop-top guard runs, force-close
+            // the auto-drive lock now so the daemon watchdog does not re-dispatch
+            // wrap again. Without this, the lock stays in_flight:pending_next
+            // and the watchdog treats it as a stale handoff needing re-dispatch.
+            if dispatched_wrap_this_run {
+                if let Err(e) =
+                    crate::handlers::agents_run::force_close_auto_drive_lock_ok(conn, display_id)
+                {
+                    eprintln!(
+                        "[{display_id}] force_close_auto_drive_lock_ok (max-iters path) \
+                         failed (non-fatal): {e}"
+                    );
+                    let _ = std::io::stderr().flush();
+                }
+            }
             // Re-read state for summary.
             let na2 = compute_next_action(schema, conn, display_id)?;
             eprintln!(
@@ -2316,13 +2366,118 @@ mod tests {
             )
             .unwrap();
         assert!(
-            finished_at.is_some(),
-            "T049: auto-drive lock must be closed by drive_loop's first submit"
+            finished_at.is_none(),
+            "T067: first submit with pending next_agent keeps auto-drive lock in-flight"
         );
         assert_eq!(
             last_status.as_deref(),
+            Some("in_flight:pending_next"),
+            "T067: pending handoff lock must carry last_status='in_flight:pending_next'"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T067 r5: auto-drive lock closes terminal-ok after wrap dispatch
+    //
+    // When the drive loop exits at the `in_review && dispatched_wrap_this_run`
+    // guard, it calls force_close_auto_drive_lock_ok before returning. This
+    // prevents the daemon watchdog from infinitely re-dispatching wrap on the
+    // next sweep (which it would do because the schema always yields
+    // next_agent=Some("wrap") for in_review — no when: guard exists).
+    //
+    // A1 invariant preserved: the decision to close is made by the current-cycle
+    // `dispatched_wrap_this_run` flag, NOT by inspecting wrap_log history.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn drive_loop_wrap_dispatch_closes_lock_terminal_ok() {
+        // Regression test for the infinite-wrap-redispatch bug (r4 A1-strict
+        // over-application): after a successful wrap submit, the drive loop must
+        // close the auto-drive lock with terminal_reason='ok' and finished_at
+        // non-null before exiting.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn,
+            &schema,
+            "T802",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+
+        let row_id: i64 = conn
+            .query_row("SELECT id FROM tasks WHERE display_id='T802'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        // Open auto-drive dispatch_lock (mirrors post-T049 invariant).
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, \
+              claimed_at, claimed_by) \
+             VALUES ('tasks', ?1, 'T802', 'auto-drive', 1, \
+                     '2026-05-04T00:00:00Z', 'test-claimer')",
+            rusqlite::params![row_id],
+        )
+        .unwrap();
+
+        // One wrap response — drive should consume it and exit Ok.
+        let wrap_out = make_run_output(wrap_fixture_json(), 0);
+        let runner = MockRunner::new(vec![wrap_out]);
+        drive_loop(&schema, &conn, "T802", &runner, 50)
+            .expect("wrap dispatch at in_review must succeed");
+
+        // Runner fully drained — wrap was consumed.
+        assert_eq!(runner.remaining_count(), 0, "wrap response must be consumed");
+
+        // T067 r5: lock must be closed terminal-ok (no infinite re-dispatch).
+        let (finished_at, last_status, terminal_reason): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT finished_at, last_status, terminal_reason FROM dispatch_locks \
+                 WHERE display_id='T802' AND agent_name='auto-drive'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            finished_at.is_some(),
+            "T067 r5: lock must be closed (finished_at non-null) after wrap dispatch; \
+             got finished_at=None (daemon would infinitely re-dispatch wrap)"
+        );
+        assert_eq!(
+            last_status.as_deref(),
+            Some("ok:wrap_completed"),
+            "T067 r7: last_status must be 'ok:wrap_completed' after force_close (watchdog discriminator)"
+        );
+        assert_eq!(
+            terminal_reason.as_deref(),
             Some("ok"),
-            "T049: closed lock must carry last_status='ok'"
+            "T067 r5: terminal_reason must be 'ok' after wrap dispatch closes lock"
+        );
+
+        // A1 invariant: wrap_log is populated as provenance (not used as sentinel).
+        let wrap_log: Option<String> = conn
+            .query_row(
+                "SELECT wrap_log FROM tasks WHERE display_id='T802'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            wrap_log
+                .as_deref()
+                .unwrap_or("")
+                .contains("executive_summary"),
+            "wrap_log must be populated as provenance after wrap dispatch; got {wrap_log:?}"
         );
     }
 
@@ -2359,6 +2514,93 @@ mod tests {
         assert!(
             msg.contains("max iterations exceeded"),
             "error must mention max iterations: {msg}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T067 r7 MEDIUM: max-iters fires after wrap dispatch → force-close must run
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn max_iters_after_wrap_dispatch_force_closes_lock() {
+        // Regression: if max-iters fires immediately after a successful wrap submit,
+        // the loop bails before reaching the loop-top `in_review && dispatched_wrap_this_run`
+        // guard. Without the r7 fix, the lock stays in_flight:pending_next and the
+        // daemon watchdog re-dispatches wrap again. With the fix, force_close fires
+        // before the bail and the lock reaches last_status='ok:wrap_completed'.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn,
+            &schema,
+            "T803",
+            "in_review",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+
+        let row_id: i64 = conn
+            .query_row("SELECT id FROM tasks WHERE display_id='T803'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        // Open auto-drive dispatch_lock.
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, \
+              claimed_at, claimed_by) \
+             VALUES ('tasks', ?1, 'T803', 'auto-drive', 1, \
+                     '2026-05-04T00:00:00Z', 'test-claimer')",
+            rusqlite::params![row_id],
+        )
+        .unwrap();
+
+        // One wrap response — max_iters=1 means the loop fires wrap in iter 0,
+        // increments iter to 1, and bails on the max-iters check before reaching
+        // the next loop-top guard.
+        let wrap_out = make_run_output(wrap_fixture_json(), 0);
+        let runner = MockRunner::new(vec![wrap_out]);
+        // drive_loop returns Err (max-iters exceeded).
+        let err = drive_loop(&schema, &conn, "T803", &runner, 1)
+            .expect_err("max_iters=1 must abort after wrap dispatch");
+        assert!(
+            err.to_string().contains("max iterations exceeded"),
+            "error must mention max iterations: {err}"
+        );
+
+        // T067 r7: lock must be force-closed (finished_at non-null,
+        // last_status='ok:wrap_completed') even though the bail path fired.
+        let (finished_at, last_status, terminal_reason): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT finished_at, last_status, terminal_reason FROM dispatch_locks \
+                 WHERE display_id='T803' AND agent_name='auto-drive'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            finished_at.is_some(),
+            "T067 r7: lock must be force-closed (finished_at non-null) even on max-iters bail \
+             after wrap dispatch; daemon would re-dispatch wrap otherwise"
+        );
+        assert_eq!(
+            last_status.as_deref(),
+            Some("ok:wrap_completed"),
+            "T067 r7: last_status must be 'ok:wrap_completed' after max-iters force-close; \
+             got {last_status:?}"
+        );
+        assert_eq!(
+            terminal_reason.as_deref(),
+            Some("ok"),
+            "terminal_reason must be 'ok'; got {terminal_reason:?}"
         );
     }
 
@@ -2585,10 +2827,14 @@ mod tests {
 
     #[test]
     fn in_review_re_entry_after_amend_dispatches_fresh_wrap() {
-        // AC4.3a: A fresh drive invocation on a row at `in_review` with an existing
-        // wrap_log[] entry (from a prior wrap run) must still dispatch wrap. The
-        // state-local flag only prevents same-run re-dispatch; cross-run re-entry
-        // always dispatches (wrap_log preserves history as a list_record).
+        // AC4.3a (pi ruling r3 strict-pi A1): A fresh drive invocation on a row
+        // at `in_review` with an existing wrap_log[] entry (from a prior wrap run)
+        // MUST dispatch wrap again. wrap_log is durable history evidence; it is NOT
+        // a sentinel that THIS cycle's wrap is complete.
+        //
+        // Amend/re-entry is exactly where historical evidence is UNSAFE for control
+        // flow: the wrap_log entry is from the prior cycle, not the current one.
+        // next_agent=wrap IS the source of truth. If next_agent=wrap, dispatch wrap.
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
 
@@ -2603,8 +2849,7 @@ mod tests {
             None,
             None,
         );
-        // Simulate non-empty wrap_log from a prior wrap dispatch (Phase 1 stub; Phase 3
-        // will write this via compute_submit_wrap).
+        // Pre-seed wrap_log from a prior cycle (simulating prior wrap via compute_submit_wrap).
         conn.execute(
             &format!(
                 "UPDATE {} SET wrap_log = ?1 WHERE display_id = ?2",
@@ -3228,6 +3473,9 @@ mod tests {
     fn in_review_re_entry_after_amend_wrap_log_content() {
         // Strengthen in_review_re_entry_after_amend_dispatches_fresh_wrap: assert
         // wrap_log[] grows to 2 and the latest executive_summary == "stub".
+        //
+        // pi ruling r3 strict-pi A1: wrap_log is durable history. Re-entry dispatches
+        // a fresh wrap; the new cycle appends its entry to the existing list.
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
 

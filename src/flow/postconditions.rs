@@ -112,11 +112,13 @@ pub fn task_workspace_exists(
     Ok(n > 0)
 }
 
-/// True iff the named task row records a positive `drive_pid` OR is parked in
-/// a terminal-from-drive's-perspective status (`blocked`, `accepted`,
-/// `deploy_blocked`, `schema_migrated`). The disjunction covers both the
-/// happy path (drive recorded its pid) and the post-drive terminal states the
-/// row may already have advanced into by the time the postcondition runs.
+/// True iff auto-drive may be stamped terminal-ok: `next_agent IS NULL` OR the
+/// row is in a hard-terminal state (accepted, rejected, abandoned, …).
+/// A positive `drive_pid` alone is not sufficient while workflow next-action
+/// still has pending work. Note: for `in_review` rows, `next_agent` is always
+/// `Some("wrap")` (schema has no `when:` guard); the drive subprocess closes
+/// its own lock via `force_close_auto_drive_lock_ok` after a successful wrap
+/// dispatch rather than relying on this postcondition to gate closure.
 ///
 /// Args: `{"display_id": "T123"}`.
 pub fn drive_pid_recorded_or_terminal(
@@ -204,8 +206,8 @@ mod tests {
         let now = "2026-05-06T00:00:00Z";
         let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
         conn.execute(
-            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, drive_pid, linked_observations, contract, created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, ?2, 'test', 't', 'feat/x', ?3, ?4, ?5, ?6, ?7, ?7, 'framework', 'framework')",
+            "INSERT INTO tasks (display_id, status, title, slug, branch, tier_hint, workspace_path, drive_pid, linked_observations, contract, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, ?2, 'test', 't', 'feat/x', 'T2', ?3, ?4, ?5, ?6, ?7, ?7, 'framework', 'framework')",
             rusqlite::params![display_id, status, workspace_path, drive_pid, linked_observations, contract, now],
         )
         .unwrap();
@@ -217,14 +219,18 @@ mod tests {
         insert_task(&conn, "T100", "planning", None, None, Some(r#"["L045"]"#));
         insert_task(&conn, "T101", "planning", None, None, Some(r#"["L099"]"#));
 
-        assert!(
-            task_exists_for_linked_observation(&conn, &json!({"observation_id": "L045"}), None)
-                .unwrap()
-        );
-        assert!(
-            !task_exists_for_linked_observation(&conn, &json!({"observation_id": "L777"}), None)
-                .unwrap()
-        );
+        assert!(task_exists_for_linked_observation(
+            &conn,
+            &json!({"observation_id": "L045"}),
+            None
+        )
+        .unwrap());
+        assert!(!task_exists_for_linked_observation(
+            &conn,
+            &json!({"observation_id": "L777"}),
+            None
+        )
+        .unwrap());
     }
 
     #[test]
@@ -241,17 +247,17 @@ mod tests {
     #[test]
     fn drive_pid_recorded_or_terminal_satisfies_and_fails() {
         let conn = fresh_db();
-        // Satisfies via positive drive_pid.
+        // Fails: positive drive_pid alone is not terminal while next_agent is pending.
         insert_task(&conn, "T300", "executing", None, Some(12345), None);
         // Satisfies via terminal status (blocked).
         insert_task(&conn, "T301", "blocked", None, None, None);
-        // Fails: planning with no pid.
+        // Fails: planning with no pid and pending planner.
         insert_task(&conn, "T302", "planning", None, None, None);
-        // Fails: drive_pid=0 is not "recorded".
+        // Fails: drive_pid=0 is not terminal while pending planner.
         insert_task(&conn, "T303", "planning", None, Some(0), None);
 
         assert!(
-            drive_pid_recorded_or_terminal(&conn, &json!({"display_id": "T300"}), None).unwrap()
+            !drive_pid_recorded_or_terminal(&conn, &json!({"display_id": "T300"}), None).unwrap()
         );
         assert!(
             drive_pid_recorded_or_terminal(&conn, &json!({"display_id": "T301"}), None).unwrap()
