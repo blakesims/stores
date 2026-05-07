@@ -35,7 +35,7 @@ where
             _ => continue,
         };
 
-        let value = assemble_field_value(&leaf.field.ty, &raws);
+        let value = assemble_field_value(&leaf.field.ty, &raws)?;
 
         // Insert value at the correct depth.
         insert_at_path(&mut entry, &leaf.path, value);
@@ -46,39 +46,37 @@ where
 
 /// Combine one or more raw CLI inputs into the JSON value for a field.
 ///
-/// Scalars and `Record`/`Json`/`List` fields delegate to `coerce_value` after
-/// joining (List uses pipe-join for back-compat).  `ListFk` and `ListRecord`
-/// support repeated `--<flag>` and bare-value auto-promote per the
+/// `List(_)` fields support repeated flags and comma-separated values. Commas
+/// and backslashes can be escaped with `\`; an empty raw value means an empty
+/// list. Legacy pipe splitting is preserved for back-compat. `ListFk` and
+/// `ListRecord` support repeated `--<flag>` and bare-value auto-promote per the
 /// `build_entry_map` doc.
-fn assemble_field_value(ty: &FieldType, raws: &[String]) -> Value {
+fn assemble_field_value(ty: &FieldType, raws: &[String]) -> Result<Value> {
     match ty {
-        FieldType::List(_) => {
-            // Pipe-join all inputs; coerce_value splits on '|' (preserves `--foo "X|Y"`
-            // and `--foo X --foo Y` equivalence).
-            let joined = raws.join("|");
-            coerce_value(ty, &joined)
-        }
+        FieldType::List(_) => Ok(Value::Array(parse_list_values(raws)?)),
         FieldType::ListFk { .. } => {
             if raws.len() == 1 {
                 let raw = &raws[0];
                 match serde_json::from_str::<Value>(raw) {
-                    Ok(Value::Array(arr)) => Value::Array(arr),
+                    Ok(Value::Array(arr)) => Ok(Value::Array(arr)),
                     // Bare display_id (or any non-JSON-array): auto-promote to single-element array.
-                    _ => Value::Array(vec![Value::String(raw.clone())]),
+                    _ => Ok(Value::Array(vec![Value::String(raw.clone())])),
                 }
             } else {
-                Value::Array(raws.iter().cloned().map(Value::String).collect())
+                Ok(Value::Array(
+                    raws.iter().cloned().map(Value::String).collect(),
+                ))
             }
         }
         FieldType::ListRecord(_) => {
             if raws.len() == 1 {
                 let raw = &raws[0];
                 match serde_json::from_str::<Value>(raw) {
-                    Ok(Value::Array(arr)) => Value::Array(arr),
+                    Ok(Value::Array(arr)) => Ok(Value::Array(arr)),
                     // Single JSON object → wrap as 1-element array.
-                    Ok(v @ Value::Object(_)) => Value::Array(vec![v]),
+                    Ok(v @ Value::Object(_)) => Ok(Value::Array(vec![v])),
                     // Anything else (bad JSON, scalar, etc.): sentinel for the validator.
-                    _ => Value::String(raw.clone()),
+                    _ => Ok(Value::String(raw.clone())),
                 }
             } else {
                 // Multi-arg: each must parse as JSON. On any parse failure, sentinel the
@@ -87,16 +85,69 @@ fn assemble_field_value(ty: &FieldType, raws: &[String]) -> Value {
                 for r in raws {
                     match serde_json::from_str::<Value>(r) {
                         Ok(v) => parsed.push(v),
-                        Err(_) => return Value::String(r.clone()),
+                        Err(_) => return Ok(Value::String(r.clone())),
                     }
                 }
-                Value::Array(parsed)
+                Ok(Value::Array(parsed))
             }
         }
         // Scalars, Record, Json: take the first input and run through coerce_value.
         // (Repeated flags on scalar fields are not blocked by clap but we use the first.)
-        _ => coerce_value(ty, &raws[0]),
+        _ => Ok(coerce_value(ty, &raws[0])),
     }
+}
+
+fn parse_list_values(raws: &[String]) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for raw in raws {
+        if raw.is_empty() {
+            continue;
+        }
+        if raw.contains('|') && !raw.contains(',') && !raw.contains('\\') {
+            out.extend(raw.split('|').map(|s| Value::String(s.to_string())));
+            continue;
+        }
+        for part in split_csvish(raw)? {
+            out.push(Value::String(part));
+        }
+    }
+    Ok(out)
+}
+
+fn split_csvish(raw: &str) -> Result<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut escaped = false;
+
+    for ch in raw.chars() {
+        if escaped {
+            match ch {
+                ',' | '\\' => cur.push(ch),
+                other => anyhow::bail!("invalid escape in list value: \\{other}"),
+            }
+            escaped = false;
+        } else {
+            match ch {
+                '\\' => escaped = true,
+                ',' => {
+                    if cur.is_empty() {
+                        anyhow::bail!("empty element in comma-separated list value");
+                    }
+                    parts.push(std::mem::take(&mut cur));
+                }
+                other => cur.push(other),
+            }
+        }
+    }
+
+    if escaped {
+        anyhow::bail!("dangling escape in list value");
+    }
+    if cur.is_empty() && raw.contains(',') {
+        anyhow::bail!("empty element in comma-separated list value");
+    }
+    parts.push(cur);
+    Ok(parts)
 }
 
 /// Insert `value` into `entry` following `path` (any depth ≥ 1).
@@ -518,7 +569,7 @@ mod tests {
         let ty = FieldType::ListFk {
             ref_store: "tasks".to_string(),
         };
-        let v = assemble_field_value(&ty, &["L001".to_string()]);
+        let v = assemble_field_value(&ty, &["L001".to_string()]).unwrap();
         assert_eq!(v, Value::Array(vec![Value::String("L001".to_string())]));
     }
 
@@ -527,7 +578,7 @@ mod tests {
         let ty = FieldType::ListFk {
             ref_store: "tasks".to_string(),
         };
-        let v = assemble_field_value(&ty, &[r#"["L001","L002"]"#.to_string()]);
+        let v = assemble_field_value(&ty, &[r#"["L001","L002"]"#.to_string()]).unwrap();
         match v {
             Value::Array(arr) => {
                 let ids: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
@@ -545,7 +596,8 @@ mod tests {
         let v = assemble_field_value(
             &ty,
             &["L001".to_string(), "L002".to_string(), "L003".to_string()],
-        );
+        )
+        .unwrap();
         match v {
             Value::Array(arr) => {
                 let ids: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
@@ -559,7 +611,7 @@ mod tests {
     fn assemble_list_record_single_json_object_wraps_in_array() {
         let ty = FieldType::ListRecord(vec![]);
         let raw = r#"{"system":"sentry","kind":"issue","id":"PROJ-1"}"#;
-        let v = assemble_field_value(&ty, &[raw.to_string()]);
+        let v = assemble_field_value(&ty, &[raw.to_string()]).unwrap();
         match v {
             Value::Array(arr) => {
                 assert_eq!(arr.len(), 1);
@@ -574,7 +626,7 @@ mod tests {
     fn assemble_list_record_single_json_array_passes_through() {
         let ty = FieldType::ListRecord(vec![]);
         let raw = r#"[{"system":"sentry","kind":"issue","id":"X"}]"#;
-        let v = assemble_field_value(&ty, &[raw.to_string()]);
+        let v = assemble_field_value(&ty, &[raw.to_string()]).unwrap();
         match v {
             Value::Array(arr) => {
                 assert_eq!(arr.len(), 1);
@@ -593,7 +645,8 @@ mod tests {
                 r#"{"system":"sentry","kind":"issue","id":"X"}"#.to_string(),
                 r#"{"system":"github","kind":"commit","id":"abc"}"#.to_string(),
             ],
-        );
+        )
+        .unwrap();
         match v {
             Value::Array(arr) => {
                 assert_eq!(arr.len(), 2);
@@ -609,7 +662,7 @@ mod tests {
         // Preserves the T006 REVISE-1 contract: bad JSON surfaces via the validator,
         // not silently as Null.
         let ty = FieldType::ListRecord(vec![]);
-        let v = assemble_field_value(&ty, &["{not json".to_string()]);
+        let v = assemble_field_value(&ty, &["{not json".to_string()]).unwrap();
         assert_eq!(v, Value::String("{not json".to_string()));
     }
 
@@ -618,9 +671,53 @@ mod tests {
         // List(_) keeps its existing pipe-split semantics: --foo "X|Y" and
         // --foo X --foo Y produce the same array.
         let ty = FieldType::List(Box::new(FieldType::Text));
-        let from_pipe = assemble_field_value(&ty, &["X|Y".to_string()]);
-        let from_repeat = assemble_field_value(&ty, &["X".to_string(), "Y".to_string()]);
+        let from_pipe = assemble_field_value(&ty, &["X|Y".to_string()]).unwrap();
+        let from_repeat = assemble_field_value(&ty, &["X".to_string(), "Y".to_string()]).unwrap();
         assert_eq!(from_pipe, from_repeat);
+    }
+
+    #[test]
+    fn assemble_list_comma_form_splits_values() {
+        let ty = FieldType::List(Box::new(FieldType::Text));
+        let v = assemble_field_value(&ty, &["A,B".to_string()]).unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![Value::String("A".into()), Value::String("B".into())])
+        );
+    }
+
+    #[test]
+    fn assemble_list_empty_raw_clears_to_empty_array() {
+        let ty = FieldType::List(Box::new(FieldType::Text));
+        let v = assemble_field_value(&ty, &["".to_string()]).unwrap();
+        assert_eq!(v, Value::Array(vec![]));
+    }
+
+    #[test]
+    fn assemble_list_csv_escapes_comma_and_backslash() {
+        let ty = FieldType::List(Box::new(FieldType::Text));
+        let v = assemble_field_value(&ty, &[r"A\,B,C\\D".to_string()]).unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![
+                Value::String("A,B".into()),
+                Value::String(r"C\D".into())
+            ])
+        );
+    }
+
+    #[test]
+    fn assemble_list_csv_rejects_empty_element() {
+        let ty = FieldType::List(Box::new(FieldType::Text));
+        let err = assemble_field_value(&ty, &["A,,B".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("empty element"));
+    }
+
+    #[test]
+    fn assemble_list_csv_rejects_dangling_escape() {
+        let ty = FieldType::List(Box::new(FieldType::Text));
+        let err = assemble_field_value(&ty, &[r"A\".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("dangling escape"));
     }
 
     // ---- T008 Phase 4: read_row round-trip for Json fields ----

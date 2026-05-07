@@ -178,7 +178,6 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db;
     use crate::schema::actor::Actor;
     use crate::schema::Schema;
 
@@ -198,6 +197,21 @@ fields:
         type: text
 "#;
 
+    const OBS_LIST_SCHEMA: &str = r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: summary
+    type: text
+  - name: risk_flags
+    type:
+      list: text
+    actor: ai_with_human
+"#;
+
     fn build_cmd(schema: &Schema, verb: &'static str, with_display_id: bool) -> clap::Command {
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();
         let mut cmd = clap::Command::new(verb);
@@ -205,11 +219,13 @@ fields:
             cmd = cmd.arg(clap::Arg::new("display_id").required(true));
         }
         for leaf in &leaves {
-            cmd = cmd.arg(
-                clap::Arg::new(leaf.cli_name.clone())
-                    .long(leaf.cli_name.clone())
-                    .required(false),
-            );
+            let mut arg = clap::Arg::new(leaf.cli_name.clone())
+                .long(leaf.cli_name.clone())
+                .required(false);
+            if matches!(leaf.field.ty, crate::schema::FieldType::List(_)) {
+                arg = arg.action(clap::ArgAction::Append);
+            }
+            cmd = cmd.arg(arg);
         }
         cmd
     }
@@ -251,5 +267,46 @@ fields:
             "notes must be preserved after partial Record update"
         );
         assert_eq!(v["severity"], "warning", "severity must reflect the update");
+    }
+
+    fn observations_setup() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(OBS_LIST_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        let add_cmd = build_cmd(&schema, "add", false);
+        let add_matches = add_cmd.get_matches_from(["add", "--summary", "row"]);
+        crate::handlers::add::run(&schema, &conn, &add_matches, Actor::Human.into()).unwrap();
+        (schema, conn)
+    }
+
+    fn stored_risk_flags(conn: &Connection) -> Vec<String> {
+        let raw: String = conn
+            .query_row(
+                "SELECT risk_flags FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Vec<String>>(&raw).unwrap()
+    }
+
+    #[test]
+    fn observations_update_risk_flags_repeated_values() {
+        let (schema, conn) = observations_setup();
+        let upd_cmd = build_cmd(&schema, "update", true);
+        let upd_matches =
+            upd_cmd.get_matches_from(["update", "L001", "--risk-flags", "A", "--risk-flags", "B"]);
+        run(&schema, &conn, &upd_matches, Actor::AiWithHuman.into()).unwrap();
+        assert_eq!(stored_risk_flags(&conn), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn observations_update_risk_flags_comma_single_value() {
+        let (schema, conn) = observations_setup();
+        let upd_cmd = build_cmd(&schema, "update", true);
+        let upd_matches = upd_cmd.get_matches_from(["update", "L001", "--risk-flags", "A,B"]);
+        run(&schema, &conn, &upd_matches, Actor::AiWithHuman.into()).unwrap();
+        assert_eq!(stored_risk_flags(&conn), vec!["A", "B"]);
     }
 }
