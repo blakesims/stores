@@ -540,29 +540,82 @@ fn layer2_repeated_tick_does_not_duplicate_dispatch() {
     assert_eq!(running_count, 1, "exactly ONE pending→running transition must exist");
 }
 
-/// Test: cap accounting includes BOTH pending AND running rows (Finding 1 fix).
+/// Test: 0 running + 3 pending + cap=2 → exactly 2 dispatched, 1 remains pending.
 ///
-/// Pi msg_ccfb6b59: "pending/tooling_held-eligible" accounting.  The scenario
-/// where this matters: M reviews are already `running` (long-running external
-/// processes) and N pending reviews are queued.  cap_allows_or_log must count
-/// running+pending (excluding the candidate itself) so that M+N > cap causes
-/// the pending candidates to be held rather than all dispatched simultaneously.
+/// Pi msg_577e80a3: cap = max RUNNING jobs; pending rows are queue backlog.
+/// With 0 running and cap=2, Layer 2 must dispatch up to `cap - running = 2`
+/// pending rows and leave the third pending (not cap-held, just not yet
+/// dispatched this tick — the reconciler processes each candidate serially, so
+/// the 3rd row sees 2 already dispatched/running and gets cap-held).
 ///
-/// Setup: cap=2, 2 rows already `running`, 3 rows `pending`.
-/// Expected: all 3 pending rows are cap-held (running already fills the cap).
+/// Setup: cap=2, 0 rows running, 3 rows pending.
+/// Expected: exactly 2 dispatched (Dispatched outcome), 1 CapHeld.
 #[test]
-fn layer2_cap_accounting_includes_pending_rows() {
+fn layer2_cap_zero_running_three_pending_dispatches_two() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    external_review::visible_status_rows(&conn).unwrap(); // adds runtime cols
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "in_review");
+
+    // 0 running; 3 pending rows queued.
+    insert_review(&conn, "ER070", "T900", "pending", 1);
+    insert_review(&conn, "ER071", "T900", "pending", 1);
+    insert_review(&conn, "ER072", "T900", "pending", 1);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
+    // cap=2 with 0 running → dispatch capacity = 2.
+    let cfg_path = cfg(tmp.path(), &sh, 2);
+    let a = agents();
+
+    let dispatches =
+        reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
+
+    let dispatched: Vec<_> = dispatches
+        .iter()
+        .filter(|d| d.outcome == ExternalReviewDispatchOutcome::Dispatched)
+        .collect();
+    let held: Vec<_> = dispatches
+        .iter()
+        .filter(|d| d.outcome == ExternalReviewDispatchOutcome::CapHeld)
+        .collect();
+
+    assert_eq!(
+        dispatched.len(),
+        2,
+        "with 0 running + cap=2, exactly 2 pending rows must be dispatched; got {} dispatched",
+        dispatched.len()
+    );
+    assert_eq!(
+        held.len(),
+        1,
+        "with 0 running + cap=2, exactly 1 pending row must be cap-held; got {} held",
+        held.len()
+    );
+}
+
+/// Test: 2 running + 3 pending + cap=2 → 0 dispatched (cap already full).
+///
+/// Pi msg_577e80a3: when running == cap, no further pending rows may be dispatched.
+/// This is the "cap already full" guard — pending rows are the queue, but the
+/// running slots are exhausted.
+///
+/// Setup: cap=2, 2 rows running, 3 rows pending.
+/// Expected: all 3 pending rows are cap-held (0 dispatched).
+#[test]
+fn layer2_cap_two_running_three_pending_dispatches_zero() {
     let conn = Connection::open_in_memory().unwrap();
     install_db(&conn);
     external_review::visible_status_rows(&conn).unwrap(); // adds runtime cols
 
     // 2 reviews already running — fills the cap=2 lane.
-    insert_review(&conn, "ER048", "T948", "running", 1);
-    insert_review(&conn, "ER049", "T949", "running", 1);
+    insert_review(&conn, "ER073", "T948", "running", 1);
+    insert_review(&conn, "ER074", "T949", "running", 1);
     // 3 pending reviews — should all be cap-held.
-    insert_review(&conn, "ER050", "T951", "pending", 1);
-    insert_review(&conn, "ER051", "T952", "pending", 1);
-    insert_review(&conn, "ER052", "T953", "pending", 1);
+    insert_review(&conn, "ER075", "T951", "pending", 1);
+    insert_review(&conn, "ER076", "T952", "pending", 1);
+    insert_review(&conn, "ER077", "T953", "pending", 1);
 
     let tmp = tempfile::tempdir().unwrap();
     let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
@@ -573,8 +626,6 @@ fn layer2_cap_accounting_includes_pending_rows() {
     let dispatches =
         reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
 
-    // cap_allows_or_log counts running(2) + pending-excluding-candidate(2) = 4 >= 2
-    // for each candidate; all 3 pending rows must be cap-held.
     let dispatched: Vec<_> = dispatches
         .iter()
         .filter(|d| d.outcome == ExternalReviewDispatchOutcome::Dispatched)

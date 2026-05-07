@@ -222,28 +222,36 @@ pub fn cap_allows_or_log(
     };
     let cfg = resolve_review_config(config_path);
     let cap = cfg.max_parallel.max(1);
-    let active = count_active_reviews(conn)?;
-    if active < cap as usize {
+    // Pi msg_577e80a3: cap = max RUNNING jobs; pending rows are queue backlog
+    // and do NOT consume capacity at the pre-screen level.
+    let running = count_running_reviews(conn)?;
+    if running < cap as usize {
         return Ok(true);
     }
     mark_cap_held(conn, &row)?;
     eprintln!(
-        "[external-review cap held] task_id={} review_attempt_id={} runner={} status=pending held_reason=cap-held active={} cap={} liveness=cap-held retry=next-poll",
-        row.task_id, row.display_id, cfg.runner, active, cap
+        "[external-review cap held] task_id={} review_attempt_id={} runner={} status=pending held_reason=cap-held running={} cap={} liveness=cap-held retry=next-poll",
+        row.task_id, row.display_id, cfg.runner, running, cap
     );
     Ok(false)
 }
 
-/// Count reviews in states that consume lane capacity.
+/// Count reviews actively running (WHERE status='running' only).
 ///
-/// Pi msg_ccfb6b59 requires "pending/tooling_held-eligible" accounting.
-/// Both `pending` and `running` rows occupy a lane slot — `pending` rows are
-/// about to be dispatched (or are cap-held candidates), and `running` rows are
-/// actively executing.  Counting only `running` lets N pending + M running
-/// exceed the cap on a single tick.
-fn count_active_reviews(conn: &Connection) -> Result<usize> {
+/// Pi msg_577e80a3: cap semantics are "max RUNNING external review jobs."
+/// Pending rows are queue backlog waiting for capacity; they do not consume
+/// the cap at the pre-screen (`cap_allows_or_log`) level.  This means Layer 2
+/// can dispatch up to `cap - running` pending rows per tick.
+///
+/// The in-TX race-safety counter (`count_active_reviews_tx`) is intentionally
+/// separate: it counts pending+running (minus candidate) to prevent concurrent
+/// oversubscription under the write lock.
+///
+/// `pub` so `reconcile_pending_external_review_dispatch` in engine_runner can
+/// compute the per-tick dispatch budget at tick start.
+pub fn count_running_reviews(conn: &Connection) -> Result<usize> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM external_reviews WHERE status IN ('pending','running')",
+        "SELECT COUNT(*) FROM external_reviews WHERE status = 'running'",
         [],
         |r| r.get(0),
     )?;
@@ -268,6 +276,18 @@ fn count_active_reviews_tx(
         |r| r.get(0),
     )?;
     Ok(n.max(0) as usize)
+}
+
+/// Mark a row as cap-held by display_id (no ReviewRow required).
+/// `pub` so the Layer 2 reconciler can mark budget-exceeded candidates held
+/// without going through the full `cap_allows_or_log` flow.
+pub fn mark_cap_held_by_display_id(conn: &Connection, display_id: &str) -> Result<()> {
+    let now = now_iso8601();
+    conn.execute(
+        "UPDATE external_reviews SET held_reason='cap-held', updated_at=?2 WHERE display_id=?1",
+        params![display_id, now],
+    )?;
+    Ok(())
 }
 
 fn mark_cap_held(conn: &Connection, row: &ReviewRow) -> Result<()> {

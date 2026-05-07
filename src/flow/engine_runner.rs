@@ -517,9 +517,45 @@ pub fn reconcile_pending_external_review_dispatch(
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
+    // Pi msg_577e80a3: per-tick dispatch budget = cap - running_at_tick_start.
+    // Pending rows are queue backlog; they do not consume running capacity.
+    // We compute the budget once at tick start so that synchronous dispatches
+    // that complete before the next candidate check don't inflate the budget.
+    let cap = review_cfg.max_parallel.max(1) as usize;
+    let running_at_start =
+        crate::flow::builtins::external_review::count_running_reviews(conn).unwrap_or(0);
+    let budget = cap.saturating_sub(running_at_start);
+    let mut dispatched_this_tick: usize = 0;
+
     let mut results = Vec::new();
     for (review_row_id, review_display_id, task_display_id) in candidates {
+        // Per-tick budget gate: stop dispatching once we've reached cap.
+        // budget = cap - running_at_tick_start; once exhausted, mark remaining
+        // candidates cap-held so they surface in visible_status_rows.
+        if dispatched_this_tick >= budget {
+            if let Err(e) = crate::flow::builtins::external_review::mark_cap_held_by_display_id(
+                conn,
+                &review_display_id,
+            ) {
+                eprintln!(
+                    "[engine-runner Layer2] mark_cap_held error for {review_display_id}: {e}"
+                );
+            }
+            eprintln!(
+                "[engine-runner Layer2 cap held] review_attempt_id={review_display_id} budget_exhausted dispatched_this_tick={dispatched_this_tick} cap={cap} running_at_start={running_at_start}"
+            );
+            results.push(ExternalReviewDispatch {
+                review_row_id,
+                review_display_id,
+                task_display_id,
+                outcome: ExternalReviewDispatchOutcome::CapHeld,
+            });
+            continue;
+        }
+
         // Cap check via the exported helper (marks the row cap-held if needed).
+        // This is the per-row in-database safety check (guards against concurrent
+        // callers from the action_loop path racing with Layer 2).
         match crate::flow::builtins::external_review::cap_allows_or_log(
             conn,
             config_path,
@@ -555,6 +591,7 @@ pub fn reconcile_pending_external_review_dispatch(
         );
         match crate::flow::builtins::external_review::run(&row_json, &ctx) {
             Ok(_) => {
+                dispatched_this_tick += 1;
                 results.push(ExternalReviewDispatch {
                     review_row_id,
                     review_display_id,
