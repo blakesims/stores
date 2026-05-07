@@ -13,7 +13,9 @@ pub enum AuthCmd {
         identity: Option<PathBuf>,
         force: bool,
     },
-    Show,
+    Show {
+        identity: Option<PathBuf>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +135,7 @@ pub fn run(cmd: AuthCmd) -> Result<()> {
             identity,
             force,
         } => init(recipient, identity, force),
-        AuthCmd::Show => show(),
+        AuthCmd::Show { identity } => show(identity),
     }
 }
 
@@ -258,7 +260,7 @@ fn encrypt_with_age(recipient: &str, plaintext: &[u8], out: &Path) -> Result<()>
     Ok(())
 }
 
-fn show() -> Result<()> {
+fn show(identity: Option<PathBuf>) -> Result<()> {
     let age_path = token_age_path()?;
     if !age_path.exists() {
         bail!(
@@ -266,7 +268,8 @@ fn show() -> Result<()> {
             age_path.display()
         );
     }
-    let identity = default_identity_path()
+    let identity = identity
+        .or_else(default_identity_path)
         .ok_or_else(|| anyhow!("HOME not set; cannot locate identity file"))?;
     if !identity.exists() {
         bail!(
@@ -382,6 +385,33 @@ else
   od -An -tx1 -v | tr -d ' \n' >> "$out"
   printf '\n' >> "$out"
 fi
+"#;
+        fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        script
+    }
+
+    fn write_show_age(dir: &Path) -> PathBuf {
+        let script = dir.join("age-show-stub.sh");
+        let body = r#"#!/usr/bin/env bash
+set -e
+identity=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d) shift;;
+    -i) identity="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+if [ "$identity" != "$EXPECT_IDENTITY" ]; then
+  echo "wrong identity: $identity" >&2
+  exit 42
+fi
+printf 'fixture-token\n'
 "#;
         fs::write(&script, body).unwrap();
         #[cfg(unix)]
@@ -680,5 +710,64 @@ fi
                 assert!(tdir.join("approve.token.age").exists());
             },
         );
+    }
+
+    #[test]
+    fn show_uses_explicit_identity() {
+        let tdir = unique_dir("show-explicit");
+        let id = tdir.join("custom.keys.txt");
+        armored_id(&id);
+        fs::write(tdir.join("approve.token.age"), "ciphertext\n").unwrap();
+        let stub = write_show_age(&tdir);
+
+        with_env(
+            &[
+                ("STORES_TOKEN_DIR", tdir.to_str().unwrap()),
+                ("STORES_AGE_BIN", stub.to_str().unwrap()),
+                ("EXPECT_IDENTITY", id.to_str().unwrap()),
+            ],
+            || show(Some(id.clone())).unwrap(),
+        );
+    }
+
+    #[test]
+    fn show_without_identity_uses_default_identity() {
+        let tdir = unique_dir("show-default");
+        fs::write(tdir.join("approve.token.age"), "ciphertext\n").unwrap();
+        let home = unique_dir("home");
+        let id = home
+            .join(".config")
+            .join("sops")
+            .join("age")
+            .join("keys.txt");
+        fs::create_dir_all(id.parent().unwrap()).unwrap();
+        armored_id(&id);
+        let stub = write_show_age(&tdir);
+
+        with_env(
+            &[
+                ("STORES_TOKEN_DIR", tdir.to_str().unwrap()),
+                ("STORES_AGE_BIN", stub.to_str().unwrap()),
+                ("EXPECT_IDENTITY", id.to_str().unwrap()),
+                ("HOME", home.to_str().unwrap()),
+            ],
+            || show(None).unwrap(),
+        );
+    }
+
+    #[test]
+    fn show_errors_cleanly_for_missing_explicit_identity() {
+        let tdir = unique_dir("show-missing");
+        fs::write(tdir.join("approve.token.age"), "ciphertext\n").unwrap();
+        let missing = tdir.join("missing.keys.txt");
+
+        with_env(&[("STORES_TOKEN_DIR", tdir.to_str().unwrap())], || {
+            let err = show(Some(missing.clone())).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("identity file") && msg.contains("not found"),
+                "expected clean missing identity error, got: {msg}"
+            );
+        });
     }
 }
