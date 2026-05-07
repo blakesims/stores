@@ -3,6 +3,9 @@
 //! T3 tasks (or tier_hint unset) take the planner → plan-reviewer → executor
 //! → code-reviewer → wrap path. This regression-guards against the T1/T2
 //! tier-shape changes leaking into the T3 path.
+//!
+//! Also asserts agent_runs persistence: all 5 roles must produce rows with
+//! non-NULL prompt_cache_hits.
 
 use rusqlite::Connection;
 
@@ -10,7 +13,7 @@ use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use stores::handlers::drive::drive_loop;
 use stores::runner::mock::MockRunner;
-use stores::runner::RunnerOutput;
+use stores::runner::{AgentRunTelemetry, RunnerOutput};
 use stores::schema::Schema;
 
 fn tasks_schema() -> Schema {
@@ -30,12 +33,25 @@ fn fresh_db() -> Connection {
     conn
 }
 
-fn make_run_output(stdout: &str) -> RunnerOutput {
+/// Create a workspace TempDir under target/test-workspaces (never under /tmp).
+/// The caller MUST keep the returned TempDir alive for the duration of the test.
+fn make_workspace() -> tempfile::TempDir {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-workspaces");
+    std::fs::create_dir_all(&base).unwrap();
+    tempfile::TempDir::new_in(&base).unwrap()
+}
+
+fn make_run_output(stdout: &str, workspace: &tempfile::TempDir) -> RunnerOutput {
     let last = stdout
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty())
         .map(|s| s.to_string());
+    let mut telemetry = AgentRunTelemetry::with_mock_defaults(workspace.path());
+    // Supply an explicit non-NULL prompt_cache_hits (synthetic positive value).
+    telemetry.prompt_cache_hits = Some(5);
     RunnerOutput {
         stdout: stdout.to_string(),
         stderr: String::new(),
@@ -44,6 +60,8 @@ fn make_run_output(stdout: &str) -> RunnerOutput {
         structured_output: None,
         session_id: None,
         structured_output_source: None,
+        payload_error: None,
+        telemetry,
     }
 }
 
@@ -86,17 +104,20 @@ fn t3_full_five_stage_cycle_runs() {
     let display_id = "T100";
     insert_t3_task_at_planning(&conn, display_id);
 
+    // Keep workspace alive for the entire drive loop so transcript files persist.
     // T072 r6: executor and code-reviewer must have session_id (MINOR 1 requirement).
-    let mut executor_out = make_run_output(executor_fixture());
+    let workspace = make_workspace();
+
+    let mut executor_out = make_run_output(executor_fixture(), &workspace);
     executor_out.session_id = Some("t3-exec-session".to_string());
-    let mut code_reviewer_out = make_run_output(code_reviewer_fixture());
+    let mut code_reviewer_out = make_run_output(code_reviewer_fixture(), &workspace);
     code_reviewer_out.session_id = Some("t3-review-session".to_string());
     let runner = MockRunner::new(vec![
-        make_run_output(planner_fixture()),
-        make_run_output(plan_reviewer_fixture()),
+        make_run_output(planner_fixture(), &workspace),
+        make_run_output(plan_reviewer_fixture(), &workspace),
         executor_out,
         code_reviewer_out,
-        make_run_output(wrap_fixture()),
+        make_run_output(wrap_fixture(), &workspace),
     ]);
 
     drive_loop(&schema, &conn, display_id, &runner, 50).expect("T3 drive_loop should succeed");
@@ -155,7 +176,10 @@ fn t3_full_five_stage_cycle_runs() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(plan_count, 1, "T3 must record exactly one submit-plan transition");
+    assert_eq!(
+        plan_count, 1,
+        "T3 must record exactly one submit-plan transition"
+    );
 
     let plan_review_count: i64 = conn
         .query_row(
@@ -168,5 +192,50 @@ fn t3_full_five_stage_cycle_runs() {
     assert_eq!(
         plan_review_count, 1,
         "T3 must record exactly one submit-plan-review transition"
+    );
+
+    // agent_runs persistence: T3 dispatches 5 roles (planner, plan-reviewer,
+    // executor, code-reviewer, wrap). Each must have a row in agent_runs with
+    // non-NULL prompt_cache_hits.
+    let run_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_runs WHERE display_id = ?1",
+            rusqlite::params![display_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        run_count, 5,
+        "T3 drive must persist exactly 5 agent_runs rows \
+         (planner, plan-reviewer, executor, code-reviewer, wrap)"
+    );
+
+    // All rows must have non-NULL prompt_cache_hits (supplied as 5 in make_run_output).
+    let null_cache_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_runs WHERE display_id = ?1 AND prompt_cache_hits IS NULL",
+            rusqlite::params![display_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        null_cache_rows, 0,
+        "all agent_runs rows must have non-NULL prompt_cache_hits"
+    );
+
+    // Check field shape on the executor row.
+    let (role, model_id, prompt_cache_hits): (String, String, i64) = conn
+        .query_row(
+            "SELECT role, model_id, prompt_cache_hits FROM agent_runs \
+             WHERE display_id = ?1 AND role = 'executor'",
+            rusqlite::params![display_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(role, "executor");
+    assert!(!model_id.is_empty(), "model_id must not be empty");
+    assert_eq!(
+        prompt_cache_hits, 5,
+        "executor row must carry the synthetic prompt_cache_hits=5"
     );
 }

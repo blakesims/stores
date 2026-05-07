@@ -102,6 +102,25 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
         ],
     },
     FrameworkTable {
+        name: "agent_runs",
+        columns: &[
+            FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },
+            FrameworkColumn { name: "display_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "display_id TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "phase", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "phase INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "cycle", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "cycle INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "role", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "role TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "model_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "model_id TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "harness_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "harness_id TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "started_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "started_at TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "ended_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "ended_at TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "exit_code", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "exit_code INTEGER NOT NULL", additive: false },
+            FrameworkColumn { name: "tokens_in", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "tokens_in INTEGER", additive: false },
+            FrameworkColumn { name: "tokens_out", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "tokens_out INTEGER", additive: false },
+            FrameworkColumn { name: "prompt_cache_hits", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "prompt_cache_hits INTEGER", additive: false },
+            FrameworkColumn { name: "transcript_path", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "transcript_path TEXT NOT NULL", additive: false },
+        ],
+    },
+    FrameworkTable {
         name: "substrate_migrations",
         columns: &[
             FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },
@@ -278,6 +297,22 @@ CREATE TABLE IF NOT EXISTS daemon_starts (
     argv TEXT NOT NULL,
     log_file TEXT,
     cwd TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_id TEXT NOT NULL,
+    phase INTEGER NOT NULL,
+    cycle INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    harness_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    exit_code INTEGER NOT NULL,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    prompt_cache_hits INTEGER,
+    transcript_path TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS substrate_migrations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -876,7 +911,10 @@ fields:
         );
         for t in FRAMEWORK_DDL_TABLES {
             let scanned_cols = scanned.get(t.name).unwrap_or_else(|| {
-                panic!("table {} declared in FRAMEWORK_DDL_TABLES but not in SUBSTRATE_DDL", t.name)
+                panic!(
+                    "table {} declared in FRAMEWORK_DDL_TABLES but not in SUBSTRATE_DDL",
+                    t.name
+                )
             });
             let const_cols: Vec<String> = t.columns.iter().map(|c| c.name.to_string()).collect();
             let scanned_set: std::collections::BTreeSet<&str> =

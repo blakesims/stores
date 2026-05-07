@@ -133,9 +133,38 @@ fn second_open_is_idempotent() {
     drop(db::open(&dbp).unwrap());
     let conn = db::open(&dbp).unwrap();
     let n: i64 = conn
-        .query_row("SELECT COUNT(*) FROM substrate_migrations", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM substrate_migrations", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(n, 1, "second open must not insert a duplicate audit row");
+}
+
+#[test]
+fn version_n_db_open_creates_agent_runs_table() {
+    let _g = ENV_GUARD.lock().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let dbp = tmp.path().join("db.sqlite");
+    seed_version_n(&dbp);
+    let conn = db::open(&dbp).unwrap();
+    let cols = col_names(&conn, "agent_runs");
+    for name in [
+        "display_id",
+        "phase",
+        "cycle",
+        "role",
+        "model_id",
+        "harness_id",
+        "started_at",
+        "ended_at",
+        "exit_code",
+        "tokens_in",
+        "tokens_out",
+        "prompt_cache_hits",
+        "transcript_path",
+    ] {
+        assert!(cols.iter().any(|c| c == name), "missing {name}: {cols:?}");
+    }
 }
 
 #[test]
@@ -145,7 +174,9 @@ fn fresh_db_has_empty_substrate_migrations() {
     let dbp = tmp.path().join("db.sqlite");
     let conn = db::open(&dbp).unwrap();
     let n: i64 = conn
-        .query_row("SELECT COUNT(*) FROM substrate_migrations", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM substrate_migrations", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(n, 0, "fresh-DB open must not record any drift");
 }
@@ -169,7 +200,9 @@ fn disable_autoapply_env_var_skips_apply() {
             "with env=1, actor_note must remain absent; got: {cols:?}"
         );
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM substrate_migrations", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM substrate_migrations", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(n, 0);
     }

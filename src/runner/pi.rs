@@ -12,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::{Runner, RunnerOutput};
+use super::{AgentRunTelemetry, Runner, RunnerOutput};
 
 pub struct PiRunner {
     node_bin: PathBuf,
@@ -56,13 +56,81 @@ fn resolve_cwd(workspace_path: Option<&str>) -> Result<PathBuf> {
     }
 }
 
-fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) {
+/// Write the JSONL transcript to `<runs_dir>/<session_id>.jsonl`.
+///
+/// Returns `Ok(path)` where `path` is always under `runs_dir` (never under
+/// system temp). If the primary write fails, attempts to write an error stub
+/// at `<runs_dir>/<session_id>-error.json`. If that also fails, tries
+/// `create_dir_all` on `runs_dir` and retries both writes. If all attempts
+/// fail, returns `Err` — callers must NOT call `insert_agent_run`; the drive
+/// layer marks the row failed without a persisted path.
+///
+/// **Invariant:** a successful return value is ALWAYS under `.stores/runs/`.
+/// No `/tmp` fallback exists.
+fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> anyhow::Result<PathBuf> {
     let runs_dir = std::env::var_os("STORES_RUNS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.join(".stores").join("runs"));
-    if fs::create_dir_all(&runs_dir).is_ok() {
-        let _ = fs::write(runs_dir.join(format!("{session_id}.jsonl")), stdout);
+
+    let try_write = |mkdir: bool| -> Option<PathBuf> {
+        if mkdir {
+            let _ = fs::create_dir_all(&runs_dir);
+        }
+        if runs_dir.is_dir() || fs::create_dir_all(&runs_dir).is_ok() {
+            let path = runs_dir.join(format!("{session_id}.jsonl"));
+            if fs::write(&path, stdout).is_ok() {
+                return Some(path);
+            }
+            eprintln!(
+                "warning: pi runner could not write transcript {}; writing error stub",
+                path.display()
+            );
+            let stub_path = runs_dir.join(format!("{session_id}-error.json"));
+            let stub_content =
+                "{\"error\":\"transcript write failed\",\"reason\":\"primary write failed\"}\n";
+            if fs::write(&stub_path, stub_content).is_ok() {
+                return Some(stub_path);
+            }
+        }
+        None
+    };
+
+    if let Some(p) = try_write(false) {
+        return Ok(p);
     }
+    if let Some(p) = try_write(true) {
+        return Ok(p);
+    }
+
+    anyhow::bail!(
+        "pi transcript write failed: could not write to {} (no /tmp fallback; \
+         transcript_path must be under .stores/runs/)",
+        runs_dir.display()
+    )
+}
+
+fn extract_pi_telemetry(stdout: &str) -> (Option<String>, Option<i64>, Option<i64>, Option<i64>) {
+    let mut model_id = None;
+    let mut tokens_in = None;
+    let mut tokens_out = None;
+    let mut prompt_cache_hits = None;
+    for line in stdout.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        model_id = model_id.or_else(|| {
+            v.get("model")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+        });
+        if let Some(u) = v.get("usage") {
+            tokens_in = tokens_in.or_else(|| u.get("input_tokens").and_then(|x| x.as_i64()));
+            tokens_out = tokens_out.or_else(|| u.get("output_tokens").and_then(|x| x.as_i64()));
+            prompt_cache_hits =
+                prompt_cache_hits.or_else(|| u.get("prompt_cache_hits").and_then(|x| x.as_i64()));
+        }
+    }
+    (model_id, tokens_in, tokens_out, prompt_cache_hits)
 }
 
 pub fn extract_final_output(stdout: &str) -> Option<serde_json::Value> {
@@ -134,18 +202,77 @@ impl Runner for PiRunner {
         if let Some(p) = &schema_path {
             cmd.arg("--schema").arg(p);
         }
+        let started_at = crate::handlers::row::now_iso8601();
         let output = cmd.output().context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
+        let ended_at = crate::handlers::row::now_iso8601();
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let exit_code = output.status.code().unwrap_or(-1);
-        write_transcript(&cwd, &session_id, &stdout);
+        // write_transcript returns Err if the path cannot be written under
+        // .stores/runs/ — no /tmp fallback. On Err, propagate so the drive
+        // layer marks the row failed without calling insert_agent_run.
+        let transcript_path = Some(
+            write_transcript(&cwd, &session_id, &stdout)
+                .context("pi transcript write failed; not persisting agent_run row")?
+                .to_string_lossy()
+                .to_string(),
+        );
+        let (raw_model_id, tokens_in, tokens_out, prompt_cache_hits) =
+            extract_pi_telemetry(&stdout);
+        // Pi runner MUST emit a deterministic model_id at the source layer so
+        // insert_agent_run never receives None. If the child transcript carries a
+        // model string, prefer it; otherwise fall back to the deterministic sentinel
+        // "pi:default". The DB contract is required = non-None, non-empty; the
+        // source layer (here) satisfies it — db.rs never provides defaults.
+        let model_id = raw_model_id.or_else(|| Some("pi:default".to_string()));
 
+        // Build telemetry from invocation-level data regardless of payload
+        // validity — telemetry belongs to the invocation, not the payload.
+        let telemetry = AgentRunTelemetry {
+            model_id,
+            harness_id: Some("pi".to_string()),
+            started_at: Some(started_at),
+            ended_at: Some(ended_at),
+            tokens_in,
+            tokens_out,
+            prompt_cache_hits,
+            transcript_path,
+        };
+
+        // Payload-level failures are surfaced via `payload_error` so that
+        // `exit_code` always reflects the REAL child process exit status.
+        // Drive persists telemetry (with the real exit_code) first, then checks
+        // `payload_error` and surfaces it via the same abort path as non-zero exit.
         let payload = extract_final_output(&stdout);
         if exit_code == 0 && payload.is_none() {
-            bail!("pi helper exited 0 but did not emit final_output");
+            return Ok(RunnerOutput {
+                stdout,
+                stderr,
+                exit_code,
+                final_message: None,
+                structured_output: None,
+                session_id: Some(session_id),
+                structured_output_source: None,
+                telemetry,
+                payload_error: Some(
+                    "pi helper exited 0 but did not emit final_output".to_string(),
+                ),
+            });
         }
         if let (Some(s), Some(p)) = (schema, payload.as_ref()) {
-            validate_payload(s, p)?;
+            if let Err(e) = validate_payload(s, p) {
+                return Ok(RunnerOutput {
+                    stdout,
+                    stderr,
+                    exit_code,
+                    final_message: None,
+                    structured_output: None,
+                    session_id: Some(session_id),
+                    structured_output_source: None,
+                    telemetry,
+                    payload_error: Some(format!("{e:#}")),
+                });
+            }
         }
         Ok(RunnerOutput {
             stdout,
@@ -155,6 +282,8 @@ impl Runner for PiRunner {
             structured_output: payload,
             session_id: Some(session_id),
             structured_output_source: Some("pi-tool"),
+            telemetry,
+            payload_error: None,
         })
     }
 }
@@ -203,12 +332,15 @@ mod tests {
 
     #[test]
     fn malformed_payload_errors() {
-        let (_d, helper) = shim(
+        // Payload validation failure → Ok(RunnerOutput) with real exit_code (0)
+        // from the child process, and the schema validation message in payload_error.
+        // Telemetry is persisted by the caller (drive) before surfacing the error.
+        let (_d, bin) = shim(
             "#!/bin/sh\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\"}}'\n",
         );
-        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
+        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
         let schema = r#"{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}"#;
-        let err = runner
+        let out = runner
             .spawn(
                 "executor",
                 "sys",
@@ -216,16 +348,29 @@ mod tests {
                 Some(schema),
                 Some(env!("CARGO_MANIFEST_DIR")),
             )
-            .unwrap_err();
-        assert!(err.to_string().contains("schema validation"));
+            .unwrap();
+        // exit_code reflects the REAL child process exit status (0 here).
+        assert_eq!(out.exit_code, 0, "payload failure preserves real child exit_code");
+        // payload_error carries the validation message, separate from exit_code.
+        let payload_err = out.payload_error.as_deref().unwrap_or("");
+        assert!(
+            payload_err.contains("schema validation"),
+            "schema validation error in payload_error: got {:?}",
+            payload_err
+        );
+        assert!(out.structured_output.is_none());
+        assert!(out.telemetry.harness_id.as_deref() == Some("pi"));
     }
 
     #[test]
     fn missing_final_tool_call_errors_when_helper_exits_zero() {
-        let (_d, helper) =
+        // Missing final_output when child exits 0 → Ok(RunnerOutput) with real
+        // exit_code (0) and the explanation in payload_error (not exit_code override).
+        // Telemetry is persisted by the caller (drive) before surfacing the error.
+        let (_d, bin) =
             shim("#!/bin/sh\necho '{\"type\":\"message\",\"text\":\"done\"}'\nexit 0\n");
-        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
-        let err = runner
+        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let out = runner
             .spawn(
                 "planner",
                 "sys",
@@ -233,8 +378,17 @@ mod tests {
                 None,
                 Some(env!("CARGO_MANIFEST_DIR")),
             )
-            .unwrap_err();
-        assert!(err.to_string().contains("did not emit final_output"));
+            .unwrap();
+        // exit_code reflects the REAL child process exit status (0 here).
+        assert_eq!(out.exit_code, 0, "missing final_output preserves real child exit_code");
+        // payload_error carries the explanation, separate from exit_code.
+        let payload_err = out.payload_error.as_deref().unwrap_or("");
+        assert!(
+            payload_err.contains("did not emit final_output"),
+            "explanation in payload_error: got {:?}",
+            payload_err
+        );
+        assert!(out.telemetry.harness_id.as_deref() == Some("pi"));
     }
 
     #[test]
@@ -264,7 +418,8 @@ mod tests {
             &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             sid,
             "{\"type\":\"final_output\"}\n",
-        );
+        )
+        .expect("write_transcript must succeed with STORES_RUNS_DIR set");
         let text = fs::read_to_string(runs.path().join(format!("{sid}.jsonl"))).unwrap();
         assert!(text.contains("final_output"));
     }

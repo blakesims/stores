@@ -10,6 +10,7 @@
 //!   * exactly one `skip-plan` row in transition_history on planning→ready
 //!   * final status: in_review
 //!   * runner role trace: [executor, code-reviewer, wrap]
+//!   * agent_runs rows persisted with non-NULL prompt_cache_hits
 
 use rusqlite::Connection;
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
@@ -17,7 +18,7 @@ use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use stores::handlers::drive::drive_loop;
 use stores::handlers::submit::fire_on_entry_follow_ons;
 use stores::runner::mock::MockRunner;
-use stores::runner::RunnerOutput;
+use stores::runner::{AgentRunTelemetry, RunnerOutput};
 use stores::schema::Schema;
 
 fn tasks_schema() -> Schema {
@@ -37,12 +38,25 @@ fn fresh_db() -> Connection {
     conn
 }
 
-fn make_run_output(stdout: &str) -> RunnerOutput {
+/// Create a workspace TempDir under target/test-workspaces (never under /tmp).
+/// The caller MUST keep the returned TempDir alive for the duration of the test.
+fn make_workspace() -> tempfile::TempDir {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-workspaces");
+    std::fs::create_dir_all(&base).unwrap();
+    tempfile::TempDir::new_in(&base).unwrap()
+}
+
+fn make_run_output(stdout: &str, workspace: &tempfile::TempDir) -> RunnerOutput {
     let last = stdout
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty())
         .map(|s| s.to_string());
+    let mut telemetry = AgentRunTelemetry::with_mock_defaults(workspace.path());
+    // Supply an explicit non-NULL prompt_cache_hits (synthetic positive value).
+    telemetry.prompt_cache_hits = Some(3);
     RunnerOutput {
         stdout: stdout.to_string(),
         stderr: String::new(),
@@ -51,6 +65,8 @@ fn make_run_output(stdout: &str) -> RunnerOutput {
         structured_output: None,
         session_id: None,
         structured_output_source: None,
+        payload_error: None,
+        telemetry,
     }
 }
 
@@ -119,17 +135,23 @@ fn t1_drive_skips_planner_and_plan_reviewer() {
         "transition_history must contain exactly one skip-plan row on planning→ready"
     );
 
+    // Keep workspace alive for the entire drive loop so transcript files persist.
     // T072 r6: executor and code-reviewer must have session_id (MINOR 1 requirement).
+    let workspace = make_workspace();
+
     let mut executor_out = make_run_output(
         r#"{"role":"executor","summary":"did the thing","commit":"abc","files_changed":["src/x.rs"]}"#,
+        &workspace,
     );
     executor_out.session_id = Some("t1-exec-session".to_string());
     let mut code_reviewer_out = make_run_output(
         r#"{"role":"code-reviewer","gate":"PASS","summary":"looks good","critical":0,"major":0,"minor":0}"#,
+        &workspace,
     );
     code_reviewer_out.session_id = Some("t1-review-session".to_string());
     let wrap_out = make_run_output(
         r#"{"role":"wrap","executive_summary":"done","deviations":[],"residual_risks":[],"recommended_sanity_checks":[]}"#,
+        &workspace,
     );
     let runner = MockRunner::new(vec![executor_out, code_reviewer_out, wrap_out]);
 
@@ -202,16 +224,62 @@ fn t1_drive_skips_planner_and_plan_reviewer() {
         )
         .unwrap();
     let plan_str = plan_str.expect("T1 row must carry a synthesized plan, not NULL");
-    let plan: serde_json::Value =
-        serde_json::from_str(&plan_str).expect("plan must be valid JSON");
+    let plan: serde_json::Value = serde_json::from_str(&plan_str).expect("plan must be valid JSON");
     let phases = plan
         .get("phases")
         .and_then(|v| v.as_array())
         .expect("synthesized plan must have phases array");
-    assert_eq!(phases.len(), 1, "T1 synthesized plan must have exactly one phase");
+    assert_eq!(
+        phases.len(),
+        1,
+        "T1 synthesized plan must have exactly one phase"
+    );
     assert_eq!(
         plan_source.as_deref(),
         Some("contract_synthesized"),
         "T1 plan provenance must be contract_synthesized"
+    );
+
+    // agent_runs persistence: T1 dispatches 3 roles (executor, code-reviewer, wrap).
+    // Each must have a row in agent_runs with non-NULL prompt_cache_hits.
+    let run_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_runs WHERE display_id = ?1",
+            rusqlite::params![display_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        run_count, 3,
+        "T1 drive must persist exactly 3 agent_runs rows (executor, code-reviewer, wrap)"
+    );
+
+    // All rows must have non-NULL prompt_cache_hits (supplied as 3 in make_run_output).
+    let null_cache_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM agent_runs WHERE display_id = ?1 AND prompt_cache_hits IS NULL",
+            rusqlite::params![display_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        null_cache_rows, 0,
+        "all agent_runs rows must have non-NULL prompt_cache_hits"
+    );
+
+    // Check field shape on the executor row (first dispatched role).
+    let (role, model_id, prompt_cache_hits): (String, String, i64) = conn
+        .query_row(
+            "SELECT role, model_id, prompt_cache_hits FROM agent_runs \
+             WHERE display_id = ?1 AND role = 'executor'",
+            rusqlite::params![display_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(role, "executor");
+    assert!(!model_id.is_empty(), "model_id must not be empty");
+    assert_eq!(
+        prompt_cache_hits, 3,
+        "executor row must carry the synthetic prompt_cache_hits=3"
     );
 }

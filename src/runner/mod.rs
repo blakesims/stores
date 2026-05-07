@@ -51,6 +51,68 @@ pub mod pi;
 #[cfg(feature = "runner-pi")]
 pub use pi::PiRunner;
 
+/// Per-agent invocation telemetry emitted by a runner at source.
+#[derive(Debug, Clone, Default)]
+pub struct AgentRunTelemetry {
+    pub model_id: Option<String>,
+    pub harness_id: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
+    pub prompt_cache_hits: Option<i64>,
+    pub transcript_path: Option<String>,
+}
+
+impl AgentRunTelemetry {
+    /// Fully-populated telemetry for mock/test use.
+    ///
+    /// All required fields (`model_id`, `harness_id`, `started_at`, `ended_at`,
+    /// `transcript_path`) are populated. `transcript_path` is a REAL file written
+    /// under `<workspace_path>/.stores/runs/mock-<uuid>.json` so that
+    /// `insert_agent_run`'s required-field validation (non-None, non-empty,
+    /// resolves to a real path) is satisfied without spinning up a full runner.
+    ///
+    /// **Invariant:** transcript_path is NEVER under system temp (`/tmp`,
+    /// `$TMPDIR`, etc.) and NEVER under `target/test-mock-runs`. The mock
+    /// invariant matches the production invariant: transcripts live under the
+    /// workspace `.stores/runs/` tree.
+    ///
+    /// Path selection (in order):
+    /// 1. `STORES_RUNS_DIR` env var (set by tests to redirect transcript writes).
+    /// 2. `<workspace_path>/.stores/runs/` — callers MUST supply a valid workspace
+    ///    directory (typically a `tempfile::tempdir()` in tests).
+    ///
+    /// # Panics
+    /// Panics if neither `STORES_RUNS_DIR` is set nor `workspace_path` is provided.
+    ///
+    /// For tests that assert specific field values (e.g. `happy_path_one_phase_mock`),
+    /// replace the telemetry on the returned `RunnerOutput` with a
+    /// fully-specified `AgentRunTelemetry` that points at real synthesized files.
+    pub fn with_mock_defaults(workspace_path: &std::path::Path) -> Self {
+        let now = crate::handlers::row::now_iso8601();
+        // Choose a runs dir that is never under system temp and never under target/.
+        // Priority: STORES_RUNS_DIR (set by tests) → <workspace_path>/.stores/runs/.
+        let stub_id = uuid::Uuid::new_v4();
+        let runs_dir = match std::env::var_os("STORES_RUNS_DIR") {
+            Some(p) => std::path::PathBuf::from(p),
+            None => workspace_path.join(".stores").join("runs"),
+        };
+        let _ = std::fs::create_dir_all(&runs_dir);
+        let stub_path = runs_dir.join(format!("mock-{stub_id}.json"));
+        let _ = std::fs::write(&stub_path, b"{\"model\":\"mock-model\"}\n");
+        let transcript_path = Some(stub_path.to_string_lossy().into_owned());
+        Self {
+            model_id: Some("mock-model".to_string()),
+            harness_id: Some("mock".to_string()),
+            started_at: Some(now.clone()),
+            ended_at: Some(now),
+            transcript_path,
+            ..Self::default()
+        }
+    }
+}
+
 /// The output produced by a single `Runner::spawn` call.
 #[derive(Debug, Clone)]
 pub struct RunnerOutput {
@@ -93,6 +155,20 @@ pub struct RunnerOutput {
     /// Used for postmortem logging (Phase 2 AC2.9). Mock runner always returns
     /// `None` unless tests explicitly set it.
     pub structured_output_source: Option<&'static str>,
+    /// Runner/source telemetry for persistence in `agent_runs`.
+    pub telemetry: AgentRunTelemetry,
+    /// Payload-level validation error surfaced separately from `exit_code`.
+    ///
+    /// `exit_code` always reflects the real child process exit status.
+    /// When the runner process exits 0 but the output fails schema validation
+    /// (missing `final_output`, wrong shape, etc.), the runner sets this field
+    /// instead of overriding `exit_code`. Drive checks this field after
+    /// persisting telemetry and surfaces it via the same abort path as
+    /// a non-zero exit.
+    ///
+    /// `None` means no payload error. `Some(reason)` means payload validation
+    /// failed with the given human-readable reason.
+    pub payload_error: Option<String>,
 }
 
 /// A synchronous, blocking agent runner.

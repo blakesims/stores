@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, Transaction};
+
+use crate::runner::AgentRunTelemetry;
 use std::path::Path;
 
 use crate::codegen::ddl::{validate_framework_ddl, RUNS_VIEW_DDL, SUBSTRATE_DDL};
@@ -93,6 +95,87 @@ pub fn open_no_autoapply(path: &Path) -> Result<Connection> {
 /// `policy_ref` / `policies_hash` are `None` for manual transitions; the
 /// autonomous flow daemon fills them when it dispatches policy-mediated writes.
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn insert_agent_run(
+    conn: &Connection,
+    display_id: &str,
+    phase: i64,
+    cycle: i64,
+    role: &str,
+    exit_code: i32,
+    telemetry: &AgentRunTelemetry,
+) -> Result<()> {
+    // All required telemetry fields must be supplied by the caller. The
+    // `legacy_unknown` sentinel is migration/backfill-only — callers doing
+    // historical backfill must pass it explicitly. New invocations that
+    // genuinely lack telemetry (runner failed before producing any output)
+    // must use a separate error shape (RunnerOutput::payload_error) rather
+    // than smuggling missing values through these fields.
+    let model_id = telemetry
+        .model_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: model_id is required for new rows; supply it from the runner or use 'legacy_unknown' explicitly for backfill"))?
+        .to_string();
+    anyhow::ensure!(
+        !model_id.is_empty(),
+        "insert_agent_run: model_id must be non-empty"
+    );
+    let harness_id = telemetry
+        .harness_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: harness_id is required for new rows"))?;
+    anyhow::ensure!(
+        !harness_id.is_empty(),
+        "insert_agent_run: harness_id must be non-empty"
+    );
+    let started_at = telemetry
+        .started_at
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: started_at is required for new rows"))?;
+    anyhow::ensure!(
+        !started_at.is_empty(),
+        "insert_agent_run: started_at must be non-empty"
+    );
+    let ended_at = telemetry
+        .ended_at
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: ended_at is required for new rows"))?;
+    anyhow::ensure!(
+        !ended_at.is_empty(),
+        "insert_agent_run: ended_at must be non-empty"
+    );
+    let transcript_path = telemetry
+        .transcript_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: transcript_path is required for new rows; supply it from the runner or use 'legacy_unknown' explicitly for backfill"))?
+        .to_string();
+    anyhow::ensure!(
+        !transcript_path.is_empty(),
+        "insert_agent_run: transcript_path must be non-empty"
+    );
+    conn.execute(
+        "INSERT INTO agent_runs \
+         (display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, tokens_in, tokens_out, prompt_cache_hits, transcript_path) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        rusqlite::params![
+            display_id,
+            phase,
+            cycle,
+            role,
+            model_id,
+            harness_id,
+            started_at,
+            ended_at,
+            exit_code,
+            telemetry.tokens_in,
+            telemetry.tokens_out,
+            telemetry.prompt_cache_hits,
+            transcript_path,
+        ],
+    )
+    .context("insert agent_runs")?;
+    Ok(())
+}
+
 pub(crate) fn insert_transition_history(
     tx: &Transaction,
     store: &str,
@@ -197,9 +280,79 @@ fields:
         .unwrap();
     }
 
+    fn agent_runs_columns(conn: &Connection) -> Vec<String> {
+        conn.prepare("PRAGMA table_info(agent_runs)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
     fn count_history(conn: &Connection) -> i64 {
         conn.query_row("SELECT COUNT(*) FROM transition_history", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn fresh_db_open_creates_agent_runs_columns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open(&tmp.path().join("db.sqlite")).unwrap();
+        let cols = agent_runs_columns(&conn);
+        for name in [
+            "display_id",
+            "phase",
+            "cycle",
+            "role",
+            "model_id",
+            "harness_id",
+            "started_at",
+            "ended_at",
+            "exit_code",
+            "tokens_in",
+            "tokens_out",
+            "prompt_cache_hits",
+            "transcript_path",
+        ] {
+            assert!(cols.iter().any(|c| c == name), "missing {name}: {cols:?}");
+        }
+    }
+
+    #[test]
+    fn insert_agent_run_persists_required_fields() {
+        let (_schema, conn) = setup_obs();
+        let telemetry = AgentRunTelemetry {
+            model_id: Some("m".to_string()),
+            harness_id: Some("mock".to_string()),
+            started_at: Some("2026-01-01T00:00:00Z".to_string()),
+            ended_at: Some("2026-01-01T00:00:01Z".to_string()),
+            tokens_in: Some(10),
+            tokens_out: Some(20),
+            prompt_cache_hits: Some(3),
+            transcript_path: Some("/tmp/run.jsonl".to_string()),
+        };
+        insert_agent_run(&conn, "T001", 1, 2, "executor", 7, &telemetry).unwrap();
+        let row: (String, i64, i64, String, String, i64, i64, i64, String) = conn
+            .query_row(
+                "SELECT display_id, phase, cycle, role, harness_id, tokens_in, tokens_out, prompt_cache_hits, transcript_path FROM agent_runs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "T001".to_string(),
+                1,
+                2,
+                "executor".to_string(),
+                "mock".to_string(),
+                10,
+                20,
+                3,
+                "/tmp/run.jsonl".to_string()
+            )
+        );
     }
 
     #[test]
