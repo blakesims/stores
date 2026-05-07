@@ -269,7 +269,7 @@ pub fn coerce_value(ty: &FieldType, raw: &str) -> Value {
 
 /// Derive the observation week label (`wNN-dD`) from `captured_at` when
 /// `captured_week` is NULL/empty. Non-empty stored values are preserved.
-pub fn derive_observation_captured_week(entry: &mut EntryMap) {
+pub(crate) fn derive_observation_captured_week(entry: &mut EntryMap) {
     let stored = entry
         .get("captured_week")
         .and_then(|v| v.as_str())

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/observations_e2e.sh — End-to-end scripted trace of the 8 T009 DONE_WHEN clauses.
+# tests/observations_e2e.sh — End-to-end scripted observations regression trace.
 #
 # Clause 1: Full add with all production-shaped fields → L001
 # Clause 2: Triage flow: open → investigating → confirmed
@@ -19,7 +19,7 @@
 #            is T010 work.
 #
 # Usage: bash tests/observations_e2e.sh
-# Requires: stores binary on PATH, python3, jq, git
+# Requires: python3, jq, git; uses STORES_BIN or the repository-built stores binary.
 
 set -euo pipefail
 
@@ -29,15 +29,24 @@ unset CLAUDECODE 2>/dev/null || true
 
 STORES_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+if [[ -z "${STORES_BIN:-}" ]]; then
+    if [[ ! -x "$STORES_ROOT/target/debug/stores" ]]; then
+        (cd "$STORES_ROOT" && cargo build >/dev/null)
+    fi
+    STORES_BIN="$STORES_ROOT/target/debug/stores"
+fi
+[[ -x "$STORES_BIN" ]] || { echo "  FAIL: stores binary not executable: $STORES_BIN" >&2; exit 1; }
+stores() { "$STORES_BIN" "$@"; }
+
 pass() { echo "  PASS: $*"; }
 fail() { echo "  FAIL: $*" >&2; exit 1; }
 
 TMPDIR="${STORES_E2E_TMP:-$(mktemp -d /tmp/t009-obs-port-XXXXXX)}"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "=== stores observations e2e (8 DONE_WHEN clauses) ==="
+echo "=== stores observations e2e (T009 + T093 regression coverage) ==="
 echo "tmp dir: $TMPDIR"
-echo "stores binary: $(command -v stores)"
+echo "stores binary: $STORES_BIN"
 echo ""
 
 cd "$TMPDIR"
@@ -599,7 +608,7 @@ pass "wont_fix_at populated on open→wont_fix and confirmed→wont_fix; resolve
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== All 8 DONE_WHEN clauses verified ==="
+echo "=== All observations e2e clauses and T093 regressions verified ==="
 echo "  #1 full add (dashboard T3, all required fields, full intent contract → L001): PASS"
 echo "  #2 triage flow (open→investigating→confirmed; guard: contract_state==ready): PASS"
 echo "  #3 required_when (flip contract_state ready without sub-fields → rejected): PASS"
