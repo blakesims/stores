@@ -1025,8 +1025,15 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                         }
                     }
                     let cap = crate::flow::config::resolve_drive_max_parallel(config_path);
-                    let live = count_live_drive_pids(conn).unwrap_or(0);
-                    if live >= cap as usize {
+                    let now = crate::handlers::row::now_iso8601();
+                    let live_pids = count_live_drive_pids(conn).unwrap_or(0);
+                    let live_locks = crate::flow::engine_runner::count_live_auto_drive_dispatch_locks(
+                        conn,
+                        &now,
+                        agent.claim_window_secs,
+                    )
+                    .unwrap_or(0);
+                    if live_pids.max(live_locks) >= cap as usize {
                         continue;
                     }
                 }

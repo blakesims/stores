@@ -130,7 +130,7 @@ pub fn scan_and_record_actionability(
     iteration: i64,
     started_at: &str,
 ) -> Result<ScannerResult> {
-    let rows = scan_rows(conn, schemas)?;
+    let rows = scan_rows(conn, schemas, started_at, 300)?;
     let summary = summarize_rows(iteration, &rows, 0);
 
     record_heartbeat(conn, summary, started_at)?;
@@ -164,7 +164,8 @@ pub fn scan_record_and_redrive_tasks(
     config_path: &Path,
     policies_hash: &str,
 ) -> Result<ScannerResult> {
-    let mut rows = scan_rows(conn, schemas)?;
+    let claim_window_secs = auto_drive_claim_window_secs(agents);
+    let mut rows = scan_rows(conn, schemas, started_at, claim_window_secs)?;
     let cap = crate::flow::config::resolve_drive_max_parallel(config_path) as usize;
     let mut dispatched = 0_i64;
 
@@ -175,8 +176,10 @@ pub fn scan_record_and_redrive_tasks(
             && r.held_reason.is_none()
     }) {
         processed_task_rows.insert(row.row_id);
-        let live = count_live_drive_pids(conn).unwrap_or(0);
-        if live >= cap {
+        let live_pids = count_live_drive_pids(conn).unwrap_or(0);
+        let live_locks = count_live_auto_drive_dispatch_locks(conn, started_at, claim_window_secs)
+            .unwrap_or(0);
+        if live_pids.max(live_locks) >= cap {
             row.classification = "held".to_string();
             row.held_reason = Some("lane_cap_full".to_string());
             upsert_actionability(
@@ -263,9 +266,19 @@ pub fn scan_record_and_redrive_tasks(
     Ok(ScannerResult { summary, rows })
 }
 
-fn scan_rows(conn: &Connection, schemas: ScannerSchemas<'_>) -> Result<Vec<ClassifiedRow>> {
+fn scan_rows(
+    conn: &Connection,
+    schemas: ScannerSchemas<'_>,
+    started_at: &str,
+    claim_window_secs: u64,
+) -> Result<Vec<ClassifiedRow>> {
     let mut rows = Vec::new();
-    rows.extend(scan_tasks(conn, schemas.tasks)?);
+    rows.extend(scan_tasks(
+        conn,
+        schemas.tasks,
+        started_at,
+        claim_window_secs,
+    )?);
     rows.extend(scan_intake(conn, schemas.intake)?);
     rows.extend(scan_observations(conn, schemas.observations)?);
     Ok(rows)
@@ -286,7 +299,12 @@ fn summarize_rows(iteration: i64, rows: &[ClassifiedRow], dispatched: i64) -> He
     }
 }
 
-fn scan_tasks(conn: &Connection, schema: &Schema) -> Result<Vec<ClassifiedRow>> {
+fn scan_tasks(
+    conn: &Connection,
+    schema: &Schema,
+    started_at: &str,
+    claim_window_secs: u64,
+) -> Result<Vec<ClassifiedRow>> {
     let table = quote_ident(&schema.name);
     let sql = format!(
         "SELECT id, status, current_phase, current_cycle, tier_hint, plan, blocked_reason, drive_pid \
@@ -334,7 +352,14 @@ fn scan_tasks(conn: &Connection, schema: &Schema) -> Result<Vec<ClassifiedRow>> 
         let (classification, held_reason) = if let Some(_agent) = next_agent {
             if live_drive_owner {
                 ("held".to_string(), Some("live_drive_owner".to_string()))
-            } else if has_live_dispatch_lock(conn, &schema.name, row_id, "auto-drive")? {
+            } else if has_live_dispatch_lock(
+                conn,
+                &schema.name,
+                row_id,
+                "auto-drive",
+                started_at,
+                claim_window_secs,
+            )? {
                 ("held".to_string(), Some("live_dispatch_lock".to_string()))
             } else {
                 ("actionable_task_redrive".to_string(), None)
@@ -440,14 +465,139 @@ fn has_live_dispatch_lock(
     store: &str,
     row_id: i64,
     agent: &str,
+    started_at: &str,
+    claim_window_secs: u64,
 ) -> Result<bool> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM dispatch_locks \
-         WHERE store=?1 AND row_id=?2 AND agent_name=?3 AND finished_at IS NULL",
-        rusqlite::params![store, row_id, agent],
-        |r| r.get(0),
+    let cutoff = iso8601_sub_secs(started_at, claim_window_secs).unwrap_or_default();
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(pid, 0) FROM dispatch_locks \
+         WHERE store=?1 AND row_id=?2 AND agent_name=?3 AND finished_at IS NULL \
+           AND COALESCE(claimed_at, '') >= ?4",
     )?;
-    Ok(count > 0)
+    let pids: Vec<i64> = stmt
+        .query_map(rusqlite::params![store, row_id, agent, cutoff], |r| r.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(pids
+        .into_iter()
+        .any(|pid| pid <= 0 || pid_is_alive(pid as i32)))
+}
+
+pub(crate) fn count_live_auto_drive_dispatch_locks(
+    conn: &Connection,
+    started_at: &str,
+    claim_window_secs: u64,
+) -> Result<usize> {
+    let cutoff = iso8601_sub_secs(started_at, claim_window_secs).unwrap_or_default();
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(pid, 0) FROM dispatch_locks \
+         WHERE store='tasks' AND agent_name='auto-drive' AND finished_at IS NULL \
+           AND COALESCE(claimed_at, '') >= ?1",
+    )?;
+    let pids: Vec<i64> = stmt
+        .query_map(rusqlite::params![cutoff], |r| r.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(pids
+        .into_iter()
+        .filter(|pid| *pid <= 0 || pid_is_alive(*pid as i32))
+        .count())
+}
+
+fn auto_drive_claim_window_secs(agents: &AgentsYaml) -> u64 {
+    agents
+        .agents
+        .iter()
+        .find(|a| a.name == "auto-drive")
+        .map(|a| a.claim_window_secs)
+        .unwrap_or(300)
+}
+
+fn iso8601_sub_secs(base: &str, secs: u64) -> Option<String> {
+    let epoch = parse_iso8601_to_epoch(base)?;
+    let shifted = epoch.saturating_sub(secs as i64).max(0) as u64;
+    let (y, mo, d, h, mi, se) = unix_to_ymd_hms(shifted);
+    Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z"))
+}
+
+fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let y: u32 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
+    let mo: u32 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
+    let d: u32 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
+    let h: u32 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
+    let mi: u32 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
+    let se: u32 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
+    Some(ymd_hms_to_epoch(y, mo, d, h, mi, se))
+}
+
+fn ymd_hms_to_epoch(y: u32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
+    fn days_in_month(y: u32, m: u32) -> u32 {
+        match m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => if is_leap(y) { 29 } else { 28 },
+            _ => 0,
+        }
+    }
+    let mut days = 0_i64;
+    for yy in 1970..y {
+        days += if is_leap(yy) { 366 } else { 365 };
+    }
+    for mm in 1..mo {
+        days += i64::from(days_in_month(y, mm));
+    }
+    days += i64::from(d.saturating_sub(1));
+    days * 86_400 + i64::from(h) * 3_600 + i64::from(mi) * 60 + i64::from(s)
+}
+
+fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let s = secs % 60;
+    let total_min = secs / 60;
+    let mi = total_min % 60;
+    let total_hr = total_min / 60;
+    let h = total_hr % 24;
+    let mut days = total_hr / 24;
+    let mut year = 1970_u32;
+    loop {
+        let dy = if is_leap(year) { 366 } else { 365 } as u64;
+        if days < dy {
+            break;
+        }
+        days -= dy;
+        year += 1;
+    }
+    let dim = [
+        31_u32,
+        if is_leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 0_usize;
+    let mut d = days as u32;
+    while month < dim.len() && d >= dim[month] {
+        d -= dim[month];
+        month += 1;
+    }
+    (year, month as u32 + 1, d + 1, h as u32, mi as u32, s as u32)
+}
+
+fn is_leap(y: u32) -> bool {
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 fn opt_i64_value(v: Option<i64>) -> Value {
@@ -833,6 +983,122 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
+        assert_eq!(locks, 0);
+    }
+
+    #[test]
+    fn scanner_ignores_stale_dispatch_lock_outside_claim_window() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let task_id = insert_task(&conn, "T911", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![999_999_997_i64, task_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, claimed_at, claimed_by) \
+             VALUES ('tasks', ?1, 'T911', 'auto-drive', '2026-05-07T00:00:00Z', 'daemon')",
+            rusqlite::params![task_id],
+        )
+        .unwrap();
+
+        let result = scan_and_record_actionability(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            11,
+            "2026-05-07T00:10:01Z",
+        )
+        .unwrap();
+
+        assert!(result.rows.iter().any(|r| r.store == "tasks"
+            && r.row_id == task_id
+            && r.classification == "actionable_task_redrive"
+            && r.held_reason.is_none()));
+    }
+
+    #[test]
+    fn scanner_holds_recent_dispatch_lock_within_claim_window() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let task_id = insert_task(&conn, "T912", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![999_999_996_i64, task_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, claimed_at, claimed_by, pid) \
+             VALUES ('tasks', ?1, 'T912', 'auto-drive', '2026-05-07T00:08:00Z', 'daemon', ?2)",
+            rusqlite::params![task_id, std::process::id() as i64],
+        )
+        .unwrap();
+
+        let result = scan_and_record_actionability(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            12,
+            "2026-05-07T00:10:00Z",
+        )
+        .unwrap();
+
+        assert!(result.rows.iter().any(|r| r.store == "tasks"
+            && r.row_id == task_id
+            && r.classification == "held"
+            && r.held_reason.as_deref() == Some("live_dispatch_lock")));
+    }
+
+    #[test]
+    fn action_loop_lane_cap_counts_recent_dispatch_locks() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let occupied_id = insert_task(&conn, "T913", "executing");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, claimed_at, claimed_by, pid) \
+             VALUES ('tasks', ?1, 'T913', 'auto-drive', '2026-05-07T00:09:00Z', 'daemon', ?2)",
+            rusqlite::params![occupied_id, std::process::id() as i64],
+        )
+        .unwrap();
+        let orphan_id = insert_task(&conn, "T914", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![999_999_995_i64, orphan_id],
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config.yaml");
+        std::fs::write(&cfg, "drive:\n  max_parallel: 1\n").unwrap();
+
+        scan_record_and_redrive_tasks(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            13,
+            "2026-05-07T00:10:00Z",
+            &AgentsYaml::default_empty(),
+            &cfg,
+            "",
+        )
+        .unwrap();
+
+        let (held, locks): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT a.held_reason, \
+                        (SELECT COUNT(*) FROM dispatch_locks WHERE row_id=?1 AND agent_name='auto-drive') \
+                 FROM engine_runner_actions a WHERE a.store='tasks' AND a.row_id=?1",
+                rusqlite::params![orphan_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(held.as_deref(), Some("lane_cap_full"));
         assert_eq!(locks, 0);
     }
 
