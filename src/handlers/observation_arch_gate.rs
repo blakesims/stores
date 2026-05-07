@@ -30,10 +30,7 @@ pub(crate) fn enforce_u1_architecture_gate(
     merged: &mut EntryMap,
     diff: &mut EntryMap,
 ) -> Result<()> {
-    let persisted_pending = persisted
-        .get("pending_architecture_review")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let persisted_pending = value_is_true(persisted.get("pending_architecture_review"));
     if !persisted_pending {
         return Ok(());
     }
@@ -94,6 +91,15 @@ pub(crate) fn enforce_u1_architecture_gate(
         Value::Bool(false),
     );
     Ok(())
+}
+
+fn value_is_true(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(true)) => true,
+        Some(Value::Number(n)) => n.as_i64() == Some(1),
+        Some(Value::String(s)) => matches!(s.as_str(), "true" | "1" | "yes"),
+        _ => false,
+    }
 }
 
 fn enforce_reframe_ack(observation_id: &str, merged: &EntryMap, ruling: &RulingRow) -> Result<()> {
