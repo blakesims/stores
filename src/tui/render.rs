@@ -201,8 +201,12 @@ fn cockpit_header_items(app: &App) -> Vec<ListItem<'static>> {
         super::daemon::Liveness::Dead => "daemon:DEAD".to_string(),
     };
     let external = match model.external_review {
-        ExternalReviewState::Available { rows } => {
-            format!("external review: available rows={rows}")
+        ExternalReviewState::Available { rows, lane, status } => {
+            format!(
+                "external review: lane={} status={} rows={rows}",
+                lane.as_deref().unwrap_or("unknown"),
+                status.as_deref().unwrap_or("unknown")
+            )
         }
         ExternalReviewState::Unavailable { reason } => reason,
     };

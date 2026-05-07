@@ -1,0 +1,26 @@
+Observation detail · L700
+
+Summary / story
+  summary: observation story
+  story: full observation body
+
+Priority
+  high
+
+Status
+  open
+
+Contract state
+  state: ready
+  objective: ratify this
+
+Next action / held reason
+  ratify contract
+
+Recent events
+  tasks ready -> executing via start at 2026-05-01
+
+Artifact pointers
+  linked task: T700
+  resolution: resolution.md
+  log: runs/x.log

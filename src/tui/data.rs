@@ -199,13 +199,21 @@ pub struct IntakeRow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalReviewState {
-    Unavailable { reason: String },
-    Available { rows: usize },
+    Unavailable {
+        reason: String,
+    },
+    Available {
+        rows: usize,
+        lane: Option<String>,
+        status: Option<String>,
+    },
 }
 
 impl Default for ExternalReviewState {
     fn default() -> Self {
-        Self::Unavailable { reason: "external review: unavailable / not installed".to_string() }
+        Self::Unavailable {
+            reason: "external review: unavailable / not installed".to_string(),
+        }
     }
 }
 
@@ -221,26 +229,65 @@ pub struct CockpitModel {
 }
 
 pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> CockpitModel {
-    let mut model = CockpitModel { external_review, ..Default::default() };
+    let mut model = CockpitModel {
+        external_review,
+        ..Default::default()
+    };
     for row in rows {
         match row {
             Row::Task(t) => {
-                if matches!(t.status.as_str(), "executing") { model.execution += 1; }
-                if matches!(t.status.as_str(), "plan_review" | "code_review" | "in_review") { model.review += 1; }
-                if matches!(t.status.as_str(), "accepted" | "complete" | "cargo_installed" | "schema_migrated") { model.accept += 1; }
-                if matches!(t.status.as_str(), "blocked" | "deploy_blocked") { model.held += 1; }
-                if is_in_flight_task_status(&t.status) { model.active += 1; }
-                if is_priority_task(t) { model.priority += 1; }
+                if matches!(t.status.as_str(), "executing") {
+                    model.execution += 1;
+                }
+                if matches!(
+                    t.status.as_str(),
+                    "plan_review" | "code_review" | "in_review"
+                ) {
+                    model.review += 1;
+                }
+                if matches!(
+                    t.status.as_str(),
+                    "accepted" | "complete" | "cargo_installed" | "schema_migrated"
+                ) {
+                    model.accept += 1;
+                }
+                if matches!(t.status.as_str(), "blocked" | "deploy_blocked") {
+                    model.held += 1;
+                }
+                if is_in_flight_task_status(&t.status) {
+                    model.active += 1;
+                }
+                if is_priority_task(t) {
+                    model.priority += 1;
+                }
             }
             Row::Obs(o) => {
-                if is_priority_text(&o.priority) || o.priority_rank.map(|r| r <= 1).unwrap_or(false) { model.priority += 1; }
-                if o.lock_reason.as_deref().map(|s| !s.is_empty()).unwrap_or(false) { model.held += 1; }
-                if o.status != "resolved" && o.status != "rejected" { model.active += 1; }
+                if is_priority_text(&o.priority) || o.priority_rank.map(|r| r <= 1).unwrap_or(false)
+                {
+                    model.priority += 1;
+                }
+                if o.lock_reason
+                    .as_deref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+                {
+                    model.held += 1;
+                }
+                if o.status != "resolved" && o.status != "rejected" {
+                    model.active += 1;
+                }
             }
             Row::Intake(i) => {
-                if i.status == "needs_info" { model.held += 1; }
-                if is_priority_text(i.priority.as_deref().unwrap_or("")) || !i.risk_flags.is_empty() { model.priority += 1; }
-                if i.status != "routed" && i.status != "dropped" { model.active += 1; }
+                if i.status == "needs_info" {
+                    model.held += 1;
+                }
+                if is_priority_text(i.priority.as_deref().unwrap_or("")) || !i.risk_flags.is_empty()
+                {
+                    model.priority += 1;
+                }
+                if i.status != "routed" && i.status != "dropped" {
+                    model.active += 1;
+                }
             }
         }
     }
@@ -248,11 +295,17 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
 }
 
 fn is_priority_task(t: &TaskRow) -> bool {
-    t.tier_hint.as_deref().map(is_priority_text).unwrap_or(false)
+    t.tier_hint
+        .as_deref()
+        .map(is_priority_text)
+        .unwrap_or(false)
 }
 
 fn is_priority_text(s: &str) -> bool {
-    matches!(s.to_ascii_lowercase().as_str(), "high" | "urgent" | "p0" | "p1" | "t1")
+    matches!(
+        s.to_ascii_lowercase().as_str(),
+        "high" | "urgent" | "p0" | "p1" | "t1"
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -467,10 +520,16 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         let display_id: String = r.get(0)?;
         let mut artifact_pointers = Vec::new();
         if let Some(b) = branch.as_deref().filter(|s| !s.is_empty()) {
-            artifact_pointers.push(ArtifactPointer { label: "branch".to_string(), value: b.to_string() });
+            artifact_pointers.push(ArtifactPointer {
+                label: "branch".to_string(),
+                value: b.to_string(),
+            });
         }
         if let Some(w) = workspace_path.as_deref().filter(|s| !s.is_empty()) {
-            artifact_pointers.push(ArtifactPointer { label: "workspace".to_string(), value: w.to_string() });
+            artifact_pointers.push(ArtifactPointer {
+                label: "workspace".to_string(),
+                value: w.to_string(),
+            });
         }
         Ok(TaskRow {
             display_id: display_id.clone(),
@@ -490,16 +549,24 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             contract_done_when: r.get(13).ok().flatten(),
             contract_scope_in: r.get(14).ok().flatten(),
             contract_scope_out: r.get(15).ok().flatten(),
-            plan_review_summaries: json_summary_list(r.get::<_, String>(16).ok().as_deref(), "summary"),
+            plan_review_summaries: json_summary_list(
+                r.get::<_, String>(16).ok().as_deref(),
+                "summary",
+            ),
             cycle_summaries: cycle_summary_list(r.get::<_, String>(17).ok().as_deref()),
-            wrap_summaries: json_summary_list(r.get::<_, String>(18).ok().as_deref(), "executive_summary"),
+            wrap_summaries: json_summary_list(
+                r.get::<_, String>(18).ok().as_deref(),
+                "executive_summary",
+            ),
             branch,
             workspace_path,
             artifact_pointers,
             recent_events: Vec::new(),
         })
     })?;
-    for r in task_iter.flatten() { rows.push(Row::Task(r)); }
+    for r in task_iter.flatten() {
+        rows.push(Row::Task(r));
+    }
 
     let obs_cols = table_columns(conn, "observations")?;
     let obs_sql = format!(
@@ -518,15 +585,35 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
     let obs_iter = stmt.query_map([], |r| {
         let evidence_raw: Option<String> = r.get(20).ok().flatten();
         Ok(ObsRow {
-            display_id: r.get(0)?, status: r.get(1)?, priority: r.get(2)?, summary: r.get(3)?, updated_at: r.get(4)?,
-            body: r.get(5).ok().flatten(), source: r.get(6).ok().flatten(), task_id: r.get(7).ok().flatten(), priority_rank: r.get(8).ok().flatten(),
-            contract_state: r.get(9).ok().flatten(), tier_hint: r.get(10).ok().flatten(), intent_objective: r.get(11).ok().flatten(), intent_type: r.get(12).ok().flatten(),
-            intent_acceptance: json_string_array(r.get::<_, String>(13).ok().as_deref()), intent_in_scope: json_string_array(r.get::<_, String>(14).ok().as_deref()), intent_out_of_scope: json_string_array(r.get::<_, String>(15).ok().as_deref()),
-            intent_known_solution: r.get(16).ok().flatten(), locked_by: r.get(17).ok().flatten(), locked_at: r.get(18).ok().flatten(), lock_reason: r.get(19).ok().flatten(),
-            evidence_pointers: evidence_pointers(evidence_raw.as_deref()), resolution_pointer: r.get(21).ok().flatten(), recent_events: Vec::new(), investigation_failure_reason: r.get(22).ok().flatten(),
+            display_id: r.get(0)?,
+            status: r.get(1)?,
+            priority: r.get(2)?,
+            summary: r.get(3)?,
+            updated_at: r.get(4)?,
+            body: r.get(5).ok().flatten(),
+            source: r.get(6).ok().flatten(),
+            task_id: r.get(7).ok().flatten(),
+            priority_rank: r.get(8).ok().flatten(),
+            contract_state: r.get(9).ok().flatten(),
+            tier_hint: r.get(10).ok().flatten(),
+            intent_objective: r.get(11).ok().flatten(),
+            intent_type: r.get(12).ok().flatten(),
+            intent_acceptance: json_string_array(r.get::<_, String>(13).ok().as_deref()),
+            intent_in_scope: json_string_array(r.get::<_, String>(14).ok().as_deref()),
+            intent_out_of_scope: json_string_array(r.get::<_, String>(15).ok().as_deref()),
+            intent_known_solution: r.get(16).ok().flatten(),
+            locked_by: r.get(17).ok().flatten(),
+            locked_at: r.get(18).ok().flatten(),
+            lock_reason: r.get(19).ok().flatten(),
+            evidence_pointers: evidence_pointers(evidence_raw.as_deref()),
+            resolution_pointer: r.get(21).ok().flatten(),
+            recent_events: Vec::new(),
+            investigation_failure_reason: r.get(22).ok().flatten(),
         })
     })?;
-    for r in obs_iter.flatten() { rows.push(Row::Obs(r)); }
+    for r in obs_iter.flatten() {
+        rows.push(Row::Obs(r));
+    }
 
     if table_exists(conn, "external_reviews")? {
         let cols = table_columns(conn, "external_reviews")?;
@@ -570,7 +657,9 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         }
     }
 
-    if table_exists(conn, "intake")? { load_intake_rows(conn, &mut rows)?; }
+    if table_exists(conn, "intake")? {
+        load_intake_rows(conn, &mut rows)?;
+    }
     attach_recent_events(conn, &mut rows)?;
     Ok(rows)
 }
@@ -601,12 +690,20 @@ fn quote_ident(s: &str) -> String {
 }
 
 fn sql_col(cols: &[String], col: &str, fallback: &str) -> String {
-    if cols.iter().any(|c| c == col) { quote_ident(col) } else { fallback.to_string() }
+    if cols.iter().any(|c| c == col) {
+        quote_ident(col)
+    } else {
+        fallback.to_string()
+    }
 }
 
 fn json_col(cols: &[String], col: &str, path: &str) -> String {
     if cols.iter().any(|c| c == col) {
-        format!("json_extract({}, '{}')", quote_ident(col), path.replace('\'', "''"))
+        format!(
+            "json_extract({}, '{}')",
+            quote_ident(col),
+            path.replace('\'', "''")
+        )
     } else {
         "NULL".to_string()
     }
@@ -614,7 +711,13 @@ fn json_col(cols: &[String], col: &str, path: &str) -> String {
 
 fn json_string_array(raw: Option<&str>) -> Vec<String> {
     raw.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
+        .and_then(|v| {
+            v.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
         .unwrap_or_default()
 }
 
@@ -634,22 +737,38 @@ fn cycle_summary_list(raw: Option<&str>) -> Vec<String> {
         .into_iter()
         .flat_map(|v| {
             let mut out = Vec::new();
-            if let Some(s) = v.pointer("/executor/summary").and_then(|s| s.as_str()) { out.push(format!("executor: {s}")); }
-            if let Some(s) = v.pointer("/review/summary").and_then(|s| s.as_str()) { out.push(format!("review: {s}")); }
+            if let Some(s) = v.pointer("/executor/summary").and_then(|s| s.as_str()) {
+                out.push(format!("executor: {s}"));
+            }
+            if let Some(s) = v.pointer("/review/summary").and_then(|s| s.as_str()) {
+                out.push(format!("review: {s}"));
+            }
             out
         })
         .collect()
 }
 
 fn evidence_pointers(raw: Option<&str>) -> Vec<ArtifactPointer> {
-    let Some(raw) = raw else { return Vec::new(); };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else { return Vec::new(); };
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     if let Some(arr) = v.get("external_refs").and_then(|x| x.as_array()) {
         for item in arr {
-            let system = item.get("system").and_then(|x| x.as_str()).unwrap_or("external");
+            let system = item
+                .get("system")
+                .and_then(|x| x.as_str())
+                .unwrap_or("external");
             let id = item.get("id").and_then(|x| x.as_str()).unwrap_or("");
-            if !id.is_empty() { out.push(ArtifactPointer { label: system.to_string(), value: id.to_string() }); }
+            if !id.is_empty() {
+                out.push(ArtifactPointer {
+                    label: system.to_string(),
+                    value: id.to_string(),
+                });
+            }
         }
     }
     out
@@ -669,16 +788,36 @@ fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
         let status: String = r.get(1)?;
         let decision: Option<String> = r.get(9).ok().flatten();
         let missing: Option<String> = r.get(10).ok().flatten();
-        let held_reason = if status == "needs_info" { missing.clone() } else { None };
+        let held_reason = if status == "needs_info" {
+            missing.clone()
+        } else {
+            None
+        };
         Ok(IntakeRow {
-            display_id: r.get(0)?, status: status.clone(), summary: r.get(2)?, body: r.get(3).ok().flatten(), updated_at: r.get(4)?,
-            source_task: r.get(5).ok().flatten(), source_agent: r.get(6).ok().flatten(), priority: None,
-            risk_flags: json_string_array(r.get::<_, String>(7).ok().as_deref()), cluster_key: r.get(8).ok().flatten(), decision: decision.clone(), missing_info_question: missing,
-            held_reason, next_action: Some(intake_next_action(&status, decision.as_deref()).to_string()),
-            routed_to_observation: r.get(11).ok().flatten(), routed_to_arch_review: r.get(12).ok().flatten(), duplicate_of: r.get(13).ok().flatten(), evidence_pointer: r.get(14).ok().flatten(), recent_events: Vec::new(),
+            display_id: r.get(0)?,
+            status: status.clone(),
+            summary: r.get(2)?,
+            body: r.get(3).ok().flatten(),
+            updated_at: r.get(4)?,
+            source_task: r.get(5).ok().flatten(),
+            source_agent: r.get(6).ok().flatten(),
+            priority: None,
+            risk_flags: json_string_array(r.get::<_, String>(7).ok().as_deref()),
+            cluster_key: r.get(8).ok().flatten(),
+            decision: decision.clone(),
+            missing_info_question: missing,
+            held_reason,
+            next_action: Some(intake_next_action(&status, decision.as_deref()).to_string()),
+            routed_to_observation: r.get(11).ok().flatten(),
+            routed_to_arch_review: r.get(12).ok().flatten(),
+            duplicate_of: r.get(13).ok().flatten(),
+            evidence_pointer: r.get(14).ok().flatten(),
+            recent_events: Vec::new(),
         })
     })?;
-    for r in iter.flatten() { rows.push(Row::Intake(r)); }
+    for r in iter.flatten() {
+        rows.push(Row::Intake(r));
+    }
     Ok(())
 }
 
@@ -687,16 +826,24 @@ fn intake_next_action(status: &str, decision: Option<&str>) -> &'static str {
         "draft" => "claim triage",
         "triaging" => "gatekeeper route",
         "needs_info" => "recon needed",
-        "routed" => match decision { Some("duplicate") => "duplicate linked", Some("arch_review_candidate") => "architecture review routed", _ => "routed" },
+        "routed" => match decision {
+            Some("duplicate") => "duplicate linked",
+            Some("arch_review_candidate") => "architecture review routed",
+            _ => "routed",
+        },
         "dropped" => "dropped unless amended",
         _ => "inspect",
     }
 }
 
 fn attach_recent_events(conn: &Connection, rows: &mut [Row]) -> Result<()> {
-    if !table_exists(conn, "transition_history")? { return Ok(()); }
+    if !table_exists(conn, "transition_history")? {
+        return Ok(());
+    }
     let cols = table_columns(conn, "transition_history")?;
-    if !cols.iter().any(|c| c == "display_id") { return Ok(()); }
+    if !cols.iter().any(|c| c == "display_id") {
+        return Ok(());
+    }
     let has = |c: &str| cols.iter().any(|x| x == c);
     let sql = format!(
         "SELECT {store}, display_id, {from_status}, {to_status}, {verb}, {occurred_at} FROM transition_history WHERE display_id=?1 ORDER BY {order_col} DESC LIMIT 5",
@@ -704,7 +851,20 @@ fn attach_recent_events(conn: &Connection, rows: &mut [Row]) -> Result<()> {
     );
     for row in rows.iter_mut() {
         let id = row.display_id().to_string();
-        let events: Vec<RecentEvent> = conn.prepare(&sql)?.query_map([id], |r| Ok(RecentEvent { store: r.get(0).ok().flatten(), display_id: r.get(1)?, from_status: r.get(2).ok().flatten(), to_status: r.get(3).ok().flatten(), verb: r.get(4).ok().flatten(), occurred_at: r.get(5).ok().flatten() }))?.filter_map(|r| r.ok()).collect();
+        let events: Vec<RecentEvent> = conn
+            .prepare(&sql)?
+            .query_map([id], |r| {
+                Ok(RecentEvent {
+                    store: r.get(0).ok().flatten(),
+                    display_id: r.get(1)?,
+                    from_status: r.get(2).ok().flatten(),
+                    to_status: r.get(3).ok().flatten(),
+                    verb: r.get(4).ok().flatten(),
+                    occurred_at: r.get(5).ok().flatten(),
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
         match row {
             Row::Task(t) => t.recent_events = events,
             Row::Obs(o) => o.recent_events = events,
@@ -716,10 +876,40 @@ fn attach_recent_events(conn: &Connection, rows: &mut [Row]) -> Result<()> {
 }
 
 pub fn load_external_review_state(conn: &Connection) -> Result<ExternalReviewState> {
-    let table = if table_exists(conn, "external_reviews")? { Some("external_reviews") } else if table_exists(conn, "external_review")? { Some("external_review") } else { None };
-    let Some(table) = table else { return Ok(ExternalReviewState::default()); };
-    let rows = conn.query_row(&format!("SELECT COUNT(*) FROM {}", quote_ident(table)), [], |r| r.get::<_, usize>(0))?;
-    if rows == 0 { Ok(ExternalReviewState::Unavailable { reason: "external review: unavailable / not installed".to_string() }) } else { Ok(ExternalReviewState::Available { rows }) }
+    let table = if table_exists(conn, "external_reviews")? {
+        Some("external_reviews")
+    } else if table_exists(conn, "external_review")? {
+        Some("external_review")
+    } else {
+        None
+    };
+    let Some(table) = table else {
+        return Ok(ExternalReviewState::default());
+    };
+    let rows = conn.query_row(
+        &format!("SELECT COUNT(*) FROM {}", quote_ident(table)),
+        [],
+        |r| r.get::<_, usize>(0),
+    )?;
+    if rows == 0 {
+        return Ok(ExternalReviewState::Unavailable {
+            reason: "external review: unavailable / not installed".to_string(),
+        });
+    }
+    let cols = table_columns(conn, table)?;
+    let sql = format!(
+        "SELECT {lane}, {status} FROM {} LIMIT 1",
+        quote_ident(table),
+        lane = sql_col(&cols, "lane", "NULL"),
+        status = sql_col(&cols, "status", "NULL"),
+    );
+    let (lane, status) = conn.query_row(&sql, [], |r| {
+        Ok((
+            r.get::<_, Option<String>>(0)?,
+            r.get::<_, Option<String>>(1)?,
+        ))
+    })?;
+    Ok(ExternalReviewState::Available { rows, lane, status })
 }
 
 /// Classify each row into a section using default watch options.
@@ -817,7 +1007,11 @@ fn section_for(row: &Row) -> Option<Section> {
         Row::Review(_) => Some(Section::ExternalReviewLane),
         Row::Intake(i) => match i.status.as_str() {
             "needs_info" => Some(Section::IntakeHeld),
-            _ if is_priority_text(i.priority.as_deref().unwrap_or("")) || !i.risk_flags.is_empty() => Some(Section::ObsOpenNoContract),
+            _ if is_priority_text(i.priority.as_deref().unwrap_or(""))
+                || !i.risk_flags.is_empty() =>
+            {
+                Some(Section::ObsOpenNoContract)
+            }
             "routed" | "dropped" => Some(Section::IntakeRouted),
             _ => Some(Section::IntakeOpen),
         },
@@ -1010,13 +1204,13 @@ mod tests {
     fn section_classification() {
         // blocked/deploy_blocked with no blocked_reason → unknown class → NeedsTriage section.
         let rows = vec![
-            task("plan_review"),      // idx 0 → REVIEW (ObsRatifiable)
-            task("blocked"),          // idx 1 → HELD / needs triage (no reason → unknown)
-            task("deploy_blocked"),   // idx 2 → HELD / needs triage (no reason → unknown)
-            task("accepted"),         // idx 3 → ACCEPT
-            obs("open", Some("ready")), // idx 4 → REVIEW (ObsRatifiable)
-            obs("open", None),        // idx 5 → OBSERVATIONS/INTAKE (ObsOpenNoContract)
-            obs("resolved", None),    // idx 6 → OBSERVATIONS/INTAKE (ObsOther)
+            task("plan_review"),        // idx 0 → REVIEW
+            task("blocked"),            // idx 1 → HELD / needs triage (no reason → unknown)
+            task("deploy_blocked"),     // idx 2 → HELD / needs triage (no reason → unknown)
+            task("accepted"),           // idx 3 → ACCEPT
+            obs("open", Some("ready")), // idx 4 → REVIEW
+            obs("open", None),          // idx 5 → OBSERVATIONS/INTAKE
+            obs("resolved", None),      // idx 6 → OBSERVATIONS/INTAKE
         ];
         let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
         assert_eq!(buckets.len(), Section::ALL.len());
@@ -1047,7 +1241,11 @@ mod tests {
             ("ready", None, Section::TasksActionableCurrentWork),
             ("executing", None, Section::TasksActionableCurrentWork),
             ("code_review", None, Section::ObsRatifiable),
-            ("blocked", Some("rate_limit 429"), Section::TasksBlockedNeedsAction),
+            (
+                "blocked",
+                Some("rate_limit 429"),
+                Section::TasksBlockedNeedsAction,
+            ),
             ("blocked", None, Section::TasksNeedsTriage),
             ("complete", None, Section::TasksRecentlyTerminal),
             ("in_review", None, Section::ObsRatifiable),
@@ -1192,7 +1390,10 @@ mod tests {
         let rows = load_rows(&conn).unwrap();
         assert_eq!(rows.iter().filter(|r| matches!(r, Row::Task(_))).count(), 1);
         assert_eq!(rows.iter().filter(|r| matches!(r, Row::Obs(_))).count(), 1);
-        assert!(matches!(load_external_review_state(&conn).unwrap(), ExternalReviewState::Unavailable { .. }));
+        assert!(matches!(
+            load_external_review_state(&conn).unwrap(),
+            ExternalReviewState::Unavailable { .. }
+        ));
     }
 
     #[test]
@@ -1204,13 +1405,25 @@ mod tests {
         ).unwrap();
 
         let rows = load_rows(&conn).unwrap();
-        let task = rows.iter().find_map(|r| match r { Row::Task(t) => Some(t), _ => None }).unwrap();
+        let task = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Task(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(task.total_phases, Some(3));
         assert_eq!(task.current_phase, Some(2));
         assert_eq!(task.current_cycle, Some(3));
         assert_eq!(task.tier_hint.as_deref(), Some("T3"));
-        assert!(task.artifact_pointers.iter().any(|p| p.label == "branch" && p.value == "feat/T003"));
-        assert!(task.artifact_pointers.iter().any(|p| p.label == "workspace" && p.value == "/tmp/T003"));
+        assert!(task
+            .artifact_pointers
+            .iter()
+            .any(|p| p.label == "branch" && p.value == "feat/T003"));
+        assert!(task
+            .artifact_pointers
+            .iter()
+            .any(|p| p.label == "workspace" && p.value == "/tmp/T003"));
     }
 
     #[test]
@@ -1229,14 +1442,23 @@ mod tests {
         ).unwrap();
 
         let rows = load_rows(&conn).unwrap();
-        let intake = rows.iter().find_map(|r| match r { Row::Intake(i) => Some(i), _ => None }).unwrap();
+        let intake = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Intake(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(intake.display_id, "I001");
         assert_eq!(intake.summary, "needs more");
         assert_eq!(intake.status, "needs_info");
         assert_eq!(intake.source_task.as_deref(), Some("T001"));
         assert_eq!(intake.risk_flags, vec!["touches_lifecycle"]);
         assert_eq!(intake.held_reason.as_deref(), Some("what is missing?"));
-        assert_eq!(section_for(&Row::Intake(intake.clone())), Some(Section::IntakeHeld));
+        assert_eq!(
+            section_for(&Row::Intake(intake.clone())),
+            Some(Section::IntakeHeld)
+        );
     }
 
     #[test]
@@ -1250,8 +1472,17 @@ mod tests {
         ).unwrap();
 
         let rows = load_rows(&conn).unwrap();
-        let task = rows.iter().find_map(|r| match r { Row::Task(t) => Some(t), _ => None }).unwrap();
+        let task = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Task(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(task.recent_events.len(), 2);
-        assert_eq!(task.recent_events[0].verb.as_deref(), Some("submit-execute"));
+        assert_eq!(
+            task.recent_events[0].verb.as_deref(),
+            Some("submit-execute")
+        );
     }
 }

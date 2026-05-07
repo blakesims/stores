@@ -3,7 +3,15 @@ use stores::tui::data::{
     ObsRow, Row, TaskRow, WatchClassifyOptions,
 };
 
-fn task(id: &str, tier: &str, status: &str, phase: i64, cycle: i64, total: i64, reason: Option<&str>) -> Row {
+fn task(
+    id: &str,
+    tier: &str,
+    status: &str,
+    phase: i64,
+    cycle: i64,
+    total: i64,
+    reason: Option<&str>,
+) -> Row {
     Row::Task(TaskRow {
         display_id: id.to_string(),
         status: status.to_string(),
@@ -33,15 +41,47 @@ fn obs(id: &str, priority: &str, summary: &str) -> Row {
 fn fixture_rows() -> Vec<Row> {
     vec![
         task("T001", "T2", "blocked", 2, 1, 3, Some("silent_zombie")),
-        task("T002", "T2", "blocked", 2, 1, 3, Some("drive_failed:silent_zombie_pid_dead")),
-        task("T003", "T2", "cargo_installed", 2, 1, 3, Some("accept_installed_inert")),
-        task("T004", "T2", "schema_migrated", 2, 1, 3, Some("accept_installed_inert")),
+        task(
+            "T002",
+            "T2",
+            "blocked",
+            2,
+            1,
+            3,
+            Some("drive_failed:silent_zombie_pid_dead"),
+        ),
+        task(
+            "T003",
+            "T2",
+            "cargo_installed",
+            2,
+            1,
+            3,
+            Some("accept_installed_inert"),
+        ),
+        task(
+            "T004",
+            "T2",
+            "schema_migrated",
+            2,
+            1,
+            3,
+            Some("accept_installed_inert"),
+        ),
         task("T010", "T2", "executing", 1, 1, 2, None),
         task("T011", "T3", "code_review", 2, 3, 3, None),
         task("T012", "T1", "ready", 1, 1, 1, None),
         task("T020", "T2", "blocked", 2, 1, 3, Some("rate_limit")),
         task("T021", "T2", "blocked", 2, 1, 3, Some("transient_infra")),
-        task("T022", "T2", "deploy_blocked", 2, 1, 3, Some("retry-deploy-recoverable")),
+        task(
+            "T022",
+            "T2",
+            "deploy_blocked",
+            2,
+            1,
+            3,
+            Some("retry-deploy-recoverable"),
+        ),
         task("T023", "T2", "deploy_blocked", 2, 1, 3, Some("opaque")),
         task("T024", "T2", "blocked", 2, 1, 3, Some("unknown")),
         task("T030", "T2", "accepted", 2, 1, 2, Some("terminal")),
@@ -63,17 +103,27 @@ fn row_line(row: &Row) -> String {
     match row {
         Row::Task(t) => {
             let progress = stores::tui::progress::task_progress(t, &ExternalReviewState::default());
-            let progress = if progress.text == t.status { String::new() } else { format!(" {}", progress.text) };
+            let progress = if progress.text == t.status {
+                String::new()
+            } else {
+                format!(" {}", progress.text)
+            };
             format!(
                 "{} {}{} {}{}",
                 t.display_id,
                 t.status,
                 progress,
                 t.title,
-                t.blocked_reason.as_deref().map(|r| format!(" reason:{r}")).unwrap_or_default()
+                t.blocked_reason
+                    .as_deref()
+                    .map(|r| format!(" reason:{r}"))
+                    .unwrap_or_default()
             )
-        },
-        Row::Obs(o) => format!("{} {} priority:{} {}", o.display_id, o.status, o.priority, o.summary),
+        }
+        Row::Obs(o) => format!(
+            "{} {} priority:{} {}",
+            o.display_id, o.status, o.priority, o.summary
+        ),
         Row::Intake(i) => format!(
             "{} {} priority:{} {} held:{}",
             i.display_id,
@@ -88,10 +138,20 @@ fn row_line(row: &Row) -> String {
 fn render_snapshot(show_all_history: bool) -> String {
     let rows = fixture_rows();
     let model = cockpit_model(&rows, ExternalReviewState::default());
-    let sections = classify_with_options(&rows, WatchClassifyOptions { show_all_history, ..Default::default() });
+    let sections = classify_with_options(
+        &rows,
+        WatchClassifyOptions {
+            show_all_history,
+            ..Default::default()
+        },
+    );
     let external = match model.external_review {
         ExternalReviewState::Unavailable { reason } => reason,
-        ExternalReviewState::Available { rows } => format!("external review: available rows={rows}"),
+        ExternalReviewState::Available { rows, lane, status } => format!(
+            "external review: lane={} status={} rows={rows}",
+            lane.as_deref().unwrap_or("unknown"),
+            status.as_deref().unwrap_or("unknown")
+        ),
     };
     let mut out = format!(
         "daemon:DEAD\nlanes: execution={} review={} accept={} held={} active={} priority={}\n{external}\n",

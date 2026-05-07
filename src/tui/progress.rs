@@ -24,7 +24,10 @@ pub fn task_progress(t: &TaskRow, external_review: &ExternalReviewState) -> Task
     let tier = t.tier_hint.as_deref().unwrap_or("").to_ascii_uppercase();
     let visual_tier = matches!(tier.as_str(), "T2" | "T3");
     if !visual_tier {
-        return TaskProgress { visual: false, text: fallback_status(t) };
+        return TaskProgress {
+            visual: false,
+            text: fallback_status(t),
+        };
     }
 
     let terminal = terminal_stage(&t.status);
@@ -33,36 +36,72 @@ pub fn task_progress(t: &TaskRow, external_review: &ExternalReviewState) -> Task
     }
 
     match t.status.as_str() {
-        "plan_review" => TaskProgress { visual: true, text: "plan ◐".to_string() },
+        "plan_review" => TaskProgress {
+            visual: true,
+            text: "plan ◐".to_string(),
+        },
         "executing" | "code_review" => match (t.current_phase, t.total_phases, t.current_cycle) {
             (Some(p), Some(n), Some(c)) if n > 0 => {
                 let boxes = phase_boxes(p, n, t.status == "code_review");
                 let dots = cycle_dots(c, MAX_CYCLES_DISPLAY);
-                TaskProgress { visual: true, text: format!("{boxes} {dots}") }
+                TaskProgress {
+                    visual: true,
+                    text: format!("{boxes} {dots}"),
+                }
             }
-            (Some(p), None, Some(c)) => TaskProgress { visual: false, text: format!("P{p}/? C{c}/{MAX_CYCLES_DISPLAY}") },
-            _ => TaskProgress { visual: false, text: fallback_status(t) },
+            (Some(p), None, Some(c)) => TaskProgress {
+                visual: false,
+                text: format!("P{p}/? C{c}/{MAX_CYCLES_DISPLAY}"),
+            },
+            _ => TaskProgress {
+                visual: false,
+                text: fallback_status(t),
+            },
         },
-        "complete" | "in_review" => TaskProgress { visual: true, text: wrap_stage(external_review) },
-        _ => TaskProgress { visual: false, text: fallback_status(t) },
+        "complete" | "in_review" => TaskProgress {
+            visual: true,
+            text: wrap_stage(external_review),
+        },
+        _ => TaskProgress {
+            visual: false,
+            text: fallback_status(t),
+        },
     }
 }
 
 pub fn phase_boxes(current_phase: i64, total_phases: i64, in_code_review: bool) -> String {
-    let current = if in_code_review { GLYPH_CURRENT_REVIEW } else { GLYPH_CURRENT_EXEC };
+    let current = if in_code_review {
+        GLYPH_CURRENT_REVIEW
+    } else {
+        GLYPH_CURRENT_EXEC
+    };
     let glyph_for = |i: i64| -> char {
-        if i < current_phase { GLYPH_DONE } else if i == current_phase { current } else { GLYPH_FUTURE }
+        if i < current_phase {
+            GLYPH_DONE
+        } else if i == current_phase {
+            current
+        } else {
+            GLYPH_FUTURE
+        }
     };
     let mut out = String::new();
     if total_phases <= 6 {
-        for i in 1..=total_phases { out.push(glyph_for(i)); }
+        for i in 1..=total_phases {
+            out.push(glyph_for(i));
+        }
     } else if current_phase <= 3 {
-        for i in 1..=6 { out.push(glyph_for(i)); }
+        for i in 1..=6 {
+            out.push(glyph_for(i));
+        }
     } else {
-        for i in 1..=3 { out.push(glyph_for(i)); }
+        for i in 1..=3 {
+            out.push(glyph_for(i));
+        }
         out.push('…');
         out.push(glyph_for(current_phase));
-        if current_phase < total_phases { out.push(GLYPH_FUTURE); }
+        if current_phase < total_phases {
+            out.push(GLYPH_FUTURE);
+        }
     }
     out
 }
@@ -71,7 +110,11 @@ pub fn cycle_dots(current_cycle: i64, max_cycles: i64) -> String {
     let burned = (current_cycle - 1).clamp(0, max_cycles);
     let mut out = String::new();
     for i in 0..max_cycles {
-        out.push(if i < burned { GLYPH_DOT_BURNED } else { GLYPH_DOT_AVAILABLE });
+        out.push(if i < burned {
+            GLYPH_DOT_BURNED
+        } else {
+            GLYPH_DOT_AVAILABLE
+        });
     }
     out
 }
@@ -92,7 +135,7 @@ fn terminal_stage(status: &str) -> Option<String> {
 
 fn wrap_stage(external_review: &ExternalReviewState) -> String {
     match external_review {
-        ExternalReviewState::Available { rows } => format!("wrap → ext:{rows}"),
+        ExternalReviewState::Available { rows, .. } => format!("wrap → ext:{rows}"),
         ExternalReviewState::Unavailable { reason } => format!("wrap → {reason}"),
     }
 }
@@ -101,7 +144,13 @@ fn wrap_stage(external_review: &ExternalReviewState) -> String {
 mod tests {
     use super::*;
 
-    fn task(tier: &str, status: &str, phase: Option<i64>, total: Option<i64>, cycle: Option<i64>) -> TaskRow {
+    fn task(
+        tier: &str,
+        status: &str,
+        phase: Option<i64>,
+        total: Option<i64>,
+        cycle: Option<i64>,
+    ) -> TaskRow {
         TaskRow {
             display_id: "T999".to_string(),
             status: status.to_string(),
@@ -116,34 +165,54 @@ mod tests {
 
     #[test]
     fn t1_no_progress_fallback() {
-        let p = task_progress(&task("T1", "executing", Some(1), Some(2), Some(1)), &ExternalReviewState::default());
+        let p = task_progress(
+            &task("T1", "executing", Some(1), Some(2), Some(1)),
+            &ExternalReviewState::default(),
+        );
         assert!(!p.visual);
         assert_eq!(p.text, "executing");
     }
 
     #[test]
     fn t2_executing_and_code_review_glyphs() {
-        let exec = task_progress(&task("T2", "executing", Some(1), Some(2), Some(1)), &ExternalReviewState::default());
-        let review = task_progress(&task("T2", "code_review", Some(2), Some(2), Some(2)), &ExternalReviewState::default());
+        let exec = task_progress(
+            &task("T2", "executing", Some(1), Some(2), Some(1)),
+            &ExternalReviewState::default(),
+        );
+        let review = task_progress(
+            &task("T2", "code_review", Some(2), Some(2), Some(2)),
+            &ExternalReviewState::default(),
+        );
         assert_eq!(exec.text, "▮▱ ···");
         assert_eq!(review.text, "▰◐ ●··");
     }
 
     #[test]
     fn t3_multi_phase_truncation() {
-        let p = task_progress(&task("T3", "executing", Some(5), Some(12), Some(3)), &ExternalReviewState::default());
+        let p = task_progress(
+            &task("T3", "executing", Some(5), Some(12), Some(3)),
+            &ExternalReviewState::default(),
+        );
         assert_eq!(p.text, "▰▰▰…▮▱ ●●·");
     }
 
     #[test]
     fn wrap_in_review_external_unavailable_stage() {
-        let p = task_progress(&task("T3", "in_review", Some(3), Some(3), Some(1)), &ExternalReviewState::default());
-        assert!(p.text.contains("wrap → external review: unavailable / not installed"));
+        let p = task_progress(
+            &task("T3", "in_review", Some(3), Some(3), Some(1)),
+            &ExternalReviewState::default(),
+        );
+        assert!(p
+            .text
+            .contains("wrap → external review: unavailable / not installed"));
     }
 
     #[test]
     fn accepted_completion_stage() {
-        let p = task_progress(&task("T2", "accepted", Some(2), Some(2), Some(1)), &ExternalReviewState::default());
+        let p = task_progress(
+            &task("T2", "accepted", Some(2), Some(2), Some(1)),
+            &ExternalReviewState::default(),
+        );
         assert_eq!(p.text, "✓ accepted");
     }
 }

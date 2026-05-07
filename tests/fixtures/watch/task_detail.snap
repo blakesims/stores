@@ -1,0 +1,101 @@
+Task detail · T701
+
+Story summary
+  T1 operator cockpit story
+
+Current state
+  status: executing
+  priority/tier: T1
+
+Why it matters
+  done_when: T701 done when operators understand state
+  executive_intent: reduce ambiguity
+
+Progress
+  executing
+  phase: 1 / 1
+  cycle: 1
+
+Blockers / held reasons
+  waiting on dependency
+
+Recent events
+  tasks ready -> executing via start at 2026-05-01
+
+Artifact pointers
+  rendered task: tasks/**/T701/main.md
+  branch: feat/T701
+  workspace: /tmp/T701
+  linked observations: L700
+  plan review log: 0 item(s)
+  cycles: 0 item(s)
+  wrap log: 0 item(s)
+  branch: feat/T701
+---
+Task detail · T702
+
+Story summary
+  T2 operator cockpit story
+
+Current state
+  status: executing
+  priority/tier: T2
+
+Why it matters
+  done_when: T702 done when operators understand state
+  executive_intent: reduce ambiguity
+
+Progress
+  ▮▱ ···
+  phase: 1 / 2
+  cycle: 1
+
+Blockers / held reasons
+  waiting on dependency
+
+Recent events
+  tasks ready -> executing via start at 2026-05-01
+
+Artifact pointers
+  rendered task: tasks/**/T702/main.md
+  branch: feat/T702
+  workspace: /tmp/T702
+  linked observations: L700
+  plan review log: 0 item(s)
+  cycles: 0 item(s)
+  wrap log: 0 item(s)
+  branch: feat/T702
+---
+Task detail · T703
+
+Story summary
+  T3 operator cockpit story
+
+Current state
+  status: code_review
+  priority/tier: T3
+
+Why it matters
+  done_when: T703 done when operators understand state
+  executive_intent: reduce ambiguity
+
+Progress
+  ▰◐▱ ●●·
+  phase: 2 / 3
+  cycle: 3
+
+Blockers / held reasons
+  waiting on dependency
+
+Recent events
+  tasks ready -> executing via start at 2026-05-01
+
+Artifact pointers
+  rendered task: tasks/**/T703/main.md
+  branch: feat/T703
+  workspace: /tmp/T703
+  linked observations: L700
+  plan review log: 0 item(s)
+  cycles: 0 item(s)
+  wrap log: 0 item(s)
+  branch: feat/T703
