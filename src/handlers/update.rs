@@ -309,4 +309,13 @@ fields:
         run(&schema, &conn, &upd_matches, Actor::AiWithHuman.into()).unwrap();
         assert_eq!(stored_risk_flags(&conn), vec!["A", "B"]);
     }
+
+    #[test]
+    fn observations_update_risk_flags_single_value_stored_as_array() {
+        let (schema, conn) = observations_setup();
+        let upd_cmd = build_cmd(&schema, "update", true);
+        let upd_matches = upd_cmd.get_matches_from(["update", "L001", "--risk-flags", "A"]);
+        run(&schema, &conn, &upd_matches, Actor::AiWithHuman.into()).unwrap();
+        assert_eq!(stored_risk_flags(&conn), vec!["A"]);
+    }
 }

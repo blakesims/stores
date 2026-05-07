@@ -997,16 +997,19 @@ fn build_leaf_cmd_owned(
             leaf.field.ty,
             FieldType::List(_) | FieldType::ListFk { .. } | FieldType::ListRecord(_)
         );
+        let is_plain_list = matches!(leaf.field.ty, FieldType::List(_));
 
         let mut help = leaf
             .field
             .description
             .clone()
             .unwrap_or_else(|| leaf.cli_name.clone());
-        if is_list {
+        if is_plain_list {
             help.push_str(
                 " (repeat flag or comma-separate values; escape commas/backslashes with backslash; empty value sets [])",
             );
+        } else if is_list {
+            help.push_str(" (repeat flag for multiple values)");
         }
 
         let mut arg = Arg::new(leaf.cli_name.clone())
@@ -1015,7 +1018,10 @@ fn build_leaf_cmd_owned(
             .required(false);
 
         if is_list {
-            arg = arg.action(ArgAction::Append).value_name("VALUE[,VALUE]");
+            arg = arg.action(ArgAction::Append);
+        }
+        if is_plain_list {
+            arg = arg.value_name("VALUE[,VALUE]");
         }
 
         cmd = cmd.arg(arg);
@@ -1116,16 +1122,20 @@ fn build_leaf_cmd(
             FieldType::List(_) | FieldType::ListFk { .. } | FieldType::ListRecord(_)
         );
 
+        let is_plain_list = matches!(leaf.field.ty, FieldType::List(_));
+
         // Main arg — clone the String into a Box<str> to satisfy Into<Id>
         let mut help = leaf
             .field
             .description
             .clone()
             .unwrap_or_else(|| leaf.cli_name.clone());
-        if is_list {
+        if is_plain_list {
             help.push_str(
                 " (repeat flag or comma-separate values; escape commas/backslashes with backslash; empty value sets [])",
             );
+        } else if is_list {
+            help.push_str(" (repeat flag for multiple values)");
         }
 
         let mut arg = Arg::new(leaf.cli_name.clone())
@@ -1134,7 +1144,10 @@ fn build_leaf_cmd(
             .required(false);
 
         if is_list {
-            arg = arg.action(ArgAction::Append).value_name("VALUE[,VALUE]");
+            arg = arg.action(ArgAction::Append);
+        }
+        if is_plain_list {
+            arg = arg.value_name("VALUE[,VALUE]");
         }
 
         cmd = cmd.arg(arg);
