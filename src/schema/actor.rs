@@ -11,12 +11,23 @@ pub enum Actor {
 }
 
 impl Actor {
-    /// Read actor from environment: if $CLAUDECODE is set (non-empty), we are AI-autonomous.
+    /// Detect whether this process is running inside an AI runtime.
+    ///
+    /// Non-empty `STORES_AI_RUNTIME` and non-empty `CLAUDECODE` are AI-runtime
+    /// signals; empty or unset values are ignored.
+    pub fn ai_runtime_detected() -> bool {
+        ["STORES_AI_RUNTIME", "CLAUDECODE"]
+            .iter()
+            .any(|name| std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false))
+    }
+
+    /// Read actor from environment: AI-runtime signals default to AI-autonomous.
     /// Never returns `Framework` — that is set only programmatically by the engine.
     pub fn from_env() -> Actor {
-        match std::env::var("CLAUDECODE") {
-            Ok(v) if !v.is_empty() => Actor::AiAutonomous,
-            _ => Actor::Human,
+        if Self::ai_runtime_detected() {
+            Actor::AiAutonomous
+        } else {
+            Actor::Human
         }
     }
 }
@@ -87,6 +98,32 @@ impl<'de> serde::Deserialize<'de> for Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::test_support::ENV_LOCK;
+
+    fn with_ai_env(stores_ai_runtime: Option<&str>, claudecode: Option<&str>, f: impl FnOnce()) {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_stores = std::env::var("STORES_AI_RUNTIME").ok();
+        let prev_claude = std::env::var("CLAUDECODE").ok();
+        match stores_ai_runtime {
+            Some(v) => std::env::set_var("STORES_AI_RUNTIME", v),
+            None => std::env::remove_var("STORES_AI_RUNTIME"),
+        }
+        match claudecode {
+            Some(v) => std::env::set_var("CLAUDECODE", v),
+            None => std::env::remove_var("CLAUDECODE"),
+        }
+
+        f();
+
+        match prev_stores {
+            Some(v) => std::env::set_var("STORES_AI_RUNTIME", v),
+            None => std::env::remove_var("STORES_AI_RUNTIME"),
+        }
+        match prev_claude {
+            Some(v) => std::env::set_var("CLAUDECODE", v),
+            None => std::env::remove_var("CLAUDECODE"),
+        }
+    }
 
     #[test]
     fn deserialize_known_actors() {
@@ -116,9 +153,39 @@ mod tests {
 
     #[test]
     fn from_env_never_returns_framework() {
-        // Even with CLAUDECODE unset, from_env returns Human (not Framework)
-        // Framework is only set programmatically.
-        let actor = Actor::from_env();
-        assert_ne!(actor, Actor::Framework);
+        with_ai_env(None, None, || {
+            // Even with AI-runtime signals unset, from_env returns Human (not Framework).
+            // Framework is only set programmatically.
+            let actor = Actor::from_env();
+            assert_ne!(actor, Actor::Framework);
+        });
+    }
+
+    #[test]
+    fn stores_ai_runtime_detected_when_non_empty() {
+        with_ai_env(Some("claude-code"), None, || {
+            assert!(Actor::ai_runtime_detected());
+            assert_eq!(Actor::from_env(), Actor::AiAutonomous);
+        });
+    }
+
+    #[test]
+    fn claudecode_detected_when_non_empty() {
+        with_ai_env(None, Some("1"), || {
+            assert!(Actor::ai_runtime_detected());
+            assert_eq!(Actor::from_env(), Actor::AiAutonomous);
+        });
+    }
+
+    #[test]
+    fn empty_or_unset_ai_runtime_values_are_not_detected() {
+        with_ai_env(None, None, || {
+            assert!(!Actor::ai_runtime_detected());
+            assert_eq!(Actor::from_env(), Actor::Human);
+        });
+        with_ai_env(Some(""), Some(""), || {
+            assert!(!Actor::ai_runtime_detected());
+            assert_eq!(Actor::from_env(), Actor::Human);
+        });
     }
 }
