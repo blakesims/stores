@@ -508,15 +508,61 @@ pub(crate) fn read_pidfile(path: &Path) -> Result<i32> {
     Ok(pid)
 }
 
+/// Atomically claim the pidfile slot before forking.
+///
+/// Uses `OpenOptions::create_new(true)` (O_CREAT|O_EXCL semantics) to ensure
+/// only one concurrent caller wins the race — the OS makes this atomic. If the
+/// file already exists we inspect the existing PID:
+///
+/// - Alive  → refuse with a clear error (daemon already running).
+/// - Dead/zombie → remove the stale file and retry the atomic create once.
+/// - Invalid content but file present → bail with a parse error.
+///
+/// This replaces the previous check-then-write pattern that allowed two
+/// concurrent `agents run --detach` callers to both pass the live-PID check
+/// and later overwrite each other's pidfile.
+///
+/// The file is written with a placeholder "0\n" so that downstream code sees a
+/// valid (if not-yet-meaningful) PID; `PidfileGuard::write_current` overwrites
+/// it with the real daemon PID immediately after fork.
 fn prepare_detached_pidfile(path: &Path) -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    // Attempt 1: atomic create. On success we hold the slot.
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut f) => {
+            // Placeholder; PidfileGuard::write_current overwrites with real PID.
+            f.write_all(b"0\n")
+                .with_context(|| format!("writing placeholder to {}", path.display()))?;
+            return Ok(());
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another caller (or a stale file) holds the slot. Inspect it.
+        }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("creating agents daemon pid file {}", path.display()));
+        }
+    }
+
+    // The file exists. Read the existing PID.
+    // A zombie PID is treated as "not live" — it has exited even though
+    // kill(pid, 0) returns 0. Use pid_is_zombie to detect that case.
     match read_pidfile(path) {
-        Ok(pid) if pid_is_alive(pid) => {
+        Ok(pid) if pid_is_alive(pid) && !pid_is_zombie(pid) => {
             bail!(
                 "agents daemon already running for this project: live pid {pid} in {}",
                 path.display()
             );
         }
         Ok(pid) => {
+            // Dead or zombie — stale pidfile.
             eprintln!(
                 "warning: removing stale agents daemon pid file {} (pid {pid} is not live)",
                 path.display()
@@ -525,11 +571,35 @@ fn prepare_detached_pidfile(path: &Path) -> Result<()> {
                 format!("removing stale agents daemon pid file {}", path.display())
             })?;
         }
-        Err(e) if path.exists() => {
+        Err(e) => {
             bail!("invalid agents daemon pid file {}: {:#}", path.display(), e);
         }
-        Err(_) => {}
     }
+
+    // Attempt 2: retry atomic create after stale removal.
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut f) => {
+            f.write_all(b"0\n")
+                .with_context(|| format!("writing placeholder to {}", path.display()))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Another concurrent caller won the retry race — they have a live daemon.
+            let pid = read_pidfile(path).unwrap_or(-1);
+            bail!(
+                "agents daemon already running for this project: live pid {pid} in {} (lost atomic claim retry)",
+                path.display()
+            );
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "creating agents daemon pid file {} (retry after stale removal)",
+                    path.display()
+                )
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -2604,6 +2674,54 @@ pub(crate) fn pid_is_alive(pid: i32) -> bool {
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
+
+/// Returns true if `pid` is in zombie state (exited, waiting to be reaped).
+///
+/// On Linux, `/proc/<pid>/stat` contains the process state as the character
+/// after the closing ')' of the comm field. State 'Z' means zombie: the
+/// process has already exited but `kill(pid, 0)` still returns 0 because the
+/// kernel has not yet released the PID. For our purposes (daemon stop wait
+/// loop and stale-pidfile detection) a zombie should be treated as "exited".
+///
+/// On non-Linux platforms (e.g. macOS) `/proc` is not available so this
+/// always returns false. Callers fall back to `kill(pid, 0)` semantics; a
+/// zombie may appear live in that case, which is an acceptable limitation.
+#[cfg(target_os = "linux")]
+pub(crate) fn pid_is_zombie(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let stat_path = format!("/proc/{pid}/stat");
+    // /proc/<pid>/stat: "pid (comm) state ..."
+    // comm can contain spaces and parentheses; find the LAST ')' to skip it.
+    if let Ok(contents) = std::fs::read_to_string(&stat_path) {
+        if let Some(after_comm) = contents.rfind(')') {
+            let rest = contents[after_comm + 1..].trim_start();
+            return rest.starts_with('Z');
+        }
+    }
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn pid_is_zombie(_pid: i32) -> bool {
+    // /proc/<pid>/stat is not available on non-Linux platforms (e.g. macOS).
+    // A zombie will appear live via kill(pid, 0); stop may time out in the
+    // rare event the daemon enters zombie state during the wait window.
+    false
+}
+
+/// Count tasks rows whose `drive_pid` is set to a still-running process.
+/// Used by the daemon's `poll_once` cap-check (Task 4.5).
+pub(crate) fn count_live_drive_pids(conn: &Connection) -> Result<usize> {
+    let mut stmt = conn.prepare("SELECT drive_pid FROM tasks WHERE drive_pid IS NOT NULL")?;
+    let pids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(pids.into_iter().filter(|p| pid_is_alive(*p as i32)).count())
+}
+
 
 /// Spawn `argv` as an orphaned grandchild detached from the daemon. Returns
 /// the grandchild PID. Stdout/stderr go to `log_path` (created/appended).

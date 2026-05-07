@@ -1,8 +1,27 @@
 use anyhow::{bail, Context, Result};
 use std::time::{Duration, Instant};
 
-const STOP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default number of seconds to wait for the daemon to exit after SIGTERM.
+/// Override via `STORES_AGENTS_STOP_TIMEOUT_SEC` environment variable.
+const DEFAULT_STOP_TIMEOUT_SECS: u64 = 5;
 const STOP_POLL: Duration = Duration::from_millis(50);
+
+fn stop_timeout() -> Duration {
+    let secs = std::env::var("STORES_AGENTS_STOP_TIMEOUT_SEC")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_STOP_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Returns true if `pid` should be treated as "still running" for the purposes
+/// of the stop wait loop. A zombie is treated as exited.
+pub(crate) fn pid_is_live_for_stop(pid: i32) -> bool {
+    if crate::handlers::agents_run::pid_is_zombie(pid) {
+        return false;
+    }
+    crate::handlers::agents_run::pid_is_alive(pid)
+}
 
 pub fn run_stop() -> Result<()> {
     let pidfile = crate::paths::agents_pid_path()?;
@@ -28,9 +47,10 @@ pub fn run_stop() -> Result<()> {
         bail!("failed to SIGTERM agents daemon pid {pid}: {err}");
     }
 
-    let deadline = Instant::now() + STOP_TIMEOUT;
+    let timeout = stop_timeout();
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if !crate::handlers::agents_run::pid_is_alive(pid) {
+        if !pid_is_live_for_stop(pid) {
             match std::fs::remove_file(&pidfile) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -48,6 +68,6 @@ pub fn run_stop() -> Result<()> {
 
     bail!(
         "timed out after {}s waiting for agents daemon pid {pid} to exit after SIGTERM",
-        STOP_TIMEOUT.as_secs()
+        timeout.as_secs()
     );
 }

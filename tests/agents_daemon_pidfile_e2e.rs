@@ -80,6 +80,12 @@ fn start_detached(project: &Path, log_name: &str) -> Output {
         .arg(log)
         .args(["--poll-interval", "0.1"])
         .current_dir(project)
+        // Pin the daemon binary path to the test binary so the stale-binary
+        // detector doesn't re-exec into an installed (different-inode) stores
+        // binary. Without this, the re-exec'd binary can take >5 s to respond
+        // to SIGTERM (blocked inside validate_stale_reexec_candidate), causing
+        // `agents stop` to time out non-deterministically.
+        .env("STORES_DAEMON_BIN_PATH", stores_bin())
         .output()
         .expect("stores agents run spawns")
 }
