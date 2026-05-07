@@ -970,16 +970,18 @@ fn seed_temp_cleaned_up_on_validation_failure() {
 /// MEDIUM r2 fix: hard_link no-replace semantics — a pre-existing private
 /// binary is never overwritten by a concurrent (or sequential) seeder.
 ///
-/// This is a sequential proxy for the concurrent race: pre-stage a valid
-/// private binary, then run `stores agents run`.  The existence-shortcut
-/// validates and returns without touching the file.  Assert size and content
-/// are unchanged.
+/// This test exercises the **existence-shortcut** path: the private binary is
+/// already present before the seeder runs, so `ensure_private_daemon_binary`
+/// validates and returns at the early-return branch (agents_run.rs:122) without
+/// reaching `hard_link`.  It does NOT exercise the `AlreadyExists` arm of the
+/// `hard_link` match; that arm is exercised by
+/// `concurrent_seeders_hard_link_already_exists_arm`.
 ///
-/// The test also names the invariant explicitly so a future refactor that
-/// accidentally re-introduces rename (which silently replaces) trips it.
+/// Assert that the inode and size are unchanged after the run — the seeder must
+/// not have replaced the binary.
 #[cfg(unix)]
 #[test]
-fn existing_private_binary_never_replaced_by_seeder() {
+fn existing_private_binary_short_circuits_seeder() {
     let tmp = tempfile::tempdir().unwrap();
     init_empty_stores_dir(tmp.path());
 
@@ -1028,6 +1030,77 @@ fn existing_private_binary_never_replaced_by_seeder() {
     assert_eq!(
         before_size, after_size,
         "private binary size must be unchanged (not replaced by seeder)"
+    );
+}
+
+/// r3 fix: real race test — exercises the `AlreadyExists` arm of `hard_link`.
+///
+/// Two concurrent `stores agents run --once` processes start with NO pre-existing
+/// private binary.  Both must race past the existence-shortcut, copy to their
+/// own uniquely-named temp, and attempt `hard_link`.  One wins (link succeeds);
+/// the other loses (link returns `AlreadyExists`) and falls through to validate
+/// the winner's binary.  Both processes must exit successfully.
+///
+/// We spawn both child processes, collect their outputs, and assert both exited
+/// zero.  The private binary must exist and be a valid binary afterwards.
+#[cfg(unix)]
+#[test]
+fn concurrent_seeders_hard_link_already_exists_arm() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+
+    let private = tmp.path().join("private/bin/stores");
+    // Do NOT pre-create the private binary — both seeders must race to create it.
+
+    let make_child = || {
+        Command::new(env!("CARGO_BIN_EXE_stores"))
+            .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+            .current_dir(tmp.path())
+            .env("STORES_DAEMON_BIN_PATH", &private)
+            .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn stores agents run")
+    };
+
+    // Spawn both before waiting on either so they overlap.
+    let child_a = make_child();
+    let child_b = make_child();
+    let out_a = child_a.wait_with_output().expect("wait child_a");
+    let out_b = child_b.wait_with_output().expect("wait child_b");
+
+    assert!(
+        out_a.status.success(),
+        "child_a failed; stderr:\n{}",
+        String::from_utf8_lossy(&out_a.stderr)
+    );
+    assert!(
+        out_b.status.success(),
+        "child_b failed; stderr:\n{}",
+        String::from_utf8_lossy(&out_b.stderr)
+    );
+
+    // Private binary must exist and be non-empty after both seeders finish.
+    let meta = std::fs::metadata(&private)
+        .expect("private binary must exist after concurrent seed");
+    assert!(meta.len() > 0, "private binary must be non-empty");
+
+    // No stale temp files should remain.
+    let parent = private.parent().unwrap();
+    let leaked: Vec<_> = std::fs::read_dir(parent)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("stores.tmp.")
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "no temp files must remain after concurrent seed; leaked: {:?}",
+        leaked.iter().map(|e| e.path()).collect::<Vec<_>>()
     );
 }
 

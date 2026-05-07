@@ -157,6 +157,26 @@ fn ensure_private_daemon_binary(
     );
     let tmp_path = parent.join(&tmp_name);
 
+    // Drop guard: if we exit this function with an error before the temp has
+    // been consumed (renamed / hard-linked into place or explicitly removed),
+    // the guard removes it so we never accumulate stale stores.tmp.<pid>.<nanos>
+    // files in the private binary directory.  Call `guard.disarm()` once the
+    // temp is no longer our responsibility.
+    struct TmpGuard(Option<PathBuf>);
+    impl TmpGuard {
+        fn disarm(&mut self) {
+            self.0 = None;
+        }
+    }
+    impl Drop for TmpGuard {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    let mut guard = TmpGuard(Some(tmp_path.clone()));
+
     std::fs::copy(&source, &tmp_path).with_context(|| {
         format!(
             "seeding private daemon binary {} from {} (via temp {})",
@@ -168,15 +188,8 @@ fn ensure_private_daemon_binary(
     if let Ok(md) = std::fs::metadata(&source) {
         let _ = std::fs::set_permissions(&tmp_path, md.permissions());
     }
-    if let Err(e) = validate_stale_reexec_candidate(&tmp_path)
-        .map_err(|f| anyhow!(private_candidate_validation_message(&f)))
-    {
-        // Validation failed: clean up the temp before propagating the error so
-        // we don't accumulate stale stores.tmp.<pid>.<nanos> files in the
-        // private binary directory.
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
+    validate_stale_reexec_candidate(&tmp_path)
+        .map_err(|f| anyhow!(private_candidate_validation_message(&f)))?;
 
     // Use hard_link (not rename) as the install primitive so that concurrent
     // seeders are detectable.  On POSIX, rename(2) silently replaces the
@@ -189,12 +202,15 @@ fn ensure_private_daemon_binary(
     match std::fs::hard_link(&tmp_path, &private_path) {
         Ok(()) => {
             // We won the race; private_path now contains our validated copy.
-            // Clean up the temp (private_path holds its own link count).
+            // Disarm the guard and remove the temp (private_path holds its own
+            // link count).
+            guard.disarm();
             let _ = std::fs::remove_file(&tmp_path);
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Another concurrent daemon seeder won; discard our temp and
-            // validate the winner before trusting it.
+            // Another concurrent daemon seeder won; discard our temp (guard
+            // handles it on drop) and validate the winner before trusting it.
+            guard.disarm();
             let _ = std::fs::remove_file(&tmp_path);
             validate_stale_reexec_candidate(&private_path)
                 .map_err(|f| anyhow!(private_candidate_validation_message(&f)))
@@ -206,7 +222,7 @@ fn ensure_private_daemon_binary(
                 })?;
         }
         Err(e) => {
-            let _ = std::fs::remove_file(&tmp_path);
+            // guard will clean up tmp_path on drop.
             return Err(e).with_context(|| {
                 format!(
                     "linking seeded temp {} to {}",
