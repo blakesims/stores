@@ -998,6 +998,8 @@ pub(crate) fn compute_submit_execute(
     files_changed: Option<&str>,
     notes: Option<&str>,
     invoker: Actor,
+    // T072 r6: when Some, embedded into executor sub-record inside the same tx (atomic backlink).
+    transcript_path: Option<&str>,
 ) -> Result<SubmitOutput> {
     // P5-m3: look up field name from submit_targets instead of hardcoding "cycles"
     let workflow = require_workflow(schema, "submit-execute")?;
@@ -1055,6 +1057,14 @@ pub(crate) fn compute_submit_execute(
     }
     if let Some(n) = notes {
         executor_obj.insert("notes".to_string(), Value::String(n.to_string()));
+    }
+    // T072 r6: atomic backlink — embed transcript_path inside the tx so the
+    // executor sub-record is never committed without its transcript pointer.
+    if let Some(tp) = transcript_path {
+        executor_obj.insert(
+            "transcript_path".to_string(),
+            Value::String(tp.to_string()),
+        );
     }
 
     let new_cycle_entry = json!({
@@ -1150,6 +1160,7 @@ pub fn run_submit_execute(
         files_changed,
         notes,
         invoker.actor,
+        None, // CLI submits have no runner session
     )?;
     println!("{}", out.summary);
     Ok(())
@@ -1170,6 +1181,8 @@ pub(crate) fn compute_submit_review(
     major: i64,
     minor: i64,
     invoker: Actor,
+    // T072 r6: when Some, embedded into review sub-record inside the same tx (atomic backlink).
+    transcript_path: Option<&str>,
 ) -> Result<SubmitOutput> {
     // P5-m3: look up field name from submit_targets instead of hardcoding "cycles"
     let workflow = require_workflow(schema, "submit-review")?;
@@ -1240,6 +1253,14 @@ pub(crate) fn compute_submit_review(
     review_obj_map.insert("critical".to_string(), Value::from(critical));
     review_obj_map.insert("major".to_string(), Value::from(major));
     review_obj_map.insert("minor".to_string(), Value::from(minor));
+    // T072 r6: atomic backlink — embed transcript_path inside the tx so the
+    // review sub-record is never committed without its transcript pointer.
+    if let Some(tp) = transcript_path {
+        review_obj_map.insert(
+            "transcript_path".to_string(),
+            Value::String(tp.to_string()),
+        );
+    }
     let review_obj = Value::Object(review_obj_map);
 
     if let Some(entry) = cycles.get_mut(cycle_idx) {
@@ -1420,6 +1441,7 @@ pub fn run_submit_review(
         major,
         minor,
         invoker.actor,
+        None, // CLI submits have no runner session
     )?;
     println!("{}", out.summary);
     // Non-zero exit when the submit routes the row to blocked (e.g. 4th REVISE guard failure).
@@ -2237,6 +2259,7 @@ workflow:
             None,
             None,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap()
     }
@@ -2275,6 +2298,7 @@ workflow:
             Some("src/foo.rs,src/bar.rs"),
             None,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -2336,6 +2360,7 @@ workflow:
             0,
             1,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -2386,6 +2411,7 @@ workflow:
             0,
             0,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -2447,6 +2473,7 @@ workflow:
             0,
             0,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -2498,6 +2525,7 @@ workflow:
                 0,
                 0,
                 Actor::AiAutonomous,
+                None,
             )
         };
 
@@ -2634,6 +2662,7 @@ workflow:
                 0,
                 0,
                 Actor::AiAutonomous,
+                None,
             )
             .unwrap();
             assert_eq!(out.new_status, "executing");
@@ -2663,6 +2692,7 @@ workflow:
                 1,
                 0,
                 Actor::AiAutonomous,
+                None,
             )
             .unwrap();
             assert_eq!(out.new_status, "executing");
@@ -2693,6 +2723,7 @@ workflow:
                 0,
                 0,
                 Actor::AiAutonomous,
+                None,
             )
             .unwrap();
             assert_eq!(out.new_status, "executing");
@@ -2734,6 +2765,7 @@ workflow:
             1,
             0,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -2778,6 +2810,7 @@ workflow:
             None,
             None,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap_err();
 
@@ -2805,6 +2838,7 @@ workflow:
             None,
             None,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
         assert_eq!(out.new_status, "code_review");
@@ -3170,6 +3204,7 @@ fields:
             None,
             None,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap_err();
 
@@ -3817,6 +3852,7 @@ fields:
             None,
             None,
             Actor::AiWithHuman,
+            None,
         )
         .unwrap_err();
 
@@ -3875,6 +3911,7 @@ fields:
             Some("src/foo.rs,src/bar.rs"),
             None,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -3906,6 +3943,7 @@ fields:
             Some(" a.rs , b.rs , , c.rs "),
             None,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -3972,6 +4010,7 @@ fields:
             None,
             None,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -4021,6 +4060,7 @@ fields:
             0,
             0,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -4199,6 +4239,7 @@ workflow:
             None,
             None,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 
@@ -4260,6 +4301,7 @@ workflow:
             2,
             3,
             Actor::AiAutonomous,
+            None,
         )
         .unwrap();
 

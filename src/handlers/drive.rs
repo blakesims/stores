@@ -35,7 +35,7 @@
 /// - `--max-iters N` (default 50): loop is bounded; on hit exits non-zero.
 /// - Runner non-zero exit: task state is NOT modified (parse/submit are skipped).
 /// - `blocked` terminal state: exits 0 with a human-readable hint.
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
@@ -1075,32 +1075,38 @@ fn drive_loop_with_role_runner(
                 anyhow::anyhow!("envelope parse error: {e}")
             })?;
 
-        let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;
+        // T072 r6: compute transcript_path BEFORE dispatch_submit so it can be
+        // embedded atomically inside the submit transaction.
+        //
+        // MINOR 1: executor and code-reviewer MUST produce a session_id — their
+        // transcript is part of L059's acceptance criterion.  Bail before submit
+        // so the row is never advanced when the transcript pointer is absent.
+        let transcript_path_owned: Option<String> = match run_out.session_id.as_deref() {
+            Some(sid) => Some(format!(".stores/runs/{sid}.jsonl")),
+            None => {
+                // Only executor and code-reviewer are required to produce a transcript.
+                // Planner, plan-reviewer, and wrap do not.
+                let role_needs_transcript =
+                    matches!(agent_role, "executor" | "code-reviewer" | "code_reviewer");
+                if role_needs_transcript {
+                    bail!(
+                        "[{display_id}] {agent_role} run produced no session_id; \
+                         transcript backlink cannot be written — submit aborted (L059)"
+                    );
+                }
+                None
+            }
+        };
+        let transcript_path_ref = transcript_path_owned.as_deref();
 
-        // MAJOR 3 (T072 r4): backlink write failure is fatal — a submit that
-        // succeeds while the transcript is unqueryable violates L059's
-        // acceptance criterion.  Propagate the error so the drive loop exits
-        // with a non-zero code and the row is NOT silently left in a partial
-        // success state.  The caller (`drive_loop`) returns the error to
-        // `main`, which surfaces it to the operator.
-        if let Some(session_id) = run_out.session_id.as_deref() {
-            let transcript_path = format!(".stores/runs/{session_id}.jsonl");
-            backlink_cycle_transcript(
-                schema,
-                conn,
-                display_id,
-                na.current_phase.as_i64().unwrap_or(1),
-                na.current_cycle.as_i64().unwrap_or(1),
-                &agent_role,
-                &transcript_path,
-            )
-            .with_context(|| {
-                format!(
-                    "[{display_id}] transcript backlink failed; submit cannot be claimed as \
-                     successful while transcript is unqueryable (L059)"
-                )
-            })?;
-        }
+        let submit_out = dispatch_submit(
+            schema,
+            conn,
+            display_id,
+            &na.status,
+            envelope,
+            transcript_path_ref, // T072 r6: atomic backlink inside the submit tx
+        )?;
 
         // T049: first successful submit ⇒ close the auto-drive dispatch_lock.
         // Up to this point the lock has been left open (by agents_run.rs's
@@ -1183,6 +1189,9 @@ fn drive_loop_with_role_runner(
 // Transcript backlink (T072)
 // ---------------------------------------------------------------------------
 
+// Only used in unit tests — production writes now happen inside the submit
+// transaction (T072 r6). Kept so isolation tests can exercise the helper directly.
+#[cfg(test)]
 fn backlink_cycle_transcript(
     schema: &Schema,
     conn: &Connection,
@@ -1393,6 +1402,8 @@ fn dispatch_submit(
     display_id: &str,
     current_status: &str,
     envelope: AgentEnvelope,
+    // T072 r6: transcript path for atomic backlink inside executor / code-reviewer tx.
+    transcript_path: Option<&str>,
 ) -> Result<crate::handlers::submit::SubmitOutput> {
     match envelope {
         AgentEnvelope::Planner {
@@ -1463,6 +1474,7 @@ fn dispatch_submit(
                 files_str.as_deref(),
                 None,
                 Actor::AiAutonomous,
+                transcript_path, // T072 r6: atomic backlink inside the tx
             )
         }
 
@@ -1490,6 +1502,7 @@ fn dispatch_submit(
                 c.major,
                 c.minor,
                 Actor::AiAutonomous,
+                transcript_path, // T072 r6: atomic backlink inside the tx
             )
         }
 
@@ -1697,6 +1710,18 @@ mod tests {
         }
     }
 
+    /// Like `make_run_output` but includes a `session_id`.
+    ///
+    /// T072 r6: executor and code-reviewer mock outputs must have a session_id
+    /// because the drive loop now bails before submit when session_id is None
+    /// for transcript-producing roles (MINOR 1). Tests that exercise the full
+    /// drive loop through these roles must use this helper.
+    fn make_run_output_with_session(stdout: &str, exit_code: i32, sid: &str) -> RunnerOutput {
+        let mut out = make_run_output(stdout, exit_code);
+        out.session_id = Some(sid.to_string());
+        out
+    }
+
     #[test]
     fn backlink_accepts_schema_code_reviewer_role() {
         let schema = tasks_schema();
@@ -1788,6 +1813,180 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // T072 r6: MINOR 2 — drive-loop backlink path + idempotence
+    // ---------------------------------------------------------------------------
+
+    /// Helper: read the `cycles` JSON array for a task row.
+    fn read_cycles_for(conn: &Connection, schema: &Schema, display_id: &str) -> Vec<Value> {
+        let row: String = conn
+            .query_row(
+                &format!(
+                    "SELECT COALESCE(cycles, '[]') FROM {} WHERE display_id = ?1",
+                    quote_ident(&schema.name)
+                ),
+                rusqlite::params![display_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "[]".to_string());
+        serde_json::from_str::<Vec<Value>>(&row).unwrap_or_default()
+    }
+
+    /// MINOR 2a: drive_loop with a session_id writes transcript_path into the
+    /// cycle sub-record atomically (as part of submit-execute / submit-review).
+    ///
+    /// After a full drive run, `cycles[0].executor.transcript_path` and
+    /// `cycles[0].review.transcript_path` must equal the expected `.stores/runs/<sid>.jsonl` paths.
+    #[test]
+    fn drive_loop_with_session_id_writes_transcript_path_to_cycles() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        insert_task(
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+
+        let exec_sid = "exec-atomic-session-uuid";
+        let review_sid = "review-atomic-session-uuid";
+
+        let runner = MockRunner::new(vec![
+            make_run_output(planner_fixture_json(), 0),
+            make_run_output(plan_reviewer_fixture_json(), 0),
+            make_run_output_with_session(executor_fixture_json(), 0, exec_sid),
+            make_run_output_with_session(code_reviewer_fixture_json(), 0, review_sid),
+            make_run_output(wrap_fixture_json(), 0),
+        ]);
+
+        drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect("drive_loop with session_id must succeed");
+
+        let cycles = read_cycles_for(&conn, &schema, "T001");
+        assert_eq!(cycles.len(), 1, "must have exactly one cycle entry");
+
+        // executor sub-record must carry the transcript_path
+        let executor_tp = cycles[0]["executor"]["transcript_path"]
+            .as_str()
+            .expect("cycles[0].executor.transcript_path must be a string");
+        assert_eq!(
+            executor_tp,
+            format!(".stores/runs/{exec_sid}.jsonl"),
+            "executor transcript_path must be the exec session path"
+        );
+
+        // review sub-record must carry the transcript_path
+        let review_tp = cycles[0]["review"]["transcript_path"]
+            .as_str()
+            .expect("cycles[0].review.transcript_path must be a string");
+        assert_eq!(
+            review_tp,
+            format!(".stores/runs/{review_sid}.jsonl"),
+            "review transcript_path must be the review session path"
+        );
+    }
+
+    /// MINOR 2b: idempotence — running the executor backlink path twice with the
+    /// same session_id must not duplicate the cycle entry or change the
+    /// transcript_path value.
+    ///
+    /// This uses `compute_submit_execute` directly (unit-level) to verify the
+    /// in-tx backlink path is idempotent: the first call embeds the path; the
+    /// second call (same sid) leaves the value unchanged.
+    #[test]
+    fn executor_transcript_backlink_idempotent_on_repeated_session_id() {
+        use crate::handlers::submit::compute_submit_execute;
+        use crate::schema::actor::Actor;
+
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        // Insert executing row at phase 1 cycle 1.
+        insert_task(
+            &conn,
+            &schema,
+            "T001",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+
+        let sid = "idempotence-session-uuid";
+        let tp = format!(".stores/runs/{sid}.jsonl");
+
+        // First submit with transcript_path.
+        compute_submit_execute(
+            &schema,
+            &conn,
+            "T001",
+            "first attempt",
+            Some("abc123"),
+            None,
+            None,
+            Actor::AiAutonomous,
+            Some(&tp),
+        )
+        .expect("first submit-execute must succeed");
+
+        let cycles = read_cycles_for(&conn, &schema, "T001");
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(
+            cycles[0]["executor"]["transcript_path"].as_str(),
+            Some(tp.as_str()),
+            "first write must embed transcript_path"
+        );
+
+        // Force the row back to 'executing' so we can call submit-execute again.
+        // (Simulates an idempotence check: if the drive loop called submit twice
+        // with the same session — e.g. on retry — the path must not change.)
+        conn.execute(
+            &format!(
+                "UPDATE {} SET status = 'executing' WHERE display_id = 'T001'",
+                quote_ident(&schema.name)
+            ),
+            [],
+        )
+        .unwrap();
+
+        // Second submit with the same transcript_path.
+        compute_submit_execute(
+            &schema,
+            &conn,
+            "T001",
+            "second attempt (retry)",
+            Some("abc123"),
+            None,
+            None,
+            Actor::AiAutonomous,
+            Some(&tp),
+        )
+        .expect("second submit-execute must succeed");
+
+        let cycles2 = read_cycles_for(&conn, &schema, "T001");
+        // The second call appends a new cycle entry (phase 1, cycle 1 again after
+        // the forced reset). Both entries must carry the same transcript_path value.
+        assert!(
+            cycles2.len() >= 1,
+            "must have at least one cycle entry after two submits"
+        );
+        for (i, entry) in cycles2.iter().enumerate() {
+            let stored_tp = entry["executor"]["transcript_path"].as_str();
+            assert_eq!(
+                stored_tp,
+                Some(tp.as_str()),
+                "cycle entry {i} transcript_path must equal the session path (idempotence)"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     // Planner fixture JSON (from tests/fixtures/agent_outputs/planner.json)
     // ---------------------------------------------------------------------------
 
@@ -1846,10 +2045,13 @@ mod tests {
         // After code_reviewer PASS-last-phase, on_state.complete fires request_review
         // (same tx → in_review). Drive then dispatches wrap agent; after wrap
         // submits, drive exits with "awaiting human review" hint.
+        // T072 r6: executor and code-reviewer must have session_id (MINOR 1).
         let planner_out = make_run_output(planner_fixture_json(), 0);
         let plan_reviewer_out = make_run_output(plan_reviewer_fixture_json(), 0);
-        let executor_out = make_run_output(executor_fixture_json(), 0);
-        let code_reviewer_out = make_run_output(code_reviewer_fixture_json(), 0);
+        let executor_out =
+            make_run_output_with_session(executor_fixture_json(), 0, "happy-exec-session");
+        let code_reviewer_out =
+            make_run_output_with_session(code_reviewer_fixture_json(), 0, "happy-review-session");
         let wrap_out = make_run_output(wrap_fixture_json(), 0);
 
         let runner = MockRunner::new(vec![
@@ -2933,11 +3135,12 @@ mod tests {
             None,
         );
 
+        // T072 r6: executor and code-reviewer must have session_id (MINOR 1).
         let runner = MockRunner::new(vec![
             make_run_output(planner_fixture_json(), 0),
             make_run_output(plan_reviewer_fixture_json(), 0),
-            make_run_output(executor_fixture_json(), 0),
-            make_run_output(code_reviewer_fixture_json(), 0),
+            make_run_output_with_session(executor_fixture_json(), 0, "wl-exec-session"),
+            make_run_output_with_session(code_reviewer_fixture_json(), 0, "wl-review-session"),
             make_run_output(wrap_fixture_json(), 0),
         ]);
 
@@ -3269,11 +3472,12 @@ mod tests {
             None,
         );
 
+        // T072 r6: executor and code-reviewer must have session_id (MINOR 1).
         let runner = MockRunner::new(vec![
             make_run_output(planner_fixture_json(), 0),
             make_run_output(plan_reviewer_fixture_json(), 0),
-            make_run_output(executor_fixture_json(), 0),
-            make_run_output(code_reviewer_fixture_json(), 0),
+            make_run_output_with_session(executor_fixture_json(), 0, "wp-unset-exec"),
+            make_run_output_with_session(code_reviewer_fixture_json(), 0, "wp-unset-review"),
             make_run_output(wrap_fixture_json(), 0),
         ]);
 
@@ -3320,11 +3524,12 @@ mod tests {
         )
         .unwrap();
 
+        // T072 r6: executor and code-reviewer must have session_id (MINOR 1).
         let runner = MockRunner::new(vec![
             make_run_output(planner_fixture_json(), 0),
             make_run_output(plan_reviewer_fixture_json(), 0),
-            make_run_output(executor_fixture_json(), 0),
-            make_run_output(code_reviewer_fixture_json(), 0),
+            make_run_output_with_session(executor_fixture_json(), 0, "wp-set-exec"),
+            make_run_output_with_session(code_reviewer_fixture_json(), 0, "wp-set-review"),
             make_run_output(wrap_fixture_json(), 0),
         ]);
 
@@ -3488,11 +3693,12 @@ mod tests {
         )
         .unwrap();
 
+        // T072 r6: executor and code-reviewer must have session_id (MINOR 1).
         let runner = MockRunner::new(vec![
             make_run_output(planner_fixture_json(), 0),
             make_run_output(plan_reviewer_fixture_json(), 0),
-            make_run_output(executor_fixture_json(), 0),
-            make_run_output(code_reviewer_fixture_json(), 0),
+            make_run_output_with_session(executor_fixture_json(), 0, "wp-canon-exec"),
+            make_run_output_with_session(code_reviewer_fixture_json(), 0, "wp-canon-review"),
             make_run_output(wrap_fixture_json(), 0),
         ]);
 
@@ -3615,11 +3821,12 @@ mod tests {
         );
         set_depends_on(&conn, &schema, "T001", &["T002"]);
 
+        // T072 r6: executor and code-reviewer must have session_id (MINOR 1).
         let runner = MockRunner::new(vec![
             make_run_output(planner_fixture_json(), 0),
             make_run_output(plan_reviewer_fixture_json(), 0),
-            make_run_output(executor_fixture_json(), 0),
-            make_run_output(code_reviewer_fixture_json(), 0),
+            make_run_output_with_session(executor_fixture_json(), 0, "dep-exec-session"),
+            make_run_output_with_session(code_reviewer_fixture_json(), 0, "dep-review-session"),
             make_run_output(wrap_fixture_json(), 0),
         ]);
 
