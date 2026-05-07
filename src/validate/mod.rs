@@ -179,7 +179,9 @@ fn validate_field_recursive(
                             .collect();
                         let actor_elem_entry: EntryMap = match actor_list_val {
                             Some(serde_json::Value::Array(actor_elems)) => {
-                                if let Some(serde_json::Value::Object(ae)) = actor_elems.get(elem_idx) {
+                                if let Some(serde_json::Value::Object(ae)) =
+                                    actor_elems.get(elem_idx)
+                                {
                                     ae.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                                 } else {
                                     BTreeMap::new()
@@ -213,6 +215,32 @@ fn validate_field_recursive(
     }
 }
 
+fn push_invalid_shape(
+    errors: &mut Vec<ValidationError>,
+    field_path: &[String],
+    expected: &str,
+    value: &serde_json::Value,
+) {
+    let got = match value {
+        serde_json::Value::String(raw) => format!(
+            "string '{}'",
+            if raw.len() > 60 {
+                &raw[..60]
+            } else {
+                raw.as_str()
+            }
+        ),
+        other => other.to_string(),
+    };
+    errors.push(ValidationError {
+        field_path: field_path.to_vec(),
+        rule: error::RuleKind::InvalidJson {
+            expected: expected.to_string(),
+        },
+        message: format!("value must be a {expected}, got {got}"),
+    });
+}
+
 fn validate_field(
     field: &crate::schema::Field,
     entry: &EntryMap,
@@ -226,35 +254,44 @@ fn validate_field(
     let mut field_path = parent_path.to_vec();
     field_path.push(field.name.clone());
 
-    // T006 REVISE 1: type-shape check for ListRecord and ListFk fields at any depth.
-    // coerce_value returns Value::String(raw) on bad JSON / non-array input as a sentinel.
-    // Value::Null is a valid nullable value (doesn't trigger required for optional fields);
-    // Value::String is never valid for list_record/list_fk columns, so this check fires
-    // unconditionally regardless of whether the field is required or optional.
-    if matches!(
-        &field.ty,
-        FieldType::ListRecord(_) | FieldType::ListFk { .. }
-    ) {
-        if let Some(value) = required::lookup(entry, &field_path) {
-            if !value.is_array() && !value.is_null() {
-                let got = match value {
-                    serde_json::Value::String(raw) => format!(
-                        "string '{}'",
-                        if raw.len() > 60 { &raw[..60] } else { raw.as_str() }
-                    ),
-                    other => other.to_string(),
-                };
-                errors.push(ValidationError {
-                    field_path: field_path.clone(),
-                    rule: error::RuleKind::InvalidJson {
-                        expected: "JSON array".to_string(),
-                    },
-                    message: format!("value must be a JSON array, got {got}"),
-                });
-                // Short-circuit: don't run required/enum/pattern/actor checks on a bad list shape —
-                // the type-shape error is the relevant signal; other checks would produce noise.
-                return;
+    // Type-shape checks for structured fields at any depth. `coerce_value` may
+    // return Value::String(raw) sentinels for bad JSON / non-array input; those
+    // must be rejected even when optional. Null remains valid for nullable slots.
+    if let Some(value) = required::lookup(entry, &field_path) {
+        match &field.ty {
+            FieldType::Record(_) => {
+                if !value.is_object() && !value.is_null() {
+                    push_invalid_shape(errors, &field_path, "JSON object", value);
+                    return;
+                }
             }
+            FieldType::ListRecord(_) => {
+                if !value.is_array() && !value.is_null() {
+                    push_invalid_shape(errors, &field_path, "JSON array", value);
+                    return;
+                }
+                if let serde_json::Value::Array(elements) = value {
+                    if let Some(bad) = elements.iter().find(|elem| !elem.is_object()) {
+                        push_invalid_shape(errors, &field_path, "JSON array of objects", bad);
+                        return;
+                    }
+                }
+            }
+            FieldType::List(inner) => {
+                if !value.is_array() && !value.is_null() {
+                    push_invalid_shape(errors, &field_path, "JSON array", value);
+                    return;
+                }
+                if matches!(inner.as_ref(), FieldType::Text) {
+                    if let serde_json::Value::Array(elements) = value {
+                        if let Some(bad) = elements.iter().find(|elem| !elem.is_string()) {
+                            push_invalid_shape(errors, &field_path, "JSON array of strings", bad);
+                            return;
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
