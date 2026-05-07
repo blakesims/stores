@@ -60,6 +60,11 @@ Generated projections under `tasks/active|planning|paused` are dirty-state noise
 
 ## When to ask Pi
 
+Default: one Pi ruling cascades to all downstream mechanical edits until new evidence changes the premise. Don't micro-approve.
+
+- **Ask early** (before drafting pages) if a contract touches doctrine/security/authority/schema in a surprising way. 30-second "shape OK?" ping > multi-page draft on a bad premise.
+- **When direction is already documented**: present the FULL contract in one message; expect terse "yes ratify" or "redirect on point N". Don't drag multi-round.
+
 Ask Pi before:
 
 1. **Ratifying or amending contracts**
@@ -100,22 +105,12 @@ Ask Pi before:
 
 ## Agent-comm protocol
 
-Use the active shared thread for the session. Current stores thread:
+Use the active shared thread for the session. **Verify the active thread path from Blake's handover or fresh init** — do NOT assume a hardcoded path. Old thread paths in skill documentation are examples only; using a stale path silently misroutes context. Past sessions: `/home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-review-session.md`, `/home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md`, `/home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md`. Confirm with Blake which is active or initialize a fresh one.
 
-```text
-/home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md
-```
-
-Older context thread:
-
-```text
-/home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md
-```
-
-Watch as substrate-agent:
+Watch as substrate-agent (substitute the active thread path):
 
 ```bash
-agent-comm watch /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md --name substrate-agent --from-end
+agent-comm watch <ACTIVE_THREAD_PATH> --name substrate-agent --from-end
 ```
 
 Ask Pi with this shape:
@@ -141,7 +136,7 @@ Why: distinct primitives, smallest scope.
 Send pattern:
 
 ```bash
-agent-comm send /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md \
+agent-comm send <ACTIVE_THREAD_PATH> \
   "<context/options/recommendation>" \
   --name substrate-agent --to pi --priority high --blocking --response-requested --task T050/L134
 ```
@@ -161,11 +156,21 @@ Useful non-blocking update phrase:
 I think this is a cascading consequence of your prior ruling on X; proceeding unless you object.
 ```
 
+## Heartbeat — keep the engine moving without nudges
+
+You own forward motion of the operational queue. Silent standing-by is a bug.
+
+- Glance at `stores tasks status` every 3-5 min. For each `in_review next=wrap blocked=false` row, either dispatch reviewer-runner or post a one-line why-not (rebase pending, lane saturated, executor in flight).
+- If queue has parked work AND you're mid-architecture-thread for >5 min, surface to Blake. Don't silently choose architecture.
+- On long sessions, post a compact heartbeat: codex/revise/integration lanes + next dispatch + blockers.
+
+Stopgap until a daemon-side engine-runner monitor primitive ships (L186-class follow-up).
+
 ## Current priority doctrine
 
 `docs/engine-health.md` and live Pi rulings are the source of truth. Keep priority snippets in this skill durable, not session-noisy.
 
-Current posture (2026-05-07): stabilize operational trust first — binary corruption, self-reexec candidate validation, private install path, handoff/review stalls, watch/actionability — while preserving gatekeeper scope boundaries.
+Current posture (2026-05-07): stabilize operational trust first — binary corruption, self-reexec candidate validation (✅ T075/L182), private install path (T076/L184 in flight), handoff/review stalls (✅ T067/L178), telemetry (T070+T072 ✅), watch/actionability — while preserving gatekeeper scope boundaries. Next focus: engine-runner actionability monitor + L171 phase α `architecture_reviews`.
 
 ## Throughput and integration-lane doctrine
 
@@ -199,10 +204,18 @@ Before applying a codex finding that claims a test fails, first run the named te
 1. Rebase task branch onto current main.
 2. Run codex against branch diff.
 3. PASS / cosmetic-only → accept with valid human/session token.
-4. Substantive local findings → revise in task worktree, commit, re-run codex.
+4. Substantive local findings → **spawn `task-workflow:executor` subagent** to revise in task worktree, commit, then re-run codex (do NOT inline-edit unless trivial).
 5. Critical/architectural findings → halt and ask Pi / Blake.
 
 If a task's tier is ambiguous (e.g., a T1 contract that grew through revision), default to running codex — false positives on review depth are cheaper than false negatives on architectural risk.
+
+### RE-REBASE-ONLY-NO-CODEX (skip codex when scope is identical)
+
+If a rebase advances main but `git diff --name-only main...HEAD` is byte-for-byte identical (pure commit replay, no merge-resolution edits), ping reviewer-runner with `RE-REBASE-ONLY-NO-CODEX T0XX (commit <sha>)`. They verify scope-identity and ack without codex. Any merge-resolution edit (even a one-line rename) → run codex.
+
+### Dispatch shape
+
+Every reviewer-runner ping includes: verb (`codex` / `re-codex` / `RE-REBASE-ONLY-NO-CODEX`), branch + worktree, commit triplet (prior_head / head / base), diff scope, Pi-ruling msg-id if relevant, worktree-clean line, `cycle N rM` label, multi-task overlap heads-up if files collide with another in-flight task.
 
 ## Token / approval discipline
 
@@ -217,6 +230,13 @@ Ask Pi before using the token when the accept/ratification embeds a material des
 Do not paste the raw token into agent-comm or logs.
 
 If token validation fails, halt for Blake. Do not fabricate authority.
+
+## Comms hygiene
+
+- Terse acks: "Acked. <one-sentence actionable bit>" is enough. Don't echo Pi's bullets back; trust the persistent thread.
+- Echo only what's new; cite prior msg-ids for continuity.
+- Optional prefixes: `DECISION NEEDED` (blocking Pi rule), `FYI` (no response), `BLOCKER` (stop-progress), `PASS-READY` (awaiting accept), `HALT:` (stop-current-action; first word; only one that requires pre-commit reaction).
+- Don't narrate acks to Blake; only surface state changes.
 
 ## Failure-mode signaling
 
@@ -337,8 +357,24 @@ This is L087/L141 surface area, partially-resolved by L134 but the "drive max-it
 
 Sonnet's session may produce substantial work + a self-diagnosis summary before the limit hits. Read the `[T###] mark_drive_failed fired (...)` log entry's preceding session snapshot for diagnostics.
 
-### Subagent delegation for bulk mechanical work
+### Subagent delegation — spawn for ALL codex-revise findings
 
-When a single task surfaces a multi-file mechanical sweep (e.g., updating many tests to assert a new invariant after a contract change), delegate to a `task-workflow:executor` or `general-purpose` subagent rather than doing it inline. Brief them with the architectural directive verbatim and the file list. Keeps engine-controller context lean for architectural conversations.
+Every codex-revise finding (any severity, any size) → spawn a `task-workflow:executor` subagent. Engine-controller does not write code in response to codex. Only inline-edit exception: trivial scrubs that aren't really code changes (e.g., projection-timestamp drift via `git checkout main -- <projection-files>` + amend). When in doubt, spawn.
 
-Example trigger: "T049 was superseded by T050; update these 3 e2e tests to assert the new typed invariant" — pi-blessed, mechanical, well-defined.
+Brief shape (codex-revise / rebase-resolution / bulk-mechanical-sweep): quote codex findings or Pi rulings verbatim; one "Direction:" line per finding for smallest fix shape; hard rules (no scope widen, no raw-SQL, no `cargo install`, no skip-hooks, no projection noise commits); final-report shape (HEAD SHA, files changed, test counts, one-paragraph resolution). HALT-and-report if a finding requires architectural judgment.
+
+### CLI ergonomics gotchas
+
+File these as observations when bitten; substrate-side fixes pending. Workarounds:
+
+- `approval_policy` requires `stores observations override-policy`, not the generic `update`.
+- `stores observations update` with many `--in-scope`/`--acceptance` args can fail silently → split into 2-4 stepwise calls.
+- `--acceptance-from-file` doesn't exist; pass as separate `--acceptance` args.
+- `stores tasks list --status X --status Y` rejects multi-value; use sqlite read for richer queries.
+- Worktree projection drift is normal; stash with `git stash push -u -m "<label>" -- tasks/active tasks/planning` before rebases.
+
+### Token / approval discipline (CLI)
+
+- Tier-A verbs accept `--invoker ai_with_human --approve-token <T>` OR `--invoker human` (interactive presence).
+- `--invoker ai_autonomous` is rejected for tier-A even with a valid token.
+- Never paste the raw token into agent-comm/commits/logs.

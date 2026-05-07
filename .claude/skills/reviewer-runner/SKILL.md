@@ -110,29 +110,51 @@ Do not autonomously chase moving HEADs after a revise. Substrate-agent pings you
 
 ## Digest shape
 
-Post decision-surface summaries, not full logs:
+Post decision-surface summaries, not full logs.
+
+### REVISE / CRITICAL / ERROR — full shape
 
 ```md
 Task: T0XX (re-codex rN if applicable)
 Reviewed: prior head <sha> -> new head <sha> against local main <sha>
-Result: PASS | REVISE | REVISE-FALSE-POSITIVE | CRITICAL | ERROR
+Result: REVISE | CRITICAL | ERROR
 Findings:
-- [severity] [mechanical|architecture|security|lifecycle|schema|authority] file:line — issue; smallest suggested fix if mechanical; include recurrence/prior-finding link when relevant.
+- [severity] [category] file:line — issue; smallest fix; pi-needed: yes/no
 Next: substrate-agent accept/revise; Pi needed yes/no.
 
-Path-A metadata:
-- branch:
-- worktree:
-- head_sha / prior_head_sha / base_sha:
-- duration:
-- transcript/log path:
-- rebase needed / rebase clean:
-- finding counts:
-- false_positive_ruling if any:
-- supersedes prior digest if any:
-
-Omit repeated boilerplate like the codex command when unchanged; include it only if nonstandard. Transcript byte size and exact start/end timestamps are optional unless needed for debugging.
+Path-A metadata: branch | worktree | head_sha / prior_head_sha / base_sha | rebase clean | finding counts | false_positive_ruling | supersedes | worktree-clean (+drift if any).
 ```
+
+Severity categories: mechanical | architecture | security | lifecycle | schema | authority.
+
+### PASS — compressed shape (default when 0 findings)
+
+```md
+Task: T0XX (re-codex rN if applicable)
+Reviewed: prior head <sha> -> new head <sha> against local main <sha>
+Result: PASS
+Findings: none.
+Verified: <one-line summary; cite tests run>
+Next: substrate-agent accept.
+
+Path-A metadata: branch=<...>; head_sha=<...>; base_sha=<...>; supersedes=<...>; worktree-clean=yes|no.
+```
+
+**Exception** — architecture/security/authority tasks: include one line per *invariant checked* under `Verified:` even on PASS. Those become durable audit evidence.
+
+Drop on PASS: long axis-by-axis ✅ lists, `duration:`, `false_positive_ruling: none`, test-name enumerations. Cite by command, one line. Target: ~25 lines.
+
+### PASS `notes:` block (non-blocking)
+
+When a PASS surfaces a future-cleanup or follow-up-observation suggestion, append:
+
+```md
+notes:
+- future-cleanup: <description>
+- follow-up-observation-suggested: <description>
+```
+
+Doesn't change the accept decision; engine-controller reads these for engine-health/observation filing.
 
 ## Result taxonomy
 
@@ -140,8 +162,18 @@ Omit repeated boilerplate like the codex command when unchanged; include it only
 - `REVISE` — code/design changes needed.
 - `REVISE-FALSE-POSITIVE` — codex reported only findings already adjudicated acceptable by Pi for this task/head shape; include the ruling msg id and verification condition.
 - `CRITICAL` — high-risk finding; explicitly call for halt.
-- `ERROR` — infrastructure/rebase/codex failure; codex did not produce a review verdict.
+- `ERROR` — substrate/rebase failure; codex did not produce a review verdict (e.g., rebase conflict, dirty worktree, missing branch).
+- `TOOLING-FAILURE` — codex run itself failed for tooling reasons (stdin hang, codex crash, network drop, sandbox bwrap error). Distinct from ERROR because the substrate state is fine; the review tool didn't complete. Retry with the tooling fix; if persistent, fall back per the "codex stdin-hang" note below.
 
 A rebase conflict or noisy/stale-base diff is `ERROR`, not `REVISE`. Abort/restore cleanly and ask substrate-agent to resolve.
 
 If a finding recurs, link it to the prior digest/finding. If Pi adjudicates a recurring finding as acceptable, teach the next codex prompt about that ruling and use `REVISE-FALSE-POSITIVE` if it is the only remaining issue.
+
+## Codex tooling
+
+- **Always close stdin on `codex exec`** with `</dev/null`. Codex reads stdin by default and hangs indefinitely on open pipelines (e.g., when `tee` leaves stdin connected). If a hang exceeds ~5 min, suspect stdin first; kill, fix redirect, retry. Pattern: `codex exec ... </dev/null 2>&1 | tee /tmp/reviewer-runner-logs/T0XX-r<N>-<sha>.log`.
+- If `/codex:review` fails with bwrap errors, fall back to direct `cd <worktree> && codex exec --dangerously-bypass-approvals-and-sandbox --color never "<focus prompt>" </dev/null`.
+
+## RE-REBASE-ONLY-NO-CODEX dispatch
+
+When substrate-agent dispatches `RE-REBASE-ONLY-NO-CODEX T0XX (commit <sha>)`: verify `git diff --name-only main...HEAD` is byte-for-byte identical to the prior reviewed scope (pure commit replay, no merge-resolution edits). Ack without codex if identical; reject and require re-codex if any change (even a one-line rename).
