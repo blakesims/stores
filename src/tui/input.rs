@@ -129,7 +129,8 @@ fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
                     fresh: false,
                 });
             } else {
-                app.status_bar.message = "no row selected".to_string();
+                // No row under cursor → fall back to general orchestrator sidecar.
+                app.pending_spawn = Some(SidecarScope::General);
             }
             KeyOutcome::Continue
         }
@@ -140,7 +141,7 @@ fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
                     fresh: true,
                 });
             } else {
-                app.status_bar.message = "no row selected".to_string();
+                app.status_bar.message = "no row selected (S requires a selected row)".to_string();
             }
             KeyOutcome::Continue
         }
@@ -342,5 +343,40 @@ mod tests {
     fn quits_on_q() {
         let mut app = fresh_app();
         assert_eq!(on_key(&mut app, key(KeyCode::Char('q'))), KeyOutcome::Quit);
+    }
+
+    #[test]
+    fn s_spawns_per_row_when_selected() {
+        // 's' with a row selected → pending_spawn is PerRow with that display_id.
+        let mut app = fresh_app();
+        // First row is T001 (tasks_and_obs order + sort).
+        on_key(&mut app, key(KeyCode::Char('s')));
+        match app.pending_spawn.take() {
+            Some(SidecarScope::PerRow { display_id, fresh }) => {
+                assert!(!display_id.is_empty(), "display_id must be set");
+                assert!(!fresh, "'s' key must use fresh=false (resume mode)");
+            }
+            other => panic!("expected PerRow pending_spawn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn s_falls_back_to_general_when_no_selection() {
+        // 's' with no row in the list → pending_spawn is General (not a status-bar message).
+        let mut app = App::new(TuiOpts::default());
+        // No rows loaded; flat list is empty; current_display_id returns None.
+        on_key(&mut app, key(KeyCode::Char('s')));
+        assert_eq!(
+            app.pending_spawn,
+            Some(SidecarScope::General),
+            "empty-list 's' must fall back to SidecarScope::General"
+        );
+    }
+
+    #[test]
+    fn g_always_spawns_general() {
+        let mut app = fresh_app();
+        on_key(&mut app, key(KeyCode::Char('g')));
+        assert_eq!(app.pending_spawn, Some(SidecarScope::General));
     }
 }
