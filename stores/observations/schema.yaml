@@ -203,7 +203,7 @@ fields:
   - name: priority_rank_at
     type: timestamp
     required: false
-    description: "When priority_rank was last written"
+    description: "When priority_rank was last written; retained to mirror stores/gate priority_rank_at because updated_at audits any row mutation, not priority-rank-only intent."
 
   - name: scheduled_for
     type: text
@@ -212,14 +212,14 @@ fields:
 
   # --- Capture metadata ---
   - name: captured_at
-    type: text
+    type: timestamp
     required: true
     description: "ISO timestamp when the observation was captured"
 
   - name: captured_week
     type: text
-    required: true
-    description: "Operator week label (e.g. w11-d4); no pattern enforced per D2"
+    required: false
+    description: "Operator week label (e.g. w11-d4); derived on read from captured_at when NULL/empty; stored non-empty values are preserved for compatibility"
 
   - name: contact_id
     type: integer
@@ -281,9 +281,14 @@ fields:
     description: "Framework-captured investigator spawn/rate-limit/nonzero failure details"
 
   - name: resolved_at
-    type: text
+    type: timestamp
     required: false
     description: "ISO timestamp when the observation was resolved"
+
+  - name: wont_fix_at
+    type: timestamp
+    required: false
+    description: "ISO timestamp when the observation was marked wont_fix"
 
   - name: resolution
     type: text

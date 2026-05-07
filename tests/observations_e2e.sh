@@ -528,6 +528,74 @@ assert ic.get('drafted_at'), f'drafted_at must be populated; got: {ic.get(\"draf
 pass "PASS: --lock-contract from human → contract_state=ready, approved_by=human, approved_at populated"
 
 # ---------------------------------------------------------------------------
+# Step 13 — T093 temporal hygiene: derived captured_week, priority_rank_at, wont_fix_at
+# ---------------------------------------------------------------------------
+echo "--- Step 13 — T093 observations temporal hygiene"
+
+grep -A3 "name: captured_at" "$STORES_ROOT/stores/observations/schema.yaml" | grep -q "type: timestamp" \
+    || fail "Step 13: captured_at must be type: timestamp"
+grep -A3 "name: resolved_at" "$STORES_ROOT/stores/observations/schema.yaml" | grep -q "type: timestamp" \
+    || fail "Step 13: resolved_at must be type: timestamp"
+grep -A3 "name: captured_week" "$STORES_ROOT/stores/observations/schema.yaml" | grep -q "required: false" \
+    || fail "Step 13: captured_week must be required: false"
+grep -A3 "name: priority_rank_at" "$STORES_ROOT/stores/observations/schema.yaml" | grep -q "type: timestamp" \
+    || fail "Step 13: priority_rank_at retained as timestamp"
+pass "schema temporal fields and priority_rank_at decision verified"
+
+L_T093_OUT=$(stores observations add \
+    --summary "T093 no captured_week add" \
+    --source dev \
+    --priority normal \
+    --captured-at 2026-03-12T08:00:00Z)
+[[ -n "$L_T093_OUT" ]] || fail "Step 13: add without --captured-week returned empty display_id"
+CW_SHOW=$(stores observations show "$L_T093_OUT" --json | jq -r '.captured_week')
+[[ -n "$CW_SHOW" && "$CW_SHOW" != "null" ]] \
+    || fail "Step 13: show did not derive captured_week for $L_T093_OUT; got: $CW_SHOW"
+CW_LIST=$(stores observations list --json | jq -r --arg id "$L_T093_OUT" '.[] | select(.display_id==$id) | .captured_week')
+[[ -n "$CW_LIST" && "$CW_LIST" != "null" ]] \
+    || fail "Step 13: list did not derive captured_week for $L_T093_OUT; got: $CW_LIST"
+pass "add/show/list derive captured_week when --captured-week omitted"
+
+sqlite3 .stores/db.sqlite <<SQL
+INSERT INTO observations (display_id, status, summary, source, priority, captured_at, captured_week, created_at, updated_at, created_by, updated_by)
+VALUES ('L950', 'open', 'T093 stored week fixture', 'dev', 'normal', '2026-03-13T08:00:00Z', 'w11-d4', '2026-03-13T08:00:00Z', '2026-03-13T08:00:00Z', 'human', 'human');
+INSERT INTO observations (display_id, status, summary, source, priority, captured_at, captured_week, created_at, updated_at, created_by, updated_by)
+VALUES ('L951', 'open', 'T093 null week fixture', 'dev', 'normal', '2026-03-12T08:00:00Z', NULL, '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z', 'human', 'human');
+INSERT INTO observations (display_id, status, summary, source, priority, captured_at, captured_week, created_at, updated_at, created_by, updated_by)
+VALUES ('L952', 'confirmed', 'T093 confirmed wont_fix fixture', 'dev', 'normal', '2026-03-12T08:00:00Z', NULL, '2026-03-12T08:00:00Z', '2026-03-12T08:00:00Z', 'human', 'human');
+SQL
+STORED_CW=$(stores observations show L950 --json | jq -r '.captured_week')
+[[ "$STORED_CW" == "w11-d4" ]] \
+    || fail "Step 13: stored captured_week was not preserved; got: $STORED_CW"
+NULL_CW=$(stores observations list --json | jq -r '.[] | select(.display_id=="L951") | .captured_week')
+[[ -n "$NULL_CW" && "$NULL_CW" != "null" ]] \
+    || fail "Step 13: list did not derive captured_week for NULL seeded row; got: $NULL_CW"
+pass "stored captured_week preserved and NULL seeded row derives on list"
+
+stores observations wont_fix L950 --invoker ai_with_human \
+    || fail "Step 13: open→wont_fix failed"
+L950_TERM=$(stores observations show L950 --json)
+echo "$L950_TERM" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+assert d['status']=='wont_fix', d
+assert d.get('wont_fix_at'), d
+assert d.get('resolved_at') in (None, ''), d
+" || fail "Step 13: open→wont_fix did not populate wont_fix_at only"
+
+stores observations wont_fix L952 --invoker ai_with_human \
+    || fail "Step 13: confirmed→wont_fix failed"
+L952_TERM=$(stores observations show L952 --json)
+echo "$L952_TERM" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+assert d['status']=='wont_fix', d
+assert d.get('wont_fix_at'), d
+assert d.get('resolved_at') in (None, ''), d
+" || fail "Step 13: confirmed→wont_fix did not populate wont_fix_at only"
+pass "wont_fix_at populated on open→wont_fix and confirmed→wont_fix; resolved_at unchanged"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
@@ -544,3 +612,4 @@ echo "  #9 T001 P4 — investigate is actor:ai_autonomous (L007): PASS"
 echo "  #10 T001 P4 — approved_by token-mediated (no/wrong/correct token; L008): PASS"
 echo "  #11 T004 (L017) — close_as_addressed open → resolved + idempotency: PASS"
 echo "  #12 T013 P2 — --lock-contract: ai_autonomous fail / human ready: PASS"
+echo "  #13 T093 — temporal hygiene, captured_week derivation, priority_rank_at retained, wont_fix_at: PASS"

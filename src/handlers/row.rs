@@ -177,7 +177,9 @@ pub fn deep_merge_value(existing: &mut Value, update: &Value) {
 
 pub fn deep_merge_entry_field(merged: &mut EntryMap, key: &str, value: &Value) {
     match merged.get_mut(key) {
-        Some(existing) if existing.is_object() && value.is_object() => deep_merge_value(existing, value),
+        Some(existing) if existing.is_object() && value.is_object() => {
+            deep_merge_value(existing, value)
+        }
         _ => {
             merged.insert(key.to_string(), value.clone());
         }
@@ -262,6 +264,77 @@ pub fn coerce_value(ty: &FieldType, raw: &str) -> Value {
             Err(_) => Value::String(raw.to_string()),
         },
         _ => Value::String(raw.to_string()),
+    }
+}
+
+/// Derive the observation week label (`wNN-dD`) from `captured_at` when
+/// `captured_week` is NULL/empty. Non-empty stored values are preserved.
+pub fn derive_observation_captured_week(entry: &mut EntryMap) {
+    let stored = entry
+        .get("captured_week")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if !stored.is_empty() {
+        return;
+    }
+    let Some(captured_at) = entry.get("captured_at").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Some(label) = week_label_from_isoish(captured_at) else {
+        return;
+    };
+    entry.insert("captured_week".to_string(), Value::String(label));
+}
+
+fn week_label_from_isoish(s: &str) -> Option<String> {
+    let date = s.get(0..10)?;
+    let mut parts = date.split('-');
+    let y: i32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=days_in_month(y as u32, m)).contains(&d) {
+        return None;
+    }
+    let ordinal = ordinal_day(y, m, d) as i32;
+    let weekday = iso_weekday(y, m, d) as i32;
+    let week = (ordinal - weekday + 10).div_euclid(7);
+    let iso_year_weeks = weeks_in_iso_year(y) as i32;
+    let iso_week = if week < 1 {
+        weeks_in_iso_year(y - 1) as i32
+    } else if week > iso_year_weeks {
+        1
+    } else {
+        week
+    };
+    Some(format!("w{iso_week:02}-d{weekday}"))
+}
+
+fn ordinal_day(y: i32, m: u32, d: u32) -> u32 {
+    (1..m).map(|mo| days_in_month(y as u32, mo)).sum::<u32>() + d
+}
+
+fn iso_weekday(y: i32, m: u32, d: u32) -> u32 {
+    // Sakamoto: Sunday=0, Monday=1, ..., Saturday=6.
+    const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let mut yy = y;
+    if m < 3 {
+        yy -= 1;
+    }
+    let w = (yy + yy / 4 - yy / 100 + yy / 400 + T[(m - 1) as usize] + d as i32) % 7;
+    if w == 0 {
+        7
+    } else {
+        w as u32
+    }
+}
+
+fn weeks_in_iso_year(y: i32) -> u32 {
+    let jan1 = iso_weekday(y, 1, 1);
+    if jan1 == 4 || (jan1 == 3 && is_leap(y as u32)) {
+        53
+    } else {
+        52
     }
 }
 
@@ -429,6 +502,10 @@ pub fn read_row(schema: &Schema, conn: &Connection, display_id: &str) -> Result<
                 }
             }
         }
+    }
+
+    if schema.name == "observations" {
+        derive_observation_captured_week(&mut entry);
     }
 
     Ok((id, entry))
@@ -881,12 +958,94 @@ fields:
         (dir, conn)
     }
 
+    const OBS_TEMPORAL_SCHEMA: &str = r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: summary
+    type: text
+    required: true
+  - name: source
+    type: text
+    required: true
+  - name: priority
+    type: text
+    required: true
+  - name: captured_at
+    type: timestamp
+    required: true
+  - name: captured_week
+    type: text
+    required: false
+  - name: priority_rank_at
+    type: timestamp
+    required: false
+  - name: resolved_at
+    type: timestamp
+    required: false
+  - name: wont_fix_at
+    type: timestamp
+    required: false
+"#;
+
     fn setup_schema_and_db() -> (Schema, tempfile::TempDir, rusqlite::Connection) {
         let schema = Schema::from_yaml(DEPTH3_SCHEMA).unwrap();
         let (dir, conn) = open_test_db();
         let ddl = crate::codegen::ddl::ddl_for(&schema);
         conn.execute_batch(&ddl).unwrap();
         (schema, dir, conn)
+    }
+
+    #[test]
+    fn observations_captured_week_derives_from_captured_at_when_null() {
+        let schema = Schema::from_yaml(OBS_TEMPORAL_SCHEMA).unwrap();
+        let (_dir, conn) = open_test_db();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO observations (display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week) VALUES (?1, 'open', ?2, ?2, 'human', 'human', 'no week', 'dev', 'normal', ?3, NULL)",
+            rusqlite::params!["L001", "2026-03-12T00:00:00Z", "2026-03-12T08:00:00Z"],
+        ).unwrap();
+
+        let (_, entry) = read_row(&schema, &conn, "L001").unwrap();
+        assert_eq!(
+            entry.get("captured_week").and_then(|v| v.as_str()),
+            Some("w11-d4")
+        );
+    }
+
+    #[test]
+    fn observations_captured_week_preserves_stored_value() {
+        let schema = Schema::from_yaml(OBS_TEMPORAL_SCHEMA).unwrap();
+        let (_dir, conn) = open_test_db();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO observations (display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week) VALUES (?1, 'open', ?2, ?2, 'human', 'human', 'stored week', 'dev', 'normal', ?3, 'w11-d4')",
+            rusqlite::params!["L001", "2026-03-13T00:00:00Z", "2026-03-13T08:00:00Z"],
+        ).unwrap();
+
+        let (_, entry) = read_row(&schema, &conn, "L001").unwrap();
+        assert_eq!(
+            entry.get("captured_week").and_then(|v| v.as_str()),
+            Some("w11-d4")
+        );
+    }
+
+    #[test]
+    fn observations_temporal_schema_fixture_retains_priority_rank_at_timestamp() {
+        let schema = Schema::from_yaml(OBS_TEMPORAL_SCHEMA).unwrap();
+        let by_name = |name: &str| schema.fields.iter().find(|f| f.name == name).unwrap();
+        assert!(matches!(by_name("captured_at").ty, FieldType::Timestamp));
+        assert!(matches!(by_name("resolved_at").ty, FieldType::Timestamp));
+        assert!(matches!(
+            by_name("priority_rank_at").ty,
+            FieldType::Timestamp
+        ));
+        assert!(!by_name("captured_week").required);
     }
 
     #[test]

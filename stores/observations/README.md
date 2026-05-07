@@ -8,8 +8,8 @@ Captures and triages observations during AI-assisted work sessions. Production s
 - `summary` (text, required) — one-line description
 - `source` (enum: dashboard|qa|dev|sentry|intake|converge|wrap, required)
 - `priority` (enum: high|normal|low, required)
-- `captured_at` (text, required) — ISO date the observation was captured
-- `captured_week` (text, required) — e.g. `w11-d4` (operator-hygiene format, no regex enforced)
+- `captured_at` (timestamp, required) — ISO date/time the observation was captured
+- `captured_week` (text, optional) — e.g. `w11-d4`; derived on show/list from `captured_at` when omitted, stored non-empty values are preserved
 
 **Optional top-level fields (selection):**
 - `body` (text) — extended notes; use `--body-from-file` for multi-line
@@ -17,7 +17,7 @@ Captures and triages observations during AI-assisted work sessions. Production s
 - `task_id` (text) — soft-FK to a `tasks` display_id (e.g. `T170`)
 - `pending_architecture_review` (bool) — set by gatekeeper `arch_review_candidate` routing; blocks U1 ratification until a clearing A### architecture-review verdict and any required reconciliation are present
 - `resolved_by`, `merge_target_id`, `resolution_kind` — architecture-review merge/redirect resolution tracking
-- `investigation_note`, `resolved_at`, `resolution` (text) — resolution tracking
+- `investigation_note`, `resolved_at`, `wont_fix_at`, `resolution` — terminal-state tracking
 - `contact_id`, `field_name` — dashboard-sync dedup keys
 
 **`intent_contract` record (15 sub-fields, D9 production names):**

@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use crate::codegen::ddl::quote_ident;
+use crate::handlers::row::derive_observation_captured_week;
 use crate::output;
 use crate::schema::{actor::InvokerCtx, FieldType, Schema};
 
@@ -222,6 +223,10 @@ pub fn run(
                     }
                 }
             }
+        }
+
+        if schema.name == "observations" {
+            derive_observation_captured_week(&mut entry);
         }
 
         entries.push(entry);

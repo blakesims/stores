@@ -185,9 +185,10 @@ fn backfill_defaults(
             quote_ident(&col.name),
         );
         let sql_value = default_to_sql_value(&field.ty, default_value);
-        conn.execute(&sql, rusqlite::params![sql_value]).with_context(|| {
-            format!("failed to backfill default for '{store_name}.{}'", col.name)
-        })?;
+        conn.execute(&sql, rusqlite::params![sql_value])
+            .with_context(|| {
+                format!("failed to backfill default for '{store_name}.{}'", col.name)
+            })?;
     }
     Ok(())
 }
@@ -210,9 +211,7 @@ fn default_to_sql_value(ty: &FieldType, v: &serde_json::Value) -> rusqlite::type
             _ => SqlValue::Null,
         },
         FieldType::Integer => match v {
-            serde_json::Value::Number(n) => {
-                SqlValue::Integer(n.as_i64().unwrap_or(0))
-            }
+            serde_json::Value::Number(n) => SqlValue::Integer(n.as_i64().unwrap_or(0)),
             _ => SqlValue::Null,
         },
         _ => match v {
@@ -267,8 +266,7 @@ pub fn run_migrate(apply: bool) -> Result<()> {
     if apply && !framework_drift.additive.is_empty() {
         let applied = crate::handlers::framework_migrate::apply_framework_drift(&conn)?;
         for m in &applied {
-            let line = serde_json::to_string(m)
-                .context("serialize AppliedFrameworkMigration")?;
+            let line = serde_json::to_string(m).context("serialize AppliedFrameworkMigration")?;
             println!("applied: {line}");
         }
     }
@@ -591,6 +589,36 @@ mod tests {
         assert_eq!(cluster_key, None, "cluster_key must remain NULL");
     }
 
+    #[test]
+    fn observations_temporal_read_regression_preserves_stored_and_derives_null_week() {
+        let (schemas, _manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        install_all(&conn, &schemas);
+        let obs = schemas.get("observations").unwrap();
+
+        conn.execute(
+            "INSERT INTO observations (display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week) \
+             VALUES (?1, 'open', ?2, ?2, 'human', 'human', ?3, 'dev', 'normal', ?4, ?5)",
+            rusqlite::params!["L901", "2026-03-12T00:00:00Z", "stored week", "2026-03-13T08:00:00Z", "w11-d4"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO observations (display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week) \
+             VALUES (?1, 'open', ?2, ?2, 'human', 'human', ?3, 'dev', 'normal', ?4, NULL)",
+            rusqlite::params!["L902", "2026-03-12T00:00:00Z", "null week", "2026-03-12T08:00:00Z"],
+        ).unwrap();
+
+        let (_, stored) = crate::handlers::row::read_row(obs, &conn, "L901").unwrap();
+        let (_, derived) = crate::handlers::row::read_row(obs, &conn, "L902").unwrap();
+        assert_eq!(
+            stored.get("captured_week").and_then(|v| v.as_str()),
+            Some("w11-d4")
+        );
+        assert_eq!(
+            derived.get("captured_week").and_then(|v| v.as_str()),
+            Some("w11-d4")
+        );
+    }
+
     /// AC1.5: PRAGMA table_info reports the four columns with the expected
     /// SQL types after install. CHECK constraints are exercised by the
     /// integration test below; PRAGMA only reports the bare type.
@@ -607,7 +635,10 @@ mod tests {
             );
         }
         assert_eq!(live.get("risk_class").map(|s| s.as_str()), Some("TEXT"));
-        assert_eq!(live.get("approval_policy").map(|s| s.as_str()), Some("TEXT"));
+        assert_eq!(
+            live.get("approval_policy").map(|s| s.as_str()),
+            Some("TEXT")
+        );
         assert_eq!(live.get("risk_flags").map(|s| s.as_str()), Some("TEXT"));
         assert_eq!(live.get("cluster_key").map(|s| s.as_str()), Some("TEXT"));
     }
