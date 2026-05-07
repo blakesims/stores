@@ -147,17 +147,115 @@ fn value_display(v: &Value) -> String {
     }
 }
 
-/// Print a list of entries as human-readable text.
-pub fn print_list_text(display_id: &str, entry: &BTreeMap<String, Value>) {
-    print!("{display_id}  ");
-    // One-line summary: print scalar fields only
-    for (k, v) in entry {
-        match v {
-            Value::Object(_) | Value::Null => {}
-            other => print!("{k}={} ", value_display(other)),
+/// Print a list of entries as a scannable human-readable table.
+pub fn print_list_table(entries: &[BTreeMap<String, Value>]) {
+    print!("{}", list_table_text(entries));
+}
+
+pub fn list_table_text(entries: &[BTreeMap<String, Value>]) -> String {
+    list_table_text_with_width(entries, terminal_width())
+}
+
+pub fn list_table_text_with_width(entries: &[BTreeMap<String, Value>], width: usize) -> String {
+    const HEADERS: [&str; 5] = ["display_id", "status", "priority", "source", "summary"];
+    let rows: Vec<[String; 5]> = entries.iter().map(standard_list_row).collect();
+
+    let mut widths = [
+        HEADERS[0].len(),
+        HEADERS[1].len(),
+        HEADERS[2].len(),
+        HEADERS[3].len(),
+    ];
+    for row in &rows {
+        for i in 0..4 {
+            widths[i] = widths[i].max(row[i].chars().count());
         }
     }
-    println!();
+
+    let fixed_width: usize = widths.iter().sum::<usize>() + (HEADERS.len() - 1) * 2;
+    let summary_width = width.saturating_sub(fixed_width).max(1);
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}\n",
+        HEADERS[0],
+        HEADERS[1],
+        HEADERS[2],
+        HEADERS[3],
+        HEADERS[4],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3]
+    ));
+    for row in rows {
+        out.push_str(&format!(
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}\n",
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            truncate_to_width(&row[4], summary_width),
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3]
+        ));
+    }
+    out
+}
+
+fn terminal_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|w| *w > 0)
+        .unwrap_or(80)
+}
+
+fn standard_list_row(entry: &BTreeMap<String, Value>) -> [String; 5] {
+    [
+        scalar_cell(entry.get("display_id")),
+        scalar_cell(entry.get("status")),
+        scalar_cell(entry.get("priority")),
+        scalar_cell(entry.get("source")),
+        summary_or_title(entry),
+    ]
+}
+
+fn summary_or_title(entry: &BTreeMap<String, Value>) -> String {
+    let summary = scalar_cell(entry.get("summary"));
+    if summary.is_empty() {
+        scalar_cell(entry.get("title"))
+    } else {
+        summary
+    }
+}
+
+fn scalar_cell(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => one_line(s),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_to_width(s: &str, width: usize) -> String {
+    let len = s.chars().count();
+    if len <= width {
+        return s.to_string();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let mut out: String = s.chars().take(width - 1).collect();
+    out.push('…');
+    out
 }
 
 /// Print a single entry as JSON.
@@ -185,12 +283,103 @@ pub fn print_value_json(value: &Value) {
 
 /// Print a list of entries as JSON array.
 pub fn print_list_json(entries: &[BTreeMap<String, Value>]) {
+    println!("{}", list_json_text(entries));
+}
+
+pub fn list_json_text(entries: &[BTreeMap<String, Value>]) -> String {
     let arr: Vec<Value> = entries
         .iter()
         .map(|e| Value::Object(e.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
         .collect();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_else(|_| "[]".to_string())
-    );
+    serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(fields: &[(&str, Value)]) -> BTreeMap<String, Value> {
+        fields
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn list_table_has_header_and_one_data_line_per_entry() {
+        let entries = vec![
+            entry(&[
+                ("display_id", Value::String("L001".into())),
+                ("status", Value::String("new".into())),
+                ("priority", Value::String("high".into())),
+                ("source", Value::String("cli".into())),
+                ("summary", Value::String("first".into())),
+                ("body", Value::String("body should not render".into())),
+            ]),
+            entry(&[
+                ("display_id", Value::String("L002".into())),
+                ("status", Value::String("triaged".into())),
+                ("priority", Value::String("low".into())),
+                ("source", Value::String("api".into())),
+                ("summary", Value::String("second".into())),
+            ]),
+        ];
+
+        let text = list_table_text_with_width(&entries, 120);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("display_id"));
+        assert!(lines[0].contains("status"));
+        assert!(lines[0].contains("priority"));
+        assert!(lines[0].contains("source"));
+        assert!(lines[0].contains("summary"));
+        assert!(lines[1].contains("L001"));
+        assert!(lines[2].contains("L002"));
+        assert!(!text.contains("body should not render"));
+    }
+
+    #[test]
+    fn long_summary_truncates_to_supplied_width() {
+        let entries = vec![entry(&[
+            ("display_id", Value::String("L001".into())),
+            ("status", Value::String("new".into())),
+            ("priority", Value::String("high".into())),
+            ("source", Value::String("cli".into())),
+            (
+                "summary",
+                Value::String("abcdefghijklmnopqrstuvwxyz".into()),
+            ),
+        ])];
+
+        let text = list_table_text_with_width(&entries, 45);
+        let data = text.lines().nth(1).unwrap();
+        assert!(data.ends_with('…'), "data line should be truncated: {data}");
+        assert!(!data.contains("abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
+    fn title_fallback_is_used_for_task_like_rows() {
+        let entries = vec![entry(&[
+            ("display_id", Value::String("T001".into())),
+            ("status", Value::String("open".into())),
+            ("title", Value::String("task title fallback".into())),
+        ])];
+
+        let text = list_table_text_with_width(&entries, 120);
+        assert!(text.contains("task title fallback"));
+    }
+
+    #[test]
+    fn missing_priority_and_source_are_blank() {
+        let entries = vec![entry(&[
+            ("display_id", Value::String("T001".into())),
+            ("status", Value::String("open".into())),
+            ("title", Value::String("task title".into())),
+        ])];
+
+        let text = list_table_text_with_width(&entries, 120);
+        let data = text.lines().nth(1).unwrap();
+        assert!(data.starts_with("T001        open"));
+        assert!(data.contains("task title"));
+    }
 }
