@@ -1044,7 +1044,7 @@ fn drive_loop_with_role_runner(
             display_id,
             phase_for_log,
             cycle_for_log,
-            &agent_name_normalized,
+            agent_role,
             run_out.exit_code,
             &run_out.telemetry,
         )?;
@@ -2128,8 +2128,14 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
         let runs_dir = _dir.path().join(".stores").join("runs");
         std::fs::create_dir_all(&runs_dir).unwrap();
-        let planner_transcript = runs_dir.join("planner.jsonl");
-        std::fs::write(&planner_transcript, "{}\n").unwrap();
+
+        // Pre-create per-role transcript files so transcript_path is a real
+        // existing path for every submit row (Finding 3).
+        let role_names = ["planner", "plan_reviewer", "executor", "code_reviewer", "wrap"];
+        for role in &role_names {
+            let p = runs_dir.join(format!("{role}.jsonl"));
+            std::fs::write(&p, "{}\n").unwrap();
+        }
 
         // Insert task in planning state, phase=0 (not yet started)
         insert_task(
@@ -2148,15 +2154,38 @@ mod tests {
         // After code_reviewer PASS-last-phase, on_state.complete fires request_review
         // (same tx → in_review). Drive then dispatches wrap agent; after wrap
         // submits, drive exits with "awaiting human review" hint.
+        //
+        // Each RunnerOutput carries fully-populated telemetry (model_id,
+        // transcript_path, tokens_in/out) so every agent_runs row satisfies
+        // Finding 1 non-null constraint without relying on legacy_unknown fallback.
         // T072 r6: executor and code-reviewer must have session_id (MINOR 1).
+        let make_telemetry = |role: &str| crate::runner::AgentRunTelemetry {
+            model_id: Some("mock-model-1".to_string()),
+            harness_id: Some("mock".to_string()),
+            started_at: Some(crate::handlers::row::now_iso8601()),
+            ended_at: Some(crate::handlers::row::now_iso8601()),
+            tokens_in: Some(10),
+            tokens_out: Some(20),
+            prompt_cache_hits: Some(0),
+            transcript_path: Some(
+                runs_dir.join(format!("{role}.jsonl")).display().to_string(),
+            ),
+        };
+
         let mut planner_out = make_run_output(planner_fixture_json(), 0);
-        planner_out.telemetry.transcript_path = Some(planner_transcript.display().to_string());
-        let plan_reviewer_out = make_run_output(plan_reviewer_fixture_json(), 0);
-        let executor_out =
-            make_run_output_with_session(executor_fixture_json(), 0, "happy-exec-session");
-        let code_reviewer_out =
-            make_run_output_with_session(code_reviewer_fixture_json(), 0, "happy-review-session");
-        let wrap_out = make_run_output(wrap_fixture_json(), 0);
+        planner_out.telemetry = make_telemetry("planner");
+
+        let mut plan_reviewer_out = make_run_output(plan_reviewer_fixture_json(), 0);
+        plan_reviewer_out.telemetry = make_telemetry("plan_reviewer");
+
+        let mut executor_out = make_run_output_with_session(executor_fixture_json(), 0, "happy-exec-session");
+        executor_out.telemetry = make_telemetry("executor");
+
+        let mut code_reviewer_out = make_run_output_with_session(code_reviewer_fixture_json(), 0, "happy-review-session");
+        code_reviewer_out.telemetry = make_telemetry("code_reviewer");
+
+        let mut wrap_out = make_run_output(wrap_fixture_json(), 0);
+        wrap_out.telemetry = make_telemetry("wrap");
 
         let runner = MockRunner::new(vec![
             planner_out,
@@ -2168,55 +2197,88 @@ mod tests {
 
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
 
-        let rows: Vec<(String, i64, i64, String, String, String, String, i64, Option<String>)> = conn
+        // Query all telemetry fields for post-drive assertions (Finding 3).
+        let rows: Vec<(String, i64, i64, String, String, String, String, String, i64, String, Option<i64>, Option<i64>)> = conn
             .prepare(
-                "SELECT display_id, phase, cycle, role, harness_id, started_at, ended_at, exit_code, transcript_path \
+                "SELECT display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, transcript_path, tokens_in, tokens_out \
                  FROM agent_runs ORDER BY id",
             )
             .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)))
+            .query_map([], |r| Ok((
+                r.get(0)?,  // display_id
+                r.get(1)?,  // phase
+                r.get(2)?,  // cycle
+                r.get(3)?,  // role
+                r.get(4)?,  // model_id
+                r.get(5)?,  // harness_id
+                r.get(6)?,  // started_at
+                r.get(7)?,  // ended_at
+                r.get(8)?,  // exit_code
+                r.get(9)?,  // transcript_path
+                r.get(10)?, // tokens_in
+                r.get(11)?, // tokens_out
+            )))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
+
         assert_eq!(
             rows.len(),
             5,
             "one agent_runs row per consumed mock response"
         );
+
+        // Finding 4: roles stored in stable underscore form (not hyphen display form).
         assert_eq!(
             rows.iter().map(|r| r.3.as_str()).collect::<Vec<_>>(),
             vec![
                 "planner",
-                "plan-reviewer",
+                "plan_reviewer",
                 "executor",
-                "code-reviewer",
+                "code_reviewer",
                 "wrap"
             ]
         );
+
+        // Finding 3: every row has all required telemetry fields non-null.
         for row in &rows {
-            assert_eq!(row.0, "T001");
-            assert!(row.1 >= 0, "phase populated");
-            assert!(row.2 >= 0, "cycle populated");
-            assert_eq!(row.4, "mock");
-            assert!(!row.5.is_empty(), "started_at populated");
-            assert!(!row.6.is_empty(), "ended_at populated");
-            assert_eq!(row.7, 0);
+            let role = &row.3;
+            assert_eq!(row.0, "T001", "display_id: {role}");
+            assert!(row.1 >= 0, "phase populated: {role}");
+            assert!(row.2 >= 0, "cycle populated: {role}");
+            assert!(!row.4.is_empty(), "model_id non-empty: {role}");
+            assert_ne!(row.4, "legacy_unknown", "model_id not fallback for new rows: {role}");
+            assert_eq!(row.5, "mock", "harness_id: {role}");
+            assert!(!row.6.is_empty(), "started_at populated: {role}");
+            assert!(!row.7.is_empty(), "ended_at populated: {role}");
+            assert_eq!(row.8, 0, "exit_code zero: {role}");
+            assert!(!row.9.is_empty(), "transcript_path non-empty: {role}");
+
+            // Each transcript_path resolves to an existing file under runs_dir.
+            let tp = std::path::Path::new(&row.9);
+            assert!(
+                tp.exists(),
+                "transcript_path resolves to existing file: {} (role={})",
+                tp.display(),
+                role
+            );
+            assert!(
+                tp.starts_with(&runs_dir),
+                "transcript_path is under runs dir: {} (role={})",
+                tp.display(),
+                role
+            );
+
+            // tokens_in and tokens_out are non-null when runner reports them.
+            assert!(
+                row.10.is_some(),
+                "tokens_in non-null when runner reports it: {role}"
+            );
+            assert!(
+                row.11.is_some(),
+                "tokens_out non-null when runner reports it: {role}"
+            );
         }
-        let persisted_transcript = rows
-            .iter()
-            .find(|row| row.3 == "planner")
-            .and_then(|row| row.8.as_ref())
-            .expect("planner transcript_path persisted");
-        let persisted_transcript = std::path::Path::new(persisted_transcript);
-        assert!(
-            persisted_transcript.exists(),
-            "persisted transcript_path resolves: {}",
-            persisted_transcript.display()
-        );
-        assert!(
-            persisted_transcript.starts_with(&runs_dir),
-            "persisted transcript_path is under runs dir"
-        );
 
         // Verify final status: in_review (drive exits after wrap dispatch, row awaits human)
         let na = compute_next_action(&schema, &conn, "T001").unwrap();

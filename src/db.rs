@@ -104,10 +104,15 @@ pub(crate) fn insert_agent_run(
     exit_code: i32,
     telemetry: &AgentRunTelemetry,
 ) -> Result<()> {
+    let model_id = telemetry
+        .model_id
+        .as_deref()
+        .unwrap_or("legacy_unknown")
+        .to_string();
     let harness_id = telemetry
         .harness_id
         .clone()
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| "legacy_unknown".to_string());
     let started_at = telemetry
         .started_at
         .clone()
@@ -116,6 +121,19 @@ pub(crate) fn insert_agent_run(
         .ended_at
         .clone()
         .unwrap_or_else(crate::handlers::row::now_iso8601);
+    let transcript_path = telemetry
+        .transcript_path
+        .as_deref()
+        .unwrap_or("legacy_unknown")
+        .to_string();
+    anyhow::ensure!(
+        !model_id.is_empty(),
+        "insert_agent_run: model_id must be non-empty; pass 'legacy_unknown' for backfill rows"
+    );
+    anyhow::ensure!(
+        !transcript_path.is_empty(),
+        "insert_agent_run: transcript_path must be non-empty; pass 'legacy_unknown' for backfill rows"
+    );
     conn.execute(
         "INSERT INTO agent_runs \
          (display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, tokens_in, tokens_out, prompt_cache_hits, transcript_path) \
@@ -125,7 +143,7 @@ pub(crate) fn insert_agent_run(
             phase,
             cycle,
             role,
-            telemetry.model_id.as_deref(),
+            model_id,
             harness_id,
             started_at,
             ended_at,
@@ -133,7 +151,7 @@ pub(crate) fn insert_agent_run(
             telemetry.tokens_in,
             telemetry.tokens_out,
             telemetry.prompt_cache_hits,
-            telemetry.transcript_path.as_deref(),
+            transcript_path,
         ],
     )
     .context("insert agent_runs")?;

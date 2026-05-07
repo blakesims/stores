@@ -172,12 +172,50 @@ impl Runner for PiRunner {
             write_transcript(&cwd, &session_id, &stdout).map(|p| p.to_string_lossy().to_string());
         let (model_id, tokens_in, tokens_out, prompt_cache_hits) = extract_pi_telemetry(&stdout);
 
+        // Build telemetry from invocation-level data regardless of payload
+        // validity — telemetry belongs to the invocation, not the payload.
+        let telemetry = AgentRunTelemetry {
+            model_id,
+            harness_id: Some("pi".to_string()),
+            started_at: Some(started_at),
+            ended_at: Some(ended_at),
+            tokens_in,
+            tokens_out,
+            prompt_cache_hits,
+            transcript_path,
+        };
+
+        // Payload-level failures: override exit_code to 1 so that drive
+        // records the agent_run (telemetry) before surfacing the error.
+        // The Runner::spawn contract says: Err only for infrastructure failures.
         let payload = extract_final_output(&stdout);
         if exit_code == 0 && payload.is_none() {
-            bail!("pi helper exited 0 but did not emit final_output");
+            return Ok(RunnerOutput {
+                stdout,
+                stderr,
+                exit_code: 1,
+                final_message: Some(
+                    "pi helper exited 0 but did not emit final_output".to_string(),
+                ),
+                structured_output: None,
+                session_id: Some(session_id),
+                structured_output_source: None,
+                telemetry,
+            });
         }
         if let (Some(s), Some(p)) = (schema, payload.as_ref()) {
-            validate_payload(s, p)?;
+            if let Err(e) = validate_payload(s, p) {
+                return Ok(RunnerOutput {
+                    stdout,
+                    stderr,
+                    exit_code: 1,
+                    final_message: Some(format!("{e:#}")),
+                    structured_output: None,
+                    session_id: Some(session_id),
+                    structured_output_source: None,
+                    telemetry,
+                });
+            }
         }
         Ok(RunnerOutput {
             stdout,
@@ -187,16 +225,7 @@ impl Runner for PiRunner {
             structured_output: payload,
             session_id: Some(session_id),
             structured_output_source: Some("pi-tool"),
-            telemetry: AgentRunTelemetry {
-                model_id,
-                harness_id: Some("pi".to_string()),
-                started_at: Some(started_at),
-                ended_at: Some(ended_at),
-                tokens_in,
-                tokens_out,
-                prompt_cache_hits,
-                transcript_path,
-            },
+            telemetry,
         })
     }
 }
@@ -245,12 +274,15 @@ mod tests {
 
     #[test]
     fn malformed_payload_errors() {
-        let (_d, helper) = shim(
+        // Payload validation failure → Ok(RunnerOutput { exit_code: 1 }) with
+        // the schema validation message in final_message. Telemetry is persisted
+        // by the caller (drive) before surfacing the non-zero exit.
+        let (_d, bin) = shim(
             "#!/bin/sh\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\"}}'\n",
         );
-        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
+        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
         let schema = r#"{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}"#;
-        let err = runner
+        let out = runner
             .spawn(
                 "executor",
                 "sys",
@@ -258,16 +290,27 @@ mod tests {
                 Some(schema),
                 Some(env!("CARGO_MANIFEST_DIR")),
             )
-            .unwrap_err();
-        assert!(err.to_string().contains("schema validation"));
+            .unwrap();
+        assert_eq!(out.exit_code, 1, "payload failure → non-zero exit_code");
+        assert!(
+            out.final_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("schema validation"),
+            "schema validation error in final_message"
+        );
+        assert!(out.structured_output.is_none());
+        assert!(out.telemetry.harness_id.as_deref() == Some("pi"));
     }
 
     #[test]
     fn missing_final_tool_call_errors_when_helper_exits_zero() {
-        let (_d, helper) =
+        // Missing final_output when exit_code == 0 → Ok(RunnerOutput { exit_code: 1 })
+        // with explanation in final_message. Telemetry persisted by caller before exit.
+        let (_d, bin) =
             shim("#!/bin/sh\necho '{\"type\":\"message\",\"text\":\"done\"}'\nexit 0\n");
-        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
-        let err = runner
+        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let out = runner
             .spawn(
                 "planner",
                 "sys",
@@ -275,8 +318,16 @@ mod tests {
                 None,
                 Some(env!("CARGO_MANIFEST_DIR")),
             )
-            .unwrap_err();
-        assert!(err.to_string().contains("did not emit final_output"));
+            .unwrap();
+        assert_eq!(out.exit_code, 1, "missing final_output → non-zero exit_code");
+        assert!(
+            out.final_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("did not emit final_output"),
+            "explanation in final_message"
+        );
+        assert!(out.telemetry.harness_id.as_deref() == Some("pi"));
     }
 
     #[test]
