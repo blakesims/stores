@@ -246,6 +246,35 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         ),
                 ),
         )
+        // Metrics subcommand — transition_history throughput/read-surface report
+        .subcommand(
+            Command::new("metrics")
+                .about("Report transition_history throughput metrics (--json or --text)")
+                .arg(
+                    Arg::new("window")
+                        .long("window")
+                        .help("Metrics window: duration like 1h/30m or RFC3339 timestamp")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help("Render JSON output (default)"),
+                )
+                .arg(
+                    Arg::new("text")
+                        .long("text")
+                        .action(ArgAction::SetTrue)
+                        .help("Render stable text output instead of JSON"),
+                )
+                .arg(
+                    Arg::new("now")
+                        .long("now")
+                        .value_hint(ValueHint::Other)
+                        .help("Override wall-clock 'now' for duration windows (RFC3339); makes output deterministic"),
+                ),
+        )
         // Watch subcommand — ratatui TUI (T028); --legacy falls back to ANSI POC
         .subcommand(
             Command::new("watch")
@@ -1451,6 +1480,31 @@ mod tests {
             "{help}"
         );
         assert!(help.contains("escape commas/backslashes"), "{help}");
+    }
+
+    #[test]
+    fn metrics_command_and_existing_top_level_verbs_are_registered() {
+        let manifest = Manifest::empty();
+        let schemas = HashMap::new();
+        let cmd = build_root(&manifest, &schemas);
+        let names: Vec<_> = cmd
+            .get_subcommands()
+            .map(|s| s.get_name().to_string())
+            .collect();
+        for expected in ["metrics", "skills", "agents", "topology", "watch"] {
+            assert!(names.contains(&expected.to_string()), "missing {expected}");
+        }
+        let metrics = cmd.find_subcommand("metrics").expect("metrics command");
+        let args: Vec<_> = metrics
+            .get_arguments()
+            .map(|a| a.get_id().as_str().to_string())
+            .collect();
+        assert!(args.contains(&"window".to_string()));
+        assert!(args.contains(&"text".to_string()));
+        assert!(
+            args.contains(&"json".to_string()),
+            "metrics must expose a local --json flag; got args: {args:?}"
+        );
     }
 
     #[test]
