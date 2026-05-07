@@ -113,10 +113,10 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 | obs | state | what hurts |
 |---|---|---|
-| L013 | ⚪ T1 | `auth init` defaults to `~/.config/sops/age/keys.txt` (entanglement with SOPS) |
+| L013 | ✅ L185/T078 | Superseded by host-bound plaintext `~/.config/stores/approve.token` (0600) plus `approve.token.hash`; `auth init` no longer discovers SOPS/age keys. |
 | L014 | ⚪ T2 | `auth init` UX gaps (opaque binary-format error; 7-line shell ritual) |
 | L015 | ⚪ T1 | `auth show` missing `--identity` flag (asymmetric with `init`) |
-| L044 | ⚪ T1 | L015 symlink workaround broke sops globally |
+| L044 | ✅ L185/T078 | Superseded by removing the SOPS/age identity path and the L015 symlink workaround; `auth show` now reads plaintext directly. |
 | L053 | ⚪ — | tier-A actor check bypass (cross-listed from Layer 2) |
 
 ### Layer 7 — Schema / contract substrate

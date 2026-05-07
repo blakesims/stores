@@ -124,10 +124,9 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .long("approve-token")
                 .global(true)
                 .help(
-                    "Plaintext approval token (chat-mediated human assent). \
+                    "Plaintext approval token for host-bound human assent. \
                      Verified against ~/.config/stores/approve.token.hash via \
-                     constant-time compare. Phase 2: validated only; Phase 3 \
-                     consumes the bit to relax actor: human gates.",
+                     constant-time compare.",
                 ),
         )
         // Init subcommand
@@ -212,39 +211,18 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
         // Auth subcommand: approval-token init/show
         .subcommand(
             Command::new("auth")
-                .about("Manage the approval token for chat-mediated human assent")
+                .about("Manage the host-bound approval token")
                 .subcommand(
                     Command::new("init")
-                        .about("Generate and age-encrypt the approval token (refuses raw plaintext age keys)")
-                        .arg(
-                            Arg::new("recipient")
-                                .long("recipient")
-                                .help("age recipient (age1...); auto-discovered from --identity if omitted")
-                                .required(false),
-                        )
-                        .arg(
-                            Arg::new("identity")
-                                .long("identity")
-                                .help("Path to age identity file (default: ~/.config/sops/age/keys.txt)")
-                                .required(false),
-                        )
+                        .about("Generate the plaintext approval token at mode 0600")
                         .arg(
                             Arg::new("force")
                                 .long("force")
                                 .action(ArgAction::SetTrue)
-                                .help("Overwrite existing approve.token.{age,hash}"),
+                                .help("Overwrite existing approve.token or approve.token.hash"),
                         ),
                 )
-                .subcommand(
-                    Command::new("show")
-                        .about("Decrypt and print the approval token (prompts for passphrase / hardware tap)")
-                        .arg(
-                            Arg::new("identity")
-                                .long("identity")
-                                .help("Path to age identity file (default: ~/.config/sops/age/keys.txt)")
-                                .required(false),
-                        ),
-                ),
+                .subcommand(Command::new("show").about("Print the plaintext approval token")),
         )
         // Metrics subcommand — transition_history throughput/read-surface report
         .subcommand(
