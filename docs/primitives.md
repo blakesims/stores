@@ -6,6 +6,8 @@ The substrate composes from a small set of typed primitives. This document is th
 
 This list is a **working draft, not a closed set**. Each design move that the existing primitives cannot compositionally express reveals a missing one. Do not shortcut the discovery — the realistic-pull doctrine (philosophy.md § *Pull from real use*) is what surfaces the gaps. New primitives appear here only when client-side or self-build pressure cannot be expressed with the existing set.
 
+Primitives is one of the two meta primitives of the substrate (the other is Philosophy). Architect-led, human-ratified amendments — see `docs/heart-and-architect.md` for the constitutional-governance shape.
+
 ## What we have
 
 | Primitive | Definition |
