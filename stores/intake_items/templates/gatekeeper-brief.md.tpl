@@ -36,7 +36,7 @@ Canonical `risk_flags`: `touches_actor_authority`, `touches_lifecycle`, `touches
 2. `needs_info`: use only when evidence is insufficient; include one concrete `missing_info_question`.
 3. `fast_track`: classification only in P1. Use only for T0/T1, high confidence, and only low-risk flags: `docs_only`, `small_local_fix`, `duplicate_symptom`. This creates a fast-track-eligible observation with audit metadata; it does NOT execute or auto-close anything.
 4. `normal_observation`: sufficient evidence, no dominant duplicate, no high-risk flags, cluster threshold not crossed.
-5. `arch_review_candidate`: use for any `touches_*`, `introduces_new_primitive`, `changes_boundary`, `security_sensitive`, `authority_surface_drift`, `contradicts_prior_decision`, or crossed cluster threshold. Route via the standard `stores intake route` verb; this creates a tagged observation (tag `arch-review-candidate`) stored in `routed_to_observation`. The dedicated `architecture_reviews` store is a P3 follow-up (L171); do not assume it exists.
+5. `arch_review_candidate`: use for any `touches_*`, `introduces_new_primitive`, `changes_boundary`, `security_sensitive`, `authority_surface_drift`, `contradicts_prior_decision`, or crossed cluster threshold. Route via the standard `stores intake route` verb; this creates a source observation stored in `routed_to_observation`, sets its typed `pending_architecture_review=true` gate, and creates a dedicated `architecture_reviews` A### row stored in `routed_to_arch_review`.
 6. `reject_noise`: use when not actionable substrate signal; `rationale` must explain why. Recovery is via human `amend`/`reopen` only.
 
 ## PROHIBIT list

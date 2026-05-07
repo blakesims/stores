@@ -1,6 +1,8 @@
 pub mod add;
 pub mod agents_backfill;
 pub mod agents_run;
+pub mod architecture_reviews;
+pub mod architecture_reviews_backfill;
 pub mod brief;
 pub mod drive;
 pub mod framework_migrate;
@@ -10,6 +12,7 @@ pub mod list;
 pub mod migrate;
 pub mod next_action;
 pub mod next_id;
+pub mod observation_arch_gate;
 pub mod overrides;
 pub mod render;
 pub mod row;

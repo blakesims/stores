@@ -274,6 +274,12 @@ pub fn run_migrate(apply: bool) -> Result<()> {
     }
 
     if plan.additive.is_empty() {
+        if apply {
+            let created = crate::handlers::architecture_reviews_backfill::run_backfill(&conn)?;
+            if created > 0 {
+                println!("architecture_reviews backfill: created {created} row(s)");
+            }
+        }
         return Ok(());
     }
 
@@ -294,6 +300,10 @@ pub fn run_migrate(apply: bool) -> Result<()> {
         let batch = format!("BEGIN;\n{}\nCOMMIT;", sql_lines.join("\n"));
         conn.execute_batch(&batch)
             .context("failed to apply additive migrations (transaction rolled back)")?;
+        let created = crate::handlers::architecture_reviews_backfill::run_backfill(&conn)?;
+        if created > 0 {
+            println!("architecture_reviews backfill: created {created} row(s)");
+        }
     }
 
     Ok(())

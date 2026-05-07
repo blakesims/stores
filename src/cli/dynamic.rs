@@ -16,6 +16,7 @@ pub static BUNDLED_STORE_NAMES: &[&str] = &[
     "tasks",
     "intake",
     "daemon_starts",
+    "architecture_reviews",
 ];
 
 /// Embedded schema.yaml content for each bundled store (same order as BUNDLED_STORE_NAMES).
@@ -33,6 +34,10 @@ pub static BUNDLED_STORE_SCHEMAS: &[(&str, &str)] = &[
     (
         "daemon_starts",
         include_str!("../../stores/daemon_starts/schema.yaml"),
+    ),
+    (
+        "architecture_reviews",
+        include_str!("../../stores/architecture_reviews/schema.yaml"),
     ),
 ];
 
@@ -83,6 +88,13 @@ pub static BUNDLED_STORE_TEMPLATES: &[(&str, &[(&str, &str)])] = &[
                 include_str!("../../stores/intake_items/templates/recon-brief.md.tpl"),
             ),
         ],
+    ),
+    (
+        "architecture_reviews",
+        &[(
+            "templates/main.md.tpl",
+            include_str!("../../stores/architecture_reviews/templates/main.md.tpl"),
+        )],
     ),
 ];
 
@@ -492,30 +504,40 @@ fn build_store_command(schema: &Schema) -> Command {
     ];
 
     let mut store_cmd = Command::new(schema.name.clone())
-        .about(format!("Operate on the '{}' store", schema.name))
-        .subcommand(add_cmd)
-        .subcommand(show_cmd)
-        .subcommand(list_cmd)
-        .subcommand(update_cmd)
-        .subcommand(schema_cmd);
-
-    // Workflow-only verbs: only when schema has a workflow declaration.
-    if schema.workflow.is_some() {
+        .about(format!("Operate on the '{}' store", schema.name));
+    if schema.name == "architecture_reviews" {
         store_cmd = store_cmd
-            .subcommand(build_next_action_cmd())
-            .subcommand(build_brief_cmd())
-            .subcommand(build_render_cmd())
-            .subcommand(build_drive_cmd())
-            .subcommand(build_status_cmd())
-            .subcommand(build_next_id_cmd())
-            .subcommand(build_submit_plan_cmd())
-            .subcommand(build_submit_plan_review_cmd())
-            .subcommand(build_submit_execute_cmd())
-            .subcommand(build_submit_review_cmd())
-            .subcommand(build_submit_wrap_cmd())
-            .subcommand(build_resume_cmd())
-            .subcommand(build_retry_deploy_cmd())
-            .subcommand(build_guide_cmd());
+            .visible_alias("architecture-reviews")
+            .disable_help_subcommand(true)
+            .subcommand(add_cmd)
+            .subcommand(list_cmd)
+            .subcommand(show_cmd);
+    } else {
+        store_cmd = store_cmd
+            .subcommand(add_cmd)
+            .subcommand(show_cmd)
+            .subcommand(list_cmd)
+            .subcommand(update_cmd)
+            .subcommand(schema_cmd);
+
+        // Workflow-only verbs: only when schema has a workflow declaration.
+        if schema.workflow.is_some() {
+            store_cmd = store_cmd
+                .subcommand(build_next_action_cmd())
+                .subcommand(build_brief_cmd())
+                .subcommand(build_render_cmd())
+                .subcommand(build_drive_cmd())
+                .subcommand(build_status_cmd())
+                .subcommand(build_next_id_cmd())
+                .subcommand(build_submit_plan_cmd())
+                .subcommand(build_submit_plan_review_cmd())
+                .subcommand(build_submit_execute_cmd())
+                .subcommand(build_submit_review_cmd())
+                .subcommand(build_submit_wrap_cmd())
+                .subcommand(build_resume_cmd())
+                .subcommand(build_retry_deploy_cmd())
+                .subcommand(build_guide_cmd());
+        }
     }
 
     // `guide` is also registered on the `gate` store (full form), which has no workflow.
@@ -554,7 +576,11 @@ fn build_store_command(schema: &Schema) -> Command {
         if !registered_verbs.insert(verb.clone()) {
             continue;
         }
-        let mut transition_cmd = build_transition_cmd(verb, &leaves);
+        let mut transition_cmd = if schema.name == "architecture_reviews" {
+            build_architecture_review_transition_cmd(verb, &leaves)
+        } else {
+            build_transition_cmd(verb, &leaves)
+        };
         // `reject` requires a human-supplied reason written to wrap_log[-1].reject_reason.
         // walk_field skips ListRecord fields, so we add --reason manually here.
         if verb == "reject" {
@@ -609,6 +635,10 @@ fn build_store_command(schema: &Schema) -> Command {
             );
         }
         store_cmd = store_cmd.subcommand(transition_cmd);
+    }
+
+    if schema.name == "architecture_reviews" {
+        store_cmd = store_cmd.subcommand(build_render_cmd());
     }
 
     store_cmd
@@ -1021,6 +1051,58 @@ fn build_drive_cmd() -> Command {
 /// Build a transition verb subcommand: positional display_id + all leaf args.
 fn build_transition_cmd(verb: &str, leaves: &[crate::schema::flatten::LeafArg<'_>]) -> Command {
     build_leaf_cmd_owned(verb.to_string(), leaves, true)
+}
+
+/// Build architecture_reviews transition commands with operator-facing help.
+fn build_architecture_review_transition_cmd(
+    verb: &str,
+    leaves: &[crate::schema::flatten::LeafArg<'_>],
+) -> Command {
+    let mut cmd = match verb {
+        "issue-verdict" => build_leaf_cmd_owned(verb.to_string(), leaves, true).about(
+            "Issue an architecture review verdict. Requires actor ai_with_human. \
+             --kind is interpret|amend; --verdict is allow_local_fix|reframe_contract|\
+             merge_with_cluster|create_primitive_task|block_pending_fixes|\
+             propose_doctrine_update|request_human_arch_decision. Amend verdicts require \
+             cascade_decisions as a JSON array of {target,decision,rationale?} and move to \
+             awaiting_human_ratification.",
+        ),
+        "ratify-amend" => Command::new(verb.to_string())
+            .about(
+                "Ratify an amend architecture review. Requires actor human plus a valid \
+                 tier-A --approve-token; ai_autonomous and ai_with_human are rejected even \
+                 with a valid token. Moves awaiting_human_ratification to verdict_issued.",
+            )
+            .arg(
+                Arg::new("display_id")
+                    .help("Display ID of the architecture review (A###)")
+                    .required(true),
+            ),
+        "supersede" => Command::new(verb.to_string())
+            .about(
+                "Mark an architecture review superseded. Requires actor ai_with_human. \
+                 New rulings can also set --supersedes A### during issue-verdict to \
+                 transition the prior ruling to the superseded terminal.",
+            )
+            .arg(
+                Arg::new("display_id")
+                    .help("Display ID of the architecture review (A###)")
+                    .required(true),
+            ),
+        _ => build_transition_cmd(verb, leaves),
+    };
+
+    if verb == "issue-verdict" {
+        cmd = cmd.mut_arg("cascade-decisions", |a| {
+            a.help(
+                "Required for --kind amend: JSON array of objects, e.g. \
+                 '[{\"target\":\"docs/heart-and-architect.md\",\"decision\":\"update\",\
+                 \"rationale\":\"why\"}]'. decision must be keep|update|supersede|\
+                 withdraw|create_followup; strict overlap validation is deferred.",
+            )
+        });
+    }
+    cmd
 }
 
 /// Same as `build_leaf_cmd` but accepts an owned verb String (for transition verbs).

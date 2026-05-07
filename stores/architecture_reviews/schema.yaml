@@ -1,0 +1,114 @@
+name: architecture_reviews
+id_format: "A{:03d}"
+scope: repo
+
+lifecycle:
+  states: [pending, in_review, awaiting_human_ratification, verdict_issued, withdrawn, superseded]
+  initial_state: pending
+  transitions:
+    - {from: pending, to: in_review, verb: claim-review, actor: ai_with_human}
+    - {from: pending, to: withdrawn, verb: withdraw, actor: ai_with_human}
+    - {from: in_review, to: withdrawn, verb: withdraw, actor: ai_with_human}
+    - {from: awaiting_human_ratification, to: withdrawn, verb: withdraw, actor: ai_with_human}
+    - {from: in_review, to: verdict_issued, verb: issue-verdict, actor: ai_with_human, guard: "kind == 'interpret'"}
+    - {from: in_review, to: awaiting_human_ratification, verb: issue-verdict, actor: ai_with_human, guard: "kind == 'amend'"}
+    - {from: awaiting_human_ratification, to: verdict_issued, verb: ratify-amend, actor: human}
+    - {from: pending, to: superseded, verb: supersede, actor: ai_with_human}
+    - {from: in_review, to: superseded, verb: supersede, actor: ai_with_human}
+    - {from: awaiting_human_ratification, to: superseded, verb: supersede, actor: ai_with_human}
+    - {from: verdict_issued, to: superseded, verb: supersede, actor: ai_with_human}
+
+fields:
+  - name: kind
+    type: enum
+    enum_values: [interpret, amend]
+    required: true
+    description: "Architecture review kind: interpret existing doctrine or amend doctrine/primitive contracts."
+
+  - name: source_observation
+    type: text
+    required: false
+    pattern: "^L[0-9]{3,}$"
+    description: "Soft-FK to observations.display_id (L###) that raised the architecture question."
+
+  - name: source_intake
+    type: text
+    required: false
+    pattern: "^I[0-9]{3,}$"
+    description: "Soft-FK to intake.display_id (I###) that routed to this ruling."
+
+  - name: cluster_key
+    type: text
+    required: false
+    pattern: "^[a-z][a-z0-9-]{2,40}$"
+    description: "Optional architecture cluster key shared by related observations/rulings."
+
+  - name: summary
+    type: text
+    required: true
+    description: "One-line summary of the architecture question/ruling."
+
+  - name: rationale
+    type: text
+    required: false
+    description: "Ruling rationale and context."
+
+  - name: verdict
+    type: enum
+    enum_values: [allow_local_fix, reframe_contract, merge_with_cluster, create_primitive_task, block_pending_fixes, propose_doctrine_update, request_human_arch_decision]
+    required: false
+    description: "Typed verdict outcome issued by the architecture review."
+
+  - name: verdict_issued_at
+    type: timestamp
+    required: false
+    description: "When the verdict was issued."
+
+  - name: ratified_at
+    type: timestamp
+    required: false
+    actor: human
+    description: "When an amendment verdict was human-ratified."
+
+  - name: ratified_by
+    type: text
+    required: false
+    actor: human
+    description: "Human ratifier for amendment verdicts."
+
+  - name: cascade_decisions
+    type: list_record
+    required_when: "kind == 'amend'"
+    description: "Required for amend rulings; advisory cascade-decision records. Strict overlap validation is deferred."
+    fields:
+      - {name: target, type: text, required: true}
+      - {name: decision, type: enum, enum_values: [keep, update, supersede, withdraw, create_followup], required: true}
+      - {name: rationale, type: text, required: false}
+
+  - name: supersedes
+    type: text
+    required: false
+    pattern: "^A[0-9]{3,}$"
+    description: "Soft-FK to the prior architecture_reviews.display_id superseded by this ruling."
+
+  - name: merge_target_id
+    type: text
+    required: false
+    pattern: "^L[0-9]{3,}$"
+    description: "Observation display id targeted by merge_with_cluster verdicts."
+
+  - name: doctrine_refs
+    type:
+      list: text
+    required: false
+    description: "Doctrine/document references consulted or updated by the ruling."
+
+  - name: reframe_acknowledged_against
+    type: text
+    required: false
+    pattern: "^A[0-9]{3,}$"
+    description: "Ruling display id acknowledged by a reconciled intent contract."
+
+workflow:
+  render_template: "templates/main.md.tpl"
+  render_target_path: "architecture-reviews/{{display_id}}/main.md"

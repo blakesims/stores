@@ -1,7 +1,7 @@
 # Heart & Architect
 
 **Path:** `docs/heart-and-architect.md`
-**Status:** direction doc — long-term constitutional governance shape. Operational seed is L171 (P3 of T045 design); first ship is "doctrine + L171 fold" (phase α below).
+**Status:** direction doc — long-term constitutional governance shape. Phase α shipped in T077/L171 as the dedicated `architecture_reviews` typed store; later typed-Heart, doc-diff, and subscriber slices remain deferred.
 **Companion docs:** `docs/philosophy.md` (the Heart content), `docs/primitives.md` (the Primitives content), `docs/architecture-coherence.md` (local correctness ≠ architectural coherence — the doctrine that surfaced this layer), `docs/risk-and-cluster-taxonomy.md` (the typed enums the gatekeeper produces), `docs/gatekeeper-design.md` (T045 phase 2 — `architecture_reviews` specced as P3 follow-up).
 **Thesis seed:** `docs/worklog/2026-05-07/02-heart-constitution-architect-thesis.md`.
 
@@ -41,7 +41,7 @@ The Architect interprets autonomously but **cannot silently shift the constituti
 
 | Ruling kind | What it does | Authority gate |
 |---|---|---|
-| **interpret** | Apply existing Philosophy / Primitives to a specific cluster, candidate, or contract. Verdicts: `allow_local_fix`, `reframe_contract`, `merge_with_cluster`, `create_primitive_task`, `block_pending_local_fixes`, `request_human_arch_decision`. | `actor: ai_with_human` — tier-B honor-system. Architect ratifies on its own authority. |
+| **interpret** | Apply existing Philosophy / Primitives to a specific cluster, candidate, or contract. Verdicts: `allow_local_fix`, `reframe_contract`, `merge_with_cluster`, `create_primitive_task`, `block_pending_fixes`, `request_human_arch_decision`. | `actor: ai_with_human` — tier-B honor-system. Architect ratifies on its own authority. |
 | **amend** | Propose a change to Philosophy or Primitives themselves. Verdict: `propose_doctrine_update` (with doc-diff and `cascade_decisions`). | `actor: human` — tier-A token-mediated. Architect can DRAFT but not RATIFY. The schema rejects an amend-ratify write that lacks a valid approval token. |
 
 The architect's **authority surface** decomposes cleanly:
@@ -96,12 +96,13 @@ The two principles together — flexible precedent + cascade-on-amendment — me
 
 ## 4. The architect's working surface — `architecture_reviews`
 
-The architect's ruling buffer is the `architecture_reviews` typed store. Currently filed as L171 (P3 of T045 design); ratification + implementation is **phase α** of this direction.
+The architect's ruling buffer is the `architecture_reviews` typed store. L171/T077 shipped this as **phase α** of this direction.
 
 ### Lifecycle
 
 ```
-pending → in_review → verdict_issued (kind ∈ {interpret, amend})
+pending → in_review → verdict_issued                         (kind=interpret)
+pending → in_review → awaiting_human_ratification → verdict_issued (kind=amend)
                     ↘
                       withdrawn (terminal: architect retracts before verdict)
 verdict_issued → superseded (terminal: replaced by later ruling with `supersedes` set)
@@ -111,18 +112,18 @@ verdict_issued → superseded (terminal: replaced by later ruling with `supersed
 
 The architect pulls from a typed queue, not a push-shaped inbox. Sources:
 
-- **`arch_review_candidate` routing from the gatekeeper** (`intake_items.triaging → escalated`). Today's primary input once L171 ships.
+- **`arch_review_candidate` routing from the gatekeeper** (`intake_items.triaging → routed`). This is phase α's primary input: the router writes an A### row and marks the downstream observation `pending_architecture_review = true` in the same transaction.
 - **Cluster-threshold crossings.** When `cluster_key` count crosses the architecture-review threshold (default 3), the next filing into the cluster routes to `arch_review_candidate` regardless of its individual risk flags.
-- **Pre-ratification holds** on observation contracts with `risk_class ∈ {architecture, security, authority}`. The contract carries `pending_architecture_review = true`; the architect's verdict gates U1 ratification.
-- **Periodic sweeps** after N shipped tasks (drift detection across recent local-fix clusters).
+- **Pre-ratification holds** on observation contracts carrying top-level `pending_architecture_review = true`; the architect's verdict gates U1 ratification until a clearing verdict and any required reconciliation are present.
+- **Periodic sweeps** after N shipped tasks (drift detection across recent local-fix clusters) — deferred beyond phase α.
 - **Self-initiated amend drafts.** The architect notices that doctrine itself needs to move; drafts an amend ruling.
 - **Other agents flagging mid-task.** An executor halts and routes "this would amend doctrine" through intake; gatekeeper escalates.
 
 ### Outputs
 
-- **Interpret rulings.** Verdict types specified in `docs/gatekeeper-design.md` § *Routing decisions*: `allow_local_fix`, `reframe_contract`, `merge_with_cluster`, `create_primitive_task`, `block_pending_local_fixes`, `request_human_arch_decision`.
-- **Amendment drafts.** `kind=amend` with `verdict=propose_doctrine_update`, including doc-diff and `cascade_decisions`. Awaits human tier-A ratification.
-- **Doctrine-doc updates.** On amend ratification, an on-entry hook applies the doc-diff to the cited doctrine file(s) and commits with the ruling-id in the message. The ruling row is the durable record; the doc commit is the projection.
+- **Interpret rulings.** Verdict types: `allow_local_fix`, `reframe_contract`, `merge_with_cluster`, `create_primitive_task`, `block_pending_fixes`, `request_human_arch_decision`. Issued by `actor: ai_with_human` and transition `in_review → verdict_issued`.
+- **Amendment drafts.** `kind=amend` with `verdict=propose_doctrine_update` and required `cascade_decisions`. `issue-verdict` moves `in_review → awaiting_human_ratification`; `ratify-amend` is pure `actor: human` tier-A token-mediated and rejects `ai_autonomous` / `ai_with_human` even with a valid token.
+- **Doctrine-doc updates.** Deferred beyond phase α. There is no doc-diff projection hook in this slice; the ruling row is the durable record.
 - **Blocked-or-reframed observation contracts.** Via the `pending_architecture_review` flag.
 - **Cluster registry edits** (rename / split / merge) — when L173 ships.
 
@@ -153,13 +154,15 @@ Long-term direction broken into ratifiable phases. Each phase is a coherent slic
 
 | Phase | What ships | Pulled forward by |
 |---|---|---|
-| **α** (first slice) | This doctrine doc (already here) + ratify L171 with the kind=interpret/amend fold. `architecture_reviews` schema, verdict surface, cascade_decisions field, pending → in_review → verdict_issued lifecycle. The tagged-observation stand-in from T053/L142 P1 deprecates. Architect role still played by Pi via the existing `pi-architect` skill, grounded as `actor: ai_with_human`. | Today. The substrate already has the gatekeeper Router + risk taxonomy + arch_review_candidate routing; L171 has been deferred specifically pending intent-hardening (this doc). |
+| **α** (first slice) | **Shipped in T077/L171.** Dedicated `architecture_reviews` store with A### namespace, `kind ∈ {interpret, amend}`, seven-verdict surface, `cascade_decisions` required for amendments, `pending → in_review → awaiting_human_ratification → verdict_issued` amend path, `pending → in_review → verdict_issued` interpret path, terminal `withdrawn`/`superseded`, flexible-precedent `supersedes`, gatekeeper A### routing, and observation `pending_architecture_review` U1 gate. The T053/L142 tagged-observation stand-in is historical/backfill input only. Architect role still played by Pi via the existing `pi-architect` skill, grounded as `actor: ai_with_human`; there is no typed actor: architect. | Done. |
 | **β** | Typed `actor: architect` actor class added to the schema's actor matrix. Authority sits between `ai_with_human` (honor-system) and `human` (cryptographic): autonomous on interpret-rulings, blocked on amend-ratify. `pi-architect` skill grounds writes as `--invoker architect`. | After α validates that the architecture_reviews flow is real load-bearing usage (≥5 ratified rulings, evidence the pi-architect skill is producing them, evidence the gatekeeper is feeding them). Otherwise the typed actor class is premature. |
-| **γ** | Typed Heart store. First sections promoted from prose: probably `philosophy.md § Two-gate operational frame`, `primitives.md` table, `architecture-coherence.md` doctrine §. Citations migrate from path strings to soft-FKs. The .md files become projections of the Heart store, not authoritative copies. | After ≥5 ratified rulings cite the same doc section. That is a real promotion signal: the section is being queried often enough that typed-row queries would help. |
-| **δ** | Amend ceremony fully wired. Verdict-issue with kind=amend applies doc-diff via on-entry hook; commits with ruling-id in message. `cascade_decisions` enforcement at the schema gate. | After γ. Doc-diff projection requires the Heart store to exist for the diff to write into. |
-| **ε** | Architect as auto-fire subscriber on cluster thresholds + pre-ratification holds on risky contracts. The architect's queue drains autonomously instead of waiting for the orchestrator to dispatch it. | After δ. Subscriber discipline is mature only after the manual flow has been exercised. |
+| **γ** | Typed Heart store (not present in phase α). First sections promoted from prose: probably `philosophy.md § Two-gate operational frame`, `primitives.md` table, `architecture-coherence.md` doctrine §. Citations migrate from path strings to soft-FKs. The .md files become projections of the Heart store, not authoritative copies. | After ≥5 ratified rulings cite the same doc section. That is a real promotion signal: the section is being queried often enough that typed-row queries would help. |
+| **δ** | Amend ceremony fully wired. Doc-diff projection hook applies doctrine changes and commits with ruling-id in message. Phase α has no doc-diff projection hook; it only records/ratifies the A### ruling. | After γ. Doc-diff projection requires the Heart store to exist for the diff to write into. |
+| **ε** | Architect as auto-fire subscriber on cluster thresholds + pre-ratification holds on risky contracts (not present in phase α). The architect's queue drains autonomously instead of waiting for the orchestrator to dispatch it. | After δ. Subscriber discipline is mature only after the manual flow has been exercised. |
 | **ζ** | Curated `cluster_key` registry (L173) + watch dashboards. Promoted cluster keys gain canonical definitions, tunable thresholds, and pointers to the architectural concern they name. | After ε. Cluster-registry curation is meaningful only when the architect is actively pulling clusters. |
 | **η** | Pre-ratification Check primitive enforces "risk_class=architecture cannot ratify without architect verdict." Mechanical enforcement of the doctrinal gate. | After ε. Otherwise the Check has nothing to enforce against. |
+
+Phase α has no typed `actor: architect`, no typed Heart store, no doc-diff projection hook, and no auto-fire subscribers. Pi plays Architect through the existing `pi-architect` skill and writes as `actor: ai_with_human` for interpret/draft work; amendment ratification remains `actor: human` tier-A.
 
 Phase α is the first substrate task to ratify against this direction. Subsequent phases surface as observations and ratify individually as the substrate pulls them.
 

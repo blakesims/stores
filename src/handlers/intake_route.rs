@@ -48,7 +48,7 @@ fn is_absent(merged: &EntryMap, key: &str) -> bool {
 /// - `needs_info`             — extract missing_info_question from gatekeeper payload
 /// - `fast_track`             — create obs (tags=[fast-track-eligible]) if not pre-supplied
 /// - `normal_observation`     — create obs + mirror L143 columns if not pre-supplied
-/// - `arch_review_candidate`  — create obs (tags=[arch-review-candidate]) stored in routed_to_observation
+/// - `arch_review_candidate`  — create source obs + dedicated A### architecture review
 /// - `reject_noise`           — no pre-validation side effects
 pub(crate) fn inject_pre_validation_fields(
     tx: &Transaction,
@@ -120,21 +120,28 @@ pub(crate) fn inject_pre_validation_fields(
                 });
                 let tags = json!(["fast-track-eligible"]);
 
-                let obs_id = insert_observation_row(tx, &ObsFields {
-                    summary,
-                    source: "intake".to_string(),
-                    priority: "normal".to_string(),
-                    captured_at: now.clone(),
-                    captured_week: week_label(),
-                    tags: Some(tags.to_string()),
-                    notes: Some(notes.to_string()),
-                    risk_class: None,
-                    approval_policy: None,
-                    risk_flags: None,
-                    cluster_key: None,
-                })?;
+                let obs_id = insert_observation_row(
+                    tx,
+                    &ObsFields {
+                        summary,
+                        source: "intake".to_string(),
+                        priority: "normal".to_string(),
+                        captured_at: now.clone(),
+                        captured_week: week_label(),
+                        tags: Some(tags.to_string()),
+                        notes: Some(notes.to_string()),
+                        risk_class: None,
+                        approval_policy: None,
+                        risk_flags: None,
+                        cluster_key: None,
+                        pending_architecture_review: false,
+                    },
+                )?;
 
-                diff.insert("routed_to_observation".to_string(), Value::String(obs_id.clone()));
+                diff.insert(
+                    "routed_to_observation".to_string(),
+                    Value::String(obs_id.clone()),
+                );
                 merged.insert("routed_to_observation".to_string(), Value::String(obs_id));
             }
         }
@@ -149,7 +156,10 @@ pub(crate) fn inject_pre_validation_fields(
                     .to_string();
 
                 // Derive L143 columns from gatekeeper decision metadata.
-                let dm = merged.get("decision_metadata").and_then(|v| v.as_object()).cloned();
+                let dm = merged
+                    .get("decision_metadata")
+                    .and_then(|v| v.as_object())
+                    .cloned();
                 let risk_class = dm
                     .as_ref()
                     .and_then(|m| m.get("risk_class_hint"))
@@ -169,56 +179,106 @@ pub(crate) fn inject_pre_validation_fields(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                let obs_id = insert_observation_row(tx, &ObsFields {
-                    summary,
-                    source: "intake".to_string(),
-                    priority: "normal".to_string(),
-                    captured_at: now.clone(),
-                    captured_week: week_label(),
-                    tags: None,
-                    notes: None,
-                    risk_class,
-                    approval_policy,
-                    risk_flags: risk_flags_val.map(|v| v.to_string()),
-                    cluster_key,
-                })?;
+                let obs_id = insert_observation_row(
+                    tx,
+                    &ObsFields {
+                        summary,
+                        source: "intake".to_string(),
+                        priority: "normal".to_string(),
+                        captured_at: now.clone(),
+                        captured_week: week_label(),
+                        tags: None,
+                        notes: None,
+                        risk_class,
+                        approval_policy,
+                        risk_flags: risk_flags_val.map(|v| v.to_string()),
+                        cluster_key,
+                        pending_architecture_review: false,
+                    },
+                )?;
 
-                diff.insert("routed_to_observation".to_string(), Value::String(obs_id.clone()));
+                diff.insert(
+                    "routed_to_observation".to_string(),
+                    Value::String(obs_id.clone()),
+                );
                 merged.insert("routed_to_observation".to_string(), Value::String(obs_id));
             }
         }
 
         "arch_review_candidate" => {
-            // Only auto-create if routed_to_observation not already supplied.
-            // arch_review_candidate is a normal Router outcome: creates a tagged observation
-            // stored in routed_to_observation (not a separate lifecycle family).
-            if is_absent(merged, "routed_to_observation") {
-                let summary = merged
-                    .get("summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(intake arch review candidate)")
-                    .to_string();
+            if !is_absent(merged, "routed_to_arch_review") {
+                anyhow::bail!(
+                    "arch_review_candidate routes must create routed_to_arch_review in the same transaction; caller-supplied routed_to_arch_review is not accepted"
+                );
+            }
+            if !is_absent(merged, "routed_to_observation") {
+                anyhow::bail!(
+                    "arch_review_candidate routes must create routed_to_observation in the same transaction; caller-supplied routed_to_observation is not accepted"
+                );
+            }
 
-                let notes = json!({ "pending_architecture_review": true });
-                let tags = json!(["arch-review-candidate"]);
+            let summary = merged
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(intake arch review candidate)")
+                .to_string();
+            let cluster_key = merged
+                .get("cluster_key")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    merged
+                        .get("gatekeeper_decision_json")
+                        .and_then(|v| v.get("cluster_key"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
 
-                let obs_id = insert_observation_row(tx, &ObsFields {
-                    summary,
+            let notes = json!({ "gatekeeper_route": { "decision": "arch_review_candidate" } });
+            let obs_id = insert_observation_row(
+                tx,
+                &ObsFields {
+                    summary: summary.clone(),
                     source: "intake".to_string(),
                     priority: "normal".to_string(),
                     captured_at: now.clone(),
                     captured_week: week_label(),
-                    tags: Some(tags.to_string()),
+                    tags: None,
                     notes: Some(notes.to_string()),
                     risk_class: None,
                     approval_policy: None,
                     risk_flags: None,
-                    cluster_key: None,
-                })?;
+                    cluster_key: cluster_key.clone(),
+                    pending_architecture_review: true,
+                },
+            )?;
+            diff.insert(
+                "routed_to_observation".to_string(),
+                Value::String(obs_id.clone()),
+            );
+            merged.insert(
+                "routed_to_observation".to_string(),
+                Value::String(obs_id.clone()),
+            );
 
-                diff.insert("routed_to_observation".to_string(), Value::String(obs_id.clone()));
-                merged.insert("routed_to_observation".to_string(), Value::String(obs_id));
-            }
+            let intake_id = merged
+                .get("display_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let arch_id = insert_architecture_review_row(
+                tx,
+                &ArchReviewFields {
+                    summary,
+                    source_observation: obs_id,
+                    source_intake: intake_id,
+                    cluster_key,
+                },
+            )?;
+            diff.insert(
+                "routed_to_arch_review".to_string(),
+                Value::String(arch_id.clone()),
+            );
+            merged.insert("routed_to_arch_review".to_string(), Value::String(arch_id));
         }
 
         // reject_noise → terminal (no pre-validation side effects)
@@ -237,10 +297,7 @@ pub(crate) fn inject_pre_validation_fields(
 ///
 /// Increments recon_round and enforces the ≤ 2 cap.  Also appends evidence
 /// from the diff to the intake row's `evidence` ndjson field if provided.
-pub(crate) fn inject_recon_return_fields(
-    diff: &mut EntryMap,
-    merged: &mut EntryMap,
-) -> Result<()> {
+pub(crate) fn inject_recon_return_fields(diff: &mut EntryMap, merged: &mut EntryMap) -> Result<()> {
     let current = merged
         .get("recon_round")
         .and_then(|v| v.as_i64())
@@ -265,7 +322,9 @@ pub(crate) fn inject_recon_return_fields(
         .map(|s| s.to_string());
 
     let new_evidence = match (existing_evidence, evidence_append) {
-        (Some(existing), Some(new)) if !existing.is_empty() => Some(format!("{}\n{}", existing.trim_end(), new.trim())),
+        (Some(existing), Some(new)) if !existing.is_empty() => {
+            Some(format!("{}\n{}", existing.trim_end(), new.trim()))
+        }
         (None, Some(new)) => Some(new),
         (Some(existing), None) => Some(existing),
         _ => None,
@@ -292,11 +351,19 @@ struct ObsFields {
     priority: String,
     captured_at: String,
     captured_week: String,
-    tags: Option<String>,       // JSON string e.g. '["fast-track-eligible"]'
-    notes: Option<String>,      // JSON string
+    tags: Option<String>,  // JSON string e.g. '["fast-track-eligible"]'
+    notes: Option<String>, // JSON string
     risk_class: Option<String>,
     approval_policy: Option<String>,
     risk_flags: Option<String>, // JSON string e.g. '["small_local_fix"]'
+    cluster_key: Option<String>,
+    pending_architecture_review: bool,
+}
+
+struct ArchReviewFields {
+    summary: String,
+    source_observation: String,
+    source_intake: Option<String>,
     cluster_key: Option<String>,
 }
 
@@ -317,14 +384,29 @@ fn insert_observation_row(tx: &Transaction, fields: &ObsFields) -> Result<String
     let mut entry = EntryMap::new();
     entry.insert("summary".to_string(), Value::String(fields.summary.clone()));
     entry.insert("source".to_string(), Value::String(fields.source.clone()));
-    entry.insert("priority".to_string(), Value::String(fields.priority.clone()));
-    entry.insert("captured_at".to_string(), Value::String(fields.captured_at.clone()));
-    entry.insert("captured_week".to_string(), Value::String(fields.captured_week.clone()));
+    entry.insert(
+        "priority".to_string(),
+        Value::String(fields.priority.clone()),
+    );
+    entry.insert(
+        "captured_at".to_string(),
+        Value::String(fields.captured_at.clone()),
+    );
+    entry.insert(
+        "captured_week".to_string(),
+        Value::String(fields.captured_week.clone()),
+    );
     if let Some(t) = &fields.tags {
-        entry.insert("tags".to_string(), serde_json::from_str(t).context("parse tags")?);
+        entry.insert(
+            "tags".to_string(),
+            serde_json::from_str(t).context("parse tags")?,
+        );
     }
     if let Some(n) = &fields.notes {
-        entry.insert("notes".to_string(), serde_json::from_str(n).context("parse notes")?);
+        entry.insert(
+            "notes".to_string(),
+            serde_json::from_str(n).context("parse notes")?,
+        );
     }
     if let Some(rc) = &fields.risk_class {
         entry.insert("risk_class".to_string(), Value::String(rc.clone()));
@@ -333,10 +415,16 @@ fn insert_observation_row(tx: &Transaction, fields: &ObsFields) -> Result<String
         entry.insert("approval_policy".to_string(), Value::String(ap.clone()));
     }
     if let Some(rf) = &fields.risk_flags {
-        entry.insert("risk_flags".to_string(), serde_json::from_str(rf).context("parse risk_flags")?);
+        entry.insert(
+            "risk_flags".to_string(),
+            serde_json::from_str(rf).context("parse risk_flags")?,
+        );
     }
     if let Some(ck) = &fields.cluster_key {
         entry.insert("cluster_key".to_string(), Value::String(ck.clone()));
+    }
+    if fields.pending_architecture_review {
+        entry.insert("pending_architecture_review".to_string(), Value::Bool(true));
     }
 
     // Use Actor::Framework + SideEffectAuthority::GatekeeperRoute so that the
@@ -352,9 +440,41 @@ fn insert_observation_row(tx: &Transaction, fields: &ObsFields) -> Result<String
     )
 }
 
+fn insert_architecture_review_row(tx: &Transaction, fields: &ArchReviewFields) -> Result<String> {
+    let schema = architecture_reviews_schema()?;
+    let mut entry = EntryMap::new();
+    entry.insert("kind".to_string(), Value::String("interpret".to_string()));
+    entry.insert("summary".to_string(), Value::String(fields.summary.clone()));
+    entry.insert(
+        "source_observation".to_string(),
+        Value::String(fields.source_observation.clone()),
+    );
+    if let Some(source_intake) = &fields.source_intake {
+        entry.insert(
+            "source_intake".to_string(),
+            Value::String(source_intake.clone()),
+        );
+    }
+    if let Some(cluster_key) = &fields.cluster_key {
+        entry.insert(
+            "cluster_key".to_string(),
+            Value::String(cluster_key.clone()),
+        );
+    }
+
+    super::add::add_row_in_tx(tx, &schema, entry, Actor::Framework)
+}
+
 fn observations_schema() -> Result<Schema> {
     Schema::from_yaml(include_str!("../../stores/observations/schema.yaml"))
         .context("parse bundled observations schema")
+}
+
+fn architecture_reviews_schema() -> Result<Schema> {
+    Schema::from_yaml(include_str!(
+        "../../stores/architecture_reviews/schema.yaml"
+    ))
+    .context("parse bundled architecture_reviews schema")
 }
 
 /// Look up the cluster_key of an intake item (I###) or observation (L###) by display_id.
@@ -426,13 +546,24 @@ mod tests {
         Schema::from_yaml(yaml).expect("parse observations schema")
     }
 
+    fn arch_schema() -> Schema {
+        let yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "architecture_reviews")
+            .map(|(_, y)| *y)
+            .expect("architecture_reviews schema");
+        Schema::from_yaml(yaml).expect("parse architecture_reviews schema")
+    }
+
     fn fresh_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(SUBSTRATE_DDL).unwrap();
         let is = intake_schema();
         let os = obs_schema();
+        let ars = arch_schema();
         conn.execute_batch(&ddl_for(&is)).unwrap();
         conn.execute_batch(&ddl_for(&os)).unwrap();
+        conn.execute_batch(&ddl_for(&ars)).unwrap();
         conn
     }
 
@@ -452,8 +583,14 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut diff: EntryMap = std::collections::BTreeMap::new();
         let mut merged: EntryMap = std::collections::BTreeMap::new();
-        merged.insert("decision".to_string(), Value::String("fast_track".to_string()));
-        merged.insert("summary".to_string(), Value::String("test fast track".to_string()));
+        merged.insert(
+            "decision".to_string(),
+            Value::String("fast_track".to_string()),
+        );
+        merged.insert(
+            "summary".to_string(),
+            Value::String("test fast track".to_string()),
+        );
 
         inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap();
         tx.commit().unwrap();
@@ -473,7 +610,10 @@ mod tests {
 
         assert_eq!(status, "open");
         let tags_raw = tags_raw.expect("tags must be set");
-        assert!(tags_raw.contains("fast-track-eligible"), "tags must contain fast-track-eligible");
+        assert!(
+            tags_raw.contains("fast-track-eligible"),
+            "tags must contain fast-track-eligible"
+        );
     }
 
     #[test]
@@ -484,14 +624,29 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut diff: EntryMap = std::collections::BTreeMap::new();
         let mut merged: EntryMap = std::collections::BTreeMap::new();
-        merged.insert("decision".to_string(), Value::String("normal_observation".to_string()));
-        merged.insert("summary".to_string(), Value::String("stale pid cleanup".to_string()));
-        merged.insert("decision_metadata".to_string(), serde_json::json!({
-            "risk_class_hint": "low",
-            "approval_policy_hint": "auto"
-        }));
-        merged.insert("risk_flags".to_string(), serde_json::json!(["small_local_fix"]));
-        merged.insert("cluster_key".to_string(), Value::String("dispatch-lifecycle".to_string()));
+        merged.insert(
+            "decision".to_string(),
+            Value::String("normal_observation".to_string()),
+        );
+        merged.insert(
+            "summary".to_string(),
+            Value::String("stale pid cleanup".to_string()),
+        );
+        merged.insert(
+            "decision_metadata".to_string(),
+            serde_json::json!({
+                "risk_class_hint": "low",
+                "approval_policy_hint": "auto"
+            }),
+        );
+        merged.insert(
+            "risk_flags".to_string(),
+            serde_json::json!(["small_local_fix"]),
+        );
+        merged.insert(
+            "cluster_key".to_string(),
+            Value::String("dispatch-lifecycle".to_string()),
+        );
 
         inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap();
         tx.commit().unwrap();
@@ -516,17 +671,21 @@ mod tests {
     }
 
     #[test]
-    fn arch_review_candidate_creates_obs_with_tag_and_notes() {
-        // arch_review_candidate is a normal Router outcome via the route verb.
-        // The created observation is stored in routed_to_observation (not routed_to_arch_review).
+    fn arch_review_candidate_creates_obs_and_arch_review() {
         let conn = fresh_db();
         insert_triaging(&conn, "I001");
 
         let tx = conn.unchecked_transaction().unwrap();
         let mut diff: EntryMap = std::collections::BTreeMap::new();
         let mut merged: EntryMap = std::collections::BTreeMap::new();
-        merged.insert("decision".to_string(), Value::String("arch_review_candidate".to_string()));
-        merged.insert("summary".to_string(), Value::String("arch candidate".to_string()));
+        merged.insert(
+            "decision".to_string(),
+            Value::String("arch_review_candidate".to_string()),
+        );
+        merged.insert(
+            "summary".to_string(),
+            Value::String("arch candidate".to_string()),
+        );
 
         inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap();
         tx.commit().unwrap();
@@ -535,23 +694,35 @@ mod tests {
             .get("routed_to_observation")
             .and_then(|v| v.as_str())
             .expect("routed_to_observation must be set for arch_review_candidate");
-        // routed_to_arch_review must NOT be set (removed field)
-        assert!(
-            merged.get("routed_to_arch_review").map_or(true, |v| v.is_null()),
-            "routed_to_arch_review must not be set"
-        );
+        let arch_id = merged
+            .get("routed_to_arch_review")
+            .and_then(|v| v.as_str())
+            .expect("routed_to_arch_review must be set for arch_review_candidate");
 
-        let (tags_raw, notes_raw): (Option<String>, Option<String>) = conn
+        let (pending, tags_raw): (i64, Option<String>) = conn
             .query_row(
-                "SELECT tags, notes FROM observations WHERE display_id = ?1",
+                "SELECT pending_architecture_review, tags FROM observations WHERE display_id = ?1",
                 rusqlite::params![obs_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .expect("observation must exist");
 
-        assert!(tags_raw.as_deref().unwrap_or("").contains("arch-review-candidate"));
-        let notes: serde_json::Value = serde_json::from_str(notes_raw.as_deref().unwrap_or("{}")).unwrap();
-        assert_eq!(notes.get("pending_architecture_review").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(pending, 1);
+        assert!(!tags_raw
+            .as_deref()
+            .unwrap_or("")
+            .contains("arch-review-candidate"));
+
+        let (status, kind, source_observation): (String, String, String) = conn
+            .query_row(
+                "SELECT status, kind, source_observation FROM architecture_reviews WHERE display_id = ?1",
+                rusqlite::params![arch_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("architecture review must exist");
+        assert_eq!(status, "pending");
+        assert_eq!(kind, "interpret");
+        assert_eq!(source_observation, obs_id);
     }
 
     #[test]
@@ -573,8 +744,14 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut diff: EntryMap = std::collections::BTreeMap::new();
         let mut merged: EntryMap = std::collections::BTreeMap::new();
-        merged.insert("decision".to_string(), Value::String("duplicate".to_string()));
-        merged.insert("duplicate_of".to_string(), Value::String("I001".to_string()));
+        merged.insert(
+            "decision".to_string(),
+            Value::String("duplicate".to_string()),
+        );
+        merged.insert(
+            "duplicate_of".to_string(),
+            Value::String("I001".to_string()),
+        );
 
         inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap();
         tx.commit().unwrap();
@@ -594,13 +771,19 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut diff: EntryMap = std::collections::BTreeMap::new();
         let mut merged: EntryMap = std::collections::BTreeMap::new();
-        merged.insert("decision".to_string(), Value::String("needs_info".to_string()));
-        merged.insert("gatekeeper_decision_json".to_string(), serde_json::json!({
-            "decision": "needs_info",
-            "confidence": "low",
-            "rationale": "Need more context.",
-            "missing_info_question": "What is the affected file path?"
-        }));
+        merged.insert(
+            "decision".to_string(),
+            Value::String("needs_info".to_string()),
+        );
+        merged.insert(
+            "gatekeeper_decision_json".to_string(),
+            serde_json::json!({
+                "decision": "needs_info",
+                "confidence": "low",
+                "rationale": "Need more context.",
+                "missing_info_question": "What is the affected file path?"
+            }),
+        );
 
         inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap();
         tx.commit().unwrap();
@@ -630,7 +813,10 @@ mod tests {
         let mut diff: EntryMap = std::collections::BTreeMap::new();
 
         let err = inject_recon_return_fields(&mut diff, &mut merged).unwrap_err();
-        assert!(err.to_string().contains("cap exceeded"), "expected cap error; got: {err}");
+        assert!(
+            err.to_string().contains("cap exceeded"),
+            "expected cap error; got: {err}"
+        );
     }
 
     #[test]
@@ -641,8 +827,14 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut diff: EntryMap = std::collections::BTreeMap::new();
         let mut merged: EntryMap = std::collections::BTreeMap::new();
-        merged.insert("decision".to_string(), Value::String("normal_observation".to_string()));
-        merged.insert("routed_to_observation".to_string(), Value::String("L042".to_string()));
+        merged.insert(
+            "decision".to_string(),
+            Value::String("normal_observation".to_string()),
+        );
+        merged.insert(
+            "routed_to_observation".to_string(),
+            Value::String("L042".to_string()),
+        );
 
         inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap();
         tx.commit().unwrap();
@@ -659,6 +851,158 @@ mod tests {
     }
 
     #[test]
+    fn arch_review_candidate_rejects_pre_supplied_arch_review_id() {
+        let conn = fresh_db();
+        insert_triaging(&conn, "I001");
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut diff: EntryMap = std::collections::BTreeMap::new();
+        let mut merged: EntryMap = std::collections::BTreeMap::new();
+        merged.insert(
+            "decision".to_string(),
+            Value::String("arch_review_candidate".to_string()),
+        );
+        merged.insert(
+            "summary".to_string(),
+            Value::String("arch candidate".to_string()),
+        );
+        merged.insert(
+            "routed_to_arch_review".to_string(),
+            Value::String("A999".to_string()),
+        );
+
+        let err = inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("caller-supplied routed_to_arch_review"),
+            "expected pre-supplied A### rejection; got: {err}"
+        );
+        drop(tx);
+
+        let obs_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        let arch_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM architecture_reviews", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            obs_count, 0,
+            "rejected pre-supplied A### must not create L###"
+        );
+        assert_eq!(
+            arch_count, 0,
+            "rejected pre-supplied A### must not create A###"
+        );
+    }
+
+    #[test]
+    fn arch_review_candidate_rejects_pre_supplied_observation_id() {
+        let conn = fresh_db();
+        insert_triaging(&conn, "I001");
+        conn.execute(
+            concat!("in", "sert into observations (display_id, status, summary, source, priority, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
+             VALUES ('L001', 'open', 'preexisting obs', 'dev', 'normal', '2026-05-06T10:00:00Z', 'w19-d2', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_with_human', 'ai_with_human')"),
+            [],
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut diff: EntryMap = std::collections::BTreeMap::new();
+        let mut merged: EntryMap = std::collections::BTreeMap::new();
+        merged.insert(
+            "decision".to_string(),
+            Value::String("arch_review_candidate".to_string()),
+        );
+        merged.insert(
+            "summary".to_string(),
+            Value::String("arch candidate".to_string()),
+        );
+        merged.insert(
+            "routed_to_observation".to_string(),
+            Value::String("L001".to_string()),
+        );
+
+        let err = inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("caller-supplied routed_to_observation"),
+            "expected pre-supplied L### rejection; got: {err}"
+        );
+        drop(tx);
+
+        let obs_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT pending_architecture_review FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let arch_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM architecture_reviews", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            obs_count, 1,
+            "rejected pre-supplied L### must not mint another L###"
+        );
+        assert_eq!(
+            pending, 0,
+            "rejected pre-supplied L### must not mark pending"
+        );
+        assert_eq!(
+            arch_count, 0,
+            "rejected pre-supplied L### must not create A###"
+        );
+    }
+
+    #[test]
+    fn arch_review_insert_failure_rolls_back_pending_observation() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        let is = intake_schema();
+        let os = obs_schema();
+        conn.execute_batch(&ddl_for(&is)).unwrap();
+        conn.execute_batch(&ddl_for(&os)).unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut diff: EntryMap = std::collections::BTreeMap::new();
+        let mut merged: EntryMap = std::collections::BTreeMap::new();
+        merged.insert(
+            "decision".to_string(),
+            Value::String("arch_review_candidate".to_string()),
+        );
+        merged.insert(
+            "summary".to_string(),
+            Value::String("should roll back".to_string()),
+        );
+        merged.insert(
+            "cluster_key".to_string(),
+            Value::String("actor-authority".to_string()),
+        );
+
+        let result = inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route");
+        assert!(
+            result.is_err(),
+            "must propagate error when architecture_reviews table missing"
+        );
+        drop(tx);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "source observation must roll back with failed A### insert"
+        );
+    }
+
+    #[test]
     fn failed_obs_insert_rolls_back_via_transaction() {
         // Verify that if observation insert fails (e.g. table doesn't exist in
         // a stripped DB), the error propagates and the caller's tx can roll back.
@@ -671,11 +1015,20 @@ mod tests {
         let tx = conn.unchecked_transaction().unwrap();
         let mut diff: EntryMap = std::collections::BTreeMap::new();
         let mut merged: EntryMap = std::collections::BTreeMap::new();
-        merged.insert("decision".to_string(), Value::String("fast_track".to_string()));
-        merged.insert("summary".to_string(), Value::String("should fail".to_string()));
+        merged.insert(
+            "decision".to_string(),
+            Value::String("fast_track".to_string()),
+        );
+        merged.insert(
+            "summary".to_string(),
+            Value::String("should fail".to_string()),
+        );
 
         let result = inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route");
-        assert!(result.is_err(), "must propagate error when observations table missing");
+        assert!(
+            result.is_err(),
+            "must propagate error when observations table missing"
+        );
         // tx dropped without commit → intake row safe
     }
 }

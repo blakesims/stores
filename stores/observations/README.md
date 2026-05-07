@@ -15,6 +15,8 @@ Captures and triages observations during AI-assisted work sessions. Production s
 - `body` (text) — extended notes; use `--body-from-file` for multi-line
 - `tags` (list<text>) — pipe-separated: `"frontend|backend"`
 - `task_id` (text) — soft-FK to a `tasks` display_id (e.g. `T170`)
+- `pending_architecture_review` (bool) — set by gatekeeper `arch_review_candidate` routing; blocks U1 ratification until a clearing A### architecture-review verdict and any required reconciliation are present
+- `resolved_by`, `merge_target_id`, `resolution_kind` — architecture-review merge/redirect resolution tracking
 - `investigation_note`, `resolved_at`, `resolution` (text) — resolution tracking
 - `contact_id`, `field_name` — dashboard-sync dedup keys
 
@@ -78,6 +80,7 @@ stores observations update L001 \
     --tier-hint T3 \
     --approved-by blake --approved-at 2026-04-30 \
     --invoker human
+# If pending_architecture_review=true, confirm fails until the linked A### ruling clears it.
 stores observations confirm L001 --invoker human
 
 stores observations show L001

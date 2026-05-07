@@ -40,16 +40,18 @@ echo ""
 cd "$TMP"
 
 # ---------------------------------------------------------------------------
-# Setup: init + install both stores
+# Setup: init + install stores
 # ---------------------------------------------------------------------------
 echo "--- Setup: init + install stores"
 "$STORES_BIN" init
 
 "$STORES_BIN" install "$STORES_ROOT/stores/intake_items"
 "$STORES_BIN" install "$STORES_ROOT/stores/observations"
+"$STORES_BIN" install "$STORES_ROOT/stores/architecture_reviews"
 
 sqlite3 .stores/db.sqlite ".tables" | grep -q "intake" || fail "intake table not created"
 sqlite3 .stores/db.sqlite ".tables" | grep -q "observations" || fail "observations table not created"
+sqlite3 .stores/db.sqlite ".tables" | grep -q "architecture_reviews" || fail "architecture_reviews table not created"
 pass "stores installed"
 
 # ---------------------------------------------------------------------------
@@ -189,7 +191,7 @@ AR_ID=$(add_triaging_item "proposed change to actor authority surface")
 
 DEC_JSON_AR='{"decision":"arch_review_candidate","confidence":"high","rationale":"Touches actor authority — needs arch review.","tier_hint":"T3","risk_flags":["touches_actor_authority","authority_surface_drift"],"cluster_key":"actor-authority"}'
 
-# arch_review_candidate is a normal Router outcome via the route verb (not escalate-arch-review)
+# arch_review_candidate is a Router outcome via the route verb; it creates L### + A###.
 CLAUDECODE=1 "$STORES_BIN" intake route "$AR_ID" --invoker ai_autonomous \
     --decision arch_review_candidate \
     --gatekeeper-decision-json "$DEC_JSON_AR" \
@@ -197,17 +199,60 @@ CLAUDECODE=1 "$STORES_BIN" intake route "$AR_ID" --invoker ai_autonomous \
 
 AR_STATUS=$(sqlite3 .stores/db.sqlite "SELECT status FROM intake WHERE display_id='$AR_ID'")
 AR_OBS_ID=$(sqlite3 .stores/db.sqlite "SELECT routed_to_observation FROM intake WHERE display_id='$AR_ID'")
+AR_ARCH_ID=$(sqlite3 .stores/db.sqlite "SELECT routed_to_arch_review FROM intake WHERE display_id='$AR_ID'")
 [[ "$AR_STATUS" == "routed" ]] || fail "arch_review_candidate: expected status=routed; got: $AR_STATUS"
 [[ -n "$AR_OBS_ID" ]] || fail "arch_review_candidate: routed_to_observation must be set"
+[[ -n "$AR_ARCH_ID" ]] || fail "arch_review_candidate: routed_to_arch_review must be set"
 
-# AC3.4: verify obs has arch-review-candidate tag and pending_architecture_review=true
-AR_OBS_TAGS=$(sqlite3 .stores/db.sqlite "SELECT tags FROM observations WHERE display_id='$AR_OBS_ID'")
-AR_OBS_NOTES=$(sqlite3 .stores/db.sqlite "SELECT notes FROM observations WHERE display_id='$AR_OBS_ID'")
-echo "$AR_OBS_TAGS" | grep -q "arch-review-candidate" || fail "arch_review obs: missing arch-review-candidate tag; got: $AR_OBS_TAGS"
+# AC4.1/AC4.3: verify obs pending flag and dedicated A### identity.
+AR_OBS_PENDING=$(sqlite3 .stores/db.sqlite "SELECT pending_architecture_review FROM observations WHERE display_id='$AR_OBS_ID'")
+AR_OBS_TAGS=$(sqlite3 .stores/db.sqlite "SELECT COALESCE(tags,'') FROM observations WHERE display_id='$AR_OBS_ID'")
+AR_ARCH_ROW=$(sqlite3 .stores/db.sqlite "SELECT status || '|' || kind || '|' || source_observation || '|' || source_intake || '|' || cluster_key FROM architecture_reviews WHERE display_id='$AR_ARCH_ID'")
+[[ "$AR_OBS_PENDING" == "1" ]] || fail "arch_review obs: pending_architecture_review not true; got: $AR_OBS_PENDING"
+[[ "$AR_OBS_TAGS" != *"arch-review-candidate"* ]] || fail "arch_review obs: must not rely on legacy tag identity; got: $AR_OBS_TAGS"
+[[ "$AR_ARCH_ROW" == "pending|interpret|$AR_OBS_ID|$AR_ID|actor-authority" ]] || fail "arch review row mismatch: $AR_ARCH_ROW"
+pass "arch_review_candidate: L### source + A### review created in same route"
 
-# Check pending_architecture_review in notes (simple string match, no jq required)
-echo "$AR_OBS_NOTES" | grep -q "pending_architecture_review" || fail "arch_review obs: notes missing pending_architecture_review; got: $AR_OBS_NOTES"
-pass "arch_review_candidate: obs created via route verb, status=routed, tags=[arch-review-candidate], notes has pending_architecture_review"
+AR_BYPASS_ID=$(add_triaging_item "attempted caller supplied architecture review id")
+ARCH_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews")
+OBS_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
+if CLAUDECODE=1 "$STORES_BIN" intake route "$AR_BYPASS_ID" --invoker ai_autonomous \
+    --decision arch_review_candidate \
+    --routed-to-arch-review A999 \
+    --gatekeeper-decision-json "$DEC_JSON_AR" \
+    >out 2>err; then
+    fail "arch_review_candidate: caller-supplied routed_to_arch_review unexpectedly succeeded"
+fi
+grep -q "caller-supplied routed_to_arch_review" err || fail "arch_review_candidate: missing pre-supplied A### rejection"
+AR_BYPASS_STATE=$(sqlite3 .stores/db.sqlite "SELECT status || '|' || COALESCE(routed_to_observation,'') || '|' || COALESCE(routed_to_arch_review,'') FROM intake WHERE display_id='$AR_BYPASS_ID'")
+ARCH_AFTER=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews")
+OBS_AFTER=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
+[[ "$AR_BYPASS_STATE" == "triaging||" ]] || fail "arch_review_candidate: rejected bypass mutated intake: $AR_BYPASS_STATE"
+[[ "$ARCH_AFTER" == "$ARCH_BEFORE" ]] || fail "arch_review_candidate: rejected bypass created A### rows"
+[[ "$OBS_AFTER" == "$OBS_BEFORE" ]] || fail "arch_review_candidate: rejected bypass created L### rows"
+pass "arch_review_candidate: caller-supplied A### rejected before side effects"
+
+AR_OBS_BYPASS_ID=$(add_triaging_item "attempted caller supplied source observation id")
+ARCH_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews")
+OBS_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
+FT_PENDING_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT pending_architecture_review FROM observations WHERE display_id='$FT_OBS_ID'")
+if CLAUDECODE=1 "$STORES_BIN" intake route "$AR_OBS_BYPASS_ID" --invoker ai_autonomous \
+    --decision arch_review_candidate \
+    --routed-to-observation "$FT_OBS_ID" \
+    --gatekeeper-decision-json "$DEC_JSON_AR" \
+    >out 2>err; then
+    fail "arch_review_candidate: caller-supplied routed_to_observation unexpectedly succeeded"
+fi
+grep -q "caller-supplied routed_to_observation" err || fail "arch_review_candidate: missing pre-supplied L### rejection"
+AR_OBS_BYPASS_STATE=$(sqlite3 .stores/db.sqlite "SELECT status || '|' || COALESCE(routed_to_observation,'') || '|' || COALESCE(routed_to_arch_review,'') FROM intake WHERE display_id='$AR_OBS_BYPASS_ID'")
+ARCH_AFTER=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews")
+OBS_AFTER=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
+FT_PENDING_AFTER=$(sqlite3 .stores/db.sqlite "SELECT pending_architecture_review FROM observations WHERE display_id='$FT_OBS_ID'")
+[[ "$AR_OBS_BYPASS_STATE" == "triaging||" ]] || fail "arch_review_candidate: rejected L### bypass mutated intake: $AR_OBS_BYPASS_STATE"
+[[ "$ARCH_AFTER" == "$ARCH_BEFORE" ]] || fail "arch_review_candidate: rejected L### bypass created A### rows"
+[[ "$OBS_AFTER" == "$OBS_BEFORE" ]] || fail "arch_review_candidate: rejected L### bypass created L### rows"
+[[ "$FT_PENDING_AFTER" == "$FT_PENDING_BEFORE" ]] || fail "arch_review_candidate: rejected L### bypass marked preexisting observation pending"
+pass "arch_review_candidate: caller-supplied L### rejected before side effects"
 
 # ---------------------------------------------------------------------------
 # Decision 5: needs_info (with recon-return loop)

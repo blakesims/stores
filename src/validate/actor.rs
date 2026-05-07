@@ -22,7 +22,7 @@ pub enum SideEffectAuthority {
     /// are framework-authored records of a routing action. The fields they write
     /// (`risk_class`, `approval_policy`, `risk_flags`, `cluster_key`, `tags`,
     /// `body`, `source`, `priority`, `notes`, `summary`, `captured_at`,
-    /// `captured_week`) describe the routing outcome and are set exclusively by
+    /// `captured_week`, `pending_architecture_review`) describe the routing outcome and are set exclusively by
     /// the intake_route handler, not by any user-facing CLI path.
     GatekeeperRoute,
 }
@@ -173,6 +173,7 @@ fn actor_allowed_with_authority(
         //   summary           — one-line description filled by side-effect
         //   captured_at       — timestamp of routing action
         //   captured_week     — week label at routing time
+        //   pending_architecture_review — U1 architecture gate set by arch routing
         const GATEKEEPER_ROUTE_FIELDS: &[&str] = &[
             "risk_class",
             "approval_policy",
@@ -186,6 +187,7 @@ fn actor_allowed_with_authority(
             "summary",
             "captured_at",
             "captured_week",
+            "pending_architecture_review",
         ];
         return GATEKEEPER_ROUTE_FIELDS.contains(&field_name);
     }

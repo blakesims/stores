@@ -532,6 +532,20 @@ pub(crate) fn run_in_tx(
         merged.insert(k.clone(), v.clone());
     }
 
+    // T077 P3: observations U1 architecture-review gate. A pending
+    // architecture review blocks confirmed→ready ratification unless the
+    // referenced A### verdict satisfies a typed clearing condition; successful
+    // clearance writes pending_architecture_review=false in the same transition.
+    if schema.name == "observations" && verb == "ratify" {
+        super::observation_arch_gate::enforce_u1_architecture_gate(
+            tx,
+            display_id,
+            &existing,
+            &mut merged,
+            &mut diff,
+        )?;
+    }
+
     // Resolve the transition using the full selection algorithm (guard-aware).
     // Must run AFTER building merged so guards are evaluated against the post-diff entry.
     // Plain transitions never carry a requires_gate, so gate=None is correct.
@@ -612,6 +626,7 @@ pub(crate) fn run_in_tx(
             row_id,
             display_id,
             &merged,
+            Some(&existing),
             pref.as_deref(),
             phash.as_deref(),
         )?;
@@ -630,6 +645,7 @@ pub(crate) fn maybe_auto_ratify_observation(
     row_id: i64,
     display_id: &str,
     merged: &crate::validate::EntryMap,
+    persisted_for_gate: Option<&crate::validate::EntryMap>,
     policy_ref: Option<&str>,
     policies_hash: Option<&str>,
 ) -> Result<()> {
@@ -658,21 +674,31 @@ pub(crate) fn maybe_auto_ratify_observation(
         return Ok(());
     }
 
-    // Build a no-op diff and resolve the ratify transition from current status
-    // (which is now 'confirmed' inside this tx).
-    let ratify_diff: crate::validate::EntryMap = std::collections::BTreeMap::new();
+    // Build a no-op diff and enforce the T077 architecture-review U1 gate
+    // before resolving the ratify transition. Successful clearance mutates
+    // both maps so pending_architecture_review=false is persisted atomically.
+    let mut ratify_diff: crate::validate::EntryMap = std::collections::BTreeMap::new();
+    let mut ratify_merged = merged.clone();
+    let persisted_for_gate = persisted_for_gate.unwrap_or(merged);
+    super::observation_arch_gate::enforce_u1_architecture_gate(
+        tx,
+        display_id,
+        persisted_for_gate,
+        &mut ratify_merged,
+        &mut ratify_diff,
+    )?;
     let from_status = "confirmed";
     let transition = select_transition(
         &schema.lifecycle.transitions,
         from_status,
         "ratify",
         None,
-        merged,
+        &ratify_merged,
     )?;
 
     validate::validate(
         schema,
-        merged,
+        &ratify_merged,
         Op::Transition("ratify".to_string(), ratify_diff.clone()),
         Actor::Framework.into(),
     )
@@ -692,7 +718,7 @@ pub(crate) fn maybe_auto_ratify_observation(
         &transition.to,
         "ratify",
         &ratify_diff,
-        merged,
+        &ratify_merged,
         Actor::Framework,
         policy_ref,
         policies_hash,
