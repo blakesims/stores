@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 use super::app::{App, FlatRow, Mode};
-use super::data::{blocked_reason_class, surface_counts, Row};
+use super::data::{blocked_reason_class, cockpit_model, ExternalReviewState, Row};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Search-mode adds an extra 1-line input bar above the status bar.
@@ -106,7 +106,7 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
     // Render only the viewport window (virtualized). Section headers are
     // emitted lazily as the window crosses a section boundary.
     let window = visible_window(app, flat);
-    let mut items: Vec<ListItem> = Vec::with_capacity(window.len());
+    let mut items: Vec<ListItem> = cockpit_header_items(app);
     let mut last_section: Option<usize> = None;
 
     // Highlight the row currently under the cursor.
@@ -138,15 +138,36 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
         ))));
     }
 
-    let ((ta, tt), (oa, ot)) = surface_counts(&app.rows, app.opts.all_history);
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::NONE)
-            .title(format!(
-                "stores watch · TASKS {ta} actionable / {tt} total (use --all) · OBSERVATIONS {oa} actionable / {ot} total (use --all)"
-            )),
+            .title("stores watch · cockpit"),
     );
     f.render_widget(list, area);
+}
+
+fn cockpit_header_items(app: &App) -> Vec<ListItem<'static>> {
+    let model = cockpit_model(&app.rows, app.external_review.clone());
+    let daemon = match app.status_bar.daemon_liveness {
+        super::daemon::Liveness::Live { pid } => format!("daemon:LIVE pid={pid}"),
+        super::daemon::Liveness::Dead => "daemon:DEAD".to_string(),
+    };
+    let external = match model.external_review {
+        ExternalReviewState::Available { rows } => format!("external review: available rows={rows}"),
+        ExternalReviewState::Unavailable { reason } => reason,
+    };
+    vec![
+        ListItem::new(Line::from(Span::styled(
+            format!("{daemon} · cap active {}/{}", app.status_bar.cap.0, app.status_bar.cap.1),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ))),
+        ListItem::new(Line::from(Span::raw(format!(
+            "lanes: execution={} review={} accept={} held={} active={} priority={}",
+            model.execution, model.review, model.accept, model.held, model.active, model.priority
+        )))),
+        ListItem::new(Line::from(Span::raw(external))),
+        ListItem::new(Line::from(Span::raw(""))),
+    ]
 }
 
 fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
@@ -162,7 +183,8 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(" "),
-            Span::raw(truncate(&t.title, 60)),
+            Span::raw(format!("{} ", task_progress(t))),
+            Span::raw(truncate(&task_snippet(t), 60)),
         ],
         Row::Obs(o) => {
             let status = if o.status == "investigation_failed" {
@@ -186,7 +208,8 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
                     Style::default().fg(Color::Yellow),
                 ),
                 Span::raw(" "),
-                Span::raw(truncate(&o.summary, 60)),
+                Span::raw(format!("priority:{} ", o.priority)),
+                Span::raw(truncate(&obs_snippet(o), 60)),
             ]
         }
         Row::Review(r) => vec![
@@ -232,7 +255,8 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(" "),
-            Span::raw(truncate(&i.summary, 60)),
+            Span::raw(format!("priority:{} ", i.priority.as_deref().unwrap_or("normal"))),
+            Span::raw(truncate(&intake_snippet(i), 60)),
         ],
     };
     if selected {
@@ -258,8 +282,58 @@ fn task_status_label(t: &super::data::TaskRow) -> String {
                 .as_deref()
                 .unwrap_or_else(|| blocked_reason_class(t.blocked_reason.as_deref()))
         ),
+        "deploy_blocked" => format!(
+            "deploy:{}",
+            t.blocked_reason.as_deref().filter(|s| !s.is_empty()).unwrap_or("unknown")
+        ),
         other => other.to_string(),
     }
+}
+
+fn task_progress(t: &super::data::TaskRow) -> String {
+    match (t.current_phase, t.total_phases, t.current_cycle) {
+        (Some(p), Some(n), Some(c)) if n > 0 => format!("[P{p}/{n} C{c}/3]"),
+        (Some(p), None, Some(c)) => format!("[P{p}/? C{c}/3]"),
+        _ => "[P?]".to_string(),
+    }
+}
+
+fn task_snippet(t: &super::data::TaskRow) -> String {
+    let mut parts = Vec::new();
+    if let Some(tier) = t.tier_hint.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(format!("tier:{tier}"));
+    }
+    if matches!(t.status.as_str(), "blocked" | "deploy_blocked") {
+        if let Some(reason) = t.blocked_reason.as_deref().filter(|s| !s.is_empty()) {
+            parts.push(format!("reason:{reason}"));
+        }
+    }
+    parts.push(t.title.clone());
+    parts.join(" · ")
+}
+
+fn obs_snippet(o: &super::data::ObsRow) -> String {
+    let mut parts = Vec::new();
+    if let Some(tier) = o.tier_hint.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(format!("tier:{tier}"));
+    }
+    if let Some(reason) = o.lock_reason.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(format!("held:{reason}"));
+    }
+    parts.push(o.summary.clone());
+    parts.join(" · ")
+}
+
+fn intake_snippet(i: &super::data::IntakeRow) -> String {
+    let mut parts = Vec::new();
+    if let Some(reason) = i.held_reason.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(format!("held:{reason}"));
+    }
+    if let Some(next) = i.next_action.as_deref().filter(|s| !s.is_empty()) {
+        parts.push(format!("next:{next}"));
+    }
+    parts.push(i.summary.clone());
+    parts.join(" · ")
 }
 
 fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -324,7 +398,7 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use crate::tui::app::{App, TuiOpts};
-    use crate::tui::data::{ObsRow, Row, TaskRow};
+    use crate::tui::data::{IntakeRow, ObsRow, Row, TaskRow};
 
     fn line_text(line: Line<'static>) -> String {
         line.spans
@@ -381,6 +455,32 @@ mod tests {
         assert!(blocked.contains("blocked:rate_limit"));
         let unknown = line_text(format_row_line(&task_row("blocked", Some("opaque")), false));
         assert!(unknown.contains("blocked:unknown"));
+    }
+
+    #[test]
+    fn row_line_exposes_priority_tier_and_held_reason_snippets() {
+        let obs = Row::Obs(ObsRow {
+            display_id: "L100".to_string(),
+            status: "open".to_string(),
+            priority: "high".to_string(),
+            summary: "priority obs".to_string(),
+            tier_hint: Some("T2".to_string()),
+            ..Default::default()
+        });
+        let intake = Row::Intake(IntakeRow {
+            display_id: "I100".to_string(),
+            status: "needs_info".to_string(),
+            priority: Some("high".to_string()),
+            summary: "held intake".to_string(),
+            held_reason: Some("missing owner".to_string()),
+            ..Default::default()
+        });
+        let obs_text = line_text(format_row_line(&obs, false));
+        let intake_text = line_text(format_row_line(&intake, false));
+        assert!(obs_text.contains("priority:high"), "{obs_text}");
+        assert!(obs_text.contains("tier:T2"), "{obs_text}");
+        assert!(intake_text.contains("priority:high"), "{intake_text}");
+        assert!(intake_text.contains("held:missing owner"), "{intake_text}");
     }
 
     #[test]

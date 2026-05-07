@@ -32,18 +32,18 @@ pub enum Section {
 impl Section {
     pub fn label(self) -> &'static str {
         match self {
-            Section::TasksActionableCurrentWork => "TASKS · ACTIONABLE CURRENT WORK",
-            Section::TasksBlockedNeedsAction => "TASKS · BLOCKED NEEDS ACTION",
-            Section::TasksDeployRecovery => "TASKS · DEPLOY RECOVERY",
-            Section::TasksNeedsTriage => "TASKS · NEEDS TRIAGE",
-            Section::TasksRecentlyTerminal => "TASKS · RECENTLY TERMINAL",
-            Section::ObsRatifiable => "OBS · RATIFIABLE",
-            Section::ObsOpenNoContract => "OBS · OPEN-NO-CONTRACT",
-            Section::ObsOther => "OBS · OTHER",
+            Section::TasksActionableCurrentWork => "ACTIVE WORK",
+            Section::TasksBlockedNeedsAction => "HELD",
+            Section::TasksDeployRecovery => "HELD",
+            Section::TasksNeedsTriage => "HELD",
+            Section::TasksRecentlyTerminal => "ACCEPT",
+            Section::ObsRatifiable => "REVIEW",
+            Section::ObsOpenNoContract => "PRIORITY",
+            Section::ObsOther => "OBSERVATIONS/INTAKE",
             Section::ExternalReviewLane => "EXTERNAL REVIEW · HELD/RUNNING",
-            Section::IntakeOpen => "INTAKE · OPEN",
-            Section::IntakeHeld => "INTAKE · HELD",
-            Section::IntakeRouted => "INTAKE · ROUTED",
+            Section::IntakeOpen => "OBSERVATIONS/INTAKE",
+            Section::IntakeHeld => "HELD",
+            Section::IntakeRouted => "OBSERVATIONS/INTAKE",
         }
     }
 
@@ -207,6 +207,52 @@ impl Default for ExternalReviewState {
     fn default() -> Self {
         Self::Unavailable { reason: "external review: unavailable / not installed".to_string() }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CockpitModel {
+    pub execution: usize,
+    pub review: usize,
+    pub accept: usize,
+    pub held: usize,
+    pub active: usize,
+    pub priority: usize,
+    pub external_review: ExternalReviewState,
+}
+
+pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> CockpitModel {
+    let mut model = CockpitModel { external_review, ..Default::default() };
+    for row in rows {
+        match row {
+            Row::Task(t) => {
+                if matches!(t.status.as_str(), "executing") { model.execution += 1; }
+                if matches!(t.status.as_str(), "plan_review" | "code_review" | "in_review") { model.review += 1; }
+                if matches!(t.status.as_str(), "accepted" | "complete" | "cargo_installed" | "schema_migrated") { model.accept += 1; }
+                if matches!(t.status.as_str(), "blocked" | "deploy_blocked") { model.held += 1; }
+                if is_in_flight_task_status(&t.status) { model.active += 1; }
+                if is_priority_task(t) { model.priority += 1; }
+            }
+            Row::Obs(o) => {
+                if is_priority_text(&o.priority) || o.priority_rank.map(|r| r <= 1).unwrap_or(false) { model.priority += 1; }
+                if o.lock_reason.as_deref().map(|s| !s.is_empty()).unwrap_or(false) { model.held += 1; }
+                if o.status != "resolved" && o.status != "rejected" { model.active += 1; }
+            }
+            Row::Intake(i) => {
+                if i.status == "needs_info" { model.held += 1; }
+                if is_priority_text(i.priority.as_deref().unwrap_or("")) || !i.risk_flags.is_empty() { model.priority += 1; }
+                if i.status != "routed" && i.status != "dropped" { model.active += 1; }
+            }
+        }
+    }
+    model
+}
+
+fn is_priority_task(t: &TaskRow) -> bool {
+    t.tier_hint.as_deref().map(is_priority_text).unwrap_or(false)
+}
+
+fn is_priority_text(s: &str) -> bool {
+    matches!(s.to_ascii_lowercase().as_str(), "high" | "urgent" | "p0" | "p1" | "t1")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -739,9 +785,6 @@ fn push_bucket(buckets: &mut [(Section, Vec<usize>)], sec: Section, idx: usize) 
 fn section_for(row: &Row) -> Option<Section> {
     match row {
         Row::Task(t) => match t.status.as_str() {
-            "planning" | "ready" | "executing" | "plan_review" | "code_review" | "in_review" => {
-                Some(Section::TasksActionableCurrentWork)
-            }
             "blocked" => {
                 if task_visibility_class(t) == VisibilityClass::NeedsTriage {
                     Some(Section::TasksNeedsTriage)
@@ -756,15 +799,17 @@ fn section_for(row: &Row) -> Option<Section> {
                     Some(Section::TasksDeployRecovery)
                 }
             }
+            "plan_review" | "code_review" | "in_review" => Some(Section::ObsRatifiable),
             "closed_out_of_band" | "accepted" | "complete" | "cargo_installed"
             | "schema_migrated" | "rejected" | "abandoned" => Some(Section::TasksRecentlyTerminal),
+            _ if is_priority_task(t) => Some(Section::ObsOpenNoContract),
             _ => Some(Section::TasksActionableCurrentWork),
         },
         Row::Obs(o) => {
-            if o.contract_state.as_deref() == Some("ready") {
-                Some(Section::ObsRatifiable)
-            } else if o.status == "open" && o.contract_state.is_none() {
+            if is_priority_text(&o.priority) || o.priority_rank.map(|r| r <= 1).unwrap_or(false) {
                 Some(Section::ObsOpenNoContract)
+            } else if o.contract_state.as_deref() == Some("ready") {
+                Some(Section::ObsRatifiable)
             } else {
                 Some(Section::ObsOther)
             }
@@ -772,6 +817,7 @@ fn section_for(row: &Row) -> Option<Section> {
         Row::Review(_) => Some(Section::ExternalReviewLane),
         Row::Intake(i) => match i.status.as_str() {
             "needs_info" => Some(Section::IntakeHeld),
+            _ if is_priority_text(i.priority.as_deref().unwrap_or("")) || !i.risk_flags.is_empty() => Some(Section::ObsOpenNoContract),
             "routed" | "dropped" => Some(Section::IntakeRouted),
             _ => Some(Section::IntakeOpen),
         },
@@ -964,13 +1010,13 @@ mod tests {
     fn section_classification() {
         // blocked/deploy_blocked with no blocked_reason → unknown class → NeedsTriage section.
         let rows = vec![
-            task("plan_review"),        // idx 0 → TasksActionableCurrentWork
-            task("blocked"),            // idx 1 → TasksNeedsTriage (no reason → unknown)
-            task("deploy_blocked"),     // idx 2 → TasksNeedsTriage (no reason → unknown)
-            task("accepted"),           // idx 3 → TasksRecentlyTerminal
-            obs("open", Some("ready")), // idx 4 → ObsRatifiable
-            obs("open", None),          // idx 5 → ObsOpenNoContract
-            obs("resolved", None),      // idx 6 → ObsOther
+            task("plan_review"),      // idx 0 → REVIEW (ObsRatifiable)
+            task("blocked"),          // idx 1 → HELD / needs triage (no reason → unknown)
+            task("deploy_blocked"),   // idx 2 → HELD / needs triage (no reason → unknown)
+            task("accepted"),         // idx 3 → ACCEPT
+            obs("open", Some("ready")), // idx 4 → REVIEW (ObsRatifiable)
+            obs("open", None),        // idx 5 → OBSERVATIONS/INTAKE (ObsOpenNoContract)
+            obs("resolved", None),    // idx 6 → OBSERVATIONS/INTAKE (ObsOther)
         ];
         let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
         assert_eq!(buckets.len(), Section::ALL.len());
@@ -981,14 +1027,14 @@ mod tests {
         let b = |sec: Section| -> Vec<usize> {
             buckets.iter().find(|(s, _)| *s == sec).unwrap().1.clone()
         };
-        assert_eq!(b(Section::TasksActionableCurrentWork), vec![0usize]);
+        assert_eq!(b(Section::TasksActionableCurrentWork), Vec::<usize>::new());
         assert_eq!(b(Section::TasksBlockedNeedsAction), Vec::<usize>::new());
         assert_eq!(b(Section::TasksDeployRecovery), Vec::<usize>::new());
         assert_eq!(b(Section::TasksNeedsTriage), vec![1usize, 2]);
         assert_eq!(b(Section::TasksRecentlyTerminal), vec![3usize]);
-        assert_eq!(b(Section::ObsRatifiable), vec![4usize]);
-        assert_eq!(b(Section::ObsOpenNoContract), vec![5usize]);
-        assert_eq!(b(Section::ObsOther), vec![6usize]);
+        assert_eq!(b(Section::ObsRatifiable), vec![0usize, 4]);
+        assert_eq!(b(Section::ObsOpenNoContract), Vec::<usize>::new());
+        assert_eq!(b(Section::ObsOther), vec![5usize, 6]);
     }
 
     #[test]
@@ -997,18 +1043,14 @@ mod tests {
         // Use an explicit recoverable reason to get TasksBlockedNeedsAction / TasksDeployRecovery.
         let mappings: &[(&str, Option<&str>, Section)] = &[
             ("planning", None, Section::TasksActionableCurrentWork),
-            ("plan_review", None, Section::TasksActionableCurrentWork),
+            ("plan_review", None, Section::ObsRatifiable),
             ("ready", None, Section::TasksActionableCurrentWork),
             ("executing", None, Section::TasksActionableCurrentWork),
-            ("code_review", None, Section::TasksActionableCurrentWork),
-            (
-                "blocked",
-                Some("rate_limit 429"),
-                Section::TasksBlockedNeedsAction,
-            ),
+            ("code_review", None, Section::ObsRatifiable),
+            ("blocked", Some("rate_limit 429"), Section::TasksBlockedNeedsAction),
             ("blocked", None, Section::TasksNeedsTriage),
             ("complete", None, Section::TasksRecentlyTerminal),
-            ("in_review", None, Section::TasksActionableCurrentWork),
+            ("in_review", None, Section::ObsRatifiable),
             ("accepted", None, Section::TasksRecentlyTerminal),
             ("rejected", None, Section::TasksRecentlyTerminal),
             (

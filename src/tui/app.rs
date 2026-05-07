@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use super::daemon::Liveness;
 use super::data::{
-    classify_with_options, is_terminal_task_status, Row, Section, WatchClassifyOptions,
+    classify_with_options, is_terminal_task_status, ExternalReviewState, Row, Section,
+    WatchClassifyOptions,
 };
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
@@ -108,6 +109,8 @@ pub struct App {
     /// is expanded (default).
     pub collapsed: HashSet<Section>,
     pub status_bar: StatusBar,
+    /// Optional T083 external-review lane state; absent tables degrade to unavailable.
+    pub external_review: ExternalReviewState,
     /// Visible-rows-per-page used by PgUp/PgDn + virtualization. Updated on
     /// each render; defaults to a sentinel until the first draw.
     pub viewport_height: usize,
@@ -180,6 +183,7 @@ impl App {
     /// Reload rows and rebuild sections (then re-apply current sort).
     pub fn refresh(&mut self, conn: &Connection) -> Result<()> {
         self.rows = super::data::load_rows(conn)?;
+        self.external_review = super::data::load_external_review_state(conn)?;
         self.sections = classify_with_options(&self.rows, self.watch_classify_options());
         self.apply_sort();
         self.recompute_status_bar();

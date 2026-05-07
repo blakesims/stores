@@ -1,13 +1,26 @@
-TASKS 7 actionable / 13 total (use --all)
-T010 executing in-flight
-T011 plan_review in-flight
-T012 ready in-flight
-T020 blocked rate_limit
-T021 blocked transient_infra
-T022 deploy_blocked retry-deploy-recoverable
-T023 deploy_blocked opaque
-T024 blocked unknown
-T030 accepted terminal
-OBSERVATIONS 1 actionable / 3 total (use --all)
-L002 deploy-blocked: task T999 merge conflict
-L003 operator note
+daemon:DEAD
+lanes: execution=1 review=1 accept=3 held=8 active=7 priority=2
+external review: unavailable / not installed
+ACTIVE WORK (2)
+T010 executing [P2/3 C1/3] in-flight
+T012 ready [P2/3 C1/3] in-flight
+HELD (2)
+T020 blocked [P2/3 C1/3] rate_limit reason:rate_limit
+T021 blocked [P2/3 C1/3] transient_infra reason:transient_infra
+HELD (1)
+T022 deploy_blocked [P2/3 C1/3] retry-deploy-recoverable reason:retry-deploy-recoverable
+HELD (2)
+T023 deploy_blocked [P2/3 C1/3] opaque reason:opaque
+T024 blocked [P2/3 C1/3] unknown reason:unknown
+ACCEPT (1)
+T030 accepted [P2/3 C1/3] terminal reason:terminal
+REVIEW (1)
+T011 plan_review [P2/3 C1/3] in-flight
+PRIORITY (1)
+L002 open priority:high deploy-blocked: task T999 merge conflict
+OBSERVATIONS/INTAKE (1)
+L003 open priority:normal operator note
+OBSERVATIONS/INTAKE (0)
+HELD (1)
+I001 needs_info priority:high intake needs answer held:missing owner
+OBSERVATIONS/INTAKE (0)

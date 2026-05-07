@@ -1,6 +1,6 @@
 use stores::tui::data::{
-    blocked_reason_class, classify_with_options, surface_counts, ObsRow, Row, Section, TaskRow,
-    WatchClassifyOptions,
+    blocked_reason_class, classify_with_options, cockpit_model, ExternalReviewState, IntakeRow,
+    ObsRow, Row, TaskRow, WatchClassifyOptions,
 };
 
 fn task(id: &str, status: &str, reason: Option<&str>) -> Row {
@@ -11,15 +11,18 @@ fn task(id: &str, status: &str, reason: Option<&str>) -> Row {
         updated_at: "1700000000".to_string(),
         blocked_reason: reason.map(str::to_string),
         blocked_reason_class: Some(blocked_reason_class(reason).to_string()),
+        current_phase: Some(2),
+        current_cycle: Some(1),
+        total_phases: Some(3),
         ..Default::default()
     })
 }
 
-fn obs(id: &str, summary: &str) -> Row {
+fn obs(id: &str, priority: &str, summary: &str) -> Row {
     Row::Obs(ObsRow {
         display_id: id.to_string(),
         status: "open".to_string(),
-        priority: "normal".to_string(),
+        priority: priority.to_string(),
         summary: summary.to_string(),
         updated_at: "1700000000".to_string(),
         ..Default::default()
@@ -45,59 +48,62 @@ fn fixture_rows() -> Vec<Row> {
         task("T023", "deploy_blocked", Some("opaque")),
         task("T024", "blocked", Some("unknown")),
         task("T030", "accepted", Some("terminal")),
-        obs("L001", "deploy-blocked: task T003 merge conflict"),
-        obs("L002", "deploy-blocked: task T999 merge conflict"),
-        obs("L003", "operator note"),
+        obs("L001", "normal", "deploy-blocked: task T003 merge conflict"),
+        obs("L002", "high", "deploy-blocked: task T999 merge conflict"),
+        obs("L003", "normal", "operator note"),
+        Row::Intake(IntakeRow {
+            display_id: "I001".to_string(),
+            status: "needs_info".to_string(),
+            summary: "intake needs answer".to_string(),
+            priority: Some("high".to_string()),
+            held_reason: Some("missing owner".to_string()),
+            ..Default::default()
+        }),
     ]
+}
+
+fn row_line(row: &Row) -> String {
+    match row {
+        Row::Task(t) => format!(
+            "{} {} [P{}/{} C{}/3] {}{}",
+            t.display_id,
+            t.status,
+            t.current_phase.unwrap_or_default(),
+            t.total_phases.unwrap_or_default(),
+            t.current_cycle.unwrap_or_default(),
+            t.title,
+            t.blocked_reason.as_deref().map(|r| format!(" reason:{r}")).unwrap_or_default()
+        ),
+        Row::Obs(o) => format!("{} {} priority:{} {}", o.display_id, o.status, o.priority, o.summary),
+        Row::Intake(i) => format!(
+            "{} {} priority:{} {} held:{}",
+            i.display_id,
+            i.status,
+            i.priority.as_deref().unwrap_or("normal"),
+            i.summary,
+            i.held_reason.as_deref().unwrap_or("unknown")
+        ),
+    }
 }
 
 fn render_snapshot(show_all_history: bool) -> String {
     let rows = fixture_rows();
-    let ((ta, tt), (oa, ot)) = surface_counts(&rows, show_all_history);
-    let sections = classify_with_options(
-        &rows,
-        WatchClassifyOptions {
-            show_all_history,
-            ..Default::default()
-        },
+    let model = cockpit_model(&rows, ExternalReviewState::default());
+    let sections = classify_with_options(&rows, WatchClassifyOptions { show_all_history, ..Default::default() });
+    let external = match model.external_review {
+        ExternalReviewState::Unavailable { reason } => reason,
+        ExternalReviewState::Available { rows } => format!("external review: available rows={rows}"),
+    };
+    let mut out = format!(
+        "daemon:DEAD\nlanes: execution={} review={} accept={} held={} active={} priority={}\n{external}\n",
+        model.execution, model.review, model.accept, model.held, model.active, model.priority
     );
-    let mut task_idxs = Vec::new();
-    let mut obs_idxs = Vec::new();
-    for (sec, idxs) in sections {
-        match sec {
-            Section::TasksActionableCurrentWork
-            | Section::TasksBlockedNeedsAction
-            | Section::TasksDeployRecovery
-            | Section::TasksNeedsTriage
-            | Section::TasksRecentlyTerminal => task_idxs.extend(idxs),
-            Section::ObsRatifiable | Section::ObsOpenNoContract | Section::ObsOther => {
-                obs_idxs.extend(idxs)
-            }
-            Section::ExternalReviewLane => task_idxs.extend(idxs),
-            Section::IntakeOpen | Section::IntakeHeld | Section::IntakeRouted => {}
-        }
-    }
-    task_idxs.sort_by_key(|i| match &rows[*i] {
-        Row::Task(t) => t.display_id.clone(),
-        _ => String::new(),
-    });
-    obs_idxs.sort_by_key(|i| match &rows[*i] {
-        Row::Obs(o) => o.display_id.clone(),
-        _ => String::new(),
-    });
-
-    let mut out = format!("TASKS {ta} actionable / {tt} total (use --all)\n");
-    for i in task_idxs {
-        if let Row::Task(t) = &rows[i] {
-            out.push_str(&format!("{} {} {}\n", t.display_id, t.status, t.title));
-        }
-    }
-    out.push_str(&format!(
-        "OBSERVATIONS {oa} actionable / {ot} total (use --all)\n"
-    ));
-    for i in obs_idxs {
-        if let Row::Obs(o) = &rows[i] {
-            out.push_str(&format!("{} {}\n", o.display_id, o.summary));
+    for (sec, mut idxs) in sections {
+        idxs.sort_by_key(|i| rows[*i].display_id().to_string());
+        out.push_str(&format!("{} ({})\n", sec.label(), idxs.len()));
+        for i in idxs {
+            out.push_str(&row_line(&rows[i]));
+            out.push('\n');
         }
     }
     out
@@ -107,22 +113,17 @@ fn render_snapshot(show_all_history: bool) -> String {
 fn tui_watch_visibility_snapshots_default_actionable_view() {
     let got = render_snapshot(false);
     assert_eq!(got, include_str!("fixtures/watch/default.snap"));
-    assert!(!got.contains("T001 blocked silent_zombie"));
+    assert!(!got.contains("T001 blocked"));
     assert!(!got.contains("L001 deploy-blocked"));
-    // 7 ActionableRecovery tasks (T010,T011,T012,T020,T021,T022,T030); 13 total
-    assert!(got.contains("TASKS 7 actionable / 13 total (use --all)"));
-    // 1 ActionableRecovery obs (L003); 3 total
-    assert!(got.contains("OBSERVATIONS 1 actionable / 3 total (use --all)"));
+    assert!(got.contains("PRIORITY (1)\nL002 open priority:high"));
+    assert!(got.contains("HELD (2)\nT020 blocked"));
+    assert!(got.contains("reason:rate_limit"));
 }
 
 #[test]
 fn tui_watch_visibility_snapshots_all_view_reveals_every_fixture_row() {
     let got = render_snapshot(true);
     assert_eq!(got, include_str!("fixtures/watch/all.snap"));
-    // Actionable = ActionableRecovery only: 7 tasks, not 13
-    assert!(got.contains("TASKS 7 actionable / 13 total (use --all)"));
-    // 1 ActionableRecovery obs (L003); 3 total
-    assert!(got.contains("OBSERVATIONS 1 actionable / 3 total (use --all)"));
-    assert!(got.contains("T001 blocked silent_zombie"));
-    assert!(got.contains("L001 deploy-blocked: task T003 merge conflict"));
+    assert!(got.contains("T001 blocked"));
+    assert!(got.contains("L001 open priority:normal deploy-blocked: task T003 merge conflict"));
 }
