@@ -35,7 +35,7 @@
 /// - `--max-iters N` (default 50): loop is bounded; on hit exits non-zero.
 /// - Runner non-zero exit: task state is NOT modified (parse/submit are skipped).
 /// - `blocked` terminal state: exits 0 with a human-readable hint.
-use anyhow::{bail, Result};
+use anyhow::{bail, Context as _, Result};
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
@@ -74,15 +74,29 @@ const LAUNCH_ERROR_EXIT_CODE: i32 = -1;
 ///
 /// When a runner fails to launch (spawn returns Err), no telemetry is available
 /// from the runner itself. We use a deterministic sentinel that mirrors what the
-/// runner would have reported at the source layer if it had started:
-/// - pi runner → `pi:default`
-/// - claude-code runner (any model variant) → `claude_code:unknown`
+/// runner would have reported at the source layer if it had started.
+///
+/// `runner_name` is the value returned by `RoleRunner::name_for_role`, which
+/// produces names like `claude-code:opus` or `claude-code` (no model suffix when
+/// no model is configured). We preserve the model suffix so the synthetic row
+/// carries a specific model_id (e.g. `claude_code:opus`) rather than collapsing
+/// all claude-code variants to `claude_code:unknown`.
+///
+/// Mapping:
+/// - `pi` → `pi:default`
+/// - `claude-code:<model>` → `claude_code:<model>`
+/// - `claude-code` (no suffix) → `claude_code:unknown`
 /// - any other runner → `<runner_name>:unknown`
 fn derive_spawn_fail_model_id(runner_name: &str) -> String {
     if runner_name == "pi" {
         "pi:default".to_string()
     } else if runner_name.starts_with("claude-code") {
-        "claude_code:unknown".to_string()
+        // runner_name is either "claude-code" (no model) or "claude-code:<model>".
+        // Split on ':' to extract the model suffix.
+        match runner_name.split_once(':') {
+            Some((_base, model)) if !model.is_empty() => format!("claude_code:{model}"),
+            _ => "claude_code:unknown".to_string(),
+        }
     } else {
         format!("{runner_name}:unknown")
     }
@@ -1149,7 +1163,9 @@ fn drive_loop_with_role_runner(
                     ..Default::default()
                 };
                 // Insert the synthetic row before transitioning the task.
-                let _ = db::insert_agent_run(
+                // Fail-loud: every attempted invocation must produce an agent_runs row
+                // (Pi ruling). Swallowing the error would violate that invariant silently.
+                db::insert_agent_run(
                     conn,
                     display_id,
                     phase_for_log,
@@ -1157,7 +1173,8 @@ fn drive_loop_with_role_runner(
                     agent_role,
                     LAUNCH_ERROR_EXIT_CODE,
                     &synthetic_telemetry,
-                );
+                )
+                .context("spawn-fail synthetic agent_runs insert")?;
                 // Now transition the task to blocked (same path as non-zero exit).
                 let blocked_reason = format!(
                     "{{\"kind\":\"spawn_failure\",\"exit_code\":{LAUNCH_ERROR_EXIT_CODE},\
@@ -2291,6 +2308,23 @@ mod tests {
     /// Full wrap fixture (Phase 2) — representative envelope with all fields populated.
     fn wrap_full_fixture_json() -> &'static str {
         include_str!("../../tests/fixtures/agent_outputs/wrap.json")
+    }
+
+    // ---------------------------------------------------------------------------
+    // derive_spawn_fail_model_id: preserve configured model suffix
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn spawn_fail_model_id_preserves_suffix() {
+        // pi runner → pi:default
+        assert_eq!(derive_spawn_fail_model_id("pi"), "pi:default");
+        // claude-code with model suffix → preserve as claude_code:<model>
+        assert_eq!(derive_spawn_fail_model_id("claude-code:opus"), "claude_code:opus");
+        assert_eq!(derive_spawn_fail_model_id("claude-code:sonnet"), "claude_code:sonnet");
+        // claude-code without model suffix → claude_code:unknown
+        assert_eq!(derive_spawn_fail_model_id("claude-code"), "claude_code:unknown");
+        // unknown runner → <name>:unknown
+        assert_eq!(derive_spawn_fail_model_id("custom"), "custom:unknown");
     }
 
     // ---------------------------------------------------------------------------
