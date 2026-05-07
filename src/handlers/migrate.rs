@@ -259,11 +259,21 @@ fn observations_source_preflight(conn: &Connection, table: &str) -> Result<()> {
 
 fn observations_source_tuple_backfill_sql(table: &str) -> String {
     let t = quote_ident(table);
+    // Pi ruling (msg_77a03121): canonical (source_env, source_id) is an
+    // indivisible pair.  source_env without source_id is NEVER valid canonical
+    // state.  For origin-only legacy rows (origin_db set, but no matching
+    // *_source_id), leave both canonical columns as NULL.  origin_db is
+    // preserved in-place for historical/filter compatibility during the
+    // transition window.
     format!(
         "UPDATE {t} SET \
-         source_env = origin_db, \
+         source_env = CASE \
+           WHEN origin_db = 'prod'    AND prod_source_id    IS NOT NULL THEN 'prod' \
+           WHEN origin_db = 'sandbox' AND sandbox_source_id IS NOT NULL THEN 'sandbox' \
+           ELSE NULL \
+         END, \
          source_id = CASE \
-           WHEN origin_db = 'prod' THEN CAST(prod_source_id AS TEXT) \
+           WHEN origin_db = 'prod'    THEN CAST(prod_source_id    AS TEXT) \
            WHEN origin_db = 'sandbox' THEN CAST(sandbox_source_id AS TEXT) \
            ELSE NULL \
          END \
@@ -915,35 +925,38 @@ mod tests {
         assert_eq!(got, (Some("sandbox".into()), Some("456".into())));
     }
 
+    /// Pi ruling (msg_77a03121): origin-only legacy row (origin_db set, both
+    /// *_source_id NULL) → canonical (NULL, NULL); origin_db preserved.
     #[test]
-    fn t084_migrate_origin_db_without_id_remains_readable() {
+    fn t084_migrate_origin_only_legacy_row_canonical_null_null() {
         let (schemas, manifest) = load_bundled();
         let conn = Connection::open_in_memory().unwrap();
         install_pre_t084_all(&conn, &schemas);
         insert_pre_t084_source_row(&conn, "L903", "prod", None, None);
 
         apply_with(&conn, &schemas, &manifest).unwrap();
-        let got: (Option<String>, Option<String>) = conn
+
+        // Canonical tuple must be (NULL, NULL) — env-only is NOT valid.
+        let got: (Option<String>, Option<String>, Option<String>) = conn
             .query_row(
-                "SELECT source_env, source_id FROM observations WHERE display_id = 'L903'",
+                "SELECT source_env, source_id, origin_db FROM observations WHERE display_id = 'L903'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(got, (Some("prod".into()), None));
-
-        let schema = schemas.get("observations").unwrap();
-        let update_cmd = clap::Command::new("update")
-            .arg(clap::Arg::new("display_id").required(true))
-            .arg(clap::Arg::new("summary").long("summary"));
-        let matches = update_cmd.get_matches_from(["update", "L903", "--summary", "changed"]);
-        crate::handlers::update::run(
-            schema,
-            &conn,
-            &matches,
-            crate::schema::actor::Actor::Human.into(),
-        )
-        .unwrap();
+        assert_eq!(
+            (got.0.as_deref(), got.1.as_deref()),
+            (None, None),
+            "canonical tuple must be (NULL, NULL) for origin-only row; got source_env={:?} source_id={:?}",
+            got.0,
+            got.1,
+        );
+        // origin_db must be preserved for historical/filter compatibility.
+        assert_eq!(
+            got.2.as_deref(),
+            Some("prod"),
+            "origin_db must be preserved during transition window"
+        );
     }
 
     /// Type comparison is case-insensitive on the bare token.
@@ -1048,10 +1061,14 @@ mod tests {
         let r921 = rows.iter().find(|(id, _, _)| id == "L921").unwrap();
         assert_eq!(r921.1.as_deref(), Some("sandbox"));
         assert_eq!(r921.2.as_deref(), Some("2"));
-        // L922: origin-only → source_env=prod, source_id=NULL
+        // L922: origin-only (prod, NULL, NULL) → canonical (NULL, NULL); Pi ruling.
         let r922 = rows.iter().find(|(id, _, _)| id == "L922").unwrap();
-        assert_eq!(r922.1.as_deref(), Some("prod"));
-        assert_eq!(r922.2, None);
+        assert_eq!(
+            r922.1.as_deref(),
+            None,
+            "origin-only row: source_env must be NULL"
+        );
+        assert_eq!(r922.2, None, "origin-only row: source_id must be NULL");
     }
 
     /// Half-migrated DB (additive applied but source_id still INTEGER) is
@@ -1102,5 +1119,68 @@ mod tests {
             Some("TEXT"),
             "source_id must be TEXT after repair"
         );
+    }
+
+    /// Pi ruling (msg_77a03121): adversarial fixture — origin_db='prod' with BOTH
+    /// *_source_id NULL → migration produces canonical (NULL, NULL), origin_db
+    /// preserved.  Coherent rows (prod/42, sandbox/99) still migrate correctly.
+    #[test]
+    fn t084_r0_followup_origin_only_canonical_null_null_origin_db_preserved() {
+        let (schemas, manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+
+        // Adversarial: origin_db='prod', prod_source_id=NULL, sandbox_source_id=NULL.
+        insert_pre_t084_source_row(&conn, "L930", "prod", None, None);
+        // Coherent prod row.
+        insert_pre_t084_source_row(&conn, "L931", "prod", Some(42), None);
+        // Coherent sandbox row.
+        insert_pre_t084_source_row(&conn, "L932", "sandbox", None, Some(99));
+
+        apply_with(&conn, &schemas, &manifest).expect("apply_with must succeed");
+
+        // Origin-only: canonical (NULL, NULL); origin_db still 'prod'.
+        let r930: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id, origin_db FROM observations WHERE display_id = 'L930'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (r930.0.as_deref(), r930.1.as_deref()),
+            (None, None),
+            "origin-only row L930 must have canonical (NULL, NULL); got {:?}/{:?}",
+            r930.0, r930.1,
+        );
+        assert_eq!(
+            r930.2.as_deref(),
+            Some("prod"),
+            "origin_db must be preserved for L930 during transition window"
+        );
+
+        // Coherent prod row: canonical (prod, 42).
+        let r931: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id, origin_db FROM observations WHERE display_id = 'L931'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(r931.0.as_deref(), Some("prod"), "L931 source_env");
+        assert_eq!(r931.1.as_deref(), Some("42"), "L931 source_id");
+        assert_eq!(r931.2.as_deref(), Some("prod"), "L931 origin_db preserved");
+
+        // Coherent sandbox row: canonical (sandbox, 99).
+        let r932: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id, origin_db FROM observations WHERE display_id = 'L932'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(r932.0.as_deref(), Some("sandbox"), "L932 source_env");
+        assert_eq!(r932.1.as_deref(), Some("99"), "L932 source_id");
+        assert_eq!(r932.2.as_deref(), Some("sandbox"), "L932 origin_db preserved");
     }
 }
