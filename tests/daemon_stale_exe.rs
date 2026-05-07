@@ -712,8 +712,8 @@ fn first_run_migration_seeds_private_binary_and_records_private_launch_path() {
 #[cfg(unix)]
 #[test]
 fn changed_global_launch_does_not_replace_private_or_emit_canonical_stale_message() {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::process::CommandExt;
 
     let tmp = tempfile::tempdir().unwrap();
     init_empty_stores_dir(tmp.path());
@@ -728,20 +728,34 @@ fn changed_global_launch_does_not_replace_private_or_emit_canonical_stale_messag
     let cargo_home = tmp.path().join("cargo-home");
     let global = cargo_home.join("bin/stores");
     std::fs::create_dir_all(global.parent().unwrap()).unwrap();
-    std::fs::write(&global, "#!/bin/sh\necho corrupted\n").unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_stores"), &global).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&global)
+        .unwrap()
+        .write_all(b"\n# simulated external cargo install overwrite\n")
+        .unwrap();
     let mut perms = std::fs::metadata(&global).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&global, perms).unwrap();
+    assert_ne!(std::fs::metadata(&global).unwrap().len(), before);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
-        .arg0(&global)
+    let output = Command::new(&global)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(tmp.path())
         .env("STORES_DAEMON_BIN_PATH", &private)
         .env("CARGO_HOME", &cargo_home)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                global.parent().unwrap().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
         .output()
-        .expect("daemon via changed global argv0");
+        .expect("daemon launched via changed global stores path");
 
     assert!(
         output.status.success(),
