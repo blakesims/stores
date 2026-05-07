@@ -181,6 +181,11 @@ lifecycle:
 
     # complete → in_review (framework on-entry follow-on)
     - {from: complete, to: in_review, verb: request_review, actor: framework}
+    # External review revision route for T2/T3 rows. T1 remains lightweight by
+    # default: skip-plan T1 rows do not require an external_review PASS unless a
+    # later phase explicitly opts them into that lane.
+    - {from: in_review, to: executing, verb: submit-external-review, actor: framework, requires_gate: REVISE}
+
     # in_review → accepted / rejected (human gated)
     - {from: in_review, to: accepted, verb: accept, actor: human}
     - {from: in_review, to: rejected, verb: reject, actor: human}
