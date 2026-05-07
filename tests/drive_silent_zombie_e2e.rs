@@ -431,23 +431,31 @@ fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
     );
 }
 
-/// T067: dead auto-drive handoff at in_review with pending next_agent=wrap is
-/// re-dispatched by the daemon watchdog; wrap_log is populated via the real
-/// compute_submit_wrap path, NOT via direct DB mutation.
+/// T067 A1-strict: dead auto-drive handoff at in_review with pending
+/// next_agent=wrap is re-dispatched by the daemon watchdog; wrap_log is
+/// populated via the real compute_submit_wrap path, NOT via direct DB mutation.
 ///
-/// Flow:
-///   Pass 1 — pending-lock sweep detects terminal-ok lock + status=in_review +
-///             next_agent=Some("wrap") (schema guard: wrap_log.length==0) →
-///             redispatches → STORES_DRIVE_CMD runs `stores tasks submit-wrap T967
-///             --summary-from-file <tmpfile>` → compute_submit_wrap appends to
-///             wrap_log[], new drive_pid recorded, lock reopened as in_flight:pending_next.
-///   Pass 2 — open-lock sweep detects dead pid + status=in_review →
-///             has_pending_auto_drive_work returns false (next_agent=None because
-///             wrap_log.length>0 suppresses the schema's dispatch_agent:wrap guard) →
-///             mark_claim_finished("ok") → lock reaches terminal.
+/// A1-strict semantics (pi ruling): wrap_log is provenance, NOT a sentinel.
+/// next_agent IS NOT NULL is the sole "pending work" signal. For in_review,
+/// the schema always yields next_agent=Some("wrap") until the task transitions
+/// out of in_review (human accept/reject). Therefore:
 ///
-/// (pi ruling r2 MAJOR 2: e2e must prove real wrap envelope through drive, not
-/// direct wrap_log mutation.)
+/// - The daemon faithfully re-dispatches wrap on every sweep while the task
+///   remains in_review (next_agent IS NOT NULL).
+/// - The dispatch_lock does NOT close with terminal_reason='ok' while the
+///   task is still in_review — it stays in_flight (re-opened each cycle).
+/// - The lock only reaches terminal_reason='ok' after the task leaves
+///   in_review (accepted/rejected), at which point next_agent IS NULL.
+///
+/// This test proves:
+///   (a) wrap fires at least once (wrap_log contains the submitted summary).
+///   (b) drive_pid is updated (new drive was spawned by watchdog).
+///   (c) task stays in_review (awaiting human accept/reject).
+///   (d) dispatch_lock is in-flight (NOT closed) — daemon keeps sweeping.
+///
+/// (pi ruling r2 MAJOR 2: wrap_log must be populated via compute_submit_wrap,
+/// not direct DB mutation. wrap_log provenance assertion remains valid; only
+/// the "terminal_reason='ok'" assertion is removed as incompatible with A1.)
 #[test]
 fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
     let bin = bin();
@@ -530,8 +538,8 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // AC (pi ruling r2 MAJOR 2): wrap_log populated via compute_submit_wrap AND
-    // dispatch_lock reaches terminal_reason='ok' with finished_at IS NOT NULL.
+    // A1-strict ACs (pi ruling): next_agent IS NOT NULL is the sole pending-work
+    // signal; wrap_log is provenance only.
     let conn = Connection::open(&db_path).unwrap();
     let (status, terminal_reason, finished_at, pid, wrap_log): (
         String,
@@ -548,12 +556,7 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .unwrap();
-    assert_eq!(status, "in_review");
-    assert!(
-        pid > 0 && pid != dead_pid(),
-        "watchdog must record a new drive_pid; got pid={pid}"
-    );
-    // (a) wrap_log is populated via compute_submit_wrap (contains the submitted summary)
+    // (a) wrap_log populated via compute_submit_wrap (provenance assertion — valid under A1).
     assert!(
         wrap_log
             .as_deref()
@@ -561,15 +564,18 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
             .contains("auto wrap"),
         "wrap_log must be populated via compute_submit_wrap after wrap fires; got {wrap_log:?}"
     );
-    // (b) dispatch_lock reaches terminal_reason='ok'
-    assert_eq!(
-        terminal_reason.as_deref(),
-        Some("ok"),
-        "dispatch_lock must reach terminal_reason='ok' after wrap completes"
-    );
-    // (c) finished_at IS NOT NULL
+    // (b) new drive_pid was recorded (watchdog re-dispatched).
     assert!(
-        finished_at.is_some(),
-        "dispatch_lock finished_at must be set after wrap completes"
+        pid > 0 && pid != dead_pid(),
+        "watchdog must record a new drive_pid; got pid={pid}"
+    );
+    // (c) task stays in_review — awaiting human accept/reject.
+    assert_eq!(status, "in_review");
+    // (d) A1-strict: dispatch_lock stays in-flight (next_agent IS NOT NULL →
+    // daemon keeps re-dispatching; lock does NOT close with 'ok' while in_review).
+    assert!(
+        terminal_reason.as_deref() != Some("ok") || finished_at.is_none(),
+        "A1-strict: lock must not reach terminal_reason='ok' while task is still in_review \
+         (next_agent IS NOT NULL; completion requires transitioning out of in_review)"
     );
 }

@@ -362,24 +362,33 @@ fn ratify_promote_scaffold_drive_happy_path() {
         "auto-drive must have recorded a drive_pid"
     );
 
-    // AC7.1: dispatch_locks for auto-drive shows finished_at non-null with
-    // last_status='ok' (the spawn returned 0).
-    let (finished_at, last_status): (Option<String>, Option<String>) = conn
+    // A1-strict (pi ruling): auto-drive lock does NOT close with finished_at
+    // non-null while task is still in_review. next_agent IS NOT NULL for
+    // in_review means the daemon keeps re-dispatching wrap; the lock stays
+    // in-flight (pending_next) until the task transitions out of in_review
+    // (human accept/reject). AC7.1 is updated to assert A1-strict semantics:
+    // drive completed (stub ran, status reached in_review), lock is in-flight.
+    let (finished_at, wrap_log): (Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT finished_at, last_status FROM dispatch_locks \
-             WHERE agent_name='auto-drive' AND display_id=?1",
+            "SELECT dl.finished_at, t.wrap_log \
+             FROM dispatch_locks dl JOIN tasks t ON t.display_id = dl.display_id \
+             WHERE dl.agent_name='auto-drive' AND dl.display_id=?1",
             rusqlite::params![task_display],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
+    // AC7.1 A1-strict: lock stays in-flight (not closed) while status=in_review.
+    // wrap_log populated by stub proves wrap ran (provenance assertion — valid under A1).
     assert!(
-        finished_at.is_some(),
-        "AC7.1: auto-drive lock must have finished_at non-null"
+        wrap_log.as_deref().is_some_and(|w| !w.is_empty()),
+        "AC7.1: wrap_log must be populated by stub drive (wrap ran); got {wrap_log:?}"
     );
-    assert_eq!(
-        last_status.as_deref(),
-        Some("ok"),
-        "AC7.1: auto-drive lock last_status must be 'ok' (spawn returned 0)"
+    // Lock must NOT be closed with terminal_reason='ok' while task is in_review
+    // (A1-strict: daemon faithfully re-dispatches until human accept/reject).
+    assert!(
+        finished_at.is_none(),
+        "AC7.1 A1-strict: lock must stay in-flight (not closed) while in_review; \
+         got finished_at={finished_at:?}"
     );
 
     std::env::remove_var("STORES_DRIVE_CMD");

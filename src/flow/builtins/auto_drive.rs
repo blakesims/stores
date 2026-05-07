@@ -52,47 +52,19 @@ const IN_CYCLE_STATUSES: &[&str] = &[
 
 /// Returns true when the task still has auto-drive work to do.
 ///
-/// For most statuses, delegates to `next_agent` from `compute()`.
+/// Delegates entirely to `next_agent` from `compute()`. Pending work means
+/// `next_agent IS NOT NULL`; no further work means `next_agent IS NULL`.
 ///
-/// Special case — `in_review`: `dispatch_agent: wrap` has no schema-level
-/// guard (pi ruling r3 strict-pi A1), so `next_agent` is always `Some("wrap")`
-/// for in_review rows. The daemon uses wrap_log as the evidence of completion:
-/// if wrap_log is non-empty, wrap already ran this cycle and the task awaits
-/// human accept/reject — no further drive subprocess is needed.
-///
-/// This is distinct from the drive-loop's exit guard (which uses
-/// `dispatched_wrap_this_run` to prevent same-run re-dispatch). The daemon
-/// needs to know whether to re-spawn a *new* drive process; wrap_log answers
-/// "did the prior drive complete its wrap?" safely for that purpose.
+/// A1-strict (pi ruling): wrap_log is durable history, NOT a completion
+/// sentinel. The daemon MUST NOT consult wrap_log to decide whether to
+/// re-spawn a drive process. For in_review rows the schema always yields
+/// `next_agent=Some("wrap")` (no `when:` guard); once wrap runs and the task
+/// transitions to accepted/rejected the status leaves in_review and
+/// `next_agent` becomes None. That is the sole completion signal.
 pub(crate) fn has_pending_auto_drive_work(conn: &Connection, display_id: &str) -> Result<bool> {
     let schema = crate::flow::builtins::load_tasks_schema()?;
     let out = crate::handlers::next_action::compute(&schema, conn, display_id)?;
-    if out.status == "in_review" {
-        let wrap_log: Option<String> = conn
-            .query_row(
-                "SELECT wrap_log FROM tasks WHERE display_id = ?1",
-                rusqlite::params![display_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        if wrap_log_has_entries(wrap_log.as_deref()) {
-            return Ok(false);
-        }
-    }
     Ok(out.next_agent.is_some())
-}
-
-fn wrap_log_has_entries(text: Option<&str>) -> bool {
-    let Some(text) = text else {
-        return false;
-    };
-    match serde_json::from_str::<Value>(text) {
-        Ok(Value::Array(a)) => !a.is_empty(),
-        Ok(Value::Null) => false,
-        Ok(_) => true,
-        Err(_) => !text.trim().is_empty(),
-    }
 }
 
 fn mark_pending_handoff_lock(
@@ -621,9 +593,9 @@ pub fn sweep_drive_watchdog(
     }
 
     // Pending-next handoff pass: terminal-ok closed locks whose task is still
-    // in_review with pending work (e.g. next_agent=wrap, wrap_log empty) and
-    // whose drive subprocess is dead are re-dispatched so wrap fires without
-    // manual intervention.
+    // in_review with pending work (next_agent IS NOT NULL) and whose drive
+    // subprocess is dead are re-dispatched so wrap fires without manual
+    // intervention.
     //
     // NARROW predicate (pi ruling, MAJOR 3): only sweep locks where
     // terminal_reason='ok' AND t.status='in_review'. Non-ok locks (error,
@@ -1114,16 +1086,27 @@ mod tests {
         );
     }
 
-    /// AC5.1 (iii): dead PID + status='in_review' → drive succeeded; row not
-    /// flipped, lock marked finished='ok'.
+    /// A1-strict AC5.1 (iii): dead PID + status='in_review' + open lock →
+    /// wrap_log is IGNORED; next_agent IS NOT NULL means work is still pending,
+    /// so the watchdog REDISPATCHES rather than marking ok.
+    ///
+    /// wrap_log content (even non-empty) must not suppress redispatch.
     #[test]
-    fn watchdog_dead_pid_in_review_marks_ok() {
+    fn watchdog_dead_pid_in_review_redispatches_regardless_of_wrap_log() {
         let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("STORES_DRIVE_CMD", "sleep 5 #");
         let conn = fresh_db_with_obs();
+        let tmp = temp_cwd();
         let row_id = insert_task_full(&conn, "T722", "in_review", Some(dead_pid()));
+        // Set workspace_path so redispatch can succeed, and set non-empty wrap_log
+        // to confirm it does NOT suppress the redispatch.
         conn.execute(
-            "UPDATE tasks SET wrap_log = ?1 WHERE display_id='T722'",
-            rusqlite::params![r#"[{"executive_summary":"done"}]"#],
+            "UPDATE tasks SET workspace_path=?1, drive_started_at='2026-01-01T00:00:00Z', \
+             wrap_log=?2 WHERE display_id='T722'",
+            rusqlite::params![
+                tmp.path().to_str().unwrap(),
+                r#"[{"executive_summary":"prior-run"}]"#
+            ],
         )
         .unwrap();
         insert_lock(&conn, row_id, "T722");
@@ -1131,8 +1114,9 @@ mod tests {
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
-        assert_eq!(acted, 1);
+        assert_eq!(acted, 1, "watchdog must act on dead-PID in_review open lock");
 
+        // Row stays in_review (redispatch, not transition).
         let status: String = conn
             .query_row(
                 "SELECT status FROM tasks WHERE display_id='T722'",
@@ -1142,6 +1126,7 @@ mod tests {
             .unwrap();
         assert_eq!(status, "in_review");
 
+        // Lock is in-flight (pending_next), NOT closed as 'ok'.
         let last: String = conn
             .query_row(
                 "SELECT last_status FROM dispatch_locks WHERE row_id=?1",
@@ -1149,9 +1134,27 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(last, "ok");
+        assert_eq!(
+            last, "in_flight:pending_next",
+            "non-empty wrap_log must not suppress redispatch; next_agent IS NOT NULL is the signal"
+        );
+
+        // Clean up spawned process.
+        let pid: i64 = conn
+            .query_row(
+                "SELECT COALESCE(drive_pid, 0) FROM tasks WHERE display_id='T722'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if pid > 0 {
+            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+        }
+        std::env::remove_var("STORES_DRIVE_CMD");
     }
 
+    /// A1-strict: in_review + dead PID + closed lock (terminal_reason='ok') +
+    /// next_agent IS NOT NULL → redispatches. wrap_log state is irrelevant.
     #[test]
     fn watchdog_dead_pid_in_review_pending_wrap_redispatches() {
         let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -1159,7 +1162,7 @@ mod tests {
         let conn = fresh_db_with_obs();
         let tmp = temp_cwd();
         let row_id = insert_task_full(&conn, "T723W", "in_review", Some(dead_pid()));
-        conn.execute("UPDATE tasks SET workspace_path=?1, drive_started_at='2026-01-01T00:00:00Z', wrap_log=NULL WHERE display_id='T723W'", rusqlite::params![tmp.path().to_str().unwrap()]).unwrap();
+        conn.execute("UPDATE tasks SET workspace_path=?1, drive_started_at='2026-01-01T00:00:00Z' WHERE display_id='T723W'", rusqlite::params![tmp.path().to_str().unwrap()]).unwrap();
         insert_lock_closed(&conn, row_id, "T723W");
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
