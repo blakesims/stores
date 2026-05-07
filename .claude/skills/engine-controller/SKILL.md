@@ -80,6 +80,25 @@ If the daemon itself is dead or stale (exe path shows `(deleted)`), restart it b
 - Quote Pi rulings verbatim in subagent briefs. If a subagent proposes a different interpretation, halt and ask Pi.
 - **Doc-only work does NOT promote to a substrate task.** The drive cycle (planner → plan-reviewer → executor → code-reviewer → wrap → codex → accept-merge) is too heavy for doc edits. If an observation's contract is doc-only (`docs/**`, `*.md`, SKILL prompts, README), route to pi-architect or engine-controller direct-commit instead — observation can be closed by direct-commit reference. The substrate's audit trail for direct-commit doc work is the git log + the linked-observation reference in the commit message.
 
+## Revise-brief discipline (mandatory clauses)
+
+When dispatching `task-workflow:executor` for a codex REVISE, ALWAYS include both clauses below. They close the two failure modes that have surfaced 4+ times this session (T080 r1, T084 r1, T084 r2, T083 r2/r3):
+
+**1. Audit-all-callers (all revise briefs):**
+> "Before changing `<function/site>`, grep the entire crate for every caller of the underlying primitive. Apply the fix consistently across all call sites. List the audited paths in your revise summary."
+
+Failure mode without it: executor patches the named call site; codex finds the parallel path on next cycle. Each miss = one wasted revise round-trip.
+
+**2. Atomicity-claim verification (when revise involves TX/race/serialization):**
+> "If your fix claims 'atomic' / 'single transaction' / 'race-free' / 'serialized,' the executor MUST cite the exact line where the TX opens, the exact line where it commits, and confirm by code-read (not by test or design summary) that ALL operations claimed inside the boundary execute through the same TX handle. The substrate-correct idiom for daemon lane claims is `BEGIN IMMEDIATE` (not deferred) wrapping SELECT + CAS UPDATE + history INSERT in the SAME transaction (T079 r4 / T083 r3 precedent)."
+
+Failure mode without it: executor calls something "atomic" that isn't (preflight before TX, default-backfill after commit, etc.); codex catches the structural lie.
+
+**3. Race-test honesty (when revise involves concurrency claims):**
+> "Any test asserting concurrency MUST: (a) use independent connections, (b) coordinate via barrier (Arc<AtomicBool> Release/Acquire or std::sync::Barrier), (c) assert exactly-one-winner on the racing operation. Sequential calls on one connection are NOT a race test. Production-side race-coordination hooks MUST be `#[cfg(debug_assertions)]`-gated AND strip-verified by `rg <SENTINEL> target/release/<binary> → empty`."
+
+Reviewer-runner verifies all three by reading the code, not the executor summary.
+
 ## Agent-comm
 
 Use the active thread from Blake/handover. Verify the path; do not trust stale hardcoded examples.
