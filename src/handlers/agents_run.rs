@@ -848,9 +848,17 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
     let config_path = stores_dir.join("config.yaml");
 
     let pidfile = crate::paths::agents_pid_path()?;
+    let mut pidfile_guard = None;
     if args.detach {
         prepare_detached_pidfile(&pidfile)?;
         detach_process(&args.log_file)?;
+    }
+
+    install_sigterm_handler();
+    if args.detach {
+        // Write before the initial stale-binary check: exec preserves this PID,
+        // and the reexeced daemon can reacquire ownership of the same pidfile.
+        pidfile_guard = Some(PidfileGuard::write_current(pidfile.clone())?);
     }
 
     // Collect argv and strip --detach (and --detach=...) before reexec so
@@ -874,15 +882,10 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
         handle_stale_daemon_reexec(&exe_guard, &daemon_argv)?;
     }
 
-    install_sigterm_handler();
-
-    let _pidfile_guard = if args.detach {
-        Some(PidfileGuard::write_current(pidfile)?)
-    } else if current_process_owns_pidfile(&pidfile) {
-        Some(PidfileGuard::write_current(pidfile)?)
-    } else {
-        None
-    };
+    if pidfile_guard.is_none() && current_process_owns_pidfile(&pidfile) {
+        pidfile_guard = Some(PidfileGuard::write_current(pidfile)?);
+    }
+    let _pidfile_guard = pidfile_guard;
 
     // T040: capture the daemon process's start timestamp once. The watchdog's
     // silent-zombie scan uses this to skip rows whose dispatch_lock was

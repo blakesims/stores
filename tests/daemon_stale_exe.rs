@@ -388,10 +388,21 @@ fn reexec_argv_strips_detach_preserves_invoker_and_log_file() {
         .expect("invoke detached stale daemon command");
 
     assert!(output.status.success(), "detach parent should exit 0");
+    let detached_pid: i32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("detached parent prints child pid");
+    let pidfile = tmp.path().join(".stores").join("agents.pid");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !args_file.exists() && Instant::now() < deadline {
+    while (!args_file.exists() || !pidfile.exists()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
+    let pidfile_pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("detached stale reexec preserves agents pidfile")
+        .trim()
+        .parse()
+        .expect("pidfile contains numeric pid");
+    assert_eq!(pidfile_pid, detached_pid, "pidfile must contain detached child pid");
     let argv = std::fs::read_to_string(&args_file).unwrap();
     // --invoker and --log-file must survive the reexec.
     assert!(argv.contains("--invoker\nhuman\n"), "argv:\n{argv}");
