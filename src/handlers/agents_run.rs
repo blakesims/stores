@@ -191,6 +191,20 @@ fn ensure_private_daemon_binary(
     validate_stale_reexec_candidate(&tmp_path)
         .map_err(|f| anyhow!(private_candidate_validation_message(&f)))?;
 
+    // Test-only synchronization hook: STORES_TEST_SEED_RACE_DELAY_MS introduces
+    // a sleep between the existence-shortcut and the hard_link so both
+    // concurrent seeders are guaranteed to pass the shortcut before either
+    // attempts the link.  Defaults to 0 (off) in production — never set in
+    // normal operation.  Must be active in the binary (not #[cfg(test)]) since
+    // the concurrent seeders test spawns real child processes.
+    if let Ok(ms) = std::env::var("STORES_TEST_SEED_RACE_DELAY_MS") {
+        if let Ok(n) = ms.parse::<u64>() {
+            if n > 0 {
+                std::thread::sleep(Duration::from_millis(n));
+            }
+        }
+    }
+
     // Use hard_link (not rename) as the install primitive so that concurrent
     // seeders are detectable.  On POSIX, rename(2) silently replaces the
     // destination if it already exists, making the AlreadyExists arm below dead
@@ -202,16 +216,27 @@ fn ensure_private_daemon_binary(
     match std::fs::hard_link(&tmp_path, &private_path) {
         Ok(()) => {
             // We won the race; private_path now contains our validated copy.
-            // Disarm the guard and remove the temp (private_path holds its own
-            // link count).
-            guard.disarm();
+            // Remove the temp first (guard still armed so drop retries if
+            // unlink fails), then disarm — the drop's idempotent remove_file
+            // is the safety net for the failure path.
             let _ = std::fs::remove_file(&tmp_path);
+            guard.disarm();
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Another concurrent daemon seeder won; discard our temp (guard
             // handles it on drop) and validate the winner before trusting it.
-            guard.disarm();
+            // Unlink first while guard is still armed so drop retries on
+            // failure; disarm only after unlink is attempted.
+            // Test-only sentinel: when STORES_TEST_SEED_RACE_DELAY_MS is set
+            // (test harness only), emit a greppable line so the concurrent
+            // seeders test can assert the AlreadyExists arm actually fired.
+            // Never set in production, so this output never appears in
+            // normal operation.
+            if std::env::var_os("STORES_TEST_SEED_RACE_DELAY_MS").is_some() {
+                eprintln!("stores::agents_run::seed_race: loser observed AlreadyExists; validating winner");
+            }
             let _ = std::fs::remove_file(&tmp_path);
+            guard.disarm();
             validate_stale_reexec_candidate(&private_path)
                 .map_err(|f| anyhow!(private_candidate_validation_message(&f)))
                 .with_context(|| {

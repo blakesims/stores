@@ -1041,8 +1041,11 @@ fn existing_private_binary_short_circuits_seeder() {
 /// the other loses (link returns `AlreadyExists`) and falls through to validate
 /// the winner's binary.  Both processes must exit successfully.
 ///
-/// We spawn both child processes, collect their outputs, and assert both exited
-/// zero.  The private binary must exist and be a valid binary afterwards.
+/// r4 fix: `STORES_TEST_SEED_RACE_DELAY_MS` is set so both seeders sleep
+/// briefly after passing the existence-shortcut and before calling `hard_link`.
+/// This guarantees both processes pass the shortcut and one observes
+/// `AlreadyExists`.  We assert on the tracing log line emitted in that branch
+/// to prove (a) AlreadyExists was observed and (b) winner-validation executed.
 #[cfg(unix)]
 #[test]
 fn concurrent_seeders_hard_link_already_exists_arm() {
@@ -1058,6 +1061,10 @@ fn concurrent_seeders_hard_link_already_exists_arm() {
             .current_dir(tmp.path())
             .env("STORES_DAEMON_BIN_PATH", &private)
             .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+            // Delay between existence-shortcut and hard_link so both seeders
+            // are guaranteed to pass the shortcut before either links.
+            // Also gates the greppable AlreadyExists sentinel in the binary.
+            .env("STORES_TEST_SEED_RACE_DELAY_MS", "150")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -1079,6 +1086,20 @@ fn concurrent_seeders_hard_link_already_exists_arm() {
         out_b.status.success(),
         "child_b failed; stderr:\n{}",
         String::from_utf8_lossy(&out_b.stderr)
+    );
+
+    // Exactly one process must have observed AlreadyExists and logged the
+    // sentinel line — proving the race arm actually fired.
+    let needle = "loser observed AlreadyExists; validating winner";
+    let matches_a = String::from_utf8_lossy(&out_a.stderr).contains(needle) as usize;
+    let matches_b = String::from_utf8_lossy(&out_b.stderr).contains(needle) as usize;
+    assert_eq!(
+        matches_a + matches_b,
+        1,
+        "expected exactly one seeder to observe AlreadyExists; \
+         child_a stderr:\n{}\nchild_b stderr:\n{}",
+        String::from_utf8_lossy(&out_a.stderr),
+        String::from_utf8_lossy(&out_b.stderr),
     );
 
     // Private binary must exist and be non-empty after both seeders finish.
