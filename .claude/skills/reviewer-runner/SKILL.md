@@ -81,12 +81,13 @@ On every reviewer-runner activation, set up two persistent monitors before stand
      cur=$(sqlite3 <repo>/.stores/db.sqlite "SELECT display_id || ':c' || current_cycle FROM tasks WHERE status='in_review' ORDER BY display_id;" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
      if [ "$cur" != "$prev" ]; then
        if [ -z "$prev" ]; then
-         echo "[in_review snapshot] $cur"
+         echo "[in_review snapshot] ${cur:-none}"
        else
-         added=$(comm -13 <(echo "$prev" | tr ' ' '\n' | sort) <(echo "$cur" | tr ' ' '\n' | sort) | tr '\n' ' ')
-         removed=$(comm -23 <(echo "$prev" | tr ' ' '\n' | sort) <(echo "$cur" | tr ' ' '\n' | sort) | tr '\n' ' ')
+         added=$(comm -13 <(printf '%s\n' $prev | sed '/^$/d' | sort) <(printf '%s\n' $cur | sed '/^$/d' | sort) | tr '\n' ' ' | sed 's/ $//')
+         removed=$(comm -23 <(printf '%s\n' $prev | sed '/^$/d' | sort) <(printf '%s\n' $cur | sed '/^$/d' | sort) | tr '\n' ' ' | sed 's/ $//')
          [ -n "$added" ] && echo "[in_review +] $added"
          [ -n "$removed" ] && echo "[in_review -] $removed"
+         [ -z "$added" ] && [ -z "$removed" ] && echo "[in_review changed] ${cur:-none}"
        fi
        prev="$cur"
      fi
