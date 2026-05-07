@@ -75,10 +75,17 @@ fn mark_pending_handoff_lock(
 ) -> Result<()> {
     let now = now_iso8601();
     conn.execute(
-        "UPDATE dispatch_locks SET last_status = 'in_flight:pending_next', finished_at = NULL, \
-         terminal_reason = NULL, next_retry_at = NULL, claimed_at = ?1, pid = ?2 \
-         WHERE store = 'tasks' AND row_id = ?3 AND display_id = ?4 AND agent_name = 'auto-drive'",
-        rusqlite::params![now, pid as i64, row_id, display_id],
+        "INSERT INTO dispatch_locks \
+         (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, attempts, \
+          last_status, finished_at, daemon_epoch, claim_source, attempt, pid, terminal_reason, next_retry_at) \
+         VALUES ('tasks', ?1, ?2, 'auto-drive', NULL, ?3, 'engine-runner', 0, \
+                 'in_flight:pending_next', NULL, '', 'try_claim', 0, ?4, NULL, NULL) \
+         ON CONFLICT(store, row_id, agent_name) DO UPDATE SET \
+             claimed_at=excluded.claimed_at, claimed_by=excluded.claimed_by, \
+             last_status=excluded.last_status, finished_at=NULL, \
+             terminal_reason=NULL, next_retry_at=NULL, pid=excluded.pid, \
+             claim_source=excluded.claim_source",
+        rusqlite::params![row_id, display_id, now, pid as i64],
     )?;
     Ok(())
 }
@@ -121,6 +128,53 @@ fn redispatch_pending_drive(
         return Ok(true);
     }
     Ok(false)
+}
+
+pub(crate) fn redispatch_orphaned_next_agent(
+    conn: &Connection,
+    row_id: i64,
+    agents: &AgentsYaml,
+    config_path: &Path,
+    policies_hash: &str,
+) -> Result<Option<i32>> {
+    let row_info: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT display_id, COALESCE(drive_pid, 0) FROM tasks WHERE id = ?1",
+            rusqlite::params![row_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let Some((display_id, before)) = row_info else {
+        return Ok(None);
+    };
+    let Some(mut row) = refresh_task_row(conn, &display_id) else {
+        return Ok(None);
+    };
+    if !has_pending_auto_drive_work(conn, &display_id)? {
+        return Ok(None);
+    }
+    if let Some(obj) = row.as_object_mut() {
+        obj.insert("drive_pid".to_string(), Value::Null);
+    }
+    let ctx = DispatchCtx {
+        conn,
+        agents,
+        config_path,
+        policies_hash,
+    };
+    if run(&row, &ctx)? != 0 {
+        return Ok(None);
+    }
+    let after: i64 = conn.query_row(
+        "SELECT COALESCE(drive_pid, 0) FROM tasks WHERE display_id = ?1",
+        rusqlite::params![&display_id],
+        |r| r.get(0),
+    )?;
+    if after > 0 && after != before {
+        mark_pending_handoff_lock(conn, row_id, &display_id, after as i32)?;
+        return Ok(Some(after as i32));
+    }
+    Ok(None)
 }
 
 fn drive_runner_configured() -> bool {
@@ -626,9 +680,7 @@ pub fn sweep_drive_watchdog(
                AND t.status = 'in_review' \
                AND COALESCE(t.drive_pid, 0) > 0",
         )?;
-        let it = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
         it.filter_map(|r| r.ok()).collect()
     };
     for (row_id, display_id) in pending_locks {
@@ -1128,7 +1180,10 @@ mod tests {
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
-        assert_eq!(acted, 1, "watchdog must act on dead-PID in_review open lock");
+        assert_eq!(
+            acted, 1,
+            "watchdog must act on dead-PID in_review open lock"
+        );
 
         // Row stays in_review (redispatch, not transition).
         let status: String = conn
@@ -1162,7 +1217,9 @@ mod tests {
             )
             .unwrap_or(0);
         if pid > 0 {
-            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
         }
         std::env::remove_var("STORES_DRIVE_CMD");
     }
