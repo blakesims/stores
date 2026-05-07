@@ -4,9 +4,6 @@ lifecycle:
   states: [started]
   transitions: []
 fields:
-  - name: daemon_epoch
-    type: integer
-    required: false
   - name: pid
     type: integer
     required: true

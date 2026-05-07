@@ -91,7 +91,6 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
             FrameworkColumn { name: "updated_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "updated_at TEXT", additive: false },
             FrameworkColumn { name: "created_by", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "created_by TEXT", additive: false },
             FrameworkColumn { name: "updated_by", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "updated_by TEXT", additive: false },
-            FrameworkColumn { name: "daemon_epoch", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "daemon_epoch INTEGER", additive: false },
             FrameworkColumn { name: "pid", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "pid INTEGER NOT NULL", additive: false },
             FrameworkColumn { name: "started_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "started_at TEXT NOT NULL", additive: false },
             FrameworkColumn { name: "binary_path", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "binary_path TEXT NOT NULL", additive: false },
@@ -271,7 +270,6 @@ CREATE TABLE IF NOT EXISTS daemon_starts (
     updated_at TEXT,
     created_by TEXT,
     updated_by TEXT,
-    daemon_epoch INTEGER,
     pid INTEGER NOT NULL,
     started_at TEXT NOT NULL,
     binary_path TEXT NOT NULL,
@@ -819,7 +817,6 @@ fields:
             .map(|f| (f.name.as_str(), &f.ty))
             .collect();
         for (name, ty) in [
-            ("daemon_epoch", FieldType::Integer),
             ("pid", FieldType::Integer),
             ("started_at", FieldType::Timestamp),
             ("binary_path", FieldType::Text),
@@ -831,6 +828,10 @@ fields:
         ] {
             assert_eq!(fields.get(name).copied(), Some(&ty), "field {name}");
         }
+        assert!(
+            !fields.contains_key("daemon_epoch"),
+            "daemon_epoch must be absent from daemon_starts schema"
+        );
     }
 
     #[test]

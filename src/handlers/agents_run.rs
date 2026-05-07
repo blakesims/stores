@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 pub const STALE_DAEMON_MESSAGE: &str = "daemon binary stale after cargo install; restart required";
@@ -230,13 +230,12 @@ fn daemon_starts_table_exists(conn: &Connection) -> Result<bool> {
 fn insert_daemon_startup<P: BinaryIdentityProvider>(
     conn: &Connection,
     args: &RunArgs,
-    daemon_epoch: &str,
+    _daemon_epoch: &str,
     exe_guard: &DaemonExeGuard<P>,
 ) -> Result<()> {
     if !daemon_starts_table_exists(conn)? {
         return Ok(());
     }
-    let daemon_epoch_i64 = daemon_epoch.parse::<i64>().ok();
     let started_at = crate::handlers::row::now_iso8601();
     let pid = i64::from(std::process::id());
     let binary_path = exe_guard.launch_path().display().to_string();
@@ -246,15 +245,21 @@ fn insert_daemon_startup<P: BinaryIdentityProvider>(
         .context("resolving daemon cwd")?
         .display()
         .to_string();
-    // Insert with a placeholder display_id, then derive the real one from the
-    // autoincrement rowid so concurrent startups never race on MAX(id)+1.
+    // Unique pending placeholder: process-id + monotonic counter so two
+    // concurrent daemon startups never collide on the UNIQUE constraint.
+    // We update to the real D### derived from last_insert_rowid() before the
+    // transaction ends, so the placeholder is never visible to readers.
+    let seq = DAEMON_START_SEQ.fetch_add(1, Ordering::Relaxed);
+    let pending = format!("__pending_{}_{}", std::process::id(), seq);
     conn.execute(
         "INSERT INTO daemon_starts \
-         (display_id, status, created_at, updated_at, created_by, updated_by, daemon_epoch, pid, started_at, binary_path, binary_version, git_sha, argv, log_file, cwd) \
-         VALUES ('D000', 'started', ?1, ?1, 'daemon', 'daemon', ?2, ?3, ?1, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (display_id, status, created_at, updated_at, created_by, updated_by, \
+          pid, started_at, binary_path, binary_version, git_sha, argv, log_file, cwd) \
+         VALUES (?1, 'started', ?2, ?2, 'daemon', 'daemon', \
+                 ?3, ?2, ?4, ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![
+            pending,
             started_at,
-            daemon_epoch_i64,
             pid,
             binary_path,
             daemon_binary_version(),
@@ -287,6 +292,12 @@ pub struct RunArgs {
 /// Process-wide shutdown flag; flipped by the SIGTERM handler. Public so
 /// tests can flip it directly without sending a signal.
 pub static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Per-process counter used to generate unique pending placeholders for
+/// daemon_starts.display_id before the autoincrement rowid is known.
+/// Monotonically increasing; combined with process ID to guarantee uniqueness
+/// across concurrent processes sharing the same SQLite file.
+static DAEMON_START_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Process-wide stale-binary flag. Set by the first stale detection inside
 /// `poll_once_with_guard` so the fail-loud message fires exactly once even
@@ -2345,21 +2356,27 @@ mod tests {
     /// Two inserts into daemon_starts must yield distinct display_ids derived
     /// from their respective autoincrement rowids — not from MAX(id)+1 which
     /// would race under concurrent writers.
+    /// Uses the unique-pending-placeholder pattern from insert_daemon_startup:
+    /// each insert uses a process+seq placeholder so no UNIQUE collision occurs.
     #[test]
     fn daemon_starts_display_id_derived_from_rowid() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SUBSTRATE_DDL).unwrap();
 
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
         // Simulate the insert-then-update pattern from insert_daemon_startup.
-        let insert_and_get_display_id = |conn: &Connection, tag: &str| -> String {
+        let insert_and_get_display_id = |conn: &Connection| -> String {
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let pending = format!("__pending_{}_{}", std::process::id(), seq);
             conn.execute(
                 "INSERT INTO daemon_starts \
                  (display_id, status, created_at, updated_at, created_by, updated_by, \
                   pid, started_at, binary_path, binary_version, git_sha, argv, cwd) \
-                 VALUES ('D000', 'started', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', \
+                 VALUES (?1, 'started', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', \
                          'daemon', 'daemon', 1, '2026-01-01T00:00:00Z', '/bin/stores', \
                          '0.1.0', 'deadbeef', '[]', '/tmp')",
-                [],
+                rusqlite::params![pending],
             ).unwrap();
             let rowid = conn.last_insert_rowid();
             let display_id = format!("D{rowid:03}");
@@ -2367,12 +2384,11 @@ mod tests {
                 "UPDATE daemon_starts SET display_id = ?1 WHERE id = ?2",
                 rusqlite::params![display_id, rowid],
             ).unwrap();
-            let _ = tag;
             display_id
         };
 
-        let d1 = insert_and_get_display_id(&conn, "first");
-        let d2 = insert_and_get_display_id(&conn, "second");
+        let d1 = insert_and_get_display_id(&conn);
+        let d2 = insert_and_get_display_id(&conn);
 
         assert_ne!(d1, d2, "display_ids must differ");
         // rowids are 1 and 2 → D001 and D002
