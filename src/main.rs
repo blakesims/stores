@@ -143,6 +143,14 @@ fn main() -> Result<()> {
             };
             auth_run(cmd)?;
         }
+        Some(("metrics", sub)) => {
+            let args = cli::metrics::MetricsArgs {
+                window: sub.get_one::<String>("window").unwrap().clone(),
+                text: *sub.get_one::<bool>("text").unwrap_or(&false),
+                json: matches.get_flag("json"),
+            };
+            cli::metrics::run(args)?;
+        }
         Some(("topology", sub)) => {
             use cli::topology::{Format, Opts};
             let format = match sub.get_one::<String>("format").map(|s| s.as_str()) {
