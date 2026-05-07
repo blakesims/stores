@@ -29,7 +29,11 @@ fn obs(id: &str, summary: &str) -> Row {
 fn fixture_rows() -> Vec<Row> {
     vec![
         task("T001", "blocked", Some("silent_zombie")),
-        task("T002", "blocked", Some("drive_failed:silent_zombie_pid_dead")),
+        task(
+            "T002",
+            "blocked",
+            Some("drive_failed:silent_zombie_pid_dead"),
+        ),
         task("T003", "cargo_installed", Some("accept_installed_inert")),
         task("T004", "schema_migrated", Some("accept_installed_inert")),
         task("T010", "executing", None),
@@ -50,7 +54,13 @@ fn fixture_rows() -> Vec<Row> {
 fn render_snapshot(show_all_history: bool) -> String {
     let rows = fixture_rows();
     let ((ta, tt), (oa, ot)) = surface_counts(&rows, show_all_history);
-    let sections = classify_with_options(&rows, WatchClassifyOptions { show_all_history, ..Default::default() });
+    let sections = classify_with_options(
+        &rows,
+        WatchClassifyOptions {
+            show_all_history,
+            ..Default::default()
+        },
+    );
     let mut task_idxs = Vec::new();
     let mut obs_idxs = Vec::new();
     for (sec, idxs) in sections {
@@ -60,11 +70,20 @@ fn render_snapshot(show_all_history: bool) -> String {
             | Section::TasksDeployRecovery
             | Section::TasksNeedsTriage
             | Section::TasksRecentlyTerminal => task_idxs.extend(idxs),
-            Section::ObsRatifiable | Section::ObsOpenNoContract | Section::ObsOther => obs_idxs.extend(idxs),
+            Section::ObsRatifiable | Section::ObsOpenNoContract | Section::ObsOther => {
+                obs_idxs.extend(idxs)
+            }
+            Section::ExternalReviewLane => task_idxs.extend(idxs),
         }
     }
-    task_idxs.sort_by_key(|i| match &rows[*i] { Row::Task(t) => t.display_id.clone(), _ => String::new() });
-    obs_idxs.sort_by_key(|i| match &rows[*i] { Row::Obs(o) => o.display_id.clone(), _ => String::new() });
+    task_idxs.sort_by_key(|i| match &rows[*i] {
+        Row::Task(t) => t.display_id.clone(),
+        _ => String::new(),
+    });
+    obs_idxs.sort_by_key(|i| match &rows[*i] {
+        Row::Obs(o) => o.display_id.clone(),
+        _ => String::new(),
+    });
 
     let mut out = format!("TASKS {ta} actionable / {tt} total (use --all)\n");
     for i in task_idxs {
@@ -72,7 +91,9 @@ fn render_snapshot(show_all_history: bool) -> String {
             out.push_str(&format!("{} {} {}\n", t.display_id, t.status, t.title));
         }
     }
-    out.push_str(&format!("OBSERVATIONS {oa} actionable / {ot} total (use --all)\n"));
+    out.push_str(&format!(
+        "OBSERVATIONS {oa} actionable / {ot} total (use --all)\n"
+    ));
     for i in obs_idxs {
         if let Row::Obs(o) = &rows[i] {
             out.push_str(&format!("{} {}\n", o.display_id, o.summary));

@@ -1351,6 +1351,15 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                         continue;
                     }
                 }
+                if agent.command == "builtin:external-review"
+                    && !crate::flow::builtins::external_review::cap_allows_or_log(
+                        conn,
+                        config_path,
+                        &display_id,
+                    )?
+                {
+                    continue;
+                }
 
                 let postcondition_id = agent
                     .command
@@ -1650,6 +1659,14 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
         Err(_payload) => {
             eprintln!("[engine-runner] iteration panicked; daemon continuing");
         }
+    }
+    match crate::flow::builtins::external_review::visible_status_rows(conn) {
+        Ok(rows) => {
+            for row in rows {
+                eprintln!("[daemon] {row}");
+            }
+        }
+        Err(e) => eprintln!("[daemon] external-review status scan error: {}", e),
     }
     Ok(dispatched)
 }
