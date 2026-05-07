@@ -102,7 +102,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 |---|---|---|
 | L032 | ✅ T032 | auto-scaffold symlinks `.stores/` artifacts into provisioned worktrees (closes L067 transitively) |
 | L165 | ✅ T059 | `stores watch` rebuckets task rows for actionable defaults: terminal/recovered/rejected exhaust no longer belongs in in-flight by default; blocked reason parsing improved |
-| L057 | ⚪ T2 | no per-agent-invocation metadata on rows (model / tokens / duration / transcript-ref) — usage analytics gap; data exists in `.stores/runs/*.jsonl` but not aggregated |
+| L057 | ✅ T070 | per-agent-invocation telemetry shipped: spawn-fail synthetic agent_runs row with source-layer model_id; fail-loud insert; tier T1/T3 tests assert non-NULL prompt_cache_hits + post-cycle agent_runs persistence; mock-defaults under workspace `target/test-workspaces`. |
 | L161/T056 | ✅ T056 | minimal Pi-runner smoke target: T1 task driven via Pi produced structured `final_output`, committed one marker file, passed review/wrap, accepted, and merged. This proves Pi runner basics but not full T034 acceptance bookkeeping. |
 | L054 | ⚪ — | no structured-read verbs for task review (orchestrator falls back to grep) |
 | L058 | ✅ T071 | `stores metrics` CLI shipped: windowed REVISE-rate, percentile interpolation, volatile_window flag for bare duration windows (per Pi Option B). Per-task-type breakdowns. |
@@ -153,20 +153,29 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L006 | ⚪ T2 | observations runner asymmetry (no drive cycle for obs) |
 | L021 | ✅ T058 | render template pulls `wrap_log` into Completion section |
 | L034 | ⚪ T1 | wrap misattributes main-ahead commits as 'rides on this branch' |
+| L186 | 🟡 T079 | **engine-runner actionability monitor (in flight)** — daemon-side loop that scans substrate-visible rows, writes a heartbeat per iteration, redispatches orphaned existing autonomous edges (e.g. tasks with `next_agent` set + dead drive_pid), and structurally records held reasons. Pi-blessed phase-1 narrow shape: visibility + redispatch only, no new policy semantics for gatekeeper/investigator/reviewer-runner/architecture_reviews; U-moments preserved. Closes the "engine stalls when ec/ec-on-main is silent" pattern Pi diagnosed at this morning's wind-down. |
+| I002 | ⚪ — | **code-reviewer / codex grepping `.sqlite` raw bytes treats stale page data as live row state** — burns review cycles on false-positive transitions (T078 c1-c3 burn). Filed via intake `I002`; doctrine fix pending: SOP edit + reviewer validator forbidding raw-byte inspection of sqlite files; substitute `sqlite3 SELECT` or substrate CLI verbs. |
 | GAP | — | **auto-investigator subscriber** — fires investigator on `open → needs_investigation` automatically; partial machinery exists (L043 investigator agent) but no subscriber wires it. Engine still can't drain its own input queue. |
 
 ## Highest-leverage next picks
 
-Layers 1–4 are substantially solid after the batch. T075/L182 candidate-binary validation, T067/L178 handoff semantics, and T072/L059 runs SQL VIEW + atomic backlink all shipped today (post-handover). T070/L057 telemetry is in flight (codex re-running on rebased branch as of this update). Re-ranked picks (post-T067/T072/T075):
+Operator-trust layer fully closed (T067 / T070 / T072 / T075 all shipped 2026-05-07 AM). Pipeline 2026-05-07 PM:
 
-1. **T070/L057 telemetry** — last operational-trust task to drain; ship-then-close. **(IN FLIGHT)**
-2. **L184 — Private substrate install path** — move runtime-owned binary away from global `~/.cargo/bin/stores` so subagents/operator installs cannot corrupt the daemon's launch path. Filed-but-not-yet-ratified follow-up to L182 (the (C) half of L182's two-part fix; T075 already shipped (D) candidate validation).
-3. **L151 auto-investigator / queue drain** — after status/review surfaces are trustworthy.
-4. **L171 phase α — `architecture_reviews` typed store** — Heart/Architect direction. Contract reframed and Pi-blessed this session (msg_69855431); ratifiable shape held until T070 ships. **(QUEUED — sequenced behind T070)**
-5. **L172/L173 gatekeeper P4/P5** — deferred follow-ups; surface after L171 phase α lands.
-6. **I001 / L005 schema ergonomics** — small schema-language and list-input improvements as filler tasks.
+**In flight right now:**
 
-Current picture: operator-trust layer almost fully closed. T075's daemon-binary validation already proven in production (first L182 contract proof during T075's own accept-merge ceremony). After T070 ships, the engine's runtime-trust geodesic is clear and the next slice is the Heart/Architect governance layer per the L171 reframe.
+1. **T076 / L184 — Private substrate install path** — daemon binary off `~/.cargo/bin/stores` to a private path (`STORES_DAEMON_BIN_PATH` or `~/.local/share/stores/bin/stores`); cargo-install validates/promotes into private; cold-start isolation test. Codex r1 REVISE on `ensure_private_daemon_binary` non-atomic seed — executor-revised to atomic temp+validate+rename + validate-on-shortcut; codex r2 dispatched. Pi: AC1.1 satisfied as written, do not widen (msg_ae95684b/msg_6e449b4e).
+2. **T077 / L171 — `architecture_reviews` typed store (phase α)** — Heart/Architect direction. Drive PID alive at phase 6/6.
+3. **T078 / L185 — SOPS+age → plaintext+0600** — auth doctrine relaxation. Resumed (U4) after a 3-cycle in-cycle code-reviewer FAIL turned out to be sqlite-raw-byte false positives (see I002 doctrine fix below). Executing.
+4. **T079 / L186 — Engine-runner actionability monitor (NEW this session)** — daemon-side actionability loop + heartbeat + orphan re-drive on existing autonomous edges. Pi-blessed phase-1 shape: visibility + redispatch only; no new policy. Auto-driven (drive pid 326953).
+
+**Queued behind in-flight:**
+
+5. **L053 — tier-A actor check bypass** — security/authority gap; should jump to next-pick after T076–T079 land.
+6. **I002 — sqlite-raw-byte review false-positive doctrine fix** — file the SOP edit + validator that forbids `grep`/`strings` against `.sqlite` files in code-reviewer/reviewer-runner output.
+7. **L172/L173 gatekeeper P4/P5** — deferred follow-ups; surface after L171 phase α lands.
+8. **I001 / L005 schema ergonomics** — small schema-language and list-input improvements as filler tasks.
+
+Current picture: operator-trust layer fully closed; the architectural surface (Heart/Architect via T077/L171) and the engine's "drives itself without operator nudge" property (T079/L186) are in flight in the same session. After this PM cluster lands, the dominant remaining bottleneck is auto-investigator / contract-drafter (L151 successor) — the engine's ability to draft contracts on its own input queue.
 
 
 ## Recently shipped

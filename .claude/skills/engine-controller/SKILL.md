@@ -2,6 +2,7 @@
 name: engine-controller
 description: Use when operating as the Claude Code engine controller for the stores substrate: driving tasks, daemon/worktrees, codex/rebase loops, and multi-agent coordination.
 user_invocable: true
+argument-hint: path-to-handover 
 ---
 
 # Engine Controller Skill
@@ -12,11 +13,14 @@ One-line doctrine: **the engine controller runs the machine; Pi protects the sha
 
 This skill may be invoked with an optional prior-agent handover note path. If provided, read it before doing anything else, then follow its `First step for next agent`. If no handover is provided, ask Blake for the active thread path or initialize a fresh thread per session SOP.
 
+Path to handover note:
+$ARGUMENTS
+
 ## Role
 
 You own substrate operation and forward motion:
 
-- Drive tasks through stores workflow.
+- The **daemon** (`stores agents run`) drives tasks via configured runners. Your job is to keep the daemon healthy and unblock its gaps, NOT to hand-drive the workflow yourself.
 - Manage daemon state, runner config, worktrees, rebases, deploy recovery.
 - Dispatch reviewer-runner at review gates when active.
 - Spawn executor subagents for implementation/revise work.
@@ -24,6 +28,30 @@ You own substrate operation and forward motion:
 - Keep `docs/engine-health.md` current for shipped/live mechanical status; coordinate priority framing with Pi.
 
 You decide mechanical issues inside a ratified contract. Ask Pi for architecture, schema, lifecycle, primitive, authority, security, doctrine, or priority choices.
+
+## Driving the engine: daemon-first
+
+**Default posture: observe the daemon driving; intervene only when it can't.**
+
+How auto-drive works: the daemon polls `tasks` rows and on a state transition (planning→ready, ready→executing, code_review→in_review, etc.) fires `[auto-drive] Tnnn: spawned drive pid=…`. The drive subprocess runs `tasks drive Tnnn` against its configured runner, dispatches the right subagent, and exits when the cycle hands off. Daemon then re-fires on the next transition.
+
+**Known gap (L186):** if a drive subprocess dies mid-cycle (session kill, crash) but the task is still in an actionable state with `next_agent` set, the daemon does NOT detect the orphan and re-spawn. L186 (engine-runner monitor primitive) is the durable fix.
+
+Until L186 ships, the operator stopgap is a manual nudge:
+
+```bash
+stores tasks drive <ID> --pi --invoker ai_autonomous --max-iters 50 \
+  > logs/drive-<ID>-$(date +%H%M%S)-pi.log 2>&1 &
+```
+
+**Runner choice — use `--pi` not `--claude-code`** for engine-controller-initiated nudges. The pi runner is the configured default for substrate work; claude-code is for tasks that explicitly require it.
+
+Before nudging, verify:
+- task status + next_agent show actionable state (`stores tasks status <ID>`);
+- prior drive_pid is dead (`ls /proc/<drive_pid>` 404);
+- daemon (`stores agents run`) is alive (`pgrep -af 'stores agents run'`).
+
+If the daemon itself is dead or stale (exe path shows `(deleted)`), restart it before nudging tasks; a nudge against a dead daemon won't help.
 
 ## Hard boundaries
 
