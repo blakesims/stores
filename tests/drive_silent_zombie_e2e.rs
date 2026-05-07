@@ -432,7 +432,22 @@ fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
 }
 
 /// T067: dead auto-drive handoff at in_review with pending next_agent=wrap is
-/// re-dispatched by the daemon watchdog; no manual `stores tasks drive` call.
+/// re-dispatched by the daemon watchdog; wrap_log is populated via the real
+/// compute_submit_wrap path, NOT via direct DB mutation.
+///
+/// Flow:
+///   Pass 1 — pending-lock sweep detects terminal-ok lock + status=in_review +
+///             next_agent=Some("wrap") (schema guard: wrap_log.length==0) →
+///             redispatches → STORES_DRIVE_CMD runs `stores tasks submit-wrap T967
+///             --summary-from-file <tmpfile>` → compute_submit_wrap appends to
+///             wrap_log[], new drive_pid recorded, lock reopened as in_flight:pending_next.
+///   Pass 2 — open-lock sweep detects dead pid + status=in_review →
+///             has_pending_auto_drive_work returns false (next_agent=None because
+///             wrap_log.length>0 suppresses the schema's dispatch_agent:wrap guard) →
+///             mark_claim_finished("ok") → lock reaches terminal.
+///
+/// (pi ruling r2 MAJOR 2: e2e must prove real wrap envelope through drive, not
+/// direct wrap_log mutation.)
 #[test]
 fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
     let bin = bin();
@@ -447,7 +462,13 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
         install_store_ddl(&conn, "tasks");
         install_store_ddl(&conn, "observations");
     }
-    std::fs::write(stores_dir.join("manifest.yaml"), "stores: []\n").unwrap();
+    // Write a manifest that registers the bundled tasks store so that the
+    // subprocess `stores tasks submit-wrap` can resolve the schema.
+    std::fs::write(
+        stores_dir.join("manifest.yaml"),
+        "stores:\n- name: tasks\n  schema_path: bundled:tasks\n  installed_at: 2026-01-01T00:00:00Z\n  table_name: tasks\n  scope: repo\n",
+    )
+    .unwrap();
 
     let stale = "2026-01-01T00:00:00Z";
     let conn = Connection::open(&db_path).unwrap();
@@ -478,28 +499,39 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
     .unwrap();
     drop(conn);
 
-    // STORES_DRIVE_CMD: a synchronous script that writes wrap_log and exits.
-    // Pass 1 of the daemon detects the terminal-ok closed lock with status=in_review
-    // → redispatches (runs this script → wrap_log populated, new pid recorded,
-    // lock reopened as in_flight:pending_next).
-    // Pass 2 detects the open lock with dead pid → has_pending_auto_drive_work
-    // returns false (wrap_log populated) → mark_claim_finished("ok") → terminal.
-    let py = r#"python3 -c 'import sqlite3; c=sqlite3.connect(".stores/db.sqlite"); c.execute("UPDATE tasks SET wrap_log=? WHERE display_id=?", ("[{\"executive_summary\":\"auto wrap\"}]", "T967")); c.commit()' #"#;
+    // STORES_DRIVE_CMD: invokes the real `stores tasks submit-wrap` verb so that
+    // wrap_log is populated via compute_submit_wrap (NOT via direct DB mutation).
+    // Uses a mktemp file to pass the summary because the detached grandchild has
+    // stdin closed (spawn_detached_drive calls libc::close(STDIN_FILENO)).
+    // The script receives the display_id as $1 via the auto-drive-stub wrapper.
+    let bin_path = bin.to_str().expect("bin path is UTF-8");
+    let drive_cmd = format!(
+        r#"f=$(mktemp) && printf 'auto wrap' > "$f" && {bin_path} tasks submit-wrap "$1" --summary-from-file "$f"; rm -f "$f" #"#
+    );
+    // Use enough iterations and poll-interval for the detached subprocess (a full
+    // `stores` binary invocation) to complete before Pass 2 checks the PID.
     let output = Command::new(&bin)
-        .args(["agents", "run", "--max-iters", "3", "--poll-interval", "0.05"])
+        .args([
+            "agents",
+            "run",
+            "--max-iters",
+            "10",
+            "--poll-interval",
+            "0.2",
+        ])
         .current_dir(workspace)
         .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
-        .env("STORES_DRIVE_CMD", py)
+        .env("STORES_DRIVE_CMD", &drive_cmd)
         .output()
         .expect("invoke daemon");
     assert!(
         output.status.success(),
-        "agents run --max-iters 3 failed: {}",
+        "agents run --max-iters 10 failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // AC (pi ruling, MAJOR 2): wrap_log populated AND dispatch_lock reaches
-    // terminal_reason='ok' with finished_at IS NOT NULL after wrap fires.
+    // AC (pi ruling r2 MAJOR 2): wrap_log populated via compute_submit_wrap AND
+    // dispatch_lock reaches terminal_reason='ok' with finished_at IS NOT NULL.
     let conn = Connection::open(&db_path).unwrap();
     let (status, terminal_reason, finished_at, pid, wrap_log): (
         String,
@@ -521,13 +553,13 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
         pid > 0 && pid != dead_pid(),
         "watchdog must record a new drive_pid; got pid={pid}"
     );
-    // (a) wrap_log is populated
+    // (a) wrap_log is populated via compute_submit_wrap (contains the submitted summary)
     assert!(
         wrap_log
             .as_deref()
             .unwrap_or("")
             .contains("auto wrap"),
-        "wrap_log must be populated after wrap fires; got {wrap_log:?}"
+        "wrap_log must be populated via compute_submit_wrap after wrap fires; got {wrap_log:?}"
     );
     // (b) dispatch_lock reaches terminal_reason='ok'
     assert_eq!(

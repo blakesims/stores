@@ -147,9 +147,15 @@ fn auto_drive_terminal_ok(conn: &Connection, display_id: &str) -> Result<bool> {
             }));
         }
     };
+    // next_agent IS NULL: schema's dispatch_agent guards are all false for this
+    // row — no agent work pending. For in_review, the `dispatch_agent: wrap`
+    // guard (`when: "wrap_log.length == 0"`) suppresses next_agent once wrap_log
+    // is populated, so this check covers both in_review-with-wrap-done and
+    // terminal states. (pi ruling r2 MAJOR 1: use next_agent, not wrap_log sentinel.)
     if out.next_agent.is_none() {
         return Ok(true);
     }
+    // Hard-terminal states: no further agent work regardless of next_agent.
     if matches!(
         out.status.as_str(),
         "accepted"
@@ -163,32 +169,7 @@ fn auto_drive_terminal_ok(conn: &Connection, display_id: &str) -> Result<bool> {
     ) {
         return Ok(true);
     }
-    if out.status == "in_review" {
-        let wrap_log: Option<String> = conn
-            .query_row(
-                "SELECT wrap_log FROM tasks WHERE display_id = ?1",
-                rusqlite::params![display_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        if wrap_log_has_entries(wrap_log.as_deref()) {
-            return Ok(true);
-        }
-    }
     Ok(false)
-}
-
-fn wrap_log_has_entries(text: Option<&str>) -> bool {
-    let Some(text) = text else {
-        return false;
-    };
-    match serde_json::from_str::<Value>(text) {
-        Ok(Value::Array(a)) => !a.is_empty(),
-        Ok(Value::Null) => false,
-        Ok(_) => true,
-        Err(_) => !text.trim().is_empty(),
-    }
 }
 
 impl Check for DrivePidRecordedOrTerminal {
