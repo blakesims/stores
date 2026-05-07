@@ -32,6 +32,10 @@ fn token_hash_path() -> Result<PathBuf> {
     Ok(token_dir()?.join("approve.token.hash"))
 }
 
+fn legacy_token_age_path() -> Result<PathBuf> {
+    Ok(token_dir()?.join("approve.token.age"))
+}
+
 // ---------------------------------------------------------------------------
 // File mode helpers
 // ---------------------------------------------------------------------------
@@ -84,6 +88,7 @@ fn init_with_secret(force: bool, secret: &[u8]) -> Result<()> {
 
     let plain_path = token_path()?;
     let hash_path = token_hash_path()?;
+    let legacy_age_path = legacy_token_age_path()?;
 
     if !force && (plain_path.exists() || hash_path.exists()) {
         bail!(
@@ -107,6 +112,11 @@ fn init_with_secret(force: bool, secret: &[u8]) -> Result<()> {
     std::fs::write(&hash_path, &hex_hash)
         .with_context(|| format!("failed to write {}", hash_path.display()))?;
     set_mode(&hash_path, 0o644)?;
+
+    if legacy_age_path.exists() {
+        std::fs::remove_file(&legacy_age_path)
+            .with_context(|| format!("failed to remove legacy {}", legacy_age_path.display()))?;
+    }
 
     println!("Initialized approval token:");
     println!("  plaintext: {} (0600)", plain_path.display());
@@ -283,6 +293,23 @@ mod tests {
             let err = init_with_secret(false, secret).unwrap_err();
             assert!(err.to_string().contains("--force"));
             init_with_secret(true, secret).unwrap();
+        });
+    }
+
+    #[test]
+    fn init_force_removes_legacy_age_token() {
+        let tdir = unique_dir("legacy-age");
+
+        with_env(&[("STORES_TOKEN_DIR", tdir.to_str().unwrap())], || {
+            let legacy = tdir.join("approve.token.age");
+            fs::write(&legacy, b"legacy encrypted token").unwrap();
+            assert!(legacy.exists());
+
+            init_with_secret(true, b"literal-secret-token").unwrap();
+
+            assert!(!legacy.exists(), "legacy approve.token.age must be removed");
+            assert!(tdir.join("approve.token").exists());
+            assert!(tdir.join("approve.token.hash").exists());
         });
     }
 
