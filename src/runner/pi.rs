@@ -58,51 +58,55 @@ fn resolve_cwd(workspace_path: Option<&str>) -> Result<PathBuf> {
 
 /// Write the JSONL transcript to `<runs_dir>/<session_id>.jsonl`.
 ///
-/// **Never returns `None`**: if the primary write fails, a small error-stub
-/// is written at `<runs_dir>/<session_id>-error.json` (or system temp as a
-/// last resort) so the caller always receives a real filesystem path and
-/// `insert_agent_run` is never given `None` for the required `transcript_path`.
-fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> PathBuf {
+/// Returns `Ok(path)` where `path` is always under `runs_dir` (never under
+/// system temp). If the primary write fails, attempts to write an error stub
+/// at `<runs_dir>/<session_id>-error.json`. If that also fails, tries
+/// `create_dir_all` on `runs_dir` and retries both writes. If all attempts
+/// fail, returns `Err` — callers must NOT call `insert_agent_run`; the drive
+/// layer marks the row failed without a persisted path.
+///
+/// **Invariant:** a successful return value is ALWAYS under `.stores/runs/`.
+/// No `/tmp` fallback exists.
+fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> anyhow::Result<PathBuf> {
     let runs_dir = std::env::var_os("STORES_RUNS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.join(".stores").join("runs"));
 
-    let runs_dir_ok = fs::create_dir_all(&runs_dir).is_ok();
-
-    if runs_dir_ok {
-        let path = runs_dir.join(format!("{session_id}.jsonl"));
-        match fs::write(&path, stdout) {
-            Ok(()) => return path,
-            Err(e) => {
-                eprintln!(
-                    "warning: pi runner could not write transcript {}: {e}; writing error stub",
-                    path.display()
-                );
-                let stub_path = runs_dir.join(format!("{session_id}-error.json"));
-                let stub_content = format!(
-                    "{{\"error\":\"transcript write failed\",\"reason\":\"{}\"}}\n",
-                    e.to_string().replace('"', "'")
-                );
-                if fs::write(&stub_path, &stub_content).is_ok() {
-                    return stub_path;
-                }
+    let try_write = |mkdir: bool| -> Option<PathBuf> {
+        if mkdir {
+            let _ = fs::create_dir_all(&runs_dir);
+        }
+        if runs_dir.is_dir() || fs::create_dir_all(&runs_dir).is_ok() {
+            let path = runs_dir.join(format!("{session_id}.jsonl"));
+            if fs::write(&path, stdout).is_ok() {
+                return Some(path);
+            }
+            eprintln!(
+                "warning: pi runner could not write transcript {}; writing error stub",
+                path.display()
+            );
+            let stub_path = runs_dir.join(format!("{session_id}-error.json"));
+            let stub_content =
+                "{\"error\":\"transcript write failed\",\"reason\":\"primary write failed\"}\n";
+            if fs::write(&stub_path, stub_content).is_ok() {
+                return Some(stub_path);
             }
         }
-    } else {
-        eprintln!(
-            "warning: pi runner could not create runs dir {}; writing error stub to tempdir",
-            runs_dir.display()
-        );
+        None
+    };
+
+    if let Some(p) = try_write(false) {
+        return Ok(p);
+    }
+    if let Some(p) = try_write(true) {
+        return Ok(p);
     }
 
-    // Last resort: write stub to system temp dir.
-    let tmp_stub = std::env::temp_dir().join(format!("{session_id}-error.json"));
-    let stub_content = format!(
-        "{{\"error\":\"transcript write failed\",\"reason\":\"could not access {}\"}}\n",
+    anyhow::bail!(
+        "pi transcript write failed: could not write to {} (no /tmp fallback; \
+         transcript_path must be under .stores/runs/)",
         runs_dir.display()
-    );
-    let _ = fs::write(&tmp_stub, &stub_content);
-    tmp_stub
+    )
 }
 
 fn extract_pi_telemetry(stdout: &str) -> (Option<String>, Option<i64>, Option<i64>, Option<i64>) {
@@ -204,9 +208,12 @@ impl Runner for PiRunner {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let exit_code = output.status.code().unwrap_or(-1);
-        // write_transcript always returns a real filesystem path — never None.
+        // write_transcript returns Err if the path cannot be written under
+        // .stores/runs/ — no /tmp fallback. On Err, propagate so the drive
+        // layer marks the row failed without calling insert_agent_run.
         let transcript_path = Some(
             write_transcript(&cwd, &session_id, &stdout)
+                .context("pi transcript write failed; not persisting agent_run row")?
                 .to_string_lossy()
                 .to_string(),
         );
@@ -411,7 +418,8 @@ mod tests {
             &PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             sid,
             "{\"type\":\"final_output\"}\n",
-        );
+        )
+        .expect("write_transcript must succeed with STORES_RUNS_DIR set");
         let text = fs::read_to_string(runs.path().join(format!("{sid}.jsonl"))).unwrap();
         assert!(text.contains("final_output"));
     }
