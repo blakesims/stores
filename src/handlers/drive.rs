@@ -66,6 +66,68 @@ use crate::schema::{actor::Actor, Schema};
 /// Matches the 5-minute window used by `submit.rs`'s `acquire_lock`.
 const LOCK_WINDOW_SECS: u64 = 300;
 
+/// Sentinel exit code for a spawn/launch failure (no child process existed).
+/// Using -1 to distinguish from a real process exit code (which is always >= 0).
+const LAUNCH_ERROR_EXIT_CODE: i32 = -1;
+
+/// Derive the source-level `model_id` sentinel for a spawn failure.
+///
+/// When a runner fails to launch (spawn returns Err), no telemetry is available
+/// from the runner itself. We use a deterministic sentinel that mirrors what the
+/// runner would have reported at the source layer if it had started:
+/// - pi runner → `pi:default`
+/// - claude-code runner (any model variant) → `claude_code:unknown`
+/// - any other runner → `<runner_name>:unknown`
+fn derive_spawn_fail_model_id(runner_name: &str) -> String {
+    if runner_name == "pi" {
+        "pi:default".to_string()
+    } else if runner_name.starts_with("claude-code") {
+        "claude_code:unknown".to_string()
+    } else {
+        format!("{runner_name}:unknown")
+    }
+}
+
+/// Write an error transcript stub under `<workspace_path>/.stores/runs/` for a
+/// spawn failure. Returns the path as a String.
+///
+/// If `workspace_path` is `None` or the directory cannot be created/written,
+/// falls back to a path string even if the file was not actually written (the
+/// path is still recorded for observability; insert_agent_run requires non-empty
+/// but does NOT verify the file exists at insert time — only at read time).
+fn write_spawn_error_transcript(
+    workspace_path: Option<&str>,
+    display_id: &str,
+    role: &str,
+    error: &anyhow::Error,
+) -> String {
+    let stub_id = uuid::Uuid::new_v4();
+    let filename = format!("{display_id}-{role}-spawn-error-{stub_id}.json");
+    // Prefer workspace .stores/runs/ (production invariant); fall back to STORES_RUNS_DIR.
+    let runs_dir = if let Some(wp) = workspace_path {
+        std::path::PathBuf::from(wp).join(".stores").join("runs")
+    } else if let Some(p) = std::env::var_os("STORES_RUNS_DIR") {
+        std::path::PathBuf::from(p)
+    } else {
+        // Last resort: use a sibling of the crate (never /tmp, never target/).
+        // This path is reached only in test scenarios where neither workspace_path
+        // nor STORES_RUNS_DIR is set — real production always has a workspace.
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".stores")
+            .join("runs")
+    };
+    let _ = std::fs::create_dir_all(&runs_dir);
+    let stub_path = runs_dir.join(&filename);
+    let content = serde_json::json!({
+        "error": "spawn failed",
+        "reason": error.to_string(),
+        "display_id": display_id,
+        "role": role,
+    });
+    let _ = std::fs::write(&stub_path, content.to_string().as_bytes());
+    stub_path.to_string_lossy().into_owned()
+}
+
 // ---------------------------------------------------------------------------
 // Runner-exit classification (T029)
 // ---------------------------------------------------------------------------
@@ -412,7 +474,7 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
             .map(|(idx, item)| {
                 // Required fields: caller/fixture supplies them; synthesize only as
                 // last resort for transcript_path when fixture omits it entirely.
-                let mut telemetry = crate::runner::AgentRunTelemetry::with_mock_defaults();
+                let mut telemetry = crate::runner::AgentRunTelemetry::with_mock_defaults(&synthetic_runs_dir);
                 if item.model_id.is_some() {
                     telemetry.model_id = item.model_id;
                 }
@@ -1046,19 +1108,80 @@ fn drive_loop_with_role_runner(
         // stdout line-by-line; for v0.3 we just bookend the call.
         let phase_for_log = na.current_phase.as_i64().unwrap_or(0);
         let cycle_for_log = na.current_cycle.as_i64().unwrap_or(0);
+        let runner_name = role_runner.name_for_role(&agent_name_normalized)?;
         eprintln!(
-            "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: spawning {agent_role} via {} runner... (may take 30-90s)",
-            role_runner.name_for_role(&agent_name_normalized)?
+            "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: spawning {agent_role} via {runner_name} runner... (may take 30-90s)"
         );
         let _ = std::io::stderr().flush();
         let spawn_start = std::time::Instant::now();
-        let run_out = role_runner.spawn_for_role(
+        let run_out = match role_runner.spawn_for_role(
             &agent_name_normalized,
             system_prompt,
             &brief_markdown,
             schema_text,
             workspace_path,
-        )?;
+        ) {
+            Ok(out) => out,
+            Err(spawn_err) => {
+                // Spawn/launch failure: record attempted-invocation telemetry before
+                // routing to fire_mark_drive_failed. Every attempted spawn has an
+                // agent_runs row (pi ruling, MAJOR 1).
+                let spawn_failed_at = crate::handlers::row::now_iso8601();
+                // Derive the source-level model_id sentinel from the runner name.
+                // This mirrors what the runner would have written if it had started.
+                let spawn_fail_model_id = derive_spawn_fail_model_id(&runner_name);
+                // Write an error transcript stub under workspace .stores/runs/ so
+                // transcript_path is a real file (required by insert_agent_run).
+                let error_transcript_path = write_spawn_error_transcript(
+                    workspace_path,
+                    display_id,
+                    agent_role,
+                    &spawn_err,
+                );
+                let synthetic_telemetry = crate::runner::AgentRunTelemetry {
+                    model_id: Some(spawn_fail_model_id),
+                    harness_id: Some(runner_name.clone()),
+                    started_at: Some(spawn_failed_at.clone()),
+                    ended_at: Some(spawn_failed_at),
+                    tokens_in: Some(0),
+                    tokens_out: Some(0),
+                    transcript_path: Some(error_transcript_path),
+                    ..Default::default()
+                };
+                // Insert the synthetic row before transitioning the task.
+                let _ = db::insert_agent_run(
+                    conn,
+                    display_id,
+                    phase_for_log,
+                    cycle_for_log,
+                    agent_role,
+                    LAUNCH_ERROR_EXIT_CODE,
+                    &synthetic_telemetry,
+                );
+                // Now transition the task to blocked (same path as non-zero exit).
+                let blocked_reason = format!(
+                    "{{\"kind\":\"spawn_failure\",\"exit_code\":{LAUNCH_ERROR_EXIT_CODE},\
+                     \"runner\":\"{runner_name}\",\"error\":{}}}",
+                    serde_json::to_string(&spawn_err.to_string())
+                        .unwrap_or_else(|_| "\"<serialization error>\"".to_string())
+                );
+                match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
+                    Ok(()) => {
+                        eprintln!(
+                            "[{display_id}] spawn failed ({runner_name}): {spawn_err:#}; mark_drive_failed fired"
+                        );
+                        let _ = std::io::stderr().flush();
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[{display_id}] spawn failed ({runner_name}): {spawn_err:#}; mark_drive_failed FAILED: {e:#}"
+                        );
+                        let _ = std::io::stderr().flush();
+                    }
+                }
+                bail!("spawn failure for role '{agent_role}' via runner '{runner_name}': {spawn_err:#}");
+            }
+        };
         db::insert_agent_run(
             conn,
             display_id,
@@ -1840,6 +1963,12 @@ mod tests {
             .rev()
             .find(|l| !l.trim().is_empty())
             .map(|s| s.to_string());
+        // Construct a transient workspace dir for the telemetry stub.
+        // The dir is dropped after the call but the path string remains valid
+        // (non-empty) for insert_agent_run's non-null check. Tests that need
+        // the transcript file to actually exist on disk must build their own
+        // explicit telemetry (see happy_path_one_phase_mock).
+        let tmp = tempdir().unwrap();
         RunnerOutput {
             stdout: stdout.to_string(),
             stderr: String::new(),
@@ -1849,7 +1978,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         }
     }
 
@@ -2245,9 +2374,9 @@ mod tests {
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
 
         // Query all telemetry fields for post-drive assertions (Finding 3).
-        let rows: Vec<(String, i64, i64, String, String, String, String, String, i64, String, Option<i64>, Option<i64>)> = conn
+        let rows: Vec<(String, i64, i64, String, String, String, String, String, i64, String, Option<i64>, Option<i64>, Option<i64>)> = conn
             .prepare(
-                "SELECT display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, transcript_path, tokens_in, tokens_out \
+                "SELECT display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, transcript_path, tokens_in, tokens_out, prompt_cache_hits \
                  FROM agent_runs ORDER BY id",
             )
             .unwrap()
@@ -2264,6 +2393,7 @@ mod tests {
                 r.get(9)?,  // transcript_path
                 r.get(10)?, // tokens_in
                 r.get(11)?, // tokens_out
+                r.get(12)?, // prompt_cache_hits
             )))
             .unwrap()
             .map(|r| r.unwrap())
@@ -2324,6 +2454,12 @@ mod tests {
             assert!(
                 row.11.is_some(),
                 "tokens_out non-null when runner reports it: {role}"
+            );
+            // prompt_cache_hits is preserved from the fixture-supplied telemetry.
+            assert_eq!(
+                row.12,
+                Some(0),
+                "prompt_cache_hits preserved from fixture telemetry (make_telemetry sets 0): {role}"
             );
         }
 
@@ -2849,7 +2985,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(_dir.path()),
         };
         let runner = MockRunner::new(vec![fail_out]);
 
@@ -2904,6 +3040,86 @@ mod tests {
         assert_eq!(verb, "mark_drive_failed");
     }
 
+    // ---------------------------------------------------------------------------
+    // MAJOR 1: spawn-fail telemetry — runner infrastructure failure (Err from spawn)
+    // creates a synthetic agent_runs row with exit_code=-1 before blocking.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn spawn_failure_creates_synthetic_agent_runs_row() {
+        // Simulate: mock runner queue is empty → spawn_for_role returns Err.
+        // Drive must insert a synthetic agent_runs row with exit_code=-1 and
+        // a real .stores/runs/ transcript file before transitioning to blocked.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        let runs_dir = _dir.path().join(".stores").join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+
+        insert_task(
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+
+        // Empty queue → first spawn call returns Err("queue exhausted").
+        let runner = MockRunner::new(vec![]);
+        let err = drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect_err("spawn failure must cause drive_loop Err");
+        assert!(
+            err.to_string().contains("spawn failure"),
+            "error must mention spawn failure: {err}"
+        );
+
+        // Synthetic agent_runs row must exist with exit_code = LAUNCH_ERROR_EXIT_CODE (-1).
+        let (exit_code, model_id, harness_id, transcript_path): (i64, String, String, String) = conn
+            .query_row(
+                "SELECT exit_code, model_id, harness_id, transcript_path \
+                 FROM agent_runs WHERE display_id='T001' AND role='planner'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("synthetic agent_runs row must be inserted on spawn failure");
+        assert_eq!(exit_code, -1, "exit_code must be LAUNCH_ERROR_EXIT_CODE (-1)");
+        assert!(!model_id.is_empty(), "model_id must be non-empty");
+        assert!(!harness_id.is_empty(), "harness_id must be non-empty");
+        assert!(!transcript_path.is_empty(), "transcript_path must be non-empty");
+
+        // Transcript file must exist and contain the error content.
+        let tp = std::path::Path::new(&transcript_path);
+        assert!(
+            tp.exists(),
+            "spawn-error transcript file must exist at: {}",
+            tp.display()
+        );
+        assert!(
+            tp.to_str().map_or(false, |s| s.contains(".stores")),
+            "transcript_path must be under .stores/runs/: {}",
+            tp.display()
+        );
+        let content = std::fs::read_to_string(tp).expect("transcript must be readable");
+        let json: serde_json::Value = serde_json::from_str(&content)
+            .expect("spawn-error transcript must be valid JSON");
+        assert_eq!(
+            json.get("error").and_then(|v| v.as_str()),
+            Some("spawn failed"),
+            "spawn-error transcript must have error='spawn failed'"
+        );
+
+        // Task row must be blocked.
+        let (_, after) = crate::handlers::row::read_row(&schema, &conn, "T001").unwrap();
+        assert_eq!(
+            after.get("status").and_then(|v| v.as_str()),
+            Some("blocked"),
+            "task must be blocked after spawn failure"
+        );
+    }
+
     #[test]
     fn runner_rate_limit_event_classifies_as_rate_limit_with_reset_at() {
         // T029: when stdout carries a stream-json `rate_limit_event` whose
@@ -2936,7 +3152,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(_dir.path()),
         };
         let runner = MockRunner::new(vec![fail_out]);
 
@@ -3146,6 +3362,7 @@ mod tests {
             "phases": [],
             "decision_matrix": []
         });
+        let tmp = tempdir().unwrap();
         let out = RunnerOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -3155,7 +3372,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         };
         let (env, source) =
             parse_envelope(&out, "planner").expect("should succeed via structured_output");
@@ -3201,7 +3418,7 @@ mod tests {
             session_id: Some("test-uuid".to_string()),
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(_dir.path()),
         };
         let runner = MockRunner::new(vec![fail_out]);
 
@@ -3226,6 +3443,7 @@ mod tests {
     #[test]
     fn parse_envelope_tolerates_commentary() {
         let stdout = "I am doing some work here.\nSome more thinking.\n{\"role\": \"planner\", \"phases\": [], \"decision_matrix\": null}";
+        let tmp = tempdir().unwrap();
         let out = RunnerOutput {
             stdout: stdout.to_string(),
             stderr: String::new(),
@@ -3235,7 +3453,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         };
         let (env, source) =
             parse_envelope(&out, "planner").expect("should parse with commentary above");
@@ -3291,6 +3509,7 @@ mod tests {
         // parse it as a serde_json::Value and inject via structured_output.
         let fixture_val: serde_json::Value = serde_json::from_str(wrap_full_fixture_json())
             .expect("wrap fixture must be valid JSON");
+        let tmp = tempdir().unwrap();
         let out = RunnerOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -3300,7 +3519,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         };
         let (env, source) = parse_envelope(&out, "wrap").expect("wrap fixture should parse");
         assert_eq!(
@@ -3374,7 +3593,7 @@ mod tests {
             session_id: Some("wrap-mismatch-session".to_string()),
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(_dir.path()),
         };
         let runner = MockRunner::new(vec![misrouted]);
 
@@ -3430,6 +3649,7 @@ mod tests {
             "```"
         );
 
+        let tmp = tempdir().unwrap();
         let out = RunnerOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -3441,7 +3661,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         };
 
         let (env, source) = parse_envelope(&out, "planner")
@@ -3468,6 +3688,7 @@ mod tests {
             "role": "executor",
             "summary": "Done"
         });
+        let tmp = tempdir().unwrap();
         let out = RunnerOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -3476,7 +3697,7 @@ mod tests {
             final_message: Some("garbage {{{{ not json".to_string()),
             session_id: None,
             structured_output_source: Some("sdk"),
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
             payload_error: None,
         };
         let (_, source) = parse_envelope(&out, "executor").expect("sdk layer must succeed");
@@ -3488,6 +3709,7 @@ mod tests {
         // Layer 2 (SAP): structured_output is None, final_message has markdown-fenced JSON.
         let fenced =
             "Thinking...\n```json\n{\"role\":\"executor\",\"summary\":\"all done\"}\n```\n";
+        let tmp = tempdir().unwrap();
         let out = RunnerOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -3497,7 +3719,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         };
         let (_, source) = parse_envelope(&out, "executor").expect("sap layer must succeed");
         assert_eq!(source, "sap");
@@ -3512,6 +3734,7 @@ mod tests {
         // parseable object anyway. To force legacy, use stdout last-line scan
         // by passing final_message=None and putting JSON on stdout.
         let json_line = "{\"role\":\"executor\",\"summary\":\"legacy path\"}";
+        let tmp = tempdir().unwrap();
         let out = RunnerOutput {
             stdout: format!("some commentary\n{json_line}"),
             stderr: String::new(),
@@ -3521,7 +3744,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         };
         let (_, source) =
             parse_envelope(&out, "executor").expect("legacy last-line scan must succeed");
@@ -3561,7 +3784,7 @@ mod tests {
             session_id: Some("smoke-session-uuid".to_string()),
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(_dir.path()),
         };
         let runner = MockRunner::new(vec![misrouted]);
 
@@ -4349,6 +4572,7 @@ mod tests {
             ```json\n\
             {\"role\":\"planner\",\"phases\":[{\"name\":\"P1\"}],\"decision_matrix\":[]}\n\
             ```\n";
+        let tmp = tempdir().unwrap();
         let out = RunnerOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -4358,7 +4582,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         };
         let (env, source) =
             parse_envelope(&out, "planner").expect("SAP must pick the right candidate");
@@ -4413,7 +4637,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(_dir.path()),
         }]);
 
         // Run a single iteration — drive_loop will exit after the first submit

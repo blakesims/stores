@@ -149,6 +149,13 @@ fn build_runner_from_args(
                 fixture_path.display()
             )
         })?;
+        // Derive a synthetic runs dir alongside the fixture file (mirrors drive.rs).
+        let synthetic_runs_dir = fixture_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(".stores")
+            .join("runs");
+        let _ = std::fs::create_dir_all(&synthetic_runs_dir);
         let outputs: Vec<RunnerOutput> = items
             .into_iter()
             .map(|item| RunnerOutput {
@@ -159,7 +166,7 @@ fn build_runner_from_args(
                 structured_output: None,
                 session_id: None,
                 structured_output_source: None,
-                telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+                telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(&synthetic_runs_dir),
                 payload_error: None,
             })
             .collect();
@@ -755,6 +762,7 @@ mod tests {
             .rev()
             .find(|l| !l.trim().is_empty())
             .map(|s| s.to_string());
+        let tmp = tempdir().unwrap();
         RunnerOutput {
             stdout: stdout.to_string(),
             stderr: String::new(),
@@ -764,7 +772,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         }
     }
 
@@ -1192,7 +1200,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(_dir.path()),
         };
         let runner = MockRunner::new(vec![runner_out]);
 
@@ -1244,7 +1252,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(_dir.path()),
         };
         let runner = MockRunner::new(vec![runner_out]);
 

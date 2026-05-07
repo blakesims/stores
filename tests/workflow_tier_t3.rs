@@ -36,6 +36,7 @@ fn make_run_output(stdout: &str) -> RunnerOutput {
         .rev()
         .find(|l| !l.trim().is_empty())
         .map(|s| s.to_string());
+    let tmp = tempfile::tempdir().unwrap();
     RunnerOutput {
         stdout: stdout.to_string(),
         stderr: String::new(),
@@ -45,7 +46,7 @@ fn make_run_output(stdout: &str) -> RunnerOutput {
         session_id: None,
         structured_output_source: None,
         payload_error: None,
-        telemetry: stores::runner::AgentRunTelemetry::with_mock_defaults(),
+        telemetry: stores::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
     }
 }
 

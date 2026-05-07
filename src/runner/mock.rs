@@ -17,6 +17,7 @@ use super::{Runner, RunnerOutput};
 /// ```rust
 /// use stores::runner::{AgentRunTelemetry, RunnerOutput, mock::MockRunner, Runner};
 ///
+/// let tmp = tempfile::tempdir().unwrap();
 /// let queue = vec![RunnerOutput {
 ///     stdout: "output".to_string(),
 ///     stderr: String::new(),
@@ -25,7 +26,7 @@ use super::{Runner, RunnerOutput};
 ///     structured_output: None,
 ///     session_id: None,
 ///     structured_output_source: None,
-///     telemetry: AgentRunTelemetry::with_mock_defaults(),
+///     telemetry: AgentRunTelemetry::with_mock_defaults(tmp.path()),
 ///     payload_error: None,
 /// }];
 /// let runner = MockRunner::new(queue);
@@ -108,6 +109,7 @@ mod tests {
     use super::*;
 
     fn make_output(stdout: &str, exit_code: i32, final_message: Option<&str>) -> RunnerOutput {
+        let tmp = tempfile::tempdir().unwrap();
         RunnerOutput {
             stdout: stdout.to_string(),
             stderr: String::new(),
@@ -117,7 +119,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         }
     }
 
@@ -194,6 +196,7 @@ mod tests {
             "phases": [],
             "decision_matrix": []
         });
+        let tmp = tempfile::tempdir().unwrap();
         let output = RunnerOutput {
             stdout: String::new(),
             stderr: String::new(),
@@ -203,7 +206,7 @@ mod tests {
             session_id: None,
             structured_output_source: None,
             payload_error: None,
-            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
         };
         let runner = MockRunner::new(vec![output]);
         // schema arg is ignored by mock

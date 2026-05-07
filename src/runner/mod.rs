@@ -69,37 +69,34 @@ impl AgentRunTelemetry {
     ///
     /// All required fields (`model_id`, `harness_id`, `started_at`, `ended_at`,
     /// `transcript_path`) are populated. `transcript_path` is a REAL file written
-    /// under a workspace-relative `.stores/runs/` directory so that
+    /// under `<workspace_path>/.stores/runs/mock-<uuid>.json` so that
     /// `insert_agent_run`'s required-field validation (non-None, non-empty,
     /// resolves to a real path) is satisfied without spinning up a full runner.
     ///
     /// **Invariant:** transcript_path is NEVER under system temp (`/tmp`,
-    /// `$TMPDIR`, etc.). The mock invariant matches the production invariant.
+    /// `$TMPDIR`, etc.) and NEVER under `target/test-mock-runs`. The mock
+    /// invariant matches the production invariant: transcripts live under the
+    /// workspace `.stores/runs/` tree.
     ///
     /// Path selection (in order):
     /// 1. `STORES_RUNS_DIR` env var (set by tests to redirect transcript writes).
-    /// 2. `<CARGO_MANIFEST_DIR>/target/test-mock-runs/` — stable, gitignored,
-    ///    always exists after the first run, never in `/tmp`.
+    /// 2. `<workspace_path>/.stores/runs/` — callers MUST supply a valid workspace
+    ///    directory (typically a `tempfile::tempdir()` in tests).
+    ///
+    /// # Panics
+    /// Panics if neither `STORES_RUNS_DIR` is set nor `workspace_path` is provided.
     ///
     /// For tests that assert specific field values (e.g. `happy_path_one_phase_mock`),
     /// replace the telemetry on the returned `RunnerOutput` with a
     /// fully-specified `AgentRunTelemetry` that points at real synthesized files.
-    pub fn with_mock_defaults() -> Self {
+    pub fn with_mock_defaults(workspace_path: &std::path::Path) -> Self {
         let now = crate::handlers::row::now_iso8601();
-        // Choose a runs dir that is never under system temp.
-        // Priority: STORES_RUNS_DIR (set by tests) → CARGO_MANIFEST_DIR/target/test-mock-runs/.
+        // Choose a runs dir that is never under system temp and never under target/.
+        // Priority: STORES_RUNS_DIR (set by tests) → <workspace_path>/.stores/runs/.
         let stub_id = uuid::Uuid::new_v4();
         let runs_dir = match std::env::var_os("STORES_RUNS_DIR") {
             Some(p) => std::path::PathBuf::from(p),
-            None => {
-                // Fall back to a stable path under the cargo target directory.
-                // CARGO_MANIFEST_DIR is always set when building with cargo.
-                // In production (non-cargo) environments this path may not exist,
-                // but with_mock_defaults() is only ever called from test contexts.
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("target")
-                    .join("test-mock-runs")
-            }
+            None => workspace_path.join(".stores").join("runs"),
         };
         let _ = std::fs::create_dir_all(&runs_dir);
         let stub_path = runs_dir.join(format!("mock-{stub_id}.json"));
