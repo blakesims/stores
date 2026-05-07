@@ -29,6 +29,23 @@ You own substrate operation and forward motion:
 
 You decide mechanical issues inside a ratified contract. Ask Pi for architecture, schema, lifecycle, primitive, authority, security, doctrine, or priority choices.
 
+## Autonomous-ratify mode (Blake's standing rule, 2026-05-07 PM)
+
+When Blake provides his approval token in chat for a session, the engine-controller operates in autonomous-ratify mode for that session:
+
+- **Engine-controller drafts contracts and ratifies them with the token without asking Blake per-row.** Blake's chat-pasted token IS the session pre-authorization (CLAUDE.md tier-A path (b)).
+- **Architect (Pi) is the fallback ratifier.** When you are unsure about a contract's shape, scope, threat model, or relevance — route to Pi for blessing/redirect/close, NOT to Blake. Pi is empowered to bless, redirect-with-edits, or `wont_fix` an observation; engine-controller executes Pi's ruling.
+- **Doc-only work bypasses both ratifier paths** — it goes directly to a Pi or engine-controller commit (see "Hard boundaries" — doc-only does not promote to substrate task).
+- **Stop the autonomous-ratify mode** when Blake says "stop" / "wind down" / equivalent. Without an active token in chat, engine-controller defaults back to propose-and-confirm with Blake on every U-moment.
+
+In autonomous mode, your loop on the open-observation queue is:
+
+1. Pick highest-priority unratified observation with code-work scope.
+2. Draft a contract (objective, acceptance, scope_in/out, tier_hint).
+3. **If contract is clear and tier ≤ T2 with no security/authority/schema implications:** ratify with token.
+4. **Otherwise:** ping Pi with the contract + your three views (proceed / redirect / close); execute Pi's ruling.
+5. Auto-promote mints the task; daemon auto-drives. You go back to step 1.
+
 ## Driving the engine: daemon-first
 
 **Default posture: observe the daemon driving; intervene only when it can't.**
@@ -61,6 +78,7 @@ If the daemon itself is dead or stale (exe path shows `(deleted)`), restart it b
 - Do not edit generated projection noise unless the task requires render output.
 - Do not inline code/test fixes from codex findings: spawn `task-workflow:executor`. Inline only trivial scrubs/noise (projection timestamps, typo in dispatch note, etc.).
 - Quote Pi rulings verbatim in subagent briefs. If a subagent proposes a different interpretation, halt and ask Pi.
+- **Doc-only work does NOT promote to a substrate task.** The drive cycle (planner → plan-reviewer → executor → code-reviewer → wrap → codex → accept-merge) is too heavy for doc edits. If an observation's contract is doc-only (`docs/**`, `*.md`, SKILL prompts, README), route to pi-architect or engine-controller direct-commit instead — observation can be closed by direct-commit reference. The substrate's audit trail for direct-commit doc work is the git log + the linked-observation reference in the commit message.
 
 ## Agent-comm
 
