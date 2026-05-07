@@ -220,6 +220,60 @@ fn external_review_daemon_tooling_failure_retries_after_next_retry_at() {
     assert_eq!(status, "passed");
 }
 
+/// Atomic CAS test: calling `promote_elapsed_tooling_held` twice on the same
+/// elapsed `tooling_held` row (simulating two concurrent daemons) must result
+/// in exactly ONE transition history record and ONE status change to `pending`.
+/// The second invocation must be a no-op because the CAS UPDATE checks
+/// `AND status='tooling_held'` — after the first call the row is `pending`.
+#[test]
+fn external_review_daemon_concurrent_promote_idempotent() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "in_review");
+    insert_review(&conn, "ER020", "T900", "tooling_held", 1);
+    external_review::visible_status_rows(&conn).unwrap();
+    conn.execute(
+        "UPDATE external_reviews SET next_retry_at='2000-01-01T00:00:00Z', held_reason='prev tooling failure', verdict='TOOLING_FAILURE' WHERE display_id='ER020'",
+        [],
+    ).unwrap();
+
+    // First promote: should succeed and insert one history record.
+    external_review::promote_elapsed_tooling_held(&conn).unwrap();
+    let (status_after_first,): (String,) = conn.query_row(
+        "SELECT status FROM external_reviews WHERE display_id='ER020'",
+        [],
+        |r| Ok((r.get(0)?,)),
+    ).unwrap();
+    assert_eq!(status_after_first, "pending", "first promote must set status=pending");
+
+    let history_after_first: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history WHERE row_id=(SELECT id FROM external_reviews WHERE display_id='ER020') AND from_status='tooling_held' AND to_status='pending'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(history_after_first, 1, "first promote must insert exactly one history record");
+
+    // Second promote: the row is already pending; the CAS must be a no-op.
+    external_review::promote_elapsed_tooling_held(&conn).unwrap();
+    let (status_after_second,): (String,) = conn.query_row(
+        "SELECT status FROM external_reviews WHERE display_id='ER020'",
+        [],
+        |r| Ok((r.get(0)?,)),
+    ).unwrap();
+    assert_eq!(status_after_second, "pending", "second promote must leave status=pending");
+
+    let history_after_second: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history WHERE row_id=(SELECT id FROM external_reviews WHERE display_id='ER020') AND from_status='tooling_held' AND to_status='pending'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(
+        history_after_second, 1,
+        "second (no-op) promote must NOT insert a duplicate history record"
+    );
+}
+
 #[test]
 fn external_review_daemon_pass_and_revise_update_status_and_revise_routes_task() {
     for (id, verdict, expected_status, expected_task) in [

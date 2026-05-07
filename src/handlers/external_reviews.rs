@@ -449,7 +449,31 @@ pub fn run_external_review_attempt(
     // payload_error must be checked BEFORE exit_code / verdict parsing.
     // A runner can return exit_code=0 with payload_error set (schema/payload-shape
     // failure). Proceeding to parse stdout in that case can produce a false PASS.
+    //
+    // IMPORTANT: persist runner telemetry (stdout/stderr/transcript/log) BEFORE
+    // returning Err.  Operators debugging a TOOLING_FAILURE need the runner output;
+    // skipping persist here leaves them with no artefacts.
     if let Some(pe) = out.payload_error.as_deref() {
+        let tooling_failure_parsed = ParsedReviewOutput {
+            verdict: ExternalReviewVerdict::ToolingFailure,
+            counts: FindingCounts {
+                critical: 0,
+                major: 0,
+                minor: 0,
+            },
+        };
+        // Best-effort persist: if this fails, swallow the error so the primary
+        // ToolingError (the payload_error reason) is what the caller sees.
+        let _ = persist_review_runner_result(
+            conn,
+            review_display_id,
+            &bundle,
+            review,
+            codex,
+            &out,
+            &tooling_failure_parsed,
+            duration_ms,
+        );
         return Err(ToolingError::new(format!(
             "TOOLING_FAILURE: runner payload error: {pe}"
         )));

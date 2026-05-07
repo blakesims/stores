@@ -8,8 +8,9 @@ use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use stores::flow::agents_yaml::TransitionEdge;
 use stores::flow::builtins::{external_review, DispatchCtx};
+use stores::flow::config::{CodexCfg, ReviewCfg};
 use stores::flow::{AgentEntry, AgentsYaml, BackoffKind, RetryPolicy, Subscription};
-use stores::handlers::{next_action, row, transition};
+use stores::handlers::{external_reviews::run_external_review_attempt, next_action, row, transition};
 use stores::schema::actor::Actor;
 use stores::schema::Schema;
 
@@ -417,4 +418,133 @@ fn external_review_e2e_tooling_failure_held_visible_and_accept_blocked() {
         err.contains("ER930") && err.contains("TOOLING_FAILURE"),
         "{err}"
     );
+}
+
+/// MAJOR 2 fix: when `run_external_review_attempt` returns Err due to
+/// `payload_error`, runner telemetry (transcript_path, log_path) MUST be
+/// persisted to the DB row BEFORE the early return.
+///
+/// We trigger `payload_error` via a codex shim that exits non-zero (the codex
+/// runner sets `payload_error` on any non-zero exit).  After the attempt we
+/// assert the DB row has `log_path` and `transcript_path` populated — proving
+/// that `persist_review_runner_result` ran before the Err was returned.
+#[test]
+fn external_review_payload_error_persists_telemetry_before_err_return() {
+    let conn = install_db_bare();
+    let ws = git_workspace();
+    insert_task_bare(&conn, ws.path(), "T3", "in_review");
+    conn.execute("INSERT INTO external_reviews (display_id,status,task_id,attempt,adapter,created_at,updated_at,created_by,updated_by) VALUES ('ER940','running','T900',1,'external_review','2026-05-07T00:00:00Z','2026-05-07T00:00:00Z','test','test')", []).unwrap();
+
+    // Shim exits 1 → codex runner sets payload_error; stdout is non-empty so
+    // the transcript has content to persist.
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(
+        tmp.path(),
+        "#!/bin/sh\necho 'runner output line'\necho 'more output' >&2\nexit 1\n",
+    );
+    let review_cfg = ReviewCfg {
+        runner: "codex".to_string(),
+        model: None,
+        max_parallel: 1,
+        timeout_secs: 5,
+    };
+    let codex_cfg = CodexCfg {
+        command: sh.to_string_lossy().to_string(),
+        args: vec![],
+    };
+    // run_external_review_attempt must return Err (payload_error from codex exit 1).
+    let result = run_external_review_attempt(
+        &conn,
+        "ER940",
+        "T900",
+        &review_cfg,
+        &codex_cfg,
+        Some(ws.path()),
+        None,
+        None,
+    );
+    assert!(result.is_err(), "expected Err from payload_error path");
+
+    // Telemetry columns must be populated (persist ran before the early return).
+    let (log_path, transcript_path): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT log_path, transcript_path FROM external_reviews WHERE display_id='ER940'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        log_path.is_some() && !log_path.as_deref().unwrap_or("").is_empty(),
+        "log_path must be persisted on payload_error early return; got {:?}",
+        log_path
+    );
+    assert!(
+        transcript_path.is_some() && !transcript_path.as_deref().unwrap_or("").is_empty(),
+        "transcript_path must be persisted on payload_error early return; got {:?}",
+        transcript_path
+    );
+}
+
+/// Bare DB installer for MAJOR 2 test: installs only the minimal columns needed
+/// by `run_external_review_attempt` + `persist_review_runner_result` without
+/// requiring the full SUBSTRATE_DDL + bundled schemas setup.
+fn install_db_bare() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE tasks (
+            display_id TEXT PRIMARY KEY,
+            contract TEXT,
+            plan TEXT,
+            cycles TEXT,
+            wrap_log TEXT,
+            workspace_path TEXT,
+            branch TEXT
+        );
+        CREATE TABLE external_reviews (
+            display_id TEXT PRIMARY KEY,
+            status TEXT,
+            task_id TEXT,
+            attempt INTEGER,
+            adapter TEXT,
+            verdict TEXT,
+            critical_count INTEGER,
+            major_count INTEGER,
+            minor_count INTEGER,
+            findings TEXT,
+            log_path TEXT,
+            transcript_path TEXT,
+            model_id TEXT,
+            model_metadata TEXT,
+            base_sha TEXT,
+            head_sha TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            duration_ms INTEGER,
+            runner TEXT,
+            contract_ref TEXT,
+            plan_ref TEXT,
+            wrap_log_ref TEXT,
+            diff_ref TEXT,
+            prior_review_ref TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            created_by TEXT,
+            updated_by TEXT
+        );",
+    ).unwrap();
+    conn
+}
+
+fn insert_task_bare(conn: &Connection, workspace: &std::path::Path, tier: &str, status: &str) {
+    conn.execute(
+        "INSERT INTO tasks (display_id, contract, plan, cycles, wrap_log, workspace_path, branch)
+         VALUES ('T900',?1,?2,'[]',?3,?4,'main')",
+        rusqlite::params![
+            json!({"done_when":"done","scope_in":"in","scope_out":"out","tier_hint":tier}).to_string(),
+            json!({"phases":[{"name":"p1"}]}).to_string(),
+            json!([{"executive_summary":"wrapped"}]).to_string(),
+            workspace.display().to_string(),
+        ],
+    ).unwrap();
+    let _ = status; // status is in a separate column; insert above doesn't have it
 }

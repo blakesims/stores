@@ -43,11 +43,35 @@ fn build_trio() -> (Manifest, HashMap<String, Schema>) {
     (manifest, schemas)
 }
 
+/// RAII guard that saves `NO_COLOR` on construction and restores it on drop.
+/// Prevents env mutation from leaking into later tests in the same process.
+struct NoColorGuard {
+    saved: Option<std::ffi::OsString>,
+}
+
+impl NoColorGuard {
+    fn new() -> Self {
+        let saved = std::env::var_os("NO_COLOR");
+        std::env::remove_var("NO_COLOR");
+        Self { saved }
+    }
+}
+
+impl Drop for NoColorGuard {
+    fn drop(&mut self) {
+        match &self.saved {
+            Some(val) => std::env::set_var("NO_COLOR", val),
+            None => std::env::remove_var("NO_COLOR"),
+        }
+    }
+}
+
 #[test]
 fn ac2_4_dot_snapshot_matches() {
     // Remove NO_COLOR so the snapshot is always the colored variant,
     // regardless of the operator shell environment (fixes topology flake I003).
-    std::env::remove_var("NO_COLOR");
+    // The guard restores the previous value (or removes the var) on test exit.
+    let _guard = NoColorGuard::new();
     let (manifest, schemas) = build_trio();
     let opts = Opts {
         format: Format::Dot,

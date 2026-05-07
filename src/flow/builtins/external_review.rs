@@ -209,7 +209,10 @@ fn mark_running(conn: &Connection, row: &ReviewRow) -> Result<()> {
 /// Scan for `tooling_held` rows whose `next_retry_at` has elapsed and
 /// transition them back to `pending` so they are picked up on the next
 /// daemon iteration.  Called at the top of `run()` before the pending guard.
-fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
+///
+/// `pub` so that integration tests can call it directly to assert
+/// atomicity (concurrent promote → single transition history record).
+pub fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
     let now = now_iso8601();
     // Collect rows that are past their retry window.
     let candidates: Vec<(i64, String)> = {
@@ -223,28 +226,46 @@ fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
         rows
     };
     for (row_id, did) in candidates {
-        conn.execute(
-            "UPDATE external_reviews SET status='pending', held_reason=NULL, next_retry_at=NULL, updated_at=?2 WHERE display_id=?1 AND status='tooling_held'",
+        // Atomic CAS: BEGIN IMMEDIATE acquires a write lock so concurrent daemons
+        // cannot both win the UPDATE.  We check rows_affected == 1 before inserting
+        // transition history — if another daemon already claimed the row (rows_affected
+        // == 0), we skip history and commit the empty transaction, which is safe.
+        // Same pattern as T079's orphan re-drive fix.
+        //
+        // Transaction::new_unchecked accepts &Connection (no &mut required),
+        // matching the signature of the surrounding function.
+        let tx = rusqlite::Transaction::new_unchecked(
+            conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let affected = tx.execute(
+            "UPDATE external_reviews \
+             SET status='pending', held_reason=NULL, next_retry_at=NULL, updated_at=?2 \
+             WHERE display_id=?1 AND status='tooling_held' AND next_retry_at <= ?2",
             params![did, now],
         )?;
-        let tx = conn.unchecked_transaction()?;
-        crate::db::insert_transition_history(
-            &tx,
-            "external_reviews",
-            row_id,
-            &did,
-            "tooling_held",
-            "pending",
-            "retry-after-tooling-held",
-            "framework",
-            None,
-            None,
-            Some(REVIEW_AGENT_NAME),
-        )?;
-        tx.commit()?;
-        eprintln!(
-            "[external-review] {did}: tooling_held → pending (retry window elapsed)"
-        );
+        if affected == 1 {
+            crate::db::insert_transition_history(
+                &tx,
+                "external_reviews",
+                row_id,
+                &did,
+                "tooling_held",
+                "pending",
+                "retry-after-tooling-held",
+                "framework",
+                None,
+                None,
+                Some(REVIEW_AGENT_NAME),
+            )?;
+            tx.commit()?;
+            eprintln!(
+                "[external-review] {did}: tooling_held → pending (retry window elapsed)"
+            );
+        } else {
+            // Lost the race — another daemon already promoted this row; no-op.
+            tx.commit()?;
+        }
     }
     Ok(())
 }
