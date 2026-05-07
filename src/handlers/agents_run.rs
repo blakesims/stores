@@ -1313,7 +1313,80 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
     ) {
         eprintln!("[daemon] drive watchdog sweep error: {}", e);
     }
+
+    if let Err(e) =
+        run_engine_runner_iteration(conn, agents, config_path, &policies.hash, dispatched as i64)
+    {
+        eprintln!("[engine-runner] actionability loop error: {}", e);
+    }
     Ok(dispatched)
+}
+
+fn run_engine_runner_iteration(
+    conn: &Connection,
+    agents: &AgentsYaml,
+    config_path: &Path,
+    policies_hash: &str,
+    base_dispatched: i64,
+) -> Result<()> {
+    for table in ["tasks", "intake", "observations"] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![table],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if exists == 0 {
+            return Ok(());
+        }
+    }
+    let tasks = crate::flow::builtins::load_tasks_schema()?;
+    let intake_yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "intake")
+        .map(|(_, y)| *y)
+        .ok_or_else(|| anyhow!("bundled intake schema missing"))?;
+    let observations_yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "observations")
+        .map(|(_, y)| *y)
+        .ok_or_else(|| anyhow!("bundled observations schema missing"))?;
+    let intake = crate::schema::Schema::from_yaml(intake_yaml)?;
+    let observations = crate::schema::Schema::from_yaml(observations_yaml)?;
+    let started_at = crate::handlers::row::now_iso8601();
+    let iteration: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(iteration), 0) + 1 FROM engine_runner_heartbeats",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(1);
+    let mut result = crate::flow::engine_runner::scan_record_and_redrive_tasks(
+        conn,
+        crate::flow::engine_runner::ScannerSchemas {
+            tasks: &tasks,
+            intake: &intake,
+            observations: &observations,
+        },
+        iteration,
+        &started_at,
+        agents,
+        config_path,
+        policies_hash,
+    )?;
+    result.summary.dispatched += base_dispatched;
+    eprintln!(
+        "[engine-runner] iter={} saw=tasks:{} intake:{} obs:{} actionable={} held={} dispatched={}",
+        result.summary.iteration,
+        result.summary.saw_tasks,
+        result.summary.saw_intake,
+        result.summary.saw_observations,
+        result.summary.actionable,
+        result.summary.held,
+        result.summary.dispatched
+    );
+    Ok(())
 }
 
 /// Starting-line seeder (T026 P1, refined for L116). For each agent declared

@@ -8,9 +8,11 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::codegen::ddl::quote_ident;
-use crate::handlers::agents_run::pid_is_alive;
+use crate::flow::AgentsYaml;
+use crate::handlers::agents_run::{count_live_drive_pids, pid_is_alive};
 use crate::handlers::next_action::find_next_agent;
 use crate::schema::Schema;
 use crate::validate::EntryMap;
@@ -33,6 +35,7 @@ pub struct ActionabilityRecord<'a> {
     pub store: &'a str,
     pub row_id: i64,
     pub classification: &'a str,
+    pub action: Option<&'a str>,
     pub held_reason: Option<&'a str>,
     pub dispatched: bool,
     pub last_logged_at: Option<&'a str>,
@@ -94,10 +97,11 @@ pub fn upsert_actionability(
 ) -> Result<()> {
     conn.execute(
         "INSERT INTO engine_runner_actions \
-         (store, row_id, classification, held_reason, dispatched, last_logged_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         (store, row_id, classification, action, held_reason, dispatched, last_logged_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
          ON CONFLICT(store, row_id) DO UPDATE SET \
          classification=excluded.classification, \
+         action=excluded.action, \
          held_reason=excluded.held_reason, \
          dispatched=excluded.dispatched, \
          last_logged_at=excluded.last_logged_at, \
@@ -106,6 +110,7 @@ pub fn upsert_actionability(
             record.store,
             record.row_id,
             record.classification,
+            record.action,
             record.held_reason,
             if record.dispatched { 1 } else { 0 },
             record.last_logged_at,
@@ -125,23 +130,8 @@ pub fn scan_and_record_actionability(
     iteration: i64,
     started_at: &str,
 ) -> Result<ScannerResult> {
-    let mut rows = Vec::new();
-    rows.extend(scan_tasks(conn, schemas.tasks)?);
-    rows.extend(scan_intake(conn, schemas.intake)?);
-    rows.extend(scan_observations(conn, schemas.observations)?);
-
-    let summary = HeartbeatSummary {
-        iteration,
-        saw_tasks: rows.iter().filter(|r| r.store == "tasks").count() as i64,
-        saw_intake: rows.iter().filter(|r| r.store == "intake").count() as i64,
-        saw_observations: rows.iter().filter(|r| r.store == "observations").count() as i64,
-        actionable: rows
-            .iter()
-            .filter(|r| r.held_reason.is_none() && r.classification.starts_with("actionable_"))
-            .count() as i64,
-        held: rows.iter().filter(|r| r.held_reason.is_some()).count() as i64,
-        dispatched: 0,
-    };
+    let rows = scan_rows(conn, schemas)?;
+    let summary = summarize_rows(iteration, &rows, 0);
 
     record_heartbeat(conn, summary, started_at)?;
     for row in &rows {
@@ -151,6 +141,7 @@ pub fn scan_and_record_actionability(
                 store: &row.store,
                 row_id: row.row_id,
                 classification: &row.classification,
+                action: None,
                 held_reason: row.held_reason.as_deref(),
                 dispatched: false,
                 last_logged_at: Some(started_at),
@@ -160,6 +151,139 @@ pub fn scan_and_record_actionability(
     }
 
     Ok(ScannerResult { summary, rows })
+}
+
+/// Scan and execute only existing autonomous task re-drive edges. Non-task
+/// actionable rows remain observation-only for this phase.
+pub fn scan_record_and_redrive_tasks(
+    conn: &Connection,
+    schemas: ScannerSchemas<'_>,
+    iteration: i64,
+    started_at: &str,
+    agents: &AgentsYaml,
+    config_path: &Path,
+    policies_hash: &str,
+) -> Result<ScannerResult> {
+    let mut rows = scan_rows(conn, schemas)?;
+    let cap = crate::flow::config::resolve_drive_max_parallel(config_path) as usize;
+    let mut dispatched = 0_i64;
+
+    let mut processed_task_rows = std::collections::BTreeSet::new();
+    for row in rows.iter_mut().filter(|r| {
+        r.store == "tasks"
+            && r.classification == "actionable_task_redrive"
+            && r.held_reason.is_none()
+    }) {
+        processed_task_rows.insert(row.row_id);
+        let live = count_live_drive_pids(conn).unwrap_or(0);
+        if live >= cap {
+            row.classification = "held".to_string();
+            row.held_reason = Some("lane_cap_full".to_string());
+            upsert_actionability(
+                conn,
+                ActionabilityRecord {
+                    store: &row.store,
+                    row_id: row.row_id,
+                    classification: &row.classification,
+                    action: None,
+                    held_reason: row.held_reason.as_deref(),
+                    dispatched: false,
+                    last_logged_at: Some(started_at),
+                },
+                started_at,
+            )?;
+            continue;
+        }
+
+        match crate::flow::builtins::auto_drive::redispatch_orphaned_next_agent(
+            conn,
+            row.row_id,
+            agents,
+            config_path,
+            policies_hash,
+        )? {
+            Some(_) => {
+                row.classification = "dispatched_task_redrive".to_string();
+                dispatched += 1;
+                upsert_actionability(
+                    conn,
+                    ActionabilityRecord {
+                        store: &row.store,
+                        row_id: row.row_id,
+                        classification: &row.classification,
+                        action: Some("redispatched"),
+                        held_reason: None,
+                        dispatched: true,
+                        last_logged_at: Some(started_at),
+                    },
+                    started_at,
+                )?;
+            }
+            None => {
+                row.classification = "held".to_string();
+                row.held_reason = Some("redrive_noop".to_string());
+                upsert_actionability(
+                    conn,
+                    ActionabilityRecord {
+                        store: &row.store,
+                        row_id: row.row_id,
+                        classification: &row.classification,
+                        action: None,
+                        held_reason: row.held_reason.as_deref(),
+                        dispatched: false,
+                        last_logged_at: Some(started_at),
+                    },
+                    started_at,
+                )?;
+            }
+        }
+    }
+
+    for row in rows
+        .iter()
+        .filter(|r| !(r.store == "tasks" && processed_task_rows.contains(&r.row_id)))
+    {
+        upsert_actionability(
+            conn,
+            ActionabilityRecord {
+                store: &row.store,
+                row_id: row.row_id,
+                classification: &row.classification,
+                action: None,
+                held_reason: row.held_reason.as_deref(),
+                dispatched: false,
+                last_logged_at: Some(started_at),
+            },
+            started_at,
+        )?;
+    }
+
+    let summary = summarize_rows(iteration, &rows, dispatched);
+    record_heartbeat(conn, summary, started_at)?;
+    Ok(ScannerResult { summary, rows })
+}
+
+fn scan_rows(conn: &Connection, schemas: ScannerSchemas<'_>) -> Result<Vec<ClassifiedRow>> {
+    let mut rows = Vec::new();
+    rows.extend(scan_tasks(conn, schemas.tasks)?);
+    rows.extend(scan_intake(conn, schemas.intake)?);
+    rows.extend(scan_observations(conn, schemas.observations)?);
+    Ok(rows)
+}
+
+fn summarize_rows(iteration: i64, rows: &[ClassifiedRow], dispatched: i64) -> HeartbeatSummary {
+    HeartbeatSummary {
+        iteration,
+        saw_tasks: rows.iter().filter(|r| r.store == "tasks").count() as i64,
+        saw_intake: rows.iter().filter(|r| r.store == "intake").count() as i64,
+        saw_observations: rows.iter().filter(|r| r.store == "observations").count() as i64,
+        actionable: rows
+            .iter()
+            .filter(|r| r.held_reason.is_none() && r.classification.starts_with("actionable_"))
+            .count() as i64,
+        held: rows.iter().filter(|r| r.held_reason.is_some()).count() as i64,
+        dispatched,
+    }
 }
 
 fn scan_tasks(conn: &Connection, schema: &Schema) -> Result<Vec<ClassifiedRow>> {
@@ -207,10 +331,10 @@ fn scan_tasks(conn: &Connection, schema: &Schema) -> Result<Vec<ClassifiedRow>> 
         let live_drive_owner = drive_pid
             .and_then(|pid| i32::try_from(pid).ok())
             .is_some_and(pid_is_alive);
-        let (classification, held_reason) = if let Some(agent) = next_agent {
+        let (classification, held_reason) = if let Some(_agent) = next_agent {
             if live_drive_owner {
                 ("held".to_string(), Some("live_drive_owner".to_string()))
-            } else if has_live_dispatch_lock(conn, &schema.name, row_id, &agent)? {
+            } else if has_live_dispatch_lock(conn, &schema.name, row_id, "auto-drive")? {
                 ("held".to_string(), Some("live_dispatch_lock".to_string()))
             } else {
                 ("actionable_task_redrive".to_string(), None)
@@ -343,7 +467,14 @@ fn parse_json_text(v: Option<String>) -> Value {
 mod tests {
     use super::*;
     use crate::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
+    use crate::flow::AgentsYaml;
     use crate::schema::Schema;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static L: OnceLock<Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn actionability_upsert_replaces_latest_state_for_row() {
@@ -356,6 +487,7 @@ mod tests {
                 store: "tasks",
                 row_id: 7,
                 classification: "held",
+                action: None,
                 held_reason: Some("needs_human"),
                 dispatched: false,
                 last_logged_at: Some("2026-05-07T00:00:00Z"),
@@ -369,6 +501,7 @@ mod tests {
                 store: "tasks",
                 row_id: 7,
                 classification: "actionable",
+                action: Some("redispatched"),
                 held_reason: Some("orphaned_next_agent"),
                 dispatched: true,
                 last_logged_at: Some("2026-05-07T00:01:00Z"),
@@ -560,6 +693,150 @@ mod tests {
     }
 
     #[test]
+    fn action_loop_redispatches_dead_pid_orphan() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("STORES_DRIVE_CMD", "sleep 5 #");
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let task_id = insert_task(&conn, "T907", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1, workspace_path=?2 WHERE id=?3",
+            rusqlite::params![999_999_999_i64, tmp.path().to_str().unwrap(), task_id],
+        )
+        .unwrap();
+        let cfg = tmp.path().join("config.yaml");
+        std::fs::write(&cfg, "drive:\n  max_parallel: 5\n").unwrap();
+
+        scan_record_and_redrive_tasks(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            8,
+            "2026-05-07T00:07:00Z",
+            &AgentsYaml::default_empty(),
+            &cfg,
+            "",
+        )
+        .unwrap();
+
+        let (pid, action, agent): (i64, Option<String>, String) = conn
+            .query_row(
+                "SELECT t.drive_pid, a.action, dl.agent_name \
+                 FROM tasks t \
+                 JOIN engine_runner_actions a ON a.row_id=t.id AND a.store='tasks' \
+                 JOIN dispatch_locks dl ON dl.row_id=t.id AND dl.store='tasks' \
+                 WHERE t.id=?1",
+                rusqlite::params![task_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(pid > 0 && pid != 999_999_999_i64);
+        assert!(pid_is_alive(pid as i32));
+        assert_eq!(action.as_deref(), Some("redispatched"));
+        assert_eq!(agent, "auto-drive");
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+        std::env::remove_var("STORES_DRIVE_CMD");
+    }
+
+    #[test]
+    fn action_loop_live_pid_is_held_noop() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let task_id = insert_task(&conn, "T908", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![std::process::id() as i64, task_id],
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config.yaml");
+
+        scan_record_and_redrive_tasks(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            9,
+            "2026-05-07T00:08:00Z",
+            &AgentsYaml::default_empty(),
+            &cfg,
+            "",
+        )
+        .unwrap();
+
+        let (held, dispatched, locks): (Option<String>, i64, i64) = conn
+            .query_row(
+                "SELECT a.held_reason, a.dispatched, \
+                        (SELECT COUNT(*) FROM dispatch_locks WHERE row_id=?1 AND agent_name='auto-drive') \
+                 FROM engine_runner_actions a WHERE a.store='tasks' AND a.row_id=?1",
+                rusqlite::params![task_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(held.as_deref(), Some("live_drive_owner"));
+        assert_eq!(dispatched, 0);
+        assert_eq!(locks, 0);
+    }
+
+    #[test]
+    fn action_loop_respects_drive_lane_cap() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let live_id = insert_task(&conn, "T909", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![std::process::id() as i64, live_id],
+        )
+        .unwrap();
+        let orphan_id = insert_task(&conn, "T910", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![999_999_998_i64, orphan_id],
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config.yaml");
+        std::fs::write(&cfg, "drive:\n  max_parallel: 1\n").unwrap();
+
+        scan_record_and_redrive_tasks(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            10,
+            "2026-05-07T00:09:00Z",
+            &AgentsYaml::default_empty(),
+            &cfg,
+            "",
+        )
+        .unwrap();
+
+        let held: Option<String> = conn
+            .query_row(
+                "SELECT held_reason FROM engine_runner_actions WHERE store='tasks' AND row_id=?1",
+                rusqlite::params![orphan_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(held.as_deref(), Some("lane_cap_full"));
+        let locks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE row_id=?1 AND agent_name='auto-drive'",
+                rusqlite::params![orphan_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(locks, 0);
+    }
+
+    #[test]
     fn scanner_holds_u_moment_observation_without_lifecycle_writes() {
         let (conn, tasks, intake, observations) = open_scanner_db();
         let original_contract = r#"{"contract_state":"draft","approved_by":null,"approved_at":null,"objective":"draft"}"#;
@@ -614,14 +891,8 @@ mod tests {
     fn scanner_holds_non_investigating_draft_contract_as_needs_human() {
         let (conn, tasks, intake, observations) = open_scanner_db();
         let original_contract = r#"{"contract_state":"draft","approved_by":null,"approved_at":null,"objective":"draft"}"#;
-        let obs_id = insert_observation(
-            &conn,
-            "L904",
-            "open",
-            original_contract,
-            "normal",
-            "human",
-        );
+        let obs_id =
+            insert_observation(&conn, "L904", "open", original_contract, "normal", "human");
 
         let result = scan_and_record_actionability(
             &conn,
@@ -699,7 +970,7 @@ mod tests {
         let task_id = insert_task(&conn, "T904", "code_review");
         conn.execute(
             "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, claimed_at, claimed_by) \
-             VALUES ('tasks', ?1, 'T904', 'code_reviewer', '2026-05-07T00:00:00Z', 'daemon')",
+             VALUES ('tasks', ?1, 'T904', 'auto-drive', '2026-05-07T00:00:00Z', 'daemon')",
             rusqlite::params![task_id],
         )
         .unwrap();
