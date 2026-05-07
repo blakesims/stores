@@ -2,6 +2,8 @@ use rusqlite::Connection;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(debug_assertions)]
+use std::sync::atomic::Ordering;
 
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
@@ -220,57 +222,113 @@ fn external_review_daemon_tooling_failure_retries_after_next_retry_at() {
     assert_eq!(status, "passed");
 }
 
-/// Atomic CAS test: calling `promote_elapsed_tooling_held` twice on the same
-/// elapsed `tooling_held` row (simulating two concurrent daemons) must result
-/// in exactly ONE transition history record and ONE status change to `pending`.
-/// The second invocation must be a no-op because the CAS UPDATE checks
-/// `AND status='tooling_held'` — after the first call the row is `pending`.
+/// Real concurrent race test: two independent connections call
+/// `promote_elapsed_tooling_held` at the same time against the same
+/// `tooling_held` row.  Exactly ONE must win the BEGIN IMMEDIATE lock and
+/// promote the row; the other must no-op cleanly.
+///
+/// Sync mechanism (matching T079 r4 / T076 r6 precedent):
+///   - `STORES_TEST_PROMOTE_DELAY_MS=150` is set so the first thread sleeps
+///     before opening its BEGIN IMMEDIATE transaction.
+///   - `PROMOTE_DELAY_HOOK_ENTERED` (AtomicBool, debug_assertions only) is
+///     set by the delay hook BEFORE the sleep so the second thread can
+///     deterministically know the first is inside the delay window before
+///     it too calls `promote_elapsed_tooling_held`.
+///
+/// Assertions:
+///   (a) Exactly ONE row ends up with status=pending.
+///   (b) Exactly ONE transition_history record for tooling_held→pending exists.
+///   (c) No second history record is inserted by the losing thread.
+#[cfg(debug_assertions)]
 #[test]
 fn external_review_daemon_concurrent_promote_idempotent() {
-    let conn = Connection::open_in_memory().unwrap();
-    install_db(&conn);
-    let ws = git_workspace();
-    insert_task(&conn, ws.path(), "in_review");
-    insert_review(&conn, "ER020", "T900", "tooling_held", 1);
-    external_review::visible_status_rows(&conn).unwrap();
-    conn.execute(
-        "UPDATE external_reviews SET next_retry_at='2000-01-01T00:00:00Z', held_reason='prev tooling failure', verdict='TOOLING_FAILURE' WHERE display_id='ER020'",
-        [],
-    ).unwrap();
+    // Reset the sentinel before the test.
+    stores::flow::builtins::external_review::PROMOTE_DELAY_HOOK_ENTERED
+        .store(false, Ordering::SeqCst);
 
-    // First promote: should succeed and insert one history record.
-    external_review::promote_elapsed_tooling_held(&conn).unwrap();
-    let (status_after_first,): (String,) = conn.query_row(
+    std::env::set_var("STORES_TEST_PROMOTE_DELAY_MS", "150");
+
+    // Use a temp-file DB so two independent connections can reach the same DB.
+    let db_file = tempfile::NamedTempFile::new().unwrap();
+    let db_path = db_file.path().to_owned();
+
+    // Setup: install schema + one elapsed tooling_held row via a dedicated
+    // setup connection that is dropped before the race threads open theirs.
+    {
+        let setup_conn = Connection::open(&db_path).unwrap();
+        setup_conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        install_db(&setup_conn);
+        let ws = git_workspace();
+        insert_task(&setup_conn, ws.path(), "in_review");
+        insert_review(&setup_conn, "ER020", "T900", "tooling_held", 1);
+        external_review::visible_status_rows(&setup_conn).unwrap();
+        setup_conn.execute(
+            "UPDATE external_reviews SET next_retry_at='2000-01-01T00:00:00Z', held_reason='prev tooling failure', verdict='TOOLING_FAILURE' WHERE display_id='ER020'",
+            [],
+        ).unwrap();
+    } // setup_conn dropped here
+
+    // ── Thread A (first to enter delay hook) ─────────────────────────────────
+    let db_path_a = db_path.clone();
+    let thread_a = std::thread::spawn(move || {
+        let conn = Connection::open(&db_path_a).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.pragma_update(None, "busy_timeout", 5000i64).unwrap();
+        external_review::promote_elapsed_tooling_held(&conn).unwrap();
+    });
+
+    // ── Main thread (Thread B) ────────────────────────────────────────────────
+    // Wait until Thread A signals it has entered the delay hook (it is past its
+    // pre-tx point and sleeping in the delay window).
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if stores::flow::builtins::external_review::PROMOTE_DELAY_HOOK_ENTERED
+                .load(Ordering::Acquire)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for PROMOTE_DELAY_HOOK_ENTERED signal"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    // Thread A is inside the delay window.  Thread B now calls promote too —
+    // it will either win or block on BEGIN IMMEDIATE until Thread A commits.
+    let conn_b = Connection::open(&db_path).unwrap();
+    conn_b.pragma_update(None, "journal_mode", "WAL").unwrap();
+    conn_b.pragma_update(None, "busy_timeout", 5000i64).unwrap();
+    external_review::promote_elapsed_tooling_held(&conn_b).unwrap();
+
+    thread_a.join().expect("thread A panicked");
+
+    std::env::remove_var("STORES_TEST_PROMOTE_DELAY_MS");
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+    let verify_conn = Connection::open(&db_path).unwrap();
+
+    // (a) Exactly one row must be pending.
+    let (status,): (String,) = verify_conn.query_row(
         "SELECT status FROM external_reviews WHERE display_id='ER020'",
         [],
         |r| Ok((r.get(0)?,)),
     ).unwrap();
-    assert_eq!(status_after_first, "pending", "first promote must set status=pending");
+    assert_eq!(status, "pending", "exactly one thread must promote to pending");
 
-    let history_after_first: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM transition_history WHERE row_id=(SELECT id FROM external_reviews WHERE display_id='ER020') AND from_status='tooling_held' AND to_status='pending'",
-        [],
-        |r| r.get(0),
-    ).unwrap();
-    assert_eq!(history_after_first, 1, "first promote must insert exactly one history record");
-
-    // Second promote: the row is already pending; the CAS must be a no-op.
-    external_review::promote_elapsed_tooling_held(&conn).unwrap();
-    let (status_after_second,): (String,) = conn.query_row(
-        "SELECT status FROM external_reviews WHERE display_id='ER020'",
-        [],
-        |r| Ok((r.get(0)?,)),
-    ).unwrap();
-    assert_eq!(status_after_second, "pending", "second promote must leave status=pending");
-
-    let history_after_second: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM transition_history WHERE row_id=(SELECT id FROM external_reviews WHERE display_id='ER020') AND from_status='tooling_held' AND to_status='pending'",
+    // (b) Exactly one transition history record for tooling_held→pending.
+    let history_count: i64 = verify_conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE row_id=(SELECT id FROM external_reviews WHERE display_id='ER020') \
+           AND from_status='tooling_held' AND to_status='pending'",
         [],
         |r| r.get(0),
     ).unwrap();
     assert_eq!(
-        history_after_second, 1,
-        "second (no-op) promote must NOT insert a duplicate history record"
+        history_count, 1,
+        "exactly ONE tooling_held→pending transition record must exist; got {history_count}"
     );
 }
 

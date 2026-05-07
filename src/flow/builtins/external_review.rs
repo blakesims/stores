@@ -5,7 +5,7 @@
 //! back to the task executor lane via the framework transition.
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -212,11 +212,50 @@ fn mark_running(conn: &Connection, row: &ReviewRow) -> Result<()> {
 ///
 /// `pub` so that integration tests can call it directly to assert
 /// atomicity (concurrent promote → single transition history record).
+///
+/// Atomicity: ONE `BEGIN IMMEDIATE` transaction wraps both the candidate SELECT
+/// and all per-row CAS UPDATEs.  This eliminates the TOCTOU window between
+/// candidate enumeration and the first per-row lock that the previous per-row
+/// BEGIN IMMEDIATE pattern had.  Holding the write lock across the entire
+/// scan-and-promote pass is acceptable because the candidate set is bounded —
+/// only a small number of `tooling_held` rows exist at any time.
+///
+/// Per T079's pattern, `Transaction::new_unchecked` is used to open the
+/// transaction without requiring `&mut Connection`.
 pub fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
     let now = now_iso8601();
-    // Collect rows that are past their retry window.
+
+    // Test-only synchronization hook: STORES_TEST_PROMOTE_DELAY_MS introduces a
+    // sleep AFTER signalling PROMOTE_DELAY_HOOK_ENTERED but BEFORE opening the
+    // BEGIN IMMEDIATE transaction.  This lets the concurrent-race test inject a
+    // second thread that attempts its own BEGIN IMMEDIATE after the first thread
+    // enters the delay window, exposing any remaining TOCTOU window.
+    // Gated on debug_assertions so release builds compile this out entirely.
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(ms) = std::env::var("STORES_TEST_PROMOTE_DELAY_MS") {
+            if let Ok(n) = ms.parse::<u64>() {
+                PROMOTE_DELAY_HOOK_ENTERED.store(true, std::sync::atomic::Ordering::Release);
+                eprintln!("[external-review::promote] pre-tx delay start ({n}ms)");
+                if n > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(n));
+                }
+                eprintln!("[external-review::promote] pre-tx delay end");
+            }
+        }
+    }
+
+    // Open ONE BEGIN IMMEDIATE transaction before the SELECT so that the
+    // candidate read and all per-row CAS UPDATEs happen under the same write
+    // lock.  Concurrent callers will block on this lock until we commit.
+    //
+    // Transaction::new_unchecked accepts &Connection (no &mut required),
+    // matching the immutable-shared &Connection signature of this function.
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+
+    // Read candidates inside the transaction.
     let candidates: Vec<(i64, String)> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT id, display_id FROM external_reviews \
              WHERE status='tooling_held' AND next_retry_at IS NOT NULL AND next_retry_at <= ?1",
         )?;
@@ -225,19 +264,11 @@ pub fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows
     };
+
     for (row_id, did) in candidates {
-        // Atomic CAS: BEGIN IMMEDIATE acquires a write lock so concurrent daemons
-        // cannot both win the UPDATE.  We check rows_affected == 1 before inserting
-        // transition history — if another daemon already claimed the row (rows_affected
-        // == 0), we skip history and commit the empty transaction, which is safe.
-        // Same pattern as T079's orphan re-drive fix.
-        //
-        // Transaction::new_unchecked accepts &Connection (no &mut required),
-        // matching the signature of the surrounding function.
-        let tx = rusqlite::Transaction::new_unchecked(
-            conn,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+        // CAS UPDATE: the WHERE clause re-checks status='tooling_held' so
+        // concurrent callers that somehow reach this point (e.g. via a
+        // different lock scope) will no-op cleanly.
         let affected = tx.execute(
             "UPDATE external_reviews \
              SET status='pending', held_reason=NULL, next_retry_at=NULL, updated_at=?2 \
@@ -258,17 +289,25 @@ pub fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
                 None,
                 Some(REVIEW_AGENT_NAME),
             )?;
-            tx.commit()?;
             eprintln!(
                 "[external-review] {did}: tooling_held → pending (retry window elapsed)"
             );
-        } else {
-            // Lost the race — another daemon already promoted this row; no-op.
-            tx.commit()?;
         }
+        // rows_affected == 0: row was not in tooling_held (raced or already
+        // promoted); no history insert needed.
     }
+
+    tx.commit()?;
     Ok(())
 }
+
+/// Test-only sentinel: set to `true` immediately when the delay hook inside
+/// `promote_elapsed_tooling_held` is entered (before the sleep begins).
+/// Tests busy-wait on this flag before opening their own BEGIN IMMEDIATE.
+/// Only compiled in debug builds; absent from release binaries.
+#[cfg(debug_assertions)]
+pub static PROMOTE_DELAY_HOOK_ENTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn record_terminal(
     ctx: &DispatchCtx,
