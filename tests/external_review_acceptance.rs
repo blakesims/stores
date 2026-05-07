@@ -10,7 +10,9 @@ use stores::flow::agents_yaml::TransitionEdge;
 use stores::flow::builtins::{external_review, DispatchCtx};
 use stores::flow::config::{CodexCfg, ReviewCfg};
 use stores::flow::{AgentEntry, AgentsYaml, BackoffKind, RetryPolicy, Subscription};
-use stores::handlers::{external_reviews::run_external_review_attempt, next_action, row, transition};
+use stores::handlers::{
+    external_reviews::run_external_review_attempt, next_action, row, transition,
+};
 use stores::schema::actor::Actor;
 use stores::schema::Schema;
 
@@ -160,6 +162,35 @@ fn external_review_accept_precheck_t3_current_head_pass_succeeds() {
         )
         .unwrap();
     assert_eq!(status, "accepted");
+}
+
+#[test]
+fn external_review_accept_precheck_t2_blocks_until_human_accept_after_pass() {
+    let conn = Connection::open_in_memory().unwrap();
+    let schema = install_db(&conn);
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "T2", "in_review");
+    let err = accept(&schema, &conn).unwrap_err().to_string();
+    assert!(err.contains("external review PASS required"), "{err}");
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM tasks WHERE display_id='T900'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "in_review", "PASS precheck must not auto-accept");
+
+    insert_review(&conn, "ER002", "passed", "PASS", &head(ws.path()), 1);
+    accept(&schema, &conn).unwrap();
+    let accepted: String = conn
+        .query_row(
+            "SELECT status FROM tasks WHERE display_id='T900'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(accepted, "accepted");
 }
 
 #[test]
@@ -531,7 +562,8 @@ fn install_db_bare() -> Connection {
             created_by TEXT,
             updated_by TEXT
         );",
-    ).unwrap();
+    )
+    .unwrap();
     conn
 }
 
@@ -540,11 +572,13 @@ fn insert_task_bare(conn: &Connection, workspace: &std::path::Path, tier: &str, 
         "INSERT INTO tasks (display_id, contract, plan, cycles, wrap_log, workspace_path, branch)
          VALUES ('T900',?1,?2,'[]',?3,?4,'main')",
         rusqlite::params![
-            json!({"done_when":"done","scope_in":"in","scope_out":"out","tier_hint":tier}).to_string(),
+            json!({"done_when":"done","scope_in":"in","scope_out":"out","tier_hint":tier})
+                .to_string(),
             json!({"phases":[{"name":"p1"}]}).to_string(),
             json!([{"executive_summary":"wrapped"}]).to_string(),
             workspace.display().to_string(),
         ],
-    ).unwrap();
+    )
+    .unwrap();
     let _ = status; // status is in a separate column; insert above doesn't have it
 }
