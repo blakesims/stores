@@ -86,11 +86,16 @@ fn t3_full_five_stage_cycle_runs() {
     let display_id = "T100";
     insert_t3_task_at_planning(&conn, display_id);
 
+    // T072 r6: executor and code-reviewer must have session_id (MINOR 1 requirement).
+    let mut executor_out = make_run_output(executor_fixture());
+    executor_out.session_id = Some("t3-exec-session".to_string());
+    let mut code_reviewer_out = make_run_output(code_reviewer_fixture());
+    code_reviewer_out.session_id = Some("t3-review-session".to_string());
     let runner = MockRunner::new(vec![
         make_run_output(planner_fixture()),
         make_run_output(plan_reviewer_fixture()),
-        make_run_output(executor_fixture()),
-        make_run_output(code_reviewer_fixture()),
+        executor_out,
+        code_reviewer_out,
         make_run_output(wrap_fixture()),
     ]);
 

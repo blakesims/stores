@@ -119,12 +119,15 @@ fn t1_drive_skips_planner_and_plan_reviewer() {
         "transition_history must contain exactly one skip-plan row on planning→ready"
     );
 
-    let executor_out = make_run_output(
+    // T072 r6: executor and code-reviewer must have session_id (MINOR 1 requirement).
+    let mut executor_out = make_run_output(
         r#"{"role":"executor","summary":"did the thing","commit":"abc","files_changed":["src/x.rs"]}"#,
     );
-    let code_reviewer_out = make_run_output(
+    executor_out.session_id = Some("t1-exec-session".to_string());
+    let mut code_reviewer_out = make_run_output(
         r#"{"role":"code-reviewer","gate":"PASS","summary":"looks good","critical":0,"major":0,"minor":0}"#,
     );
+    code_reviewer_out.session_id = Some("t1-review-session".to_string());
     let wrap_out = make_run_output(
         r#"{"role":"wrap","executive_summary":"done","deviations":[],"residual_risks":[],"recommended_sanity_checks":[]}"#,
     );

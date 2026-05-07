@@ -294,6 +294,35 @@ CREATE TABLE IF NOT EXISTS framework_migrations (
 );
 ";
 
+/// Virtual read-only VIEW over tasks.cycles JSON.  Applied by `db::open` on
+/// every connection so the query surface is always available.  Uses SQLite
+/// JSON1 functions (json_each / json_extract) to flatten the cycles JSON array
+/// into one row per (display_id, phase, cycle, role).  Two UNION ALL branches:
+/// one for the executor sub-record, one for the review sub-record; rows whose
+/// sub-record or transcript_path is absent are filtered by the WHERE clause.
+/// Per T072 L059 architecture decision (pi msg_32b0e4c4): SQL VIEW, not a
+/// materialized table.
+pub const RUNS_VIEW_DDL: &str = "\
+CREATE VIEW IF NOT EXISTS runs AS
+  SELECT
+    t.display_id,
+    CAST(json_extract(c.value, '$.phase') AS INTEGER) AS phase,
+    CAST(json_extract(c.value, '$.cycle') AS INTEGER) AS cycle,
+    'executor' AS role,
+    json_extract(c.value, '$.executor.transcript_path') AS transcript_path
+  FROM tasks t, json_each(t.cycles) c
+  WHERE json_extract(c.value, '$.executor.transcript_path') IS NOT NULL
+UNION ALL
+  SELECT
+    t.display_id,
+    CAST(json_extract(c.value, '$.phase') AS INTEGER) AS phase,
+    CAST(json_extract(c.value, '$.cycle') AS INTEGER) AS cycle,
+    'code-reviewer' AS role,
+    json_extract(c.value, '$.review.transcript_path') AS transcript_path
+  FROM tasks t, json_each(t.cycles) c
+  WHERE json_extract(c.value, '$.review.transcript_path') IS NOT NULL;
+";
+
 /// Reserved columns prepended to every generated table.
 /// Order is fixed for determinism.
 const RESERVED_COLUMNS: &[&str] = &[

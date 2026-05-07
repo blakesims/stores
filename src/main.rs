@@ -10,8 +10,8 @@ mod output;
 mod paths;
 pub mod render;
 pub mod runner;
-pub mod tui;
 pub mod schema;
+pub mod tui;
 pub mod validate;
 mod version;
 
@@ -153,6 +153,29 @@ fn main() -> Result<()> {
                 now: sub.get_one::<String>("now").cloned(),
             };
             cli::metrics::run(args)?;
+        }
+        Some(("runs", sub)) => {
+            use cli::runs::{run as runs_run, RunsCmd};
+            let cmd = match sub.subcommand() {
+                Some(("list", lsub)) => RunsCmd::List {
+                    display_id: lsub.get_one::<String>("display_id").unwrap().clone(),
+                },
+                Some(("show", ssub)) => RunsCmd::Show {
+                    display_id: ssub.get_one::<String>("display_id").unwrap().clone(),
+                    phase: *ssub.get_one::<i64>("phase").unwrap(),
+                    cycle: ssub.get_one::<i64>("cycle").copied(),
+                    role: ssub.get_one::<String>("role").unwrap().clone(),
+                },
+                _ => {
+                    let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
+                    if let Some(runs_cmd) = cmd2.find_subcommand_mut("runs") {
+                        runs_cmd.print_help()?;
+                        println!();
+                    }
+                    return Ok(());
+                }
+            };
+            runs_run(cmd)?;
         }
         Some(("topology", sub)) => {
             use cli::topology::{Format, Opts};

@@ -380,12 +380,13 @@ mod tests {
         let _g = crate::paths::test_notifier_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("STORES_NTFY_URL", "https://test.local");
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_dir.path().join("config.yaml");
+        std::fs::write(&cfg, "ntfy:\n  url: https://test.local\n").unwrap();
         let mock = install_mock();
         let conn = fresh_db();
         insert_obs(&conn, "L001", "open", None);
         let agents = AgentsYaml::default_empty();
-        let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
 
         let code = run(
             &row(serde_json::json!(["L001", "L999"]), "abc1234"),
@@ -405,7 +406,6 @@ mod tests {
         assert!(mock.events().iter().any(|(_, e)| {
             e.row_id == "T020" && e.summary.contains("L999") && e.summary.contains("no matching")
         }));
-        std::env::remove_var("STORES_NTFY_URL");
     }
 
     #[test]

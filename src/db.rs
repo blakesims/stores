@@ -2,13 +2,40 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, Transaction};
 use std::path::Path;
 
-use crate::codegen::ddl::{validate_framework_ddl, SUBSTRATE_DDL};
+use crate::codegen::ddl::{validate_framework_ddl, RUNS_VIEW_DDL, SUBSTRATE_DDL};
 use crate::handlers::framework_migrate::apply_framework_drift;
 
 /// Env var: when set to "1", `db::open` validates SUBSTRATE_DDL but skips
 /// the framework-drift auto-apply pass. Used by operators who want explicit
 /// control over `stores migrate` runs.
 const DISABLE_AUTOAPPLY_ENV: &str = "STORES_DISABLE_FRAMEWORK_AUTOAPPLY";
+
+/// Apply the `runs` VIEW DDL only when the `tasks` table exists in the DB.
+///
+/// SQLite recompiles all views on every DDL statement; a view that references
+/// a missing base table causes every subsequent DDL (even on unrelated tables)
+/// to fail with "error in view runs: no such table: main.tasks".  The tasks
+/// store is installed separately from the substrate tables (via `stores install
+/// tasks`), so this guard lets connections that only have the substrate tables
+/// (e.g. a DB with only `observations` installed) proceed without the VIEW.
+///
+/// When tasks is later installed (or already exists), the VIEW is created
+/// idempotently.  T072 / L059.
+pub(crate) fn ensure_runs_view_if_tasks_exists(conn: &Connection) -> Result<()> {
+    let tasks_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if tasks_exists {
+        conn.execute_batch(RUNS_VIEW_DDL)
+            .context("apply runs view DDL")?;
+    }
+    Ok(())
+}
 
 fn open_inner(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -20,6 +47,13 @@ fn open_inner(path: &Path) -> Result<Connection> {
     // Substrate-level tables (store-agnostic). Idempotent (CREATE IF NOT EXISTS).
     conn.execute_batch(SUBSTRATE_DDL)
         .context("apply substrate DDL")?;
+    // T072 / L059: runs VIEW over tasks.cycles JSON.  Only created when the
+    // tasks table exists — SQLite schema recompilation during later DDL (e.g.
+    // ALTER TABLE on unrelated tables) fails if a view references a missing
+    // base table.  The tasks store is installed separately from the substrate
+    // tables, so we guard the CREATE VIEW with a table-existence check.
+    ensure_runs_view_if_tasks_exists(&conn)
+        .context("apply runs view DDL")?;
     // L134 / T050 Phase 1: typed-buffer migration + legacy backfill.
     // Idempotent; safe to run on every CLI verb that opens the DB.
     crate::handlers::agents_run::ensure_dispatch_locks_typed(&conn)
