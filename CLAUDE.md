@@ -14,7 +14,7 @@
 
 ### Cross-project filing (`--meta` / `STORES_META_PATH`)
 
-When friction surfaces while doing client work, file it against the stores substrate without context-switching: pass `--meta=<PATH>` (or set `STORES_META_PATH=<PATH>` once and use bare `--meta`) to route a single CLI invocation at a META substrate. The META substrate is just another `.stores/` — by convention, the stores repo itself. The flag is global, so it works uniformly with `observations add`, `tasks add`, `tasks render`, etc. Bare `--meta` with `STORES_META_PATH` unset, or a path that doesn't contain a `.stores/` directory, errors fail-loud — no silent fallback to CWD.
+When friction surfaces while doing client work, file it against the stores substrate without context-switching: pass `--meta=<PATH>` (or set `STORES_META_PATH=<PATH>` once and use bare `--meta`) to route a single CLI invocation at a META substrate. The META substrate is just another `.stores/` — by convention, the stores repo itself. The flag is global, so it works uniformly with `intake add`, `observations add`, `tasks add`, `tasks render`, etc. Bare `--meta` with `STORES_META_PATH` unset, or a path that doesn't contain a `.stores/` directory, errors fail-loud — no silent fallback to CWD.
 
 ### `--invoker` discipline (the strict rule)
 
@@ -30,7 +30,7 @@ The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by defa
   - **Observation-first (post-T020 — the path you should default to):** `observations update LXXX --contract-state ready --approved-by blake --approved-at <now> --invoker ai_with_human --approve-token <T>`. The auto-promote subscriber (L046) creates the task autonomously within ~5s; the human does **not** separately approve "promotion." U1 covers ratification; the framework-fired task creation is grounded transitively by the human-approved upstream contract.
   - **Direct-task (escape hatch):** `tasks add --invoker ai_with_human --title ... --slug ... --done-when ... --scope-in ... --scope-out ...` for tasks born without an observation (emergency hot-fix; infrastructure work where filing→ratify→promote is overkill). Prefer observation-first when an observation would do; the observation row is the durable surface and the dominant path.
 - **U3 — Acceptance.** `tasks accept` / `tasks reject`. Tier-A (token-mediated): the user either types the verb (`--invoker human`) OR pre-authorizes via `--invoker ai_with_human --approve-token <T>` and the AI executes.
-- **U4 — Resume / amend.** `tasks resume` (blocked → ready), `tasks amend` (rejected → planning). The human must have seen the blocker / rejection and authorized the unblock.
+- **U4 — Resume / amend / abandon.** `tasks resume` (blocked → ready), `tasks amend` (rejected → planning), `tasks abandon <id> --reason <text>` (non-terminal → abandoned). The human must have seen the blocker / rejection / stale-row rationale and authorized the unblock, re-open, or retirement.
 
 (The earlier "U2 — Promotion" moment is folded into U1: with auto-promote, ratifying the contract IS the act that produces the task. There is no longer a separate U2.)
 
@@ -42,6 +42,8 @@ Each U-moment now has two equivalent grounding paths:
 Both paths are equally valid grounding. Pick (a) when the user is at the keyboard for this exact verb; pick (b) when the user has pre-authorized a session of work and wants the AI to execute without typing each verb.
 
 **Everything else is `ai_autonomous`:** every `submit-*` during a drive cycle, every `observations add` for friction encountered mid-work, every `tasks render` / `tasks status` / `tasks next-action`, every read.
+
+Task terminal/history semantics are distinct: `rejected` = reviewed-and-rejected-on-merits; `abandoned` = intentionally-retired (superseded/misadd/duplicate/stale); `closed_out_of_band` = work-shipped-via-manual-commit. `tasks abandon` is the non-destructive L002 alternative to raw rollback/delete or wiping `.stores/db.sqlite` for stale or misadded task rows.
 
 **Halting is a feature.** When autonomous work hits a moment that needs U1–U4 grounding, **halt and propose**, then write `ai_with_human` after assent. Do not pre-seek consent for autonomous moments; do not skip consent for grounding moments. The schema's rejection of an undergrounded write is the fail-loud signal we want — getting rejected is not an error to recover from, it's the substrate doing its job.
 
@@ -70,20 +72,21 @@ The doctrine is: tier-A is cryptographically gated; tier-B is honor-system; `ai_
 
 ### Bugs are observations, not blockers
 
-When the substrate hurts mid-task, **do not retreat to hand-editing markdown**. File the friction in the observations store with `--invoker ai_autonomous` — filing friction is autonomous work, not a U-moment. The observation lands in the `open` state and shows up in the next `/pickup` queue.
+When the substrate hurts mid-task, **do not retreat to hand-editing markdown**. Prefer the intake gate for autonomous local friction: `stores intake add --invoker ai_autonomous` lands raw signal in `draft` for gatekeeper classification before it becomes an observation. Filing friction is autonomous work, not a U-moment.
 
 ```bash
-stores observations add --invoker ai_autonomous \
+stores intake add --invoker ai_autonomous \
   --summary "<one-line>" \
-  --source dev \
-  --priority high|normal|low \
+  --source-agent "<planner|executor|code_reviewer|orchestrator|...>" \
   --captured-at "$(date -Iseconds)" \
-  --captured-week "$(date +w%V)" \
-  --task-id "<surfacing-task-display-id>" \
+  --captured-week "w$(date +%V)-d$(date +%u)" \
+  --source-task "<surfacing-task-display-id>" \
   --body "<longer description; --body-from-file for multi-line>"
 ```
 
-Observations get `L{:03d}` IDs (`L001`, `L002`, …) — distinct from tasks' `T###`. The `task_id` field is a soft-FK (plain text, no referential guard) — set it to the display id of the task that surfaced the friction.
+`stores observations add` remains valid as the explicit escape hatch for human / `ai_with_human` filings and for gatekeeper routing side-effects. Direct observation add is not blocked by this rule; it is no longer the default autonomous-local-friction path.
+
+Intake items get `I{:03d}` IDs (`I001`, `I002`, …). Routed observations get `L{:03d}` IDs (`L001`, `L002`, …) — distinct from tasks' `T###`. The `source_task` / observation `task_id` fields are soft-FKs (plain text, no referential guard) — set them to the display id of the task that surfaced the friction.
 
 **Observations carry their own triage tier** via their `intent_contract.tier_hint` (T0 / T1 / T2 / T3):
 - **T0** — doctrinal-only. **Do not file.** Edit `CLAUDE.md` (or the relevant doc) directly. T0 is the class of change too small or too implicit to deserve a substrate row; there is no observation, no task, no cycle.
@@ -119,9 +122,34 @@ Tasks `fs/T001`–`fs/T012` lived only in the filesystem (`tasks/completed/`). T
 
 Commit docs as soon as you write them — uncommitted files in main block accept-merge (one dirty `CLAUDE.md` line stalled T023's deploy).
 
+### Session doctrine — 2026-05-06: pragmatic escape from broken dogfood (NEVER raw-SQL the DB)
+
+The pure-dogfood rule says: drive substrate work through substrate verbs. We've already proven the system end-to-end (T021 onward); we don't need to re-prove that ratio on every task. Today's working rule trades ceremony for throughput when the substrate is too broken to drive its own fix:
+
+1. **File substrate friction as observations.** Always. The pain is the data, even when we work around it. Filing is `ai_autonomous`, not a U-moment.
+2. **Try the substrate path first** with a cheap budget (≤3 verb calls). If verbs work, ship via verbs.
+3. **If two or more substrate bugs interlock and block the fix path, escape to direct code edits.** Use Edit/Write, spawn subagents for parallel investigation/work, run normal `cargo test` / git cycles. The branch + commit + linked-observation reference in the commit message is the audit trail. Don't burn the session re-proving a ratio that's already been proven.
+4. **Hard rule: NEVER raw-SQL the substrate DB.** No `sqlite3 .stores/db.sqlite UPDATE/DELETE/INSERT`, ever. Direct DB writes bypass actor gates, transition history, validators, and on-entry hooks — the entire safety surface that makes the substrate trustworthy. If you reach for `sqlite3 ... UPDATE`, that's the signal to fix the broken handler in code instead. Same cost, infinitely more correct. *Reading via `sqlite3 ... SELECT` is fine — read-only is not a substrate write.*
+5. **Name the friction in the commit/PR.** "Couldn't dogfood because L116 + L117 interlock; direct fix tracked via L###" — so the next reader sees both the path taken and why.
+
+**Why this rule today:** the orchestrator (me) hand-edited `dispatch_locks` and `tasks` rows via raw SQL while routing around L116 (seeder race) to attempt a Pi-runner E2E on T036. That was wrong. Hand-editing markdown was already off the table; this codifies that hand-editing the DB is also off the table, with a clear pragmatic escape (edit code) so the orchestrator doesn't get stuck choosing between "violate the doctrine" and "stall indefinitely on interlocking substrate bugs."
+
+**When to revisit:** when L116 + L117 ship and the dogfood path is restored end-to-end, tighten the rule back toward "always dogfood unless [extreme circumstance]." This is a working rule for 2026-05-06, not a permanent relaxation.
+
+### Codex review as the in_review gate (2026-05-06)
+
+When a task hits `in_review`:
+
+1. Rebase the task's branch onto current `main` (codex "deleted X" findings are often stale-base artifacts).
+2. Run codex against the branch diff. If `/codex:review` fails with bwrap errors, fall back to `cd <worktree> && codex exec --dangerously-bypass-approvals-and-sandbox --color never "<focus prompt>"`.
+3. PASS / cosmetic-only → `tasks accept <id> --invoker ai_with_human --approve-token <T>`.
+4. Substantive findings, non-critical → direct-edit the worktree, commit as `<TID> codex-revise: <summary>`, re-run codex, loop until PASS.
+5. Critical / architectural findings → halt and surface to the user.
+
 ### What NOT to do
 
 - Don't retreat to hand-editing markdown when the substrate hurts. The pain is the data.
+- Don't raw-SQL the substrate DB (see § *Session doctrine — 2026-05-06* above). Reads are fine; writes are forbidden.
 - Don't paper over a substrate bug with a workaround in the task content. File the observation; then either fix the substrate (in this same task or a fresh one) or work around it explicitly so the next reader sees the friction.
 - Don't backfill placeholder rows to "align" filesystem and substrate IDs. The great divide is a feature.
 - Don't give the orchestrator agent privileged channels into the substrate (e.g. "let me pause drive"). Re-read `docs/philosophy.md` if tempted. The answer is no.
@@ -132,7 +160,9 @@ Commit docs as soon as you write them — uncommitted files in main block accept
 
 - `tasks/CLAUDE.md` — task lifecycle protocol (status state machine, section ownership, orchestrator rules). Still applies — the DB is just the new source of truth.
 - `docs/philosophy.md` — the substrate's design principles. § *What's outside the substrate* is the doctrine that grounds `--invoker` enforcement and the wrapper boundary.
+- `docs/architecture-coherence.md` — doctrine that local correctness is not architectural coherence (T045); grounds the gatekeeper / intake / architecture-review layer.
 - `docs/primitives.md` — the typed primitives the substrate composes from (working draft, with changelog). Read here before proposing schema-shape moves.
+- `docs/engine-health.md` — long-standing snapshot of where the engine bleeds, what's filed against each weakness, and what's already shipped. **Keep this up to date** at inflection points: when a batch of fixes lands (move obs to ✅), when a new high-priority bug surfaces (add a row), or when a bug class is named that wasn't previously visible (add a Layer or GAP). The doc has a self-update section at the bottom; follow it. The worklog under `docs/worklog/<date>/` carries session detail; promote insights to engine-health when they become long-standing.
 - `docs/worklog/2026-05-02/01-real-world-workflow-takeover-analysis.md` — the design discussion behind the dogfood decision.
 - `docs/worklog/2026-05-02/03-t012-workspace-path-and-next-id.md` — the substrate hooks (`workspace_path`, `next-id`) shipped in T012 to make multi-worktree dogfooding safe.
 
