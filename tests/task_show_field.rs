@@ -64,6 +64,14 @@ fn task_show_field_reads_scalars_objects_json_and_reports_missing_fields() {
         format!("{DONE_WHEN}\n")
     );
 
+    let contract_default_args = ["tasks", "show", "T001", "--field", "contract"];
+    let contract_default = assert_success(
+        stores(tmp.path(), &contract_default_args),
+        &contract_default_args,
+    );
+    let contract_default_json: Value = serde_json::from_slice(&contract_default.stdout).unwrap();
+    assert_eq!(contract_default_json["done_when"], DONE_WHEN);
+
     let contract_args = ["tasks", "show", "T001", "--field", "contract", "--json"];
     let contract = assert_success(stores(tmp.path(), &contract_args), &contract_args);
     let contract_json: Value = serde_json::from_slice(&contract.stdout).unwrap();
