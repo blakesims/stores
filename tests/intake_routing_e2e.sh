@@ -232,6 +232,28 @@ OBS_AFTER=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
 [[ "$OBS_AFTER" == "$OBS_BEFORE" ]] || fail "arch_review_candidate: rejected bypass created L### rows"
 pass "arch_review_candidate: caller-supplied A### rejected before side effects"
 
+AR_OBS_BYPASS_ID=$(add_triaging_item "attempted caller supplied source observation id")
+ARCH_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews")
+OBS_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
+FT_PENDING_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT pending_architecture_review FROM observations WHERE display_id='$FT_OBS_ID'")
+if CLAUDECODE=1 "$STORES_BIN" intake route "$AR_OBS_BYPASS_ID" --invoker ai_autonomous \
+    --decision arch_review_candidate \
+    --routed-to-observation "$FT_OBS_ID" \
+    --gatekeeper-decision-json "$DEC_JSON_AR" \
+    >out 2>err; then
+    fail "arch_review_candidate: caller-supplied routed_to_observation unexpectedly succeeded"
+fi
+grep -q "caller-supplied routed_to_observation" err || fail "arch_review_candidate: missing pre-supplied L### rejection"
+AR_OBS_BYPASS_STATE=$(sqlite3 .stores/db.sqlite "SELECT status || '|' || COALESCE(routed_to_observation,'') || '|' || COALESCE(routed_to_arch_review,'') FROM intake WHERE display_id='$AR_OBS_BYPASS_ID'")
+ARCH_AFTER=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews")
+OBS_AFTER=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
+FT_PENDING_AFTER=$(sqlite3 .stores/db.sqlite "SELECT pending_architecture_review FROM observations WHERE display_id='$FT_OBS_ID'")
+[[ "$AR_OBS_BYPASS_STATE" == "triaging||" ]] || fail "arch_review_candidate: rejected L### bypass mutated intake: $AR_OBS_BYPASS_STATE"
+[[ "$ARCH_AFTER" == "$ARCH_BEFORE" ]] || fail "arch_review_candidate: rejected L### bypass created A### rows"
+[[ "$OBS_AFTER" == "$OBS_BEFORE" ]] || fail "arch_review_candidate: rejected L### bypass created L### rows"
+[[ "$FT_PENDING_AFTER" == "$FT_PENDING_BEFORE" ]] || fail "arch_review_candidate: rejected L### bypass marked preexisting observation pending"
+pass "arch_review_candidate: caller-supplied L### rejected before side effects"
+
 # ---------------------------------------------------------------------------
 # Decision 5: needs_info (with recon-return loop)
 # ---------------------------------------------------------------------------

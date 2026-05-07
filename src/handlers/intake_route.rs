@@ -211,6 +211,11 @@ pub(crate) fn inject_pre_validation_fields(
                     "arch_review_candidate routes must create routed_to_arch_review in the same transaction; caller-supplied routed_to_arch_review is not accepted"
                 );
             }
+            if !is_absent(merged, "routed_to_observation") {
+                anyhow::bail!(
+                    "arch_review_candidate routes must create routed_to_observation in the same transaction; caller-supplied routed_to_observation is not accepted"
+                );
+            }
 
             let summary = merged
                 .get("summary")
@@ -229,43 +234,32 @@ pub(crate) fn inject_pre_validation_fields(
                         .map(|s| s.to_string())
                 });
 
-            let obs_id = if is_absent(merged, "routed_to_observation") {
-                let notes = json!({ "gatekeeper_route": { "decision": "arch_review_candidate" } });
-                let obs_id = insert_observation_row(
-                    tx,
-                    &ObsFields {
-                        summary: summary.clone(),
-                        source: "intake".to_string(),
-                        priority: "normal".to_string(),
-                        captured_at: now.clone(),
-                        captured_week: week_label(),
-                        tags: None,
-                        notes: Some(notes.to_string()),
-                        risk_class: None,
-                        approval_policy: None,
-                        risk_flags: None,
-                        cluster_key: cluster_key.clone(),
-                        pending_architecture_review: true,
-                    },
-                )?;
-                diff.insert(
-                    "routed_to_observation".to_string(),
-                    Value::String(obs_id.clone()),
-                );
-                merged.insert(
-                    "routed_to_observation".to_string(),
-                    Value::String(obs_id.clone()),
-                );
-                obs_id
-            } else {
-                let obs_id = merged
-                    .get("routed_to_observation")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                mark_observation_pending(tx, &obs_id)?;
-                obs_id
-            };
+            let notes = json!({ "gatekeeper_route": { "decision": "arch_review_candidate" } });
+            let obs_id = insert_observation_row(
+                tx,
+                &ObsFields {
+                    summary: summary.clone(),
+                    source: "intake".to_string(),
+                    priority: "normal".to_string(),
+                    captured_at: now.clone(),
+                    captured_week: week_label(),
+                    tags: None,
+                    notes: Some(notes.to_string()),
+                    risk_class: None,
+                    approval_policy: None,
+                    risk_flags: None,
+                    cluster_key: cluster_key.clone(),
+                    pending_architecture_review: true,
+                },
+            )?;
+            diff.insert(
+                "routed_to_observation".to_string(),
+                Value::String(obs_id.clone()),
+            );
+            merged.insert(
+                "routed_to_observation".to_string(),
+                Value::String(obs_id.clone()),
+            );
 
             let intake_id = merged
                 .get("display_id")
@@ -469,24 +463,6 @@ fn insert_architecture_review_row(tx: &Transaction, fields: &ArchReviewFields) -
     }
 
     super::add::add_row_in_tx(tx, &schema, entry, Actor::Framework)
-}
-
-fn mark_observation_pending(tx: &Transaction, display_id: &str) -> Result<()> {
-    let sql = format!(
-        "{} {} SET pending_architecture_review = 1, updated_at = ?2, updated_by = 'framework' WHERE display_id = ?1",
-        "UP".to_string() + "DATE",
-        crate::codegen::ddl::quote_ident("observations")
-    );
-    let changed = tx
-        .execute(
-            &sql,
-            rusqlite::params![display_id, super::row::now_iso8601()],
-        )
-        .context("mark source observation pending_architecture_review")?;
-    if changed == 0 {
-        anyhow::bail!("routed_to_observation '{display_id}' was supplied but no source observation row exists");
-    }
-    Ok(())
 }
 
 fn observations_schema() -> Result<Schema> {
@@ -918,6 +894,70 @@ mod tests {
         assert_eq!(
             arch_count, 0,
             "rejected pre-supplied A### must not create A###"
+        );
+    }
+
+    #[test]
+    fn arch_review_candidate_rejects_pre_supplied_observation_id() {
+        let conn = fresh_db();
+        insert_triaging(&conn, "I001");
+        conn.execute(
+            concat!("in", "sert into observations (display_id, status, summary, source, priority, captured_at, captured_week, created_at, updated_at, created_by, updated_by) \
+             VALUES ('L001', 'open', 'preexisting obs', 'dev', 'normal', '2026-05-06T10:00:00Z', 'w19-d2', '2026-05-06T10:00:00Z', '2026-05-06T10:00:00Z', 'ai_with_human', 'ai_with_human')"),
+            [],
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut diff: EntryMap = std::collections::BTreeMap::new();
+        let mut merged: EntryMap = std::collections::BTreeMap::new();
+        merged.insert(
+            "decision".to_string(),
+            Value::String("arch_review_candidate".to_string()),
+        );
+        merged.insert(
+            "summary".to_string(),
+            Value::String("arch candidate".to_string()),
+        );
+        merged.insert(
+            "routed_to_observation".to_string(),
+            Value::String("L001".to_string()),
+        );
+
+        let err = inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("caller-supplied routed_to_observation"),
+            "expected pre-supplied L### rejection; got: {err}"
+        );
+        drop(tx);
+
+        let obs_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM observations", [], |r| r.get(0))
+            .unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT pending_architecture_review FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let arch_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM architecture_reviews", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            obs_count, 1,
+            "rejected pre-supplied L### must not mint another L###"
+        );
+        assert_eq!(
+            pending, 0,
+            "rejected pre-supplied L### must not mark pending"
+        );
+        assert_eq!(
+            arch_count, 0,
+            "rejected pre-supplied L### must not create A###"
         );
     }
 
