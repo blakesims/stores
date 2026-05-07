@@ -15,7 +15,7 @@ use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const STALE_DAEMON_MESSAGE: &str = "daemon binary stale after cargo install; restart required";
 
@@ -339,11 +339,187 @@ fn cstring_arg(arg: &std::ffi::OsStr) -> Result<CString> {
     CString::new(arg.as_bytes()).context("daemon reexec argv contains interior NUL")
 }
 
+const STALE_REEXEC_VALIDATION_TIMEOUT: Duration = Duration::from_millis(1500);
+const STALE_REEXEC_OUTPUT_LIMIT: usize = 512;
+
+#[derive(Debug)]
+struct CandidateValidationFailure {
+    path: PathBuf,
+    size: Option<u64>,
+    command: String,
+    /// Stringified exit status for diagnostics. Numeric codes are rendered as
+    /// their integer value; synthetic cases use sentinel strings:
+    ///   - `"timeout"` — process exceeded the validation deadline
+    ///   - `"spawn_failed"` — `spawn()` / `wait()` I/O error; no OS exit code
+    exit_status: Option<String>,
+    reason: String,
+    stdout: String,
+    stderr: String,
+}
+
+fn bounded_output(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out: String = text.chars().take(STALE_REEXEC_OUTPUT_LIMIT).collect();
+    if text.chars().count() > STALE_REEXEC_OUTPUT_LIMIT {
+        out.push_str("...[truncated]");
+    }
+    out.replace('\n', "\\n")
+}
+
+fn validate_stale_reexec_candidate(
+    path: &Path,
+) -> std::result::Result<(), CandidateValidationFailure> {
+    let size = std::fs::metadata(path).map(|m| m.len()).ok();
+    let command = format!("{} --help", path.display());
+    let mut cmd = std::process::Command::new(path);
+    cmd.arg("--help")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    let mut child = cmd.spawn().map_err(|e| CandidateValidationFailure {
+        path: path.to_path_buf(),
+        size,
+        command: command.clone(),
+        exit_status: Some("spawn_failed".to_string()),
+        reason: format!("spawn error: {e}"),
+        stdout: String::new(),
+        stderr: String::new(),
+    })?;
+
+    let deadline = Instant::now() + STALE_REEXEC_VALIDATION_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|e| CandidateValidationFailure {
+                        path: path.to_path_buf(),
+                        size,
+                        command: command.clone(),
+                        exit_status: Some("spawn_failed".to_string()),
+                        reason: format!("collect output error: {e}"),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })?;
+                let stdout = bounded_output(&output.stdout);
+                let stderr = bounded_output(&output.stderr);
+                let exit_status_str = Some(
+                    output
+                        .status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| output.status.to_string()),
+                );
+                if !output.status.success() {
+                    return Err(CandidateValidationFailure {
+                        path: path.to_path_buf(),
+                        size,
+                        command,
+                        exit_status: exit_status_str,
+                        reason: format!("non-success exit status: {}", output.status),
+                        stdout,
+                        stderr,
+                    });
+                }
+                if output.stdout.is_empty() {
+                    return Err(CandidateValidationFailure {
+                        path: path.to_path_buf(),
+                        size,
+                        command,
+                        exit_status: exit_status_str,
+                        reason: "empty stdout from --help".to_string(),
+                        stdout,
+                        stderr,
+                    });
+                }
+                let stdout_text = String::from_utf8_lossy(&output.stdout).to_lowercase();
+                if !stdout_text.contains("schema-driven store framework") {
+                    return Err(CandidateValidationFailure {
+                        path: path.to_path_buf(),
+                        size,
+                        command,
+                        exit_status: exit_status_str,
+                        reason: "missing stores marker in --help stdout".to_string(),
+                        stdout,
+                        stderr,
+                    });
+                }
+                return Ok(());
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    #[cfg(unix)]
+                    unsafe {
+                        let _ = libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+                    }
+                    #[cfg(not(unix))]
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(CandidateValidationFailure {
+                        path: path.to_path_buf(),
+                        size,
+                        command,
+                        exit_status: Some("timeout".to_string()),
+                        reason: format!(
+                            "timeout after {}ms",
+                            STALE_REEXEC_VALIDATION_TIMEOUT.as_millis()
+                        ),
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    });
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CandidateValidationFailure {
+                    path: path.to_path_buf(),
+                    size,
+                    command,
+                    exit_status: Some("spawn_failed".to_string()),
+                    reason: format!("wait error: {e}"),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+        }
+    }
+}
+
+fn log_candidate_validation_failure(f: &CandidateValidationFailure) {
+    eprintln!(
+        "candidate stores binary failed validation: path={} size={} command='{}' exit_status={} reason={} stdout='{}' stderr='{}'; {}",
+        f.path.display(),
+        f.size.map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string()),
+        f.command,
+        f.exit_status.as_deref().unwrap_or("unknown"),
+        f.reason,
+        f.stdout,
+        f.stderr,
+        STALE_DAEMON_MESSAGE
+    );
+}
+
 fn handle_stale_daemon_reexec<P: BinaryIdentityProvider>(
     guard: &DaemonExeGuard<P>,
     argv: &[OsString],
 ) -> Result<()> {
     log_stale_reexec_attempt_once(guard);
+    if let Err(failure) = validate_stale_reexec_candidate(guard.launch_path()) {
+        log_candidate_validation_failure(&failure);
+        bail!(STALE_DAEMON_MESSAGE);
+    }
     let path_c = match cstring_arg(guard.launch_path().as_os_str()) {
         Ok(path) => path,
         Err(e) => {
@@ -3798,7 +3974,10 @@ policies:
         let check: crate::flow::checks::CheckResult = serde_json::from_str(payload).unwrap();
         assert_eq!(check.check_id, "drive_pid_recorded_or_terminal");
         assert_eq!(check.outcome, crate::flow::checks::CheckOutcome::Fail);
-        assert_eq!(check.args.get("display_id").and_then(|v| v.as_str()), Some("T850"));
+        assert_eq!(
+            check.args.get("display_id").and_then(|v| v.as_str()),
+            Some("T850")
+        );
         assert!(!check.observed_at.is_empty());
         assert!(check.reason.is_some());
         let th_count: i64 = conn
