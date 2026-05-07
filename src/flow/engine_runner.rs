@@ -12,7 +12,7 @@ use std::path::Path;
 
 use crate::codegen::ddl::quote_ident;
 use crate::flow::AgentsYaml;
-use crate::handlers::agents_run::{count_live_drive_pids, pid_is_alive};
+use crate::handlers::agents_run::pid_is_alive;
 use crate::handlers::next_action::find_next_agent;
 use crate::schema::Schema;
 use crate::validate::EntryMap;
@@ -176,10 +176,9 @@ pub fn scan_record_and_redrive_tasks(
             && r.held_reason.is_none()
     }) {
         processed_task_rows.insert(row.row_id);
-        let live_pids = count_live_drive_pids(conn).unwrap_or(0);
-        let live_locks = count_live_auto_drive_dispatch_locks(conn, started_at, claim_window_secs)
-            .unwrap_or(0);
-        if live_pids.max(live_locks) >= cap {
+        let occupied =
+            count_active_auto_drive_capacity(conn, started_at, claim_window_secs).unwrap_or(0);
+        if occupied >= cap {
             row.classification = "held".to_string();
             row.held_reason = Some("lane_cap_full".to_string());
             upsert_actionability(
@@ -475,7 +474,9 @@ fn has_live_dispatch_lock(
            AND COALESCE(claimed_at, '') >= ?4",
     )?;
     let pids: Vec<i64> = stmt
-        .query_map(rusqlite::params![store, row_id, agent, cutoff], |r| r.get(0))?
+        .query_map(rusqlite::params![store, row_id, agent, cutoff], |r| {
+            r.get(0)
+        })?
         .filter_map(|r| r.ok())
         .collect();
     Ok(pids
@@ -483,25 +484,42 @@ fn has_live_dispatch_lock(
         .any(|pid| pid <= 0 || pid_is_alive(pid as i32)))
 }
 
-pub(crate) fn count_live_auto_drive_dispatch_locks(
+/// Count occupied auto-drive capacity as the union of active task owners and
+/// in-window unfinished auto-drive locks. Same task row counted once.
+pub(crate) fn count_active_auto_drive_capacity(
     conn: &Connection,
     started_at: &str,
     claim_window_secs: u64,
 ) -> Result<usize> {
+    let mut occupied = std::collections::BTreeSet::new();
+
+    let mut task_stmt =
+        conn.prepare("SELECT id, drive_pid FROM tasks WHERE drive_pid IS NOT NULL")?;
+    let task_rows = task_stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+    for row in task_rows.filter_map(|r| r.ok()) {
+        let (row_id, pid) = row;
+        if pid_is_alive(pid as i32) {
+            occupied.insert(row_id);
+        }
+    }
+
     let cutoff = iso8601_sub_secs(started_at, claim_window_secs).unwrap_or_default();
-    let mut stmt = conn.prepare(
-        "SELECT COALESCE(pid, 0) FROM dispatch_locks \
+    let mut lock_stmt = conn.prepare(
+        "SELECT row_id, COALESCE(pid, 0) FROM dispatch_locks \
          WHERE store='tasks' AND agent_name='auto-drive' AND finished_at IS NULL \
            AND COALESCE(claimed_at, '') >= ?1",
     )?;
-    let pids: Vec<i64> = stmt
-        .query_map(rusqlite::params![cutoff], |r| r.get(0))?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(pids
-        .into_iter()
-        .filter(|pid| *pid <= 0 || pid_is_alive(*pid as i32))
-        .count())
+    let lock_rows = lock_stmt.query_map(rusqlite::params![cutoff], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    for row in lock_rows.filter_map(|r| r.ok()) {
+        let (row_id, pid) = row;
+        if pid <= 0 || pid_is_alive(pid as i32) {
+            occupied.insert(row_id);
+        }
+    }
+
+    Ok(occupied.len())
 }
 
 fn auto_drive_claim_window_secs(agents: &AgentsYaml) -> u64 {
@@ -542,7 +560,13 @@ fn ymd_hms_to_epoch(y: u32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
         match m {
             1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
             4 | 6 | 9 | 11 => 30,
-            2 => if is_leap(y) { 29 } else { 28 },
+            2 => {
+                if is_leap(y) {
+                    29
+                } else {
+                    28
+                }
+            }
             _ => 0,
         }
     }
@@ -1100,6 +1124,60 @@ mod tests {
             .unwrap();
         assert_eq!(held.as_deref(), Some("lane_cap_full"));
         assert_eq!(locks, 0);
+    }
+
+    #[test]
+    fn action_loop_lane_cap_counts_mixed_live_pid_and_lock_capacity() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let live_id = insert_task(&conn, "T915", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![std::process::id() as i64, live_id],
+        )
+        .unwrap();
+        let locked_id = insert_task(&conn, "T916", "executing");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, claimed_at, claimed_by, pid) \
+             VALUES ('tasks', ?1, 'T916', 'auto-drive', '2026-05-07T00:09:00Z', 'daemon', 0)",
+            rusqlite::params![locked_id],
+        )
+        .unwrap();
+        let orphan_id = insert_task(&conn, "T917", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE id=?2",
+            rusqlite::params![999_999_994_i64, orphan_id],
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config.yaml");
+        std::fs::write(&cfg, "drive:\n  max_parallel: 2\n").unwrap();
+
+        scan_record_and_redrive_tasks(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            14,
+            "2026-05-07T00:10:00Z",
+            &AgentsYaml::default_empty(),
+            &cfg,
+            "",
+        )
+        .unwrap();
+
+        let (held, orphan_locks): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT a.held_reason, \
+                        (SELECT COUNT(*) FROM dispatch_locks WHERE row_id=?1 AND agent_name='auto-drive') \
+                 FROM engine_runner_actions a WHERE a.store='tasks' AND a.row_id=?1",
+                rusqlite::params![orphan_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(held.as_deref(), Some("lane_cap_full"));
+        assert_eq!(orphan_locks, 0);
     }
 
     #[test]
