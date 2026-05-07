@@ -2316,13 +2316,13 @@ mod tests {
             )
             .unwrap();
         assert!(
-            finished_at.is_some(),
-            "T049: auto-drive lock must be closed by drive_loop's first submit"
+            finished_at.is_none(),
+            "T067: first submit with pending next_agent keeps auto-drive lock in-flight"
         );
         assert_eq!(
             last_status.as_deref(),
-            Some("ok"),
-            "T049: closed lock must carry last_status='ok'"
+            Some("in_flight:pending_next"),
+            "T067: pending handoff lock must carry last_status='in_flight:pending_next'"
         );
     }
 

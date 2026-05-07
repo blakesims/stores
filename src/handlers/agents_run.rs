@@ -901,15 +901,32 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                         &status_str,
                     );
                 }
-                let _ = mark_claim_finished_typed(
-                    conn,
-                    &sub.store,
-                    row_id,
-                    &display_id,
-                    agent,
-                    &terminal_reason,
-                    &status_str,
-                );
+                if agent.name == "auto-drive"
+                    && terminal_reason == "ok"
+                    && crate::flow::builtins::auto_drive::has_pending_auto_drive_work(
+                        conn,
+                        &display_id,
+                    )
+                    .unwrap_or(false)
+                {
+                    let _ = mark_auto_drive_pending_handoff(
+                        conn,
+                        &sub.store,
+                        row_id,
+                        &display_id,
+                        agent,
+                    );
+                } else {
+                    let _ = mark_claim_finished_typed(
+                        conn,
+                        &sub.store,
+                        row_id,
+                        &display_id,
+                        agent,
+                        &terminal_reason,
+                        &status_str,
+                    );
+                }
                 if code != 0 {
                     route_failure_to_deploy_blocked(
                         conn,
@@ -1058,15 +1075,27 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                     &status_str,
                 );
             }
-            let _ = mark_claim_finished_typed(
-                conn,
-                &c.store,
-                c.row_id,
-                &c.display_id,
-                agent,
-                &terminal_reason,
-                &status_str,
-            );
+            if agent.name == "auto-drive"
+                && terminal_reason == "ok"
+                && crate::flow::builtins::auto_drive::has_pending_auto_drive_work(
+                    conn,
+                    &c.display_id,
+                )
+                .unwrap_or(false)
+            {
+                let _ =
+                    mark_auto_drive_pending_handoff(conn, &c.store, c.row_id, &c.display_id, agent);
+            } else {
+                let _ = mark_claim_finished_typed(
+                    conn,
+                    &c.store,
+                    c.row_id,
+                    &c.display_id,
+                    agent,
+                    &terminal_reason,
+                    &status_str,
+                );
+            }
             if code != 0 {
                 route_failure_to_deploy_blocked(
                     conn,
@@ -1418,9 +1447,23 @@ pub(crate) fn route_failure_to_deploy_blocked(
 /// second call is a no-op zero-row UPDATE.
 pub(crate) fn close_auto_drive_lock_ok(conn: &Connection, display_id: &str) -> Result<()> {
     let now = crate::handlers::row::now_iso8601();
+    if crate::flow::builtins::auto_drive::has_pending_auto_drive_work(conn, display_id)
+        .unwrap_or(false)
+    {
+        conn.execute(
+            "UPDATE dispatch_locks SET last_status = 'in_flight:pending_next', finished_at = NULL, \
+                                      claimed_at = ?1, attempts = attempts + 1, \
+                                      terminal_reason = NULL, next_retry_at = NULL \
+             WHERE store = 'tasks' AND display_id = ?2 AND agent_name = 'auto-drive' \
+               AND finished_at IS NULL",
+            rusqlite::params![now, display_id],
+        )?;
+        return Ok(());
+    }
     conn.execute(
         "UPDATE dispatch_locks SET last_status = 'ok', finished_at = ?1, \
-                                  claimed_at = ?1, attempts = attempts + 1 \
+                                  claimed_at = ?1, attempts = attempts + 1, \
+                                  terminal_reason = 'ok', next_retry_at = NULL \
          WHERE store = 'tasks' AND display_id = ?2 AND agent_name = 'auto-drive' \
            AND finished_at IS NULL",
         rusqlite::params![now, display_id],
@@ -1676,6 +1719,32 @@ fn next_retry_at_for(
     } else {
         None
     }
+}
+
+fn mark_auto_drive_pending_handoff(
+    conn: &Connection,
+    store: &str,
+    row_id: i64,
+    display_id: &str,
+    agent: &AgentEntry,
+) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    let completed_attempt = conn
+        .query_row(
+            "SELECT COALESCE(attempts, 0) + 1 FROM dispatch_locks \
+             WHERE store = ?1 AND row_id = ?2 AND agent_name = ?3",
+            rusqlite::params![store, row_id, &agent.name],
+            |r| r.get::<_, u32>(0),
+        )
+        .unwrap_or(1);
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = 'in_flight:pending_next', finished_at = NULL, \
+         attempts = attempts + 1, attempt = ?1, terminal_reason = NULL, next_retry_at = NULL \
+         WHERE store = ?2 AND row_id = ?3 AND agent_name = ?4",
+        rusqlite::params![completed_attempt, store, row_id, &agent.name],
+    )?;
+    let _ = (display_id, now);
+    Ok(())
 }
 
 fn mark_claim_finished_typed(

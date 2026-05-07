@@ -58,7 +58,10 @@ fn agents_run_once_flag_exists_and_succeeds() {
 #[test]
 fn silent_zombie_lock_already_closed_e2e() {
     let bin = bin();
-    assert!(bin.exists(), "CARGO_BIN_EXE_stores must point at a built binary");
+    assert!(
+        bin.exists(),
+        "CARGO_BIN_EXE_stores must point at a built binary"
+    );
 
     let tmp = tempfile::tempdir().expect("tmpdir");
     let workspace = tmp.path();
@@ -172,7 +175,10 @@ fn silent_zombie_lock_already_closed_e2e() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(cnt, 1, "exactly one to_status='blocked' history row must land");
+    assert_eq!(
+        cnt, 1,
+        "exactly one to_status='blocked' history row must land"
+    );
 }
 
 /// L141 -> L134: end-to-end regression for the closed-ok-lock dead-PID detection path.
@@ -200,7 +206,10 @@ fn silent_zombie_lock_already_closed_e2e() {
 #[test]
 fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
     let bin = bin();
-    assert!(bin.exists(), "CARGO_BIN_EXE_stores must point at a built binary");
+    assert!(
+        bin.exists(),
+        "CARGO_BIN_EXE_stores must point at a built binary"
+    );
 
     let tmp = tempfile::tempdir().expect("tmpdir");
     let workspace = tmp.path();
@@ -351,9 +360,7 @@ fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
     // Brief wait for the kernel to reap. The watchdog uses kill(pid, 0)
     // (`pid_is_alive`); after SIGKILL + reaping, that returns ESRCH.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while std::time::Instant::now() < deadline
-        && unsafe { libc::kill(pid as i32, 0) } == 0
-    {
+    while std::time::Instant::now() < deadline && unsafe { libc::kill(pid as i32, 0) } == 0 {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
@@ -422,4 +429,117 @@ fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
         Some("silent_zombie"),
         "L141 -> L134: watchdog updates terminal_reason to 'silent_zombie' after flip"
     );
+}
+
+/// T067: dead auto-drive handoff at in_review with pending next_agent=wrap is
+/// re-dispatched by the daemon watchdog; no manual `stores tasks drive` call.
+#[test]
+fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
+    let bin = bin();
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let workspace = tmp.path();
+    let stores_dir = workspace.join(".stores");
+    std::fs::create_dir_all(&stores_dir).unwrap();
+    let db_path = stores_dir.join("db.sqlite");
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        install_store_ddl(&conn, "tasks");
+        install_store_ddl(&conn, "observations");
+    }
+    std::fs::write(stores_dir.join("manifest.yaml"), "stores: []\n").unwrap();
+
+    let stale = "2026-01-01T00:00:00Z";
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, slug, branch, tier_hint, workspace_path, \
+                            contract, drive_pid, drive_started_at, wrap_log, \
+                            created_at, updated_at, created_by, updated_by) \
+         VALUES ('T967', 'in_review', 'pending-wrap', 'pending-wrap', 'feat/wrap', 'T2', ?1, \
+                 '{\"done_when\":\"x\",\"scope_in\":\"y\",\"scope_out\":\"z\"}', \
+                 ?2, ?3, NULL, ?3, ?3, 'framework', 'framework')",
+        rusqlite::params![workspace.to_str().unwrap(), dead_pid(), stale],
+    )
+    .unwrap();
+    let row_id: i64 = conn
+        .query_row("SELECT id FROM tasks WHERE display_id='T967'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    conn.execute(
+        "INSERT INTO dispatch_locks \
+         (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, \
+          last_status, finished_at, terminal_reason, postcondition_id, postcondition_args) \
+         VALUES ('tasks', ?1, 'T967', 'auto-drive', 1, ?2, 'dead-drive', \
+                 'ok', ?2, 'ok', 'drive_pid_recorded_or_terminal', \
+                 '{\"display_id\":\"T967\",\"store\":\"tasks\"}')",
+        rusqlite::params![row_id, stale],
+    )
+    .unwrap();
+    drop(conn);
+
+    let py = r#"python3 -c 'import sqlite3; c=sqlite3.connect(".stores/db.sqlite"); c.execute("UPDATE tasks SET wrap_log=? WHERE display_id=?", ("[{\"executive_summary\":\"auto wrap\"}]", "T967")); c.commit()' #"#;
+    let output = Command::new(&bin)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(workspace)
+        .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
+        .env("STORES_DRIVE_CMD", py)
+        .output()
+        .expect("invoke daemon");
+    assert!(
+        output.status.success(),
+        "agents run --once failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let conn = Connection::open(&db_path).unwrap();
+        let wrap_log: Option<String> = conn
+            .query_row(
+                "SELECT wrap_log FROM tasks WHERE display_id='T967'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if wrap_log.as_deref().unwrap_or("").contains("auto wrap") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "wrap_log not populated; got {wrap_log:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let conn = Connection::open(&db_path).unwrap();
+    let (status, terminal_reason, finished_at, pid, wrap_log): (
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT t.status, dl.terminal_reason, dl.finished_at, t.drive_pid, t.wrap_log \
+         FROM tasks t JOIN dispatch_locks dl ON dl.row_id=t.id \
+         WHERE t.display_id='T967' AND dl.agent_name='auto-drive'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "in_review");
+    assert!(
+        pid > 0 && pid != dead_pid(),
+        "watchdog must record a new drive_pid"
+    );
+    assert!(
+        terminal_reason.is_none(),
+        "redispatched handoff remains in-flight, not terminal ok"
+    );
+    assert!(
+        finished_at.is_none(),
+        "redispatched handoff lock remains open"
+    );
+    assert!(wrap_log.contains("auto wrap"));
 }
