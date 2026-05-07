@@ -497,6 +497,11 @@ pub fn reconcile_pending_external_review_dispatch(
         }
     }
 
+    // Promote elapsed tooling_held rows before candidate enumeration so retry-review
+    // rows re-enter the same Layer 2 pending-dispatch path on this tick.
+    crate::flow::builtins::external_review::promote_elapsed_tooling_held(conn)
+        .context("Layer2: promote elapsed tooling_held external_reviews")?;
+
     // Candidates: pending ER rows with no live (unfinished) dispatch_lock.
     // "Live" = dispatch_lock row exists AND finished_at IS NULL.
     // Rows with finished locks (skip-historical or completed) are re-eligible.

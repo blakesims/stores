@@ -540,6 +540,191 @@ fn layer2_repeated_tick_does_not_duplicate_dispatch() {
     assert_eq!(running_count, 1, "exactly ONE pending→running transition must exist");
 }
 
+
+#[test]
+fn layer2_elapsed_tooling_held_promotes_and_dispatches_same_tick() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    external_review::visible_status_rows(&conn).unwrap();
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "in_review");
+    insert_review(&conn, "ER080", "T900", "tooling_held", 1);
+    conn.execute(
+        "UPDATE external_reviews \
+         SET next_retry_at='2000-01-01T00:00:00Z', held_reason='prev tooling failure', verdict='TOOLING_FAILURE' \
+         WHERE display_id='ER080'",
+        [],
+    ).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
+    let cfg_path = cfg(tmp.path(), &sh, 2);
+    let a = agents();
+
+    let dispatches = reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
+
+    assert_eq!(dispatches.len(), 1, "elapsed tooling_held row must dispatch same tick");
+    assert_eq!(dispatches[0].review_display_id, "ER080");
+    assert_eq!(dispatches[0].outcome, ExternalReviewDispatchOutcome::Dispatched);
+
+    let (status, verdict, next_retry_at): (String, String, Option<String>) = conn.query_row(
+        "SELECT status, verdict, next_retry_at FROM external_reviews WHERE display_id='ER080'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).unwrap();
+    assert_eq!(status, "passed");
+    assert_eq!(verdict, "PASS");
+    assert!(next_retry_at.is_none(), "retry timestamp must clear on retry-review promotion");
+
+    let retry_hist: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='external_reviews' AND display_id='ER080' \
+           AND from_status='tooling_held' AND to_status='pending' AND verb='retry-review'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(retry_hist, 1, "exactly one retry-review transition must be recorded");
+
+    let running_hist: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='external_reviews' AND display_id='ER080' \
+           AND from_status='pending' AND to_status='running' AND verb='start-review'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(running_hist, 1, "dispatch attempt must fire after promotion");
+}
+
+
+#[test]
+fn layer2_elapsed_tooling_held_tooling_failure_reholds_with_new_retry() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    external_review::visible_status_rows(&conn).unwrap();
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "in_review");
+    insert_review(&conn, "ER083", "T900", "tooling_held", 1);
+    conn.execute(
+        "UPDATE external_reviews \
+         SET next_retry_at='2000-01-01T00:00:00Z', held_reason='prev tooling failure', verdict='TOOLING_FAILURE' \
+         WHERE display_id='ER083'",
+        [],
+    ).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: TOOLING_FAILURE'\n");
+    let cfg_path = cfg(tmp.path(), &sh, 2);
+    let a = agents();
+
+    let dispatches = reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
+
+    assert_eq!(dispatches.len(), 1, "elapsed retry must dispatch even when tooling fails again");
+    assert_eq!(dispatches[0].outcome, ExternalReviewDispatchOutcome::Dispatched);
+    let (status, verdict, held_reason, next_retry_at): (String, String, String, String) = conn.query_row(
+        "SELECT status, verdict, held_reason, next_retry_at FROM external_reviews WHERE display_id='ER083'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).unwrap();
+    assert_eq!(status, "tooling_held");
+    assert_eq!(verdict, "TOOLING_FAILURE");
+    assert_eq!(held_reason, "runner returned TOOLING_FAILURE");
+    assert_ne!(next_retry_at, "2000-01-01T00:00:00Z");
+
+    let retry_hist: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='external_reviews' AND display_id='ER083' \
+           AND from_status='tooling_held' AND to_status='pending' AND verb='retry-review'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(retry_hist, 1, "retry-review must be recorded before re-hold");
+}
+
+#[test]
+fn layer2_future_tooling_held_retry_is_unchanged() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    external_review::visible_status_rows(&conn).unwrap();
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "in_review");
+    insert_review(&conn, "ER081", "T900", "tooling_held", 1);
+    conn.execute(
+        "UPDATE external_reviews \
+         SET next_retry_at='2999-01-01T00:00:00Z', held_reason='prev tooling failure', verdict='TOOLING_FAILURE' \
+         WHERE display_id='ER081'",
+        [],
+    ).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
+    let cfg_path = cfg(tmp.path(), &sh, 2);
+    let a = agents();
+
+    let dispatches = reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
+
+    assert!(dispatches.is_empty(), "future retry row must not dispatch early");
+    let (status, held_reason, next_retry_at): (String, String, String) = conn.query_row(
+        "SELECT status, held_reason, next_retry_at FROM external_reviews WHERE display_id='ER081'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).unwrap();
+    assert_eq!(status, "tooling_held");
+    assert_eq!(held_reason, "prev tooling failure");
+    assert_eq!(next_retry_at, "2999-01-01T00:00:00Z");
+
+    let retry_hist: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='external_reviews' AND display_id='ER081' \
+           AND from_status='tooling_held' AND to_status='pending'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(retry_hist, 0, "future retry row must not record retry-review");
+}
+
+#[test]
+fn layer2_elapsed_tooling_held_retry_is_idempotent_across_ticks() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    external_review::visible_status_rows(&conn).unwrap();
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "in_review");
+    insert_review(&conn, "ER082", "T900", "tooling_held", 1);
+    conn.execute(
+        "UPDATE external_reviews \
+         SET next_retry_at='2000-01-01T00:00:00Z', held_reason='prev tooling failure', verdict='TOOLING_FAILURE' \
+         WHERE display_id='ER082'",
+        [],
+    ).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
+    let cfg_path = cfg(tmp.path(), &sh, 2);
+    let a = agents();
+
+    let tick1 = reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
+    let tick2 = reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
+
+    assert_eq!(tick1.len(), 1, "first elapsed tick must dispatch");
+    assert!(tick2.is_empty(), "second tick must not duplicate retry dispatch");
+    let retry_hist: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='external_reviews' AND display_id='ER082' \
+           AND from_status='tooling_held' AND to_status='pending' AND verb='retry-review'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(retry_hist, 1, "repeated ticks must record one retry-review only");
+    let running_hist: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='external_reviews' AND display_id='ER082' \
+           AND from_status='pending' AND to_status='running' AND verb='start-review'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(running_hist, 1, "repeated ticks must start one retry attempt only");
+}
+
 /// Test: 0 running + 3 pending + cap=2 → exactly 2 dispatched, 1 remains pending.
 ///
 /// Pi msg_577e80a3 / msg_6c40e0b6: cap = max RUNNING jobs; pending rows are
