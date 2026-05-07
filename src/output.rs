@@ -147,15 +147,17 @@ fn value_display(v: &Value) -> String {
     }
 }
 
-/// Print a list of entries as a scannable human-readable table.
+/// Print a list of entries as the default scannable human-readable table.
 pub fn print_list_table(entries: &[BTreeMap<String, Value>]) {
     print!("{}", list_table_text(entries));
 }
 
+/// Render entries as a table using the detected terminal width for summary truncation.
 pub fn list_table_text(entries: &[BTreeMap<String, Value>]) -> String {
     list_table_text_with_width(entries, terminal_width())
 }
 
+/// Render entries as a table using an explicit terminal width for deterministic tests.
 pub fn list_table_text_with_width(entries: &[BTreeMap<String, Value>], width: usize) -> String {
     const HEADERS: [&str; 5] = ["display_id", "status", "priority", "source", "summary"];
     let rows: Vec<[String; 5]> = entries.iter().map(standard_list_row).collect();
@@ -281,11 +283,12 @@ pub fn print_value_json(value: &Value) {
     );
 }
 
-/// Print a list of entries as JSON array.
+/// Print a list of entries as a JSON array without altering entry shape.
 pub fn print_list_json(entries: &[BTreeMap<String, Value>]) {
     println!("{}", list_json_text(entries));
 }
 
+/// Render entries as a pretty JSON array, preserving all decoded fields untruncated.
 pub fn list_json_text(entries: &[BTreeMap<String, Value>]) -> String {
     let arr: Vec<Value> = entries
         .iter()
