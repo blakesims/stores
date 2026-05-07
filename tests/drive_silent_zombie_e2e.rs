@@ -478,9 +478,15 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
     .unwrap();
     drop(conn);
 
+    // STORES_DRIVE_CMD: a synchronous script that writes wrap_log and exits.
+    // Pass 1 of the daemon detects the terminal-ok closed lock with status=in_review
+    // → redispatches (runs this script → wrap_log populated, new pid recorded,
+    // lock reopened as in_flight:pending_next).
+    // Pass 2 detects the open lock with dead pid → has_pending_auto_drive_work
+    // returns false (wrap_log populated) → mark_claim_finished("ok") → terminal.
     let py = r#"python3 -c 'import sqlite3; c=sqlite3.connect(".stores/db.sqlite"); c.execute("UPDATE tasks SET wrap_log=? WHERE display_id=?", ("[{\"executive_summary\":\"auto wrap\"}]", "T967")); c.commit()' #"#;
     let output = Command::new(&bin)
-        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .args(["agents", "run", "--max-iters", "3", "--poll-interval", "0.05"])
         .current_dir(workspace)
         .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
         .env("STORES_DRIVE_CMD", py)
@@ -488,37 +494,19 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
         .expect("invoke daemon");
     assert!(
         output.status.success(),
-        "agents run --once failed: {}",
+        "agents run --max-iters 3 failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    loop {
-        let conn = Connection::open(&db_path).unwrap();
-        let wrap_log: Option<String> = conn
-            .query_row(
-                "SELECT wrap_log FROM tasks WHERE display_id='T967'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        if wrap_log.as_deref().unwrap_or("").contains("auto wrap") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "wrap_log not populated; got {wrap_log:?}"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-
+    // AC (pi ruling, MAJOR 2): wrap_log populated AND dispatch_lock reaches
+    // terminal_reason='ok' with finished_at IS NOT NULL after wrap fires.
     let conn = Connection::open(&db_path).unwrap();
     let (status, terminal_reason, finished_at, pid, wrap_log): (
         String,
         Option<String>,
         Option<String>,
         i64,
-        String,
+        Option<String>,
     ) = conn
         .query_row(
             "SELECT t.status, dl.terminal_reason, dl.finished_at, t.drive_pid, t.wrap_log \
@@ -531,15 +519,25 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
     assert_eq!(status, "in_review");
     assert!(
         pid > 0 && pid != dead_pid(),
-        "watchdog must record a new drive_pid"
+        "watchdog must record a new drive_pid; got pid={pid}"
     );
+    // (a) wrap_log is populated
     assert!(
-        terminal_reason.is_none(),
-        "redispatched handoff remains in-flight, not terminal ok"
+        wrap_log
+            .as_deref()
+            .unwrap_or("")
+            .contains("auto wrap"),
+        "wrap_log must be populated after wrap fires; got {wrap_log:?}"
     );
+    // (b) dispatch_lock reaches terminal_reason='ok'
+    assert_eq!(
+        terminal_reason.as_deref(),
+        Some("ok"),
+        "dispatch_lock must reach terminal_reason='ok' after wrap completes"
+    );
+    // (c) finished_at IS NOT NULL
     assert!(
-        finished_at.is_none(),
-        "redispatched handoff lock remains open"
+        finished_at.is_some(),
+        "dispatch_lock finished_at must be set after wrap completes"
     );
-    assert!(wrap_log.contains("auto wrap"));
 }

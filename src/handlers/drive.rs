@@ -1112,13 +1112,28 @@ fn drive_loop_with_role_runner(
         // Up to this point the lock has been left open (by agents_run.rs's
         // post-spawn skip), so a drive subprocess that dies between spawn and
         // first submit remains visible to the watchdog as an open-lock zombie.
+        //
+        // `auto_drive_lock_closed` tracks only the actually-closed case
+        // (LockCloseOutcome::Closed). PendingNext means the lock is still
+        // in-flight awaiting the daemon's handoff re-dispatch; the flag stays
+        // false so the next iteration re-evaluates whether the lock can close.
         if !auto_drive_lock_closed {
-            if let Err(e) = crate::handlers::agents_run::close_auto_drive_lock_ok(conn, display_id)
-            {
-                eprintln!("[{display_id}] close_auto_drive_lock_ok failed (non-fatal): {e}");
-                let _ = std::io::stderr().flush();
+            match crate::handlers::agents_run::close_auto_drive_lock_ok(conn, display_id) {
+                Ok(crate::handlers::agents_run::LockCloseOutcome::Closed) => {
+                    auto_drive_lock_closed = true;
+                }
+                Ok(crate::handlers::agents_run::LockCloseOutcome::PendingNext) => {
+                    // Lock is still in-flight; daemon will re-dispatch once
+                    // the current work lands. Do not set auto_drive_lock_closed.
+                }
+                Ok(crate::handlers::agents_run::LockCloseOutcome::Failed) => {
+                    // Unreachable via this code path; treat as no-op.
+                }
+                Err(e) => {
+                    eprintln!("[{display_id}] close_auto_drive_lock_ok failed (non-fatal): {e}");
+                    let _ = std::io::stderr().flush();
+                }
             }
-            auto_drive_lock_closed = true;
         }
 
         // AC4.3 flag: wrap dispatches when na.status == "in_review" (the row is in

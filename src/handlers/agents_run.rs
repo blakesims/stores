@@ -1438,14 +1438,37 @@ pub(crate) fn route_failure_to_deploy_blocked(
     }
 }
 
+/// Precise outcome from [`close_auto_drive_lock_ok`].
+///
+/// * `Closed` — the lock was written with `terminal_reason='ok'` and
+///   `finished_at` set; the drive cycle is fully terminal.
+/// * `PendingNext` — the task still has work outstanding (`next_agent` is
+///   non-null and wrap_log not yet populated); the lock was left open with
+///   `last_status='in_flight:pending_next'` for the daemon to re-dispatch.
+/// * `Failed` — reserved for callers that map `Err` to a non-fatal outcome;
+///   `close_auto_drive_lock_ok` itself never returns this variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockCloseOutcome {
+    Closed,
+    PendingNext,
+    Failed,
+}
+
 /// T049: close the open auto-drive `dispatch_locks` row for `display_id`
 /// with `last_status='ok'`. Called from inside the drive subprocess on its
 /// first successful `compute_submit_*` call so a drive that dies between
 /// spawn and first submit leaves the lock open for the watchdog.
 ///
+/// Returns a [`LockCloseOutcome`] distinguishing the actually-closed case
+/// from the pending-next case. Callers must not treat `PendingNext` as a
+/// successful close — the lock is still in-flight.
+///
 /// Idempotent: the WHERE clause filters on `finished_at IS NULL`, so a
 /// second call is a no-op zero-row UPDATE.
-pub(crate) fn close_auto_drive_lock_ok(conn: &Connection, display_id: &str) -> Result<()> {
+pub(crate) fn close_auto_drive_lock_ok(
+    conn: &Connection,
+    display_id: &str,
+) -> Result<LockCloseOutcome> {
     let now = crate::handlers::row::now_iso8601();
     if crate::flow::builtins::auto_drive::has_pending_auto_drive_work(conn, display_id)
         .unwrap_or(false)
@@ -1458,7 +1481,7 @@ pub(crate) fn close_auto_drive_lock_ok(conn: &Connection, display_id: &str) -> R
                AND finished_at IS NULL",
             rusqlite::params![now, display_id],
         )?;
-        return Ok(());
+        return Ok(LockCloseOutcome::PendingNext);
     }
     conn.execute(
         "UPDATE dispatch_locks SET last_status = 'ok', finished_at = ?1, \
@@ -1468,7 +1491,7 @@ pub(crate) fn close_auto_drive_lock_ok(conn: &Connection, display_id: &str) -> R
            AND finished_at IS NULL",
         rusqlite::params![now, display_id],
     )?;
-    Ok(())
+    Ok(LockCloseOutcome::Closed)
 }
 
 pub(crate) fn mark_claim_finished(

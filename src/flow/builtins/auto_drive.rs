@@ -606,20 +606,27 @@ pub fn sweep_drive_watchdog(
         }
     }
 
-    // Pending-next handoff pass: closed-ok or open auto-drive locks whose drive
-    // subprocess is dead but next-action still has work (e.g. in_review→wrap)
-    // are re-dispatched instead of treated as terminal ok or silent zombies.
+    // Pending-next handoff pass: terminal-ok closed locks whose task is still
+    // in_review with pending work (e.g. next_agent=wrap, wrap_log empty) and
+    // whose drive subprocess is dead are re-dispatched so wrap fires without
+    // manual intervention.
+    //
+    // NARROW predicate (pi ruling, MAJOR 3): only sweep locks where
+    // terminal_reason='ok' AND t.status='in_review'. Non-ok locks (error,
+    // retry, silent_zombie) belong to the L134/L135 retry/error lifecycle and
+    // must NOT be swept here. next_agent is computed dynamically by
+    // has_pending_auto_drive_work below; the SQL gate narrows to the
+    // structural condition observable in the DB.
     let pending_locks: Vec<(i64, String)> = {
         let mut stmt = conn.prepare(
             "SELECT dl.row_id, dl.display_id \
              FROM dispatch_locks dl JOIN tasks t ON t.id = dl.row_id \
              WHERE dl.store = 'tasks' AND dl.agent_name = 'auto-drive' \
-               AND COALESCE(t.drive_pid, 0) > 0 \
-               AND COALESCE(t.drive_started_at, '') < ?1 \
-               AND COALESCE(dl.terminal_reason, '') != 'silent_zombie'",
+               AND dl.terminal_reason = 'ok' \
+               AND t.status = 'in_review' \
+               AND COALESCE(t.drive_pid, 0) > 0",
         )?;
-        let cutoff = "9999-12-31T23:59:59Z";
-        let it = stmt.query_map(rusqlite::params![cutoff], |r| {
+        let it = stmt.query_map([], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
         })?;
         it.filter_map(|r| r.ok()).collect()
@@ -1224,13 +1231,15 @@ mod tests {
     // T030 Phase 1: silent-zombie reproductions (these MUST FAIL on main)
     // -----------------------------------------------------------------
 
-    /// Insert a closed lock — `finished_at` is SET, simulating
-    /// `mark_claim_finished` already ran post-spawn (the L062 shape).
+    /// Insert a closed lock — `finished_at` is SET and `terminal_reason='ok'`,
+    /// simulating `mark_claim_finished` already ran post-spawn (the L062 shape).
     fn insert_lock_closed(conn: &Connection, row_id: i64, display_id: &str) {
         conn.execute(
             "INSERT INTO dispatch_locks \
-             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, last_status, finished_at) \
-             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, '2026-05-03T00:00:00Z', 'test-claimer', 'ok', '2026-05-03T00:00:01Z')",
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, \
+              last_status, finished_at, terminal_reason) \
+             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, '2026-05-03T00:00:00Z', 'test-claimer', \
+                     'ok', '2026-05-03T00:00:01Z', 'ok')",
             rusqlite::params![row_id, display_id],
         )
         .unwrap();
