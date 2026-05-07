@@ -347,6 +347,11 @@ struct CandidateValidationFailure {
     path: PathBuf,
     size: Option<u64>,
     command: String,
+    /// Stringified exit status for diagnostics. Numeric codes are rendered as
+    /// their integer value; synthetic cases use sentinel strings:
+    ///   - `"timeout"` — process exceeded the validation deadline
+    ///   - `"spawn_failed"` — `spawn()` / `wait()` I/O error; no OS exit code
+    exit_status: Option<String>,
     reason: String,
     stdout: String,
     stderr: String,
@@ -385,6 +390,7 @@ fn validate_stale_reexec_candidate(
         path: path.to_path_buf(),
         size,
         command: command.clone(),
+        exit_status: Some("spawn_failed".to_string()),
         reason: format!("spawn error: {e}"),
         stdout: String::new(),
         stderr: String::new(),
@@ -400,17 +406,26 @@ fn validate_stale_reexec_candidate(
                         path: path.to_path_buf(),
                         size,
                         command: command.clone(),
+                        exit_status: Some("spawn_failed".to_string()),
                         reason: format!("collect output error: {e}"),
                         stdout: String::new(),
                         stderr: String::new(),
                     })?;
                 let stdout = bounded_output(&output.stdout);
                 let stderr = bounded_output(&output.stderr);
+                let exit_status_str = Some(
+                    output
+                        .status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| output.status.to_string()),
+                );
                 if !output.status.success() {
                     return Err(CandidateValidationFailure {
                         path: path.to_path_buf(),
                         size,
                         command,
+                        exit_status: exit_status_str,
                         reason: format!("non-success exit status: {}", output.status),
                         stdout,
                         stderr,
@@ -421,6 +436,7 @@ fn validate_stale_reexec_candidate(
                         path: path.to_path_buf(),
                         size,
                         command,
+                        exit_status: exit_status_str,
                         reason: "empty stdout from --help".to_string(),
                         stdout,
                         stderr,
@@ -434,6 +450,7 @@ fn validate_stale_reexec_candidate(
                         path: path.to_path_buf(),
                         size,
                         command,
+                        exit_status: exit_status_str,
                         reason: "missing stores marker in --help stdout".to_string(),
                         stdout,
                         stderr,
@@ -454,6 +471,7 @@ fn validate_stale_reexec_candidate(
                         path: path.to_path_buf(),
                         size,
                         command,
+                        exit_status: Some("timeout".to_string()),
                         reason: format!(
                             "timeout after {}ms",
                             STALE_REEXEC_VALIDATION_TIMEOUT.as_millis()
@@ -471,6 +489,7 @@ fn validate_stale_reexec_candidate(
                     path: path.to_path_buf(),
                     size,
                     command,
+                    exit_status: Some("spawn_failed".to_string()),
                     reason: format!("wait error: {e}"),
                     stdout: String::new(),
                     stderr: String::new(),
@@ -482,10 +501,11 @@ fn validate_stale_reexec_candidate(
 
 fn log_candidate_validation_failure(f: &CandidateValidationFailure) {
     eprintln!(
-        "candidate stores binary failed validation: path={} size={} command='{}' reason={} stdout='{}' stderr='{}'; {}",
+        "candidate stores binary failed validation: path={} size={} command='{}' exit_status={} reason={} stdout='{}' stderr='{}'; {}",
         f.path.display(),
         f.size.map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string()),
         f.command,
+        f.exit_status.as_deref().unwrap_or("unknown"),
         f.reason,
         f.stdout,
         f.stderr,

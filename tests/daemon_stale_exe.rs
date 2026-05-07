@@ -144,6 +144,11 @@ fn assert_validation_failure_context(stderr: &str, launch_path: &Path, reason: &
     );
     assert!(stderr.contains("--help"), "stderr:\n{stderr}");
     assert!(stderr.contains(reason), "stderr:\n{stderr}");
+    // L182 codex-revise: exit_status must be present in the diagnostic line.
+    assert!(
+        stderr.contains("exit_status="),
+        "exit_status field missing from diagnostic; stderr:\n{stderr}"
+    );
 }
 
 fn insert_candidate(conn: &Connection, id: i64, display_id: &str, workspace_path: &Path) {
