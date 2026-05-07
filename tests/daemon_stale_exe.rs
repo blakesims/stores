@@ -314,6 +314,50 @@ fn stale_then_reexec_fails_fallback_exits_nonzero() {
     assert!(stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
 }
 
+/// LOW (T075 codex r3 follow-up): missing launch-path candidate is rejected fail-loud
+/// at daemon startup-identity-guard construction, before the daemon can run any
+/// subscriptions or attempt a reexec. The reviewer-runner suggested arg0->missing
+/// would surface via the spawn-error mapping at the validation step; in practice
+/// the identity-guard fails earlier (stat() of the missing launch path), which is
+/// a stronger fail-loud (no work performed, no exec attempted). This test pins
+/// that behavior so a future refactor that defers the stat (and would let the
+/// daemon partially run before discovering the missing path) trips the test.
+#[cfg(unix)]
+#[test]
+fn stale_reexec_missing_launch_path_rejected_at_startup() {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+    let launch_path = tmp.path().join("nonexistent");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&launch_path)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_TEST_DAEMON_FORCE_STALE", "1")
+        .output()
+        .expect("invoke stale daemon command");
+
+    assert!(
+        !output.status.success(),
+        "missing launch-path must exit nonzero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("constructing daemon executable guard"),
+        "expected startup-identity-guard failure context; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(launch_path.to_str().unwrap()),
+        "missing launch path must appear in error; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("daemon binary stale; reexecing into"),
+        "daemon must NOT attempt reexec when launch_path is missing; stderr:\n{stderr}"
+    );
+}
+
 /// MEDIUM fix (Pi Option A): --detach must be stripped from reexec argv so the
 /// daemon does not attempt to re-daemonize on self-reexec. --invoker and
 /// --log-file must be preserved.

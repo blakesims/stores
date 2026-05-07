@@ -443,9 +443,7 @@ fn validate_stale_reexec_candidate(
                     });
                 }
                 let stdout_text = String::from_utf8_lossy(&output.stdout).to_lowercase();
-                if !stdout_text.contains("schema-driven store framework")
-                    && !stdout_text.contains("stores")
-                {
+                if !stdout_text.contains("schema-driven store framework") {
                     return Err(CandidateValidationFailure {
                         path: path.to_path_buf(),
                         size,
