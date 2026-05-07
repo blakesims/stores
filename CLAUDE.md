@@ -4,6 +4,8 @@
 
 **Why.** Twelve tasks of careful planning and building taught us a lot. The thirteenth, where the orchestrator first tried to scaffold via `stores tasks add`, hit an obvious gap in 30 seconds: the substrate auto-mints `T001` with no `--display-id` override, so substrate IDs and filesystem-scanned IDs diverged immediately. No amount of design review caught that. **One real attempt to use the system did.** That ratio is the rule. Real use surfaces what real use surfaces; planning, code review, and tests do not replace it. The substrate's quality ceiling is set by what surfaces when actual work runs through it.
 
+**Doc-only exception.** Pure documentation / SOP edits should not promote into full substrate tasks by default. The task workflow is intentionally heavy (planner, plan review, execution, code review, wrap, external review, acceptance, merge ceremony) and is the wrong tool for small prose corrections, principle codification, or skill wording tweaks. Pi-architect and engine-controller may make focused doc-only commits directly when the change does not alter schema, lifecycle, authority, security, runtime behavior, or priority doctrine. If a doc edit WOULD change those constitutional or operational boundaries, route it through the appropriate observation / architecture-review / human-ratification path.
+
 ### The verbs you'll actually use
 
 - `stores tasks add --invoker ai_with_human --title ... --slug ... --done-when ... --scope-in ... --scope-out ...` — scaffold a new task. Substrate auto-mints the ID.
