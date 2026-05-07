@@ -37,7 +37,7 @@ The substrate detects `$CLAUDECODE` and treats writes as `ai_autonomous` by defa
 Each U-moment now has two equivalent grounding paths:
 
 (a) **`--invoker human`** — the user types the verb themselves (works for any U-moment, required where the field is `actor: human` and no token is presented).
-(b) **`--invoker ai_with_human --approve-token <T>`** — the user pre-authorized the row by decrypting the approval token (passphrase / hardware tap) and pasting it into chat; the AI executes the write with the token attached. The substrate verifies the token via constant-time hash-equality and accepts the write under tier-A semantics.
+(b) **`--invoker ai_with_human --approve-token <T>`** — the user pre-authorized the row by allowing the AI to read the host-bound plaintext token at `~/.config/stores/approve.token` (mode 0600), typically via `stores auth show`; the AI executes the write with the token attached. The substrate verifies the token via constant-time hash-equality and accepts the write under tier-A semantics.
 
 Both paths are equally valid grounding. Pick (a) when the user is at the keyboard for this exact verb; pick (b) when the user has pre-authorized a session of work and wants the AI to execute without typing each verb.
 
