@@ -22,7 +22,7 @@ fn arg_value(matches: &ArgMatches, entry: &EntryMap, name: &str) -> Option<Strin
         })
 }
 
-pub fn normalize_cli_source_tuple(matches: &ArgMatches, entry: &mut EntryMap) -> Result<()> {
+pub(crate) fn normalize_cli_source_tuple(matches: &ArgMatches, entry: &mut EntryMap) -> Result<()> {
     let source_env = arg_value(matches, entry, "source-env");
     let source_id = arg_value(matches, entry, "source-id");
     let prod_source_id = arg_value(matches, entry, "prod-source-id");

@@ -15,7 +15,7 @@ pub mod migrate;
 pub mod next_action;
 pub mod next_id;
 pub mod observation_arch_gate;
-pub mod observations_source;
+pub(crate) mod observations_source;
 pub mod overrides;
 pub mod render;
 pub mod row;
