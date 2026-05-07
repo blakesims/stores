@@ -1,0 +1,9 @@
+[T034] phase 2 cycle 1: spawning executor via pi runner... (may take 30-90s)
+[T034] phase 2 cycle 1: executor returned (exit=0, 72.9s)
+Error: cannot submit-execute: row is in state 'code_review', expected 'executing'
+[T034] phase 2 cycle 1: spawning code_reviewer via pi runner... (may take 30-90s)
+[T034] phase 2 cycle 1: code_reviewer returned (exit=0, 116.6s)
+[T034] phase 2 cycle 1: code_reviewer → submitted (gate=Some(PASS); source=sdk)
+[T034] max iterations exceeded (1); current state: status=executing phase=4 cycle=1
+Error: max iterations exceeded (1) for task T034
+[T034] blocked: drive_failed:silent_zombie_pid_dead; run `stores gate T034 guide` for help

@@ -249,12 +249,18 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
         // Metrics subcommand — transition_history throughput/read-surface report
         .subcommand(
             Command::new("metrics")
-                .about("Report transition_history throughput metrics (JSON via global --json)")
+                .about("Report transition_history throughput metrics (--json or --text)")
                 .arg(
                     Arg::new("window")
                         .long("window")
                         .help("Metrics window: duration like 1h/30m or RFC3339 timestamp")
                         .required(true),
+                )
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help("Render JSON output (default)"),
                 )
                 .arg(
                     Arg::new("text")
@@ -1489,6 +1495,10 @@ mod tests {
             .collect();
         assert!(args.contains(&"window".to_string()));
         assert!(args.contains(&"text".to_string()));
+        assert!(
+            args.contains(&"json".to_string()),
+            "metrics must expose a local --json flag; got args: {args:?}"
+        );
     }
 
     #[test]

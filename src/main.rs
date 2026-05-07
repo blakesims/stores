@@ -147,7 +147,9 @@ fn main() -> Result<()> {
             let args = cli::metrics::MetricsArgs {
                 window: sub.get_one::<String>("window").unwrap().clone(),
                 text: *sub.get_one::<bool>("text").unwrap_or(&false),
-                json: matches.get_flag("json"),
+                // Accept metrics-local --json or global --json flag.
+                json: *sub.get_one::<bool>("json").unwrap_or(&false)
+                    || matches.get_flag("json"),
             };
             cli::metrics::run(args)?;
         }

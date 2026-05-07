@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
@@ -109,7 +110,7 @@ pub fn build_report(conn: &Connection, window: &str) -> Result<MetricsReport> {
         ratification_cycle_time: RatificationMetrics {
             open_to_ready: ratification_metric(&rows, since_epoch),
         },
-        revise_rate: revise_metrics(conn)?,
+        revise_rate: revise_metrics(conn, since_epoch, window)?,
         agent_runs: agent_run_metrics(conn, &since)?,
     })
 }
@@ -241,13 +242,24 @@ fn ratification_metric(rows: &[TransitionRow], since_epoch: i64) -> PercentileMe
     }
 }
 
-fn revise_metrics(conn: &Connection) -> Result<ReviseSection> {
+/// Compute REVISE rate from `tasks.cycles` JSON.
+///
+/// **Window note:** individual review events inside `tasks.cycles` do not carry
+/// timestamps, so window-filtering cannot be applied at the review-event level.
+/// The rows returned reflect all-time data from `tasks.cycles`.  Windowed REVISE
+/// tracking requires transition_history-tagged review events (planned; tracked
+/// separately).  A note is always appended to the output to make this visible.
+fn revise_metrics(conn: &Connection, _since_epoch: i64, window: &str) -> Result<ReviseSection> {
     let mut notes = Vec::new();
+    // Window note: cycles JSON lacks per-review timestamps; data is all-time.
+    notes.push(format!(
+        "revise_rate source: tasks.cycles (unwindowed; --window={window} not applied \
+         — per-review timestamps not stored in cycles JSON; windowed REVISE tracking \
+         requires transition_history-tagged review events, tracked separately)"
+    ));
     if !table_exists(conn, "tasks")? || !column_exists(conn, "tasks", "cycles")? {
-        return Ok(ReviseSection {
-            rows: vec![],
-            notes: vec!["tasks.cycles unavailable; revise_rate source unavailable".into()],
-        });
+        notes.push("tasks.cycles unavailable; revise_rate rows empty".into());
+        return Ok(ReviseSection { rows: vec![], notes });
     }
     let has_task_type =
         column_exists(conn, "tasks", "task_type")? || column_exists(conn, "tasks", "type")?;
@@ -480,54 +492,34 @@ pub fn render_text(report: &MetricsReport) -> String {
     out
 }
 
+/// Parse an RFC3339 timestamp string to Unix epoch seconds (UTC).
+///
+/// Handles all valid RFC3339 forms:
+///   - `2026-01-01T00:00:00Z`
+///   - `2026-01-01T00:00:00+00:00`
+///   - `2026-01-01T00:00:00-08:00`
+///   - space separator instead of `T` (SQLite common form)
+///
+/// Returns `None` for malformed input.
 fn epoch_seconds(s: &str) -> Option<i64> {
-    let s = s.strip_suffix('Z').unwrap_or(s);
-    let (date, time) = s.split_once('T').or_else(|| s.split_once(' '))?;
-    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
-    let y = d.next()??;
-    let m = d.next()??;
-    let day = d.next()??;
-    let time = time.split('.').next().unwrap_or(time);
-    let mut t = time.split(':').map(|p| p.parse::<i64>().ok());
-    let hh = t.next()??;
-    let mm = t.next()??;
-    let ss = t.next()??;
-    Some(days_from_civil(y, m, day) * 86400 + hh * 3600 + mm * 60 + ss)
+    // Normalise space-separator to 'T' for chrono compatibility.
+    let normalised;
+    let s = if s.contains(' ') && !s.contains('T') {
+        normalised = s.replacen(' ', "T", 1);
+        &normalised
+    } else {
+        s
+    };
+    // chrono handles Z and ±HH:MM offsets natively.
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc).timestamp())
 }
 
 fn format_epoch_utc(epoch: i64) -> String {
-    let days = epoch.div_euclid(86400);
-    let secs = epoch.rem_euclid(86400);
-    let (y, m, d) = civil_from_days(days);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        secs / 3600,
-        (secs % 3600) / 60,
-        secs % 60
-    )
-}
-
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = y - (m <= 2) as i64;
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = m + if m > 2 { -3 } else { 9 };
-    let doy = (153 * mp + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    (y + (m <= 2) as i64, m, d)
+    DateTime::from_timestamp(epoch, 0)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| format!("{epoch}"))
 }
 
 #[cfg(test)]
@@ -706,5 +698,101 @@ mod tests {
         assert!(txt.contains("revise_rate"));
         assert!(txt.contains("agent_runs"));
         assert!(txt.contains("agent_runs not yet captured"));
+    }
+
+    // ── epoch_seconds: RFC3339 parser coverage (MAJOR-2 fix) ─────────────────
+
+    #[test]
+    fn epoch_seconds_parses_z_suffix() {
+        // 2026-01-01T00:00:00Z → Unix epoch for that moment
+        let e = epoch_seconds("2026-01-01T00:00:00Z").expect("Z form must parse");
+        assert_eq!(e, 1767225600);
+    }
+
+    #[test]
+    fn epoch_seconds_parses_plus_zero_offset() {
+        // +00:00 is equivalent to Z
+        let z = epoch_seconds("2026-01-01T00:00:00Z").unwrap();
+        let off = epoch_seconds("2026-01-01T00:00:00+00:00").unwrap();
+        assert_eq!(z, off, "+00:00 must equal Z");
+    }
+
+    #[test]
+    fn epoch_seconds_parses_negative_offset() {
+        // -08:00 means the UTC equivalent is +8h
+        let z = epoch_seconds("2026-01-01T00:00:00Z").unwrap();
+        let neg = epoch_seconds("2025-12-31T16:00:00-08:00").unwrap();
+        assert_eq!(z, neg, "-08:00 offset must convert to correct UTC epoch");
+    }
+
+    #[test]
+    fn epoch_seconds_rejects_malformed() {
+        assert!(epoch_seconds("not-a-date").is_none());
+        assert!(epoch_seconds("2026-13-01T00:00:00Z").is_none()); // month 13
+        assert!(epoch_seconds("").is_none());
+    }
+
+    #[test]
+    fn epoch_seconds_parses_sqlite_space_separator() {
+        // SQLite stores timestamps as "2026-01-01 00:00:00"
+        let z = epoch_seconds("2026-01-01T00:00:00Z").unwrap();
+        let sp = epoch_seconds("2026-01-01 00:00:00Z").unwrap();
+        assert_eq!(z, sp, "space-separator form must parse the same as T-separator");
+    }
+
+    // ── revise_rate window note (MAJOR-1 fix) ────────────────────────────────
+
+    #[test]
+    fn revise_rate_always_carries_window_note() {
+        // Even when tasks table is absent the window-caveat note must be present.
+        let c = conn(); // no tasks table
+        let r = build_report(&c, "1h").unwrap();
+        assert!(
+            r.revise_rate.notes.iter().any(|n| n.contains("unwindowed")),
+            "revise_rate.notes must include unwindowed caveat; got: {:?}",
+            r.revise_rate.notes
+        );
+    }
+
+    #[test]
+    fn revise_rate_window_note_contains_window_arg() {
+        let c = conn();
+        c.execute_batch("CREATE TABLE tasks (display_id TEXT, tier_hint TEXT, cycles TEXT);")
+            .unwrap();
+        let r = build_report(&c, "30m").unwrap();
+        let note = r
+            .revise_rate
+            .notes
+            .iter()
+            .find(|n| n.contains("unwindowed"))
+            .unwrap();
+        assert!(
+            note.contains("--window=30m"),
+            "note must echo the window arg; got: {note}"
+        );
+    }
+
+    // ── --json flag reachable via metrics-local flag (MINOR fix) ─────────────
+
+    #[test]
+    fn json_output_is_valid_json() {
+        let c = conn();
+        ins(&c, "tasks", "T1", None, "planning", "2026-01-01T00:00:00Z");
+        let report = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        let json_str = render_json(&report).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("render_json must produce valid JSON");
+        assert!(
+            parsed.get("window").is_some(),
+            "JSON must contain 'window' key"
+        );
+        assert!(
+            parsed.get("per_edge").is_some(),
+            "JSON must contain 'per_edge' key"
+        );
+        assert!(
+            parsed.get("revise_rate").is_some(),
+            "JSON must contain 'revise_rate' key"
+        );
     }
 }
