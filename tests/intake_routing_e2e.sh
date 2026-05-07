@@ -213,6 +213,25 @@ AR_ARCH_ROW=$(sqlite3 .stores/db.sqlite "SELECT status || '|' || kind || '|' || 
 [[ "$AR_ARCH_ROW" == "pending|interpret|$AR_OBS_ID|$AR_ID|actor-authority" ]] || fail "arch review row mismatch: $AR_ARCH_ROW"
 pass "arch_review_candidate: L### source + A### review created in same route"
 
+AR_BYPASS_ID=$(add_triaging_item "attempted caller supplied architecture review id")
+ARCH_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews")
+OBS_BEFORE=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
+if CLAUDECODE=1 "$STORES_BIN" intake route "$AR_BYPASS_ID" --invoker ai_autonomous \
+    --decision arch_review_candidate \
+    --routed-to-arch-review A999 \
+    --gatekeeper-decision-json "$DEC_JSON_AR" \
+    >out 2>err; then
+    fail "arch_review_candidate: caller-supplied routed_to_arch_review unexpectedly succeeded"
+fi
+grep -q "caller-supplied routed_to_arch_review" err || fail "arch_review_candidate: missing pre-supplied A### rejection"
+AR_BYPASS_STATE=$(sqlite3 .stores/db.sqlite "SELECT status || '|' || COALESCE(routed_to_observation,'') || '|' || COALESCE(routed_to_arch_review,'') FROM intake WHERE display_id='$AR_BYPASS_ID'")
+ARCH_AFTER=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM architecture_reviews")
+OBS_AFTER=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
+[[ "$AR_BYPASS_STATE" == "triaging||" ]] || fail "arch_review_candidate: rejected bypass mutated intake: $AR_BYPASS_STATE"
+[[ "$ARCH_AFTER" == "$ARCH_BEFORE" ]] || fail "arch_review_candidate: rejected bypass created A### rows"
+[[ "$OBS_AFTER" == "$OBS_BEFORE" ]] || fail "arch_review_candidate: rejected bypass created L### rows"
+pass "arch_review_candidate: caller-supplied A### rejected before side effects"
+
 # ---------------------------------------------------------------------------
 # Decision 5: needs_info (with recon-return loop)
 # ---------------------------------------------------------------------------
