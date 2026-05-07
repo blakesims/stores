@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 #[cfg(debug_assertions)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::Result;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -28,6 +28,14 @@ use serde_json::Value;
 /// in release.  Tests assert this counter to prove the race path executed.
 #[cfg(debug_assertions)]
 pub static CAS_ABORT_DRIVE_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only synchronization signal: set to `true` immediately when the
+/// CAS pre-spawn delay hook is entered (before the sleep begins).  Tests
+/// busy-wait on this flag before injecting a live drive_pid, guaranteeing
+/// the scanner is past its fast-path read and inside the delay window.
+/// Only compiled in debug builds; absent from release binaries.
+#[cfg(debug_assertions)]
+pub static CAS_DELAY_HOOK_ENTERED: AtomicBool = AtomicBool::new(false);
 
 use crate::flow::builtins::{
     dispatch_to_specialist, fire_mark_drive_failed, refresh_task_row, BuiltinResult, DispatchCtx,
@@ -170,6 +178,11 @@ pub(crate) fn redispatch_orphaned_next_agent(
     {
         if let Ok(ms) = std::env::var("STORES_TEST_CAS_PRE_SPAWN_DELAY_MS") {
             if let Ok(n) = ms.parse::<u64>() {
+                // Signal BEFORE the sleep so the injector thread can observe
+                // that the scanner is past its fast-path read and inside the
+                // delay window.  The test busy-waits on this flag before
+                // writing the live drive_pid, making the sync deterministic.
+                CAS_DELAY_HOOK_ENTERED.store(true, Ordering::Release);
                 eprintln!("[engine-runner::cas] {display_id}: pre-spawn delay start ({n}ms)");
                 if n > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(n));

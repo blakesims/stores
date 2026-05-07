@@ -405,9 +405,11 @@ fn atomic_cas_prevents_double_spawn_on_same_orphan() {
 fn cas_abort_branch_fires_when_owner_appears_in_gap() {
     let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 
-    // Reset the global sentinel counter before the test.
+    // Reset global sentinels before the test.
     stores::flow::builtins::auto_drive::CAS_ABORT_DRIVE_PID_COUNT
         .store(0, Ordering::SeqCst);
+    stores::flow::builtins::auto_drive::CAS_DELAY_HOOK_ENTERED
+        .store(false, Ordering::SeqCst);
 
     std::env::set_var("STORES_DRIVE_CMD", "sleep 60 #");
     std::env::set_var("STORES_TEST_CAS_PRE_SPAWN_DELAY_MS", "150");
@@ -481,8 +483,26 @@ fn cas_abort_branch_fires_when_owner_appears_in_gap() {
     });
 
     // ── Injector (main thread) ─────────────────────────────────────────────────
-    // Sleep 50 ms — inside the 150 ms delay window — then write a live pid.
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    // Wait for the scanner to signal that it has entered the delay hook — i.e.
+    // it is past its fast-path read and sleeping inside the CAS window.  This
+    // replaces the old fixed `sleep(50ms)` with a deterministic barrier: the
+    // flag is set by the scanner BEFORE it starts sleeping, so by the time we
+    // observe it here the scanner is guaranteed to be inside the delay window.
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if stores::flow::builtins::auto_drive::CAS_DELAY_HOOK_ENTERED
+                .load(Ordering::Acquire)
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for CAS_DELAY_HOOK_ENTERED signal"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
 
     {
         let inj_conn = Connection::open(&db_path).unwrap();
