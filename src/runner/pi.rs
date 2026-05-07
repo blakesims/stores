@@ -237,6 +237,7 @@ impl Runner for PiRunner {
             tokens_out,
             prompt_cache_hits,
             transcript_path,
+            stderr_log_path: None,
         };
 
         // Payload-level failures are surfaced via `payload_error` so that

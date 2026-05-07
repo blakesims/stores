@@ -28,6 +28,7 @@ pub mod auto_promote;
 pub mod auto_resolve_observation;
 pub mod auto_scaffold;
 pub mod cargo_install;
+pub mod external_review;
 pub mod gatekeeper_stub;
 pub mod investigator;
 pub mod schema_migrate;
@@ -58,6 +59,7 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
         "auto-resolve-observation" => Some(auto_resolve_observation::run(row, ctx)),
         "auto-scaffold" => Some(auto_scaffold::run(row, ctx)),
         "cargo-install" => Some(cargo_install::run(row, ctx)),
+        "external-review" => Some(external_review::run(row, ctx)),
         "gatekeeper-stub" => Some(gatekeeper_stub::run(row, ctx)),
         "investigator" => Some(investigator::run(row, ctx)),
         "schema-migrate" => Some(schema_migrate::run(row, ctx)),

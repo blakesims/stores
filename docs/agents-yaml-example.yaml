@@ -106,6 +106,16 @@ agents:
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }
 
+  - name: external-review
+    subscribes_to:
+      - store: external_reviews
+        transition: { from: "", to: pending }
+      - store: external_reviews
+        transition: { from: tooling_held, to: pending }
+    command: "builtin:external-review"
+    claim_window_secs: 1800
+    retry_policy: { max_attempts: 1, backoff: linear }
+
   # T053 P4 — intake gatekeeper. Production is shell-out: the command renders
   # a bundled brief, asks the configured agent CLI for one JSON decision, then
   # calls `stores intake route` (the single P1 routing verb). All six decisions
@@ -148,3 +158,22 @@ deployment_specialist: user-escalation
 #                     # Caps how many `tasks drive` subprocesses the daemon
 #                     # will spawn concurrently. Raise on multi-worktree setups
 #                     # where parallel drives are safe.
+#
+# review:
+#   runner: codex      # codex, pi, or claude-code. Default: codex.
+#   max_parallel: 1    # external-review lane concurrency cap. Default: 1.
+#   timeout_secs: 1800
+#   model: gpt-5-codex # optional runner/model metadata persisted on review rows.
+# codex:
+#   command: codex
+#   args: ["review", "--stdin"]
+#
+# Pi review runner example:
+# review: { runner: pi, max_parallel: 1, timeout_secs: 1800, model: pi-review }
+#
+# Claude Code review runner example:
+# review: { runner: claude-code, max_parallel: 1, timeout_secs: 1800, model: sonnet }
+#
+# T2/T3 accept precheck: a current-head external_reviews PASS is required.
+# REVISE routes back to executor; TOOLING_FAILURE becomes tooling_held with
+# held_reason/next_retry_at visible to agents-run/watch logs.

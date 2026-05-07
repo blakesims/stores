@@ -54,7 +54,8 @@ fn open_inner(path: &Path) -> Result<Connection> {
     // ALTER TABLE on unrelated tables) fails if a view references a missing
     // base table.  The tasks store is installed separately from the substrate
     // tables, so we guard the CREATE VIEW with a table-existence check.
-    ensure_runs_view_if_tasks_exists(&conn).context("apply runs view DDL")?;
+    ensure_runs_view_if_tasks_exists(&conn)
+        .context("apply runs view DDL")?;
     // L134 / T050 Phase 1: typed-buffer migration + legacy backfill.
     // Idempotent; safe to run on every CLI verb that opens the DB.
     crate::handlers::agents_run::ensure_dispatch_locks_typed(&conn)
@@ -349,6 +350,7 @@ fields:
             tokens_out: Some(20),
             prompt_cache_hits: Some(3),
             transcript_path: Some("/tmp/run.jsonl".to_string()),
+            stderr_log_path: None,
         };
         insert_agent_run(&conn, "T001", 1, 2, "executor", 7, &telemetry).unwrap();
         let row: (String, i64, i64, String, String, i64, i64, i64, String) = conn

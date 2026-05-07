@@ -189,6 +189,38 @@ fn format_row_line(row: &Row, selected: bool) -> Line<'static> {
                 Span::raw(truncate(&o.summary, 60)),
             ]
         }
+        Row::Review(r) => vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{:<6}", r.display_id),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                format!("{:<24}", format!("review:{}", r.status)),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" "),
+            Span::raw(truncate(
+                &format!(
+                    "task={} runner={} held_reason={} attempts={} next_retry_at={} liveness={}",
+                    r.task_id,
+                    if r.runner.is_empty() {
+                        "unknown"
+                    } else {
+                        &r.runner
+                    },
+                    r.held_reason.as_deref().unwrap_or("none"),
+                    r.attempts,
+                    r.next_retry_at.as_deref().unwrap_or("none"),
+                    match r.status.as_str() {
+                        "running" => "live",
+                        "tooling_held" => "held",
+                        _ => "pending",
+                    }
+                ),
+                80,
+            )),
+        ],
     };
     if selected {
         let mut spans = base;

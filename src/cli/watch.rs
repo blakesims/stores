@@ -112,6 +112,31 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
         }
     }
 
+    // ---- EXTERNAL REVIEWS -----------------------------------------------
+    let review_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {
+        crate::tui::data::Section::ExternalReviewLane => idxs.clone(),
+        _ => Vec::new(),
+    }).collect();
+    if !review_indices.is_empty() {
+        out.push('\n');
+        out.push_str(&format!("{ANSI_BOLD}EXTERNAL REVIEWS{ANSI_RESET}\n"));
+        for idx in review_indices.iter().take(10) {
+            if let crate::tui::data::Row::Review(r) = &rows[*idx] {
+                out.push_str(&format!(
+                    "  {ANSI_CYAN}{:<6}{ANSI_RESET} {ANSI_YELLOW}{:<16}{ANSI_RESET} task={} runner={} held_reason={} attempts={} next_retry_at={} liveness={}\n",
+                    r.display_id,
+                    r.status,
+                    r.task_id,
+                    if r.runner.is_empty() { "unknown" } else { &r.runner },
+                    r.held_reason.as_deref().unwrap_or("none"),
+                    r.attempts,
+                    r.next_retry_at.as_deref().unwrap_or("none"),
+                    match r.status.as_str() { "running" => "live", "tooling_held" => "held", _ => "pending" }
+                ));
+            }
+        }
+    }
+
     // ---- OBSERVATIONS ----------------------------------------------------
     out.push('\n');
     let mut obs_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {

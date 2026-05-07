@@ -496,12 +496,25 @@ impl Runner for ClaudeCodeRunner {
             extract_structured_output_from_stream_json(&stdout);
 
         // Surface error_max_structured_output_retries clearly.
+        // Also surface it as payload_error so Drive classifies this as
+        // TOOLING_FAILURE rather than falling through to verdict-text parsing
+        // which can produce a false PASS on malformed structured output.
         if let Some(ref subtype) = error_subtype {
             eprintln!(
                 "runner[{role}]: schema validation retries exhausted (subtype={subtype}); \
                  transcript at .stores/runs/{session_id}.jsonl"
             );
         }
+        // Derive payload_error from error_subtype: any error_subtype coming out
+        // of the SDK result event signals a payload-level failure.  Set
+        // payload_error so that Drive / run_external_review_attempt checks it
+        // BEFORE attempting verdict-text parsing — preventing false PASS.
+        let payload_error = error_subtype.as_deref().map(|subtype| {
+            format!(
+                "claude-code schema validation failed (subtype={subtype}); \
+                 structured output could not be produced"
+            )
+        });
 
         // Three-layer extraction at the runner level:
         // Layer 1 (SDK): result.structured_output populated by claude CLI schema validation.
@@ -574,8 +587,9 @@ impl Runner for ClaudeCodeRunner {
                 tokens_out,
                 prompt_cache_hits,
                 transcript_path,
+                stderr_log_path: None,
             },
-            payload_error: None,
+            payload_error,
         })
     }
 }
@@ -1163,6 +1177,88 @@ mod tests {
         assert_eq!(
             actual_cwd, expected_cwd,
             "spawned cwd with workspace_path=None must equal inherited cwd"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // MAJOR 3 fix: real adapter-level payload_error tests
+    // -------------------------------------------------------------------------
+
+    /// Real ClaudeCodeRunner adapter test: when the claude binary emits a
+    /// result event with `error.subtype = "error_max_structured_output_retries"`,
+    /// the adapter MUST return `payload_error: Some(...)`.
+    ///
+    /// The shim mimics the actual SDK stream-json output for a retries-exhausted
+    /// event.  The runner is pointed at the shim via `with_bin` — no PATH
+    /// mutation, no real `claude` binary required.
+    #[test]
+    fn adapter_sets_payload_error_on_error_max_structured_output_retries() {
+        redirect_runs_dir();
+        let workspace = env!("CARGO_MANIFEST_DIR").to_string();
+
+        // Write a shim that emits the stream-json error event for retries exhausted.
+        let shim_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-shims");
+        fs::create_dir_all(&shim_dir).unwrap();
+        let shim_path = shim_dir.join("retries-exhausted-shim.sh");
+        let script = concat!(
+            "#!/bin/sh\n",
+            // Emit a stream-json result event with error.subtype set.
+            "echo '{\"type\":\"result\",\"error\":{\"subtype\":\"error_max_structured_output_retries\",\"message\":\"retries exhausted\"},\"result\":\"\"}'\n",
+            "exit 0\n",
+        );
+        {
+            let mut f = fs::File::create(&shim_path).unwrap();
+            f.write_all(script.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = ClaudeCodeRunner::new().with_bin(shim_path);
+        let schema_text = r#"{"type":"object","required":["verdict"]}"#;
+        let out = runner
+            .spawn("external-review", "", "review this", Some(schema_text), Some(&workspace))
+            .expect("adapter spawn must succeed (infrastructure ok)");
+
+        // The adapter must set payload_error when error_subtype is present.
+        assert!(
+            out.payload_error.is_some(),
+            "adapter must set payload_error when error_max_structured_output_retries is detected; \
+             got None"
+        );
+        let pe = out.payload_error.unwrap();
+        assert!(
+            pe.contains("error_max_structured_output_retries"),
+            "payload_error must reference the subtype; got: {pe}"
+        );
+
+        // structured_output must be None (the SDK did not produce valid output).
+        assert!(
+            out.structured_output.is_none(),
+            "structured_output must be None on retries-exhausted; got Some"
+        );
+    }
+
+    /// Real ClaudeCodeRunner adapter test: when the shim exits 0 with valid
+    /// structured output and no error_subtype, payload_error must be None.
+    /// Regression guard: the payload_error fix must not set it on success paths.
+    #[test]
+    fn adapter_payload_error_is_none_on_success_result() {
+        redirect_runs_dir();
+        let workspace = env!("CARGO_MANIFEST_DIR").to_string();
+
+        // The stable silent shim exits 0 with no stream-json at all — no error_subtype.
+        let runner = ClaudeCodeRunner::new().with_bin(shims().silent.clone());
+        let out = runner
+            .spawn("external-review", "", "review this", None, Some(&workspace))
+            .expect("adapter spawn must succeed");
+
+        assert!(
+            out.payload_error.is_none(),
+            "payload_error must be None on success (exit 0, no error_subtype); \
+             got Some({:?})",
+            out.payload_error
         );
     }
 }

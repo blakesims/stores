@@ -2380,6 +2380,7 @@ mod tests {
             transcript_path: Some(
                 runs_dir.join(format!("{role}.jsonl")).display().to_string(),
             ),
+            stderr_log_path: None,
         };
 
         let mut planner_out = make_run_output(planner_fixture_json(), 0);
