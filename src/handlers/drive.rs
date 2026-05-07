@@ -35,7 +35,7 @@
 /// - `--max-iters N` (default 50): loop is bounded; on hit exits non-zero.
 /// - Runner non-zero exit: task state is NOT modified (parse/submit are skipped).
 /// - `blocked` terminal state: exits 0 with a human-readable hint.
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
@@ -1077,9 +1077,15 @@ fn drive_loop_with_role_runner(
 
         let submit_out = dispatch_submit(schema, conn, display_id, &na.status, envelope)?;
 
+        // MAJOR 3 (T072 r4): backlink write failure is fatal — a submit that
+        // succeeds while the transcript is unqueryable violates L059's
+        // acceptance criterion.  Propagate the error so the drive loop exits
+        // with a non-zero code and the row is NOT silently left in a partial
+        // success state.  The caller (`drive_loop`) returns the error to
+        // `main`, which surfaces it to the operator.
         if let Some(session_id) = run_out.session_id.as_deref() {
             let transcript_path = format!(".stores/runs/{session_id}.jsonl");
-            if let Err(e) = backlink_cycle_transcript(
+            backlink_cycle_transcript(
                 schema,
                 conn,
                 display_id,
@@ -1087,10 +1093,13 @@ fn drive_loop_with_role_runner(
                 na.current_cycle.as_i64().unwrap_or(1),
                 &agent_role,
                 &transcript_path,
-            ) {
-                eprintln!("[{display_id}] transcript backlink failed (non-fatal): {e}");
-                let _ = std::io::stderr().flush();
-            }
+            )
+            .with_context(|| {
+                format!(
+                    "[{display_id}] transcript backlink failed; submit cannot be claimed as \
+                     successful while transcript is unqueryable (L059)"
+                )
+            })?;
         }
 
         // T049: first successful submit ⇒ close the auto-drive dispatch_lock.
@@ -1744,6 +1753,37 @@ mod tests {
         assert_eq!(
             value[0]["review"]["transcript_path"],
             ".stores/runs/review-session.jsonl"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T072 r4: MAJOR 3 — backlink failure propagates (fail-loud)
+    // ---------------------------------------------------------------------------
+
+    /// Verify that `backlink_cycle_transcript` fails fast when the target row is
+    /// absent (the cycles JSON UPDATE hits no row).  This tests the error-path
+    /// branch that the drive loop now propagates instead of swallowing.
+    ///
+    /// Specifically: if the task row for `display_id` does not exist,
+    /// `read_row` returns an error, which the updated drive-loop code
+    /// propagates via `?` rather than logging and continuing.
+    #[test]
+    fn backlink_returns_err_when_row_absent() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        // Do NOT insert a task row — backlink must fail on read_row.
+        let result = backlink_cycle_transcript(
+            &schema,
+            &conn,
+            "T_NONEXISTENT",
+            1,
+            1,
+            "executor",
+            ".stores/runs/some-session.jsonl",
+        );
+        assert!(
+            result.is_err(),
+            "backlink must fail when the task row is absent; drive must not claim success"
         );
     }
 

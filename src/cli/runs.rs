@@ -66,9 +66,22 @@ pub fn list_for_task(stores_dir: &Path, display_id: &str) -> Result<Vec<RunTrans
     let conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open substrate DB {}", db_path.display()))?;
 
-    // Ensure the runs VIEW exists on this connection (needed when tests open a
-    // bare Connection without going through db::open).
-    conn.execute_batch(crate::codegen::ddl::RUNS_VIEW_DDL)
+    // MAJOR 2 (T072 r4): use the guarded helper — creating the VIEW directly
+    // here would bypass the tasks-table existence check and install an invalid
+    // VIEW when tasks is not installed.  If tasks is absent, return a clean
+    // error rather than a cryptic SQL error about a missing base table.
+    let tasks_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !tasks_exists {
+        anyhow::bail!("tasks store not installed; cannot query runs");
+    }
+    crate::db::ensure_runs_view_if_tasks_exists(&conn)
         .context("apply runs view DDL")?;
 
     // Query the runs VIEW — the substrate's official query surface for
@@ -129,62 +142,76 @@ pub fn find_transcript(
     let conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open substrate DB {}", db_path.display()))?;
 
-    conn.execute_batch(crate::codegen::ddl::RUNS_VIEW_DDL)
+    // MAJOR 2 (T072 r4): use the guarded helper — do NOT create the VIEW
+    // directly here (bypasses tasks-table existence check).  Clean error when
+    // tasks store is absent.
+    let tasks_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !tasks_exists {
+        anyhow::bail!("tasks store not installed; cannot query runs");
+    }
+    crate::db::ensure_runs_view_if_tasks_exists(&conn)
         .context("apply runs view DDL")?;
 
-    // Query only the specific (display_id, phase, role[, cycle]) row from the
-    // VIEW.  This avoids validating every transcript in the task — a missing
-    // sibling transcript must not prevent showing a different, existing one.
-    let (sql, row_count_sql): (&str, &str) = if cycle.is_some() {
-        (
-            "SELECT phase, cycle, role, transcript_path \
-             FROM runs \
-             WHERE display_id = ?1 AND phase = ?2 AND role = ?3 AND cycle = ?4",
-            "SELECT COUNT(*) FROM runs \
-             WHERE display_id = ?1 AND phase = ?2 AND role = ?3 AND cycle = ?4",
-        )
-    } else {
-        (
-            "SELECT phase, cycle, role, transcript_path \
-             FROM runs \
-             WHERE display_id = ?1 AND phase = ?2 AND role = ?3 \
-             ORDER BY cycle",
-            "SELECT COUNT(*) FROM runs \
-             WHERE display_id = ?1 AND phase = ?2 AND role = ?3",
-        )
-    };
-
-    // Check count first to give a clear "multiple" error when --cycle is omitted.
-    let count: i64 = if let Some(c) = cycle {
-        conn.query_row(row_count_sql, params![display_id, phase, role, c], |r| {
-            r.get(0)
-        })
-    } else {
-        conn.query_row(row_count_sql, params![display_id, phase, role], |r| r.get(0))
-    }
-    .context("count matching runs rows")?;
-
-    match count {
-        0 => bail!(
-            "missing transcript for {display_id} phase {phase} role {role}{}",
-            cycle.map(|c| format!(" cycle {c}")).unwrap_or_default()
-        ),
-        n if n > 1 => bail!(
-            "multiple transcripts for {display_id} phase {phase} role {role}; pass --cycle to disambiguate"
-        ),
-        _ => {}
-    }
-
+    // MAJOR 1 (T072 r4): when --cycle is absent, default to the LATEST cycle
+    // for the given phase+role (highest cycle number — deterministic DESC
+    // ordering).  --cycle remains an optional disambiguator for callers that
+    // want a specific historical cycle.
+    //
+    // When --cycle is provided: exact match (existing behaviour).
+    // When --cycle is absent:  ORDER BY cycle DESC LIMIT 1 → latest cycle.
     let (p, c, r, path_str): (i64, i64, String, String) = if let Some(cyc) = cycle {
-        conn.query_row(sql, params![display_id, phase, role, cyc], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
+        // Exact-cycle path: check existence first for a clean error.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM runs \
+                 WHERE display_id = ?1 AND phase = ?2 AND role = ?3 AND cycle = ?4",
+                params![display_id, phase, role, cyc],
+                |r| r.get(0),
+            )
+            .context("count matching runs rows (exact cycle)")?;
+        if count == 0 {
+            bail!(
+                "missing transcript for {display_id} phase {phase} role {role} cycle {cyc}"
+            );
+        }
+        conn.query_row(
+            "SELECT phase, cycle, role, transcript_path \
+             FROM runs \
+             WHERE display_id = ?1 AND phase = ?2 AND role = ?3 AND cycle = ?4",
+            params![display_id, phase, role, cyc],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .context("fetch matching runs row (exact cycle)")?
     } else {
-        conn.query_row(sql, params![display_id, phase, role], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-    }
-    .context("fetch matching runs row")?;
+        // Latest-cycle path: ORDER BY cycle DESC LIMIT 1.
+        // Returns the highest cycle number — deterministic when multiple cycles
+        // exist for the same phase+role (e.g. executor retry cycles).
+        let result = conn
+            .query_row(
+                "SELECT phase, cycle, role, transcript_path \
+                 FROM runs \
+                 WHERE display_id = ?1 AND phase = ?2 AND role = ?3 \
+                 ORDER BY cycle DESC LIMIT 1",
+                params![display_id, phase, role],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            );
+        match result {
+            Ok(row) => row,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                bail!(
+                    "missing transcript for {display_id} phase {phase} role {role}"
+                );
+            }
+            Err(e) => return Err(e).context("fetch latest runs row"),
+        }
+    };
 
     let path = PathBuf::from(&path_str);
     let read_path = resolve_transcript_path(stores_dir, &path);
@@ -428,6 +455,82 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0, "empty cycles must yield zero runs rows");
+    }
+
+    // ---- T072 r4: MAJOR 1 — latest-cycle default ----
+
+    /// When --cycle is absent, `find_transcript` returns the row with the
+    /// highest cycle number (cycle DESC ordering — deterministic).
+    #[test]
+    fn show_without_cycle_returns_latest_cycle() {
+        let tmp = fixture();
+        // fixture has phase=2 executor at cycle=1 AND cycle=2; cycle=2 is latest.
+        let row = find_transcript(
+            &tmp.path().join(".stores"),
+            "T999",
+            2,
+            None,   // no --cycle: should default to latest (cycle=2)
+            "executor",
+        )
+        .unwrap();
+        assert_eq!(
+            row.cycle, 2,
+            "show without --cycle must return the highest cycle (latest)"
+        );
+        assert_eq!(row.path, PathBuf::from(".stores/runs/executor-session.jsonl"));
+    }
+
+    /// When --cycle is provided, `find_transcript` returns that exact cycle.
+    #[test]
+    fn show_with_explicit_cycle_returns_that_cycle() {
+        let tmp = fixture();
+        // fixture has executor at cycle=1 and cycle=2; request cycle=1 explicitly.
+        let row = find_transcript(
+            &tmp.path().join(".stores"),
+            "T999",
+            2,
+            Some(1),    // explicit --cycle=1
+            "executor",
+        )
+        .unwrap();
+        assert_eq!(row.cycle, 1, "explicit --cycle must return that exact cycle");
+        assert_eq!(row.path, PathBuf::from(".stores/runs/executor-session.jsonl"));
+    }
+
+    // ---- T072 r4: MAJOR 2 — tasks-absent clean error ----
+
+    /// When the tasks table is absent, `list_for_task` returns a clean error
+    /// rather than a cryptic SQL error about a missing base table.
+    #[test]
+    fn list_errors_cleanly_when_tasks_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stores = tmp.path().join(".stores");
+        fs::create_dir_all(&stores).unwrap();
+        // Open a DB with NO tasks table (substrate-only, or just empty).
+        let conn = Connection::open(stores.join("db.sqlite")).unwrap();
+        drop(conn); // close; list_for_task opens its own connection
+
+        let err = list_for_task(&stores, "T999").unwrap_err();
+        assert!(
+            err.to_string().contains("tasks store not installed"),
+            "expected clean tasks-absent error, got: {err}"
+        );
+    }
+
+    /// When the tasks table is absent, `find_transcript` returns a clean error.
+    #[test]
+    fn show_errors_cleanly_when_tasks_not_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stores = tmp.path().join(".stores");
+        fs::create_dir_all(&stores).unwrap();
+        let conn = Connection::open(stores.join("db.sqlite")).unwrap();
+        drop(conn);
+
+        let err = find_transcript(&stores, "T999", 1, None, "executor").unwrap_err();
+        assert!(
+            err.to_string().contains("tasks store not installed"),
+            "expected clean tasks-absent error, got: {err}"
+        );
     }
 
     /// VIEW is idempotent: applying RUNS_VIEW_DDL twice must not error.
