@@ -30,8 +30,14 @@ fn liveness_dead_when_pidfile_missing() {
     assert_eq!(liveness(&path), Liveness::Dead);
 }
 
+#[test]
+fn pidfile_path_uses_agents_pid() {
+    let path = stores::tui::daemon::pidfile_path().unwrap();
+    assert!(path.ends_with(std::path::Path::new(".stores").join("agents.pid")));
+}
+
 /// AC3.4: e2e — pressing D starts the daemon. Guarded with #[ignore]: requires
-/// the `stores` binary on PATH and writes to `.stores/`. Run manually with
+/// the `stores` binary on PATH and writes to `.stores/agents.pid`. Run manually with
 /// `cargo test --test tui_daemon -- --ignored start_detached_writes_pidfile`.
 #[test]
 #[ignore]

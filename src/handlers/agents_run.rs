@@ -492,6 +492,81 @@ fn install_sigterm_handler() {
     }
 }
 
+pub(crate) fn read_pidfile(path: &Path) -> Result<i32> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading agents daemon pid file {}", path.display()))?;
+    let pid: i32 = text
+        .trim()
+        .parse()
+        .with_context(|| format!("parsing agents daemon pid file {}", path.display()))?;
+    if pid <= 0 {
+        bail!(
+            "agents daemon pid file {} contains non-positive pid: {pid}",
+            path.display()
+        );
+    }
+    Ok(pid)
+}
+
+fn prepare_detached_pidfile(path: &Path) -> Result<()> {
+    match read_pidfile(path) {
+        Ok(pid) if pid_is_alive(pid) => {
+            bail!(
+                "agents daemon already running for this project: live pid {pid} in {}",
+                path.display()
+            );
+        }
+        Ok(pid) => {
+            eprintln!(
+                "warning: removing stale agents daemon pid file {} (pid {pid} is not live)",
+                path.display()
+            );
+            std::fs::remove_file(path).with_context(|| {
+                format!("removing stale agents daemon pid file {}", path.display())
+            })?;
+        }
+        Err(e) if path.exists() => {
+            bail!("invalid agents daemon pid file {}: {:#}", path.display(), e);
+        }
+        Err(_) => {}
+    }
+    Ok(())
+}
+
+struct PidfileGuard {
+    path: PathBuf,
+    pid: i32,
+}
+
+impl PidfileGuard {
+    fn write_current(path: PathBuf) -> Result<Self> {
+        let pid = std::process::id() as i32;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&path, format!("{pid}\n"))
+            .with_context(|| format!("writing agents daemon pid file {}", path.display()))?;
+        Ok(Self { path, pid })
+    }
+}
+
+impl Drop for PidfileGuard {
+    fn drop(&mut self) {
+        if let Ok(pid) = read_pidfile(&self.path) {
+            if pid == self.pid {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+fn current_process_owns_pidfile(path: &Path) -> bool {
+    read_pidfile(path)
+        .map(|pid| pid == std::process::id() as i32)
+        .unwrap_or(false)
+}
+
 fn stale_reexec_attempt_line(path: &Path) -> String {
     format!(
         "daemon binary stale; reexecing into {} (was version {})",
@@ -772,10 +847,10 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
 
     let config_path = stores_dir.join("config.yaml");
 
+    let pidfile = crate::paths::agents_pid_path()?;
     if args.detach {
+        prepare_detached_pidfile(&pidfile)?;
         detach_process(&args.log_file)?;
-        let pidfile = stores_dir.join("agents-daemon.pid");
-        let _ = std::fs::write(&pidfile, std::process::id().to_string());
     }
 
     // Collect argv and strip --detach (and --detach=...) before reexec so
@@ -800,6 +875,14 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
     }
 
     install_sigterm_handler();
+
+    let _pidfile_guard = if args.detach {
+        Some(PidfileGuard::write_current(pidfile)?)
+    } else if current_process_owns_pidfile(&pidfile) {
+        Some(PidfileGuard::write_current(pidfile)?)
+    } else {
+        None
+    };
 
     // T040: capture the daemon process's start timestamp once. The watchdog's
     // silent-zombie scan uses this to skip rows whose dispatch_lock was
@@ -2506,13 +2589,17 @@ pub(crate) fn default_config_path() -> Result<PathBuf> {
     Ok(crate::paths::stores_dir()?.join("config.yaml"))
 }
 
-/// True when `pid > 0` and `kill(pid, 0)` succeeds (signal-0 is the standard
-/// liveness probe — sends nothing, errors EPERM/ESRCH on dead/foreign).
+/// True when `pid > 0` and `kill(pid, 0)` succeeds or returns EPERM (foreign
+/// live process). Signal 0 sends nothing; ESRCH means no such process.
 pub(crate) fn pid_is_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
-    unsafe { libc::kill(pid, 0) == 0 }
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Spawn `argv` as an orphaned grandchild detached from the daemon. Returns

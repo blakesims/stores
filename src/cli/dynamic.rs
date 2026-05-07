@@ -383,6 +383,10 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .about("Manage bundled workflow agent system prompts")
                 .subcommand(Command::new("list").about("List available bundled agents"))
                 .subcommand(
+                    Command::new("stop")
+                        .about("Stop the detached agents daemon for this project"),
+                )
+                .subcommand(
                     Command::new("install")
                         .about("Install a bundled agent into .claude/agents/")
                         .arg(Arg::new("name").help("Agent name").required(false))

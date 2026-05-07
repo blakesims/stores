@@ -264,6 +264,10 @@ fn main() -> Result<()> {
                 handlers::agents_backfill::run_backfill()?;
                 return Ok(());
             }
+            if let Some(("stop", _)) = sub.subcommand() {
+                handlers::agents_stop::run_stop()?;
+                return Ok(());
+            }
             let cmd = match sub.subcommand() {
                 Some(("list", _)) => AgentsCmd::List,
                 Some(("install", isub)) => AgentsCmd::Install {
