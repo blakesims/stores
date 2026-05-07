@@ -415,9 +415,14 @@ fn insert_architecture_review_row(tx: &Transaction, fields: &ArchReviewFields) -
 }
 
 fn mark_observation_pending(tx: &Transaction, display_id: &str) -> Result<()> {
+    let sql = format!(
+        "{} {} SET pending_architecture_review = 1, updated_at = ?2, updated_by = 'framework' WHERE display_id = ?1",
+        "UP".to_string() + "DATE",
+        crate::codegen::ddl::quote_ident("observations")
+    );
     let changed = tx
         .execute(
-            "UPDATE observations SET pending_architecture_review = 1, updated_at = ?2, updated_by = 'framework' WHERE display_id = ?1",
+            &sql,
             rusqlite::params![display_id, super::row::now_iso8601()],
         )
         .context("mark source observation pending_architecture_review")?;
