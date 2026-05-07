@@ -55,6 +55,12 @@ specification for the human to rubber-stamp. The shape of your output is:
   a decision
 - `grill_question` — one tight question the human should consider before
   ratifying (≤200 chars)
+- `harden_log_fragment` — optional bounded audit fragments for
+  `observations.intent_contract.harden_log` when your investigation produces
+  structured derivation reasoning (decisions, scope cuts, alternatives
+  rejected, compress-vs-surface judgments, unresolved questions). This is
+  durable rationale for later contract hardening, not transcript-like
+  chain-of-thought and not a draft contract.
 
 You MUST NOT include any of:
 
@@ -86,9 +92,16 @@ Emit a single JSON object conforming to
   ],
   "confidence": "high",
   "proposed_tier": "T2",
-  "grill_question": "Is the panic intentional for the bounded path, or did the L116 refactor miss a case?"
+  "grill_question": "Is the panic intentional for the bounded path, or did the L116 refactor miss a case?",
+  "harden_log_fragment": {
+    "decisions": [{"id": "D1", "decision": "Treat panic as bug candidate", "rationale": "Evidence points to missed refactor path", "source_quote": "panic!(\"unreachable\")"}],
+    "unresolved_questions": ["Should this path be impossible by invariant?"]
+  }
 }
 ```
+
+Omit `harden_log_fragment` if you did not produce structured derivation
+reasoning. Never use it to store a transcript mirror or hidden chain-of-thought.
 
 `evidence` items may be plain strings (free-form observations) or objects
 with `file` + `line` + optional `snippet`. The schema accepts both.

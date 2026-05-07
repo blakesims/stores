@@ -7,7 +7,7 @@ use crate::codegen::ddl::quote_ident;
 use crate::schema::{actor::InvokerCtx, FieldType, Schema};
 use crate::validate::{self, Op};
 
-use super::row::{build_entry_map, now_iso8601, read_row};
+use super::row::{build_entry_map, deep_merge_entry_field, now_iso8601, read_row};
 
 pub fn run(
     schema: &Schema,
@@ -52,8 +52,8 @@ pub fn run(
         }
     })?;
 
-    // Merge diff into existing; deep-merge Record-typed fields so sibling
-    // sub-fields not present in the diff are preserved.
+    // Merge diff into existing; deep-merge Record-typed fields recursively so
+    // sibling sub-fields at any nested depth are preserved.
     let mut merged = existing.clone();
     for (k, v) in &diff {
         let is_record = schema
@@ -61,18 +61,10 @@ pub fn run(
             .iter()
             .any(|f| f.name == *k && matches!(f.ty, crate::schema::FieldType::Record(_)));
         if is_record {
-            if let (Some(Value::Object(existing_obj)), Value::Object(new_obj)) =
-                (merged.get(k).cloned(), v)
-            {
-                let mut combined = existing_obj.clone();
-                for (sk, sv) in new_obj {
-                    combined.insert(sk.clone(), sv.clone());
-                }
-                merged.insert(k.clone(), Value::Object(combined));
-                continue;
-            }
+            deep_merge_entry_field(&mut merged, k, v);
+        } else {
+            merged.insert(k.clone(), v.clone());
         }
-        merged.insert(k.clone(), v.clone());
     }
 
     // L143 / T052: `approval_policy` is verb-owned. The dedicated

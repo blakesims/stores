@@ -1,5 +1,12 @@
 # Primitives
 
+## intent_contract.harden_log
+
+`observations.intent_contract.harden_log` is a nullable bounded derivation audit for high-leverage contract hardening. It stores structured rationale (decisions, scope cuts, alternatives rejected, compress-vs-surface judgments, source quotes, unresolved questions) that produced the final contract; it is analogous to `plan_review_log` as durable rationale, but it is not coupled to plan review and is not transcript-like chain-of-thought storage.
+
+Repository inspection found no substrate-controlled `/intent-harden` or harden prompt under `agents/` or `skills/`; that Claude Code skill lives outside this repository. Substrate-side hardening guidance is therefore encoded here, in `agents/investigator.md`, and in `agents/sidecar/system-prompt.md`: populate `intent_contract.harden_log` when structured derivation reasoning is produced, but never make its presence a U1 ratification gate.
+
+
 The substrate composes from a small set of typed primitives. This document is the single source of truth on what those primitives are, what we know we're missing, and the rules of discovery.
 
 ## Working draft, not closed set

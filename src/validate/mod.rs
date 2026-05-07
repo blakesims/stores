@@ -106,11 +106,11 @@ pub fn validate_with_authority(
         }
     }
 
-    // Walk all fields (top-level + Record sub-fields).
-    // required/enum/pattern checks run against the full merged entry;
-    // actor checks run against actor_entry (diff-only for Transition/Update, full entry for Add).
+    // Walk all fields recursively. Required/enum/pattern checks run against the
+    // full merged entry; actor checks run against actor_entry (diff-only for
+    // Transition/Update, full entry for Add).
     for field in &schema.fields {
-        validate_field(
+        validate_field_recursive(
             field,
             entry,
             actor_entry,
@@ -120,87 +120,96 @@ pub fn validate_with_authority(
             authority,
             &mut errors,
         );
-
-        if let FieldType::Record(sub_fields) = &field.ty {
-            let parent_path = vec![field.name.clone()];
-            for sub in sub_fields {
-                validate_field(
-                    sub,
-                    entry,
-                    actor_entry,
-                    &parent_path,
-                    &schema.default_actor,
-                    invoker,
-                    authority,
-                    &mut errors,
-                );
-            }
-        }
-
-        // Phase 5 (P1-M2 closed): recurse into ListRecord sub-fields.
-        // For each element in the list, build a flat sub-entry and validate each sub-field.
-        // The sub-field path for lookup uses just the sub-field name (root of elem_entry);
-        // the error path is prefixed with the list field name for readable diagnostics.
-        // Actor checks use diff-scoped semantics: if the actor_entry's list doesn't
-        // contain an element at this index, actor checks are skipped for that element.
-        if let FieldType::ListRecord(sub_fields) = &field.ty {
-            let list_val = entry.get(&field.name);
-            let actor_list_val = actor_entry.get(&field.name);
-
-            if let Some(serde_json::Value::Array(elements)) = list_val {
-                for (elem_idx, elem) in elements.iter().enumerate() {
-                    if let serde_json::Value::Object(elem_map) = elem {
-                        // Flat elem-level entry: lookup uses just the sub-field name
-                        let elem_entry: EntryMap = elem_map
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-
-                        // Corresponding actor-scoped elem-level entry
-                        let actor_elem_entry: EntryMap = match actor_list_val {
-                            Some(serde_json::Value::Array(actor_elems)) => {
-                                if let Some(serde_json::Value::Object(ae)) =
-                                    actor_elems.get(elem_idx)
-                                {
-                                    ae.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                                } else {
-                                    BTreeMap::new() // not in diff → skip actor checks
-                                }
-                            }
-                            _ => BTreeMap::new(), // list not in diff → skip actor checks
-                        };
-
-                        // parent_path=[] so field_path = [sub.name]; validate_field
-                        // uses elem_entry for lookup (correct — elem is the root).
-                        // But we want errors to show "field_name.sub_name" not just
-                        // "sub_name", so we rewrite paths after collection.
-                        let before = errors.len();
-                        for sub in sub_fields {
-                            validate_field(
-                                sub,
-                                &elem_entry,
-                                &actor_elem_entry,
-                                &[], // no parent — elem_entry is flat at sub-field level
-                                &schema.default_actor,
-                                invoker,
-                                authority,
-                                &mut errors,
-                            );
-                        }
-                        // Prefix all newly added errors with the list field name
-                        for err in errors[before..].iter_mut() {
-                            err.field_path.insert(0, field.name.clone());
-                        }
-                    }
-                }
-            }
-        }
     }
 
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn validate_field_recursive(
+    field: &crate::schema::Field,
+    entry: &EntryMap,
+    actor_entry: &EntryMap,
+    parent_path: &[String],
+    default_actor: &Option<Actor>,
+    invoker: InvokerCtx,
+    authority: Option<SideEffectAuthority>,
+    errors: &mut Vec<ValidationError>,
+) {
+    validate_field(
+        field,
+        entry,
+        actor_entry,
+        parent_path,
+        default_actor,
+        invoker,
+        authority,
+        errors,
+    );
+
+    let mut field_path = parent_path.to_vec();
+    field_path.push(field.name.clone());
+
+    match &field.ty {
+        FieldType::Record(sub_fields) => {
+            for sub in sub_fields {
+                validate_field_recursive(
+                    sub,
+                    entry,
+                    actor_entry,
+                    &field_path,
+                    default_actor,
+                    invoker,
+                    authority,
+                    errors,
+                );
+            }
+        }
+        FieldType::ListRecord(sub_fields) => {
+            if let Some(serde_json::Value::Array(elements)) = required::lookup(entry, &field_path) {
+                let actor_list_val = required::lookup(actor_entry, &field_path);
+                for (elem_idx, elem) in elements.iter().enumerate() {
+                    if let serde_json::Value::Object(elem_map) = elem {
+                        let elem_entry: EntryMap = elem_map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        let actor_elem_entry: EntryMap = match actor_list_val {
+                            Some(serde_json::Value::Array(actor_elems)) => {
+                                if let Some(serde_json::Value::Object(ae)) = actor_elems.get(elem_idx) {
+                                    ae.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                                } else {
+                                    BTreeMap::new()
+                                }
+                            }
+                            _ => BTreeMap::new(),
+                        };
+                        let before = errors.len();
+                        for sub in sub_fields {
+                            validate_field_recursive(
+                                sub,
+                                &elem_entry,
+                                &actor_elem_entry,
+                                &[],
+                                default_actor,
+                                invoker,
+                                authority,
+                                errors,
+                            );
+                        }
+                        for err in errors[before..].iter_mut() {
+                            let mut prefixed = field_path.clone();
+                            prefixed.append(&mut err.field_path);
+                            err.field_path = prefixed;
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -226,24 +235,26 @@ fn validate_field(
         &field.ty,
         FieldType::ListRecord(_) | FieldType::ListFk { .. }
     ) {
-        if let Some(serde_json::Value::String(raw)) = required::lookup(entry, &field_path) {
-            errors.push(ValidationError {
-                field_path: field_path.clone(),
-                rule: error::RuleKind::InvalidJson {
-                    expected: "JSON array".to_string(),
-                },
-                message: format!(
-                    "value must be a JSON array, got string '{}'",
-                    if raw.len() > 60 {
-                        &raw[..60]
-                    } else {
-                        raw.as_str()
-                    }
-                ),
-            });
-            // Short-circuit: don't run required/enum/pattern/actor checks on a sentinel string —
-            // the type-shape error is the relevant signal; other checks would produce noise.
-            return;
+        if let Some(value) = required::lookup(entry, &field_path) {
+            if !value.is_array() && !value.is_null() {
+                let got = match value {
+                    serde_json::Value::String(raw) => format!(
+                        "string '{}'",
+                        if raw.len() > 60 { &raw[..60] } else { raw.as_str() }
+                    ),
+                    other => other.to_string(),
+                };
+                errors.push(ValidationError {
+                    field_path: field_path.clone(),
+                    rule: error::RuleKind::InvalidJson {
+                        expected: "JSON array".to_string(),
+                    },
+                    message: format!("value must be a JSON array, got {got}"),
+                });
+                // Short-circuit: don't run required/enum/pattern/actor checks on a bad list shape —
+                // the type-shape error is the relevant signal; other checks would produce noise.
+                return;
+            }
         }
     }
 

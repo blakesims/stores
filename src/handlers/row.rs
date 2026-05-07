@@ -155,6 +155,35 @@ fn split_csvish(raw: &str) -> Result<Vec<String>> {
 /// Creates intermediate `Value::Object` nodes as needed.  Silently ignores
 /// writes into non-object intermediates (schema validation catches those
 /// separately).
+pub fn deep_merge_value(existing: &mut Value, update: &Value) {
+    match (existing.as_object_mut(), update.as_object()) {
+        (Some(existing_obj), Some(update_obj)) => {
+            for (k, v) in update_obj {
+                match existing_obj.get_mut(k) {
+                    Some(existing_child) if existing_child.is_object() && v.is_object() => {
+                        deep_merge_value(existing_child, v);
+                    }
+                    _ => {
+                        existing_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        _ => {
+            *existing = update.clone();
+        }
+    }
+}
+
+pub fn deep_merge_entry_field(merged: &mut EntryMap, key: &str, value: &Value) {
+    match merged.get_mut(key) {
+        Some(existing) if existing.is_object() && value.is_object() => deep_merge_value(existing, value),
+        _ => {
+            merged.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
 pub fn insert_at_path(entry: &mut EntryMap, path: &[String], value: Value) {
     match path.len() {
         0 => {} // nothing to do

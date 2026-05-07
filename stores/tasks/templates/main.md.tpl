@@ -55,7 +55,16 @@
 
 ---
 
-## Plan Review
+{{#if linked_observation_harden_logs}}
+## Intent Contract Harden Log
+
+{{#each linked_observation_harden_logs}}
+### Observation {{this.display_id}}
+{{this.rendered}}
+{{/each}}
+---
+
+{{/if}}## Plan Review
 
 {{#if plan_review_log}}
 {{#each plan_review_log}}

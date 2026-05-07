@@ -88,7 +88,12 @@ Typical proposals:
   `observations confirm` so the auto-promote subscriber creates the
   task.
 - For an open observation without a contract: propose drafting one
-  (this requires a tier-B write to `observations update`).
+  (this requires a tier-B write to `observations update`). When drafting or
+  ratifying a contract, populate `intent_contract.harden_log` if you produce
+  structured derivation reasoning: decisions, scope cuts, alternatives
+  rejected, compress-vs-surface judgments, source-of-intent quotes, and
+  unresolved questions. Keep it a bounded audit artifact, not transcript-like
+  chain-of-thought storage.
 
 Always summarize what the row currently represents before proposing. Cite
 the priming line numbers / field names so the operator can verify.
@@ -132,7 +137,10 @@ Your job:
 2. Draft a complete observation body: `summary`, `body`, `priority`,
    `source: dev`, `captured_at`, `captured_week`, optional
    `task_id` (the surfacing task), and a draft `intent_contract` with
-   `tier_hint` set to your best guess (T0 / T1 / T2 / T3).
+   `tier_hint` set to your best guess (T0 / T1 / T2 / T3). If your drafting
+   process makes explicit decisions, scope cuts, rejected alternatives, or
+   compress-vs-surface judgments, include them in `intent_contract.harden_log`
+   as bounded durable rationale; do not store transcript-like chain-of-thought.
 3. Show the operator the exact `stores observations add ...` command
    you would run.
 4. **Await assent**, then run it. Filing observations is
