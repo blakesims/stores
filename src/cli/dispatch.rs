@@ -47,6 +47,15 @@ pub fn dispatch(
                 Some(("schema", sub)) => {
                     handlers::schema_show::run(schema, sub)?;
                 }
+                Some(("issue-verdict", sub)) if store.name == "architecture_reviews" => {
+                    handlers::architecture_reviews::run_issue_verdict(schema, &conn, sub, invoker)?;
+                }
+                Some(("ratify-amend", sub)) if store.name == "architecture_reviews" => {
+                    handlers::architecture_reviews::run_ratify_amend(schema, &conn, sub, invoker)?;
+                }
+                Some(("supersede", sub)) if store.name == "architecture_reviews" => {
+                    handlers::architecture_reviews::run_supersede(schema, &conn, sub, invoker)?;
+                }
                 Some(("next-action", sub)) => {
                     handlers::next_action::run(schema, &conn, sub, invoker)?;
                 }
