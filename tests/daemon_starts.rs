@@ -150,6 +150,7 @@ fn daemon_starts_concurrent_inserts_get_distinct_display_ids() {
     {
         let conn = Connection::open(&db_path).unwrap();
         conn.execute_batch(stores::codegen::ddl::SUBSTRATE_DDL).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
     }
 
     // Shared counter that mimics DAEMON_START_SEQ; each thread gets its own
@@ -167,7 +168,7 @@ fn daemon_starts_concurrent_inserts_get_distinct_display_ids() {
         move || -> String {
             let conn = Connection::open(&db_path).unwrap();
             // Give the other thread up to 2 s to release any write lock.
-            conn.execute_batch("PRAGMA busy_timeout=2000; PRAGMA journal_mode=WAL;").unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(2)).unwrap();
             let seq = ctr.fetch_add(1, Ordering::Relaxed);
             let pending = format!("__pending_{}_{}", pid, seq);
             conn.execute(
