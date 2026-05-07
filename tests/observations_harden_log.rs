@@ -156,6 +156,22 @@ fn scalar_harden_log_and_non_string_unresolved_question_fail() {
         "{scalar_paths:?}"
     );
 
+    let utf8_boundary_scalar = validate(
+        &s,
+        &base_entry(json!({"harden_log": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaé"})),
+        Op::Add,
+        Actor::AiWithHuman.into(),
+    )
+    .unwrap_err();
+    let utf8_paths: Vec<String> = utf8_boundary_scalar
+        .iter()
+        .map(|e| e.field_path.join("."))
+        .collect();
+    assert!(
+        utf8_paths.contains(&"intent_contract.harden_log".to_string()),
+        "{utf8_paths:?}"
+    );
+
     let bad_question = validate(
         &s,
         &base_entry(json!({"harden_log": {

@@ -222,14 +222,10 @@ fn push_invalid_shape(
     value: &serde_json::Value,
 ) {
     let got = match value {
-        serde_json::Value::String(raw) => format!(
-            "string '{}'",
-            if raw.len() > 60 {
-                &raw[..60]
-            } else {
-                raw.as_str()
-            }
-        ),
+        serde_json::Value::String(raw) => {
+            let preview: String = raw.chars().take(60).collect();
+            format!("string '{preview}'")
+        }
         other => other.to_string(),
     };
     errors.push(ValidationError {
