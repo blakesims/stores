@@ -65,12 +65,25 @@ pub struct AgentRunTelemetry {
 }
 
 impl AgentRunTelemetry {
+    /// Fully-populated telemetry for mock/test use.
+    ///
+    /// All required fields (`model_id`, `harness_id`, `started_at`, `ended_at`,
+    /// `transcript_path`) are set to sentinel mock values so that tests that
+    /// construct `RunnerOutput` directly and call `drive_loop` pass
+    /// `insert_agent_run`'s required-field validation without needing to spin
+    /// up real transcript files.
+    ///
+    /// For tests that assert specific field values (e.g. `happy_path_one_phase_mock`),
+    /// replace the telemetry on the returned `RunnerOutput` with a
+    /// fully-specified `AgentRunTelemetry` that points at real synthesized files.
     pub fn with_mock_defaults() -> Self {
         let now = crate::handlers::row::now_iso8601();
         Self {
+            model_id: Some("mock-model".to_string()),
             harness_id: Some("mock".to_string()),
             started_at: Some(now.clone()),
             ended_at: Some(now),
+            transcript_path: Some("mock://transcript".to_string()),
             ..Self::default()
         }
     }
@@ -120,6 +133,18 @@ pub struct RunnerOutput {
     pub structured_output_source: Option<&'static str>,
     /// Runner/source telemetry for persistence in `agent_runs`.
     pub telemetry: AgentRunTelemetry,
+    /// Payload-level validation error surfaced separately from `exit_code`.
+    ///
+    /// `exit_code` always reflects the real child process exit status.
+    /// When the runner process exits 0 but the output fails schema validation
+    /// (missing `final_output`, wrong shape, etc.), the runner sets this field
+    /// instead of overriding `exit_code`. Drive checks this field after
+    /// persisting telemetry and surfaces it via the same abort path as
+    /// a non-zero exit.
+    ///
+    /// `None` means no payload error. `Some(reason)` means payload validation
+    /// failed with the given human-readable reason.
+    pub payload_error: Option<String>,
 }
 
 /// A synchronous, blocking agent runner.

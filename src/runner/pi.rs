@@ -185,22 +185,24 @@ impl Runner for PiRunner {
             transcript_path,
         };
 
-        // Payload-level failures: override exit_code to 1 so that drive
-        // records the agent_run (telemetry) before surfacing the error.
-        // The Runner::spawn contract says: Err only for infrastructure failures.
+        // Payload-level failures are surfaced via `payload_error` so that
+        // `exit_code` always reflects the REAL child process exit status.
+        // Drive persists telemetry (with the real exit_code) first, then checks
+        // `payload_error` and surfaces it via the same abort path as non-zero exit.
         let payload = extract_final_output(&stdout);
         if exit_code == 0 && payload.is_none() {
             return Ok(RunnerOutput {
                 stdout,
                 stderr,
-                exit_code: 1,
-                final_message: Some(
-                    "pi helper exited 0 but did not emit final_output".to_string(),
-                ),
+                exit_code,
+                final_message: None,
                 structured_output: None,
                 session_id: Some(session_id),
                 structured_output_source: None,
                 telemetry,
+                payload_error: Some(
+                    "pi helper exited 0 but did not emit final_output".to_string(),
+                ),
             });
         }
         if let (Some(s), Some(p)) = (schema, payload.as_ref()) {
@@ -208,12 +210,13 @@ impl Runner for PiRunner {
                 return Ok(RunnerOutput {
                     stdout,
                     stderr,
-                    exit_code: 1,
-                    final_message: Some(format!("{e:#}")),
+                    exit_code,
+                    final_message: None,
                     structured_output: None,
                     session_id: Some(session_id),
                     structured_output_source: None,
                     telemetry,
+                    payload_error: Some(format!("{e:#}")),
                 });
             }
         }
@@ -226,6 +229,7 @@ impl Runner for PiRunner {
             session_id: Some(session_id),
             structured_output_source: Some("pi-tool"),
             telemetry,
+            payload_error: None,
         })
     }
 }
@@ -274,9 +278,9 @@ mod tests {
 
     #[test]
     fn malformed_payload_errors() {
-        // Payload validation failure → Ok(RunnerOutput { exit_code: 1 }) with
-        // the schema validation message in final_message. Telemetry is persisted
-        // by the caller (drive) before surfacing the non-zero exit.
+        // Payload validation failure → Ok(RunnerOutput) with real exit_code (0)
+        // from the child process, and the schema validation message in payload_error.
+        // Telemetry is persisted by the caller (drive) before surfacing the error.
         let (_d, bin) = shim(
             "#!/bin/sh\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\"}}'\n",
         );
@@ -291,13 +295,14 @@ mod tests {
                 Some(env!("CARGO_MANIFEST_DIR")),
             )
             .unwrap();
-        assert_eq!(out.exit_code, 1, "payload failure → non-zero exit_code");
+        // exit_code reflects the REAL child process exit status (0 here).
+        assert_eq!(out.exit_code, 0, "payload failure preserves real child exit_code");
+        // payload_error carries the validation message, separate from exit_code.
+        let payload_err = out.payload_error.as_deref().unwrap_or("");
         assert!(
-            out.final_message
-                .as_deref()
-                .unwrap_or("")
-                .contains("schema validation"),
-            "schema validation error in final_message"
+            payload_err.contains("schema validation"),
+            "schema validation error in payload_error: got {:?}",
+            payload_err
         );
         assert!(out.structured_output.is_none());
         assert!(out.telemetry.harness_id.as_deref() == Some("pi"));
@@ -305,8 +310,9 @@ mod tests {
 
     #[test]
     fn missing_final_tool_call_errors_when_helper_exits_zero() {
-        // Missing final_output when exit_code == 0 → Ok(RunnerOutput { exit_code: 1 })
-        // with explanation in final_message. Telemetry persisted by caller before exit.
+        // Missing final_output when child exits 0 → Ok(RunnerOutput) with real
+        // exit_code (0) and the explanation in payload_error (not exit_code override).
+        // Telemetry is persisted by the caller (drive) before surfacing the error.
         let (_d, bin) =
             shim("#!/bin/sh\necho '{\"type\":\"message\",\"text\":\"done\"}'\nexit 0\n");
         let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
@@ -319,13 +325,14 @@ mod tests {
                 Some(env!("CARGO_MANIFEST_DIR")),
             )
             .unwrap();
-        assert_eq!(out.exit_code, 1, "missing final_output → non-zero exit_code");
+        // exit_code reflects the REAL child process exit status (0 here).
+        assert_eq!(out.exit_code, 0, "missing final_output preserves real child exit_code");
+        // payload_error carries the explanation, separate from exit_code.
+        let payload_err = out.payload_error.as_deref().unwrap_or("");
         assert!(
-            out.final_message
-                .as_deref()
-                .unwrap_or("")
-                .contains("did not emit final_output"),
-            "explanation in final_message"
+            payload_err.contains("did not emit final_output"),
+            "explanation in payload_error: got {:?}",
+            payload_err
         );
         assert!(out.telemetry.harness_id.as_deref() == Some("pi"));
     }

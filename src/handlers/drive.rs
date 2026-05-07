@@ -397,9 +397,21 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
                 fixture_path.display()
             )
         })?;
+        // Synthetic transcript dir for fixture items that don't supply their own
+        // transcript_path. Lives alongside the fixture file so paths are stable.
+        let synthetic_runs_dir = fixture_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(".stores")
+            .join("runs");
+        let _ = std::fs::create_dir_all(&synthetic_runs_dir);
+
         let outputs: Vec<RunnerOutput> = items
             .into_iter()
-            .map(|item| {
+            .enumerate()
+            .map(|(idx, item)| {
+                // Required fields: caller/fixture supplies them; synthesize only as
+                // last resort for transcript_path when fixture omits it entirely.
                 let mut telemetry = crate::runner::AgentRunTelemetry::with_mock_defaults();
                 if item.model_id.is_some() {
                     telemetry.model_id = item.model_id;
@@ -416,7 +428,14 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
                 telemetry.tokens_in = item.tokens_in;
                 telemetry.tokens_out = item.tokens_out;
                 telemetry.prompt_cache_hits = item.prompt_cache_hits;
-                telemetry.transcript_path = item.transcript_path;
+                // If the fixture item supplied a transcript_path, use it; otherwise
+                // synthesize a real stub file under .stores/runs/ so insert_agent_run
+                // never receives None for this required field.
+                telemetry.transcript_path = item.transcript_path.or_else(|| {
+                    let p = synthetic_runs_dir.join(format!("mock-item-{idx}.jsonl"));
+                    let _ = std::fs::write(&p, b"{\"model\":\"stub-model\"}\n");
+                    Some(p.display().to_string())
+                });
                 RunnerOutput {
                     stdout: item.stdout,
                     stderr: item.stderr,
@@ -426,6 +445,7 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
                     session_id: None,
                     structured_output_source: None,
                     telemetry,
+                    payload_error: None,
                 }
             })
             .collect();
@@ -1122,6 +1142,32 @@ fn drive_loop_with_role_runner(
             }
         }
 
+        // Payload validation error (MAJOR 2): surfaced after telemetry is
+        // persisted (above) so the real exit_code is preserved in agent_runs.
+        // Treated like a runner failure — transition to blocked.
+        if let Some(ref payload_err) = run_out.payload_error {
+            eprintln!(
+                "[{display_id}] runner payload validation failed (exit={}): {payload_err}",
+                run_out.exit_code
+            );
+            let _ = std::io::stderr().flush();
+            let blocked_reason = classify_runner_exit(&run_out);
+            match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
+                Ok(()) => {
+                    bail!(
+                        "runner payload validation failed (exit={}): {payload_err}; transitioned to blocked",
+                        run_out.exit_code
+                    );
+                }
+                Err(e) => {
+                    bail!(
+                        "runner payload validation failed (exit={}): {payload_err}; mark_drive_failed FAILED: {e:#}",
+                        run_out.exit_code
+                    );
+                }
+            }
+        }
+
         // ── Step 2e: parse envelope + dispatch submit ─────────────────────
         let (envelope, source_tag) =
             parse_envelope(&run_out, &agent_name_normalized).map_err(|e| {
@@ -1802,6 +1848,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         }
     }
@@ -2801,6 +2848,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![fail_out]);
@@ -2887,6 +2935,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![fail_out]);
@@ -3105,6 +3154,7 @@ mod tests {
             structured_output: Some(valid_envelope),
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (env, source) =
@@ -3150,6 +3200,7 @@ mod tests {
             structured_output: None,
             session_id: Some("test-uuid".to_string()),
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![fail_out]);
@@ -3183,6 +3234,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (env, source) =
@@ -3247,6 +3299,7 @@ mod tests {
             structured_output: Some(fixture_val),
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (env, source) = parse_envelope(&out, "wrap").expect("wrap fixture should parse");
@@ -3320,6 +3373,7 @@ mod tests {
             structured_output: None,
             session_id: Some("wrap-mismatch-session".to_string()),
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![misrouted]);
@@ -3386,6 +3440,7 @@ mod tests {
             final_message: Some(fenced_text.to_string()),
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
 
@@ -3422,6 +3477,7 @@ mod tests {
             session_id: None,
             structured_output_source: Some("sdk"),
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
+            payload_error: None,
         };
         let (_, source) = parse_envelope(&out, "executor").expect("sdk layer must succeed");
         assert_eq!(source, "sdk");
@@ -3440,6 +3496,7 @@ mod tests {
             final_message: Some(fenced.to_string()),
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (_, source) = parse_envelope(&out, "executor").expect("sap layer must succeed");
@@ -3463,6 +3520,7 @@ mod tests {
             final_message: None, // No final_message → skip Layers 2+3 final_message paths.
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (_, source) =
@@ -3502,6 +3560,7 @@ mod tests {
             structured_output: None,
             session_id: Some("smoke-session-uuid".to_string()),
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![misrouted]);
@@ -4298,6 +4357,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let (env, source) =
@@ -4352,6 +4412,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         }]);
 

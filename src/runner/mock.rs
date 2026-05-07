@@ -26,6 +26,7 @@ use super::{Runner, RunnerOutput};
 ///     session_id: None,
 ///     structured_output_source: None,
 ///     telemetry: AgentRunTelemetry::with_mock_defaults(),
+///     payload_error: None,
 /// }];
 /// let runner = MockRunner::new(queue);
 /// let out = runner.spawn("planner", "sys", "brief", None, None).unwrap();
@@ -115,6 +116,7 @@ mod tests {
             structured_output: None,
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         }
     }
@@ -200,6 +202,7 @@ mod tests {
             structured_output: Some(structured.clone()),
             session_id: None,
             structured_output_source: None,
+            payload_error: None,
             telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(),
         };
         let runner = MockRunner::new(vec![output]);

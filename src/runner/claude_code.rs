@@ -527,6 +527,7 @@ impl Runner for ClaudeCodeRunner {
                 prompt_cache_hits,
                 transcript_path,
             },
+            payload_error: None,
         })
     }
 }

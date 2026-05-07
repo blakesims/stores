@@ -44,6 +44,7 @@ fn make_run_output(stdout: &str) -> RunnerOutput {
         structured_output: None,
         session_id: None,
         structured_output_source: None,
+        payload_error: None,
         telemetry: stores::runner::AgentRunTelemetry::with_mock_defaults(),
     }
 }

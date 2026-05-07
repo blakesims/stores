@@ -104,35 +104,53 @@ pub(crate) fn insert_agent_run(
     exit_code: i32,
     telemetry: &AgentRunTelemetry,
 ) -> Result<()> {
+    // All required telemetry fields must be supplied by the caller. The
+    // `legacy_unknown` sentinel is migration/backfill-only — callers doing
+    // historical backfill must pass it explicitly. New invocations that
+    // genuinely lack telemetry (runner failed before producing any output)
+    // must use a separate error shape (RunnerOutput::payload_error) rather
+    // than smuggling missing values through these fields.
     let model_id = telemetry
         .model_id
         .as_deref()
-        .unwrap_or("legacy_unknown")
-        .to_string();
-    let harness_id = telemetry
-        .harness_id
-        .clone()
-        .unwrap_or_else(|| "legacy_unknown".to_string());
-    let started_at = telemetry
-        .started_at
-        .clone()
-        .unwrap_or_else(crate::handlers::row::now_iso8601);
-    let ended_at = telemetry
-        .ended_at
-        .clone()
-        .unwrap_or_else(crate::handlers::row::now_iso8601);
-    let transcript_path = telemetry
-        .transcript_path
-        .as_deref()
-        .unwrap_or("legacy_unknown")
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: model_id is required for new rows; supply it from the runner or use 'legacy_unknown' explicitly for backfill"))?
         .to_string();
     anyhow::ensure!(
         !model_id.is_empty(),
-        "insert_agent_run: model_id must be non-empty; pass 'legacy_unknown' for backfill rows"
+        "insert_agent_run: model_id must be non-empty"
     );
+    let harness_id = telemetry
+        .harness_id
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: harness_id is required for new rows"))?;
+    anyhow::ensure!(
+        !harness_id.is_empty(),
+        "insert_agent_run: harness_id must be non-empty"
+    );
+    let started_at = telemetry
+        .started_at
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: started_at is required for new rows"))?;
+    anyhow::ensure!(
+        !started_at.is_empty(),
+        "insert_agent_run: started_at must be non-empty"
+    );
+    let ended_at = telemetry
+        .ended_at
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: ended_at is required for new rows"))?;
+    anyhow::ensure!(
+        !ended_at.is_empty(),
+        "insert_agent_run: ended_at must be non-empty"
+    );
+    let transcript_path = telemetry
+        .transcript_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("insert_agent_run: transcript_path is required for new rows; supply it from the runner or use 'legacy_unknown' explicitly for backfill"))?
+        .to_string();
     anyhow::ensure!(
         !transcript_path.is_empty(),
-        "insert_agent_run: transcript_path must be non-empty; pass 'legacy_unknown' for backfill rows"
+        "insert_agent_run: transcript_path must be non-empty"
     );
     conn.execute(
         "INSERT INTO agent_runs \
