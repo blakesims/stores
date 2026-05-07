@@ -25,13 +25,13 @@ Read the printed path before editing.
 
 ## Fill only live state
 
-Include:
+Include, in this order (the first item is non-negotiable — the next reviewer needs it before doing anything else):
 
-- active thread path;
+- **Active thread path** — the full path under `/home/blake/repos/.agent-comm/threads/`. The thread is different each session; the next reviewer must NOT init a fresh one. Spell the path out; do not reference it as "the thread" or "today's thread."
 - codex processes still running: PID, task, commit, worktree, log path, stdin closed yes/no;
 - review queue awareness: in-flight, ready pings expected, parked tasks;
 - last digest/result per active task;
-- tooling caveats (e.g. codex stdin must be `</dev/null`);
+- tooling caveats (e.g. codex stdin must be `</dev/null`; `Monitor` tool is deferred and must be loaded with `ToolSearch select:Monitor` before use);
 - first exact next action for the next reviewer-runner.
 
 Do not include full digests; link message ids or log paths.

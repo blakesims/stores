@@ -12,7 +12,15 @@ One-line doctrine: **reviewer-runner observes review gates; it does not decide, 
 
 ## Activation inputs
 
-This skill may be invoked with an optional prior-reviewer handover note path. If provided, read it before setting monitors or running codex. Resume any listed codex PIDs/logs first, then follow its `First step for next agent`. If no handover is provided, join the active thread Blake gives you and stand by.
+The active agent-comm thread path is **always provided** — either in the prior-reviewer handover note's "active thread path" field or directly by Blake at invocation time. The thread is different each session; never assume the previous session's path is still live.
+
+Order of precedence:
+
+1. **Handover note path** passed at activation → read it first. Resume any listed codex PIDs/logs, then follow its `First step for next agent`. The note carries the active thread path; use it.
+2. **Direct path from Blake** (e.g. `/agent-comm watch <path>` after `/reviewer-runner startup`) → use it verbatim. Do NOT init a new thread on top.
+3. **Neither provided** → ask Blake which thread to join. Initing a fresh thread is a last resort and risks fragmenting the session — substrate-agent and Pi will be on the canonical thread, not yours.
+
+After resolving the thread path, set up monitors (next section) before running anything else.
 
 ## Role
 
@@ -59,25 +67,24 @@ Allowed:
 
 ## Session bring-up (do this first, every session)
 
-On every reviewer-runner activation, set up two persistent monitors before standing by:
+On every reviewer-runner activation, set up two persistent monitors before standing by. **Both must use the `Monitor` tool, not `Bash` with `run_in_background`** — see the failure-mode callout below.
 
-1. **agent-comm thread monitor** — the ping channel from substrate-agent. Either init a new thread or join the path the user provides:
+1. **agent-comm thread monitor** — the ping channel from substrate-agent. Use the resolved thread path from "Activation inputs" above. **Use the `Monitor` tool, persistent=true**, with a `grep --line-buffered` filter so each new message becomes one notification:
 
-   ```bash
-   # New thread
-   agent-comm init "stores-review-session" --name reviewer-runner --to substrate-agent --message "<standing-by note>"
-   # OR join an existing thread the user/handover provided
+   ```
+   Monitor:
+     description: "agent-comm: <session-slug> thread events"
+     persistent: true
+     command: |
+       agent-comm watch <thread-path> --name reviewer-runner --from-end 2>&1 \
+         | grep --line-buffered -E '"type":|"id":|"author":|"summary":'
    ```
 
-   Then start a persistent Monitor running:
+   This is the **trigger surface**: pings here drive codex runs. Each substrate-agent dispatch becomes a push notification you cannot miss.
 
-   ```bash
-   agent-comm watch <thread-path> --name reviewer-runner --from-end
-   ```
+   The `Monitor` tool is deferred — load its schema once at session start with `ToolSearch` (`select:Monitor`) before calling it. If `Monitor` is unavailable, treat it as a TOOLING-FAILURE for the session-bring-up step and surface to Blake; do NOT fall back to a polling buffer.
 
-   This is the **trigger surface**: pings here drive codex runs.
-
-2. **in_review queue monitor** — situational awareness only; does NOT trigger codex. Start a persistent Monitor with a 30s poll loop that emits only on changes (arrivals, departures, cycle bumps):
+2. **in_review queue monitor** — situational awareness only; does NOT trigger codex. Use the `Monitor` tool (persistent=true) with a 30s poll loop that emits only on changes (arrivals, departures, cycle bumps):
 
    ```bash
    prev=""
@@ -102,6 +109,16 @@ On every reviewer-runner activation, set up two persistent monitors before stand
    Sqlite read is fine (read-only is not a substrate write). The cycle suffix (`:c<N>`) catches revise → re-codex bumps that don't change the row count.
 
 Do NOT auto-trigger codex when the queue monitor reports new arrivals — wait for substrate-agent's explicit ping. The queue monitor exists so you can ack a ping with context and notice if substrate-agent forgot to ping you for a row that's been sitting.
+
+### Failure mode: polling buffer ≠ subscription
+
+`Bash` with `run_in_background` writes a process's output to a file you have to read; it does **not** push notifications. A reviewer-runner that starts `agent-comm watch ... &` and then "stands by" is silently deaf — dispatches accumulate in the buffer file and the agent never reads them. This has happened (2026-05-07 PM session: ~50 minutes of missed dispatches incl. a re-codex T076, a fresh codex T077, and a status PING). The fix is in the bring-up above: use `Monitor` so each new line arrives as a chat notification.
+
+If `Monitor` ever returns to "use Bash background" as a workaround, set yourself a `ScheduleWakeup` for ~120-180s as a safety net to re-read the buffer file. Default path is push-via-Monitor.
+
+### Heartbeat / response cadence
+
+When a dispatch (`codex T0XX`, `re-codex T0XX`, `RE-REBASE-ONLY-NO-CODEX`) lands, ack within ~10 minutes — either with the digest or with a status line ("rebasing", "codex running, ETA <N>m", "queued behind T0YY at cap=2"). Going silent for >15 minutes after a ping that was `response_requested: yes` is a bug; substrate-agent is blocked on you and will start asking. If you notice the silence yourself first, send the heartbeat unprompted.
 
 ## Concurrency and base doctrine
 
