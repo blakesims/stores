@@ -219,6 +219,12 @@ fn terminal_width() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|w| *w > 0)
+        .or_else(|| {
+            crossterm::terminal::size()
+                .ok()
+                .map(|(cols, _)| usize::from(cols))
+                .filter(|w| *w > 0)
+        })
         .unwrap_or(80)
 }
 
