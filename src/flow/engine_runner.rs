@@ -1,8 +1,11 @@
 //! Engine-runner observability substrate.
 //!
 //! Records per-iteration heartbeats and per-row actionability state, and
-//! reconciles state invariants owned by the engine runner. It does not mutate
-//! task lifecycle states or dispatch locks.
+//! reconciles state invariants owned by the engine runner. Layer 1 mints
+//! pending external_review rows for T2/T3 in_review tasks. Layer 2 dispatches
+//! pending external_review rows whose runner is configured and no live dispatch
+//! exists, closing the gap where a subscriber added after an ER row was minted
+//! never fires (L055 seeder marks historical, daemon restart loses the event).
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
@@ -82,6 +85,26 @@ pub struct ExternalReviewBackfill {
     pub review_row_id: i64,
     pub review_display_id: String,
     pub reason: String,
+}
+
+/// Outcome of a single Layer 2 external-review dispatch attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalReviewDispatchOutcome {
+    /// `external_review::run()` was called; ER row transitioned out of pending.
+    Dispatched,
+    /// Cap full: another review is running; row held for next tick.
+    CapHeld,
+    /// Runner not configured in config.yaml; row skipped.
+    NoRunner,
+}
+
+/// Record produced by the Layer 2 reconciler for each candidate ER row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalReviewDispatch {
+    pub review_row_id: i64,
+    pub review_display_id: String,
+    pub task_display_id: String,
+    pub outcome: ExternalReviewDispatchOutcome,
 }
 
 /// Insert one durable heartbeat row for a poll iteration.
@@ -384,6 +407,171 @@ pub fn reconcile_external_reviews_for_in_review_tasks(
     Ok(minted)
 }
 
+/// Layer 2 reconciler: state-driven dispatch of pending external_reviews rows.
+///
+/// Invariant: every `external_reviews` row in status=`pending` whose runner is
+/// configured AND whose dispatch_lock (if any) has `finished_at IS NOT NULL`
+/// (i.e., no live claim) MUST eventually be dispatched.  This is NOT guaranteed
+/// by the transition subscriber alone: the L055/L116 seeder marks pre-existing
+/// `""→pending` TH rows as `skip-historical` when the `external-review`
+/// subscriber is first added, so rows minted before the subscriber existed
+/// (e.g. ER001 in the ER001-backfill scenario) never get dispatched via the
+/// transition path.  Daemon restarts after a missed transition share the same
+/// gap.
+///
+/// This function fills that gap by scanning `external_reviews` directly each
+/// engine-runner tick and calling `external_review::run()` for unserviced rows.
+///
+/// Idempotency:
+///   - Status filter: only `status='pending'` rows are candidates; `run()`
+///     transitions `pending→running` atomically, so a row won't be re-dispatched
+///     once it leaves pending.
+///   - dispatch_locks guard: rows with a live unfinished dispatch_lock
+///     (`finished_at IS NULL`) are skipped — the action_loop is already
+///     handling them.
+///   - `run()` CAS: `UPDATE … WHERE status='pending'` is the final gate; a
+///     concurrent `run()` from the action_loop path will no-op if it sees
+///     status≠pending.
+///
+/// Cap: `cap_allows_or_log` is called per row; CapHeld rows are returned with
+/// the held outcome so callers can see the lane is full.
+///
+/// BEGIN IMMEDIATE scope: the candidates SELECT is done OUTSIDE a transaction
+/// (read-only snapshot is sufficient); each `run()` call internally uses its
+/// own BEGIN IMMEDIATE where needed (promote_elapsed_tooling_held + mark_running).
+/// No wrapping transaction is needed here because each `run()` is an independent
+/// unit; holding a writer lock across all rows would starve the action_loop
+/// unnecessarily.
+pub fn reconcile_pending_external_review_dispatch(
+    conn: &Connection,
+    agents: &AgentsYaml,
+    config_path: &Path,
+    policies_hash: &str,
+) -> Result<Vec<ExternalReviewDispatch>> {
+    if !table_exists(conn, "external_reviews")? || !table_exists(conn, "dispatch_locks")? {
+        return Ok(Vec::new());
+    }
+
+    // Gate: only run if the `external-review` agent is present in agents.yaml.
+    // Without an agent entry, `cap_allows_or_log` would still work but there is
+    // no configured subscriber to hand-off to; skip cleanly.
+    if !agents
+        .agents
+        .iter()
+        .any(|a| a.name == "external-review")
+    {
+        return Ok(Vec::new());
+    }
+
+    // Skip immediately if the runner is explicitly empty (mis-configuration).
+    let review_cfg = crate::flow::config::resolve_review_config(config_path);
+    if review_cfg.runner.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Ensure runtime columns exist (held_reason, next_retry_at, attempts).
+    // safe to call repeatedly; external_review::ensure_runtime_columns is private
+    // so we call visible_status_rows which calls it internally, OR inline the
+    // columns check.  Use cap_allows_or_log which calls ensure_runtime_columns.
+    // Actually: call visible_status_rows which invokes ensure_runtime_columns.
+    // Cheapest path: just call ensure_runtime_columns via an exported helper.
+    // Since it's private we inline the required column additions here.
+    {
+        let expected = [
+            ("held_reason", "TEXT"),
+            ("next_retry_at", "TEXT"),
+            ("attempts", "INTEGER DEFAULT 0"),
+        ];
+        let mut cols_stmt = conn.prepare("PRAGMA table_info(external_reviews)")?;
+        let existing: std::collections::BTreeSet<String> = cols_stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (name, ty) in expected {
+            if !existing.contains(name) {
+                conn.execute(
+                    &format!("ALTER TABLE external_reviews ADD COLUMN {name} {ty}"),
+                    [],
+                )
+                .context("Layer2: add external_reviews runtime column")?;
+            }
+        }
+    }
+
+    // Candidates: pending ER rows with no live (unfinished) dispatch_lock.
+    // "Live" = dispatch_lock row exists AND finished_at IS NULL.
+    // Rows with finished locks (skip-historical or completed) are re-eligible.
+    let mut stmt = conn.prepare(
+        "SELECT er.id, er.display_id, er.task_id \
+         FROM external_reviews er \
+         WHERE er.status = 'pending' \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM dispatch_locks dl \
+               WHERE dl.store = 'external_reviews' \
+                 AND dl.row_id = er.id \
+                 AND dl.agent_name = 'external-review' \
+                 AND dl.finished_at IS NULL \
+           ) \
+         ORDER BY er.id",
+    )?;
+    let candidates: Vec<(i64, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut results = Vec::new();
+    for (review_row_id, review_display_id, task_display_id) in candidates {
+        // Cap check via the exported helper (marks the row cap-held if needed).
+        match crate::flow::builtins::external_review::cap_allows_or_log(
+            conn,
+            config_path,
+            &review_display_id,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                results.push(ExternalReviewDispatch {
+                    review_row_id,
+                    review_display_id,
+                    task_display_id,
+                    outcome: ExternalReviewDispatchOutcome::CapHeld,
+                });
+                continue;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[engine-runner Layer2] cap_allows_or_log error for {review_display_id}: {e}"
+                );
+                continue;
+            }
+        }
+
+        let row_json = serde_json::json!({"display_id": review_display_id});
+        let ctx = crate::flow::builtins::DispatchCtx {
+            conn,
+            agents,
+            config_path,
+            policies_hash,
+        };
+        eprintln!(
+            "[engine-runner Layer2] dispatching pending external_review {review_display_id} (task={task_display_id})"
+        );
+        match crate::flow::builtins::external_review::run(&row_json, &ctx) {
+            Ok(_) => {
+                results.push(ExternalReviewDispatch {
+                    review_row_id,
+                    review_display_id,
+                    task_display_id,
+                    outcome: ExternalReviewDispatchOutcome::Dispatched,
+                });
+            }
+            Err(e) => {
+                eprintln!(
+                    "[engine-runner Layer2] external_review::run error for {review_display_id}: {e}"
+                );
+            }
+        }
+    }
+    Ok(results)
+}
+
 /// Scan and execute only existing autonomous task re-drive edges. Non-task
 /// actionable rows remain observation-only for this phase.
 pub fn scan_record_and_redrive_tasks(
@@ -399,7 +587,21 @@ pub fn scan_record_and_redrive_tasks(
     base_dispatched: i64,
 ) -> Result<ScannerResult> {
     let claim_window_secs = auto_drive_claim_window_secs(agents);
+    // Layer 1: mint pending external_review rows for T2/T3 in_review tasks.
     let backfilled = reconcile_external_reviews_for_in_review_tasks(conn)?;
+    // Layer 2: dispatch pending external_review rows that have no live claim.
+    // Runs after Layer 1 so freshly-minted rows from THIS tick are picked up
+    // immediately rather than waiting for the next daemon iteration.
+    let l2_dispatches =
+        reconcile_pending_external_review_dispatch(conn, agents, config_path, policies_hash)
+            .unwrap_or_else(|e| {
+                eprintln!("[engine-runner Layer2] reconcile error: {e}");
+                Vec::new()
+            });
+    let l2_dispatched = l2_dispatches
+        .iter()
+        .filter(|d| d.outcome == ExternalReviewDispatchOutcome::Dispatched)
+        .count() as i64;
     let mut rows = scan_rows(conn, schemas, started_at, claim_window_secs)?;
     for backfill in &backfilled {
         if let Some(row) = rows
@@ -411,7 +613,7 @@ pub fn scan_record_and_redrive_tasks(
         }
     }
     let cap = crate::flow::config::resolve_drive_max_parallel(config_path) as usize;
-    let mut dispatched = 0_i64;
+    let mut dispatched = l2_dispatched;
 
     let mut processed_task_rows = std::collections::BTreeSet::new();
     for row in rows.iter_mut().filter(|r| {
