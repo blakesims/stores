@@ -117,17 +117,11 @@ fn ac3_1_render_via_dot_produces_utf8_when_graphviz_installed() {
 
 /// AC2.1: every line of `--format auto` output ≤ 120 columns.
 ///
-/// L041: with the L040 gate fix, this test now actually runs — and fails
-/// on hosts with graph-easy because the Z1 tasks zone produces a 128-col
-/// line (over the 120-col contract). Ignored until L041 is resolved
-/// (either by changing the layout to fit 120, or by bumping the AC).
+/// T091: this must run on hosts with or without graph-easy. The auto renderer
+/// may choose graph-easy boxart or its mermaid fallback, but the stdout contract
+/// is always ≤120 columns.
 #[test]
-#[ignore = "L041: pending decision — Z1 tasks line is 128 cols vs 120-col AC"]
 fn ac_max_line_width_under_120() {
-    if !graph_easy_on_path() {
-        eprintln!("skipping: `graph-easy` not on PATH (apt install libgraph-easy-perl)");
-        return;
-    }
     let (manifest, schemas) = build_trio();
     let opts = Opts {
         format: Format::Auto,

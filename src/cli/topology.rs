@@ -9,6 +9,8 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
+const AUTO_MAX_LINE_WIDTH: usize = 120;
+
 use crate::manifest::Manifest;
 use crate::schema::actor::Actor;
 use crate::schema::Schema;
@@ -613,11 +615,16 @@ pub fn render_via_dot(dot_source: &str) -> RenderOutcome {
 // Entry point
 // ---------------------------------------------------------------------------
 
+fn max_line_width(s: &str) -> usize {
+    s.lines().map(|line| line.chars().count()).max().unwrap_or(0)
+}
+
 /// Build the `Format::Auto` stdout string. Per-zone rendering through
-/// `graph-easy --as=boxart`; on missing/failing graph-easy, returns the
-/// combined `emit_dot` source so the caller can print it with an
-/// install-hint to stderr.  The `Option<FallbackReason>` lets `run()`
-/// decide which stderr note to emit.
+/// `graph-easy --as=boxart` remains the preferred terminal view, but auto
+/// output must keep the CLI's 120-column contract. If graph-easy is missing,
+/// fails, or lays out a zone wider than the contract, auto falls back to the
+/// mermaid zone document: it preserves the same Z0/Z1/Z2 nodes and edges while
+/// keeping every bundled-zone line short enough for terminal capture.
 fn render_auto_with_reason(
     manifest: &Manifest,
     schemas: &HashMap<String, Schema>,
@@ -627,10 +634,14 @@ fn render_auto_with_reason(
     let mut rendered: Vec<(String, String)> = Vec::with_capacity(zones.len());
     for (header, dot_source) in &zones {
         match render_via_dot(dot_source) {
-            RenderOutcome::Rendered(s) => rendered.push((header.clone(), s)),
+            RenderOutcome::Rendered(s) if max_line_width(&s) <= AUTO_MAX_LINE_WIDTH => {
+                rendered.push((header.clone(), s));
+            }
+            RenderOutcome::Rendered(_) => {
+                return (emit_mermaid(manifest, schemas, opts), None);
+            }
             RenderOutcome::Fallback { reason, .. } => {
-                let combined = emit_dot(manifest, schemas, opts);
-                return (combined, Some(reason));
+                return (emit_mermaid(manifest, schemas, opts), Some(reason));
             }
         }
     }
