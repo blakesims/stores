@@ -9,7 +9,22 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::flow::builtins::{BuiltinResult, DispatchCtx};
+use crate::flow::builtins::DispatchCtx;
+
+/// Typed outcome returned by `run()`.
+///
+/// Layer 2 (`reconcile_pending_external_review_dispatch`) increments its
+/// per-tick dispatch budget ONLY on `Dispatched`.  `CapHeld` and `RaceLost`
+/// are informational: the row was not advanced, and no budget slot was consumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchOutcome {
+    /// CAS winner: pending→running transitioned + tooling spawned.
+    Dispatched,
+    /// In-TX running count >= cap; row marked cap-held and left at pending.
+    CapHeld,
+    /// CAS lost: another concurrent caller already claimed this row.
+    RaceLost,
+}
 use crate::flow::config::{resolve_codex_config, resolve_review_config};
 use crate::handlers::external_reviews::{
     run_external_review_attempt, ExternalReviewVerdict, ParsedReviewOutput, ToolingError,
@@ -32,11 +47,11 @@ struct ReviewRow {
     attempt: i64,
 }
 
-pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
+pub fn run(row: &Value, ctx: &DispatchCtx) -> Result<DispatchOutcome> {
     let display_id = row.get("display_id").and_then(Value::as_str).unwrap_or("");
     if display_id.is_empty() {
         eprintln!("[external-review] row missing display_id; skipping");
-        return Ok(1);
+        return Ok(DispatchOutcome::RaceLost);
     }
 
     ensure_runtime_columns(ctx.conn).with_context(|| "external-review runtime columns")?;
@@ -83,7 +98,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             // Row disappeared between the outer check and the TX — abort cleanly.
             tx.rollback()?;
             eprintln!("[external-review] {display_id}: row disappeared; skipping");
-            return Ok(1);
+            return Ok(DispatchOutcome::RaceLost);
         }
         Some(r) => r,
     };
@@ -94,24 +109,28 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             "[external-review] {}: status={} not pending; skipping",
             review_row.display_id, review_row.status
         );
-        return Ok(0);
+        return Ok(DispatchOutcome::RaceLost);
     }
 
+    // In-TX cap check: count RUNNING-only rows (Pi msg_6c40e0b6: pending rows are
+    // queue backlog and never consume capacity).  BEGIN IMMEDIATE serialization
+    // ensures two concurrent ticks re-read updated running counts: the first to
+    // commit running++ is seen by the second's re-read inside its own TX.
     let cap = resolve_review_config(ctx.config_path).max_parallel.max(1);
-    let active = count_active_reviews_tx(&tx, &review_row.display_id)?;
-    if active >= cap as usize {
+    let running_in_tx = count_running_reviews_tx(&tx)?;
+    if running_in_tx >= cap as usize {
         // Mark cap-held inside the TX so the update is visible atomically.
         mark_cap_held_tx(&tx, &review_row)?;
         tx.commit()?;
         eprintln!(
-            "[external-review cap held] task_id={} review_attempt_id={} runner={} status=pending held_reason=cap-held active={} cap={} liveness=cap-held retry=next-poll",
+            "[external-review cap held] task_id={} review_attempt_id={} runner={} status=pending held_reason=cap-held running={} cap={} liveness=cap-held retry=next-poll",
             review_row.task_id,
             review_row.display_id,
             resolve_review_config(ctx.config_path).runner,
-            active,
+            running_in_tx,
             cap
         );
-        return Ok(0);
+        return Ok(DispatchOutcome::CapHeld);
     }
 
     // CAS UPDATE: WHERE status='pending' re-checks atomically under the write lock.
@@ -124,7 +143,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             "[external-review] {}: CAS lost (concurrent mark_running); skipping",
             review_row.display_id
         );
-        return Ok(0);
+        return Ok(DispatchOutcome::RaceLost);
     }
 
     // CAS winner: insert transition history inside the same TX, then commit.
@@ -165,7 +184,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         Err(err) => record_tooling_held(ctx.conn, &review_row, &review_cfg.runner, &err)?,
     }
 
-    Ok(0)
+    Ok(DispatchOutcome::Dispatched)
 }
 
 fn ensure_runtime_columns(conn: &Connection) -> Result<()> {
@@ -236,16 +255,10 @@ pub fn cap_allows_or_log(
     Ok(false)
 }
 
-/// Count reviews actively running (WHERE status='running' only).
+/// Count reviews actively running (WHERE status='running' only), outside a TX.
 ///
-/// Pi msg_577e80a3: cap semantics are "max RUNNING external review jobs."
-/// Pending rows are queue backlog waiting for capacity; they do not consume
-/// the cap at the pre-screen (`cap_allows_or_log`) level.  This means Layer 2
-/// can dispatch up to `cap - running` pending rows per tick.
-///
-/// The in-TX race-safety counter (`count_active_reviews_tx`) is intentionally
-/// separate: it counts pending+running (minus candidate) to prevent concurrent
-/// oversubscription under the write lock.
+/// Pi msg_577e80a3 / msg_6c40e0b6: cap semantics are "max RUNNING external
+/// review jobs."  Pending rows are queue backlog; they do not consume capacity.
 ///
 /// `pub` so `reconcile_pending_external_review_dispatch` in engine_runner can
 /// compute the per-tick dispatch budget at tick start.
@@ -258,13 +271,30 @@ pub fn count_running_reviews(conn: &Connection) -> Result<usize> {
     Ok(n.max(0) as usize)
 }
 
-/// Transaction-aware variant of `count_active_reviews` for use inside the
-/// `run()` CAS BEGIN IMMEDIATE transaction.
+/// Transaction-aware cap counter for use inside the `run()` BEGIN IMMEDIATE TX.
 ///
-/// Excludes the row currently being dispatched (`exclude_display_id`) from the
-/// count, because that row is already locked in this tx and is about to become
-/// running.  Including it would make every single-row dispatch appear to consume
-/// a slot before the UPDATE fires, causing false cap-holds.
+/// Pi msg_6c40e0b6: cap semantics are "max RUNNING jobs."  Pending rows are
+/// queue backlog and never consume a running slot, so we count only
+/// `status='running'` rows here.  No candidate exclusion is required: the
+/// candidate row is still `pending` at this point (we have not yet called
+/// `mark_running_tx`), so it does not appear in the running count.
+///
+/// Race safety: two concurrent ticks both enter a BEGIN IMMEDIATE TX.  The
+/// first to commit transitions its row to `running` (running++).  The second's
+/// TX re-reads inside its own IMMEDIATE lock and sees the updated count, so it
+/// correctly detects cap-full and returns `CapHeld`.
+fn count_running_reviews_tx(tx: &rusqlite::Transaction<'_>) -> Result<usize> {
+    let n: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM external_reviews WHERE status = 'running'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n.max(0) as usize)
+}
+
+/// Superseded by `count_running_reviews_tx` (Pi msg_6c40e0b6).
+/// Retained for reference; no longer called by `run()`.
+#[allow(dead_code)]
 fn count_active_reviews_tx(
     tx: &rusqlite::Transaction<'_>,
     exclude_display_id: &str,

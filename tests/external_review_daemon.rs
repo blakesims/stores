@@ -542,14 +542,20 @@ fn layer2_repeated_tick_does_not_duplicate_dispatch() {
 
 /// Test: 0 running + 3 pending + cap=2 → exactly 2 dispatched, 1 remains pending.
 ///
-/// Pi msg_577e80a3: cap = max RUNNING jobs; pending rows are queue backlog.
-/// With 0 running and cap=2, Layer 2 must dispatch up to `cap - running = 2`
-/// pending rows and leave the third pending (not cap-held, just not yet
-/// dispatched this tick — the reconciler processes each candidate serially, so
-/// the 3rd row sees 2 already dispatched/running and gets cap-held).
+/// Pi msg_577e80a3 / msg_6c40e0b6: cap = max RUNNING jobs; pending rows are
+/// queue backlog.  With 0 running and cap=2, Layer 2 must dispatch exactly
+/// `cap - running = 2` pending rows and cap-hold the third.
 ///
-/// Setup: cap=2, 0 rows running, 3 rows pending.
-/// Expected: exactly 2 dispatched (Dispatched outcome), 1 CapHeld.
+/// Setup: cap=2, 0 rows running, 3 rows pending (single task T900).
+/// Expected (enum): 2 Dispatched outcomes, 1 CapHeld outcome.
+/// Expected (DB state, Pi msg_6c40e0b6 requirement):
+///   - COUNT(*) WHERE status='running' = 2  (not passed — shim exits fast but
+///     run() transitions pending→running and then running→passed; net: 0 running
+///     if shim completes synchronously.  For a synchronous PASS shim the row ends
+///     at status='passed'.  The test therefore asserts non-pending count = 2 and
+///     pending count = 1 rather than running=2, since the shim runs inline.)
+///   - COUNT(*) WHERE status='pending' = 1
+///   - transition_history pending→running records = 2
 #[test]
 fn layer2_cap_zero_running_three_pending_dispatches_two() {
     let conn = Connection::open_in_memory().unwrap();
@@ -572,6 +578,7 @@ fn layer2_cap_zero_running_three_pending_dispatches_two() {
     let dispatches =
         reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
 
+    // ── Enum outcome assertions ───────────────────────────────────────────────
     let dispatched: Vec<_> = dispatches
         .iter()
         .filter(|d| d.outcome == ExternalReviewDispatchOutcome::Dispatched)
@@ -593,16 +600,57 @@ fn layer2_cap_zero_running_three_pending_dispatches_two() {
         "with 0 running + cap=2, exactly 1 pending row must be cap-held; got {} held",
         held.len()
     );
+
+    // ── DB-state assertions (Pi msg_6c40e0b6) ────────────────────────────────
+    // The PASS shim completes synchronously inside run(), so rows transition
+    // pending→running→passed within the same call.  Net DB state: 2 non-pending
+    // rows (passed) and 1 still-pending row.
+    let pending_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM external_reviews WHERE status='pending'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(
+        pending_count, 1,
+        "exactly 1 row must remain pending after cap=2 dispatch; got {pending_count}"
+    );
+
+    let non_pending_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM external_reviews WHERE status != 'pending'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(
+        non_pending_count, 2,
+        "exactly 2 rows must have left pending (dispatched through); got {non_pending_count}"
+    );
+
+    // Exactly 2 pending→running transition_history records must exist (one per
+    // dispatched row).  Pi msg_6c40e0b6: test must assert persisted state.
+    let th_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='external_reviews' AND from_status='pending' AND to_status='running' \
+           AND verb='start-review'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(
+        th_count, 2,
+        "exactly 2 pending→running transition_history records must exist; got {th_count}"
+    );
 }
 
 /// Test: 2 running + 3 pending + cap=2 → 0 dispatched (cap already full).
 ///
-/// Pi msg_577e80a3: when running == cap, no further pending rows may be dispatched.
-/// This is the "cap already full" guard — pending rows are the queue, but the
-/// running slots are exhausted.
+/// Pi msg_577e80a3 / msg_6c40e0b6: when running == cap, no further pending rows
+/// may be dispatched.
 ///
 /// Setup: cap=2, 2 rows running, 3 rows pending.
-/// Expected: all 3 pending rows are cap-held (0 dispatched).
+/// Expected (enum): 0 Dispatched, 3 CapHeld.
+/// Expected (DB state, Pi msg_6c40e0b6 requirement):
+///   - running count UNCHANGED = 2
+///   - pending count UNCHANGED = 3
+///   - 0 new pending→running transition_history records added
 #[test]
 fn layer2_cap_two_running_three_pending_dispatches_zero() {
     let conn = Connection::open_in_memory().unwrap();
@@ -626,6 +674,7 @@ fn layer2_cap_two_running_three_pending_dispatches_zero() {
     let dispatches =
         reconcile_pending_external_review_dispatch(&conn, &a, &cfg_path, "").unwrap();
 
+    // ── Enum outcome assertions ───────────────────────────────────────────────
     let dispatched: Vec<_> = dispatches
         .iter()
         .filter(|d| d.outcome == ExternalReviewDispatchOutcome::Dispatched)
@@ -646,6 +695,41 @@ fn layer2_cap_two_running_three_pending_dispatches_zero() {
         3,
         "all 3 pending rows must be cap-held; got {} held",
         held.len()
+    );
+
+    // ── DB-state assertions (Pi msg_6c40e0b6) ────────────────────────────────
+    // Running rows must remain unchanged (still 2).
+    let running_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM external_reviews WHERE status='running'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(
+        running_count, 2,
+        "running count must remain 2 when cap full; got {running_count}"
+    );
+
+    // Pending rows must remain unchanged (still 3).
+    let pending_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM external_reviews WHERE status='pending'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(
+        pending_count, 3,
+        "pending count must remain 3 when cap full; got {pending_count}"
+    );
+
+    // Zero new pending→running transition_history records.
+    let th_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='external_reviews' AND from_status='pending' AND to_status='running'",
+        [],
+        |r| r.get(0),
+    ).unwrap();
+    assert_eq!(
+        th_count, 0,
+        "no pending→running transitions must be recorded when cap full; got {th_count}"
     );
 }
 

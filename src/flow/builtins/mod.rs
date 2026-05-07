@@ -59,7 +59,13 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
         "auto-resolve-observation" => Some(auto_resolve_observation::run(row, ctx)),
         "auto-scaffold" => Some(auto_scaffold::run(row, ctx)),
         "cargo-install" => Some(cargo_install::run(row, ctx)),
-        "external-review" => Some(external_review::run(row, ctx)),
+        "external-review" => Some(
+            external_review::run(row, ctx).map(|outcome| match outcome {
+                external_review::DispatchOutcome::Dispatched => 0,
+                external_review::DispatchOutcome::CapHeld => 0,
+                external_review::DispatchOutcome::RaceLost => 0,
+            }),
+        ),
         "gatekeeper-stub" => Some(gatekeeper_stub::run(row, ctx)),
         "investigator" => Some(investigator::run(row, ctx)),
         "schema-migrate" => Some(schema_migrate::run(row, ctx)),

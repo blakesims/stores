@@ -590,7 +590,8 @@ pub fn reconcile_pending_external_review_dispatch(
             "[engine-runner Layer2] dispatching pending external_review {review_display_id} (task={task_display_id})"
         );
         match crate::flow::builtins::external_review::run(&row_json, &ctx) {
-            Ok(_) => {
+            Ok(crate::flow::builtins::external_review::DispatchOutcome::Dispatched) => {
+                // CAS winner: budget consumed.
                 dispatched_this_tick += 1;
                 results.push(ExternalReviewDispatch {
                     review_row_id,
@@ -598,6 +599,24 @@ pub fn reconcile_pending_external_review_dispatch(
                     task_display_id,
                     outcome: ExternalReviewDispatchOutcome::Dispatched,
                 });
+            }
+            Ok(crate::flow::builtins::external_review::DispatchOutcome::CapHeld) => {
+                // In-TX cap held: row marked held inside run(); no budget consumed.
+                eprintln!(
+                    "[engine-runner Layer2] {review_display_id}: in-TX cap held (no budget consumed)"
+                );
+                results.push(ExternalReviewDispatch {
+                    review_row_id,
+                    review_display_id,
+                    task_display_id,
+                    outcome: ExternalReviewDispatchOutcome::CapHeld,
+                });
+            }
+            Ok(crate::flow::builtins::external_review::DispatchOutcome::RaceLost) => {
+                // CAS loser or row disappeared: no budget consumed; log only.
+                eprintln!(
+                    "[engine-runner Layer2] {review_display_id}: CAS lost or row gone (no budget consumed)"
+                );
             }
             Err(e) => {
                 eprintln!(
