@@ -162,8 +162,8 @@ fields:
   - name: routed_to_observation
     type: text
     required: false
-    required_when: "decision == 'normal_observation'"
-    description: "Soft-FK to observations.display_id (L###) when decision=normal_observation or arch_review_candidate (handler guarantees presence for both; required_when covers normal_observation; arch_review_candidate enforcement is at handler level)"
+    required_when: "decision IN ['normal_observation', 'arch_review_candidate']"
+    description: "Soft-FK to observations.display_id (L###) when decision=normal_observation or arch_review_candidate"
 
   # --- Recon loop counter ---
   - name: recon_round
