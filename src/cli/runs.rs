@@ -65,48 +65,56 @@ pub fn list_for_task(stores_dir: &Path, display_id: &str) -> Result<Vec<RunTrans
     let db_path = stores_dir.join("db.sqlite");
     let conn = Connection::open(&db_path)
         .with_context(|| format!("failed to open substrate DB {}", db_path.display()))?;
-    let cycles_json: String = conn
-        .query_row(
-            "SELECT cycles FROM tasks WHERE display_id = ?1",
-            [display_id],
-            |row| row.get(0),
+
+    // Ensure the runs VIEW exists on this connection (needed when tests open a
+    // bare Connection without going through db::open).
+    conn.execute_batch(crate::codegen::ddl::RUNS_VIEW_DDL)
+        .context("apply runs view DDL")?;
+
+    // Query the runs VIEW — the substrate's official query surface for
+    // (display_id, phase, cycle, role, transcript_path) tuples.  JSON decoding
+    // stays inside SQLite (json_each / json_extract); Rust only handles rows.
+    let mut stmt = conn
+        .prepare(
+            "SELECT phase, cycle, role, transcript_path \
+             FROM runs \
+             WHERE display_id = ?1 \
+             ORDER BY phase, cycle, role",
         )
-        .with_context(|| format!("task {display_id} not found in substrate DB"))?;
+        .context("prepare runs view query")?;
 
-    let cycles: serde_json::Value = serde_json::from_str(&cycles_json)
-        .with_context(|| format!("task {display_id} cycles JSON is invalid"))?;
-    let cycles = cycles
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("task {display_id} cycles field is not an array"))?;
+    let view_rows: Vec<(i64, i64, String, String)> = stmt
+        .query_map([display_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .context("query runs view")?
+        .collect::<rusqlite::Result<_>>()
+        .context("collect runs view rows")?;
 
-    let mut rows = Vec::new();
-    for entry in cycles {
-        let phase = entry.get("phase").and_then(|v| v.as_i64()).unwrap_or(1);
-        let cycle = entry.get("cycle").and_then(|v| v.as_i64()).unwrap_or(1);
-        collect_role_transcript(stores_dir, display_id, phase, cycle, entry, "executor", &mut rows)?;
-        collect_role_transcript(
-            stores_dir,
-            display_id,
-            phase,
-            cycle,
-            entry,
-            "code-reviewer",
-            &mut rows,
-        )?;
-    }
-
-    if rows.is_empty() {
+    if view_rows.is_empty() {
         bail!("no transcript backlinks found for {display_id} in tasks.cycles");
     }
 
-    rows.sort_by(|a, b| {
-        (a.phase, a.cycle, a.role.as_str(), a.path.to_string_lossy()).cmp(&(
-            b.phase,
-            b.cycle,
-            b.role.as_str(),
-            b.path.to_string_lossy(),
-        ))
-    });
+    let mut rows = Vec::new();
+    for (phase, cycle, role, path_str) in view_rows {
+        let path = PathBuf::from(&path_str);
+        let read_path = resolve_transcript_path(stores_dir, &path);
+        if !read_path.exists() {
+            bail!(
+                "missing transcript for {display_id} phase {phase} cycle {cycle} role {role}: {} does not exist (resolved to {})",
+                path.display(),
+                read_path.display()
+            );
+        }
+        rows.push(RunTranscript {
+            display_id: display_id.to_string(),
+            phase,
+            cycle,
+            role,
+            path,
+        });
+    }
+
     Ok(rows)
 }
 
@@ -136,47 +144,6 @@ pub fn find_transcript(
     }
 }
 
-fn collect_role_transcript(
-    stores_dir: &Path,
-    display_id: &str,
-    phase: i64,
-    cycle: i64,
-    entry: &serde_json::Value,
-    role: &str,
-    rows: &mut Vec<RunTranscript>,
-) -> Result<()> {
-    let subrecord = match role {
-        "executor" => "executor",
-        "code-reviewer" => "review",
-        _ => role,
-    };
-    let Some(path_str) = entry
-        .get(subrecord)
-        .and_then(|v| v.get("transcript_path"))
-        .and_then(|v| v.as_str())
-    else {
-        return Ok(());
-    };
-
-    let path = PathBuf::from(path_str);
-    let read_path = resolve_transcript_path(stores_dir, &path);
-    if !read_path.exists() {
-        bail!(
-            "missing transcript for {display_id} phase {phase} cycle {cycle} role {role}: {} does not exist (resolved to {})",
-            path.display(),
-            read_path.display()
-        );
-    }
-
-    rows.push(RunTranscript {
-        display_id: display_id.to_string(),
-        phase,
-        cycle,
-        role: role.to_string(),
-        path,
-    });
-    Ok(())
-}
 
 fn resolve_transcript_path(stores_dir: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -301,5 +268,119 @@ mod tests {
         assert!(err.to_string().contains(
             "missing transcript for T999 phase 2 cycle 1 role code-reviewer"
         ));
+    }
+
+    // ---- T072 r2: runs VIEW tests ----
+
+    /// Build a minimal in-memory DB (tasks table + VIEW) and verify the VIEW
+    /// exists and returns expected columns.  Uses rusqlite::Connection directly
+    /// to isolate the DDL from the filesystem fixture.
+    #[test]
+    fn runs_view_exists_after_ddl_applied() {
+        use crate::codegen::ddl::RUNS_VIEW_DDL;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE tasks (display_id TEXT UNIQUE NOT NULL, cycles TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(RUNS_VIEW_DDL)
+            .expect("RUNS_VIEW_DDL must apply cleanly");
+        // Verify the view exists via sqlite_master.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='runs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "runs VIEW must exist after DDL is applied");
+    }
+
+    /// VIEW returns expected rows from a fixture cycles JSON blob.
+    #[test]
+    fn runs_view_returns_expected_rows() {
+        use crate::codegen::ddl::RUNS_VIEW_DDL;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE tasks (display_id TEXT UNIQUE NOT NULL, cycles TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(RUNS_VIEW_DDL).unwrap();
+        let cycles = serde_json::json!([
+            {
+                "phase": 1, "cycle": 1,
+                "executor": {"transcript_path": ".stores/runs/ex1.jsonl"},
+                "review":   {"transcript_path": ".stores/runs/rv1.jsonl"}
+            },
+            {
+                "phase": 2, "cycle": 1,
+                "executor": {"transcript_path": ".stores/runs/ex2.jsonl"}
+            }
+        ]);
+        conn.execute(
+            "INSERT INTO tasks (display_id, cycles) VALUES (?1, ?2)",
+            params!["T001", serde_json::to_string(&cycles).unwrap()],
+        )
+        .unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT display_id, phase, cycle, role, transcript_path \
+                 FROM runs WHERE display_id='T001' ORDER BY phase, cycle, role",
+            )
+            .unwrap();
+        let rows: Vec<(String, i64, i64, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+
+        assert_eq!(rows.len(), 3, "expected 3 rows (2 executor + 1 reviewer)");
+        assert_eq!(rows[0], ("T001".into(), 1, 1, "code-reviewer".into(), ".stores/runs/rv1.jsonl".into()));
+        assert_eq!(rows[1], ("T001".into(), 1, 1, "executor".into(),      ".stores/runs/ex1.jsonl".into()));
+        assert_eq!(rows[2], ("T001".into(), 2, 1, "executor".into(),      ".stores/runs/ex2.jsonl".into()));
+    }
+
+    /// Empty cycles array produces zero rows without error.
+    #[test]
+    fn runs_view_empty_cycles_no_error() {
+        use crate::codegen::ddl::RUNS_VIEW_DDL;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE tasks (display_id TEXT UNIQUE NOT NULL, cycles TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(RUNS_VIEW_DDL).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id, cycles) VALUES (?1, ?2)",
+            params!["T002", "[]"],
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM runs WHERE display_id='T002'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "empty cycles must yield zero runs rows");
+    }
+
+    /// VIEW is idempotent: applying RUNS_VIEW_DDL twice must not error.
+    #[test]
+    fn runs_view_ddl_is_idempotent() {
+        use crate::codegen::ddl::RUNS_VIEW_DDL;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE tasks (display_id TEXT UNIQUE NOT NULL, cycles TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(RUNS_VIEW_DDL).unwrap();
+        conn.execute_batch(RUNS_VIEW_DDL)
+            .expect("applying RUNS_VIEW_DDL a second time must be a no-op (CREATE VIEW IF NOT EXISTS)");
     }
 }
