@@ -237,7 +237,13 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 )
                 .subcommand(
                     Command::new("show")
-                        .about("Decrypt and print the approval token (prompts for passphrase / hardware tap)"),
+                        .about("Decrypt and print the approval token (prompts for passphrase / hardware tap)")
+                        .arg(
+                            Arg::new("identity")
+                                .long("identity")
+                                .help("Path to age identity file (default: ~/.config/sops/age/keys.txt)")
+                                .required(false),
+                        ),
                 ),
         )
         // Watch subcommand — ratatui TUI (T028); --legacy falls back to ANSI POC
