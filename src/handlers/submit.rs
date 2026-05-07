@@ -1061,10 +1061,7 @@ pub(crate) fn compute_submit_execute(
     // T072 r6: atomic backlink — embed transcript_path inside the tx so the
     // executor sub-record is never committed without its transcript pointer.
     if let Some(tp) = transcript_path {
-        executor_obj.insert(
-            "transcript_path".to_string(),
-            Value::String(tp.to_string()),
-        );
+        executor_obj.insert("transcript_path".to_string(), Value::String(tp.to_string()));
     }
 
     let new_cycle_entry = json!({
@@ -1256,10 +1253,7 @@ pub(crate) fn compute_submit_review(
     // T072 r6: atomic backlink — embed transcript_path inside the tx so the
     // review sub-record is never committed without its transcript pointer.
     if let Some(tp) = transcript_path {
-        review_obj_map.insert(
-            "transcript_path".to_string(),
-            Value::String(tp.to_string()),
-        );
+        review_obj_map.insert("transcript_path".to_string(), Value::String(tp.to_string()));
     }
     let review_obj = Value::Object(review_obj_map);
 
@@ -1457,6 +1451,100 @@ pub fn run_submit_review(
 }
 
 // ---------------------------------------------------------------------------
+// External review seam for submit-wrap (T083 P1)
+// ---------------------------------------------------------------------------
+
+fn next_external_review_display_id(tx: &Transaction) -> Result<String> {
+    let next_num: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(id), 0) + 1 FROM external_reviews",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(format!("ER{next_num:03}"))
+}
+
+fn maybe_create_pending_external_review(
+    tx: &Transaction,
+    task_row_id: i64,
+    task_display_id: &str,
+    task_row: &EntryMap,
+    wrap_len: usize,
+    invoker: &str,
+) -> Result<Option<i64>> {
+    if !table_exists(tx, "external_reviews")? {
+        return Ok(None);
+    }
+
+    let tier = task_row
+        .get("tier_hint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if tier == "T1" {
+        return Ok(None);
+    }
+
+    let open_attempts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM external_reviews \
+         WHERE task_id = ?1 AND status IN ('pending', 'running')",
+        rusqlite::params![task_display_id],
+        |r| r.get(0),
+    )?;
+    if open_attempts > 0 {
+        return Ok(None);
+    }
+
+    let next_attempt: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(attempt), 0) + 1 FROM external_reviews WHERE task_id = ?1",
+        rusqlite::params![task_display_id],
+        |r| r.get(0),
+    )?;
+    let review_display_id = next_external_review_display_id(tx)?;
+    let now = now_iso8601();
+    let wrap_ref = if wrap_len == 0 {
+        format!("tasks:{task_display_id}:wrap_log")
+    } else {
+        format!("tasks:{task_display_id}:wrap_log[{}]", wrap_len - 1)
+    };
+
+    tx.execute(
+        "INSERT INTO external_reviews \
+         (display_id, status, created_at, updated_at, created_by, updated_by, \
+          task_id, attempt, adapter, contract_ref, plan_ref, wrap_log_ref, diff_ref, prior_review_ref) \
+         VALUES (?1, 'pending', ?2, ?2, ?3, ?3, ?4, ?5, 'external_review', ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            review_display_id,
+            now,
+            invoker,
+            task_display_id,
+            next_attempt,
+            format!("tasks:{task_display_id}:contract"),
+            format!("tasks:{task_display_id}:plan"),
+            wrap_ref,
+            format!("tasks:{task_display_id}:diff"),
+            format!("tasks:{task_display_id}:cycles"),
+        ],
+    )
+    .context("submit-wrap: create pending external_review")?;
+    let review_row_id = tx.last_insert_rowid();
+
+    crate::db::insert_transition_history(
+        tx,
+        "external_reviews",
+        review_row_id,
+        &review_display_id,
+        "",
+        "pending",
+        "create-external-review",
+        invoker,
+        None,
+        None,
+        Some(&format!("task_row_id={task_row_id}")),
+    )?;
+
+    Ok(Some(review_row_id))
+}
+
+// ---------------------------------------------------------------------------
 // submit-wrap: append to wrap_log[] (pure write — no transition fired) (AC3.x)
 // ---------------------------------------------------------------------------
 
@@ -1576,7 +1664,15 @@ pub(crate) fn compute_submit_wrap(
         None,
     )?;
 
-    // Step 9: no follow-on transitions
+    // Step 9: after the wrap_log append, T2/T3 rows become externally reviewable.
+    maybe_create_pending_external_review(
+        &tx,
+        row_id,
+        display_id,
+        &existing,
+        wrap_list.len(),
+        &invoker.to_string(),
+    )?;
 
     // Step 10: release lock
     release_lock(&tx, &schema.name, display_id)?;
@@ -4472,6 +4568,163 @@ workflow:
             "recommended_sanity_checks": ["run integration test suite"],
             "reject_reason": null
         })
+    }
+
+    fn install_external_reviews_table(conn: &Connection) {
+        let schema = Schema::from_yaml(include_str!("../../stores/external_reviews/schema.yaml"))
+            .expect("external_reviews schema parses");
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .expect("external_reviews DDL applies");
+    }
+
+    fn set_task_tier(conn: &Connection, tier: &str) {
+        conn.execute(
+            "UPDATE wf_tasks SET tier_hint = ?1 WHERE display_id = 'WF001'",
+            rusqlite::params![tier],
+        )
+        .unwrap();
+    }
+
+    fn external_review_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM external_reviews", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn external_review_attempts(conn: &Connection) -> Vec<i64> {
+        let mut stmt = conn
+            .prepare("SELECT attempt FROM external_reviews ORDER BY attempt")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn external_review_transition_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM transition_history \
+             WHERE store = 'external_reviews' AND verb = 'create-external-review' \
+             AND from_status = '' AND to_status = 'pending'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    // ---------------------------------------------------------------------------
+    // T083 P1: submit-wrap creates typed external review rows for T2/T3 only.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn submit_wrap_external_review_creates_pending_for_t2_and_t3() {
+        for tier in ["T2", "T3"] {
+            let (schema, conn) = setup();
+            install_external_reviews_table(&conn);
+            insert_row_at_in_review(&conn, &schema, vec![]);
+            set_task_tier(&conn, tier);
+
+            compute_submit_wrap(
+                &schema,
+                &conn,
+                "WF001",
+                make_wrap_entry(),
+                Actor::AiAutonomous,
+            )
+            .unwrap();
+
+            let (task_id, status, attempt): (String, String, i64) = conn
+                .query_row(
+                    "SELECT task_id, status, attempt FROM external_reviews",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(task_id, "WF001");
+            assert_eq!(status, "pending");
+            assert_eq!(attempt, 1);
+        }
+    }
+
+    #[test]
+    fn submit_wrap_external_review_t1_no_op() {
+        let (schema, conn) = setup();
+        install_external_reviews_table(&conn);
+        insert_row_at_in_review(&conn, &schema, vec![]);
+        set_task_tier(&conn, "T1");
+
+        compute_submit_wrap(
+            &schema,
+            &conn,
+            "WF001",
+            make_wrap_entry(),
+            Actor::AiAutonomous,
+        )
+        .unwrap();
+
+        assert_eq!(external_review_count(&conn), 0);
+    }
+
+    #[test]
+    fn submit_wrap_external_review_idempotent_until_terminal_verdict() {
+        let (schema, conn) = setup();
+        install_external_reviews_table(&conn);
+        insert_row_at_in_review(&conn, &schema, vec![]);
+        set_task_tier(&conn, "T2");
+
+        compute_submit_wrap(
+            &schema,
+            &conn,
+            "WF001",
+            make_wrap_entry(),
+            Actor::AiAutonomous,
+        )
+        .unwrap();
+        compute_submit_wrap(
+            &schema,
+            &conn,
+            "WF001",
+            make_wrap_entry(),
+            Actor::AiAutonomous,
+        )
+        .unwrap();
+        assert_eq!(external_review_count(&conn), 1);
+        assert_eq!(external_review_attempts(&conn), vec![1]);
+
+        conn.execute(
+            "UPDATE external_reviews SET status = 'passed', verdict = 'PASS' WHERE task_id = 'WF001'",
+            [],
+        )
+        .unwrap();
+        compute_submit_wrap(
+            &schema,
+            &conn,
+            "WF001",
+            make_wrap_entry(),
+            Actor::AiAutonomous,
+        )
+        .unwrap();
+
+        assert_eq!(external_review_count(&conn), 2);
+        assert_eq!(external_review_attempts(&conn), vec![1, 2]);
+    }
+
+    #[test]
+    fn submit_wrap_external_review_records_creation_edge() {
+        let (schema, conn) = setup();
+        install_external_reviews_table(&conn);
+        insert_row_at_in_review(&conn, &schema, vec![]);
+        set_task_tier(&conn, "T3");
+
+        compute_submit_wrap(
+            &schema,
+            &conn,
+            "WF001",
+            make_wrap_entry(),
+            Actor::AiAutonomous,
+        )
+        .unwrap();
+
+        assert_eq!(external_review_transition_count(&conn), 1);
     }
 
     // ---------------------------------------------------------------------------
