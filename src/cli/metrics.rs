@@ -22,6 +22,7 @@ pub struct MetricsReport {
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct WindowReport {
+    pub requested: String,
     pub since: String,
 }
 
@@ -99,39 +100,55 @@ pub fn run(args: MetricsArgs) -> Result<()> {
 }
 
 pub fn build_report(conn: &Connection, window: &str) -> Result<MetricsReport> {
-    let since = parse_since(window)?;
+    let (window_report, since) = parse_window(window)?;
     let since_epoch = epoch_seconds(&since).unwrap_or(i64::MIN);
     let rows = load_transition_rows(conn)?;
     Ok(MetricsReport {
-        window: WindowReport { since },
+        window: window_report,
         per_edge: per_edge_metrics(&rows, since_epoch),
         ratification_cycle_time: RatificationMetrics {
             open_to_ready: ratification_metric(&rows, since_epoch),
         },
         revise_rate: revise_metrics(conn)?,
-        agent_runs: agent_run_metrics(conn, window)?,
+        agent_runs: agent_run_metrics(conn, &since)?,
     })
 }
 
-fn parse_since(window: &str) -> Result<String> {
+fn parse_window(window: &str) -> Result<(WindowReport, String)> {
     if epoch_seconds(window).is_some() {
-        return Ok(window.to_string());
+        return Ok((
+            WindowReport {
+                requested: window.to_string(),
+                since: window.to_string(),
+            },
+            window.to_string(),
+        ));
     }
+    let secs = parse_duration_seconds(window)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    Ok((
+        WindowReport {
+            requested: window.to_string(),
+            since: format!("now-{window}"),
+        },
+        format_epoch_utc(now - secs),
+    ))
+}
+
+fn parse_duration_seconds(window: &str) -> Result<i64> {
     let (num, unit) = window.split_at(window.len().saturating_sub(1));
     let n: i64 = num
         .parse()
         .with_context(|| format!("invalid --window '{window}'"))?;
-    let secs = match unit {
-        "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86400,
+    match unit {
+        "s" => Ok(n),
+        "m" => Ok(n * 60),
+        "h" => Ok(n * 3600),
+        "d" => Ok(n * 86400),
         _ => bail!("invalid --window '{window}'; use duration like 1h or RFC3339 timestamp"),
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    Ok(format_epoch_utc(now - secs))
+    }
 }
 
 fn load_transition_rows(conn: &Connection) -> Result<Vec<TransitionRow>> {
@@ -348,7 +365,7 @@ fn collect_reviews(v: &Value, out: &mut Vec<(String, String)>) {
     }
 }
 
-fn agent_run_metrics(conn: &Connection, window: &str) -> Result<AgentRunsSection> {
+fn agent_run_metrics(conn: &Connection, since: &str) -> Result<AgentRunsSection> {
     if !table_exists(conn, "agent_runs")? {
         return Ok(AgentRunsSection {
             rows: vec![],
@@ -373,7 +390,6 @@ fn agent_run_metrics(conn: &Connection, window: &str) -> Result<AgentRunsSection
             notes: vec!["agent_runs schema not recognized".into()],
         });
     }
-    let since = parse_since(window)?;
     let i = input.unwrap_or_else(|| "0".to_string());
     let o = output.unwrap_or_else(|| "0".to_string());
     let total_expr = total.unwrap_or_else(|| format!("COALESCE({i},0)+COALESCE({o},0)"));
@@ -659,6 +675,16 @@ mod tests {
         let a = render_json(&build_report(&c, "2025-12-31T00:00:00Z").unwrap()).unwrap();
         let b = render_json(&build_report(&c, "2025-12-31T00:00:00Z").unwrap()).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn duration_window_json_omits_volatile_clock_cutoff() {
+        let c = conn();
+        let a = render_json(&build_report(&c, "1h").unwrap()).unwrap();
+        let b = render_json(&build_report(&c, "1h").unwrap()).unwrap();
+        assert_eq!(a, b);
+        assert!(a.contains(r#""requested": "1h""#));
+        assert!(a.contains(r#""since": "now-1h""#));
     }
 
     #[test]
