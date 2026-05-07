@@ -2,7 +2,7 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-07 (PM priority realignment) — The engine is now productive across a three-role operating model (substrate-agent engine controller, Pi architect, reviewer-runner external reviewer), but too much of its operating system still lives in chat. Runtime trust is largely closed or closing (T076 private install path PASS; T081 provenance PASS; T077 architecture_reviews PASS). The live priority is now structural throughput: finish the current PASS/near-PASS pile, ship **T079/L186** actionability visibility, then **T083/L188** substrate-native external review lane, then priority/file-overlap scheduling, then metrics over runner/review outcomes. Keep Gatekeeper/Router (classification), Scheduler (next compatible executable work), Architect (shape), and Reviewer (implementation correctness) separate; do not merge them into one mushy triage brain.
+**Last updated:** 2026-05-07 (PM priority realignment) — The engine is now productive across a three-role operating model (substrate-agent engine controller, Pi architect, reviewer-runner external reviewer), but too much of its operating system still lives in chat. Runtime trust is largely closed or closing (T076 private install path PASS; T081 provenance PASS; T077 architecture_reviews PASS; **T083/L188 external review lane PASS — shipped 8f6ce35**). The live priority is now structural throughput: drain remaining T084 (env-id trio) + T085 (watch cockpit), then priority/file-overlap scheduling, then metrics over runner/review outcomes. Sidecar (L088/L089/L090/L091) deprioritized — closed as resolved-by L192. Keep Gatekeeper/Router (classification), Scheduler (next compatible executable work), Architect (shape), and Reviewer (implementation correctness) separate; do not merge them into one mushy triage brain.
 
 ## The picture in one sentence
 
@@ -10,12 +10,11 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Read-this-first priority ladder
 
-1. **Finish T083 / L188 external review lane.** Make final review substrate-native (typed review records; codex/pi/claude-code runners; PASS/REVISE/TOOLING_FAILURE; U3 still human).
-2. **Ship L192 `stores watch` cockpit.** Blake needs to feel the engine: lane occupancy, priorities, held reasons, visual T2/T3 progress, and friendly drilldown.
-3. **Run an observation backlog hygiene sweep.** The 46 no-contract observations are not all real work; classify/close duplicates, addressed rows, stale rows, and draft only the real contracts.
-4. **Build priority + file-overlap scheduler.** Pick the highest-priority compatible row and hold conflicts with explicit reasons; do not raise WIP by blind active-count.
-5. **Add runner/review metrics.** Use T070/T072/T083 data to compare pi vs claude and codex/pi/claude review outcomes by role/tier/duration/cost.
-6. **Then expand adapters/domains.** CodeRabbit, richer conflict domains, L006 observation runner asymmetry, and L035 typed inter-agent refs come after the review/watch/scheduler substrate is legible.
+1. **Finish T084 / L082 (env-id trio) + T085 / L192 (`stores watch` cockpit).** Both in flight; T084 in r3 codex-revise (atomicity-claim closure), T085 daemon-driving cycle 1.
+2. **Run an observation backlog hygiene sweep.** The 46 no-contract observations are not all real work; classify/close duplicates, addressed rows, stale rows, and draft only the real contracts.
+3. **Build priority + file-overlap scheduler.** Pick the highest-priority compatible row and hold conflicts with explicit reasons; do not raise WIP by blind active-count.
+4. **Add runner/review metrics.** Use T070/T072/T083 data to compare pi vs claude and codex/pi/claude review outcomes by role/tier/duration/cost.
+5. **Then expand adapters/domains.** CodeRabbit, richer conflict domains, L006 observation runner asymmetry, and L035 typed inter-agent refs come after the review/watch/scheduler substrate is legible.
 
 ## Status legend
 
