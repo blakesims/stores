@@ -153,6 +153,7 @@ When Pi answers:
 - Do not silently reinterpret architectural guidance.
 - Treat one architectural ruling as cascading to downstream mechanical edits/tests until new evidence changes the premise.
 - Re-ask only when the downstream edit reveals a materially new semantic choice, contradicts the ruling, widens scope, or changes user/authority/security posture.
+- When delegating a Pi-ruling implementation to a subagent, quote Pi's ruling verbatim in the brief. If the subagent proposes a nuanced interpretation that differs from the literal ruling, halt and ask Pi before patching.
 
 Useful non-blocking update phrase:
 
@@ -179,13 +180,17 @@ Default lane caps unless Blake explicitly overrides:
 
 When multiple tasks pile up in review, **quiesce main**: pause accepts/merges while reviewer-runner rebases and reviews the batch. Do not keep advancing main between rebase and codex. Avoid parallel tasks that touch the same hot files (`schema.yaml`, `CLAUDE.md`, `docs/philosophy.md`, `docs/engine-health.md`, `src/flow/builtins/mod.rs`, `src/handlers/agents_run.rs`, shared e2e tests) unless the conflict is intentional.
 
-If rebase races start dominating, lower WIP rather than ratifying more tasks to satisfy a raw active-count target. More WIP after the integration lane saturates creates negative throughput.
+If rebase races start dominating, lower WIP rather than ratifying more tasks to satisfy a raw active-count target. More WIP after the integration lane saturates creates negative throughput. When the in-review queue exceeds 2, pause new ratifications until it drains.
+
+After heavy rebase resolution (roughly 10+ conflict instances or any broad doc/test sweep), do a scope check before pinging reviewer-runner: `git diff --name-only <local-main>..HEAD` should match the task contract. Restore/re-cherry-pick if unrelated files were absorbed.
 
 ## Codex / review gate doctrine
 
 Codex is a tier-gated review tool, not a universal one. Run it where the architectural blast radius justifies the latency; skip it where the in-cycle `code_reviewer` agent's PASS/REVISE/FAIL gate is sufficient.
 
-When reviewer-runner is active, delegate codex sensing to it. Substrate-agent pings reviewer-runner after each revise commit; reviewer-runner does not chase moving HEADs autonomously. Review against **local main**, not stale `origin/main`; local main is the substrate's accepted state for the session. If a branch is not cleanly rebased onto local main, fix the rebase first. Do not ask reviewer-runner to review noisy merge-base diffs.
+When reviewer-runner is active, delegate codex sensing to it. Substrate-agent pings reviewer-runner after each first-pass rebase and after each revise commit; reviewer-runner does not chase moving HEADs autonomously. Review against **local main**, not stale `origin/main`; local main is the substrate's accepted state for the session. If a branch is not cleanly rebased onto local main, fix the rebase first. Do not ask reviewer-runner to review noisy merge-base diffs.
+
+Before applying a codex finding that claims a test fails, first run the named test/target when cheap. Codex stale-state false positives happen; verify the failure is real before spending a subagent cycle.
 
 **T1 (contract-is-plan, narrow scope):** skip codex. Trust the in-cycle code_reviewer's gate. When the task reaches `in_review`, rebase the branch onto current main and accept directly with the valid human/session token. The contract is small enough that codex is overhead, not insurance.
 

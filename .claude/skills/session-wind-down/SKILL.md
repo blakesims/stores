@@ -61,6 +61,17 @@ Synthesize feedback into:
 - Substrate tasks/observations to file later.
 - Immediate skill/doc updates.
 
+Common improvements to consider from prior sessions:
+
+- Keep the three-agent split when review volume is high: Pi architect, substrate-agent engine controller, reviewer-runner codex sensor.
+- Use local main as review base; do not review noisy origin/main or merge-base diffs.
+- Quiesce main while codex reviews a batch.
+- First-pass codex should normally wait for substrate-agent's rebased-and-ready ping.
+- Add/maintain `REVISE-FALSE-POSITIVE` for Pi-adjudicated codex findings.
+- Require scope checks after heavy rebases.
+- Require subagent briefs to quote Pi rulings verbatim.
+- Verify codex-reported test failures before patching when cheap.
+
 Keep this concise. Do not paste the whole thread into docs.
 
 ## 4. Update durable skills/docs
