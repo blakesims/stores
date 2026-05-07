@@ -185,8 +185,8 @@ mod tests {
 
     #[test]
     fn success_populates_pi_tool_structured_output() {
-        let (_d, bin) = shim("#!/bin/sh\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"ok\"}}'\n");
-        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let (_d, helper) = shim("#!/bin/sh\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"ok\"}}'\n");
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
         let schema = r#"{"type":"object","required":["role","summary"],"properties":{"role":{"const":"executor"},"summary":{"type":"string"}}}"#;
         let out = runner
             .spawn(
@@ -203,10 +203,10 @@ mod tests {
 
     #[test]
     fn malformed_payload_errors() {
-        let (_d, bin) = shim(
+        let (_d, helper) = shim(
             "#!/bin/sh\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\"}}'\n",
         );
-        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
         let schema = r#"{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}"#;
         let err = runner
             .spawn(
@@ -222,9 +222,9 @@ mod tests {
 
     #[test]
     fn missing_final_tool_call_errors_when_helper_exits_zero() {
-        let (_d, bin) =
+        let (_d, helper) =
             shim("#!/bin/sh\necho '{\"type\":\"message\",\"text\":\"done\"}'\nexit 0\n");
-        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
         let err = runner
             .spawn(
                 "planner",
@@ -239,8 +239,8 @@ mod tests {
 
     #[test]
     fn non_zero_helper_exit_is_returned_not_infra_error() {
-        let (_d, bin) = shim("#!/bin/sh\necho nope >&2\nexit 7\n");
-        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let (_d, helper) = shim("#!/bin/sh\necho nope >&2\nexit 7\n");
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
         let out = runner
             .spawn(
                 "planner",

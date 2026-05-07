@@ -45,10 +45,16 @@ pub struct Expr {
 }
 
 impl Expr {
+    /// Returns true when `value` equals any accepted RHS literal.
+    /// For `==`, this checks the single literal; for `IN [...]`, this checks
+    /// membership in the parsed literal list.
     pub fn matches_literal(&self, value: &str) -> bool {
         self.rhs_literals.iter().any(|lit| lit == value)
     }
 
+    /// Renders the parsed condition in canonical schema syntax, preserving
+    /// `==` for single-literal expressions and `IN [...]` for membership
+    /// expressions.
     pub fn condition_string(&self) -> String {
         if self.rhs_literals.len() == 1 {
             format!("{} == '{}'", self.lhs_path.join("."), self.rhs_literal)

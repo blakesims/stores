@@ -1087,6 +1087,20 @@ mod tests {
         // Use a config file (immune to STORES_NTFY_URL env races across modules).
         let cfg_file = tmp.path().join("config.yaml");
         std::fs::write(&cfg_file, "ntfy:\n  url: https://test.local\n").unwrap();
+        let stores_bin = tmp.path().join("stores-migrate-fails.sh");
+        std::fs::write(
+            &stores_bin,
+            "#!/bin/sh\necho 'bundled store does-not-exist not found' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&stores_bin).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&stores_bin, perms).unwrap();
+        }
+        std::env::set_var("STORES_BIN", stores_bin.to_string_lossy().to_string());
 
         let (conn, _t, _o) = fresh_db_with_tasks();
         insert_cargo_installed_task(&conn, "T502", root.to_str().unwrap());
@@ -1103,6 +1117,7 @@ mod tests {
         };
 
         schema_migrate::run(&row, &ctx).unwrap();
+        std::env::remove_var("STORES_BIN");
 
         let (status, reason): (String, Option<String>) = conn
             .query_row(

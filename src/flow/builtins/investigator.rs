@@ -23,7 +23,7 @@
 use anyhow::{anyhow, Context, Result};
 use rusqlite::Connection;
 use serde_json::Value;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Stdio};
 
 use crate::flow::builtins::{
@@ -225,9 +225,12 @@ fn invoke_subagent(display_id: &str, question: &str) -> Result<String> {
             .spawn()
             .with_context(|| format!("spawning STORES_INVESTIGATOR_CMD: {cmd_str}"))?;
         if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(question.as_bytes())
-                .context("writing investigator question to STORES_INVESTIGATOR_CMD stdin")?;
+            if let Err(e) = stdin.write_all(question.as_bytes()) {
+                if e.kind() != ErrorKind::BrokenPipe {
+                    return Err(e)
+                        .context("writing investigator question to STORES_INVESTIGATOR_CMD stdin");
+                }
+            }
         }
         let output = child
             .wait_with_output()

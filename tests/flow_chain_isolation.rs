@@ -127,6 +127,12 @@ fn cwd_lock() -> &'static std::sync::Mutex<()> {
     L.get_or_init(|| Mutex::new(()))
 }
 
+fn cargo_env_lock() -> &'static std::sync::Mutex<()> {
+    use std::sync::{Mutex, OnceLock};
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
+}
+
 fn fresh_db_with_substrate() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(SUBSTRATE_DDL).unwrap();
@@ -249,6 +255,7 @@ fn ac4_2_post_accept_chain_fixture_parses() {
 /// accept-merge link and does not prevent T100 from completing.
 #[test]
 fn ac4_1_chain_isolation_failure_does_not_block_peer() {
+    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     // Independent tempdir CARGO_HOME / target dir so the test does not
     // pollute the developer's shared cargo cache.
     let cargo_home = tempfile::tempdir().unwrap();
@@ -346,6 +353,7 @@ fn ac4_1_chain_isolation_failure_does_not_block_peer() {
 /// edge and re-runs the normal accept-merge/cargo-install/schema-migrate chain.
 #[test]
 fn retry_deploy_daemon_poll_retries_post_accept_chain() {
+    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let cargo_home = tempfile::tempdir().unwrap();
     let target_dir = tempfile::tempdir().unwrap();
     std::env::set_var("CARGO_HOME", cargo_home.path());
@@ -419,6 +427,7 @@ fn retry_deploy_daemon_poll_retries_post_accept_chain() {
 ///   - transition_history shows mark_cargo_installed with invoker='framework'.
 #[test]
 fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
+    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let cargo_home = tempfile::tempdir().unwrap();
     let target_dir = tempfile::tempdir().unwrap();
     std::env::set_var("CARGO_HOME", cargo_home.path());
@@ -463,13 +472,7 @@ fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
             .unwrap(),
     )
     .unwrap();
-    submit::run_retry_deploy(
-        &task_schema,
-        &conn,
-        "T997",
-        Actor::AiWithHuman.into(),
-    )
-    .unwrap();
+    submit::run_retry_deploy(&task_schema, &conn, "T997", Actor::AiWithHuman.into()).unwrap();
     assert_eq!(status_of(&conn, "T997"), "accepted");
 
     // Use production agents.yaml fixture (cargo-install is a peer subscriber
@@ -622,7 +625,10 @@ fn cargo_install_cwd_fallback_rejects_wrong_crate() {
     drop(_cwd_g);
 
     // Must return Err, not Ok.
-    assert!(result.is_err(), "cargo_install must fail for non-stores cwd crate");
+    assert!(
+        result.is_err(),
+        "cargo_install must fail for non-stores cwd crate"
+    );
     let err_msg = format!("{:#}", result.unwrap_err());
     assert!(
         err_msg.contains("not the stores crate"),

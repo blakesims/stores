@@ -99,13 +99,10 @@ pub fn resolve_drive_max_parallel(config_path: &Path) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Serialize tests that mutate process env (`STORES_NTFY_URL`).
-    fn env_lock() -> &'static Mutex<()> {
-        use std::sync::OnceLock;
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(()))
+    /// Serialize tests that mutate process env (`STORES_NTFY_URL`) against
+    /// notifier tests that also rely on that process-global env var.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        crate::paths::test_notifier_lock()
     }
 
     #[test]
@@ -126,7 +123,7 @@ mod tests {
 
     #[test]
     fn config_yaml_wins_over_env() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
         std::fs::write(&path, "ntfy:\n  url: https://from-config\n").unwrap();
@@ -138,7 +135,7 @@ mod tests {
 
     #[test]
     fn env_fallback_when_no_config() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml"); // does not exist
         std::env::set_var("STORES_NTFY_URL", "https://from-env");
@@ -149,7 +146,7 @@ mod tests {
 
     #[test]
     fn neither_returns_none() {
-        let _g = env_lock().lock().unwrap();
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.yaml");
         std::env::remove_var("STORES_NTFY_URL");

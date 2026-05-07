@@ -27,6 +27,7 @@ digraph stores_topology {
     "z1_tasks__cargo_installed" [label="cargo_installed"];
     "z1_tasks__schema_migrated" [label="schema_migrated"];
     "z1_tasks__closed_out_of_band" [label="closed_out_of_band"];
+    "z1_tasks__abandoned" [label="abandoned"];
     "z1_tasks__planning" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__plan_review" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__ready" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
@@ -37,7 +38,6 @@ digraph stores_topology {
     "z1_tasks__in_review" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__rejected" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__deploy_blocked" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
-    "z1_tasks__abandoned" [label="abandoned"];
     "z1_tasks__planning" -> "z1_tasks__plan_review" [label=" A\nsubmit-plan", color=green, fontcolor=green];
     "z1_tasks__planning" -> "z1_tasks__ready" [label=" F\nskip-plan", color=gray, fontcolor=gray];
     "z1_tasks__plan_review" -> "z1_tasks__ready" [label=" A\nsubmit-plan-review\n[READY]", color=green, fontcolor=green];
@@ -53,7 +53,6 @@ digraph stores_topology {
     "z1_tasks__code_review" -> "z1_tasks__blocked" [label=" A\nsubmit-review\n[FAIL]", color=green, fontcolor=green];
     "z1_tasks__blocked" -> "z1_tasks__planning" [label=" H+\nresume", color=gold, fontcolor=gold];
     "z1_tasks__blocked" -> "z1_tasks__ready" [label=" H+\nresume", color=gold, fontcolor=gold];
-    "z1_tasks__blocked" -> "z1_tasks__planning" [label=" H+\nresume", color=gold, fontcolor=gold];
     "z1_tasks__planning" -> "z1_tasks__blocked" [label=" F\nmark_drive_failed", color=gray, fontcolor=gray];
     "z1_tasks__plan_review" -> "z1_tasks__blocked" [label=" F\nmark_drive_failed", color=gray, fontcolor=gray];
     "z1_tasks__ready" -> "z1_tasks__blocked" [label=" F\nmark_drive_failed", color=gray, fontcolor=gray];
@@ -76,13 +75,16 @@ digraph stores_topology {
     "z1_tasks__blocked" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
     "z1_tasks__in_review" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
     "z1_tasks__deploy_blocked" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
+    "z1_tasks__complete" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
   }
 
   subgraph cluster_z1_observations {
     label="Z1: observations state machine";
     "z1_observations__open" [label="open", style=bold, peripheries=2];
-    "z1_observations__investigating" [label="investigating"];
     "z1_observations__needs_investigation" [label="needs_investigation"];
+    "z1_observations__investigating" [label="investigating"];
+    "z1_observations__investigated" [label="investigated"];
+    "z1_observations__investigation_failed" [label="investigation_failed"];
     "z1_observations__confirmed" [label="confirmed"];
     "z1_observations__ready" [label="ready"];
     "z1_observations__needs_info" [label="needs_info"];
@@ -90,7 +92,10 @@ digraph stores_topology {
     "z1_observations__resolved" [label="resolved"];
     "z1_observations__wont_fix" [label="wont_fix"];
     "z1_observations__open" -> "z1_observations__investigating" [label=" A\ninvestigate", color=green, fontcolor=green];
-    "z1_observations__open" -> "z1_observations__needs_investigation" [label=" A\nneeds_investigation", color=green, fontcolor=green];
+    "z1_observations__open" -> "z1_observations__needs_investigation" [label=" H+\nrequest-investigation", color=gold, fontcolor=gold];
+    "z1_observations__needs_investigation" -> "z1_observations__investigating" [label=" F\ninvestigation-started", color=gray, fontcolor=gray];
+    "z1_observations__investigating" -> "z1_observations__investigated" [label=" F\ninvestigation-succeeded", color=gray, fontcolor=gray];
+    "z1_observations__investigating" -> "z1_observations__investigation_failed" [label=" F\ninvestigation-failed", color=gray, fontcolor=gray];
     "z1_observations__open" -> "z1_observations__wont_fix" [label=" H+\nwont_fix", color=gold, fontcolor=gold];
     "z1_observations__open" -> "z1_observations__resolved" [label=" A\nclose_as_addressed", color=green, fontcolor=green];
     "z1_observations__investigating" -> "z1_observations__confirmed" [label=" H+\nconfirm", color=gold, fontcolor=gold];
