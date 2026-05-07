@@ -63,6 +63,18 @@
       "type": "string",
       "maxLength": 200,
       "description": "One tight question the human should consider before ratifying."
+    },
+    "harden_log_fragment": {
+      "type": "object",
+      "description": "Optional bounded derivation audit fragment for observations.intent_contract.harden_log; not a draft contract and not transcript-like chain-of-thought.",
+      "additionalProperties": false,
+      "properties": {
+        "decisions": {"type": "array", "maxItems": 20, "items": {"type": "object", "required": ["id", "decision", "rationale"], "additionalProperties": false, "properties": {"id": {"type": "string", "maxLength": 500}, "decision": {"type": "string", "maxLength": 500}, "rationale": {"type": "string", "maxLength": 500}, "source_quote": {"type": "string", "maxLength": 500}}}},
+        "scope_cuts": {"type": "array", "maxItems": 20, "items": {"type": "object", "required": ["cut", "rationale"], "additionalProperties": false, "properties": {"cut": {"type": "string", "maxLength": 500}, "rationale": {"type": "string", "maxLength": 500}, "source_quote": {"type": "string", "maxLength": 500}}}},
+        "alternatives_rejected": {"type": "array", "maxItems": 20, "items": {"type": "object", "required": ["alternative", "why_rejected"], "additionalProperties": false, "properties": {"alternative": {"type": "string", "maxLength": 500}, "why_rejected": {"type": "string", "maxLength": 500}}}},
+        "compress_vs_surface": {"type": "array", "maxItems": 20, "items": {"type": "object", "required": ["item", "judgment", "rationale"], "additionalProperties": false, "properties": {"item": {"type": "string", "maxLength": 500}, "judgment": {"type": "string", "maxLength": 500}, "rationale": {"type": "string", "maxLength": 500}}}},
+        "unresolved_questions": {"type": "array", "maxItems": 20, "items": {"type": "string", "maxLength": 500}}
+      }
     }
   }
 }

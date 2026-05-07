@@ -106,11 +106,11 @@ pub fn validate_with_authority(
         }
     }
 
-    // Walk all fields (top-level + Record sub-fields).
-    // required/enum/pattern checks run against the full merged entry;
-    // actor checks run against actor_entry (diff-only for Transition/Update, full entry for Add).
+    // Walk all fields recursively. Required/enum/pattern checks run against the
+    // full merged entry; actor checks run against actor_entry (diff-only for
+    // Transition/Update, full entry for Add).
     for field in &schema.fields {
-        validate_field(
+        validate_field_recursive(
             field,
             entry,
             actor_entry,
@@ -120,81 +120,6 @@ pub fn validate_with_authority(
             authority,
             &mut errors,
         );
-
-        if let FieldType::Record(sub_fields) = &field.ty {
-            let parent_path = vec![field.name.clone()];
-            for sub in sub_fields {
-                validate_field(
-                    sub,
-                    entry,
-                    actor_entry,
-                    &parent_path,
-                    &schema.default_actor,
-                    invoker,
-                    authority,
-                    &mut errors,
-                );
-            }
-        }
-
-        // Phase 5 (P1-M2 closed): recurse into ListRecord sub-fields.
-        // For each element in the list, build a flat sub-entry and validate each sub-field.
-        // The sub-field path for lookup uses just the sub-field name (root of elem_entry);
-        // the error path is prefixed with the list field name for readable diagnostics.
-        // Actor checks use diff-scoped semantics: if the actor_entry's list doesn't
-        // contain an element at this index, actor checks are skipped for that element.
-        if let FieldType::ListRecord(sub_fields) = &field.ty {
-            let list_val = entry.get(&field.name);
-            let actor_list_val = actor_entry.get(&field.name);
-
-            if let Some(serde_json::Value::Array(elements)) = list_val {
-                for (elem_idx, elem) in elements.iter().enumerate() {
-                    if let serde_json::Value::Object(elem_map) = elem {
-                        // Flat elem-level entry: lookup uses just the sub-field name
-                        let elem_entry: EntryMap = elem_map
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-
-                        // Corresponding actor-scoped elem-level entry
-                        let actor_elem_entry: EntryMap = match actor_list_val {
-                            Some(serde_json::Value::Array(actor_elems)) => {
-                                if let Some(serde_json::Value::Object(ae)) =
-                                    actor_elems.get(elem_idx)
-                                {
-                                    ae.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                                } else {
-                                    BTreeMap::new() // not in diff → skip actor checks
-                                }
-                            }
-                            _ => BTreeMap::new(), // list not in diff → skip actor checks
-                        };
-
-                        // parent_path=[] so field_path = [sub.name]; validate_field
-                        // uses elem_entry for lookup (correct — elem is the root).
-                        // But we want errors to show "field_name.sub_name" not just
-                        // "sub_name", so we rewrite paths after collection.
-                        let before = errors.len();
-                        for sub in sub_fields {
-                            validate_field(
-                                sub,
-                                &elem_entry,
-                                &actor_elem_entry,
-                                &[], // no parent — elem_entry is flat at sub-field level
-                                &schema.default_actor,
-                                invoker,
-                                authority,
-                                &mut errors,
-                            );
-                        }
-                        // Prefix all newly added errors with the list field name
-                        for err in errors[before..].iter_mut() {
-                            err.field_path.insert(0, field.name.clone());
-                        }
-                    }
-                }
-            }
-        }
     }
 
     if errors.is_empty() {
@@ -202,6 +127,229 @@ pub fn validate_with_authority(
     } else {
         Err(errors)
     }
+}
+
+fn validate_field_recursive(
+    field: &crate::schema::Field,
+    entry: &EntryMap,
+    actor_entry: &EntryMap,
+    parent_path: &[String],
+    default_actor: &Option<Actor>,
+    invoker: InvokerCtx,
+    authority: Option<SideEffectAuthority>,
+    errors: &mut Vec<ValidationError>,
+) {
+    validate_field(
+        field,
+        entry,
+        actor_entry,
+        parent_path,
+        default_actor,
+        invoker,
+        authority,
+        errors,
+    );
+
+    let mut field_path = parent_path.to_vec();
+    field_path.push(field.name.clone());
+
+    match &field.ty {
+        FieldType::Record(sub_fields) => {
+            for sub in sub_fields {
+                validate_field_recursive(
+                    sub,
+                    entry,
+                    actor_entry,
+                    &field_path,
+                    default_actor,
+                    invoker,
+                    authority,
+                    errors,
+                );
+            }
+        }
+        FieldType::ListRecord(sub_fields) => {
+            if let Some(serde_json::Value::Array(elements)) = required::lookup(entry, &field_path) {
+                let actor_list_val = required::lookup(actor_entry, &field_path);
+                for (elem_idx, elem) in elements.iter().enumerate() {
+                    if let serde_json::Value::Object(elem_map) = elem {
+                        let elem_entry: EntryMap = elem_map
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        let actor_elem_entry: EntryMap = match actor_list_val {
+                            Some(serde_json::Value::Array(actor_elems)) => {
+                                if let Some(serde_json::Value::Object(ae)) =
+                                    actor_elems.get(elem_idx)
+                                {
+                                    ae.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                                } else {
+                                    BTreeMap::new()
+                                }
+                            }
+                            _ => BTreeMap::new(),
+                        };
+                        let before = errors.len();
+                        for sub in sub_fields {
+                            validate_field_recursive(
+                                sub,
+                                &elem_entry,
+                                &actor_elem_entry,
+                                &[],
+                                default_actor,
+                                invoker,
+                                authority,
+                                errors,
+                            );
+                        }
+                        for err in errors[before..].iter_mut() {
+                            let mut prefixed = field_path.clone();
+                            prefixed.append(&mut err.field_path);
+                            err.field_path = prefixed;
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// harden_log bounds enforcement (L077 contract: bounded structured field,
+// NOT a transcript dump).
+//
+// Bounds (option b — narrow harden_log-specific constants):
+//   - Each of the 5 list fields: max 20 items.
+//   - Each string value within an item: max 500 chars.
+//
+// These match the mirrors in:
+//   - agents/schemas/investigator.schema.json (harden_log_fragment)
+//   - src/flow/builtins/investigator.rs (validate_harden_log_fragment)
+// ---------------------------------------------------------------------------
+
+const HARDEN_LOG_MAX_ITEMS: usize = 20;
+const HARDEN_LOG_MAX_STR_LEN: usize = 500;
+
+/// Called when we've confirmed the value at `field_path` is a non-null object
+/// and the path matches `["intent_contract", "harden_log"]`.
+fn validate_harden_log_bounds(
+    value: &serde_json::Value,
+    field_path: &[String],
+    errors: &mut Vec<ValidationError>,
+) {
+    let Some(obj) = value.as_object() else {
+        return;
+    };
+
+    // Check all 5 list fields for item count and per-string-value length.
+    let list_fields = [
+        "decisions",
+        "scope_cuts",
+        "alternatives_rejected",
+        "compress_vs_surface",
+        "unresolved_questions",
+    ];
+
+    for list_key in &list_fields {
+        let Some(list_val) = obj.get(*list_key) else {
+            continue;
+        };
+        if list_val.is_null() {
+            continue;
+        }
+        let Some(arr) = list_val.as_array() else {
+            continue; // shape error caught by type check
+        };
+
+        // max_items check
+        if arr.len() > HARDEN_LOG_MAX_ITEMS {
+            let mut path = field_path.to_vec();
+            path.push(list_key.to_string());
+            errors.push(ValidationError {
+                field_path: path,
+                rule: error::RuleKind::BoundsExceeded {
+                    limit: HARDEN_LOG_MAX_ITEMS,
+                    actual: arr.len(),
+                },
+                message: format!(
+                    "harden_log.{} exceeds max_items={} (got {})",
+                    list_key, HARDEN_LOG_MAX_ITEMS, arr.len()
+                ),
+            });
+            continue; // no need to check strings inside an oversized list
+        }
+
+        // max_length check for each string in each item
+        for (item_idx, item) in arr.iter().enumerate() {
+            match item {
+                serde_json::Value::String(s) => {
+                    // unresolved_questions is a list of plain strings
+                    let len = s.chars().count();
+                    if len > HARDEN_LOG_MAX_STR_LEN {
+                        let mut path = field_path.to_vec();
+                        path.push(list_key.to_string());
+                        errors.push(ValidationError {
+                            field_path: path,
+                            rule: error::RuleKind::BoundsExceeded {
+                                limit: HARDEN_LOG_MAX_STR_LEN,
+                                actual: len,
+                            },
+                            message: format!(
+                                "harden_log.{}[{}] exceeds max_length={} (got {} chars)",
+                                list_key, item_idx, HARDEN_LOG_MAX_STR_LEN, len
+                            ),
+                        });
+                    }
+                }
+                serde_json::Value::Object(rec) => {
+                    for (field_key, field_val) in rec {
+                        if let serde_json::Value::String(s) = field_val {
+                            let len = s.chars().count();
+                            if len > HARDEN_LOG_MAX_STR_LEN {
+                                let mut path = field_path.to_vec();
+                                path.push(list_key.to_string());
+                                errors.push(ValidationError {
+                                    field_path: path,
+                                    rule: error::RuleKind::BoundsExceeded {
+                                        limit: HARDEN_LOG_MAX_STR_LEN,
+                                        actual: len,
+                                    },
+                                    message: format!(
+                                        "harden_log.{}[{}].{} exceeds max_length={} (got {} chars)",
+                                        list_key, item_idx, field_key, HARDEN_LOG_MAX_STR_LEN, len
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {} // shape error caught elsewhere
+            }
+        }
+    }
+}
+
+fn push_invalid_shape(
+    errors: &mut Vec<ValidationError>,
+    field_path: &[String],
+    expected: &str,
+    value: &serde_json::Value,
+) {
+    let got = match value {
+        serde_json::Value::String(raw) => {
+            let preview: String = raw.chars().take(60).collect();
+            format!("string '{preview}'")
+        }
+        other => other.to_string(),
+    };
+    errors.push(ValidationError {
+        field_path: field_path.to_vec(),
+        rule: error::RuleKind::InvalidJson {
+            expected: expected.to_string(),
+        },
+        message: format!("value must be a {expected}, got {got}"),
+    });
 }
 
 fn validate_field(
@@ -217,33 +365,54 @@ fn validate_field(
     let mut field_path = parent_path.to_vec();
     field_path.push(field.name.clone());
 
-    // T006 REVISE 1: type-shape check for ListRecord and ListFk fields at any depth.
-    // coerce_value returns Value::String(raw) on bad JSON / non-array input as a sentinel.
-    // Value::Null is a valid nullable value (doesn't trigger required for optional fields);
-    // Value::String is never valid for list_record/list_fk columns, so this check fires
-    // unconditionally regardless of whether the field is required or optional.
-    if matches!(
-        &field.ty,
-        FieldType::ListRecord(_) | FieldType::ListFk { .. }
-    ) {
-        if let Some(serde_json::Value::String(raw)) = required::lookup(entry, &field_path) {
-            errors.push(ValidationError {
-                field_path: field_path.clone(),
-                rule: error::RuleKind::InvalidJson {
-                    expected: "JSON array".to_string(),
-                },
-                message: format!(
-                    "value must be a JSON array, got string '{}'",
-                    if raw.len() > 60 {
-                        &raw[..60]
-                    } else {
-                        raw.as_str()
+    // Type-shape checks for structured fields at any depth. `coerce_value` may
+    // return Value::String(raw) sentinels for bad JSON / non-array input; those
+    // must be rejected even when optional. Null remains valid for nullable slots.
+    if let Some(value) = required::lookup(entry, &field_path) {
+        match &field.ty {
+            FieldType::Record(_) => {
+                if !value.is_object() && !value.is_null() {
+                    push_invalid_shape(errors, &field_path, "JSON object", value);
+                    return;
+                }
+            }
+            FieldType::ListRecord(_) => {
+                if !value.is_array() && !value.is_null() {
+                    push_invalid_shape(errors, &field_path, "JSON array", value);
+                    return;
+                }
+                if let serde_json::Value::Array(elements) = value {
+                    if let Some(bad) = elements.iter().find(|elem| !elem.is_object()) {
+                        push_invalid_shape(errors, &field_path, "JSON array of objects", bad);
+                        return;
                     }
-                ),
-            });
-            // Short-circuit: don't run required/enum/pattern/actor checks on a sentinel string —
-            // the type-shape error is the relevant signal; other checks would produce noise.
-            return;
+                }
+            }
+            FieldType::List(inner) => {
+                if !value.is_array() && !value.is_null() {
+                    push_invalid_shape(errors, &field_path, "JSON array", value);
+                    return;
+                }
+                if matches!(inner.as_ref(), FieldType::Text) {
+                    if let serde_json::Value::Array(elements) = value {
+                        if let Some(bad) = elements.iter().find(|elem| !elem.is_string()) {
+                            push_invalid_shape(errors, &field_path, "JSON array of strings", bad);
+                            return;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // harden_log bounds check — fires when the field path is exactly
+    // ["intent_contract", "harden_log"] and the value is a non-null object.
+    if field_path == ["intent_contract", "harden_log"] {
+        if let Some(value) = required::lookup(entry, &field_path) {
+            if !value.is_null() {
+                validate_harden_log_bounds(value, &field_path, errors);
+            }
         }
     }
 

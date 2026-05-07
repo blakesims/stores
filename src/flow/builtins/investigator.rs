@@ -50,6 +50,8 @@ const REQUIRED_FIELDS: &[&str] = &[
     "grill_question",
 ];
 
+const OPTIONAL_FIELDS: &[&str] = &["harden_log_fragment"]; 
+
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let display_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
     if display_id.is_empty() {
@@ -403,7 +405,15 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
     // the "additionalProperties: false" check the JSON schema declares; it
     // closes the MEDIUM finding that nested forbidden fields could slip
     // through (e.g. {"notes": {"draft_contract": ...}}).
-    let allowed: std::collections::HashSet<&str> = REQUIRED_FIELDS.iter().copied().collect();
+    if let Some(fragment) = obj.get("harden_log_fragment") {
+        validate_harden_log_fragment(fragment)?;
+    }
+
+    let allowed: std::collections::HashSet<&str> = REQUIRED_FIELDS
+        .iter()
+        .chain(OPTIONAL_FIELDS.iter())
+        .copied()
+        .collect();
     for key in obj.keys() {
         if !allowed.contains(key.as_str()) {
             return Err(anyhow!(
@@ -437,6 +447,134 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
         return Err(anyhow!("'grill_question' exceeds 200 chars"));
     }
 
+    Ok(())
+}
+
+// Bounds mirroring stores/observations/schema.yaml harden_log limits and
+// agents/schemas/investigator.schema.json.  Must stay in sync with
+// HARDEN_LOG_MAX_ITEMS / HARDEN_LOG_MAX_STR_LEN in src/validate/mod.rs.
+const HARDEN_LOG_MAX_ITEMS: usize = 20;
+const HARDEN_LOG_MAX_STR_LEN: usize = 500;
+
+fn validate_harden_log_fragment(fragment: &Value) -> Result<()> {
+    let obj = fragment
+        .as_object()
+        .ok_or_else(|| anyhow!("'harden_log_fragment' must be an object"))?;
+    let allowed: std::collections::HashSet<&str> = [
+        "decisions",
+        "scope_cuts",
+        "alternatives_rejected",
+        "compress_vs_surface",
+        "unresolved_questions",
+    ]
+    .iter()
+    .copied()
+    .collect();
+    for key in obj.keys() {
+        if !allowed.contains(key.as_str()) {
+            return Err(anyhow!("'harden_log_fragment' has extra field '{}'", key));
+        }
+    }
+    check_record_list(obj, "decisions", &["id", "decision", "rationale"], &["source_quote"])?;
+    check_record_list(obj, "scope_cuts", &["cut", "rationale"], &["source_quote"])?;
+    check_record_list(obj, "alternatives_rejected", &["alternative", "why_rejected"], &[])?;
+    check_record_list(obj, "compress_vs_surface", &["item", "judgment", "rationale"], &[])?;
+    if let Some(v) = obj.get("unresolved_questions") {
+        let arr = v
+            .as_array()
+            .ok_or_else(|| anyhow!("'harden_log_fragment.unresolved_questions' must be an array"))?;
+        if arr.len() > HARDEN_LOG_MAX_ITEMS {
+            return Err(anyhow!(
+                "'harden_log_fragment.unresolved_questions' exceeds max_items={} (got {})",
+                HARDEN_LOG_MAX_ITEMS,
+                arr.len()
+            ));
+        }
+        for (i, item) in arr.iter().enumerate() {
+            if !item.is_string() {
+                return Err(anyhow!(
+                    "'harden_log_fragment.unresolved_questions[{}]' must be a string",
+                    i
+                ));
+            }
+            let s = item.as_str().unwrap();
+            if s.chars().count() > HARDEN_LOG_MAX_STR_LEN {
+                return Err(anyhow!(
+                    "'harden_log_fragment.unresolved_questions[{}]' exceeds max_length={} (got {} chars)",
+                    i,
+                    HARDEN_LOG_MAX_STR_LEN,
+                    s.chars().count()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_record_list(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<()> {
+    let Some(v) = obj.get(key) else { return Ok(()); };
+    let arr = v
+        .as_array()
+        .ok_or_else(|| anyhow!("'harden_log_fragment.{}' must be an array", key))?;
+    if arr.len() > HARDEN_LOG_MAX_ITEMS {
+        return Err(anyhow!(
+            "'harden_log_fragment.{}' exceeds max_items={} (got {})",
+            key,
+            HARDEN_LOG_MAX_ITEMS,
+            arr.len()
+        ));
+    }
+    let allowed: std::collections::HashSet<&str> = required.iter().chain(optional.iter()).copied().collect();
+    for (i, item) in arr.iter().enumerate() {
+        let rec = item
+            .as_object()
+            .ok_or_else(|| anyhow!("'harden_log_fragment.{}[{}]' must be an object", key, i))?;
+        for req in required {
+            if !rec.get(*req).map(|v| v.is_string()).unwrap_or(false) {
+                return Err(anyhow!(
+                    "'harden_log_fragment.{}[{}].{}' must be a string",
+                    key,
+                    i,
+                    req
+                ));
+            }
+        }
+        for k in rec.keys() {
+            if !allowed.contains(k.as_str()) {
+                return Err(anyhow!(
+                    "'harden_log_fragment.{}[{}]' has extra field '{}'",
+                    key,
+                    i,
+                    k
+                ));
+            }
+            let field_val = rec.get(k).unwrap();
+            if !field_val.is_string() {
+                return Err(anyhow!(
+                    "'harden_log_fragment.{}[{}].{}' must be a string",
+                    key,
+                    i,
+                    k
+                ));
+            }
+            let s = field_val.as_str().unwrap();
+            if s.chars().count() > HARDEN_LOG_MAX_STR_LEN {
+                return Err(anyhow!(
+                    "'harden_log_fragment.{}[{}].{}' exceeds max_length={} (got {} chars)",
+                    key,
+                    i,
+                    k,
+                    HARDEN_LOG_MAX_STR_LEN,
+                    s.chars().count()
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -488,6 +626,11 @@ fn investigation_success_diff(
     let mut diff = EntryMap::new();
     diff.insert("investigation_note".to_string(), Value::String(note));
     diff.insert("notes".to_string(), Value::Object(notes_obj));
+    if let Some(fragment) = envelope.get("harden_log_fragment") {
+        let mut intent = serde_json::Map::new();
+        intent.insert("harden_log".to_string(), fragment.clone());
+        diff.insert("intent_contract".to_string(), Value::Object(intent));
+    }
     Ok(diff)
 }
 
@@ -722,6 +865,41 @@ mod tests {
         ] {
             assert!(notes.get(key).is_some(), "notes must contain '{}'", key);
         }
+    }
+
+    #[test]
+    fn investigator_accepts_and_persists_harden_log_fragment() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db();
+        insert_obs(&conn, "L006", "needs_investigation");
+        let mut env = valid_envelope();
+        env.as_object_mut().unwrap().insert(
+            "harden_log_fragment".to_string(),
+            serde_json::json!({
+                "decisions": [{"id":"D1","decision":"classify as repro gap","rationale":"evidence cites missing branch"}],
+                "unresolved_questions": ["Is the branch reachable in prod?"]
+            }),
+        );
+        let _shim = CmdShim::install(&serde_json::to_string(&env).unwrap());
+
+        let row = obs_row_json(&conn, "L006");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let ctx = ctx_for(&conn, &agents, &cfg);
+        assert_eq!(run(&row, &ctx).unwrap(), 0);
+
+        let raw: String = conn
+            .query_row(
+                "SELECT intent_contract FROM observations WHERE display_id='L006'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let intent: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            intent["harden_log"]["decisions"][0]["decision"],
+            "classify as repro gap"
+        );
     }
 
     #[test]

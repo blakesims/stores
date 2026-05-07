@@ -85,7 +85,10 @@ pub(crate) fn compute_render_in(
     let (_id, entry) = read_row(schema, conn, display_id)?;
 
     // Build render context.
-    let ctx = build_context(schema, &entry);
+    let mut ctx = build_context(schema, &entry);
+    if schema.name == "tasks" {
+        enrich_task_context_with_observation_harden_logs(conn, &entry, &mut ctx)?;
+    }
 
     // Resolve the render target path.
     let target_path = resolve_render_path(&render_target_tpl, &ctx, repo_root)?;
@@ -158,6 +161,49 @@ pub(crate) fn compute_render_in(
 }
 
 /// Pure logic using cwd for both repo_root and manifest_root.
+fn enrich_task_context_with_observation_harden_logs(
+    conn: &Connection,
+    entry: &crate::validate::EntryMap,
+    ctx: &mut serde_json::Value,
+) -> Result<()> {
+    let ids = entry
+        .get("linked_observations")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut logs = Vec::new();
+    for idv in ids {
+        let Some(display_id) = idv.as_str() else { continue; };
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT intent_contract FROM observations WHERE display_id = ?1",
+                rusqlite::params![display_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        let Some(raw) = raw else { continue; };
+        let Ok(intent) = serde_json::from_str::<serde_json::Value>(&raw) else { continue; };
+        let Some(harden_log) = intent.get("harden_log").filter(|v| !v.is_null()).cloned() else { continue; };
+        let rendered = crate::output::harden_log_markdown(&harden_log);
+        if rendered.trim().is_empty() {
+            continue;
+        }
+        logs.push(serde_json::json!({
+            "display_id": display_id,
+            "harden_log": harden_log,
+            "rendered": rendered
+        }));
+    }
+    if let Some(obj) = ctx.as_object_mut() {
+        obj.insert(
+            "linked_observation_harden_logs".to_string(),
+            serde_json::Value::Array(logs),
+        );
+    }
+    Ok(())
+}
+
 pub fn compute_render(
     schema: &Schema,
     conn: &Connection,

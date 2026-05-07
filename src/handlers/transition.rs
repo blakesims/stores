@@ -11,7 +11,7 @@ use crate::schema::{
 };
 use crate::validate::{self, Op};
 
-use super::row::{build_entry_map, now_iso8601, read_row};
+use super::row::{build_entry_map, deep_merge_entry_field, now_iso8601, read_row};
 
 /// Read the policy_ref/policies_hash env vars set by the autonomous flow
 /// daemon (Phase 5: agents_run.rs::run_dispatch). When unset (the manual CLI
@@ -510,7 +510,8 @@ pub(crate) fn run_in_tx(
         }
     })?;
 
-    // Deep-merge diff into existing; Record-typed fields get sub-field-level merge
+    // Deep-merge diff into existing; Record-typed fields get recursive
+    // sub-field-level merge.
     let mut merged = existing.clone();
     for (k, v) in &diff {
         let is_record = schema
@@ -518,18 +519,10 @@ pub(crate) fn run_in_tx(
             .iter()
             .any(|f| f.name == *k && matches!(f.ty, crate::schema::FieldType::Record(_)));
         if is_record {
-            if let (Some(Value::Object(existing_obj)), Value::Object(new_obj)) =
-                (merged.get(k).cloned(), v)
-            {
-                let mut combined = existing_obj.clone();
-                for (sk, sv) in new_obj {
-                    combined.insert(sk.clone(), sv.clone());
-                }
-                merged.insert(k.clone(), Value::Object(combined));
-                continue;
-            }
+            deep_merge_entry_field(&mut merged, k, v);
+        } else {
+            merged.insert(k.clone(), v.clone());
         }
-        merged.insert(k.clone(), v.clone());
     }
 
     // T077 P3: observations U1 architecture-review gate. A pending
