@@ -215,6 +215,121 @@ fn validate_field_recursive(
     }
 }
 
+// ---------------------------------------------------------------------------
+// harden_log bounds enforcement (L077 contract: bounded structured field,
+// NOT a transcript dump).
+//
+// Bounds (option b — narrow harden_log-specific constants):
+//   - Each of the 5 list fields: max 20 items.
+//   - Each string value within an item: max 500 chars.
+//
+// These match the mirrors in:
+//   - agents/schemas/investigator.schema.json (harden_log_fragment)
+//   - src/flow/builtins/investigator.rs (validate_harden_log_fragment)
+// ---------------------------------------------------------------------------
+
+const HARDEN_LOG_MAX_ITEMS: usize = 20;
+const HARDEN_LOG_MAX_STR_LEN: usize = 500;
+
+/// Called when we've confirmed the value at `field_path` is a non-null object
+/// and the path matches `["intent_contract", "harden_log"]`.
+fn validate_harden_log_bounds(
+    value: &serde_json::Value,
+    field_path: &[String],
+    errors: &mut Vec<ValidationError>,
+) {
+    let Some(obj) = value.as_object() else {
+        return;
+    };
+
+    // Check all 5 list fields for item count and per-string-value length.
+    let list_fields = [
+        "decisions",
+        "scope_cuts",
+        "alternatives_rejected",
+        "compress_vs_surface",
+        "unresolved_questions",
+    ];
+
+    for list_key in &list_fields {
+        let Some(list_val) = obj.get(*list_key) else {
+            continue;
+        };
+        if list_val.is_null() {
+            continue;
+        }
+        let Some(arr) = list_val.as_array() else {
+            continue; // shape error caught by type check
+        };
+
+        // max_items check
+        if arr.len() > HARDEN_LOG_MAX_ITEMS {
+            let mut path = field_path.to_vec();
+            path.push(list_key.to_string());
+            errors.push(ValidationError {
+                field_path: path,
+                rule: error::RuleKind::BoundsExceeded {
+                    limit: HARDEN_LOG_MAX_ITEMS,
+                    actual: arr.len(),
+                },
+                message: format!(
+                    "harden_log.{} exceeds max_items={} (got {})",
+                    list_key, HARDEN_LOG_MAX_ITEMS, arr.len()
+                ),
+            });
+            continue; // no need to check strings inside an oversized list
+        }
+
+        // max_length check for each string in each item
+        for (item_idx, item) in arr.iter().enumerate() {
+            match item {
+                serde_json::Value::String(s) => {
+                    // unresolved_questions is a list of plain strings
+                    let len = s.chars().count();
+                    if len > HARDEN_LOG_MAX_STR_LEN {
+                        let mut path = field_path.to_vec();
+                        path.push(list_key.to_string());
+                        errors.push(ValidationError {
+                            field_path: path,
+                            rule: error::RuleKind::BoundsExceeded {
+                                limit: HARDEN_LOG_MAX_STR_LEN,
+                                actual: len,
+                            },
+                            message: format!(
+                                "harden_log.{}[{}] exceeds max_length={} (got {} chars)",
+                                list_key, item_idx, HARDEN_LOG_MAX_STR_LEN, len
+                            ),
+                        });
+                    }
+                }
+                serde_json::Value::Object(rec) => {
+                    for (field_key, field_val) in rec {
+                        if let serde_json::Value::String(s) = field_val {
+                            let len = s.chars().count();
+                            if len > HARDEN_LOG_MAX_STR_LEN {
+                                let mut path = field_path.to_vec();
+                                path.push(list_key.to_string());
+                                errors.push(ValidationError {
+                                    field_path: path,
+                                    rule: error::RuleKind::BoundsExceeded {
+                                        limit: HARDEN_LOG_MAX_STR_LEN,
+                                        actual: len,
+                                    },
+                                    message: format!(
+                                        "harden_log.{}[{}].{} exceeds max_length={} (got {} chars)",
+                                        list_key, item_idx, field_key, HARDEN_LOG_MAX_STR_LEN, len
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {} // shape error caught elsewhere
+            }
+        }
+    }
+}
+
 fn push_invalid_shape(
     errors: &mut Vec<ValidationError>,
     field_path: &[String],
@@ -288,6 +403,16 @@ fn validate_field(
                 }
             }
             _ => {}
+        }
+    }
+
+    // harden_log bounds check — fires when the field path is exactly
+    // ["intent_contract", "harden_log"] and the value is a non-null object.
+    if field_path == ["intent_contract", "harden_log"] {
+        if let Some(value) = required::lookup(entry, &field_path) {
+            if !value.is_null() {
+                validate_harden_log_bounds(value, &field_path, errors);
+            }
         }
     }
 

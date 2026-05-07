@@ -450,6 +450,12 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
     Ok(())
 }
 
+// Bounds mirroring stores/observations/schema.yaml harden_log limits and
+// agents/schemas/investigator.schema.json.  Must stay in sync with
+// HARDEN_LOG_MAX_ITEMS / HARDEN_LOG_MAX_STR_LEN in src/validate/mod.rs.
+const HARDEN_LOG_MAX_ITEMS: usize = 20;
+const HARDEN_LOG_MAX_STR_LEN: usize = 500;
+
 fn validate_harden_log_fragment(fragment: &Value) -> Result<()> {
     let obj = fragment
         .as_object()
@@ -477,11 +483,27 @@ fn validate_harden_log_fragment(fragment: &Value) -> Result<()> {
         let arr = v
             .as_array()
             .ok_or_else(|| anyhow!("'harden_log_fragment.unresolved_questions' must be an array"))?;
+        if arr.len() > HARDEN_LOG_MAX_ITEMS {
+            return Err(anyhow!(
+                "'harden_log_fragment.unresolved_questions' exceeds max_items={} (got {})",
+                HARDEN_LOG_MAX_ITEMS,
+                arr.len()
+            ));
+        }
         for (i, item) in arr.iter().enumerate() {
             if !item.is_string() {
                 return Err(anyhow!(
                     "'harden_log_fragment.unresolved_questions[{}]' must be a string",
                     i
+                ));
+            }
+            let s = item.as_str().unwrap();
+            if s.chars().count() > HARDEN_LOG_MAX_STR_LEN {
+                return Err(anyhow!(
+                    "'harden_log_fragment.unresolved_questions[{}]' exceeds max_length={} (got {} chars)",
+                    i,
+                    HARDEN_LOG_MAX_STR_LEN,
+                    s.chars().count()
                 ));
             }
         }
@@ -499,6 +521,14 @@ fn check_record_list(
     let arr = v
         .as_array()
         .ok_or_else(|| anyhow!("'harden_log_fragment.{}' must be an array", key))?;
+    if arr.len() > HARDEN_LOG_MAX_ITEMS {
+        return Err(anyhow!(
+            "'harden_log_fragment.{}' exceeds max_items={} (got {})",
+            key,
+            HARDEN_LOG_MAX_ITEMS,
+            arr.len()
+        ));
+    }
     let allowed: std::collections::HashSet<&str> = required.iter().chain(optional.iter()).copied().collect();
     for (i, item) in arr.iter().enumerate() {
         let rec = item
@@ -523,12 +553,24 @@ fn check_record_list(
                     k
                 ));
             }
-            if !rec.get(k).map(|v| v.is_string()).unwrap_or(false) {
+            let field_val = rec.get(k).unwrap();
+            if !field_val.is_string() {
                 return Err(anyhow!(
                     "'harden_log_fragment.{}[{}].{}' must be a string",
                     key,
                     i,
                     k
+                ));
+            }
+            let s = field_val.as_str().unwrap();
+            if s.chars().count() > HARDEN_LOG_MAX_STR_LEN {
+                return Err(anyhow!(
+                    "'harden_log_fragment.{}[{}].{}' exceeds max_length={} (got {} chars)",
+                    key,
+                    i,
+                    k,
+                    HARDEN_LOG_MAX_STR_LEN,
+                    s.chars().count()
                 ));
             }
         }

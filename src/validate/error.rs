@@ -18,6 +18,13 @@ pub enum RuleKind {
     InvalidJson {
         expected: String,
     },
+    /// An array field exceeded its declared `max_items` bound, or a string field
+    /// exceeded its declared `max_length` bound.  `limit` is the bound; `actual`
+    /// is what was supplied.
+    BoundsExceeded {
+        limit: usize,
+        actual: usize,
+    },
 }
 
 /// A single validation violation.

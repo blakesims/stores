@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use stores::schema::actor::Actor;
 use stores::schema::Schema;
 use stores::validate::{validate, EntryMap, Op};
+use stores::validate::error::RuleKind;
 
 fn schema() -> Schema {
     let yaml = std::fs::read_to_string("stores/observations/schema.yaml").unwrap();
@@ -267,4 +268,209 @@ fn prompt_guidance_mentions_bounded_harden_log_not_transcript() {
     assert!(inv.contains("not transcript-like"));
     assert!(side.contains("intent_contract.harden_log"));
     assert!(side.contains("bounded audit artifact"));
+}
+
+// ---------------------------------------------------------------------------
+// Bound-overflow rejection tests (L077 contract: max 20 items, max 500 chars)
+// ---------------------------------------------------------------------------
+
+fn make_decisions(n: usize) -> Value {
+    let items: Vec<Value> = (0..n)
+        .map(|i| json!({"id": format!("D{i}"), "decision": "x", "rationale": "y"}))
+        .collect();
+    json!(items)
+}
+
+fn make_scope_cuts(n: usize) -> Value {
+    let items: Vec<Value> = (0..n)
+        .map(|_| json!({"cut": "c", "rationale": "r"}))
+        .collect();
+    json!(items)
+}
+
+fn make_alternatives_rejected(n: usize) -> Value {
+    let items: Vec<Value> = (0..n)
+        .map(|_| json!({"alternative": "a", "why_rejected": "b"}))
+        .collect();
+    json!(items)
+}
+
+fn make_compress_vs_surface(n: usize) -> Value {
+    let items: Vec<Value> = (0..n)
+        .map(|_| json!({"item": "i", "judgment": "j", "rationale": "r"}))
+        .collect();
+    json!(items)
+}
+
+fn make_unresolved_questions(n: usize) -> Value {
+    let items: Vec<Value> = (0..n).map(|i| json!(format!("q{i}"))).collect();
+    json!(items)
+}
+
+#[test]
+fn harden_log_max_items_decisions_21_rejected() {
+    let s = schema();
+    let entry = base_entry(json!({"harden_log": {"decisions": make_decisions(21)}}));
+    let errs = validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap_err();
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.rule,
+            RuleKind::BoundsExceeded { limit: 20, actual: 21 }
+        ) && e.field_path.last().map(|s| s.as_str()) == Some("decisions")),
+        "expected BoundsExceeded on decisions, got: {errs:?}"
+    );
+}
+
+#[test]
+fn harden_log_max_items_scope_cuts_21_rejected() {
+    let s = schema();
+    let entry = base_entry(json!({"harden_log": {"scope_cuts": make_scope_cuts(21)}}));
+    let errs = validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap_err();
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.rule,
+            RuleKind::BoundsExceeded { limit: 20, actual: 21 }
+        ) && e.field_path.last().map(|s| s.as_str()) == Some("scope_cuts")),
+        "expected BoundsExceeded on scope_cuts, got: {errs:?}"
+    );
+}
+
+#[test]
+fn harden_log_max_items_alternatives_rejected_21_rejected() {
+    let s = schema();
+    let entry = base_entry(json!({"harden_log": {"alternatives_rejected": make_alternatives_rejected(21)}}));
+    let errs = validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap_err();
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.rule,
+            RuleKind::BoundsExceeded { limit: 20, actual: 21 }
+        ) && e.field_path.last().map(|s| s.as_str()) == Some("alternatives_rejected")),
+        "expected BoundsExceeded on alternatives_rejected, got: {errs:?}"
+    );
+}
+
+#[test]
+fn harden_log_max_items_compress_vs_surface_21_rejected() {
+    let s = schema();
+    let entry = base_entry(json!({"harden_log": {"compress_vs_surface": make_compress_vs_surface(21)}}));
+    let errs = validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap_err();
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.rule,
+            RuleKind::BoundsExceeded { limit: 20, actual: 21 }
+        ) && e.field_path.last().map(|s| s.as_str()) == Some("compress_vs_surface")),
+        "expected BoundsExceeded on compress_vs_surface, got: {errs:?}"
+    );
+}
+
+#[test]
+fn harden_log_max_items_unresolved_questions_21_rejected() {
+    let s = schema();
+    let entry = base_entry(json!({"harden_log": {"unresolved_questions": make_unresolved_questions(21)}}));
+    let errs = validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap_err();
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.rule,
+            RuleKind::BoundsExceeded { limit: 20, actual: 21 }
+        ) && e.field_path.last().map(|s| s.as_str()) == Some("unresolved_questions")),
+        "expected BoundsExceeded on unresolved_questions, got: {errs:?}"
+    );
+}
+
+#[test]
+fn harden_log_max_items_exactly_20_passes() {
+    let s = schema();
+    let entry = base_entry(json!({"harden_log": {
+        "decisions": make_decisions(20),
+        "scope_cuts": make_scope_cuts(20),
+        "alternatives_rejected": make_alternatives_rejected(20),
+        "compress_vs_surface": make_compress_vs_surface(20),
+        "unresolved_questions": make_unresolved_questions(20)
+    }}));
+    validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap();
+}
+
+#[test]
+fn harden_log_string_501_chars_in_decision_field_rejected() {
+    let s = schema();
+    let long_str: String = "a".repeat(501);
+    let entry = base_entry(json!({"harden_log": {
+        "decisions": [{"id": "D1", "decision": long_str, "rationale": "r"}]
+    }}));
+    let errs = validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap_err();
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.rule,
+            RuleKind::BoundsExceeded { limit: 500, actual: 501 }
+        )),
+        "expected BoundsExceeded(500, 501) for 501-char decision, got: {errs:?}"
+    );
+}
+
+#[test]
+fn harden_log_string_500_chars_passes() {
+    let s = schema();
+    let ok_str: String = "a".repeat(500);
+    let entry = base_entry(json!({"harden_log": {
+        "decisions": [{"id": "D1", "decision": ok_str, "rationale": "r"}]
+    }}));
+    validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap();
+}
+
+#[test]
+fn harden_log_string_501_chars_in_unresolved_questions_rejected() {
+    let s = schema();
+    let long_str: String = "x".repeat(501);
+    let entry = base_entry(json!({"harden_log": {
+        "unresolved_questions": [long_str]
+    }}));
+    let errs = validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap_err();
+    assert!(
+        errs.iter().any(|e| matches!(
+            &e.rule,
+            RuleKind::BoundsExceeded { limit: 500, actual: 501 }
+        )),
+        "expected BoundsExceeded(500, 501) for 501-char unresolved_question, got: {errs:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Malformed-byte regression test (non-UTF-8 input)
+//
+// The CLI write-path takes &str, so non-UTF-8 bytes cannot enter through
+// coerce_value. They can arrive via the SQLite blob→String path (lossy), which
+// means by the time the validator runs the bytes have already been sanitized by
+// from_utf8_lossy. The remaining risk is a malformed harden_log JSON string
+// injected directly. Here we test that serde_json (which requires valid UTF-8)
+// produces a parse error rather than panicking, and that the resulting sentinel
+// value triggers a validator error via the type-shape check path (not a panic).
+//
+// We feed the raw bytes as a String built from replacement chars to simulate
+// what from_utf8_lossy produces, then confirm validation rejects the sentinel.
+// ---------------------------------------------------------------------------
+#[test]
+fn harden_log_non_utf8_bytes_via_lossy_path_no_panic() {
+    // Simulate what the SQLite blob->String path produces for invalid UTF-8:
+    // invalid bytes are replaced with U+FFFD by from_utf8_lossy.
+    let invalid_bytes: Vec<u8> = vec![0xFF, 0xFE, 0x80];
+    let lossy = String::from_utf8_lossy(&invalid_bytes).into_owned();
+    // The lossy string is valid UTF-8 (replacement chars), but is not valid JSON.
+    // Feed it as the raw harden_log value (as if it came through the blob path).
+    // serde_json::from_str should fail; the validator must not panic.
+    let parse_result = serde_json::from_str::<serde_json::Value>(&lossy);
+    // The lossy output (U+FFFD chars) is not valid JSON — parse must fail gracefully.
+    assert!(
+        parse_result.is_err(),
+        "expected JSON parse failure for lossy-encoded non-UTF-8, got: {parse_result:?}"
+    );
+    // Verify no panic by wrapping the value as a sentinel string in the entry map
+    // (mimicking coerce_value for a JSON/Record field that gets bad input).
+    let s = schema();
+    let entry = base_entry(json!({"harden_log": lossy}));
+    // Should produce a shape error (string instead of object), not a panic.
+    let errs = validate(&s, &entry, Op::Add, Actor::AiWithHuman.into()).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.field_path.last().map(|s| s.as_str()) == Some("harden_log")),
+        "expected shape error on harden_log for sentinel string, got: {errs:?}"
+    );
 }
