@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::codegen::ddl::{expected_columns, quote_ident, ExpectedColumn};
+use crate::codegen::ddl::{ddl_for, expected_columns, quote_ident, ExpectedColumn};
 use crate::manifest::Manifest;
 use crate::schema::{FieldType, Schema};
 
@@ -150,6 +150,10 @@ pub fn apply_with(
     // fills NULL cells with the literal default value.
     backfill_defaults(conn, schemas, manifest, &plan)?;
 
+    if observations_source_id_type_mismatch(&plan) {
+        rebuild_observations_source_id_as_text(conn, schemas, manifest)?;
+    }
+
     Ok(report)
 }
 
@@ -164,6 +168,69 @@ fn observations_source_tuple_backfill_sql(table: &str) -> String {
         "UPDATE {} SET source_env = origin_db, source_id = COALESCE(prod_source_id, sandbox_source_id) WHERE source_env IS NULL AND origin_db IS NOT NULL;",
         quote_ident(table)
     )
+}
+
+fn observations_source_id_type_mismatch(plan: &MigrationPlan) -> bool {
+    plan.type_mismatches
+        .iter()
+        .any(|(store, col, db_type, expected_type)| {
+            store == "observations"
+                && col == "source_id"
+                && db_type.eq_ignore_ascii_case("INTEGER")
+                && expected_type.eq_ignore_ascii_case("TEXT")
+        })
+}
+
+fn rebuild_observations_source_id_as_text(
+    conn: &Connection,
+    schemas: &HashMap<String, Schema>,
+    manifest: &Manifest,
+) -> Result<()> {
+    let schema = schemas
+        .get("observations")
+        .ok_or_else(|| anyhow!("observations schema not loaded for T084 source_id rebuild"))?;
+    let table = manifest
+        .stores
+        .iter()
+        .find(|s| s.name == "observations")
+        .map(|s| s.table_name.as_str())
+        .unwrap_or("observations");
+    let tmp_table = format!("{table}__t084_source_id_text");
+    let create_tmp = ddl_for(schema).replace(
+        &format!("CREATE TABLE IF NOT EXISTS {}", quote_ident(table)),
+        &format!("CREATE TABLE {}", quote_ident(&tmp_table)),
+    );
+    let live_cols = read_table_info(conn, table)?;
+    let expected = expected_columns(schema);
+    let common: Vec<String> = expected
+        .into_iter()
+        .filter(|c| live_cols.contains_key(&c.name))
+        .map(|c| c.name)
+        .collect();
+    let insert_cols = common
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select_cols = common
+        .iter()
+        .map(|c| {
+            if c == "source_id" {
+                format!("CAST({} AS TEXT)", quote_ident(c))
+            } else {
+                quote_ident(c)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "BEGIN;\nDROP TABLE IF EXISTS {tmp};\n{create_tmp}\nINSERT INTO {tmp} ({insert_cols}) SELECT {select_cols} FROM {table_q};\nDROP TABLE {table_q};\nALTER TABLE {tmp} RENAME TO {table_q};\nCOMMIT;",
+        tmp = quote_ident(&tmp_table),
+        table_q = quote_ident(table),
+    );
+    conn.execute_batch(&sql)
+        .context("failed to rebuild observations.source_id as TEXT")?;
+    Ok(())
 }
 
 /// Defensive UPDATE pass after ALTER TABLE ADD COLUMN (T052 P1).
@@ -317,6 +384,9 @@ pub fn run_migrate(apply: bool) -> Result<()> {
         let batch = format!("BEGIN;\n{}\nCOMMIT;", sql_lines.join("\n"));
         conn.execute_batch(&batch)
             .context("failed to apply additive migrations (transaction rolled back)")?;
+        if observations_source_id_type_mismatch(&plan) {
+            rebuild_observations_source_id_as_text(&conn, &schemas, &manifest)?;
+        }
         let created = crate::handlers::architecture_reviews_backfill::run_backfill(&conn)?;
         if created > 0 {
             println!("architecture_reviews backfill: created {created} row(s)");
@@ -383,7 +453,7 @@ mod tests {
     use super::*;
     use crate::codegen::ddl::ddl_for;
     use crate::manifest::InstalledStore;
-    use crate::schema::{Schema, StoreScope};
+    use crate::schema::{FieldType, Schema, StoreScope};
     use std::path::PathBuf;
 
     const OBSERVATIONS_YAML: &str = include_str!("../../stores/observations/schema.yaml");
@@ -662,9 +732,23 @@ mod tests {
         assert_eq!(live.get("cluster_key").map(|s| s.as_str()), Some("TEXT"));
     }
 
-
-    fn drop_t084_source_env(conn: &Connection) {
-        conn.execute_batch("ALTER TABLE \"observations\" DROP COLUMN \"source_env\";").unwrap();
+    fn install_pre_t084_all(conn: &Connection, schemas: &HashMap<String, Schema>) {
+        let mut pre_t084_observations = schemas.get("observations").unwrap().clone();
+        pre_t084_observations
+            .fields
+            .retain(|f| f.name != "source_env");
+        pre_t084_observations
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "source_id")
+            .expect("observations.source_id exists")
+            .ty = FieldType::Integer;
+        conn.execute_batch(&ddl_for(&pre_t084_observations))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("gate").unwrap()))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("tasks").unwrap()))
+            .unwrap();
     }
 
     fn insert_pre_t084_source_row(
@@ -685,17 +769,30 @@ mod tests {
     fn t084_migrate_backfills_prod_source_tuple() {
         let (schemas, manifest) = load_bundled();
         let conn = Connection::open_in_memory().unwrap();
-        install_all(&conn, &schemas);
-        drop_t084_source_env(&conn);
+        install_pre_t084_all(&conn, &schemas);
         insert_pre_t084_source_row(&conn, "L901", "prod", Some(123), None);
 
+        let pre_live = read_table_info(&conn, "observations").unwrap();
+        assert_eq!(
+            pre_live.get("source_id").map(|s| s.as_str()),
+            Some("INTEGER")
+        );
+        assert!(!pre_live.contains_key("source_env"));
+
         let report = apply_with(&conn, &schemas, &manifest).unwrap();
-        assert!(report.applied_columns.iter().any(|(s, c)| s == "observations" && c == "source_env"));
-        let got: (Option<String>, Option<String>) = conn.query_row(
-            "SELECT source_env, source_id FROM observations WHERE display_id = 'L901'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        assert!(report
+            .applied_columns
+            .iter()
+            .any(|(s, c)| s == "observations" && c == "source_env"));
+        let post_live = read_table_info(&conn, "observations").unwrap();
+        assert_eq!(post_live.get("source_id").map(|s| s.as_str()), Some("TEXT"));
+        let got: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id FROM observations WHERE display_id = 'L901'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(got, (Some("prod".into()), Some("123".into())));
     }
 
@@ -703,16 +800,17 @@ mod tests {
     fn t084_migrate_backfills_sandbox_source_tuple() {
         let (schemas, manifest) = load_bundled();
         let conn = Connection::open_in_memory().unwrap();
-        install_all(&conn, &schemas);
-        drop_t084_source_env(&conn);
+        install_pre_t084_all(&conn, &schemas);
         insert_pre_t084_source_row(&conn, "L902", "sandbox", None, Some(456));
 
         apply_with(&conn, &schemas, &manifest).unwrap();
-        let got: (Option<String>, Option<String>) = conn.query_row(
-            "SELECT source_env, source_id FROM observations WHERE display_id = 'L902'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        let got: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id FROM observations WHERE display_id = 'L902'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(got, (Some("sandbox".into()), Some("456".into())));
     }
 
@@ -720,16 +818,17 @@ mod tests {
     fn t084_migrate_origin_db_without_id_remains_readable() {
         let (schemas, manifest) = load_bundled();
         let conn = Connection::open_in_memory().unwrap();
-        install_all(&conn, &schemas);
-        drop_t084_source_env(&conn);
+        install_pre_t084_all(&conn, &schemas);
         insert_pre_t084_source_row(&conn, "L903", "prod", None, None);
 
         apply_with(&conn, &schemas, &manifest).unwrap();
-        let got: (Option<String>, Option<String>) = conn.query_row(
-            "SELECT source_env, source_id FROM observations WHERE display_id = 'L903'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        let got: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id FROM observations WHERE display_id = 'L903'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(got, (Some("prod".into()), None));
 
         let schema = schemas.get("observations").unwrap();
@@ -737,7 +836,13 @@ mod tests {
             .arg(clap::Arg::new("display_id").required(true))
             .arg(clap::Arg::new("summary").long("summary"));
         let matches = update_cmd.get_matches_from(["update", "L903", "--summary", "changed"]);
-        crate::handlers::update::run(schema, &conn, &matches, crate::schema::actor::Actor::Human.into()).unwrap();
+        crate::handlers::update::run(
+            schema,
+            &conn,
+            &matches,
+            crate::schema::actor::Actor::Human.into(),
+        )
+        .unwrap();
     }
 
     /// Type comparison is case-insensitive on the bare token.
