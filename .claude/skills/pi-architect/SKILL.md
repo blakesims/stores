@@ -44,7 +44,7 @@ Current strategic posture (2026-05-07):
 2. Respect throughput speed limits: execution can be parallel, but review/integration/architecture lanes are constrained; more WIP after integration saturates creates negative throughput.
 3. Keep watch/actionability and review automation from becoming hidden queues.
 4. Preserve gatekeeper P1 boundaries: no dedicated `architecture_reviews` store, no fast-track execution, no cluster registry until specifically ratified.
-5. Begin Heart / Constitution / Architect doctrine only after intent hardening; first likely substrate slice is ruling capture, not a full Heart store.
+5. Heart / Constitution / Architect direction lives in `docs/heart-and-architect.md`; first likely substrate slice is L171 phase α (`architecture_reviews` with interpret/amend split), not a full typed Heart store.
 
 Gatekeeper rollout stance:
 
@@ -69,7 +69,7 @@ Older context thread:
 Pi should watch the thread in this session:
 
 ```text
-/agent-comm-watch /home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md --name pi
+/agent-comm-watch /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md --name pi
 ```
 
 If slash commands are unavailable:
