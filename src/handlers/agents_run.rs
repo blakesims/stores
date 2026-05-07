@@ -194,13 +194,20 @@ fn ensure_private_daemon_binary(
     // Test-only synchronization hook: STORES_TEST_SEED_RACE_DELAY_MS introduces
     // a sleep between the existence-shortcut and the hard_link so both
     // concurrent seeders are guaranteed to pass the shortcut before either
-    // attempts the link.  Defaults to 0 (off) in production — never set in
-    // normal operation.  Must be active in the binary (not #[cfg(test)]) since
-    // the concurrent seeders test spawns real child processes.
-    if let Ok(ms) = std::env::var("STORES_TEST_SEED_RACE_DELAY_MS") {
-        if let Ok(n) = ms.parse::<u64>() {
-            if n > 0 {
-                std::thread::sleep(Duration::from_millis(n));
+    // attempts the link.  Gated on debug_assertions so release builds compile
+    // it out entirely — the env-var cannot leak into production release
+    // binaries.
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(ms) = std::env::var("STORES_TEST_SEED_RACE_DELAY_MS") {
+            if let Ok(n) = ms.parse::<u64>() {
+                // Emit a greppable sentinel before the sleep+link so the
+                // concurrent-seeders test can assert both seeders reached this
+                // point (not just that the loser fired the AlreadyExists arm).
+                eprintln!("stores::agents_run::seed_race: reached pre-link");
+                if n > 0 {
+                    std::thread::sleep(Duration::from_millis(n));
+                }
             }
         }
     }
@@ -216,26 +223,31 @@ fn ensure_private_daemon_binary(
     match std::fs::hard_link(&tmp_path, &private_path) {
         Ok(()) => {
             // We won the race; private_path now contains our validated copy.
-            // Remove the temp first (guard still armed so drop retries if
-            // unlink fails), then disarm — the drop's idempotent remove_file
-            // is the safety net for the failure path.
-            let _ = std::fs::remove_file(&tmp_path);
+            // Remove the temp first (guard still armed so drop retries on
+            // failure), then disarm only on success.  If unlink fails the
+            // guard remains armed and runs its own idempotent remove_file on
+            // drop — that is the safety net for the failure path.
+            std::fs::remove_file(&tmp_path).with_context(|| {
+                format!("removing seed temp file {}", tmp_path.display())
+            })?;
             guard.disarm();
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Another concurrent daemon seeder won; discard our temp (guard
             // handles it on drop) and validate the winner before trusting it.
             // Unlink first while guard is still armed so drop retries on
-            // failure; disarm only after unlink is attempted.
-            // Test-only sentinel: when STORES_TEST_SEED_RACE_DELAY_MS is set
-            // (test harness only), emit a greppable line so the concurrent
-            // seeders test can assert the AlreadyExists arm actually fired.
-            // Never set in production, so this output never appears in
-            // normal operation.
+            // failure; disarm only on success — the guard's idempotent
+            // remove_file is the safety net when unlink fails.
+            // Test-only sentinel (debug_assertions builds only): emit a
+            // greppable line so the concurrent-seeders test can assert the
+            // AlreadyExists arm actually fired.
+            #[cfg(debug_assertions)]
             if std::env::var_os("STORES_TEST_SEED_RACE_DELAY_MS").is_some() {
                 eprintln!("stores::agents_run::seed_race: loser observed AlreadyExists; validating winner");
             }
-            let _ = std::fs::remove_file(&tmp_path);
+            std::fs::remove_file(&tmp_path).with_context(|| {
+                format!("removing seed temp file (loser) {}", tmp_path.display())
+            })?;
             guard.disarm();
             validate_stale_reexec_candidate(&private_path)
                 .map_err(|f| anyhow!(private_candidate_validation_message(&f)))

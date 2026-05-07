@@ -1088,18 +1088,34 @@ fn concurrent_seeders_hard_link_already_exists_arm() {
         String::from_utf8_lossy(&out_b.stderr)
     );
 
+    // Both processes must have emitted the pre-link sentinel, proving BOTH
+    // seeders reached the link attempt (not just that the loser arm fired).
+    let pre_link_needle = "stores::agents_run::seed_race: reached pre-link";
+    let stderr_a = String::from_utf8_lossy(&out_a.stderr);
+    let stderr_b = String::from_utf8_lossy(&out_b.stderr);
+    let pre_link_count =
+        stderr_a.contains(pre_link_needle) as usize + stderr_b.contains(pre_link_needle) as usize;
+    assert_eq!(
+        pre_link_count,
+        2,
+        "expected both seeders to emit the pre-link sentinel; \
+         child_a stderr:\n{}\nchild_b stderr:\n{}",
+        stderr_a,
+        stderr_b,
+    );
+
     // Exactly one process must have observed AlreadyExists and logged the
     // sentinel line — proving the race arm actually fired.
-    let needle = "loser observed AlreadyExists; validating winner";
-    let matches_a = String::from_utf8_lossy(&out_a.stderr).contains(needle) as usize;
-    let matches_b = String::from_utf8_lossy(&out_b.stderr).contains(needle) as usize;
+    let loser_needle = "loser observed AlreadyExists; validating winner";
+    let loser_count =
+        stderr_a.contains(loser_needle) as usize + stderr_b.contains(loser_needle) as usize;
     assert_eq!(
-        matches_a + matches_b,
+        loser_count,
         1,
         "expected exactly one seeder to observe AlreadyExists; \
          child_a stderr:\n{}\nchild_b stderr:\n{}",
-        String::from_utf8_lossy(&out_a.stderr),
-        String::from_utf8_lossy(&out_b.stderr),
+        stderr_a,
+        stderr_b,
     );
 
     // Private binary must exist and be non-empty after both seeders finish.
