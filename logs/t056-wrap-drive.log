@@ -1,5 +1,0 @@
-[T056] phase 1 cycle 1: spawning wrap via pi runner... (may take 30-90s)
-[T056] phase 1 cycle 1: wrap returned (exit=0, 28.1s)
-[T056] phase 1 cycle 1: wrap → submitted (gate=None; source=sdk)
-[T056] max iterations exceeded (1); current state: status=in_review phase=1 cycle=1
-Error: max iterations exceeded (1) for task T056

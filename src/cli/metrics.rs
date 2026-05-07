@@ -242,20 +242,126 @@ fn ratification_metric(rows: &[TransitionRow], since_epoch: i64) -> PercentileMe
     }
 }
 
-/// Compute REVISE rate from `tasks.cycles` JSON.
+/// Compute REVISE rate from transition_history (windowed) or fall back to
+/// `tasks.cycles` JSON (unwindowed).
 ///
-/// **Window note:** individual review events inside `tasks.cycles` do not carry
-/// timestamps, so window-filtering cannot be applied at the review-event level.
-/// The rows returned reflect all-time data from `tasks.cycles`.  Windowed REVISE
-/// tracking requires transition_history-tagged review events (planned; tracked
-/// separately).  A note is always appended to the output to make this visible.
-fn revise_metrics(conn: &Connection, _since_epoch: i64, window: &str) -> Result<ReviseSection> {
+/// **Primary path — transition_history:** `submit-review` and `submit-plan-review`
+/// rows carry `occurred_at` timestamps, so the `--window` filter applies exactly.
+/// Verdict mapping:
+///   - submit-plan-review → ready          = PASS (plan review)
+///   - submit-plan-review → planning|blocked = REVISE (plan review)
+///   - submit-review      → complete       = PASS (code review)
+///   - submit-review      → executing|blocked = REVISE (code review)
+///
+/// **Fallback — tasks.cycles:** used only when transition_history lacks the
+/// relevant review-verb rows.  Cycles JSON has no per-event timestamps; data is
+/// all-time regardless of --window.  A note is appended to make this visible.
+fn revise_metrics(conn: &Connection, since_epoch: i64, window: &str) -> Result<ReviseSection> {
+    // Try transition_history-based windowed computation first.
+    if table_exists(conn, "transition_history")? {
+        let th_cols = table_columns(conn, "transition_history")?;
+        let has_verb = th_cols.iter().any(|c| c == "verb");
+        let has_to = th_cols.iter().any(|c| c == "to_status");
+        let has_ts = th_cols.iter().any(|c| c == "occurred_at");
+        let has_store = th_cols.iter().any(|c| c == "store");
+        if has_verb && has_to && has_ts {
+            return revise_metrics_from_transition_history(conn, since_epoch, window, has_store);
+        }
+    }
+    // Fallback: tasks.cycles (unwindowed).
+    revise_metrics_from_cycles(conn, since_epoch, window)
+}
+
+/// Windowed REVISE rate derived from transition_history review verbs.
+fn revise_metrics_from_transition_history(
+    conn: &Connection,
+    since_epoch: i64,
+    window: &str,
+    has_store: bool,
+) -> Result<ReviseSection> {
+    let store_filter = if has_store {
+        "AND store = 'tasks'"
+    } else {
+        ""
+    };
+    // Convert since_epoch back to RFC3339 string for SQLite text comparison.
+    // SQLite stores occurred_at as ISO-8601 text; lexicographic comparison works
+    // for UTC timestamps (YYYY-MM-DDTHH:MM:SSZ).
+    let since_str = if since_epoch == i64::MIN {
+        "0000-00-00".to_string()
+    } else {
+        chrono::DateTime::from_timestamp(since_epoch, 0)
+            .map(|dt: DateTime<Utc>| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            .unwrap_or_else(|| "0000-00-00".to_string())
+    };
+    let sql = format!(
+        "SELECT verb, to_status, occurred_at FROM transition_history \
+         WHERE verb IN ('submit-review','submit-plan-review') \
+         AND occurred_at >= ?1 \
+         {store_filter}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    // group by (phase, tier_hint="unknown", task_type="unknown") — transition_history
+    // does not carry tier/type; those come from tasks table if available but would
+    // require a join that may fail when tasks table is absent.  Use "unknown" for now;
+    // the grouping key is (phase, tier_hint, task_type).
+    let mut grouped: BTreeMap<(String, String, String), (usize, usize)> = BTreeMap::new();
+    let rows = stmt.query_map([&since_str], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+        ))
+    })?;
+    for row in rows {
+        let (verb, to_status) = row?;
+        let (phase, is_revise) = match (verb.as_str(), to_status.as_str()) {
+            ("submit-plan-review", "ready") => ("plan_review".to_string(), false),
+            ("submit-plan-review", _) => ("plan_review".to_string(), true),
+            ("submit-review", "complete") => ("code_review".to_string(), false),
+            ("submit-review", _) => ("code_review".to_string(), true),
+            _ => continue,
+        };
+        let entry = grouped
+            .entry((phase, "unknown".to_string(), "unknown".to_string()))
+            .or_insert((0, 0));
+        entry.1 += 1;
+        if is_revise {
+            entry.0 += 1;
+        }
+    }
+    let rows_out = grouped
+        .into_iter()
+        .map(
+            |((phase, tier_hint, task_type), (revise_count, total_reviews))| ReviseMetric {
+                phase,
+                tier_hint,
+                task_type,
+                revise_count,
+                total_reviews,
+                revise_rate: if total_reviews == 0 {
+                    0.0
+                } else {
+                    revise_count as f64 / total_reviews as f64
+                },
+            },
+        )
+        .collect();
+    Ok(ReviseSection {
+        rows: rows_out,
+        notes: vec![format!(
+            "revise_rate source: transition_history (windowed; --window={window} applied)"
+        )],
+    })
+}
+
+/// Fallback: compute REVISE rate from `tasks.cycles` JSON (unwindowed).
+fn revise_metrics_from_cycles(conn: &Connection, _since_epoch: i64, window: &str) -> Result<ReviseSection> {
     let mut notes = Vec::new();
     // Window note: cycles JSON lacks per-review timestamps; data is all-time.
     notes.push(format!(
         "revise_rate source: tasks.cycles (unwindowed; --window={window} not applied \
-         — per-review timestamps not stored in cycles JSON; windowed REVISE tracking \
-         requires transition_history-tagged review events, tracked separately)"
+         — per-review timestamps not stored in cycles JSON; \
+         transition_history table absent or missing verb/to_status/occurred_at columns)"
     ));
     if !table_exists(conn, "tasks")? || !column_exists(conn, "tasks", "cycles")? {
         notes.push("tasks.cycles unavailable; revise_rate rows empty".into());
@@ -443,14 +549,32 @@ fn pick_col(cols: &[String], names: &[&str]) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Compute the p-th percentile of `vals` using linear interpolation.
+///
+/// Uses the standard fractional-rank formula:
+///   index = (p / 100.0) * (n - 1)
+/// If index is an integer, return that element; otherwise interpolate between
+/// floor(index) and ceil(index).  This gives the true median for even-count
+/// series (e.g. [120, 240] → p50 = 180, not 120).
 fn percentile(vals: &[i64], pct: usize) -> Option<i64> {
     if vals.is_empty() {
         return None;
     }
     let mut v = vals.to_vec();
     v.sort_unstable();
-    let idx = ((pct * v.len()).div_ceil(100)).saturating_sub(1);
-    v.get(idx).copied()
+    let n = v.len();
+    if n == 1 {
+        return Some(v[0]);
+    }
+    let index = (pct as f64 / 100.0) * (n - 1) as f64;
+    let lo = index.floor() as usize;
+    let hi = index.ceil() as usize;
+    if lo == hi {
+        Some(v[lo])
+    } else {
+        let frac = index - lo as f64;
+        Some((v[lo] as f64 + frac * (v[hi] as f64 - v[lo] as f64)).round() as i64)
+    }
 }
 
 pub fn render_json(report: &MetricsReport) -> Result<String> {
@@ -566,9 +690,12 @@ mod tests {
             .iter()
             .find(|e| e.store == "tasks" && e.edge == "planning -> plan_review")
             .unwrap();
+        // Linear interpolation: [120, 240], n=2
+        //   p50: index = 0.50 * 1 = 0.5 → 120 + 0.5 * (240 - 120) = 180
+        //   p95: index = 0.95 * 1 = 0.95 → 120 + 0.95 * (240 - 120) = 234
         assert_eq!(
             (edge.count, edge.p50_seconds, edge.p95_seconds),
-            (2, Some(120), Some(240))
+            (2, Some(180), Some(234))
         );
     }
 
@@ -594,12 +721,15 @@ mod tests {
             "2026-01-01T00:20:00Z",
         );
         let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+        // Linear interpolation: [600, 1200], n=2
+        //   p50: index = 0.50 * 1 = 0.5 → 600 + 0.5 * (1200 - 600) = 900
+        //   p95: index = 0.95 * 1 = 0.95 → 600 + 0.95 * (1200 - 600) = 1170
         assert_eq!(
             r.ratification_cycle_time.open_to_ready,
             PercentileMetric {
                 count: 2,
-                p50_seconds: Some(600),
-                p95_seconds: Some(1200)
+                p50_seconds: Some(900),
+                p95_seconds: Some(1170)
             }
         );
     }
@@ -770,6 +900,145 @@ mod tests {
             note.contains("--window=30m"),
             "note must echo the window arg; got: {note}"
         );
+    }
+
+    // ── percentile: interpolation coverage ───────────────────────────────────
+
+    #[test]
+    fn percentile_empty_returns_none() {
+        assert_eq!(percentile(&[], 50), None);
+        assert_eq!(percentile(&[], 95), None);
+    }
+
+    #[test]
+    fn percentile_one_element_returns_that_element() {
+        assert_eq!(percentile(&[42], 0), Some(42));
+        assert_eq!(percentile(&[42], 50), Some(42));
+        assert_eq!(percentile(&[42], 100), Some(42));
+    }
+
+    #[test]
+    fn percentile_two_elements_interpolates() {
+        // [120, 240], n=2
+        //   p50: index = 0.5 * 1 = 0.5 → 120 + 0.5*(240-120) = 180
+        //   p95: index = 0.95 * 1 = 0.95 → 120 + 0.95*(240-120) = 234
+        //   p0:  index = 0 → 120
+        //   p100: index = 1 → 240
+        assert_eq!(percentile(&[120, 240], 50), Some(180));
+        assert_eq!(percentile(&[120, 240], 95), Some(234));
+        assert_eq!(percentile(&[120, 240], 0), Some(120));
+        assert_eq!(percentile(&[120, 240], 100), Some(240));
+    }
+
+    #[test]
+    fn percentile_odd_count_exact_median() {
+        // [1, 2, 3], n=3
+        //   p50: index = 0.5 * 2 = 1.0 (exact) → v[1] = 2
+        assert_eq!(percentile(&[1, 2, 3], 50), Some(2));
+    }
+
+    #[test]
+    fn percentile_even_count_interpolated_median() {
+        // [1, 2, 3, 4], n=4
+        //   p50: index = 0.5 * 3 = 1.5 → 2 + 0.5*(3-2) = 2.5 → rounds to 3
+        //   (round-half-up for the midpoint)
+        let p50 = percentile(&[1, 2, 3, 4], 50).unwrap();
+        // With f64 round: 2.5.round() = 3 (round-half-away-from-zero)
+        assert_eq!(p50, 3);
+    }
+
+    #[test]
+    fn percentile_unsorted_input_sorts_first() {
+        // Input [240, 120] must be treated as [120, 240] after sorting
+        assert_eq!(percentile(&[240, 120], 50), Some(180));
+    }
+
+    #[test]
+    fn percentile_large_series_p50_and_p95() {
+        // [1..=100], n=100
+        //   p50: index = 0.5 * 99 = 49.5 → v[49]+0.5*(v[50]-v[49]) = 50+0.5*1 = 50.5 → 51 (round)
+        //   p95: index = 0.95 * 99 = 94.05 → v[94]+0.05*(v[95]-v[94]) = 95+0.05*1 = 95.05 → 95 (round)
+        let vals: Vec<i64> = (1..=100).collect();
+        let p50 = percentile(&vals, 50).unwrap();
+        let p95 = percentile(&vals, 95).unwrap();
+        assert_eq!(p50, 51);
+        assert_eq!(p95, 95);
+    }
+
+    // ── MAJOR 1: windowed REVISE rate from transition_history ────────────────
+
+    fn conn_with_th_verbs() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE transition_history \
+             (store TEXT, display_id TEXT, from_status TEXT, to_status TEXT, \
+              occurred_at TEXT, verb TEXT);",
+        )
+        .unwrap();
+        c
+    }
+    fn ins_th(c: &Connection, verb: &str, to: &str, ts: &str) {
+        c.execute(
+            "INSERT INTO transition_history VALUES ('tasks','T1',NULL,?1,?2,?3)",
+            (to, ts, verb),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn revise_rate_windowed_from_transition_history() {
+        let c = conn_with_th_verbs();
+        // 3 code reviews: 2 REVISE (→ executing), 1 PASS (→ complete)
+        ins_th(&c, "submit-review", "executing", "2026-01-01T00:00:00Z");
+        ins_th(&c, "submit-review", "executing", "2026-01-01T01:00:00Z");
+        ins_th(&c, "submit-review", "complete", "2026-01-01T02:00:00Z");
+        // 2 plan reviews: 1 REVISE (→ planning), 1 PASS (→ ready)
+        ins_th(&c, "submit-plan-review", "planning", "2026-01-01T03:00:00Z");
+        ins_th(&c, "submit-plan-review", "ready", "2026-01-01T04:00:00Z");
+
+        let r = build_report(&c, "2025-12-31T00:00:00Z").unwrap();
+
+        let code_row = r
+            .revise_rate
+            .rows
+            .iter()
+            .find(|m| m.phase == "code_review")
+            .expect("code_review row must exist");
+        assert_eq!((code_row.revise_count, code_row.total_reviews), (2, 3));
+        assert!((code_row.revise_rate - 2.0 / 3.0).abs() < 1e-9);
+
+        let plan_row = r
+            .revise_rate
+            .rows
+            .iter()
+            .find(|m| m.phase == "plan_review")
+            .expect("plan_review row must exist");
+        assert_eq!((plan_row.revise_count, plan_row.total_reviews), (1, 2));
+
+        // Note must say "windowed" not "unwindowed"
+        assert!(
+            r.revise_rate.notes.iter().any(|n| n.contains("windowed") && !n.contains("unwindowed")),
+            "notes must confirm windowed source; got: {:?}",
+            r.revise_rate.notes
+        );
+    }
+
+    #[test]
+    fn revise_rate_transition_history_respects_window() {
+        let c = conn_with_th_verbs();
+        // One REVISE before window, one after
+        ins_th(&c, "submit-review", "executing", "2025-06-01T00:00:00Z"); // before window
+        ins_th(&c, "submit-review", "complete", "2026-06-01T00:00:00Z");  // inside window
+        // Window: 2026-01-01 onward
+        let r = build_report(&c, "2026-01-01T00:00:00Z").unwrap();
+        let code_row = r
+            .revise_rate
+            .rows
+            .iter()
+            .find(|m| m.phase == "code_review")
+            .expect("code_review row must exist");
+        // Only the PASS inside window counts; REVISE before window excluded
+        assert_eq!((code_row.revise_count, code_row.total_reviews), (0, 1));
     }
 
     // ── --json flag reachable via metrics-local flag (MINOR fix) ─────────────
