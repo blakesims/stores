@@ -383,6 +383,19 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .about("Manage bundled workflow agent system prompts")
                 .subcommand(Command::new("list").about("List available bundled agents"))
                 .subcommand(
+                    Command::new("stop")
+                        .about("Stop the detached agents daemon for this project")
+                        .arg(
+                            Arg::new("force")
+                                .long("force")
+                                .action(ArgAction::SetTrue)
+                                .help(
+                                    "If the daemon does not exit within the graceful timeout, \
+                                     escalate to SIGKILL. Default: error on timeout without killing.",
+                                ),
+                        ),
+                )
+                .subcommand(
                     Command::new("install")
                         .about("Install a bundled agent into .claude/agents/")
                         .arg(Arg::new("name").help("Agent name").required(false))

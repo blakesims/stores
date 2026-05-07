@@ -1,9 +1,9 @@
 //! Agents-daemon liveness probe + `D`-key spawn helper.
 //!
 //! The pidfile written by `stores agents run --detach` lives at
-//! `.stores/agents-daemon.pid`. `liveness()` reads it and verifies the pid
-//! is still running (`kill(pid, 0)`); `start_detached()` shells out the same
-//! verb the operator would type, returning the new pid.
+//! `.stores/agents.pid`. `liveness()` reads it and verifies the pid is still
+//! running (`kill(pid, 0)`); `start_detached()` shells out the same verb the
+//! operator would type, returning the new pid.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -48,7 +48,7 @@ pub fn liveness(pidfile: &Path) -> Liveness {
 
 /// The canonical pidfile path under the current `.stores/`.
 pub fn pidfile_path() -> Result<PathBuf> {
-    Ok(crate::paths::stores_dir()?.join("agents-daemon.pid"))
+    crate::paths::agents_pid_path()
 }
 
 /// The canonical log path (`.stores/logs/agents-daemon.log`).

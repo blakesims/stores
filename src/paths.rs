@@ -111,6 +111,10 @@ pub fn ensure_daemon_binary_parent() -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn agents_pid_path() -> Result<PathBuf> {
+    Ok(stores_dir()?.join("agents.pid"))
+}
+
 /// Check that `.stores/` has been initialized (db + manifest both present).
 /// Returns an error directing the user to run `stores init` if not.
 pub fn ensure_initialized() -> Result<()> {
