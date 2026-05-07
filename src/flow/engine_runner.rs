@@ -278,6 +278,9 @@ pub fn scan_record_and_redrive_tasks(
     agents: &AgentsYaml,
     config_path: &Path,
     policies_hash: &str,
+    // Dispatches already issued by the daemon's base poll loop this iteration.
+    // Folded into the heartbeat row so the persisted record matches the log line.
+    base_dispatched: i64,
 ) -> Result<ScannerResult> {
     let claim_window_secs = auto_drive_claim_window_secs(agents);
     let mut rows = scan_rows(conn, schemas, started_at, claim_window_secs)?;
@@ -375,7 +378,9 @@ pub fn scan_record_and_redrive_tasks(
         )?;
     }
 
-    let summary = summarize_rows(iteration, &rows, dispatched);
+    // Fold base_dispatched into the summary BEFORE recording the heartbeat so
+    // the persisted row and the caller's log line both see the same union count.
+    let summary = summarize_rows(iteration, &rows, dispatched + base_dispatched);
     record_heartbeat(conn, summary, started_at)?;
     Ok(ScannerResult { summary, rows })
 }
@@ -1111,6 +1116,7 @@ mod tests {
             &AgentsYaml::default_empty(),
             &cfg,
             "",
+            0,
         )
         .unwrap();
 
@@ -1159,6 +1165,7 @@ mod tests {
             &AgentsYaml::default_empty(),
             &cfg,
             "",
+            0,
         )
         .unwrap();
 
@@ -1207,6 +1214,7 @@ mod tests {
             &AgentsYaml::default_empty(),
             &cfg,
             "",
+            0,
         )
         .unwrap();
 
@@ -1328,6 +1336,7 @@ mod tests {
             &AgentsYaml::default_empty(),
             &cfg,
             "",
+            0,
         )
         .unwrap();
 
@@ -1382,6 +1391,7 @@ mod tests {
             &AgentsYaml::default_empty(),
             &cfg,
             "",
+            0,
         )
         .unwrap();
 

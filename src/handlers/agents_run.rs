@@ -1320,10 +1320,21 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
         eprintln!("[daemon] drive watchdog sweep error: {}", e);
     }
 
-    if let Err(e) =
+    // Panics inside the engine-runner iteration (e.g. in classification, DDL
+    // query, or heartbeat write) must not crash the daemon's main poll loop.
+    // Catch all panics here and log without payload content (payload may
+    // contain sensitive row data), then continue.
+    let iter_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_engine_runner_iteration(conn, agents, config_path, &policies.hash, dispatched as i64)
-    {
-        eprintln!("[engine-runner] actionability loop error: {}", e);
+    }));
+    match iter_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!("[engine-runner] actionability loop error: {}", e);
+        }
+        Err(_payload) => {
+            eprintln!("[engine-runner] iteration panicked; daemon continuing");
+        }
     }
     Ok(dispatched)
 }
@@ -1368,7 +1379,9 @@ fn run_engine_runner_iteration(
             |r| r.get(0),
         )
         .unwrap_or(1);
-    let mut result = crate::flow::engine_runner::scan_record_and_redrive_tasks(
+    // Pass base_dispatched so the persisted heartbeat row and the log line below
+    // both reflect the union of engine-runner redrives + daemon base dispatches.
+    let result = crate::flow::engine_runner::scan_record_and_redrive_tasks(
         conn,
         crate::flow::engine_runner::ScannerSchemas {
             tasks: &tasks,
@@ -1380,8 +1393,8 @@ fn run_engine_runner_iteration(
         agents,
         config_path,
         policies_hash,
+        base_dispatched,
     )?;
-    result.summary.dispatched += base_dispatched;
     eprintln!(
         "[engine-runner] iter={} saw=tasks:{} intake:{} obs:{} actionable={} held={} dispatched={}",
         result.summary.iteration,

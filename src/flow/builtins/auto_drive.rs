@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde_json::Value;
 
 use crate::flow::builtins::{
@@ -137,6 +137,7 @@ pub(crate) fn redispatch_orphaned_next_agent(
     config_path: &Path,
     policies_hash: &str,
 ) -> Result<Option<i32>> {
+    // Fast-path read: row existence + pending work check before taking a write lock.
     let row_info: Option<(String, i64)> = conn
         .query_row(
             "SELECT display_id, COALESCE(drive_pid, 0) FROM tasks WHERE id = ?1",
@@ -144,36 +145,103 @@ pub(crate) fn redispatch_orphaned_next_agent(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .ok();
-    let Some((display_id, before)) = row_info else {
-        return Ok(None);
-    };
-    let Some(mut row) = refresh_task_row(conn, &display_id) else {
+    let Some((display_id, _before_fast)) = row_info else {
         return Ok(None);
     };
     if !has_pending_auto_drive_work(conn, &display_id)? {
         return Ok(None);
     }
+
+    // Atomic CAS: BEGIN IMMEDIATE acquires a write-intent lock so no concurrent
+    // writer (another daemon iteration, an external `stores tasks drive`, or a
+    // race-reused OS PID) can interleave between the re-read and the spawn+UPDATE.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+
+    // Re-read inside the transaction — the authoritative check.
+    let reread: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT display_id, COALESCE(drive_pid, 0) FROM tasks WHERE id = ?1",
+            rusqlite::params![row_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let Some((display_id_tx, before)) = reread else {
+        // Row vanished between fast-path and lock.
+        tx.rollback()?;
+        return Ok(None);
+    };
+
+    // Verify drive_pid is still absent or dead.
+    if before > 0 && pid_is_alive(before as i32) {
+        eprintln!(
+            "[engine-runner] {display_id_tx}: raced; drive_pid={before} alive since scan; skipping redispatch"
+        );
+        tx.rollback()?;
+        return Ok(None);
+    }
+
+    // Verify no live auto-drive dispatch_lock appeared within the claim window
+    // since the scanner pass (another engine-runner instance could have claimed it).
+    let live_lock: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM dispatch_locks \
+             WHERE store='tasks' AND row_id=?1 AND agent_name='auto-drive' \
+               AND finished_at IS NULL AND COALESCE(pid, 0) > 0",
+            rusqlite::params![row_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if live_lock > 0 {
+        // Check whether that lock's PID is actually alive before aborting.
+        let lock_pid: i64 = tx
+            .query_row(
+                "SELECT COALESCE(pid, 0) FROM dispatch_locks \
+                 WHERE store='tasks' AND row_id=?1 AND agent_name='auto-drive' \
+                   AND finished_at IS NULL AND COALESCE(pid, 0) > 0 \
+                 LIMIT 1",
+                rusqlite::params![row_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if lock_pid > 0 && pid_is_alive(lock_pid as i32) {
+            eprintln!(
+                "[engine-runner] {display_id_tx}: raced; live auto-drive lock pid={lock_pid} appeared since scan; skipping redispatch"
+            );
+            tx.rollback()?;
+            return Ok(None);
+        }
+    }
+
+    // Still an orphan — perform the refresh and mutate drive_pid to Null so
+    // `run()` treats this as a fresh spawn (not an already-running drive).
+    let Some(mut row) = refresh_task_row(&tx, &display_id_tx) else {
+        tx.rollback()?;
+        return Ok(None);
+    };
     if let Some(obj) = row.as_object_mut() {
         obj.insert("drive_pid".to_string(), Value::Null);
     }
     let ctx = DispatchCtx {
-        conn,
+        conn: &tx,
         agents,
         config_path,
         policies_hash,
     };
     if run(&row, &ctx)? != 0 {
+        tx.rollback()?;
         return Ok(None);
     }
-    let after: i64 = conn.query_row(
+    let after: i64 = tx.query_row(
         "SELECT COALESCE(drive_pid, 0) FROM tasks WHERE display_id = ?1",
-        rusqlite::params![&display_id],
+        rusqlite::params![&display_id_tx],
         |r| r.get(0),
     )?;
     if after > 0 && after != before {
-        mark_pending_handoff_lock(conn, row_id, &display_id, after as i32)?;
+        mark_pending_handoff_lock(&tx, row_id, &display_id_tx, after as i32)?;
+        tx.commit()?;
         return Ok(Some(after as i32));
     }
+    tx.rollback()?;
     Ok(None)
 }
 
