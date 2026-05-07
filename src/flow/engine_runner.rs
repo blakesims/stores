@@ -465,6 +465,13 @@ fn scan_tasks(
         entry.insert("plan".into(), parse_json_text(plan));
 
         let next_agent = workflow.and_then(|wf| find_next_agent(wf, &status, &entry));
+        // Known limitation: drive_pid liveness uses kill(pid, 0) which does not
+        // protect against PID reuse. If the OS reuses the PID for an unrelated
+        // process between drive exit and engine-runner observation, the row will
+        // appear live and be held as `live_drive_owner` indefinitely — until the
+        // stale process exits or an operator intervenes. Owner-identity hardening
+        // (pid + start_time / dispatch_lock owner identity) is a future
+        // scheduler/dispatch ownership task — not in T079/L186 phase-1 scope.
         let live_drive_owner = drive_pid
             .and_then(|pid| i32::try_from(pid).ok())
             .is_some_and(pid_is_alive);
