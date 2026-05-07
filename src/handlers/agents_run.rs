@@ -148,6 +148,33 @@ fn daemon_git_sha() -> &'static str {
     option_env!("VERGEN_GIT_SHA").unwrap_or("unknown")
 }
 
+/// Return true when `arg` is a bare secret flag (no `=value` embedded).
+/// Covers: `--approve-token`, `--*-token`, `--*-secret`, `--*-key`, `--secret-*`, `--token`, `--key`.
+fn is_secret_flag(arg: &str) -> bool {
+    if !arg.starts_with("--") {
+        return false;
+    }
+    let name = arg.trim_start_matches('-');
+    // Exact matches
+    if matches!(name, "approve-token" | "token" | "key") {
+        return true;
+    }
+    // Prefix/suffix patterns
+    name.starts_with("secret-")
+        || name.ends_with("-token")
+        || name.ends_with("-secret")
+        || name.ends_with("-key")
+}
+
+/// Return true when `arg` is a secret flag in `--flag=value` form (value embedded).
+fn is_secret_flag_with_value(arg: &str) -> bool {
+    if let Some(eq) = arg.find('=') {
+        is_secret_flag(&arg[..eq])
+    } else {
+        false
+    }
+}
+
 fn filter_daemon_argv<I, S>(args: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
@@ -158,20 +185,30 @@ where
     for arg in args {
         let arg = arg.as_ref();
         if skip_next {
+            // This arg is the value of the preceding secret flag — drop it.
+            // But if it is itself a secret flag (adjacent secret flags), treat
+            // it as a flag instead: drop it and arm another value-skip.
             skip_next = false;
+            if is_secret_flag(arg) {
+                // Adjacent secret flag: its value is next — arm skip again.
+                skip_next = true;
+            } else if is_secret_flag_with_value(arg) {
+                // Adjacent `--flag=value` form; no next-skip needed.
+            }
+            // Either way: do not push to filtered.
             continue;
         }
-        if arg == "--approve-token" {
+        // `--flag=value` form: entire arg is secret, no next-skip needed.
+        if is_secret_flag_with_value(arg) {
+            continue;
+        }
+        // `--flag value` form: bare secret flag — drop flag and arm value-skip.
+        if is_secret_flag(arg) {
             skip_next = true;
             continue;
         }
-        if arg.contains("--approve-token") {
-            continue;
-        }
-        if arg.contains("--secret-") {
-            if arg.starts_with("--secret-") && !arg.contains('=') {
-                skip_next = true;
-            }
+        // Legacy contains-check for non-standard embeddings (e.g. `prefix--secret-foo`).
+        if arg.contains("--secret-") || arg.contains("--approve-token") {
             continue;
         }
         filtered.push(arg.to_string());
@@ -202,10 +239,6 @@ fn insert_daemon_startup<P: BinaryIdentityProvider>(
     let daemon_epoch_i64 = daemon_epoch.parse::<i64>().ok();
     let started_at = crate::handlers::row::now_iso8601();
     let pid = i64::from(std::process::id());
-    let next_id: i64 = conn
-        .query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM daemon_starts", [], |r| r.get(0))
-        .context("allocating daemon_starts display_id")?;
-    let display_id = format!("D{next_id:03}");
     let binary_path = exe_guard.launch_path().display().to_string();
     let argv = serde_json::to_string(&filter_daemon_argv(std::env::args()))
         .context("serializing filtered daemon argv")?;
@@ -213,12 +246,13 @@ fn insert_daemon_startup<P: BinaryIdentityProvider>(
         .context("resolving daemon cwd")?
         .display()
         .to_string();
+    // Insert with a placeholder display_id, then derive the real one from the
+    // autoincrement rowid so concurrent startups never race on MAX(id)+1.
     conn.execute(
         "INSERT INTO daemon_starts \
          (display_id, status, created_at, updated_at, created_by, updated_by, daemon_epoch, pid, started_at, binary_path, binary_version, git_sha, argv, log_file, cwd) \
-         VALUES (?1, 'started', ?2, ?2, 'daemon', 'daemon', ?3, ?4, ?2, ?5, ?6, ?7, ?8, ?9, ?10)",
+         VALUES ('D000', 'started', ?1, ?1, 'daemon', 'daemon', ?2, ?3, ?1, ?4, ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![
-            display_id,
             started_at,
             daemon_epoch_i64,
             pid,
@@ -231,6 +265,13 @@ fn insert_daemon_startup<P: BinaryIdentityProvider>(
         ],
     )
     .context("inserting daemon_starts audit row")?;
+    let rowid = conn.last_insert_rowid();
+    let display_id = format!("D{rowid:03}");
+    conn.execute(
+        "UPDATE daemon_starts SET display_id = ?1 WHERE id = ?2",
+        rusqlite::params![display_id, rowid],
+    )
+    .context("updating daemon_starts display_id from rowid")?;
     Ok(())
 }
 
@@ -2213,6 +2254,137 @@ mod tests {
         assert!(!joined.contains("--secret-"));
         assert!(!joined.contains("secret-value"));
         assert!(!joined.contains("inline"));
+    }
+
+    // ----- argv scrubbing: additional cases per codex-revise -----
+
+    /// Adjacent secret flags: `--approve-token --secret-key secret_value` must
+    /// redact both flag/value pairs, not leak `secret_value` as a literal.
+    #[test]
+    fn argv_filter_adjacent_secret_flags_atomic() {
+        let filtered = filter_daemon_argv([
+            "stores",
+            "--approve-token",
+            "--secret-key",
+            "secret_value",
+            "safe-arg",
+        ]);
+        let joined = filtered.join(" ");
+        assert!(!joined.contains("--approve-token"), "approve-token leaked");
+        assert!(!joined.contains("--secret-key"), "secret-key leaked");
+        assert!(!joined.contains("secret_value"), "secret_value leaked");
+        assert!(joined.contains("safe-arg"), "safe-arg dropped incorrectly");
+    }
+
+    /// `--flag=value` form: single arg must be fully redacted.
+    #[test]
+    fn argv_filter_flag_equals_value_form() {
+        let filtered = filter_daemon_argv([
+            "stores",
+            "--approve-token=tok123",
+            "--my-token=abc",
+            "--my-key=xyz",
+            "--my-secret=sssh",
+            "--safe",
+            "ok",
+        ]);
+        let joined = filtered.join(" ");
+        assert!(!joined.contains("tok123"), "tok123 leaked");
+        assert!(!joined.contains("abc"), "abc leaked");
+        assert!(!joined.contains("xyz"), "xyz leaked");
+        assert!(!joined.contains("sssh"), "sssh leaked");
+        assert_eq!(filtered, vec!["stores", "--safe", "ok"]);
+    }
+
+    /// Non-secret flags must NOT be redacted.
+    #[test]
+    fn argv_filter_non_secret_flags_preserved() {
+        let filtered = filter_daemon_argv([
+            "stores",
+            "agents",
+            "run",
+            "--poll-interval",
+            "500",
+            "--log-file",
+            "/tmp/daemon.log",
+        ]);
+        assert_eq!(
+            filtered,
+            vec!["stores", "agents", "run", "--poll-interval", "500", "--log-file", "/tmp/daemon.log"]
+        );
+    }
+
+    /// Mixed real-world argv: multiple secret and safe flags interleaved.
+    #[test]
+    fn argv_filter_mixed_real_world() {
+        let filtered = filter_daemon_argv([
+            "stores",
+            "agents",
+            "run",
+            "--approve-token",
+            "tkn-abc",
+            "--poll-interval",
+            "1000",
+            "--secret-db-key=hunter2",
+            "--log-file",
+            "/var/log/stores.log",
+            "--my-token",
+            "bearer-xyz",
+        ]);
+        let joined = filtered.join(" ");
+        assert!(!joined.contains("tkn-abc"), "token leaked");
+        assert!(!joined.contains("hunter2"), "db-key leaked");
+        assert!(!joined.contains("bearer-xyz"), "bearer leaked");
+        assert!(joined.contains("--poll-interval"), "--poll-interval dropped");
+        assert!(joined.contains("1000"), "1000 dropped");
+        assert!(joined.contains("--log-file"), "--log-file dropped");
+    }
+
+    // ----- display_id concurrency: insert-then-rowid -----
+
+    /// Two inserts into daemon_starts must yield distinct display_ids derived
+    /// from their respective autoincrement rowids — not from MAX(id)+1 which
+    /// would race under concurrent writers.
+    #[test]
+    fn daemon_starts_display_id_derived_from_rowid() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+
+        // Simulate the insert-then-update pattern from insert_daemon_startup.
+        let insert_and_get_display_id = |conn: &Connection, tag: &str| -> String {
+            conn.execute(
+                "INSERT INTO daemon_starts \
+                 (display_id, status, created_at, updated_at, created_by, updated_by, \
+                  pid, started_at, binary_path, binary_version, git_sha, argv, cwd) \
+                 VALUES ('D000', 'started', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', \
+                         'daemon', 'daemon', 1, '2026-01-01T00:00:00Z', '/bin/stores', \
+                         '0.1.0', 'deadbeef', '[]', '/tmp')",
+                [],
+            ).unwrap();
+            let rowid = conn.last_insert_rowid();
+            let display_id = format!("D{rowid:03}");
+            conn.execute(
+                "UPDATE daemon_starts SET display_id = ?1 WHERE id = ?2",
+                rusqlite::params![display_id, rowid],
+            ).unwrap();
+            let _ = tag;
+            display_id
+        };
+
+        let d1 = insert_and_get_display_id(&conn, "first");
+        let d2 = insert_and_get_display_id(&conn, "second");
+
+        assert_ne!(d1, d2, "display_ids must differ");
+        // rowids are 1 and 2 → D001 and D002
+        assert_eq!(d1, "D001");
+        assert_eq!(d2, "D002");
+
+        // Confirm stored values match derived display_ids.
+        let stored: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT display_id FROM daemon_starts ORDER BY id").unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(stored, vec!["D001", "D002"]);
     }
 
     #[test]
