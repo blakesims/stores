@@ -1026,14 +1026,13 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                     }
                     let cap = crate::flow::config::resolve_drive_max_parallel(config_path);
                     let now = crate::handlers::row::now_iso8601();
-                    let live_pids = count_live_drive_pids(conn).unwrap_or(0);
-                    let live_locks = crate::flow::engine_runner::count_live_auto_drive_dispatch_locks(
+                    let occupied = crate::flow::engine_runner::count_active_auto_drive_capacity(
                         conn,
                         &now,
                         agent.claim_window_secs,
                     )
                     .unwrap_or(0);
-                    if live_pids.max(live_locks) >= cap as usize {
+                    if occupied >= cap as usize {
                         continue;
                     }
                 }
@@ -2501,17 +2500,6 @@ pub(crate) fn pid_is_alive(pid: i32) -> bool {
         return false;
     }
     unsafe { libc::kill(pid, 0) == 0 }
-}
-
-/// Count tasks rows whose `drive_pid` is set to a still-running process.
-/// Used by the daemon's `poll_once` cap-check (Task 4.5).
-pub(crate) fn count_live_drive_pids(conn: &Connection) -> Result<usize> {
-    let mut stmt = conn.prepare("SELECT drive_pid FROM tasks WHERE drive_pid IS NOT NULL")?;
-    let pids: Vec<i64> = stmt
-        .query_map([], |r| r.get::<_, i64>(0))?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(pids.into_iter().filter(|p| pid_is_alive(*p as i32)).count())
 }
 
 /// Spawn `argv` as an orphaned grandchild detached from the daemon. Returns
