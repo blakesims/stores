@@ -1,6 +1,6 @@
 /target/
 /.stores/
 
-# stores drive runtime renders the active task under the review worktree;
-# keep harness-generated T085 state out of review diffs.
-/tasks/active/T085-auto-promoted-l192/
+# stores drive runtime renders auto-promoted active task state under the
+# review worktree; keep harness-generated task renders out of review diffs.
+/tasks/active/T*-auto-promoted-l*/
