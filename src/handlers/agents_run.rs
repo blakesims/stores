@@ -168,12 +168,29 @@ fn ensure_private_daemon_binary(
     if let Ok(md) = std::fs::metadata(&source) {
         let _ = std::fs::set_permissions(&tmp_path, md.permissions());
     }
-    validate_stale_reexec_candidate(&tmp_path)
-        .map_err(|f| anyhow!(private_candidate_validation_message(&f)))?;
+    if let Err(e) = validate_stale_reexec_candidate(&tmp_path)
+        .map_err(|f| anyhow!(private_candidate_validation_message(&f)))
+    {
+        // Validation failed: clean up the temp before propagating the error so
+        // we don't accumulate stale stores.tmp.<pid>.<nanos> files in the
+        // private binary directory.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
 
-    match std::fs::rename(&tmp_path, &private_path) {
+    // Use hard_link (not rename) as the install primitive so that concurrent
+    // seeders are detectable.  On POSIX, rename(2) silently replaces the
+    // destination if it already exists, making the AlreadyExists arm below dead
+    // code on Linux/macOS.  hard_link(2) returns EEXIST when the destination
+    // exists, so two concurrent seeders racing here will have one win (link
+    // succeeds) and one lose (link returns AlreadyExists) — the race-handling
+    // arm now actually fires.  Both tmp and dest are in the same directory
+    // (same filesystem / mount point), so cross-device failures cannot occur.
+    match std::fs::hard_link(&tmp_path, &private_path) {
         Ok(()) => {
             // We won the race; private_path now contains our validated copy.
+            // Clean up the temp (private_path holds its own link count).
+            let _ = std::fs::remove_file(&tmp_path);
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Another concurrent daemon seeder won; discard our temp and
@@ -192,7 +209,7 @@ fn ensure_private_daemon_binary(
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e).with_context(|| {
                 format!(
-                    "renaming seeded temp {} to {}",
+                    "linking seeded temp {} to {}",
                     tmp_path.display(),
                     private_path.display()
                 )

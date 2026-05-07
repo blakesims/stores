@@ -900,6 +900,137 @@ fn real_inode_replace_triggers_stale_detection() {
     assert!(!stderr.contains(STALE_DAEMON_MESSAGE), "stderr:\n{stderr}");
 }
 
+/// MEDIUM r2 fix: temp file must be removed when validate_stale_reexec_candidate
+/// fails during the seed path (not just on success or rename/link failure).
+///
+/// Strategy: set STORES_DAEMON_BIN_PATH to a fresh directory (no private binary
+/// exists yet) and point argv[0] at a MissingMarker stub so that:
+///   1. fs::copy succeeds — a stores.tmp.<pid>.<nanos> file is created.
+///   2. validate_stale_reexec_candidate fails (missing stores marker).
+///   3. Assert: no stores.tmp.* files remain in the private-bin directory and
+///      the overall command exits non-zero (validation propagated).
+///
+/// Before the r2 fix this test would find leaked temp files.
+#[cfg(unix)]
+#[test]
+fn seed_temp_cleaned_up_on_validation_failure() {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+
+    // A stub that produces a valid-looking executable but whose --help output
+    // lacks the stores marker — validation will fail.
+    let stub_path = tmp.path().join("stores_no_marker_stub");
+    let args_file = tmp.path().join("argv-no-marker.txt");
+    write_reexec_stub(&stub_path, &args_file, 0, StubHelpBehavior::MissingMarker);
+
+    // Private-bin dir exists but the binary does NOT (no existence shortcut).
+    let private_bin_dir = tmp.path().join("private-bin");
+    std::fs::create_dir_all(&private_bin_dir).unwrap();
+    let private = private_bin_dir.join("stores");
+    assert!(!private.exists(), "pre-condition: no private binary");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .arg0(&stub_path)
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("invoke daemon with missing-marker source");
+
+    // Command must fail (validation propagated).
+    assert!(
+        !output.status.success(),
+        "missing-marker source must cause non-zero exit; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // No stores.tmp.* files must remain in the private-bin dir.
+    let leaked: Vec<_> = std::fs::read_dir(&private_bin_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("stores.tmp.")
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "temp files must be cleaned up on validation failure; leaked: {:?}",
+        leaked
+            .iter()
+            .map(|e| e.path())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// MEDIUM r2 fix: hard_link no-replace semantics — a pre-existing private
+/// binary is never overwritten by a concurrent (or sequential) seeder.
+///
+/// This is a sequential proxy for the concurrent race: pre-stage a valid
+/// private binary, then run `stores agents run`.  The existence-shortcut
+/// validates and returns without touching the file.  Assert size and content
+/// are unchanged.
+///
+/// The test also names the invariant explicitly so a future refactor that
+/// accidentally re-introduces rename (which silently replaces) trips it.
+#[cfg(unix)]
+#[test]
+fn existing_private_binary_never_replaced_by_seeder() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_empty_stores_dir(tmp.path());
+
+    let private = tmp.path().join("private/bin/stores");
+    std::fs::create_dir_all(private.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_stores"), &private).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&private).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&private, perms).unwrap();
+    }
+
+    // Record the inode before the run.
+    let before_ino = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&private).unwrap().ino()
+    };
+    let before_size = std::fs::metadata(&private).unwrap().len();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stores"))
+        .args(["agents", "run", "--once", "--poll-interval", "0.05"])
+        .current_dir(tmp.path())
+        .env("STORES_DAEMON_BIN_PATH", &private)
+        .env_remove("STORES_TEST_DAEMON_FORCE_STALE")
+        .output()
+        .expect("daemon run with pre-existing valid private binary");
+
+    assert!(
+        output.status.success(),
+        "pre-existing valid private binary must let daemon run successfully; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Inode and size must be unchanged — the seeder must not have replaced it.
+    let after_ino = {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&private).unwrap().ino()
+    };
+    let after_size = std::fs::metadata(&private).unwrap().len();
+
+    assert_eq!(
+        before_ino, after_ino,
+        "private binary inode must be unchanged (not replaced by seeder)"
+    );
+    assert_eq!(
+        before_size, after_size,
+        "private binary size must be unchanged (not replaced by seeder)"
+    );
+}
+
 /// HIGH fix (codex-revise): existence-shortcut must validate before returning.
 ///
 /// Pre-creates a corrupt (random bytes) private binary and asserts that
