@@ -208,7 +208,19 @@ fn t084_observations_source_tuple_schema_and_no_out_of_scope_drift() {
 
     let source = schema.fields.iter().find(|f| f.name == "source").unwrap();
     match &source.ty {
-        FieldType::Enum(values) => assert!(values.contains(&"wrap".to_string()), "source enum lost wrap: {values:?}"),
+        FieldType::Enum(values) => assert_eq!(
+            values,
+            &vec![
+                "dashboard".to_string(),
+                "qa".to_string(),
+                "dev".to_string(),
+                "sentry".to_string(),
+                "intake".to_string(),
+                "converge".to_string(),
+                "wrap".to_string(),
+            ],
+            "source enum value-set drifted"
+        ),
         other => panic!("source must remain enum, got {other:?}"),
     }
 
