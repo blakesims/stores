@@ -568,6 +568,14 @@ pub fn expected_columns(schema: &Schema) -> Vec<ExpectedColumn> {
                         _ => "TEXT",
                     }
                     .to_string();
+                    // T107: observations.cluster_key gets a registry-derived CHECK
+                    // constraint so SQLite enforces the allowed-list at the DB level.
+                    // Rust (CURATED_CLUSTER_KEYS) is the single source of truth; the
+                    // CHECK clause is generated from that const, not from schema.yaml.
+                    if schema.name == "observations" && field.name == "cluster_key" {
+                        let check = crate::handlers::cluster_keys::check_clause_sql();
+                        def.push_str(&format!(" {check}"));
+                    }
                     if let Some(suffix) = default_clause(field) {
                         def.push_str(&suffix);
                     }
@@ -1048,19 +1056,45 @@ fields:
             "risk_flags DDL missing DEFAULT '[]':\n{ddl}"
         );
 
-        // cluster_key: TEXT, no default → bare `cluster_key TEXT` with no DEFAULT clause
-        assert!(
-            ddl.contains("cluster_key TEXT"),
-            "cluster_key column missing:\n{ddl}"
-        );
-        // Find the cluster_key line specifically and confirm no DEFAULT
+        // cluster_key: TEXT with registry CHECK constraint, no DEFAULT
         let cluster_line = ddl
             .lines()
             .find(|l| l.trim_start().starts_with("cluster_key"))
             .expect("cluster_key line present");
         assert!(
+            cluster_line.contains("CHECK (cluster_key IN ("),
+            "cluster_key DDL must contain CHECK clause: {cluster_line}"
+        );
+        assert!(
             !cluster_line.contains("DEFAULT"),
             "cluster_key must not carry a DEFAULT clause: {cluster_line}"
+        );
+    }
+
+    /// T107: cluster_key CHECK constraint in DDL lists every entry in
+    /// CURATED_CLUSTER_KEYS exactly.
+    #[test]
+    fn cluster_key_ddl_check_constraint_lists_all_curated_keys() {
+        use crate::handlers::cluster_keys::CURATED_CLUSTER_KEYS;
+        let yaml = include_str!("../../stores/observations/schema.yaml");
+        let schema = Schema::from_yaml(yaml).expect("observations schema must parse");
+        let cols = expected_columns(&schema);
+        let cluster_col = cols
+            .iter()
+            .find(|c| c.name == "cluster_key")
+            .expect("cluster_key column present");
+        for key in CURATED_CLUSTER_KEYS {
+            assert!(
+                cluster_col.full_def.contains(key),
+                "cluster_key full_def must contain registry key '{key}': {}",
+                cluster_col.full_def
+            );
+        }
+        // Also verify CHECK syntax
+        assert!(
+            cluster_col.full_def.contains("CHECK (cluster_key IN ("),
+            "cluster_key full_def must contain CHECK clause: {}",
+            cluster_col.full_def
         );
     }
 

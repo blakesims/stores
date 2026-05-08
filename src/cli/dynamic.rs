@@ -575,12 +575,35 @@ fn build_store_command(schema: &Schema) -> Command {
         store_cmd = store_cmd.subcommand(build_guide_cmd());
     }
 
-    // next-id, override-risk, and override-policy are observations-only non-workflow verbs.
+    // next-id, override-risk, override-policy, clusters, and overdue-ready are
+    // observations-only non-workflow verbs.
     if schema.name == "observations" {
         store_cmd = store_cmd
             .subcommand(build_next_id_cmd())
             .subcommand(build_override_risk_cmd())
-            .subcommand(build_override_policy_cmd());
+            .subcommand(build_override_policy_cmd())
+            .subcommand(
+                Command::new("clusters")
+                    .about("Group open/ready observations by curated cluster_key (single-shot)")
+                    .arg(
+                        Arg::new("json")
+                            .long("json")
+                            .action(ArgAction::SetTrue)
+                            .help("Emit JSON output"),
+                    ),
+            )
+            .subcommand(
+                Command::new("overdue-ready")
+                    .about(
+                        "List ready observations whose linked task is in a terminal-success state",
+                    )
+                    .arg(
+                        Arg::new("json")
+                            .long("json")
+                            .action(ArgAction::SetTrue)
+                            .help("Emit JSON output"),
+                    ),
+            );
     }
 
     // Register one subcommand per transition verb (de-duplicated against base/workflow verbs)

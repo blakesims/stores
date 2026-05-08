@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -14,11 +14,14 @@ pub struct MigrateReport {
     pub applied_columns: Vec<(String, String)>,
     pub orphaned: usize,
     pub type_mismatches: usize,
+    /// True when the T107 cluster_key CHECK rebuild ran (i.e. the
+    /// observations table was rebuilt to add the registry CHECK constraint).
+    pub cluster_key_rebuilt: bool,
 }
 
 impl MigrateReport {
     pub fn is_no_op(&self) -> bool {
-        self.applied_columns.is_empty()
+        self.applied_columns.is_empty() && !self.cluster_key_rebuilt
     }
 }
 
@@ -137,20 +140,20 @@ fn apply_with_inner(
         applied_columns: Vec::new(),
         orphaned: plan.orphaned.len(),
         type_mismatches: plan.type_mismatches.len(),
+        cluster_key_rebuilt: false,
     };
 
     let needs_source_rebuild = observations_source_id_type_mismatch(&plan);
+    let needs_cluster_rebuild = observations_cluster_key_check_missing(conn)?;
 
-    if plan.additive.is_empty() && !needs_source_rebuild {
+    if plan.additive.is_empty() && !needs_source_rebuild && !needs_cluster_rebuild {
         return Ok(report);
     }
 
     let adding_source_tuple = observations_source_tuple_added(&plan);
 
-    // Build rebuild SQL body BEFORE opening the transaction so `read_table_info`
-    // reads the current (pre-DDL) column list, which is correct — the rebuild
-    // INSERT SELECT must include exactly the columns present right now (plus
-    // the ones being added in the same TX batch).
+    // Build rebuild SQL bodies BEFORE opening the transaction so `read_table_info`
+    // reads the current (pre-DDL) column list.
     let additive_col_names: Vec<&str> = plan
         .additive
         .iter()
@@ -159,6 +162,16 @@ fn apply_with_inner(
         .collect();
     let rebuild_sql_body = if needs_source_rebuild {
         Some(rebuild_observations_source_id_as_text_sql(
+            conn,
+            schemas,
+            manifest,
+            &additive_col_names,
+        )?)
+    } else {
+        None
+    };
+    let cluster_rebuild_sql_body = if needs_cluster_rebuild {
+        Some(rebuild_observations_with_cluster_check_sql(
             conn,
             schemas,
             manifest,
@@ -185,7 +198,8 @@ fn apply_with_inner(
     }
 
     // ONE outer BEGIN IMMEDIATE transaction wrapping the full sequence:
-    //   preflight → additive DDL → tuple backfill → type rebuild → default backfill.
+    //   preflight → additive DDL → tuple backfill → type rebuild → cluster rebuild
+    //   → cluster backfill → default backfill.
     // Any error causes RAII drop (no commit) → automatic rollback.
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -196,15 +210,24 @@ fn apply_with_inner(
         observations_source_preflight(&tx, "observations")?;
     }
 
-    // Step 2: Additive DDL + tuple backfill + type rebuild as a single batch.
+    // Step 2: Additive DDL + tuple backfill + type rebuild + cluster rebuild as a batch.
     let mut batch_lines: Vec<String> = Vec::new();
     batch_lines.extend(sql_lines);
     if let Some(ref rebuild_body) = rebuild_sql_body {
         batch_lines.push(rebuild_body.clone());
     }
+    if let Some(ref cluster_body) = cluster_rebuild_sql_body {
+        batch_lines.push(cluster_body.clone());
+    }
     if !batch_lines.is_empty() {
         tx.execute_batch(&batch_lines.join("\n"))
             .context("failed to apply migrations (transaction will roll back)")?;
+    }
+
+    // Step 2b: cluster_key backfill — run inside the TX for atomicity.
+    if needs_cluster_rebuild {
+        cluster_key_backfill(&tx)?;
+        report.cluster_key_rebuilt = true;
     }
 
     // Step 3: Default-backfill inside the same TX (T052 P1). ALTER TABLE ADD
@@ -411,6 +434,127 @@ fn rebuild_observations_source_id_as_text_sql(
         tmp = quote_ident(&tmp_table),
         table_q = quote_ident(table),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// T107: cluster_key CHECK rebuild helpers
+// ---------------------------------------------------------------------------
+
+/// Returns true iff the observations table exists but its CREATE TABLE SQL
+/// does NOT contain the first curated registry key inside a CHECK clause for
+/// cluster_key. This is the signal that the table was created before T107 and
+/// must be rebuilt with the registry CHECK.
+///
+/// Returns false when the table does not exist (it will be created fresh with
+/// the correct DDL) or when the CHECK is already present.
+fn observations_cluster_key_check_missing(conn: &Connection) -> Result<bool> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'observations' AND type = 'table'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .context("read sqlite_master for observations")?;
+    let Some(create_sql) = sql else {
+        return Ok(false);
+    };
+    let first_key = crate::handlers::cluster_keys::CURATED_CLUSTER_KEYS[0];
+    Ok(!create_sql.contains(first_key))
+}
+
+/// Returns the SQL body (without BEGIN/COMMIT) for rebuilding the observations
+/// table to add a registry-derived CHECK constraint on cluster_key. Rows whose
+/// existing cluster_key is not in the registry have cluster_key reset to NULL
+/// (defensive: there should be none on a well-managed DB, but the rebuild must
+/// be safe on arbitrary pre-T107 data).
+///
+/// `extra_cols` lists column names that will be present in the table by the
+/// time this SQL executes but are not yet visible to `read_table_info` at call
+/// time (added in the same outer transaction earlier in the batch).
+fn rebuild_observations_with_cluster_check_sql(
+    conn: &Connection,
+    schemas: &HashMap<String, Schema>,
+    manifest: &Manifest,
+    extra_cols: &[&str],
+) -> Result<String> {
+    let schema = schemas
+        .get("observations")
+        .ok_or_else(|| anyhow!("observations schema not loaded for T107 cluster_key rebuild"))?;
+    let table = manifest
+        .stores
+        .iter()
+        .find(|s| s.name == "observations")
+        .map(|s| s.table_name.as_str())
+        .unwrap_or("observations");
+    let tmp_table = format!("{table}__t107_cluster_key_check");
+    let create_tmp = ddl_for(schema).replace(
+        &format!("CREATE TABLE IF NOT EXISTS {}", quote_ident(table)),
+        &format!("CREATE TABLE {}", quote_ident(&tmp_table)),
+    );
+    let live_cols = read_table_info(conn, table)?;
+    let expected = expected_columns(schema);
+    let common: Vec<String> = expected
+        .into_iter()
+        .filter(|c| live_cols.contains_key(&c.name) || extra_cols.contains(&c.name.as_str()))
+        .map(|c| c.name)
+        .collect();
+    let insert_cols = common
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Build IN list for out-of-registry check
+    let in_list = crate::handlers::cluster_keys::CURATED_CLUSTER_KEYS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select_cols = common
+        .iter()
+        .map(|c| {
+            if c == "cluster_key" {
+                // Reset any value that's not in the registry to NULL
+                format!(
+                    "CASE WHEN {ck} IS NOT NULL AND {ck} NOT IN ({in_list}) THEN NULL ELSE {ck} END",
+                    ck = quote_ident(c),
+                )
+            } else {
+                quote_ident(c)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "DROP TABLE IF EXISTS {tmp};\n{create_tmp}\nINSERT INTO {tmp} ({insert_cols}) SELECT {select_cols} FROM {table_q};\nDROP TABLE {table_q};\nALTER TABLE {tmp} RENAME TO {table_q};",
+        tmp = quote_ident(&tmp_table),
+        table_q = quote_ident(table),
+    ))
+}
+
+/// Conservative regex backfill: for each observations row where cluster_key IS
+/// NULL, call `classify_summary` and set cluster_key to the single matching
+/// registry key. Ambiguous/unrelated rows remain NULL. Runs inside the outer
+/// migration transaction so it's atomic with the rebuild.
+fn cluster_key_backfill(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT display_id, summary FROM observations WHERE cluster_key IS NULL",
+    )?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("read observations for cluster_key backfill")?;
+    drop(stmt);
+    for (display_id, summary) in rows {
+        if let Some(key) = crate::handlers::cluster_keys::classify_summary(&summary) {
+            conn.execute(
+                "UPDATE observations SET cluster_key = ?1 WHERE display_id = ?2 AND cluster_key IS NULL",
+                rusqlite::params![key, display_id],
+            )
+            .with_context(|| format!("backfill cluster_key on {display_id}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Defensive UPDATE pass after ALTER TABLE ADD COLUMN (T052 P1).
@@ -1411,5 +1555,263 @@ mod tests {
             Some(10),
             "prod_source_id must be intact after post-DDL failure rollback"
         );
+    }
+
+    // ---- T107: cluster_key CHECK rebuild tests ----
+
+    /// Install observations WITHOUT the cluster_key CHECK (pre-T107 shape).
+    fn install_pre_t107_observations(conn: &Connection, schema: &Schema) {
+        // Create the table with cluster_key as plain TEXT (no CHECK)
+        let ddl = ddl_for(schema);
+        let check = crate::handlers::cluster_keys::check_clause_sql();
+        let pre_t107_ddl = ddl.replace(&format!(" {check}"), "");
+        conn.execute_batch(&pre_t107_ddl).unwrap();
+    }
+
+    /// Check cluster_key_check_missing detection via sqlite_master.sql
+    #[test]
+    fn t107_check_missing_detection() {
+        let (schemas, _manifest) = load_bundled();
+        let conn = Connection::open_in_memory().unwrap();
+        let obs_schema = schemas.get("observations").unwrap();
+
+        // Before creating the table: not missing (table doesn't exist)
+        assert!(!observations_cluster_key_check_missing(&conn).unwrap());
+
+        // Install without CHECK
+        install_pre_t107_observations(&conn, obs_schema);
+        assert!(
+            observations_cluster_key_check_missing(&conn).unwrap(),
+            "pre-T107 table without CHECK must be detected as missing"
+        );
+
+        // Install WITH CHECK (fresh install)
+        conn.execute_batch("DROP TABLE IF EXISTS observations;")
+            .unwrap();
+        conn.execute_batch(&ddl_for(obs_schema)).unwrap();
+        assert!(
+            !observations_cluster_key_check_missing(&conn).unwrap(),
+            "post-T107 table with CHECK must not be missing"
+        );
+    }
+
+    /// apply_with on a pre-T107 DB runs the rebuild and is idempotent on the second call.
+    #[test]
+    fn t107_apply_with_rebuilds_and_is_idempotent() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        let obs_schema = schemas.get("observations").unwrap();
+
+        // Install observations without CHECK + other stores normally
+        install_pre_t107_observations(&conn, obs_schema);
+        conn.execute_batch(&ddl_for(schemas.get("gate").unwrap()))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("tasks").unwrap()))
+            .unwrap();
+
+        // Insert a pre-existing row
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, created_at, updated_at, created_by, updated_by, \
+              summary, source, priority, captured_at, captured_week) \
+             VALUES ('L001','open','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',\
+                     'human','human','pre-existing obs','dev','normal',\
+                     '2026-01-01T00:00:00Z','w01-d1')",
+            [],
+        )
+        .unwrap();
+
+        // First apply_with: should rebuild
+        let report = apply_with(&mut conn, &schemas, &manifest).expect("first apply_with ok");
+        assert!(
+            report.cluster_key_rebuilt,
+            "first apply_with must set cluster_key_rebuilt=true"
+        );
+
+        // Verify the CHECK is now present
+        assert!(
+            !observations_cluster_key_check_missing(&conn).unwrap(),
+            "after rebuild, CHECK must be present"
+        );
+
+        // Verify pre-existing row survived with cluster_key=NULL
+        let ck: Option<String> = conn
+            .query_row(
+                "SELECT cluster_key FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ck, None, "pre-existing row must have cluster_key=NULL");
+
+        // Second apply_with: idempotent
+        let report2 = apply_with(&mut conn, &schemas, &manifest).expect("second apply_with ok");
+        assert!(
+            report2.is_no_op(),
+            "second apply_with must be a no-op: {report2:?}"
+        );
+        assert!(!report2.cluster_key_rebuilt, "second apply_with must not rebuild");
+    }
+
+    /// Backfill: 3 unambiguous + 1 ambiguous + 1 unrelated → only 3 get cluster_key set.
+    #[test]
+    fn t107_backfill_sets_exactly_3_unambiguous_rows() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        let obs_schema = schemas.get("observations").unwrap();
+
+        install_pre_t107_observations(&conn, obs_schema);
+        conn.execute_batch(&ddl_for(schemas.get("gate").unwrap()))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("tasks").unwrap()))
+            .unwrap();
+
+        // Insert 5 rows:
+        // 3 unambiguous deploy-blocked matches
+        for i in 0..3u32 {
+            conn.execute(
+                "INSERT INTO observations \
+                 (display_id, status, created_at, updated_at, created_by, updated_by, \
+                  summary, source, priority, captured_at, captured_week) \
+                 VALUES (?1,'open','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',\
+                         'human','human',?2,'dev','normal','2026-01-01T00:00:00Z','w01-d1')",
+                rusqlite::params![
+                    format!("L{:03}", i + 1),
+                    "deploy blocked by merge conflict"
+                ],
+            )
+            .unwrap();
+        }
+        // 1 ambiguous: matches both deploy-blocked and stale-base
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, created_at, updated_at, created_by, updated_by, \
+              summary, source, priority, captured_at, captured_week) \
+             VALUES ('L004','open','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',\
+                     'human','human','stale-base merge conflict','dev','normal',\
+                     '2026-01-01T00:00:00Z','w01-d1')",
+            [],
+        )
+        .unwrap();
+        // 1 unrelated
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, created_at, updated_at, created_by, updated_by, \
+              summary, source, priority, captured_at, captured_week) \
+             VALUES ('L005','open','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',\
+                     'human','human','completely unrelated observation','dev','normal',\
+                     '2026-01-01T00:00:00Z','w01-d1')",
+            [],
+        )
+        .unwrap();
+
+        apply_with(&mut conn, &schemas, &manifest).expect("apply_with ok");
+
+        // Verify backfill results
+        let rows: Vec<(String, Option<String>)> = {
+            let mut stmt = conn
+                .prepare("SELECT display_id, cluster_key FROM observations ORDER BY display_id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+
+        let deploy_blocked: Vec<&(String, Option<String>)> = rows
+            .iter()
+            .filter(|(id, _)| matches!(id.as_str(), "L001" | "L002" | "L003"))
+            .collect();
+        for (id, ck) in &deploy_blocked {
+            assert_eq!(
+                ck.as_deref(),
+                Some("deploy-blocked-merge-conflict"),
+                "row {id} must have deploy-blocked-merge-conflict"
+            );
+        }
+        // Ambiguous and unrelated must remain NULL
+        let (_, l004_ck) = rows.iter().find(|(id, _)| id == "L004").unwrap();
+        assert_eq!(l004_ck, &None, "L004 (ambiguous) must remain NULL");
+        let (_, l005_ck) = rows.iter().find(|(id, _)| id == "L005").unwrap();
+        assert_eq!(l005_ck, &None, "L005 (unrelated) must remain NULL");
+    }
+
+    /// Rows with a valid registry value before the rebuild retain their value.
+    #[test]
+    fn t107_rebuild_preserves_existing_valid_cluster_key() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        let obs_schema = schemas.get("observations").unwrap();
+
+        install_pre_t107_observations(&conn, obs_schema);
+        conn.execute_batch(&ddl_for(schemas.get("gate").unwrap()))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("tasks").unwrap()))
+            .unwrap();
+
+        // Row with a valid registry value set before migration
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, created_at, updated_at, created_by, updated_by, \
+              summary, source, priority, captured_at, captured_week, cluster_key) \
+             VALUES ('L001','open','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',\
+                     'human','human','test obs','dev','normal','2026-01-01T00:00:00Z',\
+                     'w01-d1','silent-zombie-watchdog')",
+            [],
+        )
+        .unwrap();
+
+        apply_with(&mut conn, &schemas, &manifest).expect("apply_with ok");
+
+        let ck: Option<String> = conn
+            .query_row(
+                "SELECT cluster_key FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            ck.as_deref(),
+            Some("silent-zombie-watchdog"),
+            "valid pre-existing cluster_key must be preserved"
+        );
+    }
+
+    /// Rows with an invalid (out-of-registry) cluster_key before the rebuild
+    /// have cluster_key reset to NULL after the rebuild.
+    #[test]
+    fn t107_rebuild_resets_invalid_cluster_key_to_null() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        let obs_schema = schemas.get("observations").unwrap();
+
+        install_pre_t107_observations(&conn, obs_schema);
+        conn.execute_batch(&ddl_for(schemas.get("gate").unwrap()))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("tasks").unwrap()))
+            .unwrap();
+
+        // Row with an invalid cluster_key (old format not in registry)
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, created_at, updated_at, created_by, updated_by, \
+              summary, source, priority, captured_at, captured_week, cluster_key) \
+             VALUES ('L001','open','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',\
+                     'human','human','test obs','dev','normal','2026-01-01T00:00:00Z',\
+                     'w01-d1','old-invalid-key')",
+            [],
+        )
+        .unwrap();
+
+        apply_with(&mut conn, &schemas, &manifest).expect("apply_with ok");
+
+        let ck: Option<String> = conn
+            .query_row(
+                "SELECT cluster_key FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ck, None, "invalid pre-existing cluster_key must be reset to NULL");
     }
 }

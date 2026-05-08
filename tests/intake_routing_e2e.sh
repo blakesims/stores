@@ -93,19 +93,19 @@ SRC_ID=$(sqlite3 .stores/db.sqlite "SELECT display_id FROM intake ORDER BY id DE
 CLAUDECODE=1 "$STORES_BIN" intake claim-triage "$SRC_ID" --invoker ai_autonomous > /dev/null
 
 # Route source as normal_observation so it gets a cluster_key
-DEC_JSON_SRC='{"decision":"normal_observation","confidence":"high","rationale":"source","tier_hint":"T2","risk_flags":["small_local_fix"],"cluster_key":"dispatch-lifecycle"}'
+DEC_JSON_SRC='{"decision":"normal_observation","confidence":"high","rationale":"source","tier_hint":"T2","risk_flags":["small_local_fix"],"cluster_key":"gatekeeper-front-door-stuck"}'
 CLAUDECODE=1 "$STORES_BIN" intake route "$SRC_ID" --invoker ai_autonomous \
     --decision normal_observation \
     --gatekeeper-decision-json "$DEC_JSON_SRC" \
     > /dev/null
 
 SRC_CK=$(sqlite3 .stores/db.sqlite "SELECT cluster_key FROM intake WHERE display_id='$SRC_ID'")
-[[ "$SRC_CK" == "dispatch-lifecycle" ]] || fail "source item cluster_key not set; got: $SRC_CK"
+[[ "$SRC_CK" == "gatekeeper-front-door-stuck" ]] || fail "source item cluster_key not set; got: $SRC_CK"
 
 # Create duplicate item and route it as duplicate of the source
 DUP_ID=$(add_triaging_item "duplicate of source item")
 
-DEC_JSON_DUP='{"decision":"duplicate","confidence":"high","rationale":"already filed","cluster_key":"dispatch-lifecycle","duplicate_candidates":["'"$SRC_ID"'"]}'
+DEC_JSON_DUP='{"decision":"duplicate","confidence":"high","rationale":"already filed","cluster_key":"gatekeeper-front-door-stuck","duplicate_candidates":["'"$SRC_ID"'"]}'
 CLAUDECODE=1 "$STORES_BIN" intake route "$DUP_ID" --invoker ai_autonomous \
     --decision duplicate \
     --duplicate-of "$SRC_ID" \
@@ -117,7 +117,7 @@ DUP_CK=$(sqlite3 .stores/db.sqlite "SELECT cluster_key FROM intake WHERE display
 DUP_OF=$(sqlite3 .stores/db.sqlite "SELECT duplicate_of FROM intake WHERE display_id='$DUP_ID'")
 
 [[ "$DUP_STATUS" == "routed" ]] || fail "duplicate: expected status=routed; got: $DUP_STATUS"
-[[ "$DUP_CK" == "dispatch-lifecycle" ]] || fail "duplicate: cluster_key not copied; got: $DUP_CK"
+[[ "$DUP_CK" == "gatekeeper-front-door-stuck" ]] || fail "duplicate: cluster_key not copied; got: $DUP_CK"
 [[ "$DUP_OF" == "$SRC_ID" ]] || fail "duplicate: duplicate_of not set; got: $DUP_OF"
 # Source item's normal_observation route auto-created 1 obs (per AC3.6); duplicate adds none
 OBS_COUNT=$(sqlite3 .stores/db.sqlite "SELECT COUNT(*) FROM observations")
@@ -159,7 +159,7 @@ echo "--- Decision 3: normal_observation"
 
 NO_ID=$(add_triaging_item "stale pid files causing dispatch confusion")
 
-DEC_JSON_NO='{"decision":"normal_observation","confidence":"medium","rationale":"Stale lock files.","tier_hint":"T2","risk_flags":["small_local_fix"],"cluster_key":"dispatch-lifecycle"}'
+DEC_JSON_NO='{"decision":"normal_observation","confidence":"medium","rationale":"Stale lock files.","tier_hint":"T2","risk_flags":["small_local_fix"],"cluster_key":"gatekeeper-front-door-stuck"}'
 CLAUDECODE=1 "$STORES_BIN" intake route "$NO_ID" --invoker ai_autonomous \
     --decision normal_observation \
     --gatekeeper-decision-json "$DEC_JSON_NO" \
@@ -179,7 +179,7 @@ NO_CK=$(sqlite3 .stores/db.sqlite "SELECT cluster_key FROM observations WHERE di
 [[ "$NO_RISK_CLASS" == "low" ]] || fail "normal_observation: expected risk_class=low (small_local_fix); got: $NO_RISK_CLASS"
 [[ "$NO_APPROVAL" == "auto" ]] || fail "normal_observation: expected approval_policy=auto (T2+low); got: $NO_APPROVAL"
 echo "$NO_RISK_FLAGS" | grep -q "small_local_fix" || fail "normal_observation: risk_flags missing small_local_fix; got: $NO_RISK_FLAGS"
-[[ "$NO_CK" == "dispatch-lifecycle" ]] || fail "normal_observation: cluster_key mismatch; got: $NO_CK"
+[[ "$NO_CK" == "gatekeeper-front-door-stuck" ]] || fail "normal_observation: cluster_key mismatch; got: $NO_CK"
 pass "normal_observation: obs created, L143 columns populated (risk_class=$NO_RISK_CLASS, policy=$NO_APPROVAL)"
 
 # ---------------------------------------------------------------------------

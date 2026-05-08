@@ -645,7 +645,7 @@ mod tests {
         );
         merged.insert(
             "cluster_key".to_string(),
-            Value::String("dispatch-lifecycle".to_string()),
+            Value::String("gatekeeper-front-door-stuck".to_string()),
         );
 
         inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route").unwrap();
@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(rc.as_deref(), Some("low"));
         assert_eq!(ap.as_deref(), Some("auto"));
         assert!(rf.as_deref().unwrap_or("").contains("small_local_fix"));
-        assert_eq!(ck.as_deref(), Some("dispatch-lifecycle"));
+        assert_eq!(ck.as_deref(), Some("gatekeeper-front-door-stuck"));
     }
 
     #[test]

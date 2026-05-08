@@ -632,9 +632,7 @@ fields:
   - name: cluster_key
     type: text
     required: false
-    actor: ai_with_human
-    pattern: '^[a-z][a-z0-9-]{2,40}$'
-    description: "Optional cluster key linking related observations (slug-like)"
+    description: "Curated cluster registry key (NULL or one of the 5 registry-defined keys); curated registry lives in src/handlers/cluster_keys.rs::CURATED_CLUSTER_KEYS — schema.yaml does NOT enumerate the keys (Rust is authoritative)."
 
   # --- Notes (free-shape JSON; T008 substrate) ---
   - name: notes
