@@ -27,7 +27,8 @@ pub enum DispatchOutcome {
 }
 use crate::flow::config::{resolve_codex_config, resolve_review_config};
 use crate::handlers::external_reviews::{
-    run_external_review_attempt, ExternalReviewVerdict, ParsedReviewOutput, ToolingError,
+    prepare_external_review_git, run_external_review_attempt, ExternalReviewGitPreparation,
+    ExternalReviewRebaseConflict, ExternalReviewVerdict, ParsedReviewOutput, ToolingError,
 };
 use crate::handlers::row::now_iso8601;
 use crate::handlers::transition::execute_transition_write;
@@ -170,15 +171,34 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> Result<DispatchOutcome> {
         review_row.task_id, review_row.display_id, review_row.attempt, review_cfg.runner
     );
 
+    let preflight = match prepare_external_review_git(ctx.conn, &review_row.task_id) {
+        Ok(ExternalReviewGitPreparation::Ready(preflight)) => preflight,
+        Ok(ExternalReviewGitPreparation::Conflict(conflict)) => {
+            record_stale_base_tooling_held(ctx.conn, &review_row, &review_cfg.runner, &conflict)?;
+            return Ok(DispatchOutcome::Dispatched);
+        }
+        Err(err) => {
+            record_tooling_held(ctx.conn, &review_row, &review_cfg.runner, &err)?;
+            return Ok(DispatchOutcome::Dispatched);
+        }
+    };
+
+    if preflight.rebase_performed {
+        eprintln!(
+            "[external-review] task_id={} review_attempt_id={} stale-base rebased base_sha={} head_sha={}",
+            review_row.task_id, review_row.display_id, preflight.base_sha, preflight.head_sha
+        );
+    }
+
     match run_external_review_attempt(
         ctx.conn,
         &review_row.display_id,
         &review_row.task_id,
         &review_cfg,
         &codex_cfg,
-        None,
-        None,
-        None,
+        Some(&preflight.workspace_path),
+        Some(&preflight.base_sha),
+        Some(&preflight.head_sha),
     ) {
         Ok(parsed) => record_terminal(ctx, &review_row, &review_cfg.runner, parsed)?,
         Err(err) => record_tooling_held(ctx.conn, &review_row, &review_cfg.runner, &err)?,
@@ -193,6 +213,8 @@ fn ensure_runtime_columns(conn: &Connection) -> Result<()> {
         ("held_reason", "TEXT"),
         ("next_retry_at", "TEXT"),
         ("attempts", "INTEGER DEFAULT 0"),
+        ("base_sha", "TEXT"),
+        ("head_sha", "TEXT"),
     ];
     for (name, ty) in expected {
         if !cols.contains(name) {
@@ -528,6 +550,50 @@ fn record_terminal(
     if gate == "REVISE" {
         fire_task_external_review_revise(ctx.conn, &row.task_id, ctx.policies_hash)?;
     }
+    Ok(())
+}
+
+fn record_stale_base_tooling_held(
+    conn: &Connection,
+    row: &ReviewRow,
+    runner: &str,
+    conflict: &ExternalReviewRebaseConflict,
+) -> Result<()> {
+    let now = now_iso8601();
+    let reason = "stale_base_requires_rebase";
+    let files = if conflict.conflict_files.is_empty() {
+        "<no conflict files reported>".to_string()
+    } else {
+        conflict.conflict_files.join(", ")
+    };
+    let log_ref = format!("external_review://{}/stale_base_requires_rebase", row.display_id);
+    let findings = serde_json::json!({
+        "verdict": "TOOLING_FAILURE",
+        "held_reason": reason,
+        "error": "stale task branch requires conflicted rebase before external review",
+        "base_sha": conflict.base_sha,
+        "head_sha": conflict.head_sha,
+        "conflict_files": conflict.conflict_files,
+        "stderr": conflict.stderr,
+        "log_ref": log_ref,
+    })
+    .to_string();
+    conn.execute(
+        "UPDATE external_reviews SET status='tooling_held', verdict='TOOLING_FAILURE', held_reason=?2, next_retry_at=NULL, completed_at=?3, updated_at=?3, base_sha=?4, head_sha=?5, log_path=COALESCE(NULLIF(log_path,''), ?6), transcript_path=COALESCE(NULLIF(transcript_path,''), ?6), findings=?7 WHERE display_id=?1",
+        params![row.display_id, reason, now, conflict.base_sha, conflict.head_sha, log_ref, findings],
+    )?;
+    insert_review_transition(
+        conn,
+        row,
+        "running",
+        "tooling_held",
+        "record-tooling-failure",
+        None,
+    )?;
+    eprintln!(
+        "[external-review] task_id={} review_attempt_id={} runner={} status=tooling_held held_reason={} base_sha={} head_sha={} conflicts={} liveness=held retry=none",
+        row.task_id, row.display_id, runner, reason, conflict.base_sha, conflict.head_sha, files
+    );
     Ok(())
 }
 
