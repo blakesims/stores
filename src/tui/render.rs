@@ -254,11 +254,13 @@ fn system_alert_item(app: &App) -> Option<ListItem<'static>> {
     if count == 0 {
         return None;
     }
-    let oldest = app.system_health.oldest_claimed_at_epoch?;
-    let age_hours = now_epoch().saturating_sub(oldest) / 3600;
+    let age_display = match app.system_health.oldest_claimed_at_epoch {
+        Some(oldest) => format!("{}h", now_epoch().saturating_sub(oldest) / 3600),
+        None => "?h".to_string(),
+    };
     Some(ListItem::new(Line::from(Span::styled(
         format!(
-            "system-alert: daemon DEAD; {count} dangling locks; oldest started {age_hours}h ago"
+            "system-alert: daemon DEAD; {count} dangling locks; oldest started {age_display} ago"
         ),
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
     ))))
@@ -789,6 +791,29 @@ mod tests {
         dead_zero.system_health = SystemHealth::default();
         assert!(system_alert_item(&dead_zero).is_none());
         assert!(!painted_buffer(&mut dead_zero).contains("system-alert:"));
+    }
+
+    #[test]
+    fn system_alert_item_renders_with_placeholder_age_when_oldest_claimed_at_is_null() {
+        // When daemon is DEAD + unfinished locks >= 1 BUT claimed_at is NULL
+        // (oldest_claimed_at_epoch is None), the alert MUST still render with "?h"
+        // placeholder instead of being suppressed.
+        let mut app = App::new(TuiOpts::default());
+        app.status_bar = StatusBar {
+            daemon_liveness: Liveness::Dead,
+            ..Default::default()
+        };
+        app.system_health = SystemHealth {
+            unfinished_dispatch_locks: 3,
+            oldest_claimed_at_epoch: None,
+        };
+        let alert = system_alert_item(&app);
+        assert!(alert.is_some(), "alert must render even when claimed_at is NULL");
+        let painted = painted_buffer(&mut app);
+        assert!(
+            painted.contains("system-alert: daemon DEAD; 3 dangling locks; oldest started ?h ago"),
+            "expected '?h' placeholder in alert: {painted}"
+        );
     }
 
     #[test]
