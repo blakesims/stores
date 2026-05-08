@@ -120,9 +120,8 @@ pub fn cycle_dots(current_cycle: i64, max_cycles: i64) -> String {
 }
 
 fn fallback_status(t: &TaskRow) -> String {
-    match (t.current_phase, t.total_phases, t.current_cycle) {
-        _ => t.status.clone(),
-    }
+    let _ = (t.current_phase, t.total_phases, t.current_cycle);
+    t.status.clone()
 }
 
 fn terminal_stage(status: &str) -> Option<String> {

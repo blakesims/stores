@@ -846,6 +846,7 @@ pub(crate) fn validate_stores_binary_candidate(path: &Path) -> Result<()> {
         .map_err(|f| anyhow!(candidate_validation_error_message(&f)))
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_stale_reexec_candidate(
     path: &Path,
 ) -> std::result::Result<(), CandidateValidationFailure> {
@@ -1995,9 +1996,8 @@ fn ensure_dispatch_locks_terminal_reason_allows_rate_limit(conn: &Connection) ->
          ALTER TABLE dispatch_locks__t100_new RENAME TO dispatch_locks;
          COMMIT;",
     )
-    .or_else(|e| {
+    .inspect_err(|_| {
         let _ = conn.execute_batch("ROLLBACK;");
-        Err(e)
     })?;
 
     let now = crate::handlers::row::now_iso8601();
@@ -2043,6 +2043,7 @@ pub fn backfill_legacy_locks(conn: &Connection) -> Result<usize> {
 /// Atomically claim `(store, row_id, agent_name)` by inserting a
 /// `dispatch_locks` row. Returns `Ok(true)` if we won the claim,
 /// `Ok(false)` if another claimer won (UNIQUE conflict).
+#[allow(clippy::too_many_arguments)]
 pub fn try_claim(
     conn: &Connection,
     store: &str,
@@ -2458,6 +2459,7 @@ fn iso8601_add_secs(base: &str, secs: u64) -> Option<String> {
     Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z"))
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     let s = secs % 60;
     let total_min = secs / 60;
@@ -2699,7 +2701,7 @@ fn compute_backoff_secs(kind: BackoffKind, attempt: u32) -> u64 {
             // 2^(attempt-1), but bound shift so we don't UB and saturate at
             // a reasonable ceiling. attempt=0 → BASE * 1 (treat as "no wait
             // before first retry"), attempt=N → BASE * 2^(N-1).
-            let shift = attempt.saturating_sub(1).min(32) as u32;
+            let shift = attempt.saturating_sub(1).min(32);
             BASE_BACKOFF_SECS.saturating_mul(1u64 << shift)
         }
     }
@@ -2724,6 +2726,7 @@ fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
     Some(ymd_hms_to_epoch(y, mo, d, h, mi, se))
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn ymd_hms_to_epoch(y: u32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
     fn is_leap(y: u32) -> bool {
         (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
@@ -3060,6 +3063,7 @@ pub(crate) fn pid_is_zombie(_pid: i32) -> bool {
 
 /// Count tasks rows whose `drive_pid` is set to a still-running process.
 /// Used by the daemon's `poll_once` cap-check (Task 4.5).
+#[allow(dead_code)]
 pub(crate) fn count_live_drive_pids(conn: &Connection) -> Result<usize> {
     let mut stmt = conn.prepare("SELECT drive_pid FROM tasks WHERE drive_pid IS NOT NULL")?;
     let pids: Vec<i64> = stmt
@@ -5377,8 +5381,8 @@ policies:
             // ticks = u64::MAX / 1_000_000_000; result should not panic and saturates to u64::MAX
             let ticks = u64::MAX / 1_000_000_000;
             let result = ticks_to_ns(ticks, 1);
-            // result = ticks * 1e9 / 1; must be <= u64::MAX
-            assert!(result <= u64::MAX);
+            // result = ticks * 1e9 / 1; the function must not panic (no overflow)
+            let _ = result; // u64 is always <= u64::MAX by type
         }
 
         #[test]

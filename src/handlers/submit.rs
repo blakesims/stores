@@ -21,7 +21,7 @@
 //!  12. Print summary line (run() only)
 //!
 //! compute/run split: each verb has `pub(crate) fn compute_submit_*(...) -> Result<SubmitOutput>`
-//! + thin `pub fn run_submit_*(...)` printer.  Tests call `compute_*` and assert on the
+//!   plus thin `pub fn run_submit_*(...)` printers. Tests call `compute_*` and assert on the
 //! structured output and post-call DB state.
 
 use anyhow::{bail, Context, Result};
@@ -220,6 +220,7 @@ fn days_to_ymd(mut days: u64) -> (u32, u32, u32) {
     (year, month, days as u32 + 1)
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn is_leap(y: u32) -> bool {
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
@@ -721,7 +722,7 @@ pub(crate) fn compute_submit_plan(
         Some(p) => {
             bail!(
                 "submit-plan: plan.phases must be an array, got {}",
-                p.to_string()
+                p
             );
         }
         None => {
@@ -989,6 +990,7 @@ pub fn run_submit_plan_review(
 // submit-execute: executing → code_review (AC5.1)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_submit_execute(
     schema: &Schema,
     conn: &Connection,
@@ -1138,6 +1140,7 @@ pub(crate) fn compute_submit_execute(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_submit_execute(
     schema: &Schema,
     conn: &Connection,
@@ -1167,6 +1170,7 @@ pub fn run_submit_execute(
 // submit-review: code_review → executing | complete | blocked (AC5.2/5.3/5.4/5.4b)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_submit_review(
     schema: &Schema,
     conn: &Connection,
@@ -1257,10 +1261,8 @@ pub(crate) fn compute_submit_review(
     }
     let review_obj = Value::Object(review_obj_map);
 
-    if let Some(entry) = cycles.get_mut(cycle_idx) {
-        if let Value::Object(ref mut obj) = entry {
-            obj.insert("review".to_string(), review_obj);
-        }
+    if let Some(Value::Object(ref mut obj)) = cycles.get_mut(cycle_idx) {
+        obj.insert("review".to_string(), review_obj);
     }
 
     let mut diff: EntryMap = BTreeMap::new();
@@ -1412,6 +1414,7 @@ pub(crate) fn compute_submit_review(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_submit_review(
     schema: &Schema,
     conn: &Connection,
@@ -2238,7 +2241,7 @@ workflow:
     }
 
     /// Insert a row with specific state for testing.
-    #[allow(unused_variables)]
+    #[allow(unused_variables, clippy::too_many_arguments)]
     fn insert_row_at(
         conn: &Connection,
         schema: &Schema, // unused — kept for call-site clarity

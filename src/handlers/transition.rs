@@ -742,6 +742,7 @@ pub(crate) fn run_in_tx(
 /// `intent_contract` is `ready` AND has `approved_by` AND `approved_at`
 /// populated, fire framework `ratify` (confirmed → ready) atomically in the
 /// same caller-supplied transaction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn maybe_auto_ratify_observation(
     tx: &Transaction,
     schema: &Schema,
@@ -1068,6 +1069,7 @@ pub(crate) fn maybe_validate_and_mirror_gatekeeper_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use crate::db;
     use crate::schema::Schema;
 

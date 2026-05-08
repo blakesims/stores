@@ -8,8 +8,6 @@
 //!  (e) override-policy auto→human with --invoker ai_with_human (no token) ACCEPTED (escalation)
 //!  (f) missing --reason rejected at CLI parse
 
-use std::collections::BTreeMap;
-
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use stores::handlers::overrides::{run_override_policy, run_override_risk};
@@ -291,7 +289,7 @@ fn override_risk_missing_reason_rejected_at_parse() {
         .arg(Arg::new("reason").long("reason").required(true))
         .arg(Arg::new("risk-class").long("risk-class").required(false));
     let err = cmd
-        .try_get_matches_from(&["override-risk", "L001", "--risk-class", "low"])
+        .try_get_matches_from(["override-risk", "L001", "--risk-class", "low"])
         .expect_err("missing --reason must fail parse");
     let msg = err.to_string();
     assert!(
@@ -308,7 +306,7 @@ fn override_policy_missing_reason_rejected_at_parse() {
         .arg(Arg::new("reason").long("reason").required(true))
         .arg(Arg::new("approval-policy").long("approval-policy").required(true));
     let err = cmd
-        .try_get_matches_from(&["override-policy", "L001", "--approval-policy", "auto"])
+        .try_get_matches_from(["override-policy", "L001", "--approval-policy", "auto"])
         .expect_err("missing --reason must fail parse");
     let msg = err.to_string();
     assert!(

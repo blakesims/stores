@@ -2483,13 +2483,8 @@ mod tests {
         // T067/L134 invariant: initial auto-drive spawn leaves a pending
         // next_agent (planner) and therefore the lock stays in-flight rather
         // than terminal_reason='ok'.
-        let (finished_at, last_status, terminal_reason, postcondition_id, drive_pid): (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<i64>,
-        ) = conn
+        type LockRow = (Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>);
+        let (finished_at, last_status, terminal_reason, postcondition_id, drive_pid): LockRow = conn
             .query_row(
                 "SELECT dl.finished_at, dl.last_status, dl.terminal_reason, dl.postcondition_id, t.drive_pid \
                  FROM dispatch_locks dl JOIN tasks t ON t.id = dl.row_id \

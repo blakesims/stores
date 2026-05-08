@@ -344,10 +344,8 @@ pub(crate) fn dispatch_to_specialist(
 
     if let Some(agent) = ctx.agents.agents.iter().find(|a| a.name == spec_name) {
         if let Some(kw) = agent.command.strip_prefix("builtin:") {
-            if let Some(res) = dispatch_builtin(kw, &refreshed, ctx) {
-                if let Err(e) = res {
-                    eprintln!("[{}] specialist '{}' failed: {}", caller, agent.name, e);
-                }
+            if let Some(Err(e)) = dispatch_builtin(kw, &refreshed, ctx) {
+                eprintln!("[{}] specialist '{}' failed: {}", caller, agent.name, e);
             }
         } else {
             let _ = Command::new("sh")

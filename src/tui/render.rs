@@ -337,7 +337,7 @@ fn format_row_line(
                 Style::default().fg(Color::Yellow),
             ),
             Span::raw(" "),
-            Span::raw(format!("{}", task_progress_text(t, external_review))),
+            Span::raw(task_progress_text(t, external_review)),
             Span::raw(truncate(&task_snippet(t), 60)),
         ],
         Row::Obs(o) => obs_spans(o, None),

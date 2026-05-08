@@ -9,7 +9,7 @@
 /// returns it as `RunnerOutput.structured_output` with source `pi-tool`.
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{AgentRunTelemetry, Runner, RunnerOutput};
@@ -67,7 +67,7 @@ fn resolve_cwd(workspace_path: Option<&str>) -> Result<PathBuf> {
 ///
 /// **Invariant:** a successful return value is ALWAYS under `.stores/runs/`.
 /// No `/tmp` fallback exists.
-fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> anyhow::Result<PathBuf> {
+fn write_transcript(cwd: &Path, session_id: &str, stdout: &str) -> anyhow::Result<PathBuf> {
     let runs_dir = std::env::var_os("STORES_RUNS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| cwd.join(".stores").join("runs"));

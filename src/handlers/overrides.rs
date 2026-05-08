@@ -490,7 +490,7 @@ mod tests {
             .arg(Arg::new("reason").long("reason").required(true))
             .arg(Arg::new("risk-class").long("risk-class").required(false));
         let err = cmd
-            .try_get_matches_from(&["override-risk", "L001", "--risk-class", "low"])
+            .try_get_matches_from(["override-risk", "L001", "--risk-class", "low"])
             .expect_err("missing --reason must fail parse");
         let msg = err.to_string();
         assert!(
@@ -653,7 +653,7 @@ mod tests {
             .arg(Arg::new("reason").long("reason").required(true))
             .arg(Arg::new("approval-policy").long("approval-policy").required(true));
         let err = cmd
-            .try_get_matches_from(&["override-policy", "L001", "--approval-policy", "auto"])
+            .try_get_matches_from(["override-policy", "L001", "--approval-policy", "auto"])
             .expect_err("missing --reason must fail parse");
         let msg = err.to_string();
         assert!(

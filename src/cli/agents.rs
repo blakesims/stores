@@ -13,7 +13,7 @@
 /// platform-driven**: Claude Code's subagent loader scans flat
 /// `<agents_dir>/<name>.md` — nesting would prevent registry registration.
 use anyhow::{bail, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Bundled agents — embedded at compile time
@@ -104,7 +104,7 @@ fn agents_dir(global: bool) -> Result<PathBuf> {
 }
 
 /// Flat path: `<base>/<name>.md` (NOT nested like skills).
-fn agent_path(base: &PathBuf, name: &str) -> PathBuf {
+fn agent_path(base: &Path, name: &str) -> PathBuf {
     base.join(format!("{name}.md"))
 }
 
@@ -233,7 +233,7 @@ mod tests {
         base
     }
 
-    fn write_agent_to(base: &PathBuf, name: &str, content: &str) {
+    fn write_agent_to(base: &Path, name: &str, content: &str) {
         let p = agent_path(base, name);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, content).unwrap();
@@ -243,7 +243,7 @@ mod tests {
     // Helpers that operate on an explicit base dir (avoid env side-effects)
     // -----------------------------------------------------------------------
 
-    fn install_to(name: &str, base: &PathBuf, silent: bool) -> Result<()> {
+    fn install_to(name: &str, base: &Path, silent: bool) -> Result<()> {
         let content = BUNDLED_AGENTS
             .iter()
             .find(|(n, _)| *n == name)

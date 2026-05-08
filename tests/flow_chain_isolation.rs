@@ -496,12 +496,11 @@ fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
     // Set daemon cwd to the live repo so cargo-install's cwd fallback works.
     // Round-3: the cwd validation now requires Cargo.toml [package] name = "stores".
     // The noop fixture uses a different name, so overwrite it before cd-ing in.
-    let stores_cargo_toml = format!(
+    let stores_cargo_toml =
         "[package]\nname = \"stores\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
          [[bin]]\nname = \"stores\"\npath = \"src/main.rs\"\n\
-         [features]\ndefault = []\nrunner-claude-code = []\n"
-    );
-    std::fs::write(repo.join("Cargo.toml"), &stores_cargo_toml)
+         [features]\ndefault = []\nrunner-claude-code = []\n";
+    std::fs::write(repo.join("Cargo.toml"), stores_cargo_toml)
         .expect("overwrite Cargo.toml to name=stores for cwd validation");
 
     let _cwd_g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());

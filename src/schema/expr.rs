@@ -184,8 +184,8 @@ fn extract_op(s: &str) -> Result<(&str, Op, &str)> {
 
 fn parse_lhs(raw: &str) -> Result<Lhs> {
     // Detect `.length` suffix
-    let (path_str, is_length) = if raw.ends_with(".length") {
-        (&raw[..raw.len() - ".length".len()], true)
+    let (path_str, is_length) = if let Some(stripped) = raw.strip_suffix(".length") {
+        (stripped, true)
     } else {
         (raw, false)
     };
@@ -238,8 +238,8 @@ fn parse_rhs(raw: &str, original: &str) -> Result<Rhs> {
     }
     // Attempt to parse as a dotted-identifier path (possibly ending in .length).
     // This mirrors parse_lhs so that `current_phase < plan.phases.length` works.
-    let (path_str, is_length) = if raw.ends_with(".length") {
-        (&raw[..raw.len() - ".length".len()], true)
+    let (path_str, is_length) = if let Some(stripped) = raw.strip_suffix(".length") {
+        (stripped, true)
     } else {
         (raw, false)
     };

@@ -47,7 +47,7 @@
 /// and re-run (Decision Matrix row 8).
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{AgentRunTelemetry, Runner, RunnerOutput};
@@ -308,7 +308,7 @@ pub fn resolve_cwd() -> Result<PathBuf> {
 ///
 /// **Invariant:** a successful return value is ALWAYS under `.stores/runs/`.
 /// No `/tmp` fallback exists.
-fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> anyhow::Result<PathBuf> {
+fn write_transcript(cwd: &Path, session_id: &str, stdout: &str) -> anyhow::Result<PathBuf> {
     let runs_dir = match std::env::var_os("STORES_RUNS_DIR") {
         Some(p) => PathBuf::from(p),
         None => cwd.join(".stores").join("runs"),
@@ -330,10 +330,9 @@ fn write_transcript(cwd: &PathBuf, session_id: &str, stdout: &str) -> anyhow::Re
                 path.display()
             );
             let stub_path = runs_dir.join(format!("{session_id}-error.json"));
-            let stub_content = format!(
-                "{{\"error\":\"transcript write failed\",\"reason\":\"primary write failed\"}}\n"
-            );
-            if fs::write(&stub_path, &stub_content).is_ok() {
+            let stub_content =
+                "{\"error\":\"transcript write failed\",\"reason\":\"primary write failed\"}\n";
+            if fs::write(&stub_path, stub_content).is_ok() {
                 return Some(stub_path);
             }
         }

@@ -579,8 +579,7 @@ fields:
                     "SELECT display_id, status, title, notes FROM jstore WHERE display_id = 'J001'",
                 )
                 .unwrap();
-            let row = stmt
-                .query_row([], |r| {
+            stmt.query_row([], |r| {
                     let mut m = std::collections::BTreeMap::new();
                     m.insert(
                         "display_id".to_string(),
@@ -600,8 +599,7 @@ fields:
                     );
                     Ok(m)
                 })
-                .unwrap();
-            row
+                .unwrap()
         };
 
         // Apply the same decode logic as list.rs
@@ -676,8 +674,7 @@ fields:
             let mut stmt = conn
                 .prepare("SELECT tags, refs FROM lrstore WHERE display_id = 'R001'")
                 .unwrap();
-            let row = stmt
-                .query_row([], |r| {
+            stmt.query_row([], |r| {
                     let mut m = std::collections::BTreeMap::new();
                     m.insert(
                         "tags".to_string(),
@@ -689,8 +686,7 @@ fields:
                     );
                     Ok(m)
                 })
-                .unwrap();
-            row
+                .unwrap()
         };
 
         let mut entry: std::collections::BTreeMap<String, serde_json::Value> =

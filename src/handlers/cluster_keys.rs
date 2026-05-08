@@ -89,16 +89,8 @@ pub fn classify_summary(summary: &str) -> Option<&'static str> {
 // CLI handlers
 // ---------------------------------------------------------------------------
 
-/// `stores observations clusters` — single-shot grouping of open/ready
-/// observations by cluster_key.
-pub fn run_clusters_cmd(
-    _schema: &Schema,
-    conn: &Connection,
-    matches: &ArgMatches,
-    _invoker: InvokerCtx,
-) -> Result<()> {
-    let json_flag = matches.get_flag("json");
-
+/// Pure bucket builder — extracted for testability.
+pub(crate) fn build_clusters(conn: &Connection) -> Result<Vec<Bucket>> {
     let mut stmt = conn.prepare(
         "SELECT display_id, cluster_key, captured_at, summary \
          FROM observations \
@@ -128,19 +120,32 @@ pub fn run_clusters_cmd(
             .push((display_id, captured_at, summary));
     }
 
-    // Sort buckets: descending count; ties by key name; (uncategorized) always last.
+    // Sort buckets: descending count; ties broken by key name.
     let mut buckets: Vec<Bucket> = bucket_map.into_iter().collect();
     buckets.sort_by(|(ka, va), (kb, vb)| {
-        let a_uncat = ka == "(uncategorized)";
-        let b_uncat = kb == "(uncategorized)";
-        if a_uncat && !b_uncat {
-            std::cmp::Ordering::Greater
-        } else if !a_uncat && b_uncat {
-            std::cmp::Ordering::Less
-        } else {
-            vb.len().cmp(&va.len()).then_with(|| ka.cmp(kb))
-        }
+        vb.len().cmp(&va.len()).then_with(|| ka.cmp(kb))
     });
+    Ok(buckets)
+}
+
+/// `stores observations clusters` — single-shot grouping of open/ready
+/// observations by cluster_key.
+pub fn run_clusters_cmd(
+    _schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    _invoker: InvokerCtx,
+) -> Result<()> {
+    run_clusters_cmd_to(conn, matches, &mut std::io::stdout())
+}
+
+pub(crate) fn run_clusters_cmd_to(
+    conn: &Connection,
+    matches: &ArgMatches,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
+    let json_flag = matches.get_flag("json");
+    let buckets = build_clusters(conn)?;
 
     if json_flag {
         let json_buckets: Vec<serde_json::Value> = buckets
@@ -165,12 +170,12 @@ pub fn run_clusters_cmd(
             })
             .collect();
         let obj = serde_json::json!({ "buckets": json_buckets });
-        println!("{}", serde_json::to_string_pretty(&obj)?);
+        writeln!(out, "{}", serde_json::to_string_pretty(&obj)?)?;
     } else {
         for (key, rows) in &buckets {
-            println!("{key} ({})", rows.len());
+            writeln!(out, "{key} ({})", rows.len())?;
             for (display_id, captured_at, summary) in rows.iter().take(5) {
-                println!("  {display_id} {captured_at} {summary}");
+                writeln!(out, "  {display_id} {captured_at} {summary}")?;
             }
         }
     }
@@ -381,15 +386,11 @@ mod tests {
 
     // ---- clusters cmd: 3+2+5 fixture (AC1.5) ----
 
-    #[test]
-    fn clusters_fixture_3_2_5() {
-        let conn = Connection::open_in_memory().unwrap();
-        install_schemas(&conn);
-
+    fn setup_3_2_5_fixture(conn: &Connection) {
         // 3 deploy-blocked rows (status=open)
         for i in 0..3u32 {
             insert_observation(
-                &conn,
+                conn,
                 &format!("L{:03}", i + 1),
                 "open",
                 Some("deploy-blocked-merge-conflict"),
@@ -401,7 +402,7 @@ mod tests {
         // 2 silent-zombie rows (status=ready)
         for i in 0..2u32 {
             insert_observation(
-                &conn,
+                conn,
                 &format!("L{:03}", i + 4),
                 "ready",
                 Some("silent-zombie-watchdog"),
@@ -413,7 +414,7 @@ mod tests {
         // 5 untagged (cluster_key=NULL, status=open)
         for i in 0..5u32 {
             insert_observation(
-                &conn,
+                conn,
                 &format!("L{:03}", i + 6),
                 "open",
                 None,
@@ -422,32 +423,76 @@ mod tests {
                 "untagged summary",
             );
         }
+    }
 
-        // Verify bucket counts via direct query
-        let mut bucket_map: std::collections::BTreeMap<String, usize> =
-            std::collections::BTreeMap::new();
-        let rows: Vec<(Option<String>,)> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT cluster_key FROM observations WHERE status IN ('open','ready')",
-                )
-                .unwrap();
-            stmt.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?,)))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
-        for (ck,) in &rows {
-            let key = ck.clone().unwrap_or_else(|| "(uncategorized)".to_string());
-            *bucket_map.entry(key).or_insert(0) += 1;
-        }
-        assert_eq!(bucket_map.len(), 3, "expected 3 buckets: {bucket_map:?}");
-        assert_eq!(bucket_map["deploy-blocked-merge-conflict"], 3);
-        assert_eq!(bucket_map["silent-zombie-watchdog"], 2);
-        assert_eq!(bucket_map["(uncategorized)"], 5);
-
-        // Verify the cmd itself returns Ok (AC1.8: no --watch)
+    #[test]
+    fn clusters_fixture_3_2_5_text_output() {
         use clap::{Arg, ArgAction, Command};
+        let conn = Connection::open_in_memory().unwrap();
+        install_schemas(&conn);
+        setup_3_2_5_fixture(&conn);
+
+        // Text output: descending count order — (uncategorized)(5), deploy-blocked(3), silent-zombie(2)
+        let cmd = Command::new("clusters")
+            .arg(Arg::new("json").long("json").action(ArgAction::SetTrue));
+        let matches = cmd.get_matches_from(["clusters"]);
+        let mut out = Vec::<u8>::new();
+        run_clusters_cmd_to(&conn, &matches, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        // First bucket header must be (uncategorized) (5) — highest count
+        let lines: Vec<&str> = text.lines().collect();
+        let headers: Vec<&str> = lines.iter().copied().filter(|l| !l.starts_with("  ")).collect();
+        assert_eq!(headers.len(), 3, "expected 3 bucket headers: {text}");
+        assert!(
+            headers[0].starts_with("(uncategorized) (5)"),
+            "first bucket must be (uncategorized)(5), got: {}",
+            headers[0]
+        );
+        assert!(
+            headers[1].starts_with("deploy-blocked-merge-conflict (3)"),
+            "second bucket must be deploy-blocked(3), got: {}",
+            headers[1]
+        );
+        assert!(
+            headers[2].starts_with("silent-zombie-watchdog (2)"),
+            "third bucket must be silent-zombie(2), got: {}",
+            headers[2]
+        );
+    }
+
+    #[test]
+    fn clusters_fixture_3_2_5_json_output() {
+        use clap::{Arg, ArgAction, Command};
+        let conn = Connection::open_in_memory().unwrap();
+        install_schemas(&conn);
+        setup_3_2_5_fixture(&conn);
+
+        // JSON output: buckets array length 3, correct order and counts
+        let cmd = Command::new("clusters")
+            .arg(Arg::new("json").long("json").action(ArgAction::SetTrue));
+        let matches = cmd.get_matches_from(["clusters", "--json"]);
+        let mut out = Vec::<u8>::new();
+        run_clusters_cmd_to(&conn, &matches, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .expect("--json output must be valid JSON");
+        let buckets = v["buckets"].as_array().expect("buckets must be array");
+        assert_eq!(buckets.len(), 3, "expected 3 buckets in JSON");
+        assert_eq!(buckets[0]["cluster_key"].as_str().unwrap(), "(uncategorized)");
+        assert_eq!(buckets[0]["count"].as_u64().unwrap(), 5);
+        assert_eq!(buckets[1]["cluster_key"].as_str().unwrap(), "deploy-blocked-merge-conflict");
+        assert_eq!(buckets[1]["count"].as_u64().unwrap(), 3);
+        assert_eq!(buckets[2]["cluster_key"].as_str().unwrap(), "silent-zombie-watchdog");
+        assert_eq!(buckets[2]["count"].as_u64().unwrap(), 2);
+    }
+
+    #[test]
+    fn clusters_exits_cleanly_no_watch() {
+        // AC1.8: run_clusters_cmd returns Ok without --watch
+        use clap::{Arg, ArgAction, Command};
+        let conn = Connection::open_in_memory().unwrap();
+        install_schemas(&conn);
         let schema = Schema::from_yaml(OBSERVATIONS_YAML).unwrap();
         let cmd = Command::new("clusters")
             .arg(Arg::new("json").long("json").action(ArgAction::SetTrue));

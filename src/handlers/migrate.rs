@@ -98,7 +98,7 @@ pub fn compute_plan(
         }
 
         // Orphaned: columns in DB not in schema (skip reserved — they belong).
-        for (name, _) in &live_cols {
+        for name in live_cols.keys() {
             if expected_names.contains(name.as_str()) {
                 continue;
             }

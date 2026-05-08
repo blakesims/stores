@@ -363,7 +363,7 @@ fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
             Some(id) => {
                 let task = fetch_task(&conn, id)?;
                 let key = task.state_key();
-                if should_print(prev_keys.get(id).map(|k| k), &key) {
+                if should_print(prev_keys.get(id), &key) {
                     println!("{}", compute_status_frame(&task));
                     prev_keys.insert(id.clone(), key.clone());
                 }
@@ -376,7 +376,7 @@ fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
                 // Print multi-frame if any task state changed
                 let any_changed = tasks.iter().any(|t| {
                     let key = t.state_key();
-                    should_print(prev_keys.get(&t.display_id).map(|k| k), &key)
+                    should_print(prev_keys.get(&t.display_id), &key)
                 });
                 if any_changed {
                     println!("{}", compute_multi_frame(&tasks));

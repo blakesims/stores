@@ -4,14 +4,14 @@
 //!
 //!   * `observations add --lock-contract --invoker human`
 //!     → walks open→investigating→confirmed and the framework auto-ratify
-//!       hook fires confirmed→ready (Phase 1 + Phase 2).
+//!     hook fires confirmed→ready (Phase 1 + Phase 2).
 //!   * `poll_once` with the production agents.yaml fixture →
 //!     `builtin:auto-promote` mints a tasks row at `planning` with
-//!       `linked_observations` populated and `obs.task_id` back-linked
-//!       (Phase 3); `builtin:auto-scaffold` then sees the synthetic
-//!       ''→planning create transition and runs the configured shell
-//!       command, parses the last stdout line, and writes
-//!       `tasks.workspace_path` (Phase 4).
+//!     `linked_observations` populated and `obs.task_id` back-linked
+//!     (Phase 3); `builtin:auto-scaffold` then sees the synthetic
+//!     ''→planning create transition and runs the configured shell
+//!     command, parses the last stdout line, and writes
+//!     `tasks.workspace_path` (Phase 4).
 //!   * Re-running `poll_once` is a no-op: auto-promote does not duplicate
 //!     the tasks row and auto-scaffold does not re-run the command.
 

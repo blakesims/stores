@@ -483,6 +483,7 @@ fn scalar_col_def(field_name: &str, ty: &FieldType) -> Option<String> {
 /// - JSON number/bool → SQL literal (numbers as-is, bool → 0/1)
 /// - JSON array/object → JSON-encoded, wrapped in single-quote SQL literal
 ///   (intent: `DEFAULT '[]'` for list:text fields with `default: '[]'`).
+///
 /// (T052 P1)
 pub(crate) fn default_clause(field: &Field) -> Option<String> {
     let v = field.default.as_ref()?;

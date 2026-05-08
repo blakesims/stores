@@ -261,6 +261,7 @@ fn validate_observations_cluster_key(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_field_recursive(
     field: &crate::schema::Field,
     entry: &EntryMap,
@@ -484,6 +485,7 @@ fn push_invalid_shape(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_field(
     field: &crate::schema::Field,
     entry: &EntryMap,

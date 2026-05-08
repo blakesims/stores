@@ -107,7 +107,7 @@ pub fn run(
     // and its tier so the user can pass --tier-hint explicitly. Missing
     // observation rows produce a stderr warning and are excluded from the
     // tier set (soft-FK semantics; AC3.5).
-    if schema.name == "tasks" && entry.get("tier_hint").is_none() {
+    if schema.name == "tasks" && !entry.contains_key("tier_hint") {
         if let Some(Value::Array(linked)) = entry.get("linked_observations").cloned() {
             if !linked.is_empty() {
                 let mut found: Vec<(String, Option<String>)> = Vec::new();
@@ -686,6 +686,7 @@ pub(crate) fn add_row_in_tx_with_authority(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use crate::db;
     use crate::schema::actor::Actor;
     use crate::schema::Schema;

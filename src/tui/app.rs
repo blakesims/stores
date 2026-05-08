@@ -460,6 +460,17 @@ impl App {
     }
 }
 
+fn local_clock_string() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02} UTC")
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::data::TaskRow;
@@ -497,15 +508,4 @@ mod tests {
         assert!(is_terminal_task_status("rejected"));
         assert!(!is_terminal_task_status("executing"));
     }
-}
-
-fn local_clock_string() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{h:02}:{m:02}:{s:02} UTC")
 }
