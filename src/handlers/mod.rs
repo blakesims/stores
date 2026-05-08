@@ -1,4 +1,5 @@
 pub mod add;
+pub mod recover_stale_base;
 pub mod agents_backfill;
 pub mod agents_run;
 pub mod agents_stop;

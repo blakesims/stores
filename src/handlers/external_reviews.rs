@@ -339,7 +339,7 @@ fn resolve_sha(repo: &Path, rev: &str, label: &str) -> std::result::Result<Strin
         })
 }
 
-fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
