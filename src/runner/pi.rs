@@ -412,6 +412,9 @@ mod tests {
 
     #[test]
     fn writes_transcript() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
         let runs = tempfile::tempdir().unwrap();
         std::env::set_var("STORES_RUNS_DIR", runs.path());
         let sid = "pi-transcript-test";
