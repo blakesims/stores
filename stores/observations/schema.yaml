@@ -343,6 +343,26 @@ fields:
     required: false
     description: "Display id of the linked task (e.g. T123); soft-FK, no referential guard (T010)"
 
+  # --- Auto-file cascade dedup metadata (framework-written) ---
+  - name: summary_signature
+    type: text
+    required: false
+    actor: framework
+    description: "Normalized summary equivalence class for opt-in framework auto-file dedup."
+
+  - name: dupe_count
+    type: integer
+    required: false
+    default: 1
+    actor: framework
+    description: "Number of auto-file occurrences folded into this open keeper."
+
+  - name: last_seen
+    type: timestamp
+    required: false
+    actor: framework
+    description: "Most recent occurrence timestamp folded into this keeper."
+
   # --- Concurrency primitive (actor:framework, mirrors tasks claimed_by pattern, per D5) ---
   - name: locked_by
     type: text
