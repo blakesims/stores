@@ -1,8 +1,15 @@
-//! `builtin:user-escalation` — default deploy_blocked handler.
+//! `builtin:user-escalation` — deploy_blocked and silent_zombie handler.
 //!
-//! Files a substrate observation pointing at the blocked task with conflict
-//! context, then fires `ntfy`. Pure side-effect; the row stays `deploy_blocked`
-//! awaiting human `resume`.
+//! Files a substrate observation pointing at the blocked task with context
+//! drawn from `row.status`, then fires `ntfy`. Pure side-effect; the row stays
+//! in its current status awaiting human `resume`.
+//!
+//! Two templates are emitted based on `row.status`:
+//! - `deploy_blocked` — "deploy-blocked: merge conflict" (existing path, no change)
+//! - `blocked` — "drive-failed: silent_zombie" (added for L512/T113; this is the
+//!   status written by the watchdog gate shipped in L511/T112 at 42b1e79 when a
+//!   `silent_zombie_pid_dead` event triggers `mark_drive_failed`; evidence rows
+//!   L509/T110 and L510/T111 were mis-framed as merge conflicts before this fix)
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -15,12 +22,13 @@ use crate::handlers::row::now_iso8601;
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let display_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
     let branch = row.get("branch").and_then(|v| v.as_str()).unwrap_or("");
+    let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("deploy_blocked");
     let blocked_reason = row
         .get("blocked_reason")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let new_obs_id = file_observation(ctx.conn, display_id, branch, blocked_reason)
+    let new_obs_id = file_observation(ctx.conn, display_id, branch, blocked_reason, status)
         .context("filing user-escalation observation")?;
 
     let event = NotifyEvent {
@@ -56,6 +64,7 @@ fn file_observation(
     task_display_id: &str,
     branch: &str,
     blocked_reason: &str,
+    status: &str,
 ) -> Result<String> {
     file_observation_for_source(
         conn,
@@ -63,20 +72,57 @@ fn file_observation(
         task_display_id,
         branch,
         blocked_reason,
+        status,
     )
 }
 
+/// Build and insert a user-escalation observation row for the given task.
+///
+/// Template selection is driven by `status`:
+/// - `"deploy_blocked"` → "deploy-blocked: merge conflict" summary; body cites
+///   accept-merge conflict and specialist-intervention recovery path. This is
+///   the original path (subscription-fired via agents.yaml `deploy_blocked`
+///   hook) and is preserved verbatim.
+/// - `"blocked"` (and any other status) → "drive-failed: silent_zombie" summary;
+///   body cites watchdog-fired mark_drive_failed and `stores tasks resume` as the
+///   recovery path. This path was added in L512/T113 to fix mis-framed
+///   observations L509/T110 and L510/T111, which were triggered by the silent_zombie
+///   watchdog gate shipped in L511/T112 (commit 42b1e79).
+///
+/// Dedup via `summary_signature` is per-branch so a deploy_blocked row and a
+/// silent_zombie row for the same task produce independent keeper observations.
 fn file_observation_for_source(
     conn: &Connection,
     source_class: &ObservationSourceClass,
     task_display_id: &str,
     branch: &str,
     blocked_reason: &str,
+    status: &str,
 ) -> Result<String> {
-    let summary = format!(
-        "deploy-blocked: task {} merge conflict on branch '{}'",
-        task_display_id, branch
-    );
+    let (summary, body) = if status == "blocked" {
+        let s = format!(
+            "drive-failed: task {} silent_zombie on branch '{}'",
+            task_display_id, branch
+        );
+        let b = format!(
+            "Task {task_display_id} is blocked after drive failed with a silent_zombie event \
+             (zombie process detected on branch '{branch}').\n\nDetails:\n{blocked_reason}\n\n\
+             Resume after diagnosing with: stores tasks resume {task_display_id}"
+        );
+        (s, b)
+    } else {
+        let s = format!(
+            "deploy-blocked: task {} merge conflict on branch '{}'",
+            task_display_id, branch
+        );
+        let b = format!(
+            "Task {task_display_id} is in deploy_blocked after accept-merge \
+             hit a conflict on branch '{branch}'.\n\nDetails:\n{blocked_reason}\n\n\
+             Resume after specialist intervention with: \
+             stores tasks resume {task_display_id}"
+        );
+        (s, b)
+    };
     let signature = normalize_summary_signature(&summary);
     let now = now_iso8601();
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -114,12 +160,6 @@ fn file_observation_for_source(
         .unwrap_or(0);
     let next_num = max_id + 1;
     let new_display_id = format!("L{:03}", next_num);
-    let body = format!(
-        "Task {task_display_id} is in deploy_blocked after accept-merge \
-         hit a conflict on branch '{branch}'.\n\nDetails:\n{blocked_reason}\n\n\
-         Resume after specialist intervention with: \
-         stores tasks resume {task_display_id}"
-    );
     let week = ops_week_label(&now);
 
     tx.execute(
@@ -148,6 +188,8 @@ fn normalize_summary_signature(summary: &str) -> String {
     let lower = summary.to_ascii_lowercase();
     if lower.starts_with("deploy-blocked:") && lower.contains("merge conflict") {
         "deploy-blocked: merge conflict".to_string()
+    } else if lower.starts_with("drive-failed:") && lower.contains("silent_zombie") {
+        "drive-failed: silent_zombie".to_string()
     } else {
         lower
             .split_whitespace()
@@ -205,7 +247,9 @@ mod tests {
     #[test]
     fn first_occurrence_inserts_keeper_with_dupe_count_one() {
         let conn = conn();
-        let id = file_observation(&conn, "T123", "feat/T123-x", "merge conflict").unwrap();
+        let id =
+            file_observation(&conn, "T123", "feat/T123-x", "merge conflict", "deploy_blocked")
+                .unwrap();
         assert_eq!(id, "L001");
         let (count, dupe_count, signature): (i64, i64, String) = conn
             .query_row(
@@ -222,8 +266,10 @@ mod tests {
     #[test]
     fn second_occurrence_folds_into_keeper() {
         let conn = conn();
-        let first = file_observation(&conn, "T123", "feat/T123-x", "one").unwrap();
-        let second = file_observation(&conn, "T123", "feat/T999-y", "two").unwrap();
+        let first =
+            file_observation(&conn, "T123", "feat/T123-x", "one", "deploy_blocked").unwrap();
+        let second =
+            file_observation(&conn, "T123", "feat/T999-y", "two", "deploy_blocked").unwrap();
         assert_eq!(second, first);
         let dupe_count: i64 = conn
             .query_row(
@@ -245,6 +291,7 @@ mod tests {
                 "T999",
                 &format!("feat/T999-cascade-{i}"),
                 "merge conflict",
+                "deploy_blocked",
             )
             .unwrap();
         }
@@ -262,16 +309,20 @@ mod tests {
     #[test]
     fn two_unrelated_tasks_do_not_collapse() {
         let conn = conn();
-        file_observation(&conn, "T123", "feat/shared", "merge conflict").unwrap();
-        file_observation(&conn, "T124", "feat/shared", "merge conflict").unwrap();
+        file_observation(&conn, "T123", "feat/shared", "merge conflict", "deploy_blocked")
+            .unwrap();
+        file_observation(&conn, "T124", "feat/shared", "merge conflict", "deploy_blocked")
+            .unwrap();
         assert_eq!(row_count(&conn), 2);
     }
 
     #[test]
     fn summary_with_different_task_id_in_branch_still_collapses_for_same_task() {
         let conn = conn();
-        file_observation(&conn, "T123", "feat/T123-a", "merge conflict").unwrap();
-        file_observation(&conn, "T123", "feat/T456-a", "merge conflict").unwrap();
+        file_observation(&conn, "T123", "feat/T123-a", "merge conflict", "deploy_blocked")
+            .unwrap();
+        file_observation(&conn, "T123", "feat/T456-a", "merge conflict", "deploy_blocked")
+            .unwrap();
         assert_eq!(row_count(&conn), 1);
         let dupe_count: i64 = conn
             .query_row("SELECT dupe_count FROM observations", [], |r| r.get(0))
@@ -286,10 +337,24 @@ mod tests {
             source: "dev",
             dedup_summary_signature: false,
         };
-        file_observation_for_source(&conn, &source, "T123", "feat/T123-a", "merge conflict")
-            .unwrap();
-        file_observation_for_source(&conn, &source, "T123", "feat/T123-b", "merge conflict")
-            .unwrap();
+        file_observation_for_source(
+            &conn,
+            &source,
+            "T123",
+            "feat/T123-a",
+            "merge conflict",
+            "deploy_blocked",
+        )
+        .unwrap();
+        file_observation_for_source(
+            &conn,
+            &source,
+            "T123",
+            "feat/T123-b",
+            "merge conflict",
+            "deploy_blocked",
+        )
+        .unwrap();
         assert_eq!(row_count(&conn), 2);
     }
 
@@ -300,9 +365,107 @@ mod tests {
             source: "qa",
             dedup_summary_signature: true,
         };
-        file_observation(&conn, "T123", "feat/T123-a", "merge conflict").unwrap();
-        file_observation_for_source(&conn, &qa_source, "T123", "feat/T123-b", "merge conflict")
+        file_observation(&conn, "T123", "feat/T123-a", "merge conflict", "deploy_blocked")
             .unwrap();
+        file_observation_for_source(
+            &conn,
+            &qa_source,
+            "T123",
+            "feat/T123-b",
+            "merge conflict",
+            "deploy_blocked",
+        )
+        .unwrap();
         assert_eq!(row_count(&conn), 2);
+    }
+
+    #[test]
+    fn deploy_blocked_status_produces_deploy_blocked_summary() {
+        let conn = conn();
+        let id = file_observation(
+            &conn,
+            "T110",
+            "feat/T110-silent-zombie",
+            "drive_failed:silent_zombie_pid_dead",
+            "deploy_blocked",
+        )
+        .unwrap();
+        assert_eq!(id, "L001");
+        let (summary, signature): (String, String) = conn
+            .query_row(
+                "SELECT summary, summary_signature FROM observations WHERE display_id='L001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            summary.starts_with("deploy-blocked:"),
+            "deploy_blocked status must produce deploy-blocked summary; got: {summary}"
+        );
+        assert_eq!(signature, "deploy-blocked: merge conflict");
+    }
+
+    #[test]
+    fn blocked_status_produces_drive_failed_summary() {
+        let conn = conn();
+        let id = file_observation(
+            &conn,
+            "T111",
+            "feat/T111-watchdog",
+            "drive_failed:silent_zombie_pid_dead",
+            "blocked",
+        )
+        .unwrap();
+        assert_eq!(id, "L001");
+        let (summary, signature, body): (String, String, String) = conn
+            .query_row(
+                "SELECT summary, summary_signature, body FROM observations WHERE display_id='L001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            summary.starts_with("drive-failed:"),
+            "blocked status must produce drive-failed summary; got: {summary}"
+        );
+        assert_eq!(signature, "drive-failed: silent_zombie");
+        assert!(
+            body.contains("stores tasks resume T111"),
+            "body must cite resume recovery path; got: {body}"
+        );
+    }
+
+    #[test]
+    fn deploy_blocked_and_silent_zombie_signatures_are_distinct() {
+        let conn = conn();
+        // File a deploy_blocked observation for T200
+        file_observation(&conn, "T200", "feat/T200-x", "conflict on a.rs", "deploy_blocked")
+            .unwrap();
+        // File a silent_zombie (blocked) observation for the same task T200
+        file_observation(
+            &conn,
+            "T200",
+            "feat/T200-x",
+            "drive_failed:silent_zombie_pid_dead",
+            "blocked",
+        )
+        .unwrap();
+        // Must NOT dedup: distinct signatures => two separate keeper rows
+        assert_eq!(
+            row_count(&conn),
+            2,
+            "deploy_blocked and silent_zombie observations for the same task must not dedup"
+        );
+        let signatures: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT summary_signature FROM observations ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(signatures[0], "deploy-blocked: merge conflict");
+        assert_eq!(signatures[1], "drive-failed: silent_zombie");
     }
 }
