@@ -78,6 +78,12 @@ Review the executor's changes against the contract directly. There is no phase d
 {{/if}}
 {{/if}}{{/if}}{{/each}}
 
+{{#if (gt current_cycle 1)}}
+## Re-review Context
+
+This is cycle {{current_cycle}} for the current phase after prior code-review backpressure. Verify that the latest executor submission fixes the prior findings; do not treat this as a first-pass review.
+
+{{/if}}
 ## Prior Review for This Phase (if revise cycle)
 {{#each cycles}}{{#if (eq this.phase ../current_phase)}}{{#if this.review}}{{#unless (eq this.cycle ../current_cycle)}}
 ### Cycle {{this.cycle}} Review

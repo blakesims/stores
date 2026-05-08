@@ -70,9 +70,22 @@ Implement the contract directly. There is no phase decomposition and no separate
 {{/if}}{{/each}}
 {{/if}}
 
-## Prior Code Reviews for This Phase
+## Revision Context for This Phase
 {{#each cycles}}{{#if (eq this.phase ../current_phase)}}{{#if this.review}}
-### Phase {{this.phase}} Cycle {{this.cycle}} Review
+### Prior Cycle {{this.cycle}}
+{{#if this.executor}}
+**Prior Executor Submission:**
+- **Summary:** {{this.executor.summary}}
+{{#if this.executor.commit}}- **Commit:** `{{this.executor.commit}}`{{/if}}
+{{#if this.executor.files_changed}}
+- **Files Changed:** {{#each this.executor.files_changed}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}}
+{{/if}}
+{{#if this.executor.notes}}
+- **Notes:** {{this.executor.notes}}
+{{/if}}
+{{/if}}
+
+**Code Review Backpressure:**
 - **Gate:** {{this.review.gate}}
 - **Summary:** {{this.review.summary}}
 {{#if this.review.details}}
@@ -82,6 +95,11 @@ Implement the contract directly. There is no phase decomposition and no separate
 - **Findings:** {{this.review.critical}} critical, {{this.review.major}} major, {{this.review.minor}} minor
 
 {{/if}}{{/if}}{{/each}}
+{{#if (gt current_cycle 1)}}
+You are in revision cycle {{current_cycle}} for this phase. Address the prior review backpressure above directly; do not re-implement unrelated scope.
+{{else}}
+_No prior code-review backpressure for this phase._
+{{/if}}
 
 ## Critical Actions (Checklist)
 1. **READ** the entire phase above before starting

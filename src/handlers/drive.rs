@@ -165,7 +165,10 @@ fn classify_runner_exit(out: &RunnerOutput) -> String {
     }
 
     let mut payload = serde_json::Map::new();
-    payload.insert("kind".to_string(), Value::String("runner_crash".to_string()));
+    payload.insert(
+        "kind".to_string(),
+        Value::String("runner_crash".to_string()),
+    );
     payload.insert("exit_code".to_string(), Value::from(out.exit_code as i64));
     serde_json::to_string(&Value::Object(payload)).unwrap_or_else(|_| "{}".to_string())
 }
@@ -234,7 +237,9 @@ fn normalize_rate_limit_provider(lower: &str) -> String {
 }
 
 fn extract_iso8601(s: &str) -> Option<String> {
-    for token in s.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | ')' | '(')) {
+    for token in
+        s.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | ')' | '('))
+    {
         let t = token.trim_matches(|c: char| c == ':' || c == '[' || c == ']');
         if t.len() >= 20
             && t.as_bytes().get(4) == Some(&b'-')
@@ -272,7 +277,9 @@ fn epoch_to_iso8601(epoch: i64) -> Option<String> {
 }
 
 fn iso8601_add_secs(base: &str, secs: u64) -> Option<String> {
-    let epoch = parse_iso8601_to_epoch(base)?.saturating_add(secs as i64).max(0) as u64;
+    let epoch = parse_iso8601_to_epoch(base)?
+        .saturating_add(secs as i64)
+        .max(0) as u64;
     epoch_to_iso8601(epoch as i64)
 }
 
@@ -302,27 +309,72 @@ fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     let mut days = total_hr / 24;
     let mut year = 1970u32;
     loop {
-        let dy = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 366 } else { 365 };
-        if days < dy { break; }
+        let dy = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if days < dy {
+            break;
+        }
         days -= dy;
         year += 1;
     }
     let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    let dim = [31u64, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let dim = [
+        31u64,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 0usize;
     while month < 12 && days >= dim[month] {
         days -= dim[month];
         month += 1;
     }
-    (year, (month + 1) as u32, (days + 1) as u32, h as u32, mi as u32, s as u32)
+    (
+        year,
+        (month + 1) as u32,
+        (days + 1) as u32,
+        h as u32,
+        mi as u32,
+        s as u32,
+    )
 }
 
 fn ymd_hms_to_epoch(y: u32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
-    fn is_leap(y: u32) -> bool { (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) }
-    fn days_in_month(y: u32, m: u32) -> u32 { match m { 1|3|5|7|8|10|12 => 31, 4|6|9|11 => 30, 2 => if is_leap(y) { 29 } else { 28 }, _ => 0 } }
+    fn is_leap(y: u32) -> bool {
+        (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+    }
+    fn days_in_month(y: u32, m: u32) -> u32 {
+        match m {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 => {
+                if is_leap(y) {
+                    29
+                } else {
+                    28
+                }
+            }
+            _ => 0,
+        }
+    }
     let mut days: i64 = 0;
-    for yy in 1970..y { days += if is_leap(yy) { 366 } else { 365 }; }
-    for mm in 1..mo { days += days_in_month(y, mm) as i64; }
+    for yy in 1970..y {
+        days += if is_leap(yy) { 366 } else { 365 };
+    }
+    for mm in 1..mo {
+        days += days_in_month(y, mm) as i64;
+    }
     days += d.saturating_sub(1) as i64;
     days * 86_400 + h as i64 * 3600 + mi as i64 * 60 + s as i64
 }
@@ -610,7 +662,8 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
             .map(|(idx, item)| {
                 // Required fields: caller/fixture supplies them; synthesize only as
                 // last resort for transcript_path when fixture omits it entirely.
-                let mut telemetry = crate::runner::AgentRunTelemetry::with_mock_defaults(&synthetic_runs_dir);
+                let mut telemetry =
+                    crate::runner::AgentRunTelemetry::with_mock_defaults(&synthetic_runs_dir);
                 if item.model_id.is_some() {
                     telemetry.model_id = item.model_id;
                 }
@@ -1165,34 +1218,31 @@ fn drive_loop_with_role_runner(
             // in context.rs — render must stay pure). Pass it as a context overlay
             // so the template can use {{git_diff_summary}} without polluting the
             // pure build_context path.
-            let overlay: std::collections::HashMap<String, serde_json::Value> =
-                if agent_role == "wrap" {
-                    // Extract the first executor commit from cycles[] for fallback.
-                    let first_commit = entry
-                        .get("cycles")
-                        .and_then(|v| v.as_array())
-                        .and_then(|arr| arr.first())
-                        .and_then(|c| c.get("executor"))
-                        .and_then(|e| e.get("commit"))
-                        .and_then(|c| c.as_str())
-                        .map(|s| s.to_string());
+            let mut overlay =
+                crate::handlers::brief::build_source_observation_overlay(conn, &entry)?;
+            if agent_role == "wrap" {
+                // Extract the first executor commit from cycles[] for fallback.
+                let first_commit = entry
+                    .get("cycles")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|c| c.get("executor"))
+                    .and_then(|e| e.get("commit"))
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string());
 
-                    let branch = entry
-                        .get("branch")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                let branch = entry
+                    .get("branch")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
 
-                    let diff_summary =
-                        compute_git_diff_summary(branch.as_deref(), first_commit.as_deref());
-                    let mut m = std::collections::HashMap::new();
-                    m.insert(
-                        "git_diff_summary".to_string(),
-                        serde_json::Value::String(diff_summary),
-                    );
-                    m
-                } else {
-                    std::collections::HashMap::new()
-                };
+                let diff_summary =
+                    compute_git_diff_summary(branch.as_deref(), first_commit.as_deref());
+                overlay.insert(
+                    "git_diff_summary".to_string(),
+                    serde_json::Value::String(diff_summary),
+                );
+            }
 
             render_template_with_overlay(tpl_content, &ctx, &overlay)?
         };
@@ -2349,7 +2399,11 @@ mod tests {
         .expect("first submit-execute must succeed");
 
         let cycles = read_cycles_for(&conn, &schema, "T001");
-        assert_eq!(cycles.len(), 1, "first submit must produce exactly one cycle entry");
+        assert_eq!(
+            cycles.len(),
+            1,
+            "first submit must produce exactly one cycle entry"
+        );
         assert_eq!(
             cycles[0]["executor"]["transcript_path"].as_str(),
             Some(tp.as_str()),
@@ -2441,10 +2495,19 @@ mod tests {
         // pi runner → pi:default
         assert_eq!(derive_spawn_fail_model_id("pi"), "pi:default");
         // claude-code with model suffix → preserve as claude_code:<model>
-        assert_eq!(derive_spawn_fail_model_id("claude-code:opus"), "claude_code:opus");
-        assert_eq!(derive_spawn_fail_model_id("claude-code:sonnet"), "claude_code:sonnet");
+        assert_eq!(
+            derive_spawn_fail_model_id("claude-code:opus"),
+            "claude_code:opus"
+        );
+        assert_eq!(
+            derive_spawn_fail_model_id("claude-code:sonnet"),
+            "claude_code:sonnet"
+        );
         // claude-code without model suffix → claude_code:unknown
-        assert_eq!(derive_spawn_fail_model_id("claude-code"), "claude_code:unknown");
+        assert_eq!(
+            derive_spawn_fail_model_id("claude-code"),
+            "claude_code:unknown"
+        );
         // unknown runner → <name>:unknown
         assert_eq!(derive_spawn_fail_model_id("custom"), "custom:unknown");
     }
@@ -2463,7 +2526,13 @@ mod tests {
 
         // Pre-create per-role transcript files so transcript_path is a real
         // existing path for every submit row (Finding 3).
-        let role_names = ["planner", "plan_reviewer", "executor", "code_reviewer", "wrap"];
+        let role_names = [
+            "planner",
+            "plan_reviewer",
+            "executor",
+            "code_reviewer",
+            "wrap",
+        ];
         for role in &role_names {
             let p = runs_dir.join(format!("{role}.jsonl"));
             std::fs::write(&p, "{}\n").unwrap();
@@ -2499,9 +2568,7 @@ mod tests {
             tokens_in: Some(10),
             tokens_out: Some(20),
             prompt_cache_hits: Some(0),
-            transcript_path: Some(
-                runs_dir.join(format!("{role}.jsonl")).display().to_string(),
-            ),
+            transcript_path: Some(runs_dir.join(format!("{role}.jsonl")).display().to_string()),
             stderr_log_path: None,
         };
 
@@ -2511,10 +2578,12 @@ mod tests {
         let mut plan_reviewer_out = make_run_output(plan_reviewer_fixture_json(), 0);
         plan_reviewer_out.telemetry = make_telemetry("plan_reviewer");
 
-        let mut executor_out = make_run_output_with_session(executor_fixture_json(), 0, "happy-exec-session");
+        let mut executor_out =
+            make_run_output_with_session(executor_fixture_json(), 0, "happy-exec-session");
         executor_out.telemetry = make_telemetry("executor");
 
-        let mut code_reviewer_out = make_run_output_with_session(code_reviewer_fixture_json(), 0, "happy-review-session");
+        let mut code_reviewer_out =
+            make_run_output_with_session(code_reviewer_fixture_json(), 0, "happy-review-session");
         code_reviewer_out.telemetry = make_telemetry("code_reviewer");
 
         let mut wrap_out = make_run_output(wrap_fixture_json(), 0);
@@ -2581,7 +2650,10 @@ mod tests {
             assert!(row.1 >= 0, "phase populated: {role}");
             assert!(row.2 >= 0, "cycle populated: {role}");
             assert!(!row.4.is_empty(), "model_id non-empty: {role}");
-            assert_ne!(row.4, "legacy_unknown", "model_id not fallback for new rows: {role}");
+            assert_ne!(
+                row.4, "legacy_unknown",
+                "model_id not fallback for new rows: {role}"
+            );
             assert_eq!(row.5, "mock", "harness_id: {role}");
             assert!(!row.6.is_empty(), "started_at populated: {role}");
             assert!(!row.7.is_empty(), "ended_at populated: {role}");
@@ -2936,7 +3008,11 @@ mod tests {
             .expect("wrap dispatch at in_review must succeed");
 
         // Runner fully drained — wrap was consumed.
-        assert_eq!(runner.remaining_count(), 0, "wrap response must be consumed");
+        assert_eq!(
+            runner.remaining_count(),
+            0,
+            "wrap response must be consumed"
+        );
 
         // T067 r5: lock must be closed terminal-ok (no infinite re-dispatch).
         let (finished_at, last_status, terminal_reason): (
@@ -3218,8 +3294,17 @@ mod tests {
             "anthropic-api HTTP 429 rate limit; Retry-After: 60",
             None,
         ));
-        assert!(anthropic.starts_with("rate_limit:anthropic:"), "{anthropic}");
-        assert_eq!(anthropic.strip_prefix("rate_limit:anthropic:").unwrap().len(), 20);
+        assert!(
+            anthropic.starts_with("rate_limit:anthropic:"),
+            "{anthropic}"
+        );
+        assert_eq!(
+            anthropic
+                .strip_prefix("rate_limit:anthropic:")
+                .unwrap()
+                .len(),
+            20
+        );
 
         let codex = classify_runner_exit(&out("rate_limit_error: please retry later", "", None));
         assert!(codex.starts_with("rate_limit:codex:"), "{codex}");
@@ -3263,10 +3348,19 @@ mod tests {
         let runner = MockRunner::new(vec![fail_out]);
         let _ = drive_loop(&schema, &conn, "T429", &runner, 50).unwrap_err();
         let (_, after) = crate::handlers::row::read_row(&schema, &conn, "T429").unwrap();
-        assert_eq!(after.get("status").and_then(|v| v.as_str()), Some("blocked"));
-        let reason = after.get("blocked_reason").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(
+            after.get("status").and_then(|v| v.as_str()),
+            Some("blocked")
+        );
+        let reason = after
+            .get("blocked_reason")
+            .and_then(|v| v.as_str())
+            .unwrap();
         assert!(reason.starts_with("rate_limit:anthropic:"), "{reason}");
-        assert_eq!(reason.strip_prefix("rate_limit:anthropic:").unwrap().len(), 20);
+        assert_eq!(
+            reason.strip_prefix("rate_limit:anthropic:").unwrap().len(),
+            20
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -3306,18 +3400,24 @@ mod tests {
         );
 
         // Synthetic agent_runs row must exist with exit_code = LAUNCH_ERROR_EXIT_CODE (-1).
-        let (exit_code, model_id, harness_id, transcript_path): (i64, String, String, String) = conn
-            .query_row(
+        let (exit_code, model_id, harness_id, transcript_path): (i64, String, String, String) =
+            conn.query_row(
                 "SELECT exit_code, model_id, harness_id, transcript_path \
                  FROM agent_runs WHERE display_id='T001' AND role='planner'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .expect("synthetic agent_runs row must be inserted on spawn failure");
-        assert_eq!(exit_code, -1, "exit_code must be LAUNCH_ERROR_EXIT_CODE (-1)");
+        assert_eq!(
+            exit_code, -1,
+            "exit_code must be LAUNCH_ERROR_EXIT_CODE (-1)"
+        );
         assert!(!model_id.is_empty(), "model_id must be non-empty");
         assert!(!harness_id.is_empty(), "harness_id must be non-empty");
-        assert!(!transcript_path.is_empty(), "transcript_path must be non-empty");
+        assert!(
+            !transcript_path.is_empty(),
+            "transcript_path must be non-empty"
+        );
 
         // Transcript file must exist and contain the error content.
         let tp = std::path::Path::new(&transcript_path);
@@ -3332,8 +3432,8 @@ mod tests {
             tp.display()
         );
         let content = std::fs::read_to_string(tp).expect("transcript must be readable");
-        let json: serde_json::Value = serde_json::from_str(&content)
-            .expect("spawn-error transcript must be valid JSON");
+        let json: serde_json::Value =
+            serde_json::from_str(&content).expect("spawn-error transcript must be valid JSON");
         assert_eq!(
             json.get("error").and_then(|v| v.as_str()),
             Some("spawn failed"),
@@ -3397,10 +3497,7 @@ mod tests {
             .get("blocked_reason")
             .and_then(|v| v.as_str())
             .expect("blocked_reason must be set");
-        assert_eq!(
-            reason_str,
-            "rate_limit:codex:2026-04-28T16:50:00Z"
-        );
+        assert_eq!(reason_str, "rate_limit:codex:2026-04-28T16:50:00Z");
     }
 
     // ---------------------------------------------------------------------------

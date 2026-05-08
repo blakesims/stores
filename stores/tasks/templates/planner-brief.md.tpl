@@ -59,8 +59,71 @@ The task has no `tier_hint`. Default to T3-style multi-phase decomposition, but 
 {{contract.assumptions}}
 {{/if}}
 
-## Prior Plan Reviews
+{{#if source_observations}}
+## Source Observation Context
+{{#each source_observations}}
+### {{this.display_id}} — {{this.summary}}
+{{#if this.intent_contract.type}}**Type:** {{this.intent_contract.type}}
+{{/if}}
+{{#if this.intent_contract.inputs}}
+**Inputs / Dependencies:**
+{{#each this.intent_contract.inputs}}
+- {{this}}
+{{/each}}
+{{/if}}
+{{#if this.intent_contract.known_solution}}
+**Known Solution / Prior Design Guidance:**
+{{this.intent_contract.known_solution}}
+{{/if}}
+{{#if this.intent_contract.touches}}
+**Touches:** {{#each this.intent_contract.touches}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
+{{/if}}
+{{#if this.intent_contract.affects_capability}}
+**Affects Capability:** {{this.intent_contract.affects_capability}}
+{{/if}}
+{{#if this.intent_contract.harden_log.decisions}}
+**Hardened Decisions:**
+{{#each this.intent_contract.harden_log.decisions}}
+- {{this.id}}: {{this.decision}}{{#if this.rationale}} — {{this.rationale}}{{/if}}
+{{/each}}
+{{/if}}
+
+{{/each}}
+{{/if}}
+
 {{#if plan_review_log}}
+## Revision Context
+
+You are revising a rejected plan. Do **not** reconstruct the previous plan from review comments alone; revise the rejected plan shown below against the review feedback.
+
+### Rejected Plan To Revise
+
+**Objective:** {{plan.objective}}
+
+{{#each plan.phases}}
+#### Phase {{add @index 1}}: {{this.name}}
+**Objective:** {{this.objective}}
+
+**Tasks:**
+{{#each this.tasks}}
+- {{this}}
+{{/each}}
+
+**Acceptance Criteria:**
+{{#each this.acceptance_criteria}}
+- {{this}}
+{{/each}}
+
+{{#if this.files}}
+**Files:** {{#each this.files}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}}
+{{/if}}
+{{#if this.dependencies}}
+**Dependencies:** {{#each this.dependencies}}{{this}}{{#unless @last}}, {{/unless}}{{/each}}
+{{/if}}
+
+{{/each}}
+
+## Prior Plan Reviews
 {{#each plan_review_log}}
 ### Review {{add @index 1}}
 - **Gate:** {{this.gate}}
@@ -74,6 +137,7 @@ The task has no `tier_hint`. Default to T3-style multi-phase decomposition, but 
 
 {{/each}}
 {{else}}
+## Prior Plan Reviews
 _No prior plan reviews._
 {{/if}}
 

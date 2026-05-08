@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::manifest::Manifest;
 use crate::paths::stores_dir_for;
-use crate::render::{build_context, render_template};
+use crate::render::{build_context, render_template_with_overlay};
 use crate::schema::{actor::InvokerCtx, Schema};
 
 use super::next_action::find_next_agent;
@@ -154,12 +154,73 @@ pub(crate) fn compute(
 
     // Build the render context and render the template.
     let ctx = build_context(schema, &entry);
-    let rendered = render_template(&template_text, &ctx)?;
+    let overlay = build_source_observation_overlay(conn, &entry)?;
+    let rendered = render_template_with_overlay(&template_text, &ctx, &overlay)?;
 
     Ok(BriefOutput {
         agent: agent_role,
         brief_markdown: rendered,
     })
+}
+
+pub(crate) fn build_source_observation_overlay(
+    conn: &Connection,
+    entry: &crate::validate::EntryMap,
+) -> Result<std::collections::HashMap<String, serde_json::Value>> {
+    let mut overlay = std::collections::HashMap::new();
+    let ids: Vec<String> = match entry.get("linked_observations") {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        Some(serde_json::Value::String(s)) => serde_json::from_str::<serde_json::Value>(s)
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    if ids.is_empty() {
+        overlay.insert(
+            "source_observations".to_string(),
+            serde_json::Value::Array(Vec::new()),
+        );
+        return Ok(overlay);
+    }
+
+    let mut observations = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT display_id, summary, intent_contract FROM observations WHERE display_id=?1",
+    )?;
+    for obs_id in ids {
+        let row = stmt.query_row(rusqlite::params![obs_id], |r| {
+            let display_id: String = r.get(0)?;
+            let summary: Option<String> = r.get(1).ok();
+            let intent_raw: Option<String> = r.get(2).ok();
+            Ok((display_id, summary.unwrap_or_default(), intent_raw))
+        });
+        let Ok((display_id, summary, intent_raw)) = row else {
+            continue;
+        };
+        let intent_contract = intent_raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        observations.push(serde_json::json!({
+            "display_id": display_id,
+            "summary": summary,
+            "intent_contract": intent_contract,
+        }));
+    }
+
+    overlay.insert(
+        "source_observations".to_string(),
+        serde_json::Value::Array(observations),
+    );
+    Ok(overlay)
 }
 
 pub fn run(
@@ -711,6 +772,86 @@ fields:
         );
     }
 
+    #[test]
+    fn planner_revision_brief_includes_rejected_plan() {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+        use crate::render::{build_context, render_template};
+
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .expect("tasks schema");
+        let schema = Schema::from_yaml(tasks_yaml).unwrap();
+
+        let mut entry = std::collections::BTreeMap::new();
+        entry.insert("display_id".to_string(), serde_json::json!("T123"));
+        entry.insert("status".to_string(), serde_json::json!("planning"));
+        entry.insert("title".to_string(), serde_json::json!("Revise Plan"));
+        entry.insert("slug".to_string(), serde_json::json!("revise-plan"));
+        entry.insert("tier_hint".to_string(), serde_json::json!("T3"));
+        entry.insert("current_phase".to_string(), serde_json::json!(0));
+        entry.insert("current_cycle".to_string(), serde_json::json!(0));
+        entry.insert(
+            "contract".to_string(),
+            serde_json::json!({
+                "done_when": "Done",
+                "scope_in": "In",
+                "scope_out": "Out"
+            }),
+        );
+        entry.insert(
+            "plan".to_string(),
+            serde_json::json!({
+                "objective": "UNIQUE_REJECTED_PLAN_OBJECTIVE",
+                "phases": [{
+                    "name": "Rejected Phase",
+                    "objective": "Rejected objective",
+                    "tasks": ["Rejected task"],
+                    "acceptance_criteria": ["Rejected AC"],
+                    "files": ["src/rejected.rs"],
+                    "dependencies": []
+                }]
+            }),
+        );
+        entry.insert(
+            "plan_review_log".to_string(),
+            serde_json::json!([{
+                "gate": "NEEDS_WORK",
+                "summary": "UNIQUE_REVIEW_BACKPRESSURE",
+                "open_questions": ["What about invariant X?"]
+            }]),
+        );
+        entry.insert("cycles".to_string(), serde_json::json!([]));
+
+        let templates = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, t)| *t)
+            .expect("tasks templates");
+        let tpl = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/planner-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("planner template");
+        let rendered = render_template(tpl, &build_context(&schema, &entry)).expect("render");
+
+        assert!(rendered.contains("## Revision Context"), "{rendered}");
+        assert!(
+            rendered.contains("UNIQUE_REJECTED_PLAN_OBJECTIVE"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Rejected task"), "{rendered}");
+        assert!(
+            rendered.contains("UNIQUE_REVIEW_BACKPRESSURE"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("reconstruct the previous plan"),
+            "{rendered}"
+        );
+    }
+
     // T060: executor and code-reviewer briefs are tier-aware. T1 uses the
     // contract as the plan; T3 keeps the existing phase-decomposition sections.
     #[test]
@@ -757,7 +898,10 @@ fields:
             let mut m = std::collections::BTreeMap::new();
             m.insert("display_id".to_string(), serde_json::json!("T001"));
             m.insert("status".to_string(), serde_json::json!("executing"));
-            m.insert("title".to_string(), serde_json::json!(format!("{tier} task")));
+            m.insert(
+                "title".to_string(),
+                serde_json::json!(format!("{tier} task")),
+            );
             m.insert("slug".to_string(), serde_json::json!("tier-task"));
             m.insert("current_phase".to_string(), serde_json::json!(1));
             m.insert("current_cycle".to_string(), serde_json::json!(1));
@@ -841,6 +985,120 @@ fields:
         assert!(
             !t3_cr.contains("contract-is-plan"),
             "T3 code-reviewer brief must not show T1 guidance: {t3_cr}"
+        );
+    }
+
+    #[test]
+    fn executor_and_code_reviewer_revision_briefs_call_out_backpressure() {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+        use crate::render::{build_context, render_template};
+
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .expect("tasks schema");
+        let schema = Schema::from_yaml(tasks_yaml).unwrap();
+        let templates = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, t)| *t)
+            .expect("tasks templates");
+        let executor_tpl = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/executor-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("executor template");
+        let cr_tpl = templates
+            .iter()
+            .find(|(p, _)| *p == "templates/code-reviewer-brief.md.tpl")
+            .map(|(_, c)| *c)
+            .expect("code reviewer template");
+
+        let mut entry = std::collections::BTreeMap::new();
+        entry.insert("display_id".to_string(), serde_json::json!("T124"));
+        entry.insert("status".to_string(), serde_json::json!("executing"));
+        entry.insert("title".to_string(), serde_json::json!("Revise Code"));
+        entry.insert("slug".to_string(), serde_json::json!("revise-code"));
+        entry.insert("tier_hint".to_string(), serde_json::json!("T3"));
+        entry.insert("current_phase".to_string(), serde_json::json!(1));
+        entry.insert("current_cycle".to_string(), serde_json::json!(2));
+        entry.insert(
+            "contract".to_string(),
+            serde_json::json!({"done_when":"Done","scope_in":"In","scope_out":"Out"}),
+        );
+        entry.insert(
+            "plan".to_string(),
+            serde_json::json!({
+                "objective": "Plan",
+                "phases": [{
+                    "name": "Phase One",
+                    "objective": "Do phase",
+                    "tasks": ["Task"],
+                    "acceptance_criteria": ["AC"],
+                    "files": [],
+                    "dependencies": []
+                }]
+            }),
+        );
+        entry.insert("plan_review_log".to_string(), serde_json::json!([]));
+        entry.insert(
+            "cycles".to_string(),
+            serde_json::json!([
+                {
+                    "phase": 1,
+                    "cycle": 1,
+                    "executor": {
+                        "summary": "UNIQUE_PRIOR_EXECUTOR_SUMMARY",
+                        "commit": "abc123",
+                        "files_changed": ["src/lib.rs"]
+                    },
+                    "review": {
+                        "gate": "REVISE",
+                        "summary": "UNIQUE_REVISE_SUMMARY",
+                        "details": "UNIQUE_REVISE_DETAILS",
+                        "critical": 0,
+                        "major": 1,
+                        "minor": 0
+                    }
+                },
+                {
+                    "phase": 1,
+                    "cycle": 2,
+                    "executor": {
+                        "summary": "UNIQUE_CURRENT_EXECUTOR_SUMMARY",
+                        "files_changed": ["src/lib.rs"]
+                    },
+                    "review": null
+                }
+            ]),
+        );
+
+        let ctx = build_context(&schema, &entry);
+        let executor = render_template(executor_tpl, &ctx).expect("executor render");
+        assert!(
+            executor.contains("## Revision Context for This Phase"),
+            "{executor}"
+        );
+        assert!(
+            executor.contains("UNIQUE_PRIOR_EXECUTOR_SUMMARY"),
+            "{executor}"
+        );
+        assert!(executor.contains("UNIQUE_REVISE_SUMMARY"), "{executor}");
+        assert!(executor.contains("revision cycle 2"), "{executor}");
+
+        let code_reviewer = render_template(cr_tpl, &ctx).expect("code reviewer render");
+        assert!(
+            code_reviewer.contains("## Re-review Context"),
+            "{code_reviewer}"
+        );
+        assert!(
+            code_reviewer.contains("UNIQUE_CURRENT_EXECUTOR_SUMMARY"),
+            "{code_reviewer}"
+        );
+        assert!(
+            code_reviewer.contains("UNIQUE_REVISE_DETAILS"),
+            "{code_reviewer}"
         );
     }
 
