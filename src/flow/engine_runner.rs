@@ -816,7 +816,7 @@ fn scan_tasks(
     let table = quote_ident(&schema.name);
     let sql = format!(
         "SELECT id, status, current_phase, current_cycle, tier_hint, plan, blocked_reason, drive_pid \
-         FROM {table} WHERE status IN ('planning','plan_review','ready','executing','code_review','complete','in_review')"
+         FROM {table} WHERE status IN ('planning','plan_review','ready','executing','code_review','complete','in_review','blocked')"
     );
     let mut stmt = conn.prepare(&sql).context("prepare task scanner")?;
     let mut out = Vec::new();
@@ -850,9 +850,10 @@ fn scan_tasks(
         entry.insert("current_phase".into(), opt_i64_value(current_phase));
         entry.insert("current_cycle".into(), opt_i64_value(current_cycle));
         entry.insert("tier_hint".into(), opt_string_value(tier_hint.clone()));
-        entry.insert("blocked_reason".into(), opt_string_value(blocked_reason));
+        entry.insert("blocked_reason".into(), opt_string_value(blocked_reason.clone()));
         entry.insert("plan".into(), parse_json_text(plan));
 
+        let rate_limit_until = blocked_reason.as_deref().and_then(rate_limit_blocked_until);
         let next_agent = workflow.and_then(|wf| find_next_agent(wf, &status, &entry));
         // Known limitation: drive_pid liveness uses kill(pid, 0) which does not
         // protect against PID reuse. If the OS reuses the PID for an unrelated
@@ -864,7 +865,14 @@ fn scan_tasks(
         let live_drive_owner = drive_pid
             .and_then(|pid| i32::try_from(pid).ok())
             .is_some_and(pid_is_alive);
-        let (classification, held_reason) = if let Some(_agent) = next_agent {
+        let (classification, held_reason) = if let Some(until) = rate_limit_until {
+            (
+                "held".to_string(),
+                Some(format!("rate_limit_cooldown_until:{until}")),
+            )
+        } else if status == "blocked" {
+            ("held".to_string(), Some("blocked".to_string()))
+        } else if let Some(_agent) = next_agent {
             if status == "in_review" {
                 (
                     "held".to_string(),
@@ -901,6 +909,16 @@ fn scan_tasks(
         });
     }
     Ok(out)
+}
+
+fn rate_limit_blocked_until(reason: &str) -> Option<&str> {
+    let rest = reason.strip_prefix("rate_limit:")?;
+    let (_provider, until) = rest.split_once(':')?;
+    if is_iso8601_cooldown(until) { Some(until) } else { None }
+}
+
+fn is_iso8601_cooldown(s: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(s).is_ok()
 }
 
 fn external_review_backfill_reason(conn: &Connection, task_row_id: i64) -> Result<Option<String>> {
@@ -1392,6 +1410,50 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn rate_limit_blocked_until_requires_strict_rfc3339_timestamp() {
+        assert_eq!(
+            rate_limit_blocked_until("rate_limit:anthropic:not-an-iso8601-timestamp"),
+            None
+        );
+        assert_eq!(
+            rate_limit_blocked_until("rate_limit:anthropic:2026-01-01T00:00:00junk+"),
+            None
+        );
+        assert_eq!(
+            rate_limit_blocked_until("rate_limit:anthropic:2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn rate_limit_blocked_task_is_held_with_cooldown_reason() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let row_id = insert_task(&conn, "T429", "blocked");
+        conn.execute(
+            "UPDATE tasks SET blocked_reason=?1 WHERE id=?2",
+            rusqlite::params!["rate_limit:anthropic:2099-01-01T00:00:00Z", row_id],
+        )
+        .unwrap();
+        let rows = scan_rows(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            "2026-05-07T00:00:00Z",
+            300,
+        )
+        .unwrap();
+        let row = rows.iter().find(|r| r.store == "tasks" && r.row_id == row_id).unwrap();
+        assert_eq!(row.classification, "held");
+        assert_eq!(
+            row.held_reason.as_deref(),
+            Some("rate_limit_cooldown_until:2099-01-01T00:00:00Z")
+        );
     }
 
     fn insert_intake(conn: &Connection, display_id: &str, status: &str) -> i64 {

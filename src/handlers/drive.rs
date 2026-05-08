@@ -146,26 +146,49 @@ fn write_spawn_error_transcript(
 // Runner-exit classification (T029)
 // ---------------------------------------------------------------------------
 
-/// Classify a non-zero runner exit into a structured `blocked_reason` payload.
+/// Classify a non-zero runner exit into a task `blocked_reason`.
 ///
-/// Returned string is JSON-encoded so the existing `text` `blocked_reason`
-/// column captures exit_code and (for rate-limit) the upstream reset epoch
-/// without a schema migration. Shape:
-///
-/// ```json
-/// {"kind":"rate_limit"|"runner_crash","exit_code":<i32>,"reset_at":<u64?>}
-/// ```
+/// Rate-limit exits return the T100 cooldown contract string
+/// `rate_limit:<provider>:<until-iso8601>`. Non-rate-limit crashes preserve the
+/// legacy JSON runner-crash payload containing `kind=runner_crash` and
+/// `exit_code`.
 ///
 /// Detection priority:
 /// 1. stream-json `rate_limit_event` whose `rate_limit_info.status != "allowed"`
-///    (mints `kind=rate_limit` + `reset_at` from `resetsAt`).
-/// 2. stderr substring match on `"rate limit"` / `"usage limit"` (no `reset_at`).
-/// 3. fall through to `kind=runner_crash`.
+///    (uses `resetsAt` as the cooldown when present).
+/// 2. stdout/stderr/payload_error signatures for HTTP 429, `Retry-After`,
+///    `rate_limit_error`, codex throttling text, anthropic-api 429s, or pi/provider 429s.
+/// 3. fall through to `kind=runner_crash` JSON.
 fn classify_runner_exit(out: &RunnerOutput) -> String {
-    let mut kind: &str = "runner_crash";
-    let mut reset_at: Option<i64> = None;
+    if let Some((provider, until)) = classify_rate_limit(out) {
+        return format!("rate_limit:{provider}:{until}");
+    }
 
-    for line in out.stdout.lines() {
+    let mut payload = serde_json::Map::new();
+    payload.insert("kind".to_string(), Value::String("runner_crash".to_string()));
+    payload.insert("exit_code".to_string(), Value::from(out.exit_code as i64));
+    serde_json::to_string(&Value::Object(payload)).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn classify_rate_limit(out: &RunnerOutput) -> Option<(String, String)> {
+    let haystack = format!(
+        "{}\n{}\n{}",
+        out.stdout,
+        out.stderr,
+        out.payload_error.as_deref().unwrap_or("")
+    );
+    let lower = haystack.to_lowercase();
+    let mut detected = lower.contains("http 429")
+        || lower.contains(" 429")
+        || lower.contains("429 ")
+        || lower.contains("rate_limit_error")
+        || lower.contains("retry-after")
+        || lower.contains("rate limit")
+        || lower.contains("rate-limit")
+        || lower.contains("usage limit");
+    let mut reset_epoch: Option<i64> = None;
+
+    for line in out.stdout.lines().chain(out.stderr.lines()) {
         let line = line.trim();
         if !line.starts_with('{') {
             continue;
@@ -174,35 +197,134 @@ fn classify_runner_exit(out: &RunnerOutput) -> String {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if v.get("type").and_then(|t| t.as_str()) != Some("rate_limit_event") {
-            continue;
+        if v.get("type").and_then(|t| t.as_str()) == Some("rate_limit_event") {
+            if let Some(info) = v.get("rate_limit_info") {
+                let status = info.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                if !status.is_empty() && status != "allowed" {
+                    detected = true;
+                    reset_epoch = info.get("resetsAt").and_then(|v| v.as_i64());
+                }
+            }
         }
-        let info = match v.get("rate_limit_info") {
-            Some(i) => i,
-            None => continue,
-        };
-        let status = info.get("status").and_then(|s| s.as_str()).unwrap_or("");
-        if !status.is_empty() && status != "allowed" {
-            kind = "rate_limit";
-            reset_at = info.get("resetsAt").and_then(|v| v.as_i64());
-            break;
-        }
+        reset_epoch = reset_epoch
+            .or_else(|| v.get("reset_at").and_then(|v| v.as_i64()))
+            .or_else(|| v.get("resetAt").and_then(|v| v.as_i64()))
+            .or_else(|| v.get("resetsAt").and_then(|v| v.as_i64()));
     }
 
-    if kind == "runner_crash" {
-        let s = out.stderr.to_lowercase();
-        if s.contains("rate limit") || s.contains("usage limit") {
-            kind = "rate_limit";
+    if !detected {
+        return None;
+    }
+    let provider = normalize_rate_limit_provider(&lower);
+    let until = extract_iso8601(&haystack)
+        .or_else(|| parse_retry_after_until(&lower))
+        .or_else(|| reset_epoch.and_then(epoch_to_iso8601))
+        .unwrap_or_else(default_rate_limit_until);
+    Some((provider, until))
+}
+
+fn normalize_rate_limit_provider(lower: &str) -> String {
+    if lower.contains("anthropic-api") || lower.contains("anthropic") || lower.contains("claude") {
+        "anthropic".to_string()
+    } else if lower.contains(" pi") || lower.contains("pi/") || lower.contains("provider 429") {
+        "pi".to_string()
+    } else {
+        "codex".to_string()
+    }
+}
+
+fn extract_iso8601(s: &str) -> Option<String> {
+    for token in s.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | ')' | '(')) {
+        let t = token.trim_matches(|c: char| c == ':' || c == '[' || c == ']');
+        if t.len() >= 20
+            && t.as_bytes().get(4) == Some(&b'-')
+            && t.as_bytes().get(7) == Some(&b'-')
+            && t.as_bytes().get(10) == Some(&b'T')
+            && (t.ends_with('Z') || t.contains('+'))
+        {
+            return Some(t.to_string());
         }
     }
+    None
+}
 
-    let mut payload = serde_json::Map::new();
-    payload.insert("kind".to_string(), Value::String(kind.to_string()));
-    payload.insert("exit_code".to_string(), Value::from(out.exit_code as i64));
-    if let Some(r) = reset_at {
-        payload.insert("reset_at".to_string(), Value::from(r));
+fn parse_retry_after_until(lower: &str) -> Option<String> {
+    let idx = lower.find("retry-after")?;
+    let rest = &lower[idx + "retry-after".len()..];
+    let digits: String = rest
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let secs = digits.parse::<u64>().ok()?;
+    iso8601_add_secs(&crate::handlers::row::now_iso8601(), secs)
+}
+
+fn default_rate_limit_until() -> String {
+    iso8601_add_secs(&crate::handlers::row::now_iso8601(), 300)
+        .unwrap_or_else(crate::handlers::row::now_iso8601)
+}
+
+fn epoch_to_iso8601(epoch: i64) -> Option<String> {
+    let epoch = epoch.max(0) as u64;
+    let (y, mo, d, h, mi, se) = unix_to_ymd_hms(epoch);
+    Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z"))
+}
+
+fn iso8601_add_secs(base: &str, secs: u64) -> Option<String> {
+    let epoch = parse_iso8601_to_epoch(base)?.saturating_add(secs as i64).max(0) as u64;
+    epoch_to_iso8601(epoch as i64)
+}
+
+fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
+    if s.len() < 20 {
+        return None;
     }
-    serde_json::to_string(&Value::Object(payload)).unwrap_or_else(|_| "{}".to_string())
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let y: u32 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
+    let mo: u32 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
+    let d: u32 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
+    let h: u32 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
+    let mi: u32 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
+    let se: u32 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
+    Some(ymd_hms_to_epoch(y, mo, d, h, mi, se))
+}
+
+fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let s = secs % 60;
+    let total_min = secs / 60;
+    let mi = total_min % 60;
+    let total_hr = total_min / 60;
+    let h = total_hr % 24;
+    let mut days = total_hr / 24;
+    let mut year = 1970u32;
+    loop {
+        let dy = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 366 } else { 365 };
+        if days < dy { break; }
+        days -= dy;
+        year += 1;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let dim = [31u64, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 0usize;
+    while month < 12 && days >= dim[month] {
+        days -= dim[month];
+        month += 1;
+    }
+    (year, (month + 1) as u32, (days + 1) as u32, h as u32, mi as u32, s as u32)
+}
+
+fn ymd_hms_to_epoch(y: u32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
+    fn is_leap(y: u32) -> bool { (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0) }
+    fn days_in_month(y: u32, m: u32) -> u32 { match m { 1|3|5|7|8|10|12 => 31, 4|6|9|11 => 30, 2 => if is_leap(y) { 29 } else { 28 }, _ => 0 } }
+    let mut days: i64 = 0;
+    for yy in 1970..y { days += if is_leap(yy) { 366 } else { 365 }; }
+    for mm in 1..mo { days += days_in_month(y, mm) as i64; }
+    days += d.saturating_sub(1) as i64;
+    days * 86_400 + h as i64 * 3600 + mi as i64 * 60 + s as i64
 }
 
 // ---------------------------------------------------------------------------
@@ -3075,6 +3197,78 @@ mod tests {
         assert_eq!(verb, "mark_drive_failed");
     }
 
+    #[test]
+    fn rate_limit_classifier_covers_anthropic_codex_pi_and_generic_exit3() {
+        fn out(stdout: &str, stderr: &str, payload_error: Option<&str>) -> RunnerOutput {
+            RunnerOutput {
+                stdout: stdout.to_string(),
+                stderr: stderr.to_string(),
+                exit_code: 3,
+                final_message: None,
+                structured_output: None,
+                session_id: None,
+                structured_output_source: None,
+                payload_error: payload_error.map(str::to_string),
+                telemetry: crate::runner::AgentRunTelemetry::default(),
+            }
+        }
+
+        let anthropic = classify_runner_exit(&out(
+            "",
+            "anthropic-api HTTP 429 rate limit; Retry-After: 60",
+            None,
+        ));
+        assert!(anthropic.starts_with("rate_limit:anthropic:"), "{anthropic}");
+        assert_eq!(anthropic.strip_prefix("rate_limit:anthropic:").unwrap().len(), 20);
+
+        let codex = classify_runner_exit(&out("rate_limit_error: please retry later", "", None));
+        assert!(codex.starts_with("rate_limit:codex:"), "{codex}");
+        assert_eq!(codex.strip_prefix("rate_limit:codex:").unwrap().len(), 20);
+
+        let pi = classify_runner_exit(&out("", "pi/provider 429 upstream throttled", None));
+        assert!(pi.starts_with("rate_limit:pi:"), "{pi}");
+
+        let generic = classify_runner_exit(&out("partial", "runner crashed", None));
+        assert!(!generic.starts_with("rate_limit:"), "{generic}");
+        let v: serde_json::Value = serde_json::from_str(&generic).unwrap();
+        assert_eq!(v.get("kind").and_then(|v| v.as_str()), Some("runner_crash"));
+    }
+
+    #[test]
+    fn anthropic_429_exit3_transitions_task_to_rate_limit_blocked() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        insert_task(
+            &conn,
+            &schema,
+            "T429",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+        let fail_out = RunnerOutput {
+            stdout: "".to_string(),
+            stderr: "anthropic-api HTTP 429 rate limit; retry-after: 120".to_string(),
+            exit_code: 3,
+            final_message: None,
+            structured_output: None,
+            session_id: None,
+            structured_output_source: None,
+            payload_error: None,
+            telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(_dir.path()),
+        };
+        let runner = MockRunner::new(vec![fail_out]);
+        let _ = drive_loop(&schema, &conn, "T429", &runner, 50).unwrap_err();
+        let (_, after) = crate::handlers::row::read_row(&schema, &conn, "T429").unwrap();
+        assert_eq!(after.get("status").and_then(|v| v.as_str()), Some("blocked"));
+        let reason = after.get("blocked_reason").and_then(|v| v.as_str()).unwrap();
+        assert!(reason.starts_with("rate_limit:anthropic:"), "{reason}");
+        assert_eq!(reason.strip_prefix("rate_limit:anthropic:").unwrap().len(), 20);
+    }
+
     // ---------------------------------------------------------------------------
     // MAJOR 1: spawn-fail telemetry — runner infrastructure failure (Err from spawn)
     // creates a synthetic agent_runs row with exit_code=-1 before blocking.
@@ -3203,15 +3397,9 @@ mod tests {
             .get("blocked_reason")
             .and_then(|v| v.as_str())
             .expect("blocked_reason must be set");
-        let reason: serde_json::Value = serde_json::from_str(reason_str).unwrap();
         assert_eq!(
-            reason.get("kind").and_then(|v| v.as_str()),
-            Some("rate_limit")
-        );
-        assert_eq!(reason.get("exit_code").and_then(|v| v.as_i64()), Some(1));
-        assert_eq!(
-            reason.get("reset_at").and_then(|v| v.as_i64()),
-            Some(1_777_395_000)
+            reason_str,
+            "rate_limit:codex:2026-04-28T16:50:00Z"
         );
     }
 
