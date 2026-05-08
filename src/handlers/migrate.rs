@@ -1,9 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::codegen::ddl::{expected_columns, quote_ident, ExpectedColumn};
+use crate::codegen::ddl::{ddl_for, expected_columns, quote_ident, ExpectedColumn};
 use crate::manifest::Manifest;
 use crate::schema::{FieldType, Schema};
 
@@ -109,10 +109,28 @@ pub fn compute_plan(
 /// In-process apply: take a connection + the schemas/manifest already loaded
 /// and apply additive migrations transactionally. Returns a `MigrateReport`
 /// summarizing the outcome (or no-op if nothing was missing).
+///
+/// Atomicity guarantee (Pi msg_8e242c48 item 2): ONE outer `BEGIN IMMEDIATE`
+/// transaction wraps the entire sequence: preflight + additive DDL + tuple
+/// backfill + source_id type-rebuild + default-backfill. If any step returns
+/// an error the transaction is rolled back automatically (RAII drop without
+/// commit), leaving the DB in exactly the pre-migration state. Type-mismatch
+/// repair for source_id also runs on every invocation (not only when additive
+/// columns are pending), so a half-migrated DB (additive applied, type-rebuild
+/// not yet done) is always completed.
 pub fn apply_with(
-    conn: &Connection,
+    conn: &mut Connection,
     schemas: &HashMap<String, Schema>,
     manifest: &Manifest,
+) -> Result<MigrateReport> {
+    apply_with_inner(conn, schemas, manifest, false)
+}
+
+fn apply_with_inner(
+    conn: &mut Connection,
+    schemas: &HashMap<String, Schema>,
+    manifest: &Manifest,
+    inject_post_ddl_failure: bool,
 ) -> Result<MigrateReport> {
     let plan = compute_plan(conn, schemas, manifest)?;
     let mut report = MigrateReport {
@@ -120,10 +138,38 @@ pub fn apply_with(
         orphaned: plan.orphaned.len(),
         type_mismatches: plan.type_mismatches.len(),
     };
-    if plan.additive.is_empty() {
+
+    let needs_source_rebuild = observations_source_id_type_mismatch(&plan);
+
+    if plan.additive.is_empty() && !needs_source_rebuild {
         return Ok(report);
     }
-    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len());
+
+    let adding_source_tuple = observations_source_tuple_added(&plan);
+
+    // Build rebuild SQL body BEFORE opening the transaction so `read_table_info`
+    // reads the current (pre-DDL) column list, which is correct — the rebuild
+    // INSERT SELECT must include exactly the columns present right now (plus
+    // the ones being added in the same TX batch).
+    let additive_col_names: Vec<&str> = plan
+        .additive
+        .iter()
+        .filter(|(store, _)| store == "observations")
+        .map(|(_, col)| col.name.as_str())
+        .collect();
+    let rebuild_sql_body = if needs_source_rebuild {
+        Some(rebuild_observations_source_id_as_text_sql(
+            conn,
+            schemas,
+            manifest,
+            &additive_col_names,
+        )?)
+    } else {
+        None
+    };
+
+    // Collect additive ALTER + tuple-backfill SQL (no DB reads needed here).
+    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len() + 2);
     for (store, col) in &plan.additive {
         sql_lines.push(format!(
             "ALTER TABLE {} ADD COLUMN {};",
@@ -134,20 +180,237 @@ pub fn apply_with(
             .applied_columns
             .push((store.clone(), col.name.clone()));
     }
-    let batch = format!("BEGIN;\n{}\nCOMMIT;", sql_lines.join("\n"));
-    conn.execute_batch(&batch)
-        .context("failed to apply additive migrations (transaction rolled back)")?;
+    if adding_source_tuple {
+        sql_lines.push(observations_source_tuple_backfill_sql("observations"));
+    }
 
-    // T052 P1: defensive default-backfill. ALTER TABLE ADD COLUMN with a
-    // DEFAULT clause normally backfills existing rows, but list:text JSON
-    // cells (DEFAULT '[]') and any path where the SQLite version / pragma
-    // state elides the implicit backfill must still materialise as the
-    // declared default rather than SQL NULL. For every newly-added column
-    // whose schema field declares `default: <non-null>`, run an UPDATE that
-    // fills NULL cells with the literal default value.
-    backfill_defaults(conn, schemas, manifest, &plan)?;
+    // ONE outer BEGIN IMMEDIATE transaction wrapping the full sequence:
+    //   preflight → additive DDL → tuple backfill → type rebuild → default backfill.
+    // Any error causes RAII drop (no commit) → automatic rollback.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .context("failed to open BEGIN IMMEDIATE migration transaction")?;
+
+    // Step 1: Preflight — runs inside the TX so a failure rolls back everything.
+    if adding_source_tuple {
+        observations_source_preflight(&tx, "observations")?;
+    }
+
+    // Step 2: Additive DDL + tuple backfill + type rebuild as a single batch.
+    let mut batch_lines: Vec<String> = Vec::new();
+    batch_lines.extend(sql_lines);
+    if let Some(ref rebuild_body) = rebuild_sql_body {
+        batch_lines.push(rebuild_body.clone());
+    }
+    if !batch_lines.is_empty() {
+        tx.execute_batch(&batch_lines.join("\n"))
+            .context("failed to apply migrations (transaction will roll back)")?;
+    }
+
+    // Step 3: Default-backfill inside the same TX (T052 P1). ALTER TABLE ADD
+    // COLUMN with a DEFAULT clause normally backfills existing rows, but
+    // list:text JSON cells (DEFAULT '[]') and any path where the SQLite
+    // version / pragma state elides the implicit backfill must still
+    // materialise as the declared default rather than SQL NULL.
+    if inject_post_ddl_failure {
+        bail!("injected post-DDL failure for atomicity test");
+    }
+    if !plan.additive.is_empty() {
+        backfill_defaults(&tx, schemas, manifest, &plan)?;
+    }
+
+    // Commit — all steps succeeded.
+    tx.commit()
+        .context("failed to commit migration transaction")?;
 
     Ok(report)
+}
+
+fn observations_source_tuple_added(plan: &MigrationPlan) -> bool {
+    plan.additive.iter().any(|(store, col)| {
+        store == "observations" && matches!(col.name.as_str(), "source_env" | "source_id")
+    })
+}
+
+/// Preflight scan for cross-env ID coherence.
+///
+/// Fails loud if any row has:
+///   (a) both prod_source_id AND sandbox_source_id set (ambiguous COALESCE pick)
+///   (b) origin_db='prod' but sandbox_source_id set (wrong-env ID)
+///   (c) origin_db='sandbox' but prod_source_id set (wrong-env ID)
+///
+/// Returns `Err` with a descriptive message listing the offending display_ids.
+fn observations_source_preflight(conn: &Connection, table: &str) -> Result<()> {
+    let t = quote_ident(table);
+
+    // (a) Both IDs set.
+    let both_set: Vec<String> = {
+        let sql = format!(
+            "SELECT display_id FROM {t} WHERE prod_source_id IS NOT NULL AND sandbox_source_id IS NOT NULL"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    // (b) origin_db='prod' but sandbox_source_id set.
+    let prod_with_sandbox: Vec<String> = {
+        let sql = format!(
+            "SELECT display_id FROM {t} WHERE origin_db = 'prod' AND sandbox_source_id IS NOT NULL"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    // (c) origin_db='sandbox' but prod_source_id set.
+    let sandbox_with_prod: Vec<String> = {
+        let sql = format!(
+            "SELECT display_id FROM {t} WHERE origin_db = 'sandbox' AND prod_source_id IS NOT NULL"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    // (d) origin_db IS NULL but legacy source IDs are populated — the backfill
+    // query is `WHERE origin_db IS NOT NULL`, so these rows would be silently
+    // skipped, producing canonical (NULL, NULL) while legacy IDs still exist.
+    let null_origin_with_ids: Vec<String> = {
+        let sql = format!(
+            "SELECT display_id FROM {t} WHERE origin_db IS NULL AND (prod_source_id IS NOT NULL OR sandbox_source_id IS NOT NULL)"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    if both_set.is_empty()
+        && prod_with_sandbox.is_empty()
+        && sandbox_with_prod.is_empty()
+        && null_origin_with_ids.is_empty()
+    {
+        return Ok(());
+    }
+
+    let mut msg = String::from(
+        "T084 migration preflight FAILED — cross-env ID incoherence detected. \
+         Manual repair required before migration can proceed.\n",
+    );
+    if !both_set.is_empty() {
+        msg.push_str(&format!(
+            "  Rows with BOTH prod_source_id AND sandbox_source_id set (ambiguous): {}\n",
+            both_set.join(", ")
+        ));
+    }
+    if !prod_with_sandbox.is_empty() {
+        msg.push_str(&format!(
+            "  Rows with origin_db='prod' but sandbox_source_id set (cross-env ID): {}\n",
+            prod_with_sandbox.join(", ")
+        ));
+    }
+    if !sandbox_with_prod.is_empty() {
+        msg.push_str(&format!(
+            "  Rows with origin_db='sandbox' but prod_source_id set (cross-env ID): {}\n",
+            sandbox_with_prod.join(", ")
+        ));
+    }
+    if !null_origin_with_ids.is_empty() {
+        msg.push_str(&format!(
+            "  Rows with origin_db=NULL but legacy source IDs populated (would be silently skipped by backfill): {}\n",
+            null_origin_with_ids.join(", ")
+        ));
+    }
+    bail!("{}", msg.trim_end())
+}
+
+fn observations_source_tuple_backfill_sql(table: &str) -> String {
+    let t = quote_ident(table);
+    // T084 contract: backfill canonical source_env from legacy origin_db for
+    // prod/sandbox rows, even when the matching legacy ID is NULL. source_id is
+    // the text COALESCE(prod_source_id, sandbox_source_id). origin_db is
+    // preserved in-place for historical/filter compatibility during the
+    // transition window.
+    format!(
+        "UPDATE {t} SET \
+         source_env = CASE \
+           WHEN origin_db IN ('prod', 'sandbox') THEN origin_db \
+           ELSE NULL \
+         END, \
+         source_id = CAST(COALESCE(prod_source_id, sandbox_source_id) AS TEXT) \
+         WHERE source_env IS NULL AND origin_db IS NOT NULL;"
+    )
+}
+
+fn observations_source_id_type_mismatch(plan: &MigrationPlan) -> bool {
+    plan.type_mismatches
+        .iter()
+        .any(|(store, col, db_type, expected_type)| {
+            store == "observations"
+                && col == "source_id"
+                && db_type.eq_ignore_ascii_case("INTEGER")
+                && expected_type.eq_ignore_ascii_case("TEXT")
+        })
+}
+
+/// Returns the SQL body (without BEGIN/COMMIT) for rebuilding
+/// `observations.source_id` from INTEGER to TEXT. Callers are responsible
+/// for wrapping this in a transaction.
+///
+/// `extra_cols` lists column names that will be present in the table by the
+/// time this SQL executes (e.g. columns added via ALTER in the same outer
+/// transaction earlier in the batch) but are not yet visible to
+/// `read_table_info` at call time. These are merged into the INSERT SELECT.
+fn rebuild_observations_source_id_as_text_sql(
+    conn: &Connection,
+    schemas: &HashMap<String, Schema>,
+    manifest: &Manifest,
+    extra_cols: &[&str],
+) -> Result<String> {
+    let schema = schemas
+        .get("observations")
+        .ok_or_else(|| anyhow!("observations schema not loaded for T084 source_id rebuild"))?;
+    let table = manifest
+        .stores
+        .iter()
+        .find(|s| s.name == "observations")
+        .map(|s| s.table_name.as_str())
+        .unwrap_or("observations");
+    let tmp_table = format!("{table}__t084_source_id_text");
+    let create_tmp = ddl_for(schema).replace(
+        &format!("CREATE TABLE IF NOT EXISTS {}", quote_ident(table)),
+        &format!("CREATE TABLE {}", quote_ident(&tmp_table)),
+    );
+    let live_cols = read_table_info(conn, table)?;
+    let expected = expected_columns(schema);
+    // Include: columns present in live DB now, PLUS any columns that will be
+    // present by the time the rebuild SQL executes (added in same transaction).
+    let common: Vec<String> = expected
+        .into_iter()
+        .filter(|c| live_cols.contains_key(&c.name) || extra_cols.contains(&c.name.as_str()))
+        .map(|c| c.name)
+        .collect();
+    let insert_cols = common
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select_cols = common
+        .iter()
+        .map(|c| {
+            if c == "source_id" {
+                format!("CAST({} AS TEXT)", quote_ident(c))
+            } else {
+                quote_ident(c)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "DROP TABLE IF EXISTS {tmp};\n{create_tmp}\nINSERT INTO {tmp} ({insert_cols}) SELECT {select_cols} FROM {table_q};\nDROP TABLE {table_q};\nALTER TABLE {tmp} RENAME TO {table_q};",
+        tmp = quote_ident(&tmp_table),
+        table_q = quote_ident(table),
+    ))
 }
 
 /// Defensive UPDATE pass after ALTER TABLE ADD COLUMN (T052 P1).
@@ -224,7 +487,7 @@ fn default_to_sql_value(ty: &FieldType, v: &serde_json::Value) -> rusqlite::type
 
 /// Convenience: load manifest + schemas from `root/.stores/manifest.yaml`
 /// and apply against `conn`. Used by the `builtin:schema-migrate` subscriber.
-pub fn apply_at(conn: &Connection, root: &Path) -> Result<MigrateReport> {
+pub fn apply_at(conn: &mut Connection, root: &Path) -> Result<MigrateReport> {
     let manifest = Manifest::load_from(root)?;
     let schemas = load_schemas(&manifest)?;
     apply_with(conn, &schemas, &manifest)
@@ -237,7 +500,7 @@ pub fn run_migrate(apply: bool) -> Result<()> {
     let schemas = load_schemas(&manifest)?;
     // Open WITHOUT auto-applying framework drift so we can show the diff
     // before mutating the DB. (db::open would have already applied it.)
-    let conn = crate::db::open_no_autoapply(&crate::paths::db_path()?)?;
+    let mut conn = crate::db::open_no_autoapply(&crate::paths::db_path()?)?;
 
     // --- Framework-DDL drift (T051) ----------------------------------------
     let framework_drift = crate::handlers::framework_migrate::compute_framework_drift(&conn)?;
@@ -271,7 +534,9 @@ pub fn run_migrate(apply: bool) -> Result<()> {
         }
     }
 
-    if plan.additive.is_empty() {
+    let needs_source_rebuild = observations_source_id_type_mismatch(&plan);
+
+    if plan.additive.is_empty() && !needs_source_rebuild {
         if apply {
             let created = crate::handlers::architecture_reviews_backfill::run_backfill(&conn)?;
             if created > 0 {
@@ -281,7 +546,8 @@ pub fn run_migrate(apply: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len());
+    // Print the dry-run view of pending additive DDL.
+    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len() + 1);
     for (store, col) in &plan.additive {
         sql_lines.push(format!(
             "ALTER TABLE {} ADD COLUMN {};",
@@ -289,15 +555,22 @@ pub fn run_migrate(apply: bool) -> Result<()> {
             col.full_def
         ));
     }
+    if observations_source_tuple_added(&plan) {
+        sql_lines.push(observations_source_tuple_backfill_sql("observations"));
+    }
+    if needs_source_rebuild {
+        sql_lines.push("-- rebuild observations.source_id INTEGER → TEXT".to_string());
+    }
 
     for line in &sql_lines {
         println!("{line}");
     }
 
     if apply {
-        let batch = format!("BEGIN;\n{}\nCOMMIT;", sql_lines.join("\n"));
-        conn.execute_batch(&batch)
-            .context("failed to apply additive migrations (transaction rolled back)")?;
+        // Route through apply_with() — the single canonical apply path that
+        // includes preflight, atomic transaction, default-backfill, and
+        // source_id type-rebuild. This prevents CLI/lib code-path divergence.
+        apply_with(&mut conn, &schemas, &manifest)?;
         let created = crate::handlers::architecture_reviews_backfill::run_backfill(&conn)?;
         if created > 0 {
             println!("architecture_reviews backfill: created {created} row(s)");
@@ -363,8 +636,10 @@ fn type_eq(db_type: &str, expected_type: &str) -> bool {
 mod tests {
     use super::*;
     use crate::codegen::ddl::ddl_for;
+    use crate::handlers::row::read_row;
     use crate::manifest::InstalledStore;
-    use crate::schema::{Schema, StoreScope};
+    use crate::schema::{actor::Actor, FieldType, Schema, StoreScope};
+    use crate::validate::{self, Op};
     use std::path::PathBuf;
 
     const OBSERVATIONS_YAML: &str = include_str!("../../stores/observations/schema.yaml");
@@ -530,7 +805,7 @@ mod tests {
     #[test]
     fn t052_p1_migrate_backfills_risk_taxonomy_defaults_on_existing_rows() {
         let (schemas, manifest) = load_bundled();
-        let conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().unwrap();
         install_all(&conn, &schemas);
 
         // Drop the four T052 columns so the live DB is shaped like a pre-T052
@@ -556,7 +831,7 @@ mod tests {
 
         // Run additive migration: should ALTER ADD COLUMN the four columns
         // and backfill defaults on the existing row.
-        let report = apply_with(&conn, &schemas, &manifest).expect("apply_with ok");
+        let report = apply_with(&mut conn, &schemas, &manifest).expect("apply_with ok");
         let added: Vec<&str> = report
             .applied_columns
             .iter()
@@ -643,11 +918,498 @@ mod tests {
         assert_eq!(live.get("cluster_key").map(|s| s.as_str()), Some("TEXT"));
     }
 
+    fn install_pre_t084_all(conn: &Connection, schemas: &HashMap<String, Schema>) {
+        let mut pre_t084_observations = schemas.get("observations").unwrap().clone();
+        pre_t084_observations
+            .fields
+            .retain(|f| f.name != "source_env");
+        pre_t084_observations
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "source_id")
+            .expect("observations.source_id exists")
+            .ty = FieldType::Integer;
+        conn.execute_batch(&ddl_for(&pre_t084_observations))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("gate").unwrap()))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("tasks").unwrap()))
+            .unwrap();
+    }
+
+    fn insert_pre_t084_source_row(
+        conn: &Connection,
+        display_id: &str,
+        origin_db: &str,
+        prod_source_id: Option<i64>,
+        sandbox_source_id: Option<i64>,
+    ) {
+        conn.execute(
+            "INSERT INTO observations (display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week, origin_db, prod_source_id, sandbox_source_id) \
+             VALUES (?1, 'open', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', 'human', 'human', ?2, 'dashboard', 'normal', '2026-05-01T00:00:00Z', 'w18-d1', ?3, ?4, ?5)",
+            rusqlite::params![display_id, display_id, origin_db, prod_source_id, sandbox_source_id],
+        ).unwrap();
+    }
+
+    #[test]
+    fn t084_migrate_backfills_prod_source_tuple() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+        insert_pre_t084_source_row(&conn, "L901", "prod", Some(123), None);
+
+        let pre_live = read_table_info(&conn, "observations").unwrap();
+        assert_eq!(
+            pre_live.get("source_id").map(|s| s.as_str()),
+            Some("INTEGER")
+        );
+        assert!(!pre_live.contains_key("source_env"));
+
+        let report = apply_with(&mut conn, &schemas, &manifest).unwrap();
+        assert!(report
+            .applied_columns
+            .iter()
+            .any(|(s, c)| s == "observations" && c == "source_env"));
+        let post_live = read_table_info(&conn, "observations").unwrap();
+        assert_eq!(post_live.get("source_id").map(|s| s.as_str()), Some("TEXT"));
+        let got: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id FROM observations WHERE display_id = 'L901'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(got, (Some("prod".into()), Some("123".into())));
+    }
+
+    #[test]
+    fn t084_migrate_backfills_sandbox_source_tuple() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+        insert_pre_t084_source_row(&conn, "L902", "sandbox", None, Some(456));
+
+        apply_with(&mut conn, &schemas, &manifest).unwrap();
+        let got: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id FROM observations WHERE display_id = 'L902'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(got, (Some("sandbox".into()), Some("456".into())));
+    }
+
+    /// AC1.5: origin-only legacy rows (origin_db set, both *_source_id NULL)
+    /// backfill source_env from origin_db, source_id NULL, and remain readable.
+    #[test]
+    fn t084_migrate_origin_only_legacy_row_backfills_env_null_id() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+        insert_pre_t084_source_row(&conn, "L903", "prod", None, None);
+        insert_pre_t084_source_row(&conn, "L904", "sandbox", None, None);
+
+        apply_with(&mut conn, &schemas, &manifest).unwrap();
+
+        for (display_id, expected_env) in [("L903", "prod"), ("L904", "sandbox")] {
+            let got: (Option<String>, Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT source_env, source_id, origin_db FROM observations WHERE display_id = ?1",
+                    [display_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(got.0.as_deref(), Some(expected_env), "{display_id} source_env");
+            assert_eq!(got.1.as_deref(), None, "{display_id} source_id");
+            assert_eq!(got.2.as_deref(), Some(expected_env), "{display_id} origin_db preserved");
+        }
+
+        // Readability plus unrelated update validation: no source tuple flags/diff
+        // means the historical env-without-id tuple is tolerated for transition rows.
+        let observations = schemas.get("observations").unwrap();
+        let (_, mut merged) = read_row(observations, &conn, "L903").unwrap();
+        let mut diff = validate::EntryMap::new();
+        diff.insert("status".to_string(), serde_json::json!("triaged"));
+        merged.insert("status".to_string(), serde_json::json!("triaged"));
+        validate::validate(
+            observations,
+            &merged,
+            Op::Update(diff),
+            Actor::Human.into(),
+        )
+        .expect("unrelated update should not revalidate historical source_env without source_id");
+    }
+
     /// Type comparison is case-insensitive on the bare token.
     #[test]
     fn type_eq_is_case_insensitive() {
         assert!(type_eq("text", "TEXT"));
         assert!(type_eq("INTEGER", "integer"));
         assert!(!type_eq("TEXT", "INTEGER"));
+    }
+
+    // ---- T084 codex-revise r0: preflight, CASE backfill, atomicity, repair-skip ----
+
+    /// Preflight rejects a row with BOTH prod_source_id AND sandbox_source_id set.
+    #[test]
+    fn t084_preflight_fails_loud_both_ids_set() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+        // Both IDs set — ambiguous.
+        insert_pre_t084_source_row(&conn, "L910", "prod", Some(1), Some(2));
+
+        let err = apply_with(&mut conn, &schemas, &manifest).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("L910"),
+            "expected offending display_id 'L910' in error: {msg}"
+        );
+        assert!(
+            msg.contains("BOTH") || msg.contains("both"),
+            "expected 'both' in error message: {msg}"
+        );
+    }
+
+    /// Preflight rejects a row with origin_db='prod' but sandbox_source_id set.
+    #[test]
+    fn t084_preflight_fails_loud_prod_origin_with_sandbox_id() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+        // origin_db='prod' but sandbox_source_id set — cross-env.
+        insert_pre_t084_source_row(&conn, "L911", "prod", None, Some(99));
+
+        let err = apply_with(&mut conn, &schemas, &manifest).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("L911"),
+            "expected offending display_id 'L911' in error: {msg}"
+        );
+    }
+
+    /// Preflight rejects a row with origin_db='sandbox' but prod_source_id set.
+    #[test]
+    fn t084_preflight_fails_loud_sandbox_origin_with_prod_id() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+        // origin_db='sandbox' but prod_source_id set — cross-env.
+        insert_pre_t084_source_row(&conn, "L912", "sandbox", Some(77), None);
+
+        let err = apply_with(&mut conn, &schemas, &manifest).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("L912"),
+            "expected offending display_id 'L912' in error: {msg}"
+        );
+    }
+
+    /// Clean coherent rows (prod→prod_id, sandbox→sandbox_id, origin-only) succeed.
+    #[test]
+    fn t084_preflight_passes_clean_coherent_rows() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+        insert_pre_t084_source_row(&conn, "L920", "prod", Some(1), None);
+        insert_pre_t084_source_row(&conn, "L921", "sandbox", None, Some(2));
+        insert_pre_t084_source_row(&conn, "L922", "prod", None, None); // origin-only
+
+        let report = apply_with(&mut conn, &schemas, &manifest).unwrap();
+        // All three env-additive columns applied.
+        assert!(report
+            .applied_columns
+            .iter()
+            .any(|(s, c)| s == "observations" && c == "source_env"));
+
+        // Check CASE backfill correctness.
+        let rows: Vec<(String, Option<String>, Option<String>)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT display_id, source_env, source_id FROM observations ORDER BY display_id",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        // L920: prod → source_env=prod, source_id=1
+        let r920 = rows.iter().find(|(id, _, _)| id == "L920").unwrap();
+        assert_eq!(r920.1.as_deref(), Some("prod"));
+        assert_eq!(r920.2.as_deref(), Some("1"));
+        // L921: sandbox → source_env=sandbox, source_id=2
+        let r921 = rows.iter().find(|(id, _, _)| id == "L921").unwrap();
+        assert_eq!(r921.1.as_deref(), Some("sandbox"));
+        assert_eq!(r921.2.as_deref(), Some("2"));
+        // L922: origin-only (prod, NULL, NULL) → source_env=prod, source_id=NULL.
+        let r922 = rows.iter().find(|(id, _, _)| id == "L922").unwrap();
+        assert_eq!(
+            r922.1.as_deref(),
+            Some("prod"),
+            "origin-only row: source_env must backfill from origin_db"
+        );
+        assert_eq!(r922.2, None, "origin-only row: source_id must be NULL");
+    }
+
+    /// Half-migrated DB (additive applied but source_id still INTEGER) is
+    /// repaired by the next apply_with invocation even though no additive
+    /// columns are pending.
+    #[test]
+    fn t084_half_migrated_db_repair_completes_on_next_apply() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Simulate the half-migrated state: source_env column is already present
+        // (via ALTER ADD COLUMN) but source_id is still INTEGER.
+        let mut pre_half = schemas.get("observations").unwrap().clone();
+        pre_half
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "source_id")
+            .expect("source_id exists")
+            .ty = FieldType::Integer;
+        // source_env is present (unlike install_pre_t084_all), so no additive
+        // columns are pending — only the type mismatch remains.
+        conn.execute_batch(&ddl_for(&pre_half)).unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("gate").unwrap()))
+            .unwrap();
+        conn.execute_batch(&ddl_for(schemas.get("tasks").unwrap()))
+            .unwrap();
+
+        let pre_live = read_table_info(&conn, "observations").unwrap();
+        assert_eq!(
+            pre_live.get("source_id").map(|s| s.as_str()),
+            Some("INTEGER"),
+            "fixture must have INTEGER source_id before migration"
+        );
+        assert!(
+            pre_live.contains_key("source_env"),
+            "fixture must already have source_env (half-migrated)"
+        );
+
+        // apply_with with no additive columns pending — but type mismatch present.
+        let report = apply_with(&mut conn, &schemas, &manifest).expect("apply_with should succeed");
+        assert!(
+            report.applied_columns.is_empty(),
+            "no additive columns expected: {:?}",
+            report.applied_columns
+        );
+
+        // source_id must now be TEXT.
+        let post_live = read_table_info(&conn, "observations").unwrap();
+        assert_eq!(
+            post_live.get("source_id").map(|s| s.as_str()),
+            Some("TEXT"),
+            "source_id must be TEXT after repair"
+        );
+    }
+
+    /// Preflight rejects a row with origin_db=NULL but a legacy source ID populated.
+    /// These rows would be silently skipped by the backfill WHERE clause
+    /// (`WHERE origin_db IS NOT NULL`), leaving canonical (NULL, NULL) while
+    /// legacy IDs still exist.
+    #[test]
+    fn t084_preflight_fails_loud_null_origin_db_with_prod_source_id() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+        // origin_db IS NULL but prod_source_id is set — dirty shape.
+        conn.execute(
+            "INSERT INTO observations (display_id, status, created_at, updated_at, created_by, updated_by, summary, source, priority, captured_at, captured_week, origin_db, prod_source_id, sandbox_source_id) \
+             VALUES (?1, 'open', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', 'human', 'human', ?1, 'dashboard', 'normal', '2026-05-01T00:00:00Z', 'w18-d1', NULL, 42, NULL)",
+            rusqlite::params!["L940"],
+        ).unwrap();
+
+        let err = apply_with(&mut conn, &schemas, &manifest).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("L940"),
+            "expected offending display_id 'L940' in error: {msg}"
+        );
+        assert!(
+            msg.contains("origin_db") || msg.contains("NULL"),
+            "error should mention origin_db=NULL gap: {msg}"
+        );
+    }
+
+    /// AC1.5: adversarial fixture — origin_db='prod' with BOTH *_source_id NULL
+    /// → migration produces source_env='prod', source_id=NULL, origin_db
+    /// preserved. Coherent rows (prod/42, sandbox/99) still migrate correctly.
+    #[test]
+    fn t084_r0_followup_origin_only_backfills_env_null_id_origin_db_preserved() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+
+        // Adversarial: origin_db='prod', prod_source_id=NULL, sandbox_source_id=NULL.
+        insert_pre_t084_source_row(&conn, "L930", "prod", None, None);
+        // Coherent prod row.
+        insert_pre_t084_source_row(&conn, "L931", "prod", Some(42), None);
+        // Coherent sandbox row.
+        insert_pre_t084_source_row(&conn, "L932", "sandbox", None, Some(99));
+
+        apply_with(&mut conn, &schemas, &manifest).expect("apply_with must succeed");
+
+        // Origin-only: source_env='prod', source_id=NULL; origin_db still 'prod'.
+        let r930: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id, origin_db FROM observations WHERE display_id = 'L930'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (r930.0.as_deref(), r930.1.as_deref()),
+            (Some("prod"), None),
+            "origin-only row L930 must backfill env with NULL id; got {:?}/{:?}",
+            r930.0,
+            r930.1,
+        );
+        assert_eq!(
+            r930.2.as_deref(),
+            Some("prod"),
+            "origin_db must be preserved for L930 during transition window"
+        );
+
+        // Coherent prod row: canonical (prod, 42).
+        let r931: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id, origin_db FROM observations WHERE display_id = 'L931'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(r931.0.as_deref(), Some("prod"), "L931 source_env");
+        assert_eq!(r931.1.as_deref(), Some("42"), "L931 source_id");
+        assert_eq!(r931.2.as_deref(), Some("prod"), "L931 origin_db preserved");
+
+        // Coherent sandbox row: canonical (sandbox, 99).
+        let r932: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT source_env, source_id, origin_db FROM observations WHERE display_id = 'L932'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(r932.0.as_deref(), Some("sandbox"), "L932 source_env");
+        assert_eq!(r932.1.as_deref(), Some("99"), "L932 source_id");
+        assert_eq!(
+            r932.2.as_deref(),
+            Some("sandbox"),
+            "L932 origin_db preserved"
+        );
+    }
+
+    /// Atomicity: when preflight fails (cross-env row present), the DB must
+    /// be left in exactly the pre-migration state — no additive columns, no
+    /// partial backfill.
+    #[test]
+    fn t084_preflight_failure_leaves_db_in_pre_migration_state() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+
+        // Coherent row (will be fine if migration ran).
+        insert_pre_t084_source_row(&conn, "L950", "prod", Some(1), None);
+        // Poisoned row: both IDs set — will trigger preflight failure.
+        insert_pre_t084_source_row(&conn, "L951", "prod", Some(2), Some(3));
+
+        let pre_live = read_table_info(&conn, "observations").unwrap();
+        assert!(
+            !pre_live.contains_key("source_env"),
+            "pre-condition: no source_env column"
+        );
+        assert_eq!(
+            pre_live.get("source_id").map(|s| s.as_str()),
+            Some("INTEGER"),
+            "pre-condition: INTEGER source_id"
+        );
+
+        // Migration must fail because of L951.
+        let err = apply_with(&mut conn, &schemas, &manifest).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("L951"),
+            "error must mention L951"
+        );
+
+        // Post-failure: DB must be unchanged — no source_env column added, source_id still INTEGER.
+        let post_live = read_table_info(&conn, "observations").unwrap();
+        assert!(
+            !post_live.contains_key("source_env"),
+            "source_env column must NOT be present after failed migration"
+        );
+        assert_eq!(
+            post_live.get("source_id").map(|s| s.as_str()),
+            Some("INTEGER"),
+            "source_id must still be INTEGER after failed migration"
+        );
+    }
+
+    /// Atomicity (post-DDL failure path, Finding 2): when a failure occurs AFTER
+    /// additive DDL is applied but before the transaction commits (injected via
+    /// the test-only apply_with_inner flag), the entire TX must roll back — no additive
+    /// columns must remain in the schema.
+    ///
+    /// This covers the case preflight-only atomicity cannot: a partial migration
+    /// that succeeded DDL but failed before commit.
+    #[test]
+    fn t084_post_ddl_failure_rolls_back_entire_transaction() {
+        let (schemas, manifest) = load_bundled();
+        let mut conn = Connection::open_in_memory().unwrap();
+        install_pre_t084_all(&conn, &schemas);
+
+        // Insert a clean coherent row so preflight passes and DDL runs.
+        insert_pre_t084_source_row(&conn, "L960", "prod", Some(10), None);
+
+        let pre_live = read_table_info(&conn, "observations").unwrap();
+        assert!(
+            !pre_live.contains_key("source_env"),
+            "pre-condition: source_env must not exist before migration"
+        );
+        assert_eq!(
+            pre_live.get("source_id").map(|s| s.as_str()),
+            Some("INTEGER"),
+            "pre-condition: source_id must be INTEGER"
+        );
+
+        // Inject failure AFTER DDL executes but before commit.
+        let result = apply_with_inner(&mut conn, &schemas, &manifest, true);
+
+        assert!(
+            result.is_err(),
+            "apply_with must fail with injected post-DDL error"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("injected post-DDL failure"),
+            "error must mention injected failure: {msg}"
+        );
+
+        // Post-failure: the TX must have rolled back — schema unchanged.
+        let post_live = read_table_info(&conn, "observations").unwrap();
+        assert!(
+            !post_live.contains_key("source_env"),
+            "source_env column must NOT be present after post-DDL failure rollback"
+        );
+        assert_eq!(
+            post_live.get("source_id").map(|s| s.as_str()),
+            Some("INTEGER"),
+            "source_id must still be INTEGER after post-DDL failure rollback"
+        );
+
+        // Data must also be intact — prod_source_id is still INTEGER in pre-T084 schema.
+        let prod_source_id: Option<i64> = conn
+            .query_row(
+                "SELECT prod_source_id FROM observations WHERE display_id = 'L960'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            prod_source_id,
+            Some(10),
+            "prod_source_id must be intact after post-DDL failure rollback"
+        );
     }
 }

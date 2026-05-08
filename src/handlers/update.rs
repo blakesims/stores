@@ -24,7 +24,7 @@ pub fn run(
     let (row_id, existing) = read_row(schema, conn, display_id)?;
 
     // Build diff entry from args
-    let diff = build_entry_map(schema, |cli_name| {
+    let mut diff = build_entry_map(schema, |cli_name| {
         let from_file_key = format!("{cli_name}-from-file");
         if matches.try_contains_id(&from_file_key).unwrap_or(false) {
             if let Some(path) = matches.get_one::<String>(&from_file_key) {
@@ -51,6 +51,10 @@ pub fn run(
             _ => None,
         }
     })?;
+
+    if schema.name == "observations" {
+        super::observations_source::normalize_cli_source_tuple(matches, &mut diff)?;
+    }
 
     // Merge diff into existing; deep-merge Record-typed fields recursively so
     // sibling sub-fields at any nested depth are preserved.

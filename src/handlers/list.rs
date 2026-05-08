@@ -8,6 +8,7 @@ use crate::codegen::ddl::quote_ident;
 use crate::handlers::row::derive_observation_captured_week;
 use crate::output;
 use crate::schema::{actor::InvokerCtx, FieldType, Schema};
+use crate::validate::EntryMap;
 
 /// The 13 canonical risk flag values (mirrors risk_flags.list_enum in observations schema.yaml).
 pub const CANONICAL_RISK_FLAGS: &[&str] = &[
@@ -127,6 +128,19 @@ pub fn run(
         // created_at is stored as ISO-8601; string prefix comparison works for YYYY-MM-DD
         where_clauses.push(format!("created_at >= ?{}", params.len() + 1));
         params.push(rusqlite::types::Value::Text(since_date.clone()));
+    }
+
+    if schema.name == "observations" {
+        let mut source_filter = EntryMap::new();
+        super::observations_source::normalize_cli_source_tuple(matches, &mut source_filter)?;
+        if let Some(Value::String(env)) = source_filter.get("source_env") {
+            where_clauses.push(format!("source_env = ?{}", params.len() + 1));
+            params.push(rusqlite::types::Value::Text(env.clone()));
+        }
+        if let Some(Value::String(id)) = source_filter.get("source_id") {
+            where_clauses.push(format!("source_id = ?{}", params.len() + 1));
+            params.push(rusqlite::types::Value::Text(id.clone()));
+        }
     }
 
     // risk_flags membership filter via json_each — one EXISTS subquery per flag (AND semantics)

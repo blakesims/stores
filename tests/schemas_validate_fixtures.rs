@@ -199,3 +199,61 @@ fn fixtures_with_stray_field_rejected_by_schema() {
         );
     }
 }
+
+#[test]
+fn t084_observations_source_tuple_schema_and_no_out_of_scope_drift() {
+    let yaml = std::fs::read_to_string(project_root().join("stores/observations/schema.yaml"))
+        .expect("observations schema readable");
+    let schema = Schema::from_yaml(&yaml).expect("observations schema parses");
+
+    let source = schema.fields.iter().find(|f| f.name == "source").unwrap();
+    match &source.ty {
+        FieldType::Enum(values) => assert_eq!(
+            values,
+            &vec![
+                "dashboard".to_string(),
+                "qa".to_string(),
+                "dev".to_string(),
+                "sentry".to_string(),
+                "intake".to_string(),
+                "converge".to_string(),
+                "wrap".to_string(),
+            ],
+            "source enum value-set drifted"
+        ),
+        other => panic!("source must remain enum, got {other:?}"),
+    }
+
+    let source_env = schema.fields.iter().find(|f| f.name == "source_env").unwrap();
+    match &source_env.ty {
+        FieldType::Enum(values) => assert_eq!(values, &vec!["prod".to_string(), "sandbox".to_string()]),
+        other => panic!("source_env must be enum, got {other:?}"),
+    }
+    assert!(!source_env.required);
+
+    let source_id = schema.fields.iter().find(|f| f.name == "source_id").unwrap();
+    assert!(matches!(source_id.ty, FieldType::Text));
+    assert!(!source_id.required);
+
+    for legacy in ["prod_source_id", "sandbox_source_id", "origin_db"] {
+        let field = schema.fields.iter().find(|f| f.name == legacy).unwrap();
+        assert!(!field.required, "{legacy} must remain nullable");
+        assert!(field.description.as_deref().unwrap_or("").contains("DEPRECATED"), "{legacy} missing deprecation description");
+    }
+
+    let unchanged_fields = [
+        ("qa_item_id", "integer", "QA checklist item id (source=qa dedup)"),
+        ("tour_session_id", "integer", "Tour session id (source=qa dedup)"),
+        ("step_index", "integer", "Step index within tour session (source=qa dedup)"),
+        ("staff_user_id", "integer", "Staff user who triggered the QA observation"),
+        ("message", "text", "Raw message text from the QA step (dedup key)"),
+        ("contact_id", "integer", "Contact the observation is associated with"),
+        ("field_name", "text", "Specific field name within the contact record, if applicable"),
+    ];
+    for (name, ty, description) in unchanged_fields {
+        let field = schema.fields.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("{name} removed"));
+        assert_eq!(format!("{:?}", field.ty).to_ascii_lowercase(), ty, "{name} type drifted");
+        assert!(!field.required, "{name} required bit drifted");
+        assert_eq!(field.description.as_deref(), Some(description), "{name} description drifted");
+    }
+}

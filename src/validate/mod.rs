@@ -106,6 +106,8 @@ pub fn validate_with_authority(
         }
     }
 
+    validate_observations_source_pair(schema, entry, &op, &mut errors);
+
     // Walk all fields recursively. Required/enum/pattern checks run against the
     // full merged entry; actor checks run against actor_entry (diff-only for
     // Transition/Update, full entry for Add).
@@ -126,6 +128,84 @@ pub fn validate_with_authority(
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn validate_observations_source_pair(
+    schema: &Schema,
+    entry: &EntryMap,
+    op: &Op,
+    errors: &mut Vec<ValidationError>,
+) {
+    if schema.name != "observations" {
+        return;
+    }
+
+    let should_check = match op {
+        Op::Add => {
+            entry.contains_key("source_env")
+                || entry.contains_key("source_id")
+                || entry.contains_key("origin_db")
+                || entry.contains_key("prod_source_id")
+                || entry.contains_key("sandbox_source_id")
+        }
+        Op::Update(diff)
+        | Op::Transition(_, diff)
+        | Op::SubmitPlan(diff)
+        | Op::SubmitExecute(diff) => {
+            diff.contains_key("source_env")
+                || diff.contains_key("source_id")
+                || diff.contains_key("origin_db")
+                || diff.contains_key("prod_source_id")
+                || diff.contains_key("sandbox_source_id")
+        }
+        Op::SubmitPlanReview(_, diff) | Op::SubmitReview(_, diff) => {
+            diff.contains_key("source_env")
+                || diff.contains_key("source_id")
+                || diff.contains_key("origin_db")
+                || diff.contains_key("prod_source_id")
+                || diff.contains_key("sandbox_source_id")
+        }
+    };
+    if !should_check {
+        return;
+    }
+
+    let env_present = entry.get("source_env").is_some_and(|v| !v.is_null());
+    let id_present = entry.get("source_id").is_some_and(|v| !v.is_null());
+    if env_present != id_present {
+        errors.push(ValidationError {
+            field_path: vec!["source_env".to_string(), "source_id".to_string()],
+            rule: error::RuleKind::Required,
+            message: "source_env/source_id must be supplied as a required clean pair; use --source-env with --source-id".to_string(),
+        });
+    }
+
+    // Cleanup-invariant: when the canonical tuple (source_env + source_id) is
+    // fully populated, the legacy per-env source IDs must be null on the same
+    // row — canonical + raw IDs is always invalid.
+    //
+    // Pi ruling (msg_77a03121): `origin_db` is PRESERVED during the transition
+    // window (a row may have canonical tuple AND origin_db populated and that
+    // is the EXPECTED post-migration state). Only prod_source_id and
+    // sandbox_source_id are forbidden alongside the canonical pair.
+    if env_present && id_present {
+        let legacy_id_fields = [
+            ("prod_source_id", entry.get("prod_source_id")),
+            ("sandbox_source_id", entry.get("sandbox_source_id")),
+        ];
+        for (field_name, value) in legacy_id_fields {
+            if value.is_some_and(|v| !v.is_null()) {
+                errors.push(ValidationError {
+                    field_path: vec![field_name.to_string()],
+                    rule: error::RuleKind::Required,
+                    message: format!(
+                        "field '{field_name}' must be null when canonical source tuple \
+                         (source_env + source_id) is populated; clear the legacy ID before writing the new pair"
+                    ),
+                });
+            }
+        }
     }
 }
 
@@ -590,6 +670,178 @@ fields:
         let s = schema();
         let entry = entry_from(&[("summary", str_val("hello")), ("priority", str_val("high"))]);
         validate(&s, &entry, Op::Add, Actor::Human.into()).unwrap();
+    }
+
+
+
+    #[test]
+    fn t084_observations_source_env_without_source_id_rejected() {
+        let schema = Schema::from_yaml(r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: source_env
+    type: enum
+    enum_values: [prod, sandbox]
+  - name: source_id
+    type: text
+"#).unwrap();
+        let entry = entry_from(&[("source_env", str_val("prod"))]);
+        let errs = validate(&schema, &entry, Op::Add, Actor::Human.into()).unwrap_err();
+        let msg = pretty_print(&errs);
+        assert!(msg.contains("source_env/source_id"), "{msg}");
+        assert!(msg.contains("clean pair"), "{msg}");
+    }
+
+    #[test]
+    fn t084_observations_source_id_without_source_env_rejected() {
+        let schema = Schema::from_yaml(r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: source_env
+    type: enum
+    enum_values: [prod, sandbox]
+  - name: source_id
+    type: text
+"#).unwrap();
+        let entry = entry_from(&[("source_id", str_val("P123"))]);
+        let errs = validate(&schema, &entry, Op::Add, Actor::Human.into()).unwrap_err();
+        let msg = pretty_print(&errs);
+        assert!(msg.contains("source_env/source_id"), "{msg}");
+        assert!(msg.contains("clean pair"), "{msg}");
+    }
+
+    // ---- T084 codex-revise r0: cleanup-invariant validator ----
+
+    const OBS_CLEANUP_SCHEMA: &str = r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: source_env
+    type: enum
+    enum_values: [prod, sandbox]
+  - name: source_id
+    type: text
+  - name: origin_db
+    type: text
+  - name: prod_source_id
+    type: integer
+  - name: sandbox_source_id
+    type: integer
+"#;
+
+    /// Pi ruling (msg_77a03121): canonical tuple + origin_db is the EXPECTED
+    /// post-migration state during the transition window — validator must ALLOW it.
+    #[test]
+    fn t084_cleanup_invariant_allows_canonical_plus_origin_db() {
+        let schema = Schema::from_yaml(OBS_CLEANUP_SCHEMA).unwrap();
+        let entry = entry_from(&[
+            ("source_env", str_val("prod")),
+            ("source_id", str_val("123")),
+            ("origin_db", str_val("prod")), // preserved during transition window — must be allowed
+        ]);
+        validate(&schema, &entry, Op::Add, Actor::Human.into())
+            .expect("canonical tuple + origin_db must be allowed during transition window");
+    }
+
+    /// Confirm that canonical tuple + prod_source_id is still rejected (canonical
+    /// pair and raw legacy ID coexisting is never valid).
+    #[test]
+    fn t084_cleanup_invariant_rejects_canonical_plus_prod_source_id_standalone() {
+        let schema = Schema::from_yaml(OBS_CLEANUP_SCHEMA).unwrap();
+        let entry = entry_from(&[
+            ("source_env", str_val("prod")),
+            ("source_id", str_val("123")),
+            ("origin_db", str_val("prod")),
+            ("prod_source_id", serde_json::Value::Number(123.into())),
+        ]);
+        let errs = validate(&schema, &entry, Op::Add, Actor::Human.into()).unwrap_err();
+        let paths: Vec<String> = errs.iter().map(|e| e.field_path.join(".")).collect();
+        assert!(
+            paths.contains(&"prod_source_id".to_string()),
+            "expected prod_source_id in errors; got: {paths:?}"
+        );
+        // origin_db must NOT appear in errors
+        assert!(
+            !paths.contains(&"origin_db".to_string()),
+            "origin_db must NOT be in errors during transition window; got: {paths:?}"
+        );
+    }
+
+    /// When canonical tuple is fully populated AND prod_source_id is set,
+    /// validator must reject.
+    #[test]
+    fn t084_cleanup_invariant_rejects_canonical_plus_prod_source_id() {
+        let schema = Schema::from_yaml(OBS_CLEANUP_SCHEMA).unwrap();
+        let entry = entry_from(&[
+            ("source_env", str_val("prod")),
+            ("source_id", str_val("456")),
+            ("prod_source_id", serde_json::Value::Number(456.into())),
+        ]);
+        let errs = validate(&schema, &entry, Op::Add, Actor::Human.into()).unwrap_err();
+        let paths: Vec<String> = errs.iter().map(|e| e.field_path.join(".")).collect();
+        assert!(
+            paths.contains(&"prod_source_id".to_string()),
+            "expected prod_source_id in errors; got: {paths:?}"
+        );
+    }
+
+    /// When canonical tuple is fully populated AND sandbox_source_id is set,
+    /// validator must reject.
+    #[test]
+    fn t084_cleanup_invariant_rejects_canonical_plus_sandbox_source_id() {
+        let schema = Schema::from_yaml(OBS_CLEANUP_SCHEMA).unwrap();
+        let entry = entry_from(&[
+            ("source_env", str_val("sandbox")),
+            ("source_id", str_val("789")),
+            ("sandbox_source_id", serde_json::Value::Number(789.into())),
+        ]);
+        let errs = validate(&schema, &entry, Op::Add, Actor::Human.into()).unwrap_err();
+        let paths: Vec<String> = errs.iter().map(|e| e.field_path.join(".")).collect();
+        assert!(
+            paths.contains(&"sandbox_source_id".to_string()),
+            "expected sandbox_source_id in errors; got: {paths:?}"
+        );
+    }
+
+    /// When canonical tuple is fully populated and all old-trio fields are null,
+    /// validator must pass.
+    #[test]
+    fn t084_cleanup_invariant_passes_canonical_only_row() {
+        let schema = Schema::from_yaml(OBS_CLEANUP_SCHEMA).unwrap();
+        let entry = entry_from(&[
+            ("source_env", str_val("prod")),
+            ("source_id", str_val("999")),
+            // origin_db, prod_source_id, sandbox_source_id all absent/null
+        ]);
+        validate(&schema, &entry, Op::Add, Actor::Human.into())
+            .expect("canonical-only row with no old-trio values should pass");
+    }
+
+    /// When only old-trio fields are set (pre-migration style), validator must
+    /// not trigger the cleanup-invariant check (that fires only when canonical
+    /// tuple is fully populated).
+    #[test]
+    fn t084_cleanup_invariant_silent_for_old_trio_only_row() {
+        let schema = Schema::from_yaml(OBS_CLEANUP_SCHEMA).unwrap();
+        let entry = entry_from(&[
+            ("origin_db", str_val("prod")),
+            ("prod_source_id", serde_json::Value::Number(100.into())),
+        ]);
+        // The old-trio-only row has no source_env/source_id; cleanup invariant should not fire.
+        // (Pair-completeness check also doesn't fire since neither canonical field is set.)
+        validate(&schema, &entry, Op::Add, Actor::Human.into())
+            .expect("old-trio-only row must not trigger cleanup-invariant");
     }
 
     // ---- pattern rule ----
