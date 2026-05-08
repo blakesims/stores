@@ -85,9 +85,87 @@ Direct edits (`6c5f13c`, `c8d993e`, `5519597`) used the dogfood-escape doctrine 
 
 **Reviewer-runner has been idle the entire session.** Substrate path-A (daemon-spawned codex via T083 external_reviews lane) handled every T2/T3 review automatically. Reviewer-runner waited for explicit pings that never came. The engine-controller SKILL still tells me to dispatch reviewer-runner with structured pings — that pre-dates T083's substrate-native lane. Either (a) update the SKILL to mark reviewer-runner as observability-optional / cross-check-only, or (b) disable daemon path-A and route everything through reviewer-runner (path-B). Blake's call.
 
+## Monitor setup (re-arm at session start — VITAL)
+
+These two monitors give substrate-state visibility. They do NOT carry across sessions; arm them via the `Monitor` tool exactly as below at session start. Both are persistent (run until session end / TaskStop).
+
+### Monitor 1 — substrate state diff (tasks + ER, on-change, 20s poll)
+
+Emits a `+ T:T###...` / `- T:T###...` line for every task-status transition and every external_reviews row entering/leaving the active queue. Quiet when nothing changes (no held-reason noise).
+
+```
+Tool: Monitor
+Args:
+  description: substrate state diff (tasks + ER only, quiet)
+  persistent: true
+  timeout_ms: 3600000
+  command: |
+    cd /home/blake/repos/experiments/stores
+    prev_t=""
+    prev_e=""
+    while true; do
+      now_t=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
+        | jq -r '.[] | select(.status | IN("in_review","ready","planning","plan_review","executing","code_review","blocked","deploy_blocked","accepted","cargo_installed")) | "T:\(.display_id)|status=\(.status)|tier=\(.tier_hint // "-")|next=\(.next_agent // "-")|drive_pid=\(.drive_pid // "-")|wrap=\(.wrap_log | length // 0)|blocked=\(.blocked_reason // "-" | .[0:60])"' \
+        | sort)
+      now_e=$(sqlite3 .stores/db.sqlite "SELECT 'ER:' || display_id || '|task=' || COALESCE(task_id,'-') || '|status=' || status || '|verdict=' || COALESCE(verdict,'-') || '|runner=' || COALESCE(NULLIF(runner,''),'unknown') || '|attempt=' || COALESCE(attempt,0) FROM external_reviews WHERE status IN ('pending','running','tooling_held') ORDER BY id;" 2>/dev/null | sort)
+      if [ "$now_t" != "$prev_t" ] || [ "$now_e" != "$prev_e" ]; then
+        if [ -z "$prev_t$prev_e" ]; then
+          echo "[init $(date +%H:%M:%S)]"; echo "$now_t"; [ -n "$now_e" ] && echo "$now_e"
+        else
+          [ "$now_t" != "$prev_t" ] && { comm -13 <(echo "$prev_t") <(echo "$now_t") | sed 's/^/+ /'; comm -23 <(echo "$prev_t") <(echo "$now_t") | sed 's/^/- /'; }
+          [ "$now_e" != "$prev_e" ] && { comm -13 <(echo "$prev_e") <(echo "$now_e") | sed 's/^/+ /'; comm -23 <(echo "$prev_e") <(echo "$now_e") | sed 's/^/- /'; }
+        fi
+        prev_t=$now_t; prev_e=$now_e
+      fi
+      sleep 20
+    done
+```
+
+Note: the SKILL has a richer 3-surface variant that ALSO tails `logs/agents-daemon.log` for held-reasons. **Don't use it.** I tried it this session and the held-reason emissions are too chatty (`needs_human` / `live_drive_owner` re-emits every iteration as the tail-window slides). The 2-surface filter above is the quiet, useful version. If you need held-reasons, `tail -f logs/agents-daemon.log | grep --line-buffered "row store="` ad-hoc.
+
+### Monitor 2 — 15-min backup scan (snapshot, even when no change)
+
+The diff monitor only emits on changes. A row stuck at `in_review` / `tooling_held` / `accepted-but-no-ceremony-progress` produces NO diff event and would otherwise be invisible. This monitor emits a full snapshot every 15 min regardless.
+
+```
+Tool: Monitor
+Args:
+  description: 15-min in_review + stuck-state backup scan
+  persistent: true
+  timeout_ms: 3600000
+  command: |
+    cd /home/blake/repos/experiments/stores
+    while true; do
+      sleep 900
+      echo "=== 15-MIN BACKUP SCAN $(date +%H:%M:%S) ==="
+      ir=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
+        | jq -r '.[] | select(.status=="in_review") | "T:\(.display_id) tier=\(.tier_hint // "-") wrap=\(.wrap_log | length // 0) drive_pid=\(.drive_pid // "-")"')
+      [ -n "$ir" ] && { echo "IN_REVIEW (codex/accept lane):"; echo "$ir" | sed 's/^/  /'; } || echo "IN_REVIEW: <empty>"
+      bl=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
+        | jq -r '.[] | select(.status=="blocked" or .status=="deploy_blocked") | "T:\(.display_id) status=\(.status) reason=\(.blocked_reason // "-" | .[0:80])"')
+      [ -n "$bl" ] && { echo "BLOCKED:"; echo "$bl" | sed 's/^/  /'; } || echo "BLOCKED: <empty>"
+      er=$(sqlite3 .stores/db.sqlite "SELECT 'ER:' || display_id || ' task=' || COALESCE(task_id,'-') || ' status=' || status || ' verdict=' || COALESCE(verdict,'-') FROM external_reviews WHERE status IN ('pending','running','tooling_held') ORDER BY id;" 2>/dev/null)
+      [ -n "$er" ] && { echo "ER:"; echo "$er" | sed 's/^/  /'; } || echo "ER: <empty>"
+      active=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
+        | jq -r '[.[] | select(.status | IN("planning","plan_review","ready","executing","code_review","in_review"))] | length')
+      echo "ACTIVE WIP (planning..in_review): $active"
+    done
+```
+
+### What you'll see
+
+- **Diff monitor on init:** prints `[init HH:MM:SS]` and the current actionable rows. If T098 is still in flight when you start, expect ~1 line.
+- **Diff monitor on change:** `+`-prefixed lines for entries entering the actionable set, `-`-prefixed lines for entries leaving. ER rows get `ER:`-prefixed entries.
+- **Backup scan every 15 min:** four sections — IN_REVIEW (action: codex pending OR accept), BLOCKED (action: triage/resume), ER (action: dispatch / accept / retry), ACTIVE WIP count.
+
+### Stop early
+
+If a monitor goes too chatty, use the `TaskStop` tool with the `task_id` returned at Monitor start.
+
 ## First step for next agent
 
-1. **Watch T098.** Check `stores tasks status T098`. If still cycling, monitor:
+1. **Re-arm both monitors above** via the `Monitor` tool. Verify each prints an init/snapshot line within ~30s.
+2. **Watch T098.** Check `stores tasks status T098`. If still cycling, monitor:
    - `executing → code_review → in_review` (ER spawn, this time with L488 auto-rebase)
    - On in_review, ER will fire automatically; codex returns PASS/REVISE on real findings (rebase-before-codex now in production)
    - If REVISE: drive cycle continues; if PASS: verify scope (`git diff --stat $(git merge-base feat/T098-auto-promoted-l480 main)..feat/T098-auto-promoted-l480` should show TUI-scoped files only) then `stores tasks accept T098 --invoker ai_with_human --approve-token <T>`.
