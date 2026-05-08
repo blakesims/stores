@@ -121,11 +121,11 @@ fn current_cycle_val(entry: &EntryMap) -> i64 {
         .unwrap_or(0)
 }
 
-/// Returns `(executor.summary, review.summary)` from the prior REVISE cycle if one exists.
+/// Returns `(executor.summary, executor.commit, review.summary)` from the prior REVISE cycle if one exists.
 ///
 /// Looks for a `cycles[]` entry where `cycle == current_cycle - 1`, `review.gate == "REVISE"`,
 /// and `executor.summary` is non-empty.
-fn get_prior_revise_cycle(entry: &EntryMap) -> Option<(String, String)> {
+fn get_prior_revise_cycle(entry: &EntryMap) -> Option<(String, String, String)> {
     let cur = current_cycle_val(entry);
     if cur < 2 {
         return None;
@@ -140,9 +140,13 @@ fn get_prior_revise_cycle(entry: &EntryMap) -> Option<(String, String)> {
         if cycle_num != Some(prev) {
             continue;
         }
-        let executor_summary = cycle_val
-            .get("executor")
+        let executor_obj = cycle_val.get("executor");
+        let executor_summary = executor_obj
             .and_then(|e| e.get("summary"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let executor_commit = executor_obj
+            .and_then(|e| e.get("commit"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let review_gate = cycle_val
@@ -156,7 +160,11 @@ fn get_prior_revise_cycle(entry: &EntryMap) -> Option<(String, String)> {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if review_gate == "REVISE" && !executor_summary.is_empty() {
-            return Some((executor_summary.to_string(), review_summary.to_string()));
+            return Some((
+                executor_summary.to_string(),
+                executor_commit.to_string(),
+                review_summary.to_string(),
+            ));
         }
     }
     None
@@ -309,16 +317,25 @@ impl BriefContract for ExecutorReviseMustIncludePriorExecutorAndCodeReview {
         let args = json!(null);
         let rendered = ctx.rendered;
 
-        let (executor_summary, review_summary) = match get_prior_revise_cycle(ctx.entry) {
-            Some(pair) => pair,
-            None => return CheckResult::pass(id, &args),
-        };
+        let (executor_summary, executor_commit, review_summary) =
+            match get_prior_revise_cycle(ctx.entry) {
+                Some(triple) => triple,
+                None => return CheckResult::pass(id, &args),
+            };
 
         if !executor_summary.is_empty() && !rendered.contains(executor_summary.as_str()) {
             return CheckResult::fail(
                 id,
                 &args,
                 json!({"message": "missing prior executor summary"}),
+            );
+        }
+
+        if !executor_commit.is_empty() && !rendered.contains(executor_commit.as_str()) {
+            return CheckResult::fail(
+                id,
+                &args,
+                json!({"message": "missing prior executor commit"}),
             );
         }
 
@@ -427,13 +444,24 @@ impl BriefContract for ExecutorExternalReviseMustIncludeExternalReviewBackpressu
             missing.push("base_sha".to_string());
         }
 
-        if !rendered.contains("critical") {
+        // Assert the actual numeric count values appear (e.g. "0 critical", "1 major") rather
+        // than the bare words — bare-word checks would pass if findings text contains "[major]"
+        // while the template's count line was dropped.
+        let critical_count = er.get("critical_count").and_then(|v| v.as_i64()).unwrap_or(0);
+        let major_count = er.get("major_count").and_then(|v| v.as_i64()).unwrap_or(0);
+        let minor_count = er.get("minor_count").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        let critical_token = format!("{} critical", critical_count);
+        let major_token = format!("{} major", major_count);
+        let minor_token = format!("{} minor", minor_count);
+
+        if !rendered.contains(critical_token.as_str()) {
             missing.push("critical_count token".to_string());
         }
-        if !rendered.contains("major") {
+        if !rendered.contains(major_token.as_str()) {
             missing.push("major_count token".to_string());
         }
-        if !rendered.contains("minor") {
+        if !rendered.contains(minor_token.as_str()) {
             missing.push("minor_count token".to_string());
         }
 
@@ -557,8 +585,8 @@ impl BriefContract for ProvenanceLabelsMustDistinguishInternalVsExternal {
                 );
             }
 
-            let (_, review_summary) = match get_prior_revise_cycle(ctx.entry) {
-                Some(pair) => pair,
+            let (_, _, review_summary) = match get_prior_revise_cycle(ctx.entry) {
+                Some(triple) => triple,
                 None => return CheckResult::pass(id, &args),
             };
 
@@ -624,8 +652,8 @@ impl BriefContract for ProvenanceLabelsMustDistinguishInternalVsExternal {
                 }
             }
 
-            let (_, review_summary) = match get_prior_revise_cycle(ctx.entry) {
-                Some(pair) => pair,
+            let (_, _, review_summary) = match get_prior_revise_cycle(ctx.entry) {
+                Some(triple) => triple,
                 None => return CheckResult::pass(id, &args),
             };
             if !review_summary.is_empty() {
@@ -1106,6 +1134,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn contract2_executor_revise_fail_missing_prior_commit() {
+        let schema = tasks_schema();
+        let entry = executor_revise_entry(); // cycle 1 executor has commit="abc123"
+        let tpl = executor_template();
+        let ctx_val = build_context(&schema, &entry);
+        let rendered = render_template(tpl, &ctx_val).expect("render");
+        // Verify the commit is actually rendered before stripping it.
+        assert!(rendered.contains("abc123"), "fixture must render prior executor commit");
+        // Strip the commit SHA; leave the summary and review text intact.
+        let stripped = strip_substrings(&rendered, &["abc123"]);
+        let overlay = empty_overlay();
+        let ctx = BriefContext {
+            rendered: &stripped,
+            entry: &entry,
+            overlay: &overlay,
+            agent_role: "executor",
+        };
+        let result = CONTRACT_2.evaluate(&ctx);
+        assert_eq!(
+            result.outcome,
+            CheckOutcome::Fail,
+            "must fail when prior executor commit stripped"
+        );
+        let reason_str = result.reason.as_ref().unwrap().to_string();
+        assert!(
+            reason_str.contains("commit"),
+            "reason must name missing prior commit: {reason_str}"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Task 1.13 — Contract 3 (external review reuse + failing + null-applies)
     // -----------------------------------------------------------------------
@@ -1271,6 +1330,72 @@ mod tests {
         assert!(
             reason_str.contains("findings"),
             "reason must cite missing findings: {reason_str}"
+        );
+    }
+
+    #[test]
+    fn contract3_fail_count_value_not_just_word() {
+        // Demonstrates that the contract checks actual numeric values ("1 major") rather than
+        // the bare word "major" — a findings text containing "[major]" would fool a word-only
+        // check but not a value-specific check.
+        let schema = tasks_schema();
+        // findings text deliberately contains the word "major" so bare-word check would pass.
+        let findings_text = "[major] important invariant violated — contracts.rs:50";
+        let overlay = er_overlay(findings_text); // critical_count=0, major_count=1, minor_count=0
+
+        let mut entry: EntryMap = std::collections::BTreeMap::new();
+        entry.insert("display_id".to_string(), json!("T300"));
+        entry.insert("status".to_string(), json!("executing"));
+        entry.insert("title".to_string(), json!("Count Value Test"));
+        entry.insert("slug".to_string(), json!("count-value-test"));
+        entry.insert("current_phase".to_string(), json!(1));
+        entry.insert("current_cycle".to_string(), json!(1));
+        entry.insert(
+            "contract".to_string(),
+            json!({"done_when": "Done", "scope_in": "In", "scope_out": "Out"}),
+        );
+        entry.insert(
+            "plan".to_string(),
+            json!({"phases": [{"name": "P1", "objective": "obj", "tasks": ["t1"], "acceptance_criteria": ["ac1"]}]}),
+        );
+        entry.insert("cycles".to_string(), json!([]));
+
+        let ctx_val = build_context(&schema, &entry);
+        let tpl = executor_template();
+        let rendered =
+            render_template_with_overlay(tpl, &ctx_val, &overlay).expect("executor render");
+
+        // Verify the count line is present before stripping.
+        assert!(
+            rendered.contains("0 critical, 1 major, 0 minor"),
+            "template must render count line"
+        );
+
+        // Strip only the count line values (e.g. "0 critical, 1 major, 0 minor") — the word
+        // "major" still appears in findings_text ("[major] important..."), so a bare-word
+        // check would incorrectly pass while the numeric-value check correctly fails.
+        let stripped = strip_substrings(&rendered, &["0 critical, 1 major, 0 minor"]);
+        assert!(
+            stripped.contains("[major]"),
+            "stripped brief must still contain [major] from findings"
+        );
+
+        let ctx = BriefContext {
+            rendered: &stripped,
+            entry: &entry,
+            overlay: &overlay,
+            agent_role: "executor",
+        };
+        let result = CONTRACT_3.evaluate(&ctx);
+        assert_eq!(
+            result.outcome,
+            CheckOutcome::Fail,
+            "must fail when count line stripped even though word 'major' still appears in findings"
+        );
+        let reason_str = result.reason.as_ref().unwrap().to_string();
+        assert!(
+            reason_str.contains("major_count token") || reason_str.contains("critical_count token"),
+            "reason must cite missing count token: {reason_str}"
         );
     }
 
