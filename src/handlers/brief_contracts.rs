@@ -556,11 +556,7 @@ impl BriefContract for ProvenanceLabelsMustDistinguishInternalVsExternal {
                 _ => return CheckResult::pass(id, &args),
             };
             let findings = er.get("findings").and_then(|v| v.as_str()).unwrap_or("");
-            let findings_prefix = if findings.len() >= 32 {
-                &findings[..32]
-            } else {
-                findings
-            };
+            let findings_prefix = utf8_safe_prefix(findings, 32);
 
             if !findings_prefix.is_empty() {
                 let ext_header_pos = rendered.find(EXTERNAL_HEADER).unwrap();
@@ -641,11 +637,7 @@ impl BriefContract for ProvenanceLabelsMustDistinguishInternalVsExternal {
                 _ => return CheckResult::pass(id, &args),
             };
             let findings = er.get("findings").and_then(|v| v.as_str()).unwrap_or("");
-            let findings_prefix = if findings.len() >= 32 {
-                &findings[..32]
-            } else {
-                findings
-            };
+            let findings_prefix = utf8_safe_prefix(findings, 32);
 
             if !findings_prefix.is_empty() {
                 if let (Some(int_pos), Some(ext_pos)) =
