@@ -250,6 +250,96 @@ fn ac4_2_post_accept_chain_fixture_parses() {
     );
 }
 
+/// I027 regression: pin the canonical reference template
+/// `docs/agents-yaml-example.yaml` to the post-accept ceremony's recovery
+/// edge (`deploy_blocked → accepted`).
+///
+/// The test fixture at `tests/fixtures/agents-yaml/post-accept-chain.yaml`
+/// had the recovery subscription all along (asserted by
+/// `ac4_2_post_accept_chain_fixture_parses` above), but new operators copy
+/// `docs/agents-yaml-example.yaml` to their own `.stores/agents.yaml`. If the
+/// canonical reference template drifts from the recovery shape, every
+/// fresh-cloned operator inherits the bug.
+///
+/// In the actual incident (T107 / I027), the running `.stores/agents.yaml`
+/// only subscribed accept-merge / cargo-install on `(in_review, accepted)`.
+/// After `tasks retry-deploy` (deploy_blocked → accepted), the daemon's
+/// subscriber-dispatch loop in `agents_run::poll_once` matches
+/// `(store, from, to)` exactly — so the missing recovery subscription
+/// silently broke the entire post-accept ceremony. Operator had to
+/// manually `git merge` and the row stayed stranded at `accepted`.
+///
+/// Pi ruling msg_7190d789: re-fire the chain on retry-deploy. This test
+/// pins the canonical template so future drift fails-loud.
+///
+/// `.stores/agents.yaml` itself is gitignored (per-project operator config)
+/// so cannot be tested here directly. Operators are expected to copy from
+/// `docs/agents-yaml-example.yaml`; pinning the example catches the drift
+/// at its source.
+#[test]
+fn i027_agents_yaml_example_subscribes_post_accept_chain_to_recovery_edge() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/agents-yaml-example.yaml");
+    let yaml = std::fs::read_to_string(&path)
+        .expect("docs/agents-yaml-example.yaml must be present");
+    let parsed = AgentsYaml::from_yaml(&yaml)
+        .expect("docs/agents-yaml-example.yaml must parse");
+
+    let accept = parsed
+        .agents
+        .iter()
+        .find(|a| a.name == "accept-merge")
+        .expect("agents.yaml example must declare accept-merge");
+    assert!(
+        accept
+            .subscribes_to
+            .iter()
+            .any(|s| s.transition.from == "in_review" && s.transition.to == "accepted"),
+        "accept-merge must keep the happy-path (in_review, accepted) subscription"
+    );
+    assert!(
+        accept
+            .subscribes_to
+            .iter()
+            .any(|s| s.transition.from == "deploy_blocked" && s.transition.to == "accepted"),
+        "accept-merge must subscribe (deploy_blocked, accepted) for retry-deploy recovery (I027)"
+    );
+
+    let cargo = parsed
+        .agents
+        .iter()
+        .find(|a| a.name == "cargo-install")
+        .expect("agents.yaml example must declare cargo-install");
+    assert!(
+        cargo
+            .subscribes_to
+            .iter()
+            .any(|s| s.transition.from == "in_review" && s.transition.to == "accepted"),
+        "cargo-install must keep the happy-path (in_review, accepted) peer subscription"
+    );
+    assert!(
+        cargo
+            .subscribes_to
+            .iter()
+            .any(|s| s.transition.from == "deploy_blocked" && s.transition.to == "accepted"),
+        "cargo-install must subscribe (deploy_blocked, accepted) as peer of accept-merge on retry-deploy (I027)"
+    );
+
+    // schema-migrate's edge is unaffected by I027 — it keys off cargo-install's
+    // mark_cargo_installed fire (accepted → cargo_installed).
+    let migrate = parsed
+        .agents
+        .iter()
+        .find(|a| a.name == "schema-migrate")
+        .expect("agents.yaml example must declare schema-migrate");
+    assert!(
+        migrate
+            .subscribes_to
+            .iter()
+            .any(|s| s.transition.from == "accepted" && s.transition.to == "cargo_installed"),
+        "schema-migrate must subscribe (accepted, cargo_installed); unchanged by I027"
+    );
+}
+
 /// AC4.1: chain isolation — T100 (clean) reaches schema_migrated via the
 /// full ceremony; T101 (merge conflict) flips to deploy_blocked at the
 /// accept-merge link and does not prevent T100 from completing.
