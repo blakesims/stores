@@ -146,21 +146,19 @@ fn write_spawn_error_transcript(
 // Runner-exit classification (T029)
 // ---------------------------------------------------------------------------
 
-/// Classify a non-zero runner exit into a structured `blocked_reason` payload.
+/// Classify a non-zero runner exit into a task `blocked_reason`.
 ///
-/// Returned string is JSON-encoded so the existing `text` `blocked_reason`
-/// column captures exit_code and (for rate-limit) the upstream reset epoch
-/// without a schema migration. Shape:
-///
-/// ```json
-/// {"kind":"rate_limit"|"runner_crash","exit_code":<i32>,"reset_at":<u64?>}
-/// ```
+/// Rate-limit exits return the T100 cooldown contract string
+/// `rate_limit:<provider>:<until-iso8601>`. Non-rate-limit crashes preserve the
+/// legacy JSON runner-crash payload containing `kind=runner_crash` and
+/// `exit_code`.
 ///
 /// Detection priority:
 /// 1. stream-json `rate_limit_event` whose `rate_limit_info.status != "allowed"`
-///    (mints `kind=rate_limit` + `reset_at` from `resetsAt`).
-/// 2. stderr substring match on `"rate limit"` / `"usage limit"` (no `reset_at`).
-/// 3. fall through to `kind=runner_crash`.
+///    (uses `resetsAt` as the cooldown when present).
+/// 2. stdout/stderr/payload_error signatures for HTTP 429, `Retry-After`,
+///    `rate_limit_error`, codex throttling text, anthropic-api 429s, or pi/provider 429s.
+/// 3. fall through to `kind=runner_crash` JSON.
 fn classify_runner_exit(out: &RunnerOutput) -> String {
     if let Some((provider, until)) = classify_rate_limit(out) {
         return format!("rate_limit:{provider}:{until}");

@@ -1422,7 +1422,7 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                 }
                 if code != 0 {
                     if let Some(until) = task_rate_limit_until(conn, &sub.store, row_id)? {
-                        let _ = mark_claim_rate_limit_cooldown(
+                        mark_claim_rate_limit_cooldown(
                             conn,
                             &sub.store,
                             row_id,
@@ -1430,7 +1430,7 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                             agent,
                             &until,
                             &status_str,
-                        );
+                        )?;
                     } else {
                         let _ = mark_claim_finished_typed(
                             conn,
@@ -1618,7 +1618,7 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
             }
             if code != 0 {
                 if let Some(until) = task_rate_limit_until(conn, &c.store, c.row_id)? {
-                    let _ = mark_claim_rate_limit_cooldown(
+                    mark_claim_rate_limit_cooldown(
                         conn,
                         &c.store,
                         c.row_id,
@@ -1626,7 +1626,7 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                         agent,
                         &until,
                         &status_str,
-                    );
+                    )?;
                 } else if agent.name == "auto-drive"
                     && terminal_reason == "ok"
                     && crate::flow::builtins::auto_drive::has_pending_auto_drive_work(
@@ -1939,6 +1939,74 @@ pub fn ensure_dispatch_locks_typed(conn: &Connection) -> Result<()> {
             rusqlite::params![now],
         )?;
     }
+
+    ensure_dispatch_locks_terminal_reason_allows_rate_limit(conn)?;
+    Ok(())
+}
+
+fn ensure_dispatch_locks_terminal_reason_allows_rate_limit(conn: &Connection) -> Result<()> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='dispatch_locks'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(sql) = sql else { return Ok(()); };
+    if sql.contains("'rate_limit'") {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "BEGIN IMMEDIATE;
+         CREATE TABLE dispatch_locks__t100_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store TEXT NOT NULL,
+            row_id INTEGER NOT NULL,
+            display_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            transition_id INTEGER,
+            claimed_at TEXT NOT NULL,
+            claimed_by TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 1,
+            last_status TEXT,
+            finished_at TEXT,
+            daemon_epoch TEXT,
+            claim_source TEXT CHECK(claim_source IN ('try_claim','retry_claim','manual','legacy')),
+            attempt INTEGER,
+            pid INTEGER,
+            heartbeat_at TEXT,
+            postcondition_id TEXT,
+            postcondition_args TEXT,
+            terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown','rate_limit')),
+            next_retry_at TEXT,
+            UNIQUE(store, row_id, agent_name)
+         );
+         INSERT INTO dispatch_locks__t100_new (
+            id, store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by,
+            attempts, last_status, finished_at, daemon_epoch, claim_source, attempt, pid,
+            heartbeat_at, postcondition_id, postcondition_args, terminal_reason, next_retry_at
+         )
+         SELECT id, store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by,
+            attempts, last_status, finished_at, daemon_epoch, claim_source, attempt, pid,
+            heartbeat_at, postcondition_id, postcondition_args, terminal_reason, next_retry_at
+         FROM dispatch_locks;
+         DROP TABLE dispatch_locks;
+         ALTER TABLE dispatch_locks__t100_new RENAME TO dispatch_locks;
+         COMMIT;",
+    )
+    .or_else(|e| {
+        let _ = conn.execute_batch("ROLLBACK;");
+        Err(e)
+    })?;
+
+    let now = crate::handlers::row::now_iso8601();
+    conn.execute(
+        "INSERT OR IGNORE INTO framework_migrations (id, applied_at, note) \
+         VALUES ('T100-dispatch-locks-rate-limit-terminal-reason', ?1, \
+                 'allow dispatch_locks.terminal_reason rate_limit')",
+        rusqlite::params![now],
+    )?;
     Ok(())
 }
 
@@ -2506,7 +2574,27 @@ fn task_rate_limit_until(conn: &Connection, store: &str, row_id: i64) -> Result<
 fn parse_rate_limit_blocked_reason(reason: &str) -> Option<&str> {
     let rest = reason.strip_prefix("rate_limit:")?;
     let (_provider, until) = rest.split_once(':')?;
-    if until.len() >= 20 { Some(until) } else { None }
+    if is_iso8601_cooldown(until) { Some(until) } else { None }
+}
+
+fn is_iso8601_cooldown(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() < 20
+        || b.get(4) != Some(&b'-')
+        || b.get(7) != Some(&b'-')
+        || b.get(10) != Some(&b'T')
+        || b.get(13) != Some(&b':')
+        || b.get(16) != Some(&b':')
+    {
+        return false;
+    }
+    b[0..4].iter().all(u8::is_ascii_digit)
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && b[11..13].iter().all(u8::is_ascii_digit)
+        && b[14..16].iter().all(u8::is_ascii_digit)
+        && b[17..19].iter().all(u8::is_ascii_digit)
+        && (s.ends_with('Z') || s[19..].contains('+') || s[19..].contains('-'))
 }
 
 fn mark_claim_rate_limit_cooldown(
@@ -4718,6 +4806,61 @@ policies:
                 .is_empty(),
             "legacy_unknown must not leak to any other agent"
         );
+    }
+
+    #[test]
+    fn t100_migrates_old_terminal_reason_check_to_allow_rate_limit() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE framework_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL, note TEXT);
+             CREATE TABLE dispatch_locks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store TEXT NOT NULL,
+                row_id INTEGER NOT NULL,
+                display_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                transition_id INTEGER,
+                claimed_at TEXT NOT NULL,
+                claimed_by TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 1,
+                last_status TEXT,
+                finished_at TEXT,
+                daemon_epoch TEXT,
+                claim_source TEXT CHECK(claim_source IN ('try_claim','retry_claim','manual','legacy')),
+                attempt INTEGER,
+                pid INTEGER,
+                heartbeat_at TEXT,
+                postcondition_id TEXT,
+                postcondition_args TEXT,
+                terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown')),
+                next_retry_at TEXT,
+                UNIQUE(store, row_id, agent_name)
+             );
+             INSERT INTO dispatch_locks
+             (store,row_id,display_id,agent_name,transition_id,claimed_at,claimed_by,last_status,finished_at,attempts,attempt,terminal_reason,next_retry_at)
+             VALUES ('tasks',809,'T809','auto-drive',1,'2026-01-01T00:00:00Z','daemon','exit=3','2026-01-01T00:00:00Z',1,1,'exit_nonzero',NULL);",
+        )
+        .unwrap();
+
+        ensure_dispatch_locks_typed(&conn).unwrap();
+        conn.execute(
+            "UPDATE dispatch_locks SET terminal_reason='rate_limit', next_retry_at='2099-01-01T00:00:00Z' WHERE row_id=809",
+            [],
+        )
+        .unwrap();
+        let reason: String = conn
+            .query_row(
+                "SELECT terminal_reason FROM dispatch_locks WHERE row_id=809",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "rate_limit");
+    }
+
+    #[test]
+    fn malformed_rate_limit_blocked_reason_is_not_cooldown() {
+        assert_eq!(parse_rate_limit_blocked_reason("rate_limit:anthropic:not-an-iso8601-timestamp"), None);
     }
 
     #[test]
