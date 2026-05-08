@@ -565,6 +565,11 @@ fn build_store_command(schema: &Schema) -> Command {
         }
     }
 
+    // recover-stale-base is a tasks-only operator recovery verb.
+    if schema.name == "tasks" {
+        store_cmd = store_cmd.subcommand(build_recover_stale_base_cmd());
+    }
+
     // `guide` is also registered on the `gate` store (full form), which has no workflow.
     if schema.name == "gate" {
         store_cmd = store_cmd.subcommand(build_guide_cmd());
@@ -900,6 +905,28 @@ fn build_retry_deploy_cmd() -> Command {
     Command::new("retry-deploy")
         .about("Retry deploy-blocked release ceremony (deploy_blocked → accepted; use after fixing deploy issue)")
         .arg(Arg::new("display_id").help("Display ID").required(true))
+}
+
+/// Build the `recover-stale-base` command (tasks only).
+///
+/// Operator recovery verb: after rebase, supersedes all tooling_held
+/// stale_base_requires_rebase ER rows for the task and spawns one fresh
+/// pending external_review against the current branch tip. Requires
+/// ai_with_human or human invoker; ai_autonomous is rejected.
+fn build_recover_stale_base_cmd() -> Command {
+    Command::new("recover-stale-base")
+        .about(
+            "Recover a task stuck in stale_base_requires_rebase: after rebase of the task \
+             branch, supersede all tooling_held ER rows and spawn a fresh pending \
+             external_review against the current branch tip. Requires --invoker ai_with_human \
+             or human; ai_autonomous is rejected. The daemon picks up the new pending ER \
+             and runs the normal external_review supersede path.",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the task (T###)")
+                .required(true),
+        )
 }
 
 /// Build the `status` command.

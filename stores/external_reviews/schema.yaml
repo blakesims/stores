@@ -12,6 +12,7 @@ lifecycle:
     - {from: running, to: tooling_held, verb: record-tooling-failure, actor: framework}
     - {from: pending, to: superseded, verb: supersede, actor: framework}
     - {from: running, to: superseded, verb: supersede, actor: framework}
+    - {from: tooling_held, to: superseded, verb: supersede, actor: framework}
     - {from: tooling_held, to: pending, verb: retry-review, actor: framework}
 
 fields:
@@ -39,6 +40,7 @@ fields:
   - {name: prior_review_ref, type: text, required: false, description: "Reference to prior review context input."}
   - {name: held_reason, type: text, required: false, description: "Framework tooling hold reason such as cap-held, runner/tooling failure text, or stale_base_requires_rebase."}
   - {name: next_retry_at, type: timestamp, required: false, description: "Retry eligibility for retryable tooling_held rows; stale_base_requires_rebase holds are not auto-retried."}
+  - {name: superseded_by, type: text, required: false, description: "ER### display_id of the new external_review that supersedes this row."}
   - {name: attempts, type: integer, required: false, description: "Number of daemon attempts that claimed this external review row."}
   - {name: findings, type: list_record, required: false, description: "Structured findings emitted by the runner or tooling hold diagnostics.", fields: [{name: severity, type: enum, enum_values: [critical, major, minor]}, {name: summary, type: text}, {name: detail, type: text}, {name: path, type: text}, {name: line, type: integer}]}
 

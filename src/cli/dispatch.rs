@@ -301,8 +301,21 @@ pub fn dispatch(
                     }
                 }
                 Some((verb, sub)) => {
+                    // recover-stale-base is a tasks-only operator recovery verb.
+                    if verb == "recover-stale-base" && store.name == "tasks" {
+                        let display_id = sub
+                            .get_one::<String>("display_id")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let er_schema =
+                            schemas.get("external_reviews").ok_or_else(|| {
+                                anyhow::anyhow!("external_reviews schema not loaded")
+                            })?;
+                        handlers::recover_stale_base::run_recover_stale_base(
+                            &conn, er_schema, display_id, invoker,
+                        )?;
                     // override-risk and override-policy are observations-only non-transition verbs
-                    if verb == "override-risk" {
+                    } else if verb == "override-risk" {
                         handlers::overrides::run_override_risk(schema, &conn, sub, invoker)?;
                     } else if verb == "override-policy" {
                         handlers::overrides::run_override_policy(schema, &conn, sub, invoker)?;
