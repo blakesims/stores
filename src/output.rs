@@ -163,9 +163,23 @@ pub fn print_list_text(display_id: &str, entry: &BTreeMap<String, Value>) {
 /// Print a single entry as JSON.
 pub fn print_entry_json(entry: &BTreeMap<String, Value>) {
     let v = Value::Object(entry.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    print_value_json(&v);
+}
+
+/// Print a selected value: scalars as one raw line, objects/lists as JSON.
+pub fn print_selected_value(value: &Value) {
+    match value {
+        Value::Object(_) | Value::Array(_) => print_value_json(value),
+        Value::Null => println!(),
+        other => println!("{}", value_display(other)),
+    }
+}
+
+/// Print any selected value as valid JSON.
+pub fn print_value_json(value: &Value) {
     println!(
         "{}",
-        serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_string())
     );
 }
 

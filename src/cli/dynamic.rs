@@ -1335,11 +1335,20 @@ fn build_leaf_cmd(
 
 /// Build the `show` command.
 fn build_show_cmd() -> Command {
-    Command::new("show").about("show an entry").arg(
-        Arg::new("display_id")
-            .help("Display ID of the entry")
-            .required(true),
-    )
+    Command::new("show")
+        .about("show an entry")
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the entry")
+                .required(true),
+        )
+        .arg(
+            Arg::new("field")
+                .long("field")
+                .value_name("name")
+                .help("Print a selected field/path from the entry (for example: title or contract.done_when)")
+                .required(false),
+        )
 }
 
 /// Build the `list` command with filter/sort/limit flags.
