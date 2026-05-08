@@ -394,8 +394,10 @@ fn starts_with_leading_verdict(line: &str, verdict: &str) -> bool {
 
 fn has_revise_finding_marker(output: &str) -> bool {
     output.lines().any(|line| {
-        let lower = line.to_ascii_lowercase();
-        lower.contains("[p1]") || lower.contains("[major]") || lower.contains("[critical]")
+        let lower = line.trim_start().to_ascii_lowercase();
+        ["[critical]", "[major]", "[minor]", "[p1]", "[p2]", "[p3]"]
+            .iter()
+            .any(|marker| lower.starts_with(marker))
     })
 }
 
@@ -736,8 +738,8 @@ mod tests {
 
     #[test]
     fn codex_prose_with_revise_finding_markers_infers_revise() {
-        for marker in ["[P1]", "[major]", "[critical]"] {
-            let output = format!("Review summary: changes required.\n{marker} fix this\n");
+        for marker in ["[critical]", "[major]", "[minor]", "[P1]", "[P2]", "[P3]"] {
+            let output = format!("Review summary: changes required.\n  {marker} fix this\n");
             let parsed = parse_codex_review_output(&output).unwrap();
             assert_eq!(
                 parsed.verdict,
@@ -745,6 +747,13 @@ mod tests {
                 "marker {marker} should infer REVISE"
             );
         }
+    }
+
+    #[test]
+    fn codex_t103_er326_shape_p2_marker_infers_revise() {
+        let output = "The implementation does not satisfy the contract.\n\n[P2] parse_verdict does not infer REVISE from codex finding markers.\n";
+        let parsed = parse_codex_review_output(output).unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Revise);
     }
 
     #[test]
@@ -759,6 +768,20 @@ mod tests {
     fn codex_nonempty_without_markers_needs_parse_fallback() {
         let err = parse_codex_review_output("Review summary: inconclusive prose only.\n")
             .expect_err("unmarked non-empty prose should request parse fallback");
+        assert_eq!(err.to_string(), "parse-fallback-needed");
+    }
+
+    #[test]
+    fn codex_token_not_leading_does_not_infer_pass_from_prose() {
+        let err = parse_codex_review_output("The verdict is PASS because the prose says so.\n")
+            .expect_err("non-leading PASS token must not silently pass");
+        assert_eq!(err.to_string(), "parse-fallback-needed");
+    }
+
+    #[test]
+    fn codex_embedded_finding_marker_does_not_infer_revise() {
+        let err = parse_codex_review_output("Review summary mentions [P2] inline, not as a finding.\n")
+            .expect_err("finding marker fallback is line-leading only");
         assert_eq!(err.to_string(), "parse-fallback-needed");
     }
 
