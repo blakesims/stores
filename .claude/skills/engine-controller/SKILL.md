@@ -80,6 +80,25 @@ If the daemon itself is dead or stale (exe path shows `(deleted)`), restart it b
 - Quote Pi rulings verbatim in subagent briefs. If a subagent proposes a different interpretation, halt and ask Pi.
 - **Doc-only work does NOT promote to a substrate task.** The drive cycle (planner → plan-reviewer → executor → code-reviewer → wrap → codex → accept-merge) is too heavy for doc edits. If an observation's contract is doc-only (`docs/**`, `*.md`, SKILL prompts, README), route to pi-architect or engine-controller direct-commit instead — observation can be closed by direct-commit reference. The substrate's audit trail for direct-commit doc work is the git log + the linked-observation reference in the commit message.
 
+## Substrate repair lane
+
+When the substrate workflow is blocked by a substrate bug, engine-controller may bypass full task ceremony and patch `main` directly if ALL conditions hold:
+
+1. The substrate itself is blocking progress (review parser loop, stale external_review recovery row, daemon/review lane broken, accepted task broken in production due to migration/drift).
+2. The fix is narrow, mechanical, and testable (ideally 1-2 files; no broad refactor).
+3. The fix restores the engine's ability to continue.
+4. The commit names the blocking task/obs and states why dogfood was bypassed.
+5. A durable observation exists or is filed for the broader bug class if the direct patch is not the full design fix.
+
+Still forbidden in the repair lane:
+
+- Raw SQL writes to `.stores/db.sqlite`.
+- Silent DB mutation without framework code/verbs/audit.
+- Broad schema/doctrine/security/authority changes without Pi/Blake approval.
+- Skipping ceremony merely because it is annoying.
+
+If the patch touches lifecycle, schema, auth, review gates, daemon dispatch, or architecture-sensitive files, ask Pi first. Pi's approval should specify scope, tests, and follow-up observation. Use reviewer-runner as an independent read-only witness when the repair changes review-lane internals or exceeds the stated envelope.
+
 ## Revise-brief discipline (mandatory clauses)
 
 When dispatching `task-workflow:executor` for a codex REVISE, ALWAYS include both clauses below. They close the two failure modes that have surfaced 4+ times this session (T080 r1, T084 r1, T084 r2, T083 r2/r3):
@@ -239,15 +258,27 @@ Default lane caps:
 - accept/integration: 1;
 - architecture-decision: 1.
 
-T1 narrow contract: usually skip codex after in-cycle code_review PASS; rebase and accept.
+Post-T083 doctrine:
 
-T2/T3 or broad risk: codex via reviewer-runner.
+- **Path A (substrate-native `external_reviews`) is the canonical T2/T3 review gate.** The daemon auto-fires codex, writes the verdict row, and acceptance is gated on a current-head PASS.
+- **Reviewer-runner is a read-only fallback/audit witness, not the default primary path.** Do not ping reviewer-runner for normal happy-path T2/T3 reviews.
+- **T1 narrow contract:** usually skip codex after in-cycle code_review PASS; rebase and accept.
+
+Mandatory reviewer-runner escalation triggers:
+
+1. Review-lane self-modification: task touches `external_reviews`, codex parser, rebase-before-review, ER retry/tooling-held, or review acceptance gates.
+2. Schema/migration asymmetry risk: task adds/changes `stores/**/schema.yaml`, `src/codegen/ddl.rs`, or `src/handlers/framework_migrate.rs`.
+3. T1 skip-codex but scope exceeds envelope: files outside contract, unexpectedly large diff, or architecture-sensitive files.
+4. Path A is sick: two tooling-held ER attempts on same task, parser fallback loop, stale-base loop, verdict inconsistent with obvious output, or ER stuck with no retry path.
+5. Pi/Blake explicitly asks for an independent read.
+
+Reviewer-runner output is advisory evidence; substrate state still changes only through normal verbs / Path A / token-mediated acceptance.
 
 Reviewer dispatch must include: verb (`codex`/`re-codex`/`RE-REBASE-ONLY-NO-CODEX`), task/obs, branch, worktree, prior/head/base SHAs, diff scope, worktree-clean line, cycle/rN label, relevant Pi ruling msg id, overlap with other in-flight files.
 
-If rebase advances main but diff scope is byte-identical and no merge-resolution edit occurred, dispatch `RE-REBASE-ONLY-NO-CODEX`; reviewer-runner verifies scope identity without codex. Any merge-resolution edit → codex.
+If rebase advances main but diff scope is byte-identical and no merge-resolution edit occurred, dispatch `RE-REBASE-ONLY-NO-CODEX`; reviewer-runner verifies scope identity without codex. Any merge-resolution edit → substrate-native ER or reviewer-runner codex depending on the trigger above.
 
-PASS → accept when lane free. Local REVISE → executor revise + re-codex. Architecture/security/authority CRITICAL → Pi/Blake.
+PASS → accept when lane free. REVISE → executor revise + retry/re-codex. Architecture/security/authority CRITICAL → Pi/Blake.
 
 ## Accept/deploy
 

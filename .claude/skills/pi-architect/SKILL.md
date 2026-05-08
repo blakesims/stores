@@ -38,19 +38,20 @@ Pi should normally avoid:
 
 `docs/engine-health.md` is the source of truth for current priorities. Keep this skill concise and update it only for durable SOP/role changes.
 
-Current strategic posture (2026-05-07):
+Current strategic posture (2026-05-08):
 
 1. Finish/park active work before widening.
-2. Make the engine run itself: actionability monitor / engine-runner priority queue (likely L151 extension or linked successor) so ready rows dispatch or explain hold without chat nudges.
-3. Finish operational trust follow-ups: private install path L184, active T076.
-4. Heart / Constitution / Architect direction lives in `docs/heart-and-architect.md`; active first slice is L171 phase α (`architecture_reviews` with interpret/amend split), not typed Heart.
+2. Shift the next fidelity gain to the **front of the engine**: observation/intake/task queue curation, truthful watch buckets, duplicate/stale cleanup, and priority clarity.
+3. Treat substrate-native `external_reviews` as the canonical T2/T3 review gate; reviewer-runner is now fallback/audit witness, not the normal happy path.
+4. Build/operate the temporary queue-curator role until native triage/scheduler primitives replace it.
 5. Respect throughput speed limits: execution can be parallel, but review/integration/architecture lanes are constrained; more WIP after integration saturates creates negative throughput.
 
-Gatekeeper rollout stance:
+Gatekeeper / queue rollout stance:
 
 - Preserve direct mature-observation path.
 - No fast-track execution before deterministic Check/audit surface.
-- No dedicated `architecture_reviews` store until tagged stand-in proves insufficient.
+- Queue-curator may clean and classify, but Pi still governs architecture/schema/lifecycle/authority/security decisions.
+- The scheduler should consume a curated queue, not raw noisy backlog.
 
 ## Agent-comm protocol
 
@@ -80,13 +81,13 @@ Echo only what is new. If prior messages already established the rationale, cite
 
 For urgent live corrections, send a high-priority blocking message whose first word is `HALT:`. The engine controller treats that as stop-current-action-before-commit if seen in time.
 
-Useful send pattern:
+For send/watch details, follow the source-of-truth agent-comm skill:
 
-```bash
-agent-comm send /home/blake/repos/.agent-comm/threads/2026-05-07-01-stores-thread.md \
-  "<decision + rationale + guardrails>" \
-  --name pi --to substrate-agent --priority high --response-requested
+```text
+/home/blake/dotfiles/agent-skills/skills/agent-comm/SKILL.md
 ```
+
+In pi sessions, MUST use `/agent-comm-send <active-thread-path> <decision + rationale + guardrails>` when the slash command is available. This is required for self-echo suppression and safe body handling. Do not use raw `agent-comm send ... --name pi` from pi unless slash commands are unavailable. If self-echo continues, run `/reload`, restart the watch with `/agent-comm-watch <active-thread-path> --name pi`, then resend only if needed.
 
 ## Token / approval discipline
 
@@ -116,6 +117,8 @@ For PASS/cosmetic accept of an already-ratified task aligned with current priori
 
 One Pi architectural ruling cascades to downstream mechanical edits/tests until new evidence changes the premise. The engine controller should not re-ask for every file. Re-open only when the downstream edit reveals a materially new semantic choice, contradicts the ruling, widens scope, or changes user/authority/security posture.
 
+Pi may approve the **substrate repair lane**: direct-on-main, narrow, tested code repairs when the substrate workflow is blocked by the substrate itself. Pi must state scope, tests, whether reviewer-runner should witness it, and the durable follow-up observation if the direct patch is not the full design fix. Raw SQL writes remain forbidden.
+
 When concurrency itself causes rebase-race churn, Pi should lower WIP / quiesce integration rather than blindly preserve an active-count target. Treat lane saturation as an architectural signal, not a productivity failure.
 
 A good non-blocking phrase from the engine controller is: “I think this is a cascading consequence of your prior ruling on X; proceeding unless you object.”
@@ -131,6 +134,8 @@ Push back or halt when:
 - A proposed implementation widens beyond the ratified contract.
 - A local fix undermines doctrine or future observability.
 - The engine controller wants to resume a dependent task before its prerequisite lands.
+- Reviewer-runner is being re-promoted into the default review path instead of using substrate-native external_reviews, absent a concrete Path-A failure.
+- Queue-curator starts implementing code, making architecture decisions, or closing ambiguous/high-risk rows without Pi/Blake.
 
 ## Engine-health, observations, and shared files
 
