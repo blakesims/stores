@@ -1,4 +1,9 @@
-# Sample .stores/agents.yaml fixture (Phase 2).
+# Sample .stores/agents.yaml fixture — complete post-accept ceremony chain.
+#
+# Kept in sync with docs/agents-yaml-example.yaml for post-accept agents
+# (accept-merge, cargo-install, schema-migrate) plus observations-store agents
+# (auto-promote) that the docs example does not yet carry.  The subscriber-edge
+# contracts in src/flow/subscriber_edges.rs evaluate against this file.
 agents:
   - name: accept-merge
     subscribes_to:
@@ -6,22 +11,60 @@ agents:
         transition:
           from: in_review
           to: accepted
+      - store: tasks
+        transition:
+          from: deploy_blocked
+          to: accepted
     command: "builtin:accept-merge"
     claim_window_secs: 300
     retry_policy:
       max_attempts: 3
       backoff: linear
+
+  - name: cargo-install
+    subscribes_to:
+      - store: tasks
+        transition:
+          from: in_review
+          to: accepted
+      - store: tasks
+        transition:
+          from: deploy_blocked
+          to: accepted
+    command: "builtin:cargo-install"
+    claim_window_secs: 600
+    retry_policy:
+      max_attempts: 1
+      backoff: linear
+
+  - name: schema-migrate
+    subscribes_to:
+      - store: tasks
+        transition:
+          from: accepted
+          to: cargo_installed
+    command: "builtin:schema-migrate"
+    claim_window_secs: 300
+    retry_policy:
+      max_attempts: 1
+      backoff: linear
+
   - name: user-escalation
     subscribes_to:
       - store: tasks
         transition:
           from: accepted
           to: deploy_blocked
+      - store: tasks
+        transition:
+          from: cargo_installed
+          to: deploy_blocked
     command: "builtin:user-escalation"
     claim_window_secs: 300
     retry_policy:
       max_attempts: 1
       backoff: linear
+
   - name: auto-promote
     subscribes_to:
       - store: observations
@@ -33,6 +76,7 @@ agents:
     retry_policy:
       max_attempts: 1
       backoff: linear
+
   - name: auto-scaffold
     subscribes_to:
       - store: tasks
@@ -44,6 +88,7 @@ agents:
     retry_policy:
       max_attempts: 1
       backoff: linear
+
   - name: investigator
     subscribes_to:
       - store: observations
@@ -55,6 +100,7 @@ agents:
     retry_policy:
       max_attempts: 1
       backoff: linear
+
   - name: auto-drive
     subscribes_to:
       - store: tasks
@@ -70,6 +116,7 @@ agents:
     retry_policy:
       max_attempts: 1
       backoff: linear
+
   - name: auto-resolve-observation
     subscribes_to:
       - store: tasks
@@ -81,4 +128,5 @@ agents:
     retry_policy:
       max_attempts: 1
       backoff: linear
+
 deployment_specialist: user-escalation
