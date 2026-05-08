@@ -2,23 +2,23 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-08 mid-day (post-restart + cascade-dedup ship + backlog hygiene sweep + L488 surfaced). Daemon restarted 2026-05-08T05:45:51Z; T099 (cascade-dedup subscriber, T1) shipped at `cd137a1`; T100 (rate-limit-aware retry, T2) in flight post-rebase; observation backlog 357 → 30 open via the 2026-05-08 triage note (327 closures via `close_as_addressed`). T098 (L480 watch cockpit attention-fixes) cycling in execution. Pi filed L488 (auto-codex on stale-base) as the concrete child of L486 (canonical-mainline control-plane doctrine). The live priority remains **priority + file-overlap scheduling**, with L488's pre-review stale-base check now flagged as a high-leverage gate before the full scheduler.
+**Last updated:** 2026-05-08 wind-down (front-of-engine pivot). Daemon was restarted and the post-cascade recovery batch shipped: T099/L483 cascade-dedup, T100/L484 rate-limit-aware retry, T101/T104 parser tolerance fixes, T102/L491 DDL emergency repair, T103/L488 stale-base pre-review check, plus direct repair-lane patches for markdown-list parser markers and L488 bounded retry/backfill. Observation backlog was cleaned from 357 → ~30 open via `docs/worklog/2026-05-08/04-obs-backlog-triage.md`. T098/L480 cockpit/watch attention fixes remains active and is the proving ground for the next priority: **front-of-engine fidelity**. New durable follow-ups: L489 stale-binary-alive watchdog, L492 schema/DDL drift durability, L497 review-output/parser durability, L498 external-review stale-base recovery surface, and L486 canonical-mainline control-plane doctrine.
 
 ## The picture in one sentence
 
-**The engine can now choose, review, and integrate work without chat-shaped glue, but raising concurrency without priority + file-overlap routing creates rebase debt faster than throughput.** The next geodesic is the priority+file-overlap scheduler, then metrics that turn runner/reviewer choice into evidence, then a rate-limit-aware retry that distinguishes transient flake from quota-exhausted.
+**The engine's back end can now execute, externally review, recover from stale-base review, and integrate work; the weak layer is the front door: intake/observation/architecture triage, truthful watch buckets, right-sized ceremony, and priority clarity.** The next geodesic is front-of-engine fidelity (queue-curator as manual prototype + T098 watch cockpit), then priority/file-overlap scheduling grounded in L486/L488.
 
 ## Read-this-first priority ladder
 
-1. ✅ **Daemon restarted (2026-05-08T05:45:51Z).** Private install path live (`/home/blake/.local/share/stores/bin/stores`); --detach + --log-file behaving. Six cascade rows were closed-out-of-band yesterday (T084/T085/T086/T088/T093/T095/T096); no resume needed. Note: T040 epoch-shift + T050 stale-detection did NOT auto-clean the 14 dangling `dispatch_locks` rows from the prior epoch — filed as I017 intake.
-2. ✅ **Rate-limit-aware retry filed and in flight.** L484 ratified, T100 (T2 one-phase) executing; recovered from a stale-base codex stumble via rebase + resume. Currently at code_review post-rebase.
-3. ✅ **Observation backlog hygiene sweep complete.** 357 → 30 open via `docs/worklog/2026-05-08/04-obs-backlog-triage.md`: 292 cascade dupes folded into 25 keepers, 33 superseded by shipping tasks, 1 resolved-OOB, 1 wont_fix. Subagent execution; zero errors. Working verb: `close_as_addressed --resolution <T###|L###|sha> --resolution-kind <addressed_by_observation|task|commit>`.
-4. **L488 stale-base auto-codex pre-review check (T2, high-leverage).** Pi-filed concrete child of L486. Daemon's auto-codex path runs codex against unrebased branches when main has advanced — produces stale-base REVISE that drove T100 into `silent_zombie_pid_dead` recovery. Pi's recommendation: prioritize as a T2 before the full scheduler if stale-base review noise recurs.
-5. **L486 doctrine/enforcement slice.** Pi filed canonical-mainline control-plane doctrine: `.stores/db.sqlite` is the canonical control-plane; task branches are execution sandboxes; branch-local failure reports must be scoped, idempotent, and lifecycle-cleaned. Pi will draft contract.
-6. **Build priority + file-overlap scheduler.** Pick the highest-priority compatible row and hold conflicts with explicit reasons; do not raise WIP by blind active-count. Grounded in L486.
-7. **Backlog triage agent / sweeper.** Automate the manual triage process used on 2026-05-08.
-8. **Add runner/review metrics.** Use T070/T071/T072/T083 data to compare pi vs claude and codex/pi/claude review outcomes by role/tier/duration/cost.
-9. **CLI ergonomics (L481 before L482).** `stores observations add` against a stale-schema DB returns cryptic `no such column` SQL error; multi-value flags split repeated VALUES on embedded commas. Pi deprioritizes after the scheduler/doctrine work lands.
+1. **Finish T098/L480 cockpit/watch attention fixes.** Blake's current friction is observability: `stores watch` mixes pipeline stages and overloads “review” across internal code review, final task review, and substrate-native external/Codex review. T098 is the active task addressing this layer.
+2. **Run queue-curator as the manual prototype of native triage.** New SOP: `.claude/skills/queue-curator/SKILL.md`; handover: `docs/worklog/2026-05-08/handover-queue-curator.md`. It should monitor intake/observations/tasks, use subagents for bulk analysis, and feed back missing schema/CLI/watch primitives.
+3. **Clarify the pipeline model in watch/triage.** Desired mental model: inbox/intake → triage/duplicate/wont_fix/needs_info → observations needing contract / draft / ready → architecture_review when needed → tasks → terminal history. This is not a flat list.
+4. **Systematize Architect escalation.** Long-term Heart/Architect direction lives in `docs/heart-and-architect.md`; T077/L171 shipped phase α (`architecture_reviews`). Queue-curator/gatekeeper should route architecture-gray observations to Architect against project Heart/Philosophy/Primitives, not force them through local task review.
+5. **Right-size ceremony / fast path.** Tiny 1-10 line fixes should not always pay observation→triage→contract→task→executor→review→codex ceremony. Preserve audit/authority, but design valves so process cost matches risk.
+6. **Priority + file-overlap scheduler.** Once the queue is curated enough to trust, choose highest-priority compatible work and hold conflicts explicitly. Ground in L486 canonical control-plane doctrine and L488 pre-review stale-base protection.
+7. **Durability follow-ups if they block again:** L489 stale-binary watchdog, L492 schema/DDL drift durability, L497 review-output/parser durability, L498 external-review stale-base recovery surface.
+8. **CLI ergonomics (L481 before L482).** Stale-schema actionable error and multi-value comma semantics remain useful but lower than front-door fidelity.
+9. **Runner/review metrics.** Still valuable, but lower priority than making the input queue legible and schedulable.
 
 ## Status legend
 
@@ -187,20 +187,18 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Highest-leverage next picks
 
-Operator-trust + actionability layers are now substantially closed: T076/L184 ✅, T077/L171 ✅, T078/L185 ✅, T079/L186 ✅, T080/L068 ✅, T081/L053 ✅, T082/L077 ✅, T083/L188 ✅, T086/L193 ✅ (closed-out-of-band). The bottleneck is no longer "can the engine choose, review, integrate work?" — it's **"how does the engine raise concurrency without making rebase debt faster than throughput?"** and **"how does the engine pick a runner / reviewer based on evidence rather than vibes?"**.
+Operator-trust + actionability layers are much stronger after the 2026-05-08 recovery batch. The bottleneck has shifted: **the engine can finish work better than it can understand, sort, and visualize incoming work.** The next throughput gains come from front-of-engine fidelity and right-sized ceremony, then scheduler throughput.
 
-The 2026-05-08 cascade is the cost evidence: the T086 close-out-of-band step was missed → six in-flight branches inherited the meta-merge conflict → runner crashed on stale base → T041 retried 27/35/50/55/93 times → codex/pi rate-limit further amplified the loop → 15+ dupe `deploy-blocked merge conflict` observations filed before anyone noticed.
+1. **T098/L480 cockpit/watch truth** — immediate UX/observability fix. Watch must separate pipeline boxes and review meanings: internal `code_review`, final `in_review`, and external/Codex review are distinct.
+2. **Queue-curator live run** — use the new temporary role to produce a `QUEUE-SNAPSHOT`, classify the remaining ~30 open obs + intake drafts, and report schema/CLI/watch friction. This is dogfooding the future triage subsystem before building it.
+3. **Architect escalation path / Heart systematization** — architecture-gray observations should route to Architect and be judged against project Heart/Philosophy/Primitives. T077/L171 shipped the `architecture_reviews` store; the front-door triage path now needs to use it deliberately.
+4. **Right-sized ceremony / fast path** — design valves for small safe fixes vs. high-risk work. Avoid spending multiple agent cycles on 1-10 line fixes while preserving audit, authority, and architecture guardrails.
+5. **Priority + file-overlap scheduler** — still essential for high throughput, but should consume a curated queue rather than raw noisy backlog. Ground in L486/L488.
+6. **Durability fixes if blocking:** L489 stale-binary-alive watchdog, L492 schema/DDL drift gate, L497 parser durability, L498 stale-base ER recovery verb/surface.
+7. **CLI ergonomics:** L481 stale-schema actionable error, L482 multi-value flags.
+8. **Metrics over runner/review outcomes** — useful once front-door and scheduler semantics are legible.
 
-1. **Priority + file-overlap scheduler (GAP / file next)** — the cascade above is exactly what this prevents. Choose the highest-priority compatible row, not just the next active slot. Phase 1 uses expected/actual touched-file overlap plus current priority fields (`priority`, `priority_rank`, `scheduled_for`) and writes held reasons like `held: overlaps active TXXX on src/flow/external_review.rs`. Conflict domains (semantic, schema, doctrine) can come later.
-2. **Rate-limit-aware retry (`GAP-rate-limit` filed in Layer 1)** — T041's retry-on-failure is a pure backoff; T029/L071 was supposed to type the rate-limit case as `blocked:rate_limit` but `runner_crash exit_code=3` is leaking through. The 93-cycle T085 thrash is the smoking gun. Tier T2.
-3. **Cascade-dedup subscriber (`GAP-cascade-dedup` filed in Layer 8)** — when a substrate-changing task merges into main, every open branch can re-fire `deploy-blocked merge conflict` per tick. Dedup on `(task_id, conflict_signature)`. Tier T1.
-4. **Metrics over runner/review outcomes** — T070/T071/T072/T083 store typed records; report pi-vs-claude planner/executor/reviewer effectiveness, codex/pi/claude review PASS/REVISE/TOOLING_FAILURE rates, duration, and cost. Runner-selection feedback, not vanity analytics.
-5. **Observation backlog hygiene sweep** — ~354 open observations; many are stale, addressed, or duplicates (the L465+ cascade rows alone). Classify/close before drafting more contracts.
-6. **Gatekeeper/Router autonomy follow-through** — T053/L142 classifies intake; it should not become the scheduler. Keep roles separate: Gatekeeper classifies new input, Scheduler chooses next compatible executable work, Architect governs coherence, Reviewer checks implementation.
-7. **I002 — sqlite-raw-byte review false-positive doctrine fix** — forbid `grep`/`strings` against `.sqlite` files as evidence of live substrate state; use `sqlite3 SELECT` or substrate CLI verbs.
-8. **L172/L173 / CodeRabbit / richer conflict domains** — follow after the scheduler + metrics prove the shape.
-
-Current picture: the engine can do real work; the next throughput gains come from making concurrency safe (file-overlap scheduler), making retry honest (rate-limit awareness), and making runner choice evidence-driven (metrics).
+Current picture: the engine can do real work; the next architectural move is making the input pipeline legible, governable, and cheap enough for small work.
 
 
 ## Recently shipped
