@@ -15,10 +15,10 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 3. **Clarify the pipeline model in watch/triage.** Desired mental model: inbox/intake → triage/duplicate/wont_fix/needs_info → observations needing contract / draft / ready → architecture_review when needed → tasks → terminal history. This is not a flat list.
 4. **Systematize Architect escalation.** Long-term Heart/Architect direction lives in `docs/heart-and-architect.md`; T077/L171 shipped phase α (`architecture_reviews`). Queue-curator/gatekeeper should route architecture-gray observations to Architect against project Heart/Philosophy/Primitives, not force them through local task review.
 5. **Right-size ceremony / fast path.** Tiny 1-10 line fixes should not always pay observation→triage→contract→task→executor→review→codex ceremony. Preserve audit/authority, but design valves so process cost matches risk.
-6. **Priority + file-overlap scheduler.** Once the queue is curated enough to trust, choose highest-priority compatible work and hold conflicts explicitly. Ground in L486 canonical control-plane doctrine and L488 pre-review stale-base protection.
-7. **Durability follow-ups if they block again:** L489 stale-binary watchdog, L492 schema/DDL drift durability, L497 review-output/parser durability, L498 external-review stale-base recovery surface.
-8. **CLI ergonomics (L481 before L482).** Stale-schema actionable error and multi-value comma semantics remain useful but lower than front-door fidelity.
-9. **Runner/review metrics.** Still valuable, but lower priority than making the input queue legible and schedulable.
+6. **Metrics instrumentation for empirical runner/model choice.** The spine exists (`agent_runs`, `external_reviews`, `stores metrics`), but token/cost capture, prompt/config hashes, agent_runs reporting, experiment grouping, and outcome joins are incomplete. We need to collect enough data now to compare Pi vs Claude Code vs Codex, model choices, and prompt changes later.
+7. **Priority + file-overlap scheduler.** Once the queue is curated enough to trust, choose highest-priority compatible work and hold conflicts explicitly. Ground in L486 canonical control-plane doctrine and L488 pre-review stale-base protection.
+8. **Durability follow-ups if they block again:** L489 stale-binary watchdog, L492 schema/DDL drift durability, L497 review-output/parser durability, L498 external-review stale-base recovery surface.
+9. **CLI ergonomics (L481 before L482).** Stale-schema actionable error and multi-value comma semantics remain useful but lower than front-door fidelity.
 
 ## Status legend
 
@@ -185,20 +185,30 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | I002 | ⚪ — | **code-reviewer / codex grepping `.sqlite` raw bytes treats stale page data as live row state** — burns review cycles on false-positive transitions (T078 c1-c3 burn). Filed via intake `I002`; doctrine fix pending: SOP edit + reviewer validator forbidding raw-byte inspection of sqlite files; substitute `sqlite3 SELECT` or substrate CLI verbs. |
 | GAP-cascade-dedup | — | Subscriber should dedup `deploy-blocked: merge conflict` observations on `(task_id, conflict_signature)` to avoid the L465–L479 dupe storm seen during the 2026-05-08 T086 cascade (one obs per tick × 6 affected branches × hours = 15+ duplicate rows). Tier T1. |
 
+## Architect big-picture priorities
+
+This doc is operational, but it should carry the architect's current strategic map. As of 2026-05-08, the priorities are:
+
+1. **Front-door fidelity:** make intake/observations/watch pipeline-shaped and legible rather than a flat mixed list.
+2. **Architect systematization:** route architecture-gray work to `architecture_reviews` against project Heart/Philosophy/Primitives; keep local agents local and Architect global.
+3. **Right-sized ceremony:** build valves so tiny safe fixes do not cost more process than code, while preserving audit/authority for risky work.
+4. **Empirical engine telemetry:** make runner/model/harness/prompt choices measurable. Capture tokens/cost, prompt/config hashes, role/harness/model, wall time, outcomes, and experiment grouping before trying statistical inference.
+5. **Safe throughput:** once the queue is trustworthy, add priority + file-overlap scheduling so concurrency does not manufacture rebase debt.
+
 ## Highest-leverage next picks
 
-Operator-trust + actionability layers are much stronger after the 2026-05-08 recovery batch. The bottleneck has shifted: **the engine can finish work better than it can understand, sort, and visualize incoming work.** The next throughput gains come from front-of-engine fidelity and right-sized ceremony, then scheduler throughput.
+Operator-trust + actionability layers are much stronger after the 2026-05-08 recovery batch. The bottleneck has shifted: **the engine can finish work better than it can understand, sort, and visualize incoming work.** The next throughput gains come from front-of-engine fidelity, right-sized ceremony, empirical telemetry, then scheduler throughput.
 
 1. **T098/L480 cockpit/watch truth** — immediate UX/observability fix. Watch must separate pipeline boxes and review meanings: internal `code_review`, final `in_review`, and external/Codex review are distinct.
 2. **Queue-curator live run** — use the new temporary role to produce a `QUEUE-SNAPSHOT`, classify the remaining ~30 open obs + intake drafts, and report schema/CLI/watch friction. This is dogfooding the future triage subsystem before building it.
 3. **Architect escalation path / Heart systematization** — architecture-gray observations should route to Architect and be judged against project Heart/Philosophy/Primitives. T077/L171 shipped the `architecture_reviews` store; the front-door triage path now needs to use it deliberately.
 4. **Right-sized ceremony / fast path** — design valves for small safe fixes vs. high-risk work. Avoid spending multiple agent cycles on 1-10 line fixes while preserving audit, authority, and architecture guardrails.
-5. **Priority + file-overlap scheduler** — still essential for high throughput, but should consume a curated queue rather than raw noisy backlog. Ground in L486/L488.
-6. **Durability fixes if blocking:** L489 stale-binary-alive watchdog, L492 schema/DDL drift gate, L497 parser durability, L498 stale-base ER recovery verb/surface.
-7. **CLI ergonomics:** L481 stale-schema actionable error, L482 multi-value flags.
-8. **Metrics over runner/review outcomes** — useful once front-door and scheduler semantics are legible.
+5. **Metrics instrumentation P1** — make `agent_runs` first-class in `stores metrics`; capture prompt/template/config hashes; expose role×harness×model duration, exit, token, and outcome joins. Today the tables exist but `stores metrics` reports `agent_runs schema not recognized`, token/cost data is sparse, and prompt identity is absent.
+6. **Priority + file-overlap scheduler** — still essential for high throughput, but should consume a curated queue rather than raw noisy backlog. Ground in L486/L488.
+7. **Durability fixes if blocking:** L489 stale-binary-alive watchdog, L492 schema/DDL drift gate, L497 parser durability, L498 stale-base ER recovery verb/surface.
+8. **CLI ergonomics:** L481 stale-schema actionable error, L482 multi-value flags.
 
-Current picture: the engine can do real work; the next architectural move is making the input pipeline legible, governable, and cheap enough for small work.
+Current picture: the engine can do real work; the next architectural move is making the input pipeline legible, governable, empirically measurable, and cheap enough for small work.
 
 
 ## Recently shipped
