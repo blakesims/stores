@@ -142,3 +142,68 @@ fn read_table_info(conn: &Connection, table: &str) -> Result<Vec<String>> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codegen::ddl::ddl_for;
+    use crate::schema::Schema;
+    use rusqlite::OptionalExtension;
+
+    fn pre_t099_observations_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        let schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        conn.execute_batch(&ddl_for(&schema)).unwrap();
+        for col in ["summary_signature", "dupe_count", "last_seen"] {
+            conn.execute_batch(&format!(
+                "ALTER TABLE \"observations\" DROP COLUMN \"{col}\";"
+            ))
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn t102_framework_drift_emits_observations_dedup_alters() {
+        let conn = pre_t099_observations_conn();
+        let drift = compute_framework_drift(&conn).unwrap();
+        let got: Vec<(&str, &str, &str, bool)> = drift
+            .additive
+            .iter()
+            .filter(|(table, _)| table == "observations")
+            .map(|(_, col)| (col.name, col.sql_type, col.full_def, col.additive))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("summary_signature", "TEXT", "summary_signature TEXT", true),
+                ("dupe_count", "INTEGER", "dupe_count INTEGER DEFAULT 1", true),
+                ("last_seen", "TEXT", "last_seen TEXT", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn t102_framework_apply_lands_observations_dedup_columns_and_query_works() {
+        let conn = pre_t099_observations_conn();
+        let applied = apply_framework_drift(&conn).unwrap();
+        let applied_cols: Vec<&str> = applied
+            .iter()
+            .filter(|m| m.table_name == "observations")
+            .map(|m| m.column_name.as_str())
+            .collect();
+        assert_eq!(
+            applied_cols,
+            vec!["summary_signature", "dupe_count", "last_seen"]
+        );
+
+        conn.query_row(
+            "SELECT id FROM observations WHERE summary_signature = ?1",
+            rusqlite::params!["deploy-blocked: merge conflict"],
+            |_| Ok(()),
+        )
+        .optional()
+        .expect("dedup SELECT must not error after framework drift apply");
+    }
+}
