@@ -89,6 +89,13 @@ fn tui_watch_classification_u1_u3_and_ai_review_have_distinct_sections() {
 
 #[test]
 fn tui_watch_classification_silent_zombie_routes_to_default_visible_zombie_section() {
+    let mut silent_obs = obs("L200", "silent zombie observation");
+    if let Row::Obs(o) = &mut silent_obs {
+        o.status = "investigation_failed".to_string();
+        o.investigation_failure_reason = Some(" drive_failed:silent_zombie_pid_dead".to_string());
+        o.contract_state = Some("ready".to_string());
+        o.priority = "high".to_string();
+    }
     let rows = vec![
         task("T200", "blocked", Some("silent_zombie: pid dead")),
         task(
@@ -96,12 +103,13 @@ fn tui_watch_classification_silent_zombie_routes_to_default_visible_zombie_secti
             "blocked",
             Some("drive_failed:silent_zombie_pid_dead"),
         ),
+        silent_obs,
     ];
     for row in &rows {
         assert_eq!(class(row, &[]), VisibilityClass::ActionableRecovery);
     }
     let buckets = classify_with_options(&rows, WatchClassifyOptions::default());
-    assert_eq!(bucket(&buckets, Section::TasksHeldZombie), vec![0usize, 1]);
+    assert_eq!(bucket(&buckets, Section::TasksHeldZombie), vec![0usize, 1, 2]);
 }
 
 #[test]

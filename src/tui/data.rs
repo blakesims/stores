@@ -1,10 +1,9 @@
 //! Section-grouping query layer.
 //!
 //! Reads tasks + observations from `.stores/db.sqlite` (read-only) and
-//! classifies each row into actionable watch sections:
-//!
-//!   Tasks: ACTIONABLE CURRENT WORK · BLOCKED NEEDS ACTION · DEPLOY RECOVERY · RECENTLY TERMINAL
-//!   Obs:   RATIFIABLE · OPEN-NO-CONTRACT · OTHER
+//! classifies each row into the operator cockpit taxonomy exposed by
+//! [`Section::label`]: active work, U1/U3 gates, held lanes, terminal rows,
+//! priority/observation rows, intake lanes, and external-review rows.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -402,6 +401,9 @@ pub fn obs_visibility_class(
     o: &ObsRow,
     task_status_by_id: &HashMap<String, String>,
 ) -> VisibilityClass {
+    if is_silent_zombie_reason(o.investigation_failure_reason.as_deref().unwrap_or("")) {
+        return VisibilityClass::ActionableRecovery;
+    }
     let lower = o.summary.to_ascii_lowercase();
     if lower.starts_with("deploy-blocked:") {
         if let Some(task_id) = extract_task_id(&o.summary) {
@@ -422,6 +424,7 @@ pub fn obs_visibility_class(
 }
 
 fn is_silent_zombie_reason(reason: &str) -> bool {
+    let reason = reason.trim().to_ascii_lowercase();
     reason.starts_with("silent_zombie") || reason.starts_with("drive_failed:silent_zombie")
 }
 
@@ -1017,7 +1020,9 @@ fn section_for(row: &Row) -> Option<Section> {
             }
         }
         Row::Obs(o) => {
-            if o.contract_state.as_deref() == Some("ready") {
+            if is_silent_zombie_reason(o.investigation_failure_reason.as_deref().unwrap_or("")) {
+                Some(Section::TasksHeldZombie)
+            } else if o.contract_state.as_deref() == Some("ready") {
                 Some(Section::ObsRatifiable)
             } else if is_priority_text(&o.priority)
                 || o.priority_rank.map(|r| r <= 1).unwrap_or(false)
