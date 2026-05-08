@@ -1,180 +1,103 @@
 # Handover — engine-controller
 
-**Date:** 2026-05-08
+**Date:** 2026-05-08 (afternoon wind-down; supersedes the morning handover at `git show HEAD~ -- docs/worklog/2026-05-08/handover-engine-controller.md` if archaeology is needed)
 **Type:** handover
 **Role:** engine-controller
 
 ## Active thread
 
-`/home/blake/repos/.agent-comm/threads/2026-05-08-01-stores-2026-05-08-session.md`
+`/home/blake/repos/.agent-comm/threads/2026-05-08-01-2026-05-08-2-agent-comms.md`
 
-Watching as `substrate-agent`. Reviewer-runner online (idle this session — substrate path-A auto-codex handled all reviews; see SOP gap below). Pi-architect online and active.
-
-## Current responsibility
-
-Driving T098 (T3, L480 watch cockpit) to acceptance. T098 is the last remaining WIP. All other engine work this session shipped or filed.
+Pi-architect + queue-curator both active on this thread. My last post is `msg_6927efdf` (wind-down prep + c0f45ff explanation). Watch as `substrate-agent` from the end.
 
 ## Daemon / CLI health
 
-- **Daemon:** PID 2082883, alive, `--detach`, `--log-file logs/agents-daemon.log`. Binary `/home/blake/.local/share/stores/bin/stores` (private install path). Self-reexec'd via cargo install during the session — exe symlink shows current binary (no `(deleted)`).
-- **CLI:** `stores` on `~/.cargo/bin/stores`. Diverged from daemon's binary; that's fine — daemon uses private path.
-- **Last cargo install:** commit `5519597` (legacy stale-base backfill).
+- **Daemon:** PID `1809888`, restarted at 22:30Z under fresh `c0f45ff` binary. Log: `logs/agents-daemon.log`. Exe path: `/home/blake/.local/share/stores/bin/stores`.
+- **CLI (user shell):** `~/.cargo/bin/stores` also at `c0f45ff` (cargo install --path . --force ran post-fix).
+- **Self-reexec doctrine:** any future `cargo install` will refresh the binary; the daemon should auto-detect and self-reexec without manual restart. (Today's restart was manual because Blake explicitly stopped the engine.)
+
+## Big news: substrate fix landed
+
+**`c0f45ff Fix revision agent briefs`** (Blake-led, 5 files / 409 insertions). Adds `## Revision Context` to planner / executor / code_reviewer briefs — they now carry the *artifact under review* (prior plan / prior diff / prior code-review feedback), not just commentary. Likely supersedes I022 (executor lane) and significantly narrows I026 (planner literal-invariant drift). Confirm at session start by re-evaluating those obs.
+
+**Empirical test result — c0f45ff VALIDATED.** T107 cycle 1 under c0f45ff produced commit `a1f50bd "T107 P1 revise5: add injectable writer to run_overdue_ready_cmd + assert text/JSON output"`. Targeted fix in `src/handlers/cluster_keys.rs` (+70 lines): testability injection + new output assertions, addressing codex's prior code_review concerns directly — NOT the generic single-source-of-truth stab the prior 3 cycles produced. The brief now carries `## Revision Context` and the executor is using it.
+
+ER340 spawned post-wrap but landed at `tooling_held` with `stale_base_requires_rebase` (main has moved to `dc08a28` past T107's fork-point `5e4753f`). T107 needs:
+1. `cd /home/blake/repos/experiments/stores-T107-auto-promoted-l173 && git rebase --autostash main` (clean rebase expected; resolve conflicts if any per prior T098/T105 dispatch.rs pattern).
+2. `stores tasks recover-stale-base T107 --invoker ai_with_human --approve-token <T>` to spawn a fresh ER against the rebased tree.
+3. Daemon dispatches new ER → codex runs → PASS or REVISE on real diff.
 
 ## Active work / processes
 
-| item | status | pid | worktree | branch | commit | next action |
-|---|---|---|---|---|---|---|
-| T098 (L480 cockpit, T3) | executing phase=5/5 cycle=2 next=executor | 4179281 | `stores-T098-auto-promoted-l480` | `feat/T098-auto-promoted-l480` | branch tip post-rebase #3 | drive cycle 2 addressing real REVISE on `mission_compact_window` (src/tui/render.rs:220-240). On next in_review, daemon's L488 rebase-before-codex will fire automatically. |
-| ER330 (T098 attempt 3) | revise (verdict landed) | — | — | — | head_sha=4a828ce3 base_sha=5519597 | substrate progressed to executing on this REVISE; nothing to do. |
+| item | status | drive_pid | worktree | branch | next action |
+|---|---|---|---|---|---|
+| T107 (L173 cluster_key registry, T2) | executing cycle 1 fresh post-resume; transitioned executing → code_review at wind-down boundary | `1812044` | `stores-T107-auto-promoted-l173` | `feat/T107-auto-promoted-l173` (rebased onto current main `5e4753f` earlier today) | Watch ER340 outcome. If PASS or REVISE-on-new-finding → c0f45ff validated. If REVISE on `cluster_keys.rs:27-33` again → I026 literal-invariant drift is the real bug, escalate. |
+| T108 (L499 gatekeeper drain MVP / L485 Slice 1, T2) | **blocked** at `plan-review NEEDS_WORK cycle limit exceeded` | — | `stores-T108-auto-promoted-l499` | `feat/T108-auto-promoted-l499` | PARKED per Pi `msg_7cef2d5e`. Awaits direction: (a) abandon + re-file fresh L### (path-b like L499 was, since auto-promote is one-shot per I025); (b) ship `tasks resume --reset-plan` repair-lane patch (Pi pre-blessed shape, narrow). With c0f45ff in place, a fresh planning cycle stands a real chance of converging — the brief gap is closed. |
 
 ## Active Claude subagents
 
-**None active.** Two subagents fired earlier in session and completed:
-- Obs-backlog triage subagent → produced `docs/worklog/2026-05-08/04-obs-backlog-triage.md` (327 closures executed by a separate execution subagent; both completed)
-- T098 cycle-3 revise subagent → committed test commits `68c5c32` + `84ec536`
-- T103 head_sha-timing subagent → committed `4498637` (now in main)
-
-No subagents to wait on.
-
-## Today's main commits (high-context)
-
-```
-5519597 external_review: backfill next_retry_at on legacy stale_base_requires_rebase rows (unblock T098 ER330)
-c8d993e external_review: bound stale_base_requires_rebase next_retry_at (direct unblock for T098)
-e896817 Merge branch 'feat/T103-auto-promoted-l488'   ← L488 stale-base check live in production
-6c5f13c parser: handle markdown-list revise markers (direct unblock for T103)
-bf420c0 Merge branch 'feat/T104-auto-promoted-l496'   ← parser finding-marker inference
-8294e68 Merge branch 'feat/T100-auto-promoted-l484'   ← rate-limit-aware retry
-0d22adf Merge branch 'feat/T102-auto-promoted-l491'   ← ddl.rs emergency repair (T099 schema columns)
-b06a644 Merge branch 'feat/T101-auto-promoted-l490'   ← parser leading-word-prose tolerance
-cd137a1 Merge branch 'feat/T099-auto-promoted-l483'   ← cascade-dedup subscriber
-```
-
-Direct edits (`6c5f13c`, `c8d993e`, `5519597`) used the dogfood-escape doctrine per Pi rulings (msg_dbaab2dc, msg_3cf7c3af, msg_a423719b).
+**None** active. Investigator subagent that ran this morning (`a27dedc37c4e4b651`, T098 audit) completed; queue-curator + pi-architect are cross-session agents communicating only via agent-comm.
 
 ## Substrate state
 
-- **Open observations:** 30 open + 18 ready + 1 investigating = 49 total non-terminal (down from 357 at session start; 327 closed via subagent triage cleanup using `close_as_addressed`).
-- **Filed durable obs (NOT ratified):**
-  - L489 (stale-binary-alive watchdog gap)
-  - L492 (schema-yaml ↔ ddl.rs drift durability)
-  - L497 (parser whack-a-mole — structured codex output / fixture-parser durability)
-  - L498 (L488 recovery durability — operator-callable retry-after-rebase verb)
-- **No external_reviews currently held.** ER330 transitioned in_review→executing on REVISE.
+- **WIP:** 1 (T107). T108 parked.
+- **Today's shipped commits on main:**
+  - `87f3667` — I023 watchdog gate (drive_pid + active ER race).
+  - `45224e1` — T098 close-out-of-band merge (cockpit `mission_compact_window` fix).
+  - `5e4753f` — T105 `stores tasks recover-stale-base` operator verb (already saved a wedge in production within the hour — used on T107).
+  - `98da6b5` — engine-controller SOP: convergence-stall recognition table.
+  - `c0f45ff` — revision-agent brief enrichment (Blake-led).
+- **Open observations (~33).** Filed today:
+  - **I022** REVISE-respawn brief missing external_reviews.findings — likely **superseded by c0f45ff** for executor lane; re-eval.
+  - **I023** zombie watchdog race — **shipped** in 87f3667.
+  - **I024** auto-resolve subscriber edge gap (terminal-success → ready obs cleanup) — open, secondary repair candidate.
+  - **I025** auto-promote subscriber one-shot per observation (L485 left orphaned at status=ready with abandoned T106 / replaced by L499) — open.
+  - **I026** planner literal-invariant drift — **needs re-eval** after c0f45ff. Was downstream of brief gap; if T107 cycle 1 lands targeted fix, I026 narrows / collapses.
+  - **L499** L485 Slice 1 (gatekeeper drain MVP, contract_state ready, was promoted to T108).
+  - **L500** L485 Slice 2 (failure-semantics hardening, contract_state draft, ratify only after Slice 1 ships).
+- **Engine-controller SOP:** `.claude/skills/engine-controller/SKILL.md` § *Convergence-stall recognition* (98da6b5). Note: with c0f45ff in place, the table's "feedback-relay failure" rows should now produce ~zero false positives. Recalibrate watchful: future identical-REVISE patterns post-c0f45ff are real model-capability signals, NOT relay bugs.
 
 ## Dirty worktrees / stashes
 
-- **Three pre-rebase stashes** in repo (visible from any worktree's `git stash list`; stash list is global):
-  - `stash@{0}: T098 pre-rebase #3 projection drift` (T001 test-task md only — safe to drop)
-  - `stash@{1}: T103 pre-rebase #2 projection drift` (same — safe to drop)
-  - `stash@{2}: T098 pre-rebase #2 projection drift` (same — safe to drop)
-- Do NOT drop until verified clean — recommend next agent inspect once T098 lands.
-- **Working tree drift:** `.claude/skills/handover-engine-controller/SKILL.md` and `.claude/skills/pi-architect/SKILL.md` still show modified from yesterday's wind-down (untouched this session). `tasks/active/T001-test-task/main.md` and `tasks/planning/T001-test-task/main.md` are persistent projection drift. Untracked: `logs/`, `T801-T803` test-task scaffolds, `T053-auto-promoted-l142` paused dir, `T043-auto-promoted-l124` planning dir.
+- **3 pre-existing stashes** carried over from morning (T098 #2, #3, T103 #2). **DO NOT DROP.** Same instruction as the morning handover.
+- T107 worktree post-rebase clean; cycle 1 commits applied; no in-progress rebase.
+- Persistent projection drift across worktrees (`tasks/active/T001-test-task/main.md`, etc.) — same shape as morning.
+- Untracked dirs in main repo (logs/, T801-T803 test-task scaffolds, paused/T053-auto-promoted-l142, planning/T043-auto-promoted-l124) — leave alone.
+
+## Tokens / authority
+
+- Token durable per-host at `~/.config/stores/approve.token` (mode 0600). `stores auth show` reveals it.
+- **Blake's session-token autonomous-ratify mode:** Blake pasted his token in chat earlier today (~17:11Z local). I used it for several U1/U3/U4 verbs in this session. **Do NOT assume it carries forward to next session.** Default to propose-and-confirm on U-moments. If Blake says "you have my token" or pastes it again, autonomous-ratify mode resumes per CLAUDE.md.
+
+## Monitors
+
+Both monitors armed in this session; **they die at session end.** Re-arm immediately:
+- `Monitor` substrate state diff (tasks + ER, on-change, 20s poll)
+- `Monitor` 15-min backup scan
+- `agent-comm watch /home/blake/repos/.agent-comm/threads/<NEW_THREAD_PATH> --name substrate-agent --from-end`
+
+Patterns are in `.claude/skills/engine-controller/SKILL.md` § *Heartbeat*.
 
 ## Do not do
 
-- Do NOT raw-SQL writes against `.stores/db.sqlite` (CLAUDE.md doctrine; `sqlite3 ... SELECT` reads are fine).
-- Do NOT `git add -A` / `git add .` — name paths explicitly. Several untracked test-task scaffolds and planning dirs would sweep in.
-- Do NOT push origin/main forward without Blake's deliberate decision (origin diverged since 2026-05-04; many merges local-only).
-- Do NOT ratify any of L489, L492, L497, L498 without Blake/Pi explicit blessing — those are durable follow-ups, not next-task fodder.
-- Do NOT drop the three stashes without inspection.
-- Do NOT spawn a new T098 executor subagent unless T098 hits the same REVISE 3+ times in a row (per the SKILL revise-brief discipline). The current cycle 2 should address the `mission_compact_window` finding naturally.
-- Do NOT widen WIP until T098 lands or Blake explicitly opens the gate.
-
-## SOP gap to surface in next session
-
-**Reviewer-runner has been idle the entire session.** Substrate path-A (daemon-spawned codex via T083 external_reviews lane) handled every T2/T3 review automatically. Reviewer-runner waited for explicit pings that never came. The engine-controller SKILL still tells me to dispatch reviewer-runner with structured pings — that pre-dates T083's substrate-native lane. Either (a) update the SKILL to mark reviewer-runner as observability-optional / cross-check-only, or (b) disable daemon path-A and route everything through reviewer-runner (path-B). Blake's call.
-
-## Monitor setup (re-arm at session start — VITAL)
-
-These two monitors give substrate-state visibility. They do NOT carry across sessions; arm them via the `Monitor` tool exactly as below at session start. Both are persistent (run until session end / TaskStop).
-
-### Monitor 1 — substrate state diff (tasks + ER, on-change, 20s poll)
-
-Emits a `+ T:T###...` / `- T:T###...` line for every task-status transition and every external_reviews row entering/leaving the active queue. Quiet when nothing changes (no held-reason noise).
-
-```
-Tool: Monitor
-Args:
-  description: substrate state diff (tasks + ER only, quiet)
-  persistent: true
-  timeout_ms: 3600000
-  command: |
-    cd /home/blake/repos/experiments/stores
-    prev_t=""
-    prev_e=""
-    while true; do
-      now_t=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
-        | jq -r '.[] | select(.status | IN("in_review","ready","planning","plan_review","executing","code_review","blocked","deploy_blocked","accepted","cargo_installed")) | "T:\(.display_id)|status=\(.status)|tier=\(.tier_hint // "-")|next=\(.next_agent // "-")|drive_pid=\(.drive_pid // "-")|wrap=\(.wrap_log | length // 0)|blocked=\(.blocked_reason // "-" | .[0:60])"' \
-        | sort)
-      now_e=$(sqlite3 .stores/db.sqlite "SELECT 'ER:' || display_id || '|task=' || COALESCE(task_id,'-') || '|status=' || status || '|verdict=' || COALESCE(verdict,'-') || '|runner=' || COALESCE(NULLIF(runner,''),'unknown') || '|attempt=' || COALESCE(attempt,0) FROM external_reviews WHERE status IN ('pending','running','tooling_held') ORDER BY id;" 2>/dev/null | sort)
-      if [ "$now_t" != "$prev_t" ] || [ "$now_e" != "$prev_e" ]; then
-        if [ -z "$prev_t$prev_e" ]; then
-          echo "[init $(date +%H:%M:%S)]"; echo "$now_t"; [ -n "$now_e" ] && echo "$now_e"
-        else
-          [ "$now_t" != "$prev_t" ] && { comm -13 <(echo "$prev_t") <(echo "$now_t") | sed 's/^/+ /'; comm -23 <(echo "$prev_t") <(echo "$now_t") | sed 's/^/- /'; }
-          [ "$now_e" != "$prev_e" ] && { comm -13 <(echo "$prev_e") <(echo "$now_e") | sed 's/^/+ /'; comm -23 <(echo "$prev_e") <(echo "$now_e") | sed 's/^/- /'; }
-        fi
-        prev_t=$now_t; prev_e=$now_e
-      fi
-      sleep 20
-    done
-```
-
-Note: the SKILL has a richer 3-surface variant that ALSO tails `logs/agents-daemon.log` for held-reasons. **Don't use it.** I tried it this session and the held-reason emissions are too chatty (`needs_human` / `live_drive_owner` re-emits every iteration as the tail-window slides). The 2-surface filter above is the quiet, useful version. If you need held-reasons, `tail -f logs/agents-daemon.log | grep --line-buffered "row store="` ad-hoc.
-
-### Monitor 2 — 15-min backup scan (snapshot, even when no change)
-
-The diff monitor only emits on changes. A row stuck at `in_review` / `tooling_held` / `accepted-but-no-ceremony-progress` produces NO diff event and would otherwise be invisible. This monitor emits a full snapshot every 15 min regardless.
-
-```
-Tool: Monitor
-Args:
-  description: 15-min in_review + stuck-state backup scan
-  persistent: true
-  timeout_ms: 3600000
-  command: |
-    cd /home/blake/repos/experiments/stores
-    while true; do
-      sleep 900
-      echo "=== 15-MIN BACKUP SCAN $(date +%H:%M:%S) ==="
-      ir=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
-        | jq -r '.[] | select(.status=="in_review") | "T:\(.display_id) tier=\(.tier_hint // "-") wrap=\(.wrap_log | length // 0) drive_pid=\(.drive_pid // "-")"')
-      [ -n "$ir" ] && { echo "IN_REVIEW (codex/accept lane):"; echo "$ir" | sed 's/^/  /'; } || echo "IN_REVIEW: <empty>"
-      bl=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
-        | jq -r '.[] | select(.status=="blocked" or .status=="deploy_blocked") | "T:\(.display_id) status=\(.status) reason=\(.blocked_reason // "-" | .[0:80])"')
-      [ -n "$bl" ] && { echo "BLOCKED:"; echo "$bl" | sed 's/^/  /'; } || echo "BLOCKED: <empty>"
-      er=$(sqlite3 .stores/db.sqlite "SELECT 'ER:' || display_id || ' task=' || COALESCE(task_id,'-') || ' status=' || status || ' verdict=' || COALESCE(verdict,'-') FROM external_reviews WHERE status IN ('pending','running','tooling_held') ORDER BY id;" 2>/dev/null)
-      [ -n "$er" ] && { echo "ER:"; echo "$er" | sed 's/^/  /'; } || echo "ER: <empty>"
-      active=$(stores tasks list --invoker ai_autonomous --json 2>/dev/null \
-        | jq -r '[.[] | select(.status | IN("planning","plan_review","ready","executing","code_review","in_review"))] | length')
-      echo "ACTIVE WIP (planning..in_review): $active"
-    done
-```
-
-### What you'll see
-
-- **Diff monitor on init:** prints `[init HH:MM:SS]` and the current actionable rows. If T098 is still in flight when you start, expect ~1 line.
-- **Diff monitor on change:** `+`-prefixed lines for entries entering the actionable set, `-`-prefixed lines for entries leaving. ER rows get `ER:`-prefixed entries.
-- **Backup scan every 15 min:** four sections — IN_REVIEW (action: codex pending OR accept), BLOCKED (action: triage/resume), ER (action: dispatch / accept / retry), ACTIVE WIP count.
-
-### Stop early
-
-If a monitor goes too chatty, use the `TaskStop` tool with the `task_id` returned at Monitor start.
+- Don't drop the 3 pre-existing stashes.
+- Don't widen WIP past 1 until T107's cycle 1 verdict lands and Blake/Pi direct.
+- Don't assume autonomous-ratify mode is on without Blake re-pasting his token.
+- Don't ratify L500 (Slice 2) until L499 / Slice 1 ships (Pi guidance).
+- Don't raw-SQL the substrate DB.
+- Don't ship `tasks resume --reset-plan` for T108 without checking with Blake — Pi pre-blessed the shape but Blake hasn't chosen between Path 1 (park) and Path 2 (ship).
 
 ## First step for next agent
 
-1. **Re-arm both monitors above** via the `Monitor` tool. Verify each prints an init/snapshot line within ~30s.
-2. **Watch T098.** Check `stores tasks status T098`. If still cycling, monitor:
-   - `executing → code_review → in_review` (ER spawn, this time with L488 auto-rebase)
-   - On in_review, ER will fire automatically; codex returns PASS/REVISE on real findings (rebase-before-codex now in production)
-   - If REVISE: drive cycle continues; if PASS: verify scope (`git diff --stat $(git merge-base feat/T098-auto-promoted-l480 main)..feat/T098-auto-promoted-l480` should show TUI-scoped files only) then `stores tasks accept T098 --invoker ai_with_human --approve-token <T>`.
-2. **Re-arm monitors.** The diff-on-change Monitor and 15-min backup-scan Monitor in the prior session won't carry over. Re-arm using the patterns in `.claude/skills/engine-controller/SKILL.md`.
-3. **Verify daemon health** before any nudges: `pgrep -af 'stores agents run'` + `ls -la /proc/$(grep ^PID= .stores/agents.pid | cut -d= -f2)/exe`.
+1. **Re-arm both monitors + agent-comm watch** at session start.
+2. **Verify daemon health:** `pgrep -af 'stores agents run'` + `ls -la /proc/<pid>/exe` (should show no `(deleted)`); `git log --oneline main -3` should include `c0f45ff`.
+3. **T107 cycle 1 outcome — already captured: c0f45ff validated.** Commit `a1f50bd` is the targeted fix. **Action needed:** ER340 is `tooling_held stale_base_requires_rebase`. Manual rebase T107 worktree onto current main (`dc08a28` at wind-down; may have moved further), then `stores tasks recover-stale-base T107 --invoker ai_with_human --approve-token <T>` to spawn a fresh ER. See "Empirical test result" section above.
+4. **Watch for orphan drives.** Drive 1812044 may already have completed by session start. If T107 is at in_review or blocked with watchdog reasons, check whether the I023 gate held cleanly.
+5. **T108 still parked.** Don't act on T108 without Blake's call between abandon/Path 2/hold. The new brief might let it converge — but the substrate-state mechanics for getting it into a fresh planning cycle aren't shipped yet.
+6. **Wait for Blake to start the engine.** Per wind-down protocol, new thread is created after all role handovers exist; Blake spawns next agents and says "start the engine".
 
 ## Notes
 
-- Token is durable per-host at `~/.config/stores/approve.token`. Read via `stores auth show` if needed.
-- Pi was responsive and authoritative this session — every architectural decision routed through her cleanly with quick acks. Use `agent-comm send ... --to pi --priority high --needs-ack --response-requested` for design calls.
-- The stale-base + stale-binary + parser whack-a-mole pattern dominated the session. T103 (L488) closes stale-base going forward; L489 (stale-binary watchdog) and L497 (parser durability) are the next two engine-health priorities once T098 lands.
-- 6 substrate tasks shipped + 3 direct-edits + 327-row obs cleanup + 4 durable obs filed. Big day.
+- Today was a substantial day: T098 wedge → I023 fix → SOP doctrine → T105 verb shipped → c0f45ff brief fix landed in afternoon. The engine has materially improved its convergence properties since session start.
+- The substrate-repair lane is no longer hypothetical; we exercised it three times today (87f3667, 45224e1, 5e4753f, c0f45ff was Blake's). The doctrine works.
+- Watch for opportunities to mark I022 + I026 superseded once c0f45ff is empirically validated.

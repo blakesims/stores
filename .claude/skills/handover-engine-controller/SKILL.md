@@ -8,6 +8,18 @@ user_invocable: true
 
 Goal: preserve the running engine state so the next engine-controller can resume without guessing.
 
+## Wind-down
+
+When Blake says wind down:
+
+- no new ratifications or widening unless Blake reverses;
+- do not spawn new Claude subagents except to preserve/finish already-active work;
+- let detached reviewer/codex continue only if reviewer-runner records PID/log/handoff;
+- write your own handover with `docs/worklog/new-note.sh --handover engine-controller`;
+- include active tasks, branches, worktrees, commits, subprocess/subagent PIDs, blockers, first next action;
+- create the next agent-comm thread only after all role handovers exist, then tell Blake the path.
+
+
 ## Rules
 
 - Stop widening: no new ratifications or task starts unless Blake reverses.
