@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use std::time::{SystemTime, UNIX_EPOCH};
 use stores::tui::app::StatusBar;
 use stores::tui::daemon::Liveness;
+use stores::tui::data::Section;
 use stores::tui::sort::Sort;
 use stores::tui::{render, App, TuiOpts};
 
@@ -223,8 +224,19 @@ fn render_snapshot_text(app: &mut App) -> String {
 #[test]
 fn tui_watch_live_realistic_snapshot_and_budget() {
     let mut app = live_app();
+    assert!(
+        !app.opts.all_history,
+        "live-realistic regression must use default watch semantics"
+    );
     let got = render_snapshot_text(&mut app);
     assert_eq!(got, SNAPSHOT);
+
+    let visible_lines: Vec<&str> = got.lines().collect();
+    assert!(
+        visible_lines.len() <= 34,
+        "header + body visible lines: {}\n{got}",
+        visible_lines.len()
+    );
 
     let body_lines: Vec<&str> = got.lines().skip(4).collect();
     assert!(
@@ -258,8 +270,27 @@ fn tui_watch_live_realistic_snapshot_and_budget() {
         "duplicate observations should collapse to seven rendered rows"
     );
     assert!(!got.contains("L281 open priority:normal deploy-blocked"));
-    assert!(got.contains("HELD-AI-REVIEW"));
-    assert!(got.contains("RATIFY-U1"));
-    assert!(got.contains("ACCEPT-U3"));
-    assert!(got.contains("HELD-INTAKE"));
+    for required in [
+        "HELD-AI-REVIEW",
+        "RATIFY-U1",
+        "ACCEPT-U3",
+        "HELD-INTAKE",
+        "HELD-ZOMBIE",
+    ] {
+        assert!(got.contains(required), "missing {required}:\n{got}");
+    }
+    for section in [
+        Section::TasksHeldAiReview,
+        Section::ObsRatifiable,
+        Section::TasksAcceptU3,
+        Section::IntakeHeld,
+        Section::TasksHeldZombie,
+    ] {
+        assert!(
+            app.sections
+                .iter()
+                .any(|(sec, rows)| *sec == section && !rows.is_empty()),
+            "missing populated section {section:?}"
+        );
+    }
 }

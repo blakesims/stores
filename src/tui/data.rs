@@ -1431,16 +1431,41 @@ mod tests {
     }
 
     #[test]
+    fn section_all_labels_match_contract_order_and_are_unique() {
+        let labels: Vec<&str> = Section::ALL.iter().map(|s| s.label()).collect();
+        let expected = vec![
+            "ACTIVE WORK",
+            "RATIFY-U1",
+            "ACCEPT-U3",
+            "HELD-BLOCKED",
+            "HELD-DEPLOY",
+            "HELD-TRIAGE",
+            "HELD-INTAKE",
+            "HELD-AI-REVIEW",
+            "HELD-ZOMBIE",
+            "TERMINAL",
+            "PRIORITY",
+            "OBSERVATIONS",
+            "INTAKE-OPEN",
+            "INTAKE-ROUTED",
+            "EXTERNAL-REVIEW",
+        ];
+        assert_eq!(labels, expected);
+        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
     fn section_classification() {
         // blocked/deploy_blocked with no blocked_reason → unknown class → NeedsTriage section.
         let rows = vec![
             task("plan_review"),        // idx 0 → HELD-AI-REVIEW
-            task("blocked"),            // idx 1 → HELD / needs triage (no reason → unknown)
-            task("deploy_blocked"),     // idx 2 → HELD / needs triage (no reason → unknown)
-            task("accepted"),           // idx 3 → ACCEPT
-            obs("open", Some("ready")), // idx 4 → REVIEW
-            obs("open", None),          // idx 5 → OBSERVATIONS/INTAKE
-            obs("resolved", None),      // idx 6 → OBSERVATIONS/INTAKE
+            task("blocked"),            // idx 1 → HELD-TRIAGE (no reason → unknown)
+            task("deploy_blocked"),     // idx 2 → HELD-TRIAGE (no reason → unknown)
+            task("accepted"),           // idx 3 → TERMINAL
+            obs("open", Some("ready")), // idx 4 → RATIFY-U1
+            obs("open", None),          // idx 5 → OBSERVATIONS
+            obs("resolved", None),      // idx 6 → OBSERVATIONS
         ];
         let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
         assert_eq!(buckets.len(), Section::ALL.len());
