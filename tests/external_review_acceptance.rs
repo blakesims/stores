@@ -1007,3 +1007,681 @@ fn external_review_stale_conflict_tooling_held_has_bounded_next_retry_at() {
         "next_retry_at must be a non-empty timestamp, got: {next_retry}"
     );
 }
+
+// ============================================================
+// T105 — recover-stale-base tests (Tasks 1.19-1.28)
+// ============================================================
+
+use stores::handlers::recover_stale_base::run_recover_stale_base;
+use stores::schema::actor::InvokerCtx;
+
+fn er_schema() -> Schema {
+    let yaml = BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "external_reviews")
+        .map(|(_, y)| *y)
+        .unwrap();
+    Schema::from_yaml(yaml).unwrap()
+}
+
+fn insert_tooling_held_stale_base(
+    conn: &Connection,
+    er_id: &str,
+    task_id: &str,
+    attempt: i64,
+    head_sha: &str,
+    base_sha: &str,
+) {
+    conn.execute(
+        "INSERT INTO external_reviews \
+         (display_id, status, task_id, attempt, adapter, head_sha, base_sha, verdict, held_reason, next_retry_at, \
+          created_at, updated_at, created_by, updated_by) \
+         VALUES (?1,'tooling_held',?2,?3,'external_review',?4,?5,'TOOLING_FAILURE','stale_base_requires_rebase',NULL, \
+                 '2026-05-01T00:00:00Z','2026-05-01T00:00:00Z','test','test')",
+        rusqlite::params![er_id, task_id, attempt, head_sha, base_sha],
+    )
+    .unwrap();
+}
+
+fn invoker_ai_with_human() -> InvokerCtx {
+    InvokerCtx { actor: Actor::AiWithHuman, token_valid: false }
+}
+
+fn invoker_human() -> InvokerCtx {
+    InvokerCtx { actor: Actor::Human, token_valid: false }
+}
+
+/// Test 1 (Task 1.19): single held → recovery, then PASS e2e.
+#[test]
+fn recover_stale_base_test1_single_held_then_pass() {
+    let conn = Connection::open_in_memory().unwrap();
+    let _schema = install_db(&conn);
+    let er_s = er_schema();
+
+    let ws = git_workspace();
+
+    // Create task branch with a commit.
+    git(ws.path(), &["checkout", "-b", "task-t1-recover"]);
+    std::fs::write(ws.path().join("task-t1.txt"), "task\n").unwrap();
+    git(ws.path(), &["add", "task-t1.txt"]);
+    git(ws.path(), &["commit", "-m", "task commit"]);
+    let pre_rebase_head = head(ws.path());
+
+    // Advance main (separate file, no conflict).
+    git(ws.path(), &["checkout", "main"]);
+    std::fs::write(ws.path().join("main-advance.txt"), "main\n").unwrap();
+    git(ws.path(), &["add", "main-advance.txt"]);
+    git(ws.path(), &["commit", "-m", "main advances"]);
+    let new_main = head(ws.path());
+
+    // Insert task row.
+    insert_task_id(&conn, "T2001", ws.path(), "task-t1-recover", "T3", "in_review");
+
+    // Insert one tooling_held/stale_base ER (simulating what the daemon would have created).
+    insert_tooling_held_stale_base(&conn, "ER2001", "T2001", 1, &pre_rebase_head, "oldmain");
+
+    // Operator rebases task branch.
+    git(ws.path(), &["checkout", "task-t1-recover"]);
+    git(ws.path(), &["rebase", "main"]);
+    let post_rebase_head = head(ws.path());
+    assert_ne!(post_rebase_head, pre_rebase_head, "rebase must move HEAD");
+
+    // Call recover-stale-base.
+    run_recover_stale_base(&conn, &er_s, "T2001", invoker_ai_with_human()).unwrap();
+
+    // Assert ER2001 superseded with append-only fields intact (AC1.6).
+    let (status, superseded_by, held_head, held_base, held_reason): (String, String, String, String, String) = conn
+        .query_row(
+            "SELECT status, superseded_by, head_sha, base_sha, held_reason FROM external_reviews WHERE display_id='ER2001'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "superseded");
+    assert_eq!(superseded_by, "ER2002", "superseded_by must be ER2002");
+    assert_eq!(held_head, pre_rebase_head, "head_sha must be unchanged (append-only)");
+    assert_eq!(held_base, "oldmain", "base_sha must be unchanged (append-only)");
+    assert_eq!(held_reason, "stale_base_requires_rebase", "held_reason must be unchanged (append-only)");
+
+    // Assert ER2002 is pending with current SHAs (AC1.7).
+    let (new_status, new_head, new_base): (String, String, String) = conn
+        .query_row(
+            "SELECT status, head_sha, base_sha FROM external_reviews WHERE display_id='ER2002'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(new_status, "pending");
+    assert_eq!(new_head, post_rebase_head, "new ER head_sha must be post-rebase tip");
+    assert_eq!(new_base, new_main, "new ER base_sha must be current main");
+
+    // Watch-row exclusion: only pending appears in watch filter (AC1.7).
+    let watch_rows: Vec<String> = {
+        let mut s = conn
+            .prepare(
+                "SELECT display_id FROM external_reviews \
+                 WHERE status IN ('pending','running','tooling_held') AND task_id='T2001'",
+            )
+            .unwrap();
+        s.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert_eq!(watch_rows, vec!["ER2002"], "only new pending ER must appear in watch filter");
+
+    // Transition history: one supersede row + one create row (AC1.9).
+    let th_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM transition_history WHERE store='external_reviews'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(th_count >= 2, "must have at least 2 transition_history rows (1 supersede + 1 create)");
+
+    let create_row: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM transition_history \
+             WHERE store='external_reviews' AND from_status='' AND to_status='pending' \
+               AND verb='recover-stale-base' AND display_id='ER2002'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(create_row, 1, "must have one creation history row for ER2002");
+
+    let supersede_row: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM transition_history \
+             WHERE store='external_reviews' AND from_status='tooling_held' AND to_status='superseded' \
+               AND verb='supersede' AND display_id='ER2001'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(supersede_row, 1, "must have one supersede history row for ER2001");
+
+    // Idempotent fail-loud on second call (AC1.8): no new held rows, ER2002 pending.
+    let err2 = run_recover_stale_base(&conn, &er_s, "T2001", invoker_ai_with_human())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err2.contains("no stale_base_requires_rebase") || err2.contains("fresh external_review"),
+        "second call must fail-loud: {err2}"
+    );
+
+    // E2e: run ER2002 with PASS shim → task advances to accepted.
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\ncat >/dev/null\necho 'VERDICT: PASS'\n");
+    let cfg_path = cfg(tmp.path(), &sh);
+    let a = agents();
+    external_review::run(
+        &json!({"display_id": "ER2002"}),
+        &DispatchCtx { conn: &conn, agents: &a, config_path: &cfg_path, policies_hash: "" },
+    )
+    .unwrap();
+    let new_er_status: String = conn
+        .query_row(
+            "SELECT status FROM external_reviews WHERE display_id='ER2002'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(new_er_status, "passed");
+}
+
+/// Test 2 (Task 1.20): 5 stacked held → all superseded with same new ER id.
+#[test]
+fn recover_stale_base_test2_five_stacked_held() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let er_s = er_schema();
+
+    let ws = git_workspace();
+    git(ws.path(), &["checkout", "-b", "task-t2-recover"]);
+    std::fs::write(ws.path().join("task.txt"), "task\n").unwrap();
+    git(ws.path(), &["add", "task.txt"]);
+    git(ws.path(), &["commit", "-m", "task"]);
+    let pre_head = head(ws.path());
+
+    // Advance main.
+    git(ws.path(), &["checkout", "main"]);
+    std::fs::write(ws.path().join("m.txt"), "m\n").unwrap();
+    git(ws.path(), &["add", "m.txt"]);
+    git(ws.path(), &["commit", "-m", "main"]);
+
+    insert_task_id(&conn, "T2010", ws.path(), "task-t2-recover", "T3", "in_review");
+
+    // Insert 5 held rows with different attempts.
+    for i in 1..=5 {
+        insert_tooling_held_stale_base(
+            &conn,
+            &format!("ER20{:02}", 9 + i),
+            "T2010",
+            i,
+            &pre_head,
+            "oldmain",
+        );
+    }
+
+    // Rebase task branch.
+    git(ws.path(), &["checkout", "task-t2-recover"]);
+    git(ws.path(), &["rebase", "main"]);
+
+    run_recover_stale_base(&conn, &er_s, "T2010", invoker_ai_with_human()).unwrap();
+
+    // All 5 held rows → superseded with same new ER id.
+    let superseded_ids: Vec<String> = {
+        let mut s = conn
+            .prepare(
+                "SELECT DISTINCT superseded_by FROM external_reviews \
+                 WHERE task_id='T2010' AND status='superseded'",
+            )
+            .unwrap();
+        s.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert_eq!(superseded_ids.len(), 1, "all held rows must share the same superseded_by");
+
+    let superseded_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM external_reviews WHERE task_id='T2010' AND status='superseded'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(superseded_count, 5, "all 5 held rows must be superseded");
+
+    let pending_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM external_reviews WHERE task_id='T2010' AND status='pending'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_count, 1, "exactly one new pending ER must be created");
+}
+
+/// Test 3 (Task 1.21): no held rows → fail-loud with 'no stale_base_requires_rebase'.
+#[test]
+fn recover_stale_base_test3_no_held_rows() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let er_s = er_schema();
+
+    let ws = git_workspace();
+    insert_task_id(&conn, "T2020", ws.path(), "main", "T3", "in_review");
+
+    let err = run_recover_stale_base(&conn, &er_s, "T2020", invoker_ai_with_human())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("no stale_base_requires_rebase"),
+        "error must contain 'no stale_base_requires_rebase': {err}"
+    );
+}
+
+/// Test 4 (Task 1.22): held row head_sha == current HEAD → fail-loud with 'rebase the task branch'.
+#[test]
+fn recover_stale_base_test4_no_rebase_performed() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let er_s = er_schema();
+
+    let ws = git_workspace();
+    git(ws.path(), &["checkout", "-b", "task-t4-norebase"]);
+    std::fs::write(ws.path().join("t4.txt"), "t4\n").unwrap();
+    git(ws.path(), &["add", "t4.txt"]);
+    git(ws.path(), &["commit", "-m", "t4"]);
+    let current_tip = head(ws.path());
+
+    insert_task_id(&conn, "T2030", ws.path(), "task-t4-norebase", "T3", "in_review");
+    // Insert held row with head_sha == current tip (no rebase performed).
+    insert_tooling_held_stale_base(&conn, "ER2030", "T2030", 1, &current_tip, "oldmain");
+
+    let err = run_recover_stale_base(&conn, &er_s, "T2030", invoker_ai_with_human())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("rebase the task branch"),
+        "error must contain 'rebase the task branch': {err}"
+    );
+    assert!(err.contains(&current_tip[..7]), "error must include current head SHA: {err}");
+}
+
+/// Test 5a (Task 1.23): handler-level AiAutonomous gate.
+#[test]
+fn recover_stale_base_test5a_handler_level_ai_autonomous_rejected() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let er_s = er_schema();
+
+    let ws = git_workspace();
+    insert_task_id(&conn, "T2040", ws.path(), "main", "T3", "in_review");
+
+    let ai_auto = InvokerCtx { actor: Actor::AiAutonomous, token_valid: false };
+    let err = run_recover_stale_base(&conn, &er_s, "T2040", ai_auto)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("ai_with_human"),
+        "AiAutonomous error must contain 'ai_with_human': {err}"
+    );
+
+    // Positive control: AiWithHuman proceeds past the gate (fails on no held rows, not on actor).
+    let ai_human = invoker_ai_with_human();
+    let err2 = run_recover_stale_base(&conn, &er_s, "T2040", ai_human)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        !err2.contains("ai_with_human"),
+        "AiWithHuman must pass the actor gate; got: {err2}"
+    );
+    assert!(
+        err2.contains("no stale_base_requires_rebase") || err2.contains("not found"),
+        "AiWithHuman must fail for a different reason: {err2}"
+    );
+}
+
+/// Test 5b (Task 1.24): CLI-level dispatch with ai_autonomous is rejected with 'ai_with_human'.
+#[test]
+fn recover_stale_base_test5b_cli_dispatch_ai_autonomous_rejected() {
+    use std::collections::HashMap;
+    use stores::cli::{dispatch, dynamic::build_root};
+    use stores::manifest::{InstalledStore, Manifest};
+    use stores::schema::StoreScope;
+
+    // Build manifest with tasks store.
+    let manifest = Manifest {
+        stores: vec![InstalledStore {
+            name: "tasks".to_string(),
+            schema_path: std::path::PathBuf::from("bundled:tasks"),
+            installed_at: "2026-01-01T00:00:00Z".to_string(),
+            table_name: "tasks".to_string(),
+            scope: StoreScope::Repo,
+        }],
+    };
+
+    // Build schemas map with tasks + external_reviews.
+    let mut schemas = HashMap::new();
+    for name in ["tasks", "external_reviews"] {
+        let yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, y)| *y)
+            .unwrap();
+        let schema = Schema::from_yaml(yaml).unwrap();
+        schemas.insert(name.to_string(), schema);
+    }
+
+    // Build CLI command tree and parse args.
+    let cmd = build_root(&manifest, &schemas);
+    let matches = cmd
+        .try_get_matches_from([
+            "stores",
+            "tasks",
+            "recover-stale-base",
+            "T900",
+            "--invoker",
+            "ai_autonomous",
+        ])
+        .unwrap();
+
+    // Create a temp dir with .stores/ so db_path() resolves and db::open() can create the file.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".stores")).unwrap();
+    let orig_cwd = std::env::current_dir().unwrap();
+
+    // Use a file-local mutex to prevent CWD interference across parallel tests.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_current_dir(tmp.path()).unwrap();
+
+    let result = dispatch::dispatch(&matches, &manifest, &schemas);
+
+    // Restore CWD before asserting.
+    let _ = std::env::set_current_dir(&orig_cwd);
+    drop(_guard);
+
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("ai_with_human"),
+        "CLI dispatch with ai_autonomous must return error containing 'ai_with_human': {err}"
+    );
+}
+
+/// Test 6 (Task 1.25): T098-shape e2e — conflict → held → rebase → recover → PASS.
+#[test]
+fn recover_stale_base_test6_t098_shape_e2e() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let er_s = er_schema();
+
+    let ws = git_workspace();
+
+    // Task branch edits README.md (will conflict with main).
+    git(ws.path(), &["checkout", "-b", "task-t6-conflict"]);
+    std::fs::write(ws.path().join("README.md"), "task version\n").unwrap();
+    git(ws.path(), &["add", "README.md"]);
+    git(ws.path(), &["commit", "-m", "task edits README"]);
+
+    // Main also edits README.md (conflict).
+    git(ws.path(), &["checkout", "main"]);
+    std::fs::write(ws.path().join("README.md"), "main conflicting version\n").unwrap();
+    git(ws.path(), &["add", "README.md"]);
+    git(ws.path(), &["commit", "-m", "main conflicts"]);
+
+    insert_task_id(&conn, "T2060", ws.path(), "task-t6-conflict", "T3", "in_review");
+    insert_pending_review_for_task(&conn, "ER2060", "T2060", 1);
+
+    // Run external review → conflict → tooling_held/stale_base.
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
+    let cfg_path = cfg(tmp.path(), &sh);
+    let a = agents();
+    external_review::run(
+        &json!({"display_id": "ER2060"}),
+        &DispatchCtx { conn: &conn, agents: &a, config_path: &cfg_path, policies_hash: "" },
+    )
+    .unwrap();
+
+    let held_reason: String = conn
+        .query_row(
+            "SELECT held_reason FROM external_reviews WHERE display_id='ER2060'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(held_reason, "stale_base_requires_rebase");
+
+    // Operator resolves: rebase with -X ours to keep task branch content.
+    git(ws.path(), &["checkout", "task-t6-conflict"]);
+    git(ws.path(), &["-c", "rebase.instructionFormat=%s", "rebase", "-X", "ours", "main"]);
+
+    // Call recover-stale-base.
+    run_recover_stale_base(&conn, &er_s, "T2060", invoker_human()).unwrap();
+
+    // Find the new pending ER.
+    let new_er_id: String = conn
+        .query_row(
+            "SELECT display_id FROM external_reviews WHERE task_id='T2060' AND status='pending'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // Run external review for the new pending ER → PASS.
+    let sh2 = shim(tmp.path(), "#!/bin/sh\ncat >/dev/null\necho 'VERDICT: PASS'\n");
+    let cfg2 = cfg(tmp.path(), &sh2);
+    external_review::run(
+        &json!({"display_id": new_er_id}),
+        &DispatchCtx { conn: &conn, agents: &a, config_path: &cfg2, policies_hash: "" },
+    )
+    .unwrap();
+
+    let final_status: String = conn
+        .query_row(
+            "SELECT status FROM external_reviews WHERE display_id=?1",
+            [&new_er_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(final_status, "passed");
+}
+
+/// Test 7 (Task 1.26): superseded rows do NOT appear in watch filter.
+#[test]
+fn recover_stale_base_test7_superseded_not_in_watch_filter() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let er_s = er_schema();
+
+    let ws = git_workspace();
+    git(ws.path(), &["checkout", "-b", "task-t7-watch"]);
+    std::fs::write(ws.path().join("t7.txt"), "t7\n").unwrap();
+    git(ws.path(), &["add", "t7.txt"]);
+    git(ws.path(), &["commit", "-m", "t7"]);
+    let pre_head = head(ws.path());
+
+    git(ws.path(), &["checkout", "main"]);
+    std::fs::write(ws.path().join("m7.txt"), "m7\n").unwrap();
+    git(ws.path(), &["add", "m7.txt"]);
+    git(ws.path(), &["commit", "-m", "main7"]);
+
+    insert_task_id(&conn, "T2070", ws.path(), "task-t7-watch", "T3", "in_review");
+    insert_tooling_held_stale_base(&conn, "ER2070", "T2070", 1, &pre_head, "oldmain");
+    insert_tooling_held_stale_base(&conn, "ER2071", "T2070", 2, &pre_head, "oldmain");
+
+    git(ws.path(), &["checkout", "task-t7-watch"]);
+    git(ws.path(), &["rebase", "main"]);
+
+    run_recover_stale_base(&conn, &er_s, "T2070", invoker_human()).unwrap();
+
+    // Watch filter: pending/running/tooling_held only.
+    let watch_rows: Vec<String> = {
+        let mut s = conn
+            .prepare(
+                "SELECT display_id FROM external_reviews \
+                 WHERE status IN ('pending','running','tooling_held') AND task_id='T2070'",
+            )
+            .unwrap();
+        s.query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert_eq!(
+        watch_rows.len(),
+        1,
+        "only new pending ER must appear in watch filter, got: {:?}",
+        watch_rows
+    );
+    assert_ne!(watch_rows[0], "ER2070", "superseded ER2070 must not appear");
+    assert_ne!(watch_rows[0], "ER2071", "superseded ER2071 must not appear");
+
+    // Superseded count must be 2 (held_reason intact for historical queries).
+    let superseded_held: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM external_reviews WHERE status='tooling_held' AND task_id='T2070'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(superseded_held, 0, "no rows remain as tooling_held after recovery");
+}
+
+/// Test 8 (Task 1.27): pre-patch DB migration — run on a DB without superseded_by column.
+#[test]
+fn recover_stale_base_test8_pre_patch_db_migration() {
+    let conn = Connection::open_in_memory().unwrap();
+    // Install DB schema but CREATE external_reviews WITHOUT the superseded_by column
+    // to simulate a pre-patch DB.
+    conn.execute_batch(SUBSTRATE_DDL).unwrap();
+    let tasks_yaml = BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "tasks")
+        .map(|(_, y)| *y)
+        .unwrap();
+    conn.execute_batch(&ddl_for(&Schema::from_yaml(tasks_yaml).unwrap())).unwrap();
+
+    // Create external_reviews WITHOUT superseded_by column.
+    conn.execute_batch(
+        "CREATE TABLE external_reviews ( \
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            display_id TEXT, \
+            status TEXT, \
+            task_id TEXT, \
+            attempt INTEGER, \
+            adapter TEXT, \
+            base_sha TEXT, \
+            head_sha TEXT, \
+            verdict TEXT, \
+            held_reason TEXT, \
+            next_retry_at TEXT, \
+            created_at TEXT, \
+            updated_at TEXT, \
+            created_by TEXT, \
+            updated_by TEXT \
+         )",
+    )
+    .unwrap();
+
+    let er_s = er_schema();
+    let ws = git_workspace();
+
+    git(ws.path(), &["checkout", "-b", "task-t8-prepatch"]);
+    std::fs::write(ws.path().join("t8.txt"), "t8\n").unwrap();
+    git(ws.path(), &["add", "t8.txt"]);
+    git(ws.path(), &["commit", "-m", "t8"]);
+    let pre_head = head(ws.path());
+
+    git(ws.path(), &["checkout", "main"]);
+    std::fs::write(ws.path().join("m8.txt"), "m8\n").unwrap();
+    git(ws.path(), &["add", "m8.txt"]);
+    git(ws.path(), &["commit", "-m", "main8"]);
+
+    insert_task_id(&conn, "T2080", ws.path(), "task-t8-prepatch", "T3", "in_review");
+
+    // Insert held row directly (no superseded_by column yet).
+    conn.execute(
+        "INSERT INTO external_reviews \
+         (display_id, status, task_id, attempt, adapter, head_sha, base_sha, verdict, held_reason, \
+          created_at, updated_at, created_by, updated_by) \
+         VALUES ('ER2080','tooling_held','T2080',1,'external_review',?1,'oldmain','TOOLING_FAILURE','stale_base_requires_rebase', \
+                 '2026-05-01T00:00:00Z','2026-05-01T00:00:00Z','test','test')",
+        rusqlite::params![pre_head],
+    )
+    .unwrap();
+
+    git(ws.path(), &["checkout", "task-t8-prepatch"]);
+    git(ws.path(), &["rebase", "main"]);
+
+    // Run recover-stale-base — must succeed and add the column in-process.
+    run_recover_stale_base(&conn, &er_s, "T2080", invoker_human()).unwrap();
+
+    // Verify superseded_by column now exists via PRAGMA table_info.
+    let cols: Vec<String> = {
+        let mut s = conn.prepare("PRAGMA table_info('external_reviews')").unwrap();
+        s.query_map([], |r| r.get(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    };
+    assert!(
+        cols.contains(&"superseded_by".to_string()),
+        "superseded_by column must exist after lazy ALTER: {:?}",
+        cols
+    );
+
+    // Held row must now be superseded with superseded_by populated.
+    let (status, superseded_by): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, superseded_by FROM external_reviews WHERE display_id='ER2080'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "superseded");
+    assert!(
+        superseded_by.is_some() && !superseded_by.as_deref().unwrap_or("").is_empty(),
+        "superseded_by must be populated: {:?}",
+        superseded_by
+    );
+}
+
+/// Schema invariant test (Task 1.28 / AC1.4): external_reviews schema has superseded_by field
+/// and tooling_held→superseded transition.
+#[test]
+fn recover_stale_base_schema_invariant_test() {
+    use stores::schema::FieldType;
+
+    let yaml = BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == "external_reviews")
+        .map(|(_, y)| *y)
+        .unwrap();
+    let schema = Schema::from_yaml(yaml).unwrap();
+
+    // Assert superseded_by field exists with correct type.
+    let sb_field = schema.fields.iter().find(|f| f.name == "superseded_by");
+    assert!(sb_field.is_some(), "schema must have superseded_by field");
+    let sb = sb_field.unwrap();
+    assert!(
+        matches!(sb.ty, FieldType::Text),
+        "superseded_by must be FieldType::Text, got: {:?}",
+        sb.ty
+    );
+    assert!(!sb.required, "superseded_by must be not required");
+
+    // Assert tooling_held→superseded transition exists.
+    let has_edge = schema.lifecycle.transitions.iter().any(|t| {
+        t.from == "tooling_held" && t.to == "superseded" && t.verb == "supersede"
+    });
+    assert!(
+        has_edge,
+        "schema must have tooling_held→superseded transition via supersede verb"
+    );
+}
