@@ -47,8 +47,16 @@ impl SearchState {
             return None;
         }
         for (i, row) in flat.iter().enumerate() {
+            let collapsed_id_hit = match row {
+                Row::CollapsedObs(c) => c
+                    .display_ids
+                    .iter()
+                    .any(|id| id.to_lowercase().contains(&q)),
+                _ => false,
+            };
             if row.display_id().to_lowercase().contains(&q)
                 || row.title_or_summary().to_lowercase().contains(&q)
+                || collapsed_id_hit
             {
                 self.hits.push(i);
             }
@@ -84,7 +92,7 @@ impl SearchState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::data::{ObsRow, TaskRow};
+    use crate::tui::data::{CollapsedObsRow, ObsRow, Section, TaskRow};
 
     fn task(id: &str, title: &str) -> Row {
         Row::Task(TaskRow {
@@ -146,6 +154,31 @@ mod tests {
         let hit = s.recompute(&flat);
         assert_eq!(hit, Some(1));
         assert_eq!(s.hits, vec![1]);
+    }
+
+    #[test]
+    fn search_matches_hidden_collapsed_observation_ids() {
+        let row = Row::CollapsedObs(CollapsedObsRow {
+            section: Section::ObsOther,
+            summary: "cluster".to_string(),
+            count: 2,
+            primary_display_id: "L001".to_string(),
+            display_ids: vec!["L001".to_string(), "L999".to_string()],
+            representative: ObsRow {
+                display_id: "L001".to_string(),
+                status: "open".to_string(),
+                priority: "normal".to_string(),
+                summary: "cluster".to_string(),
+                ..Default::default()
+            },
+        });
+        let rows = [row];
+        let flat: Vec<&Row> = rows.iter().collect();
+        let mut s = SearchState::open();
+        for c in "L999".chars() {
+            s.push(c);
+        }
+        assert_eq!(s.recompute(&flat), Some(0));
     }
 
     #[test]

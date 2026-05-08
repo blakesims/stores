@@ -124,12 +124,24 @@ fn row_line(row: &Row) -> String {
             "{} {} priority:{} {}",
             o.display_id, o.status, o.priority, o.summary
         ),
+        Row::CollapsedObs(c) => format!(
+            "{} {} priority:{} ×{} {}",
+            c.primary_display_id,
+            c.representative.status,
+            c.representative.priority,
+            c.count,
+            c.summary
+        ),
         Row::Review(r) => format!(
             "{} review:{} task={} runner={}",
             r.display_id,
             r.status,
             r.task_id,
-            if r.runner.is_empty() { "unknown" } else { &r.runner },
+            if r.runner.is_empty() {
+                "unknown"
+            } else {
+                &r.runner
+            },
         ),
         Row::Intake(i) => format!(
             "{} {} priority:{} {} held:{}",
@@ -179,10 +191,10 @@ fn render_snapshot(show_all_history: bool) -> String {
 fn tui_watch_visibility_snapshots_default_actionable_view() {
     let got = render_snapshot(false);
     assert_eq!(got, include_str!("fixtures/watch/default.snap"));
-    assert!(!got.contains("T001 blocked"));
-    assert!(!got.contains("L001 deploy-blocked"));
+    assert!(got.contains("HELD-ZOMBIE (2)\nT001 blocked"));
+    assert!(!got.contains("L001 open priority:normal deploy-blocked"));
     assert!(got.contains("PRIORITY (2)\nL002 open priority:high"));
-    assert!(got.contains("HELD (2)\nT020 blocked"));
+    assert!(got.contains("HELD-BLOCKED (2)\nT020 blocked"));
     assert!(got.contains("T010 executing ▮▱ ···"));
     assert!(got.contains("T011 code_review ▰◐▱ ●●·"));
     assert!(got.contains("T012 ready in-flight"));

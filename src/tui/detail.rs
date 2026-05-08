@@ -3,7 +3,9 @@
 use ratatui::text::Line;
 
 use super::app::App;
-use super::data::{ArtifactPointer, IntakeRow, ObsRow, RecentEvent, ReviewRow, Row, TaskRow};
+use super::data::{
+    ArtifactPointer, CollapsedObsRow, IntakeRow, ObsRow, RecentEvent, ReviewRow, Row, TaskRow,
+};
 
 pub fn selected_detail_lines(app: &App) -> Vec<Line<'static>> {
     let Some(detail) = &app.detail else {
@@ -31,6 +33,7 @@ fn lines_for_row(row: &Row, app: &App) -> Vec<String> {
     match row {
         Row::Task(t) => task_lines(t, app),
         Row::Obs(o) => observation_lines(o),
+        Row::CollapsedObs(c) => collapsed_observation_lines(c),
         Row::Review(r) => review_lines(r),
         Row::Intake(i) => intake_lines(i),
     }
@@ -131,6 +134,20 @@ fn observation_lines(o: &ObsRow) -> Vec<String> {
         ),
     ]);
     append_artifacts(&mut lines, &o.evidence_pointers);
+    lines
+}
+
+fn collapsed_observation_lines(c: &CollapsedObsRow) -> Vec<String> {
+    let mut lines = observation_lines(&c.representative);
+    lines.push(String::new());
+    lines.push("Collapsed observations".to_string());
+    lines.push(format!("  summary: {}", present(&c.summary)));
+    lines.push(format!("  count: {}", c.count));
+    lines.push(format!("  primary: {}", c.primary_display_id));
+    lines.push("  display_ids:".to_string());
+    for id in &c.display_ids {
+        lines.push(format!("    {id}"));
+    }
     lines
 }
 

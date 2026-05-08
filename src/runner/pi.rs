@@ -293,10 +293,18 @@ impl Runner for PiRunner {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SHIM_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn shim(script: &str) -> (tempfile::TempDir, PathBuf) {
         let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("shim.sh");
+        let shim_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-shims");
+        fs::create_dir_all(&shim_dir).unwrap();
+        let idx = SHIM_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let p = shim_dir.join(format!("pi-shim-{}-{idx}.sh", std::process::id()));
         {
             let mut f = fs::File::create(&p).unwrap();
             use std::io::Write as _;
@@ -339,7 +347,7 @@ mod tests {
         let (_d, bin) = shim(
             "#!/bin/sh\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\"}}'\n",
         );
-        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), bin);
         let schema = r#"{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}"#;
         let out = runner
             .spawn(
@@ -370,7 +378,7 @@ mod tests {
         // Telemetry is persisted by the caller (drive) before surfacing the error.
         let (_d, bin) =
             shim("#!/bin/sh\necho '{\"type\":\"message\",\"text\":\"done\"}'\nexit 0\n");
-        let runner = PiRunner::with_bin_and_helper(bin, PathBuf::from("ignored"));
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), bin);
         let out = runner
             .spawn(
                 "planner",
@@ -412,6 +420,9 @@ mod tests {
 
     #[test]
     fn writes_transcript() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
         let runs = tempfile::tempdir().unwrap();
         std::env::set_var("STORES_RUNS_DIR", runs.path());
         let sid = "pi-transcript-test";

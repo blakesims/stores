@@ -1,0 +1,23 @@
+daemon:DEAD · cap active 15/15
+lanes: execution=0 review=6 accept=0 held=10 active=291 priority=0
+external review: unavailable / not installed
+
+system-alert: daemon DEAD; 8 dangling locks; oldest started 8h ago
+▾ RATIFY-U1 (3)
+  L900  open                     priority:normal ratify ready contract 1
+▾ ACCEPT-U3 (4)
+  T400  in_review                wrap → external review: unavailable / not insta
+▾ HELD-INTAKE (1)
+  I001  needs_info               priority:normal held:missing owner · next:recon
+▾ HELD-AI-REVIEW (2)
+  T500  plan_review              plan ◐ tier:T2 · planner AI review
+▾ HELD-ZOMBIE (2)
+  T600  blocked:unknown          tier:T2 · reason:silent_zombie:pid_dead · silen
+▾ OBSERVATIONS (7)
+  L001  open                     priority:normal ×76 deploy-blocked: task T300 m
+  L077  open                     priority:normal ×47 deploy-blocked: task T301 m
+  L124  open                     priority:normal ×40 deploy-blocked: task T302 m
+  L164  open                     priority:normal ×35 deploy-blocked: task T303 m
+  L199  open                     priority:normal ×31 deploy-blocked: task T304 m
+  L230  open                     priority:normal ×28 deploy-blocked: task T305 m
+  L258  open                     priority:normal ×24 deploy-blocked: task T306 m

@@ -1,14 +1,13 @@
 //! Section-grouping query layer.
 //!
 //! Reads tasks + observations from `.stores/db.sqlite` (read-only) and
-//! classifies each row into actionable watch sections:
-//!
-//!   Tasks: ACTIONABLE CURRENT WORK · BLOCKED NEEDS ACTION · DEPLOY RECOVERY · RECENTLY TERMINAL
-//!   Obs:   RATIFIABLE · OPEN-NO-CONTRACT · OTHER
+//! classifies each row into the operator cockpit taxonomy exposed by
+//! [`Section::label`]: active work, U1/U3 gates, held lanes, terminal rows,
+//! priority/observation rows, intake lanes, and external-review rows.
 
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SECS_PER_DAY: i64 = 86_400;
@@ -16,50 +15,59 @@ const SECS_PER_DAY: i64 = 86_400;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
     TasksActionableCurrentWork,
+    ObsRatifiable,
+    TasksAcceptU3,
     TasksBlockedNeedsAction,
     TasksDeployRecovery,
     TasksNeedsTriage,
+    IntakeHeld,
+    TasksHeldAiReview,
+    TasksHeldZombie,
     TasksRecentlyTerminal,
-    ObsRatifiable,
     ObsOpenNoContract,
     ObsOther,
-    ExternalReviewLane,
     IntakeOpen,
-    IntakeHeld,
     IntakeRouted,
+    ExternalReviewLane,
 }
 
 impl Section {
     pub fn label(self) -> &'static str {
         match self {
             Section::TasksActionableCurrentWork => "ACTIVE WORK",
-            Section::TasksBlockedNeedsAction => "HELD",
-            Section::TasksDeployRecovery => "HELD",
-            Section::TasksNeedsTriage => "HELD",
-            Section::TasksRecentlyTerminal => "ACCEPT",
-            Section::ObsRatifiable => "REVIEW",
+            Section::ObsRatifiable => "RATIFY-U1",
+            Section::TasksAcceptU3 => "ACCEPT-U3",
+            Section::TasksBlockedNeedsAction => "HELD-BLOCKED",
+            Section::TasksDeployRecovery => "HELD-DEPLOY",
+            Section::TasksNeedsTriage => "HELD-TRIAGE",
+            Section::IntakeHeld => "HELD-INTAKE",
+            Section::TasksHeldAiReview => "HELD-AI-REVIEW",
+            Section::TasksHeldZombie => "HELD-ZOMBIE",
+            Section::TasksRecentlyTerminal => "TERMINAL",
             Section::ObsOpenNoContract => "PRIORITY",
-            Section::ObsOther => "OBSERVATIONS/INTAKE",
-            Section::ExternalReviewLane => "EXTERNAL REVIEW · HELD/RUNNING",
-            Section::IntakeOpen => "OBSERVATIONS/INTAKE",
-            Section::IntakeHeld => "HELD",
-            Section::IntakeRouted => "OBSERVATIONS/INTAKE",
+            Section::ObsOther => "OBSERVATIONS",
+            Section::IntakeOpen => "INTAKE-OPEN",
+            Section::IntakeRouted => "INTAKE-ROUTED",
+            Section::ExternalReviewLane => "EXTERNAL-REVIEW",
         }
     }
 
-    pub const ALL: [Section; 12] = [
+    pub const ALL: [Section; 15] = [
         Section::TasksActionableCurrentWork,
+        Section::ObsRatifiable,
+        Section::TasksAcceptU3,
         Section::TasksBlockedNeedsAction,
         Section::TasksDeployRecovery,
         Section::TasksNeedsTriage,
+        Section::IntakeHeld,
+        Section::TasksHeldAiReview,
+        Section::TasksHeldZombie,
         Section::TasksRecentlyTerminal,
-        Section::ObsRatifiable,
         Section::ObsOpenNoContract,
         Section::ObsOther,
-        Section::ExternalReviewLane,
         Section::IntakeOpen,
-        Section::IntakeHeld,
         Section::IntakeRouted,
+        Section::ExternalReviewLane,
     ];
 }
 
@@ -86,6 +94,7 @@ impl Default for WatchClassifyOptions {
 pub enum Row {
     Task(TaskRow),
     Obs(ObsRow),
+    CollapsedObs(CollapsedObsRow),
     Review(ReviewRow),
     Intake(IntakeRow),
 }
@@ -145,6 +154,16 @@ pub struct ObsRow {
     pub resolution_pointer: Option<String>,
     pub recent_events: Vec<RecentEvent>,
     pub investigation_failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CollapsedObsRow {
+    pub section: Section,
+    pub summary: String,
+    pub count: usize,
+    pub primary_display_id: String,
+    pub display_ids: Vec<String>,
+    pub representative: ObsRow,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -218,6 +237,12 @@ impl Default for ExternalReviewState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SystemHealth {
+    pub unfinished_dispatch_locks: usize,
+    pub oldest_claimed_at_epoch: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CockpitModel {
     pub execution: usize,
     pub review: usize,
@@ -261,22 +286,8 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
                     model.priority += 1;
                 }
             }
-            Row::Obs(o) => {
-                if is_priority_text(&o.priority) || o.priority_rank.map(|r| r <= 1).unwrap_or(false)
-                {
-                    model.priority += 1;
-                }
-                if o.lock_reason
-                    .as_deref()
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false)
-                {
-                    model.held += 1;
-                }
-                if o.status != "resolved" && o.status != "rejected" {
-                    model.active += 1;
-                }
-            }
+            Row::Obs(o) => apply_obs_to_model(o, 1, &mut model),
+            Row::CollapsedObs(c) => apply_obs_to_model(&c.representative, c.count, &mut model),
             Row::Intake(i) => {
                 if i.status == "needs_info" {
                     model.held += 1;
@@ -300,6 +311,22 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
         }
     }
     model
+}
+
+fn apply_obs_to_model(o: &ObsRow, count: usize, model: &mut CockpitModel) {
+    if is_priority_text(&o.priority) || o.priority_rank.map(|r| r <= 1).unwrap_or(false) {
+        model.priority += count;
+    }
+    if o.lock_reason
+        .as_deref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+    {
+        model.held += count;
+    }
+    if o.status != "resolved" && o.status != "rejected" {
+        model.active += count;
+    }
 }
 
 fn is_priority_task(t: &TaskRow) -> bool {
@@ -340,6 +367,7 @@ pub fn row_visibility_class(
     match row {
         Row::Task(t) => task_visibility_class(t),
         Row::Obs(o) => obs_visibility_class(o, task_status_by_id),
+        Row::CollapsedObs(c) => obs_visibility_class(&c.representative, task_status_by_id),
         Row::Review(_) => VisibilityClass::ActionableRecovery,
         Row::Intake(_) => VisibilityClass::ActionableRecovery,
     }
@@ -355,8 +383,8 @@ pub fn task_visibility_class(t: &TaskRow) -> VisibilityClass {
         .unwrap_or("")
         .to_ascii_lowercase();
     let reason_class = blocked_reason_class(t.blocked_reason.as_deref());
-    if reason.starts_with("silent_zombie") || reason.starts_with("drive_failed:silent_zombie") {
-        return VisibilityClass::HistoricalNoise;
+    if is_silent_zombie_reason(&reason) {
+        return VisibilityClass::ActionableRecovery;
     }
     if reason.contains("accept_installed_inert")
         && matches!(
@@ -393,6 +421,9 @@ pub fn obs_visibility_class(
     o: &ObsRow,
     task_status_by_id: &HashMap<String, String>,
 ) -> VisibilityClass {
+    if is_silent_zombie_reason(o.investigation_failure_reason.as_deref().unwrap_or("")) {
+        return VisibilityClass::ActionableRecovery;
+    }
     let lower = o.summary.to_ascii_lowercase();
     if lower.starts_with("deploy-blocked:") {
         if let Some(task_id) = extract_task_id(&o.summary) {
@@ -410,6 +441,11 @@ pub fn obs_visibility_class(
         return VisibilityClass::NeedsTriage;
     }
     VisibilityClass::ActionableRecovery
+}
+
+fn is_silent_zombie_reason(reason: &str) -> bool {
+    let reason = reason.trim().to_ascii_lowercase();
+    reason.starts_with("silent_zombie") || reason.starts_with("drive_failed:silent_zombie")
 }
 
 fn is_recoverable_deploy_reason(reason: &str) -> bool {
@@ -452,6 +488,12 @@ pub fn surface_counts(rows: &[Row], _show_all_history: bool) -> ((usize, usize),
                     obs.0 += 1;
                 }
             }
+            Row::CollapsedObs(c) => {
+                obs.1 += c.count;
+                if class == VisibilityClass::ActionableRecovery {
+                    obs.0 += c.count;
+                }
+            }
             Row::Review(_) => {}
             Row::Intake(_) => {}
         }
@@ -463,7 +505,7 @@ fn task_status_by_id(rows: &[Row]) -> HashMap<String, String> {
     rows.iter()
         .filter_map(|r| match r {
             Row::Task(t) => Some((t.display_id.clone(), t.status.clone())),
-            Row::Obs(_) | Row::Review(_) | Row::Intake(_) => None,
+            Row::Obs(_) | Row::CollapsedObs(_) | Row::Review(_) | Row::Intake(_) => None,
         })
         .collect()
 }
@@ -473,6 +515,7 @@ impl Row {
         match self {
             Row::Task(t) => &t.display_id,
             Row::Obs(o) => &o.display_id,
+            Row::CollapsedObs(c) => &c.primary_display_id,
             Row::Review(r) => &r.display_id,
             Row::Intake(i) => &i.display_id,
         }
@@ -482,6 +525,7 @@ impl Row {
         match self {
             Row::Task(t) => &t.title,
             Row::Obs(o) => &o.summary,
+            Row::CollapsedObs(c) => &c.summary,
             Row::Review(r) => &r.task_id,
             Row::Intake(i) => &i.summary,
         }
@@ -863,11 +907,39 @@ fn attach_recent_events(conn: &Connection, rows: &mut [Row]) -> Result<()> {
         match row {
             Row::Task(t) => t.recent_events = events,
             Row::Obs(o) => o.recent_events = events,
+            Row::CollapsedObs(c) => c.representative.recent_events = events,
             Row::Review(_) => {} // ReviewRow has no recent_events field
             Row::Intake(i) => i.recent_events = events,
         }
     }
     Ok(())
+}
+
+pub fn load_system_health(conn: &Connection) -> Result<SystemHealth> {
+    if !table_exists(conn, "dispatch_locks")?
+        || !column_exists(conn, "dispatch_locks", "claimed_at")?
+        || !column_exists(conn, "dispatch_locks", "finished_at")?
+    {
+        return Ok(SystemHealth::default());
+    }
+    let (count, oldest): (usize, Option<rusqlite::types::Value>) = conn.query_row(
+        "SELECT COUNT(*), MIN(claimed_at) FROM dispatch_locks WHERE finished_at IS NULL",
+        [],
+        |r| Ok((r.get(0)?, r.get(1).ok())),
+    )?;
+    Ok(SystemHealth {
+        unfinished_dispatch_locks: count,
+        oldest_claimed_at_epoch: oldest.and_then(value_to_epoch),
+    })
+}
+
+fn value_to_epoch(value: rusqlite::types::Value) -> Option<i64> {
+    match value {
+        rusqlite::types::Value::Integer(v) => Some(v),
+        rusqlite::types::Value::Real(v) => Some(v.floor() as i64),
+        rusqlite::types::Value::Text(s) => parse_epoch(&s),
+        rusqlite::types::Value::Null | rusqlite::types::Value::Blob(_) => None,
+    }
 }
 
 pub fn load_external_review_state(conn: &Connection) -> Result<ExternalReviewState> {
@@ -921,6 +993,85 @@ pub fn classify_with_options(
     classify_with_options_at(rows, opts, now_epoch())
 }
 
+/// Collapse duplicate observation summaries independently within each section.
+/// Returns a new row store plus section indices over that store; no Section
+/// variant is introduced for collapsed observations.
+pub fn dedup_observation_summaries_by_section(
+    rows: &[Row],
+    sections: &[(Section, Vec<usize>)],
+) -> (Vec<Row>, Vec<(Section, Vec<usize>)>) {
+    let mut out_rows = Vec::new();
+    let mut out_sections = Vec::with_capacity(sections.len());
+
+    for (section, indices) in sections {
+        let mut by_summary: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for &idx in indices {
+            if let Some(Row::Obs(o)) = rows.get(idx) {
+                by_summary.entry(o.summary.clone()).or_default().push(idx);
+            }
+        }
+
+        let mut new_indices = Vec::new();
+        let mut consumed = std::collections::HashSet::new();
+        for &idx in indices {
+            if consumed.contains(&idx) {
+                continue;
+            }
+            match rows.get(idx) {
+                Some(Row::Obs(o)) => {
+                    let group = by_summary.get(&o.summary).cloned().unwrap_or_else(|| vec![idx]);
+                    if group.len() >= 2 {
+                        for member in &group {
+                            consumed.insert(*member);
+                        }
+                        let mut display_ids: Vec<String> = group
+                            .iter()
+                            .filter_map(|&i| match rows.get(i) {
+                                Some(Row::Obs(obs)) => Some(obs.display_id.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        display_ids.sort();
+                        let primary_display_id = display_ids.first().cloned().unwrap_or_default();
+                        let representative = group
+                            .iter()
+                            .filter_map(|&i| match rows.get(i) {
+                                Some(Row::Obs(obs)) => Some(obs.clone()),
+                                _ => None,
+                            })
+                            .min_by(|a, b| a.display_id.cmp(&b.display_id))
+                            .unwrap_or_else(|| o.clone());
+                        let abs = out_rows.len();
+                        out_rows.push(Row::CollapsedObs(CollapsedObsRow {
+                            section: *section,
+                            summary: o.summary.clone(),
+                            count: display_ids.len(),
+                            primary_display_id,
+                            display_ids,
+                            representative,
+                        }));
+                        new_indices.push(abs);
+                    } else {
+                        consumed.insert(idx);
+                        let abs = out_rows.len();
+                        out_rows.push(rows[idx].clone());
+                        new_indices.push(abs);
+                    }
+                }
+                Some(row) => {
+                    let abs = out_rows.len();
+                    out_rows.push(row.clone());
+                    new_indices.push(abs);
+                }
+                None => {}
+            }
+        }
+        out_sections.push((*section, new_indices));
+    }
+
+    (out_rows, out_sections)
+}
+
 fn classify_with_options_at(
     rows: &[Row],
     opts: WatchClassifyOptions,
@@ -969,36 +1120,54 @@ fn push_bucket(buckets: &mut [(Section, Vec<usize>)], sec: Section, idx: usize) 
 
 fn section_for(row: &Row) -> Option<Section> {
     match row {
-        Row::Task(t) => match t.status.as_str() {
-            "blocked" => {
-                if task_visibility_class(t) == VisibilityClass::NeedsTriage {
-                    Some(Section::TasksNeedsTriage)
-                } else {
-                    Some(Section::TasksBlockedNeedsAction)
-                }
+        Row::Task(t) => {
+            let reason = t
+                .blocked_reason
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if is_silent_zombie_reason(&reason) {
+                return Some(Section::TasksHeldZombie);
             }
-            "deploy_blocked" => {
-                if task_visibility_class(t) == VisibilityClass::NeedsTriage {
-                    Some(Section::TasksNeedsTriage)
-                } else {
-                    Some(Section::TasksDeployRecovery)
+            match t.status.as_str() {
+                "blocked" => {
+                    if task_visibility_class(t) == VisibilityClass::NeedsTriage {
+                        Some(Section::TasksNeedsTriage)
+                    } else {
+                        Some(Section::TasksBlockedNeedsAction)
+                    }
                 }
+                "deploy_blocked" => {
+                    if task_visibility_class(t) == VisibilityClass::NeedsTriage {
+                        Some(Section::TasksNeedsTriage)
+                    } else {
+                        Some(Section::TasksDeployRecovery)
+                    }
+                }
+                "plan_review" | "code_review" => Some(Section::TasksHeldAiReview),
+                "in_review" => Some(Section::TasksAcceptU3),
+                "closed_out_of_band" | "accepted" | "complete" | "cargo_installed"
+                | "schema_migrated" | "rejected" | "abandoned" => {
+                    Some(Section::TasksRecentlyTerminal)
+                }
+                _ if is_priority_task(t) => Some(Section::ObsOpenNoContract),
+                _ => Some(Section::TasksActionableCurrentWork),
             }
-            "plan_review" | "code_review" | "in_review" => Some(Section::ObsRatifiable),
-            "closed_out_of_band" | "accepted" | "complete" | "cargo_installed"
-            | "schema_migrated" | "rejected" | "abandoned" => Some(Section::TasksRecentlyTerminal),
-            _ if is_priority_task(t) => Some(Section::ObsOpenNoContract),
-            _ => Some(Section::TasksActionableCurrentWork),
-        },
+        }
         Row::Obs(o) => {
-            if is_priority_text(&o.priority) || o.priority_rank.map(|r| r <= 1).unwrap_or(false) {
-                Some(Section::ObsOpenNoContract)
+            if is_silent_zombie_reason(o.investigation_failure_reason.as_deref().unwrap_or("")) {
+                Some(Section::TasksHeldZombie)
             } else if o.contract_state.as_deref() == Some("ready") {
                 Some(Section::ObsRatifiable)
+            } else if is_priority_text(&o.priority)
+                || o.priority_rank.map(|r| r <= 1).unwrap_or(false)
+            {
+                Some(Section::ObsOpenNoContract)
             } else {
                 Some(Section::ObsOther)
             }
         }
+        Row::CollapsedObs(c) => Some(c.section),
         Row::Review(_) => Some(Section::ExternalReviewLane),
         Row::Intake(i) => match i.status.as_str() {
             "needs_info" => Some(Section::IntakeHeld),
@@ -1084,7 +1253,7 @@ pub fn blocked_reason_class(reason: Option<&str>) -> &'static str {
 fn task_updated_epoch(row: &Row) -> Option<i64> {
     match row {
         Row::Task(t) => parse_epoch(&t.updated_at),
-        Row::Obs(_) | Row::Review(_) | Row::Intake(_) => None,
+        Row::Obs(_) | Row::CollapsedObs(_) | Row::Review(_) | Row::Intake(_) => None,
     }
 }
 
@@ -1186,6 +1355,18 @@ mod tests {
         })
     }
 
+    fn obs_with_id(id: &str, summary: &str, priority: &str, contract: Option<&str>) -> Row {
+        Row::Obs(ObsRow {
+            display_id: id.to_string(),
+            status: "open".to_string(),
+            priority: priority.to_string(),
+            summary: summary.to_string(),
+            updated_at: id.to_string(),
+            contract_state: contract.map(str::to_string),
+            ..Default::default()
+        })
+    }
+
     fn bucket(buckets: &[(Section, Vec<usize>)], section: Section) -> Vec<usize> {
         buckets
             .iter()
@@ -1196,16 +1377,95 @@ mod tests {
     }
 
     #[test]
+    fn dedup_collapses_same_summary_per_section_only() {
+        let rows = vec![
+            obs_with_id("L010", "same summary", "normal", None),
+            obs_with_id("L009", "same summary", "normal", None),
+            obs_with_id("L001", "same summary", "high", None),
+            obs_with_id("L002", "same summary", "high", None),
+        ];
+        let sections = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
+        let (deduped, buckets) = dedup_observation_summaries_by_section(&rows, &sections);
+        let other = bucket(&buckets, Section::ObsOther);
+        let priority = bucket(&buckets, Section::ObsOpenNoContract);
+        assert_eq!(other.len(), 1);
+        assert_eq!(priority.len(), 1);
+        assert_eq!(deduped.len(), 2);
+        match &deduped[other[0]] {
+            Row::CollapsedObs(c) => {
+                assert_eq!(c.section, Section::ObsOther);
+                assert_eq!(c.summary, "same summary");
+                assert_eq!(c.count, 2);
+                assert_eq!(c.primary_display_id, "L009");
+            }
+            got => panic!("expected collapsed obs, got {got:?}"),
+        }
+        match &deduped[priority[0]] {
+            Row::CollapsedObs(c) => {
+                assert_eq!(c.section, Section::ObsOpenNoContract);
+                assert_eq!(c.count, 2);
+                assert_eq!(c.primary_display_id, "L001");
+            }
+            got => panic!("expected collapsed obs, got {got:?}"),
+        }
+    }
+
+    #[test]
+    fn dedup_collapses_76_row_cluster_to_primary_lexicographic_id() {
+        let mut rows = Vec::new();
+        for i in (0..76).rev() {
+            rows.push(obs_with_id(&format!("L{:03}", i), "dupe cluster", "normal", None));
+        }
+        let sections = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
+        let (deduped, buckets) = dedup_observation_summaries_by_section(&rows, &sections);
+        let other = bucket(&buckets, Section::ObsOther);
+        assert_eq!(other.len(), 1);
+        match &deduped[other[0]] {
+            Row::CollapsedObs(c) => {
+                assert_eq!(c.count, 76);
+                assert_eq!(c.primary_display_id, "L000");
+                assert_eq!(c.display_ids.len(), 76);
+            }
+            got => panic!("expected collapsed obs, got {got:?}"),
+        }
+    }
+
+    #[test]
+    fn section_all_labels_match_contract_order_and_are_unique() {
+        let labels: Vec<&str> = Section::ALL.iter().map(|s| s.label()).collect();
+        let expected = vec![
+            "ACTIVE WORK",
+            "RATIFY-U1",
+            "ACCEPT-U3",
+            "HELD-BLOCKED",
+            "HELD-DEPLOY",
+            "HELD-TRIAGE",
+            "HELD-INTAKE",
+            "HELD-AI-REVIEW",
+            "HELD-ZOMBIE",
+            "TERMINAL",
+            "PRIORITY",
+            "OBSERVATIONS",
+            "INTAKE-OPEN",
+            "INTAKE-ROUTED",
+            "EXTERNAL-REVIEW",
+        ];
+        assert_eq!(labels, expected);
+        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
     fn section_classification() {
         // blocked/deploy_blocked with no blocked_reason → unknown class → NeedsTriage section.
         let rows = vec![
-            task("plan_review"),        // idx 0 → REVIEW
-            task("blocked"),            // idx 1 → HELD / needs triage (no reason → unknown)
-            task("deploy_blocked"),     // idx 2 → HELD / needs triage (no reason → unknown)
-            task("accepted"),           // idx 3 → ACCEPT
-            obs("open", Some("ready")), // idx 4 → REVIEW
-            obs("open", None),          // idx 5 → OBSERVATIONS/INTAKE
-            obs("resolved", None),      // idx 6 → OBSERVATIONS/INTAKE
+            task("plan_review"),        // idx 0 → HELD-AI-REVIEW
+            task("blocked"),            // idx 1 → HELD-TRIAGE (no reason → unknown)
+            task("deploy_blocked"),     // idx 2 → HELD-TRIAGE (no reason → unknown)
+            task("accepted"),           // idx 3 → TERMINAL
+            obs("open", Some("ready")), // idx 4 → RATIFY-U1
+            obs("open", None),          // idx 5 → OBSERVATIONS
+            obs("resolved", None),      // idx 6 → OBSERVATIONS
         ];
         let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
         assert_eq!(buckets.len(), Section::ALL.len());
@@ -1221,7 +1481,8 @@ mod tests {
         assert_eq!(b(Section::TasksDeployRecovery), Vec::<usize>::new());
         assert_eq!(b(Section::TasksNeedsTriage), vec![1usize, 2]);
         assert_eq!(b(Section::TasksRecentlyTerminal), vec![3usize]);
-        assert_eq!(b(Section::ObsRatifiable), vec![0usize, 4]);
+        assert_eq!(b(Section::ObsRatifiable), vec![4usize]);
+        assert_eq!(b(Section::TasksHeldAiReview), vec![0usize]);
         assert_eq!(b(Section::ObsOpenNoContract), Vec::<usize>::new());
         assert_eq!(b(Section::ObsOther), vec![5usize, 6]);
     }
@@ -1232,10 +1493,10 @@ mod tests {
         // Use an explicit recoverable reason to get TasksBlockedNeedsAction / TasksDeployRecovery.
         let mappings: &[(&str, Option<&str>, Section)] = &[
             ("planning", None, Section::TasksActionableCurrentWork),
-            ("plan_review", None, Section::ObsRatifiable),
+            ("plan_review", None, Section::TasksHeldAiReview),
             ("ready", None, Section::TasksActionableCurrentWork),
             ("executing", None, Section::TasksActionableCurrentWork),
-            ("code_review", None, Section::ObsRatifiable),
+            ("code_review", None, Section::TasksHeldAiReview),
             (
                 "blocked",
                 Some("rate_limit 429"),
@@ -1243,7 +1504,7 @@ mod tests {
             ),
             ("blocked", None, Section::TasksNeedsTriage),
             ("complete", None, Section::TasksRecentlyTerminal),
-            ("in_review", None, Section::ObsRatifiable),
+            ("in_review", None, Section::TasksAcceptU3),
             ("accepted", None, Section::TasksRecentlyTerminal),
             ("rejected", None, Section::TasksRecentlyTerminal),
             (
@@ -1374,6 +1635,39 @@ mod tests {
     #[test]
     fn parse_epoch_accepts_rfc3339_prefix() {
         assert_eq!(parse_epoch("1970-01-01T00:00:00Z"), Some(0));
+    }
+
+    #[test]
+    fn load_system_health_counts_unfinished_dispatch_locks_and_oldest_claimed_at() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE dispatch_locks (display_id TEXT, claimed_at INTEGER, finished_at INTEGER);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D999', 1700009999, 1700019999);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D001', 1700000001, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D002', 1700000002, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D003', 1700000003, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D004', 1700000004, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D005', 1700000005, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D006', 1700000006, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D007', 1700000007, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D008', 1700000008, NULL);
+            "#,
+        )
+        .unwrap();
+
+        let health = load_system_health(&conn).unwrap();
+        assert_eq!(health.unfinished_dispatch_locks, 8);
+        assert_eq!(health.oldest_claimed_at_epoch, Some(1_700_000_001));
+    }
+
+    #[test]
+    fn load_system_health_absent_table_or_claimed_at_returns_zero() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(load_system_health(&conn).unwrap(), SystemHealth::default());
+        conn.execute_batch("CREATE TABLE dispatch_locks (finished_at INTEGER);")
+            .unwrap();
+        assert_eq!(load_system_health(&conn).unwrap(), SystemHealth::default());
     }
 
     #[test]

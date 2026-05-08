@@ -47,6 +47,14 @@ fn build_app() -> App {
             contract_state: Some("ready".into()),
             ..Default::default()
         }),
+        Row::Obs(ObsRow {
+            display_id: "L002".into(),
+            status: "open".into(),
+            priority: "high".into(),
+            summary: "priority obs".into(),
+            updated_at: "2026-05-05".into(),
+            ..Default::default()
+        }),
     ];
     app.sections = classify(&app.rows);
     app.status_bar = StatusBar {
@@ -124,10 +132,14 @@ fn top_level_cockpit_paints_heartbeat_lanes_and_external_placeholder() {
         "review=1",
         "accept=0",
         "ACTIVE WORK",
-        "HELD",
+        "HELD-BLOCKED",
+        "RATIFY-U1",
         "PRIORITY",
         "external review: unavailable / not installed",
     ] {
-        assert!(painted.contains(needle), "missing {needle:?} in:\n{painted}");
+        assert!(
+            painted.contains(needle),
+            "missing {needle:?} in:\n{painted}"
+        );
     }
 }

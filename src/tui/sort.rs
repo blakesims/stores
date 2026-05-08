@@ -52,6 +52,7 @@ fn updated(row: &Row) -> &str {
     match row {
         Row::Task(t) => &t.updated_at,
         Row::Obs(o) => &o.updated_at,
+        Row::CollapsedObs(c) => &c.representative.updated_at,
         Row::Review(r) => r.next_retry_at.as_deref().unwrap_or(""),
         Row::Intake(i) => &i.updated_at,
     }
@@ -64,6 +65,7 @@ fn display_id(row: &Row) -> &str {
 fn priority_rank(row: &Row) -> u8 {
     let p = match row {
         Row::Obs(o) => o.priority.as_str(),
+        Row::CollapsedObs(c) => c.representative.priority.as_str(),
         // Tasks don't carry an explicit priority field in the loaded row;
         // treat them as `normal` so they cluster between high and low obs.
         Row::Task(_) | Row::Review(_) => "normal",

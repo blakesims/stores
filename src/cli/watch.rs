@@ -66,7 +66,12 @@ pub fn run(interval_ms: u64, show_all_history: bool) -> Result<()> {
     }
 }
 
-fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history: bool) -> Result<String> {
+fn render_frame(
+    conn: &Connection,
+    db: &Path,
+    interval_ms: u64,
+    show_all_history: bool,
+) -> Result<String> {
     let mut out = String::with_capacity(4096);
 
     let now = local_clock_string();
@@ -75,22 +80,62 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
         db.display()
     ));
 
-    // ---- TASKS -----------------------------------------------------------
-    let rows = crate::tui::data::load_rows(conn).unwrap_or_default();
-    let ((task_visible, task_total), (obs_visible, obs_total)) = crate::tui::data::surface_counts(&rows, show_all_history);
-    let sections = crate::tui::data::classify_with_options(
-        &rows,
-        crate::tui::data::WatchClassifyOptions { show_all_history, ..Default::default() },
-    );
+    // ---- SYSTEM HEALTH + DAEMON LIVENESS --------------------------------
+    let system_health = crate::tui::data::load_system_health(conn).unwrap_or_default();
+    let daemon_liveness = crate::tui::daemon::pidfile_path()
+        .ok()
+        .map(|p| crate::tui::daemon::liveness(&p))
+        .unwrap_or(crate::tui::daemon::Liveness::Dead);
+    let daemon_dead = matches!(daemon_liveness, crate::tui::daemon::Liveness::Dead);
 
-    let mut task_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {
-        crate::tui::data::Section::TasksActionableCurrentWork
-        | crate::tui::data::Section::TasksBlockedNeedsAction
-        | crate::tui::data::Section::TasksDeployRecovery
-        | crate::tui::data::Section::TasksNeedsTriage
-        | crate::tui::data::Section::TasksRecentlyTerminal => idxs.clone(),
-        _ => Vec::new(),
-    }).collect();
+    // ---- TASKS -----------------------------------------------------------
+    let raw_rows = crate::tui::data::load_rows(conn).unwrap_or_default();
+    let raw_sections = crate::tui::data::classify_with_options(
+        &raw_rows,
+        crate::tui::data::WatchClassifyOptions {
+            show_all_history,
+            ..Default::default()
+        },
+    );
+    // Apply cockpit dedup (same as TUI App::refresh path).
+    let (rows, sections) =
+        crate::tui::data::dedup_observation_summaries_by_section(&raw_rows, &raw_sections);
+    let ((task_visible, task_total), (obs_visible, obs_total)) =
+        crate::tui::data::surface_counts(&rows, show_all_history);
+
+    // ---- SYSTEM ALERT (dead daemon + dangling locks) --------------------
+    let unfinished = system_health.unfinished_dispatch_locks;
+    if daemon_dead && unfinished >= 1 {
+        let age_display = match system_health.oldest_claimed_at_epoch {
+            Some(oldest) => {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let now_epoch = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                format!("{}h", now_epoch.saturating_sub(oldest) / 3600)
+            }
+            None => "?h".to_string(),
+        };
+        out.push_str(&format!(
+            "{ANSI_RED}{ANSI_BOLD}system-alert: daemon DEAD; {unfinished} dangling locks; oldest started {age_display} ago{ANSI_RESET}\n"
+        ));
+    }
+
+    let mut task_indices: Vec<usize> = sections
+        .iter()
+        .flat_map(|(sec, idxs)| match sec {
+            crate::tui::data::Section::TasksActionableCurrentWork
+            | crate::tui::data::Section::TasksAcceptU3
+            | crate::tui::data::Section::TasksBlockedNeedsAction
+            | crate::tui::data::Section::TasksDeployRecovery
+            | crate::tui::data::Section::TasksNeedsTriage
+            | crate::tui::data::Section::TasksHeldAiReview
+            | crate::tui::data::Section::TasksHeldZombie
+            | crate::tui::data::Section::TasksRecentlyTerminal => idxs.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
     task_indices.sort_by_key(|&i| match &rows[i] {
         crate::tui::data::Row::Task(t) => (task_status_rank(&t.status), t.display_id.clone()),
         _ => (u8::MAX, String::new()),
@@ -108,15 +153,21 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
             }
         }
         if task_indices.len() > 20 {
-            out.push_str(&format!("  {ANSI_DIM}... {} more{ANSI_RESET}\n", task_indices.len() - 20));
+            out.push_str(&format!(
+                "  {ANSI_DIM}... {} more{ANSI_RESET}\n",
+                task_indices.len() - 20
+            ));
         }
     }
 
     // ---- EXTERNAL REVIEWS -----------------------------------------------
-    let review_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {
-        crate::tui::data::Section::ExternalReviewLane => idxs.clone(),
-        _ => Vec::new(),
-    }).collect();
+    let review_indices: Vec<usize> = sections
+        .iter()
+        .flat_map(|(sec, idxs)| match sec {
+            crate::tui::data::Section::ExternalReviewLane => idxs.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
     if !review_indices.is_empty() {
         out.push('\n');
         out.push_str(&format!("{ANSI_BOLD}EXTERNAL REVIEWS{ANSI_RESET}\n"));
@@ -139,12 +190,15 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
 
     // ---- OBSERVATIONS ----------------------------------------------------
     out.push('\n');
-    let mut obs_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {
-        crate::tui::data::Section::ObsRatifiable
-        | crate::tui::data::Section::ObsOpenNoContract
-        | crate::tui::data::Section::ObsOther => idxs.clone(),
-        _ => Vec::new(),
-    }).collect();
+    let mut obs_indices: Vec<usize> = sections
+        .iter()
+        .flat_map(|(sec, idxs)| match sec {
+            crate::tui::data::Section::ObsRatifiable
+            | crate::tui::data::Section::ObsOpenNoContract
+            | crate::tui::data::Section::ObsOther => idxs.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
     obs_indices.sort_by(|&a, &b| match (&rows[a], &rows[b]) {
         (crate::tui::data::Row::Obs(a), crate::tui::data::Row::Obs(b)) => {
             let ra = if a.status == "open" { 0 } else { 1 };
@@ -161,12 +215,19 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
         out.push_str(&format!("  {ANSI_DIM}(no rows){ANSI_RESET}\n"));
     } else {
         for idx in obs_indices.iter().take(10) {
-            if let crate::tui::data::Row::Obs(o) = &rows[*idx] {
-                out.push_str(&render_tui_obs_line(o));
+            match &rows[*idx] {
+                crate::tui::data::Row::Obs(o) => out.push_str(&render_tui_obs_line(o)),
+                crate::tui::data::Row::CollapsedObs(c) => {
+                    out.push_str(&render_tui_collapsed_obs_line(c))
+                }
+                _ => {}
             }
         }
         if obs_indices.len() > 10 {
-            out.push_str(&format!("  {ANSI_DIM}... {} more{ANSI_RESET}\n", obs_indices.len() - 10));
+            out.push_str(&format!(
+                "  {ANSI_DIM}... {} more{ANSI_RESET}\n",
+                obs_indices.len() - 10
+            ));
         }
     }
 
@@ -305,6 +366,24 @@ fn render_tui_obs_line(o: &crate::tui::data::ObsRow) -> String {
     format!(
         "  {ANSI_MAGENTA}{:<5}{ANSI_RESET} {status_color}{:<11}{ANSI_RESET} {priority_color}{:<6}{ANSI_RESET} {:<60} {ANSI_DIM}{updated}{ANSI_RESET}\n",
         o.display_id, o.status, o.priority, summary
+    )
+}
+
+fn render_tui_collapsed_obs_line(c: &crate::tui::data::CollapsedObsRow) -> String {
+    let o = &c.representative;
+    let status_color = obs_status_color(&o.status);
+    let priority_color = match o.priority.as_str() {
+        "high" => ANSI_RED,
+        "normal" => ANSI_YELLOW,
+        "low" => ANSI_DIM,
+        _ => ANSI_DIM,
+    };
+    let badge = format!("×{}", c.count);
+    let summary = truncate(&format!("{} {}", badge, c.summary), 60);
+    let updated = clock_suffix(&o.updated_at);
+    format!(
+        "  {ANSI_MAGENTA}{:<5}{ANSI_RESET} {status_color}{:<11}{ANSI_RESET} {priority_color}{:<6}{ANSI_RESET} {:<60} {ANSI_DIM}{updated}{ANSI_RESET}\n",
+        c.primary_display_id, o.status, o.priority, summary
     )
 }
 
@@ -780,5 +859,110 @@ mod tests {
                 "status={status}"
             );
         }
+    }
+
+    // --- render_frame cockpit dedup + system alert --------------------------
+
+    /// Build a minimal in-memory DB that load_rows + load_system_health can query.
+    fn watch_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE tasks (
+                display_id TEXT, status TEXT, title TEXT, claimed_by TEXT, updated_at TEXT,
+                tier_hint TEXT, linked_observations TEXT, blocked_reason TEXT,
+                current_phase INTEGER, current_cycle INTEGER, plan TEXT, plan_source TEXT,
+                contract TEXT, plan_review_log TEXT, cycles TEXT, wrap_log TEXT,
+                branch TEXT, workspace_path TEXT
+            );
+            CREATE TABLE observations (
+                display_id TEXT, status TEXT, priority TEXT, summary TEXT, updated_at TEXT,
+                body TEXT, source TEXT, task_id TEXT, priority_rank INTEGER, intent_contract TEXT,
+                locked_by TEXT, locked_at TEXT, lock_reason TEXT, evidence TEXT, resolution TEXT,
+                investigation_failure_reason TEXT
+            );
+            CREATE TABLE dispatch_locks (
+                display_id TEXT, claimed_at INTEGER, finished_at INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn render_frame_shows_system_alert_when_daemon_dead_and_unfinished_locks() {
+        let conn = watch_conn();
+        // Seed one unfinished dispatch lock with a known claimed_at epoch.
+        // In tests the daemon pidfile doesn't exist → liveness() returns Dead.
+        conn.execute(
+            "INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES (?1, ?2, NULL)",
+            rusqlite::params!["D001", 1_700_000_000i64],
+        )
+        .unwrap();
+
+        let db_path = std::path::Path::new(":memory:");
+        let frame = render_frame(&conn, db_path, 1000, false).unwrap();
+        let plain = strip_ansi(&frame);
+
+        assert!(
+            plain.contains("system-alert: daemon DEAD;"),
+            "expected system-alert in render_frame output:\n{plain}"
+        );
+        assert!(
+            plain.contains("dangling locks"),
+            "expected 'dangling locks' in alert:\n{plain}"
+        );
+    }
+
+    #[test]
+    fn render_frame_shows_system_alert_with_placeholder_when_claimed_at_null() {
+        // Verifies AC: alert renders with "?h" placeholder when claimed_at IS NULL.
+        let conn = watch_conn();
+        conn.execute(
+            "INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES (?1, NULL, NULL)",
+            rusqlite::params!["D001"],
+        )
+        .unwrap();
+
+        let db_path = std::path::Path::new(":memory:");
+        let frame = render_frame(&conn, db_path, 1000, false).unwrap();
+        let plain = strip_ansi(&frame);
+
+        assert!(
+            plain.contains("system-alert: daemon DEAD;"),
+            "alert must render even with NULL claimed_at:\n{plain}"
+        );
+        assert!(
+            plain.contains("oldest started ?h ago"),
+            "expected '?h' placeholder when claimed_at is NULL:\n{plain}"
+        );
+    }
+
+    #[test]
+    fn render_frame_applies_cockpit_dedup_for_duplicate_obs_summaries() {
+        // Verifies that render_frame collapses duplicate obs summaries (×N badge)
+        // the same way TUI App::refresh does.
+        let conn = watch_conn();
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO observations (display_id, status, priority, summary, updated_at) VALUES (?1, 'open', 'normal', 'duplicate friction', '2026-05-01')",
+                rusqlite::params![format!("L{:03}", i)],
+            ).unwrap();
+        }
+
+        let db_path = std::path::Path::new(":memory:");
+        let frame = render_frame(&conn, db_path, 1000, false).unwrap();
+        let plain = strip_ansi(&frame);
+
+        // CollapsedObs renders with "×N" badge — 3 identical summaries → ×3.
+        assert!(
+            plain.contains("×3"),
+            "expected collapsed obs ×3 badge in render_frame:\n{plain}"
+        );
+        assert!(
+            plain.contains("duplicate friction"),
+            "expected collapsed summary text:\n{plain}"
+        );
     }
 }

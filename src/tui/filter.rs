@@ -36,6 +36,11 @@ impl FilterPredicate {
                         return false;
                     }
                 }
+                Row::CollapsedObs(c) => {
+                    if &c.representative.priority != p {
+                        return false;
+                    }
+                }
                 Row::Task(_) | Row::Review(_) => {
                     // Tasks/reviews are unfiltered by priority (no field loaded).
                 }
@@ -59,7 +64,10 @@ fn state_matches(state: &str, row: &Row, section: Section) -> bool {
         // Saved-view aliases: route through section classification so the
         // filter palette can be opened with a preset and the same predicate
         // works for keypresses 1/2/3.
-        "ratifiable" => section == Section::ObsRatifiable,
+        "ratifiable" | "ratify_u1" => section == Section::ObsRatifiable,
+        "accept_u3" => section == Section::TasksAcceptU3,
+        "ai_review" | "held_ai_review" => section == Section::TasksHeldAiReview,
+        "silent_zombie" | "held_zombie" => section == Section::TasksHeldZombie,
         "actionable_current_work" | "in_flight" => section == Section::TasksActionableCurrentWork,
         "deploy_recovery" | "deploy_blocked" => section == Section::TasksDeployRecovery,
         "blocked_needs_action" => section == Section::TasksBlockedNeedsAction,
@@ -69,6 +77,7 @@ fn state_matches(state: &str, row: &Row, section: Section) -> bool {
         other => match row {
             Row::Task(t) => t.status == other,
             Row::Obs(o) => o.status == other,
+            Row::CollapsedObs(c) => c.representative.status == other,
             Row::Review(r) => r.status == other || other == "external_review",
             Row::Intake(i) => i.status == other,
         },

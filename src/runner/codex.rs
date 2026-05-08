@@ -236,6 +236,9 @@ mod tests {
 
     #[test]
     fn synthetic_shim_receives_stdin_and_writes_transcript() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
         let runs = tempfile::tempdir().unwrap();
         let old = std::env::var_os("STORES_RUNS_DIR");
         std::env::set_var("STORES_RUNS_DIR", runs.path());

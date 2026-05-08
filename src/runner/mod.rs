@@ -42,6 +42,14 @@ pub mod sap;
 
 pub use codex::CodexRunner;
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate process-wide runner environment variables.
+    pub static ENV_LOCK: Mutex<()> = Mutex::new(());
+}
+
 #[cfg(feature = "runner-claude-code")]
 pub mod claude_code;
 

@@ -600,24 +600,29 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::OnceLock;
+    use std::sync::{MutexGuard, OnceLock};
 
     /// Redirect transcript writes to `<CARGO_MANIFEST_DIR>/target/test-runs/` so
     /// shim-driven runner tests don't pollute the project's `.stores/runs/`
     /// (which is the operator-facing transcript directory). The path lives
     /// under `target/`, which is gitignored. All tests share the same dir;
     /// transcripts are UUID-keyed so writes never collide.
-    fn redirect_runs_dir() {
+    fn redirect_runs_dir() -> MutexGuard<'static, ()> {
+        let guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
         let runs_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("test-runs");
-        // Safe to set unconditionally — all tests redirect to the same path,
-        // so concurrent set_var calls converge on the same value.
         std::env::set_var("STORES_RUNS_DIR", &runs_dir);
+        guard
     }
 
     #[test]
     fn stream_json_telemetry_extraction_and_transcript_path() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
         let runs = tempfile::tempdir().unwrap();
         let previous_runs_dir = std::env::var_os("STORES_RUNS_DIR");
         std::env::set_var("STORES_RUNS_DIR", runs.path());
@@ -676,6 +681,8 @@ mod tests {
         executor: PathBuf,
         /// Emits `{"type":"result","result":"<cwd>"}` where cwd is `$(pwd)`.
         cwd_printer: PathBuf,
+        /// Emits a stream-json result event with error_max_structured_output_retries.
+        retries_exhausted: PathBuf,
     }
 
     static SHIM_DIR: OnceLock<ShimDir> = OnceLock::new();
@@ -734,6 +741,18 @@ mod tests {
                 "\nexit 0\n",
             ),
         );
+        // The retries_exhausted shim emits the Claude SDK stream-json error
+        // event. Keep it in the process-wide stable shim dir with the other
+        // exec fixtures; rewriting a per-test executable under parallel
+        // `cargo test` can intermittently fail with ETXTBSY.
+        let retries_exhausted = write(
+            "retries_exhausted",
+            concat!(
+                "#!/bin/sh\n",
+                "echo '{\"type\":\"result\",\"error\":{\"subtype\":\"error_max_structured_output_retries\",\"message\":\"retries exhausted\"},\"result\":\"\"}'\n",
+                "exit 0\n",
+            ),
+        );
 
         ShimDir {
             dir,
@@ -741,6 +760,7 @@ mod tests {
             planner,
             executor,
             cwd_printer,
+            retries_exhausted,
         }
     }
 
@@ -945,7 +965,7 @@ mod tests {
         // Pass a stable workspace_path so resolve_cwd() is never called — this
         // avoids a race with paths::tests that call set_current_dir and then
         // drop the tmp dir before restoring, leaving the process cwd dangling.
-        redirect_runs_dir();
+        let _env_guard = redirect_runs_dir();
         let workspace = env!("CARGO_MANIFEST_DIR").to_string();
         let runner = ClaudeCodeRunner::new().with_bin(shims().silent.clone());
         let result = runner.spawn("planner", "sys", "brief", None, Some(&workspace));
@@ -981,7 +1001,7 @@ mod tests {
         // Use the stable silent shim via with_bin. No PATH mutation, no per-test write.
         // Pass a stable workspace_path so resolve_cwd() is never called — guards
         // against the cwd-dangling race from paths::tests.
-        redirect_runs_dir();
+        let _env_guard = redirect_runs_dir();
         let workspace = env!("CARGO_MANIFEST_DIR").to_string();
         let runner = ClaudeCodeRunner::new().with_bin(shims().silent.clone());
         let result = runner.spawn(
@@ -1122,7 +1142,7 @@ mod tests {
         let _cwd_guard = crate::paths::test_cwd_lock()
             .lock()
             .expect("cwd lock poisoned");
-        redirect_runs_dir();
+        let _env_guard = redirect_runs_dir();
 
         // Use the cargo target directory as the workspace — it always exists,
         // has stable inodes, and never collides with the shim files' inodes.
@@ -1159,7 +1179,7 @@ mod tests {
         let _cwd_guard = crate::paths::test_cwd_lock()
             .lock()
             .expect("cwd lock poisoned");
-        redirect_runs_dir();
+        let _env_guard = redirect_runs_dir();
 
         let expected_cwd = resolve_cwd().expect("resolve_cwd must succeed");
 
@@ -1193,29 +1213,10 @@ mod tests {
     /// mutation, no real `claude` binary required.
     #[test]
     fn adapter_sets_payload_error_on_error_max_structured_output_retries() {
-        redirect_runs_dir();
+        let _env_guard = redirect_runs_dir();
         let workspace = env!("CARGO_MANIFEST_DIR").to_string();
 
-        // Write a shim that emits the stream-json error event for retries exhausted.
-        let shim_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-shims");
-        fs::create_dir_all(&shim_dir).unwrap();
-        let shim_path = shim_dir.join("retries-exhausted-shim.sh");
-        let script = concat!(
-            "#!/bin/sh\n",
-            // Emit a stream-json result event with error.subtype set.
-            "echo '{\"type\":\"result\",\"error\":{\"subtype\":\"error_max_structured_output_retries\",\"message\":\"retries exhausted\"},\"result\":\"\"}'\n",
-            "exit 0\n",
-        );
-        {
-            let mut f = fs::File::create(&shim_path).unwrap();
-            f.write_all(script.as_bytes()).unwrap();
-            f.sync_all().unwrap();
-        }
-        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let runner = ClaudeCodeRunner::new().with_bin(shim_path);
+        let runner = ClaudeCodeRunner::new().with_bin(shims().retries_exhausted.clone());
         let schema_text = r#"{"type":"object","required":["verdict"]}"#;
         let out = runner
             .spawn("external-review", "", "review this", Some(schema_text), Some(&workspace))
@@ -1245,7 +1246,7 @@ mod tests {
     /// Regression guard: the payload_error fix must not set it on success paths.
     #[test]
     fn adapter_payload_error_is_none_on_success_result() {
-        redirect_runs_dir();
+        let _env_guard = redirect_runs_dir();
         let workspace = env!("CARGO_MANIFEST_DIR").to_string();
 
         // The stable silent shim exits 0 with no stream-json at all — no error_subtype.
