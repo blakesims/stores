@@ -54,6 +54,16 @@ use crate::handlers::row::now_iso8601;
 /// gap (sub-second) but small enough that real silent zombies surface fast.
 pub(crate) const ZOMBIE_GRACE_SECS: i64 = 10;
 
+/// Grace window (seconds) after a task's latest `external_reviews` row has
+/// been touched before the drive watchdog will mark the task `blocked`. Inside
+/// this window the review reconciler (external_reviews subscriber +
+/// submit-external-review verb) and the auto-drive respawn subscriber are
+/// still propagating the verdict transition; the watchdog must not race them.
+/// Without this gate, a dead drive_pid from the prior cycle can trip the
+/// watchdog in the same poll tick that the substrate transitions
+/// in_review → executing on a REVISE verdict.
+pub(crate) const EXTERNAL_REVIEW_RACE_GRACE_SECS: i64 = 30;
+
 /// In-cycle statuses we monitor for silent zombies. A row in any of these
 /// states whose owning auto-drive subprocess has died (or never recorded its
 /// PID) past the grace window is a silent zombie that the watchdog must
@@ -69,6 +79,85 @@ const IN_CYCLE_STATUSES: &[&str] = &[
 
 fn is_watchdog_actionable_status(status: &str) -> bool {
     IN_CYCLE_STATUSES.contains(&status)
+}
+
+/// True if the task has an `external_reviews` control-plane row that the
+/// drive watchdog must defer to. Returns true when the most-recent ER row
+/// for `display_id` is either:
+///   - in non-terminal status (`pending`, `running`, `tooling_held`) — the
+///     review run is in flight, or
+///   - within `EXTERNAL_REVIEW_RACE_GRACE_SECS` of its last update — the
+///     review reconciler is still propagating a fresh verdict and a new
+///     drive subprocess may not yet be spawned.
+///
+/// Returns false when the task has no ER rows or the latest row's last
+/// update predates the grace window.
+fn task_has_active_external_review_lane(
+    conn: &Connection,
+    display_id: &str,
+    now_iso: &str,
+) -> bool {
+    let row = conn.query_row(
+        "SELECT status, COALESCE(updated_at, completed_at, created_at, '') \
+         FROM external_reviews WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
+        rusqlite::params![display_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    );
+    let (status, updated_at) = match row {
+        Ok(x) => x,
+        Err(_) => return false,
+    };
+    if matches!(status.as_str(), "pending" | "running" | "tooling_held") {
+        return true;
+    }
+    let now_epoch = match parse_iso8601_to_epoch_local(now_iso) {
+        Some(v) => v,
+        None => return false,
+    };
+    let upd_epoch = match parse_iso8601_to_epoch_local(&updated_at) {
+        Some(v) => v,
+        None => return false,
+    };
+    now_epoch.saturating_sub(upd_epoch) < EXTERNAL_REVIEW_RACE_GRACE_SECS
+}
+
+/// Parse `YYYY-MM-DDTHH:MM:SSZ` into a unix epoch. Local copy that mirrors
+/// the helpers in `agents_run.rs` / `drive.rs` to avoid a wider re-export
+/// churn for this narrow watchdog gate.
+fn parse_iso8601_to_epoch_local(s: &str) -> Option<i64> {
+    if s.len() < 20 {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let y: i64 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
+    let mo: i64 = std::str::from_utf8(&b[5..7]).ok()?.parse().ok()?;
+    let d: i64 = std::str::from_utf8(&b[8..10]).ok()?.parse().ok()?;
+    let h: i64 = std::str::from_utf8(&b[11..13]).ok()?.parse().ok()?;
+    let mi: i64 = std::str::from_utf8(&b[14..16]).ok()?.parse().ok()?;
+    let se: i64 = std::str::from_utf8(&b[17..19]).ok()?.parse().ok()?;
+    if !(1..=12).contains(&mo)
+        || !(1..=31).contains(&d)
+        || !(0..=23).contains(&h)
+        || !(0..=59).contains(&mi)
+        || !(0..=60).contains(&se)
+    {
+        return None;
+    }
+    let mut days: i64 = 0;
+    for yy in 1970..y {
+        let leap = (yy % 4 == 0 && yy % 100 != 0) || yy % 400 == 0;
+        days += if leap { 366 } else { 365 };
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for m in 1..mo {
+        days += dim[(m - 1) as usize] as i64;
+    }
+    days += d - 1;
+    Some(days * 86_400 + h * 3600 + mi * 60 + se)
 }
 
 /// Returns true when the task still has auto-drive work to do.
@@ -688,6 +777,7 @@ pub fn sweep_drive_watchdog(
     daemon_epoch: &str,
 ) -> Result<usize> {
     let mut acted = 0usize;
+    let now_iso = now_iso8601();
     let locks: Vec<(i64, String)> = {
         let mut stmt = conn.prepare(
             "SELECT row_id, display_id FROM dispatch_locks \
@@ -732,6 +822,14 @@ pub fn sweep_drive_watchdog(
             let _ = mark_claim_finished(conn, "tasks", row_id, "auto-drive", "ok");
             acted += 1;
             handled.insert(display_id.clone());
+            continue;
+        }
+        if task_has_active_external_review_lane(conn, &display_id, &now_iso) {
+            eprintln!(
+                "[auto-drive-watchdog] {}: deferring mark_drive_failed (status={status}); \
+                 external_review control-plane row is in flight or within race grace",
+                display_id
+            );
             continue;
         }
         match fire_mark_drive_failed(
@@ -858,6 +956,14 @@ pub fn sweep_drive_watchdog(
         // Idempotency guard: row already blocked → nothing to do.
         let cur_status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
         if cur_status == "blocked" {
+            continue;
+        }
+        if task_has_active_external_review_lane(conn, &display_id, &now_iso) {
+            eprintln!(
+                "[auto-drive-watchdog-zombie] {}: deferring mark_drive_failed (status={cur_status}); \
+                 external_review control-plane row is in flight or within race grace",
+                display_id
+            );
             continue;
         }
         match fire_mark_drive_failed(
@@ -1337,6 +1443,158 @@ mod tests {
                 "terminal row {display_id} must not be mutated; got {status}"
             );
         }
+    }
+
+    /// I023 regression: dead PID + active `external_reviews` control-plane
+    /// row → watchdog defers, does NOT flip to blocked. Concrete shape: the
+    /// T098 ER333 race where `submit-external-review` (REVISE) and
+    /// `mark_drive_failed` (silent_zombie) both fired in the same daemon
+    /// poll tick at 2026-05-08T12:02:23Z, racing the auto-drive subscriber's
+    /// new spawn. With the gate, the watchdog observes the active ER row
+    /// and stands down so the review reconciler can drive the next transition.
+    fn fresh_db_with_external_reviews() -> Connection {
+        let conn = fresh_db_with_obs();
+        let yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "external_reviews")
+            .map(|(_, y)| *y)
+            .unwrap();
+        let schema = Schema::from_yaml(yaml).unwrap();
+        conn.execute_batch(&ddl_for(&schema)).unwrap();
+        conn
+    }
+
+    fn insert_external_review(
+        conn: &Connection,
+        display_id: &str,
+        task_id: &str,
+        status: &str,
+        updated_at: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO external_reviews \
+             (display_id, status, task_id, attempt, runner, created_at, updated_at, \
+              created_by, updated_by) \
+             VALUES (?1, ?2, ?3, 1, 'codex', ?4, ?4, 'framework', 'framework')",
+            rusqlite::params![display_id, status, task_id, updated_at],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn watchdog_defers_mark_drive_failed_when_external_review_lane_is_active() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_external_reviews();
+        let row_id = insert_task_full(&conn, "T720R", "executing", Some(dead_pid()));
+        insert_lock(&conn, row_id, "T720R");
+        // ER row in `running` — review run in flight.
+        let now = crate::handlers::row::now_iso8601();
+        insert_external_review(&conn, "ER720R", "T720R", "running", &now);
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T720R'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "executing", "watchdog must defer when ER is running");
+        assert!(
+            reason.as_deref().unwrap_or("").is_empty(),
+            "no blocked_reason must be set: {:?}",
+            reason
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T720R' AND verb='mark_drive_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "mark_drive_failed must not have fired");
+    }
+
+    #[test]
+    fn watchdog_defers_when_external_review_just_returned_terminal_verdict() {
+        // Race shape: ER returned REVISE within the grace window; the
+        // submit-external-review verb has already advanced the task back to
+        // `executing`, but the auto-drive subscriber has not yet spawned a
+        // new drive. The dead drive_pid from the prior cycle is still on the
+        // row. Watchdog must defer, not race.
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_external_reviews();
+        let row_id = insert_task_full(&conn, "T720T", "executing", Some(dead_pid()));
+        insert_lock(&conn, row_id, "T720T");
+        let now = crate::handlers::row::now_iso8601();
+        // Terminal verdict, just-now updated → within race grace window.
+        insert_external_review(&conn, "ER720T", "T720T", "revise", &now);
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T720T'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "executing",
+            "watchdog must defer within ER race grace window"
+        );
+    }
+
+    #[test]
+    fn watchdog_flips_when_external_review_terminal_is_stale() {
+        // Companion to the deferral tests: confirm the deferral is BOUNDED.
+        // An old terminal verdict (well outside the grace window) does NOT
+        // shield the row from mark_drive_failed; the row flips as expected.
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_file = tmp.path().join("config.yaml");
+        std::fs::write(&cfg_file, "ntfy:\n  url: https://test.local\n").unwrap();
+        let mock: &'static crate::flow::MockNotifier =
+            Box::leak(Box::new(crate::flow::MockNotifier::new()));
+        struct Shim {
+            inner: &'static crate::flow::MockNotifier,
+        }
+        impl crate::flow::NotifierBackend for Shim {
+            fn send(&self, url: &str, ev: &crate::flow::NotifyEvent) -> anyhow::Result<()> {
+                self.inner.send(url, ev)
+            }
+        }
+        crate::flow::install_notifier(Box::new(Shim { inner: mock }));
+
+        let conn = fresh_db_with_external_reviews();
+        let row_id = insert_task_full(&conn, "T720S", "executing", Some(dead_pid()));
+        insert_lock(&conn, row_id, "T720S");
+        // Stale terminal verdict (far in the past).
+        insert_external_review(&conn, "ER720S", "T720S", "revise", "2024-01-01T00:00:00Z");
+
+        let agents = AgentsYaml::default_empty();
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg_file, "", "").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T720S'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked", "stale ER must not shield the row");
+        assert_eq!(
+            reason.as_deref(),
+            Some("drive_failed:silent_zombie_pid_dead")
+        );
     }
 
     /// A1-strict AC5.1 (iii): dead PID + status='in_review' + open lock →
