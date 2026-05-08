@@ -1,5 +1,7 @@
 use stores::tui::app::{App, DetailKind, DetailSelection, Mode, TuiOpts};
-use stores::tui::data::{ArtifactPointer, IntakeRow, ObsRow, RecentEvent, Row, TaskRow};
+use stores::tui::data::{
+    ArtifactPointer, CollapsedObsRow, IntakeRow, ObsRow, RecentEvent, Row, Section, TaskRow,
+};
 use stores::tui::detail::render_text_for_row;
 
 fn app() -> App {
@@ -153,6 +155,31 @@ fn observation_detail_rendering_contains_summary_priority_status_contract_next_a
         "resolution",
     ] {
         assert!(text.contains(needle), "missing {needle}: {text}");
+    }
+}
+
+#[test]
+fn collapsed_observation_detail_lists_every_hidden_display_id() {
+    let ids: Vec<String> = (0..76).map(|i| format!("L{:03}", i)).collect();
+    let row = Row::CollapsedObs(CollapsedObsRow {
+        section: Section::ObsOther,
+        summary: "dupe cluster summary".to_string(),
+        count: ids.len(),
+        primary_display_id: "L000".to_string(),
+        display_ids: ids.clone(),
+        representative: ObsRow {
+            display_id: "L000".to_string(),
+            status: "open".to_string(),
+            priority: "normal".to_string(),
+            summary: "dupe cluster summary".to_string(),
+            ..Default::default()
+        },
+    });
+    let text = render_text_for_row(&row, &app());
+    assert!(text.contains("Collapsed observations"), "{text}");
+    assert!(text.contains("count: 76"), "{text}");
+    for id in ids {
+        assert!(text.contains(&id), "missing {id}: {text}");
     }
 }
 

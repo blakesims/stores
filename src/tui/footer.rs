@@ -58,6 +58,12 @@ fn format_text(row: &Row, cursor: usize, total: usize, now_secs: u64) -> String 
             String::new(),
             o.updated_at.as_str(),
         ),
+        Row::CollapsedObs(c) => (
+            c.representative.status.as_str(),
+            c.representative.tier_hint.as_deref().unwrap_or("?"),
+            format!("×{}", c.count),
+            c.representative.updated_at.as_str(),
+        ),
         Row::Review(r) => (
             r.status.as_str(),
             "review",
@@ -80,6 +86,16 @@ fn format_text(row: &Row, cursor: usize, total: usize, now_secs: u64) -> String 
     let failure_seg = match row {
         Row::Obs(o) if o.status == "investigation_failed" => {
             let reason = o
+                .investigation_failure_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .unwrap_or("unknown");
+            format!(" failure:{reason}")
+        }
+        Row::CollapsedObs(c) if c.representative.status == "investigation_failed" => {
+            let reason = c
+                .representative
                 .investigation_failure_reason
                 .as_deref()
                 .map(str::trim)

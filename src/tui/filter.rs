@@ -36,6 +36,11 @@ impl FilterPredicate {
                         return false;
                     }
                 }
+                Row::CollapsedObs(c) => {
+                    if &c.representative.priority != p {
+                        return false;
+                    }
+                }
                 Row::Task(_) | Row::Review(_) => {
                     // Tasks/reviews are unfiltered by priority (no field loaded).
                 }
@@ -72,6 +77,7 @@ fn state_matches(state: &str, row: &Row, section: Section) -> bool {
         other => match row {
             Row::Task(t) => t.status == other,
             Row::Obs(o) => o.status == other,
+            Row::CollapsedObs(c) => c.representative.status == other,
             Row::Review(r) => r.status == other || other == "external_review",
             Row::Intake(i) => i.status == other,
         },

@@ -281,32 +281,8 @@ fn format_row_line(
             Span::raw(format!("{}", task_progress_text(t, external_review))),
             Span::raw(truncate(&task_snippet(t), 60)),
         ],
-        Row::Obs(o) => {
-            let status = if o.status == "investigation_failed" {
-                match o.investigation_failure_reason.as_deref() {
-                    Some(reason) if !reason.trim().is_empty() => {
-                        format!("investigation_failed:{}", truncate(reason.trim(), 40))
-                    }
-                    _ => "investigation_failed:unknown".to_string(),
-                }
-            } else {
-                o.status.clone()
-            };
-            vec![
-                Span::raw("  "),
-                Span::styled(
-                    format!("{:<6}", o.display_id),
-                    Style::default().fg(Color::Magenta),
-                ),
-                Span::styled(
-                    format!("{:<24}", status),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::raw(" "),
-                Span::raw(format!("priority:{} ", o.priority)),
-                Span::raw(truncate(&obs_snippet(o), 60)),
-            ]
-        }
+        Row::Obs(o) => obs_spans(o, None),
+        Row::CollapsedObs(c) => obs_spans(&c.representative, Some(c)),
         Row::Review(r) => vec![
             Span::raw("  "),
             Span::styled(
@@ -366,6 +342,45 @@ fn format_row_line(
     } else {
         Line::from(base)
     }
+}
+
+fn obs_spans(
+    o: &super::data::ObsRow,
+    collapsed: Option<&super::data::CollapsedObsRow>,
+) -> Vec<Span<'static>> {
+    let status = if o.status == "investigation_failed" {
+        match o.investigation_failure_reason.as_deref() {
+            Some(reason) if !reason.trim().is_empty() => {
+                format!("investigation_failed:{}", truncate(reason.trim(), 40))
+            }
+            _ => "investigation_failed:unknown".to_string(),
+        }
+    } else {
+        o.status.clone()
+    };
+    let (display_id, badge, summary_prefix) = collapsed
+        .map(|c| {
+            (
+                c.primary_display_id.as_str(),
+                format!(" ×{}", c.count),
+                format!("{} ", c.summary),
+            )
+        })
+        .unwrap_or((o.display_id.as_str(), String::new(), String::new()));
+    vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<6}", display_id),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::styled(
+            format!("{:<24}", status),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(" "),
+        Span::raw(format!("priority:{}{} ", o.priority, badge)),
+        Span::raw(truncate(&format!("{}{}", summary_prefix, obs_snippet(o)), 60)),
+    ]
 }
 
 fn task_status_label(t: &super::data::TaskRow) -> String {
@@ -619,6 +634,32 @@ mod tests {
         assert!(obs_text.contains("tier:T2"), "{obs_text}");
         assert!(intake_text.contains("priority:high"), "{intake_text}");
         assert!(intake_text.contains("held:missing owner"), "{intake_text}");
+    }
+
+    #[test]
+    fn collapsed_observation_row_renders_summary_count_badge_and_primary_id() {
+        let row = Row::CollapsedObs(crate::tui::data::CollapsedObsRow {
+            section: crate::tui::data::Section::ObsOther,
+            summary: "dupe cluster summary".to_string(),
+            count: 76,
+            primary_display_id: "L000".to_string(),
+            display_ids: (0..76).map(|i| format!("L{:03}", i)).collect(),
+            representative: ObsRow {
+                display_id: "L000".to_string(),
+                status: "open".to_string(),
+                priority: "normal".to_string(),
+                summary: "dupe cluster summary".to_string(),
+                ..Default::default()
+            },
+        });
+        let text = line_text(format_row_line(
+            &row,
+            false,
+            &ExternalReviewState::default(),
+        ));
+        assert!(text.contains("dupe cluster summary"), "{text}");
+        assert!(text.contains("×76"), "{text}");
+        assert!(text.contains("L000"), "{text}");
     }
 
     #[test]

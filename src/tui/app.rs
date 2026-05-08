@@ -207,6 +207,10 @@ impl App {
         self.external_review = super::data::load_external_review_state(conn)?;
         self.system_health = super::data::load_system_health(conn)?;
         self.sections = classify_with_options(&self.rows, self.watch_classify_options());
+        let (rows, sections) =
+            super::data::dedup_observation_summaries_by_section(&self.rows, &self.sections);
+        self.rows = rows;
+        self.sections = sections;
         self.apply_sort();
         self.recompute_status_bar();
         Ok(())
@@ -416,7 +420,7 @@ impl App {
         };
         let kind = match row {
             Row::Task(_) => DetailKind::Task,
-            Row::Obs(_) => DetailKind::Observation,
+            Row::Obs(_) | Row::CollapsedObs(_) => DetailKind::Observation,
             Row::Review(_) => DetailKind::Review,
             Row::Intake(_) => DetailKind::Intake,
         };

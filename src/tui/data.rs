@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SECS_PER_DAY: i64 = 86_400;
@@ -94,6 +94,7 @@ impl Default for WatchClassifyOptions {
 pub enum Row {
     Task(TaskRow),
     Obs(ObsRow),
+    CollapsedObs(CollapsedObsRow),
     Review(ReviewRow),
     Intake(IntakeRow),
 }
@@ -153,6 +154,16 @@ pub struct ObsRow {
     pub resolution_pointer: Option<String>,
     pub recent_events: Vec<RecentEvent>,
     pub investigation_failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CollapsedObsRow {
+    pub section: Section,
+    pub summary: String,
+    pub count: usize,
+    pub primary_display_id: String,
+    pub display_ids: Vec<String>,
+    pub representative: ObsRow,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -275,22 +286,8 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
                     model.priority += 1;
                 }
             }
-            Row::Obs(o) => {
-                if is_priority_text(&o.priority) || o.priority_rank.map(|r| r <= 1).unwrap_or(false)
-                {
-                    model.priority += 1;
-                }
-                if o.lock_reason
-                    .as_deref()
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false)
-                {
-                    model.held += 1;
-                }
-                if o.status != "resolved" && o.status != "rejected" {
-                    model.active += 1;
-                }
-            }
+            Row::Obs(o) => apply_obs_to_model(o, 1, &mut model),
+            Row::CollapsedObs(c) => apply_obs_to_model(&c.representative, c.count, &mut model),
             Row::Intake(i) => {
                 if i.status == "needs_info" {
                     model.held += 1;
@@ -314,6 +311,22 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
         }
     }
     model
+}
+
+fn apply_obs_to_model(o: &ObsRow, count: usize, model: &mut CockpitModel) {
+    if is_priority_text(&o.priority) || o.priority_rank.map(|r| r <= 1).unwrap_or(false) {
+        model.priority += count;
+    }
+    if o.lock_reason
+        .as_deref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+    {
+        model.held += count;
+    }
+    if o.status != "resolved" && o.status != "rejected" {
+        model.active += count;
+    }
 }
 
 fn is_priority_task(t: &TaskRow) -> bool {
@@ -354,6 +367,7 @@ pub fn row_visibility_class(
     match row {
         Row::Task(t) => task_visibility_class(t),
         Row::Obs(o) => obs_visibility_class(o, task_status_by_id),
+        Row::CollapsedObs(c) => obs_visibility_class(&c.representative, task_status_by_id),
         Row::Review(_) => VisibilityClass::ActionableRecovery,
         Row::Intake(_) => VisibilityClass::ActionableRecovery,
     }
@@ -474,6 +488,12 @@ pub fn surface_counts(rows: &[Row], _show_all_history: bool) -> ((usize, usize),
                     obs.0 += 1;
                 }
             }
+            Row::CollapsedObs(c) => {
+                obs.1 += c.count;
+                if class == VisibilityClass::ActionableRecovery {
+                    obs.0 += c.count;
+                }
+            }
             Row::Review(_) => {}
             Row::Intake(_) => {}
         }
@@ -485,7 +505,7 @@ fn task_status_by_id(rows: &[Row]) -> HashMap<String, String> {
     rows.iter()
         .filter_map(|r| match r {
             Row::Task(t) => Some((t.display_id.clone(), t.status.clone())),
-            Row::Obs(_) | Row::Review(_) | Row::Intake(_) => None,
+            Row::Obs(_) | Row::CollapsedObs(_) | Row::Review(_) | Row::Intake(_) => None,
         })
         .collect()
 }
@@ -495,6 +515,7 @@ impl Row {
         match self {
             Row::Task(t) => &t.display_id,
             Row::Obs(o) => &o.display_id,
+            Row::CollapsedObs(c) => &c.primary_display_id,
             Row::Review(r) => &r.display_id,
             Row::Intake(i) => &i.display_id,
         }
@@ -504,6 +525,7 @@ impl Row {
         match self {
             Row::Task(t) => &t.title,
             Row::Obs(o) => &o.summary,
+            Row::CollapsedObs(c) => &c.summary,
             Row::Review(r) => &r.task_id,
             Row::Intake(i) => &i.summary,
         }
@@ -885,6 +907,7 @@ fn attach_recent_events(conn: &Connection, rows: &mut [Row]) -> Result<()> {
         match row {
             Row::Task(t) => t.recent_events = events,
             Row::Obs(o) => o.recent_events = events,
+            Row::CollapsedObs(c) => c.representative.recent_events = events,
             Row::Review(_) => {} // ReviewRow has no recent_events field
             Row::Intake(i) => i.recent_events = events,
         }
@@ -968,6 +991,85 @@ pub fn classify_with_options(
     opts: WatchClassifyOptions,
 ) -> Vec<(Section, Vec<usize>)> {
     classify_with_options_at(rows, opts, now_epoch())
+}
+
+/// Collapse duplicate observation summaries independently within each section.
+/// Returns a new row store plus section indices over that store; no Section
+/// variant is introduced for collapsed observations.
+pub fn dedup_observation_summaries_by_section(
+    rows: &[Row],
+    sections: &[(Section, Vec<usize>)],
+) -> (Vec<Row>, Vec<(Section, Vec<usize>)>) {
+    let mut out_rows = Vec::new();
+    let mut out_sections = Vec::with_capacity(sections.len());
+
+    for (section, indices) in sections {
+        let mut by_summary: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for &idx in indices {
+            if let Some(Row::Obs(o)) = rows.get(idx) {
+                by_summary.entry(o.summary.clone()).or_default().push(idx);
+            }
+        }
+
+        let mut new_indices = Vec::new();
+        let mut consumed = std::collections::HashSet::new();
+        for &idx in indices {
+            if consumed.contains(&idx) {
+                continue;
+            }
+            match rows.get(idx) {
+                Some(Row::Obs(o)) => {
+                    let group = by_summary.get(&o.summary).cloned().unwrap_or_else(|| vec![idx]);
+                    if group.len() >= 2 {
+                        for member in &group {
+                            consumed.insert(*member);
+                        }
+                        let mut display_ids: Vec<String> = group
+                            .iter()
+                            .filter_map(|&i| match rows.get(i) {
+                                Some(Row::Obs(obs)) => Some(obs.display_id.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        display_ids.sort();
+                        let primary_display_id = display_ids.first().cloned().unwrap_or_default();
+                        let representative = group
+                            .iter()
+                            .filter_map(|&i| match rows.get(i) {
+                                Some(Row::Obs(obs)) => Some(obs.clone()),
+                                _ => None,
+                            })
+                            .min_by(|a, b| a.display_id.cmp(&b.display_id))
+                            .unwrap_or_else(|| o.clone());
+                        let abs = out_rows.len();
+                        out_rows.push(Row::CollapsedObs(CollapsedObsRow {
+                            section: *section,
+                            summary: o.summary.clone(),
+                            count: display_ids.len(),
+                            primary_display_id,
+                            display_ids,
+                            representative,
+                        }));
+                        new_indices.push(abs);
+                    } else {
+                        consumed.insert(idx);
+                        let abs = out_rows.len();
+                        out_rows.push(rows[idx].clone());
+                        new_indices.push(abs);
+                    }
+                }
+                Some(row) => {
+                    let abs = out_rows.len();
+                    out_rows.push(row.clone());
+                    new_indices.push(abs);
+                }
+                None => {}
+            }
+        }
+        out_sections.push((*section, new_indices));
+    }
+
+    (out_rows, out_sections)
 }
 
 fn classify_with_options_at(
@@ -1065,6 +1167,7 @@ fn section_for(row: &Row) -> Option<Section> {
                 Some(Section::ObsOther)
             }
         }
+        Row::CollapsedObs(c) => Some(c.section),
         Row::Review(_) => Some(Section::ExternalReviewLane),
         Row::Intake(i) => match i.status.as_str() {
             "needs_info" => Some(Section::IntakeHeld),
@@ -1150,7 +1253,7 @@ pub fn blocked_reason_class(reason: Option<&str>) -> &'static str {
 fn task_updated_epoch(row: &Row) -> Option<i64> {
     match row {
         Row::Task(t) => parse_epoch(&t.updated_at),
-        Row::Obs(_) | Row::Review(_) | Row::Intake(_) => None,
+        Row::Obs(_) | Row::CollapsedObs(_) | Row::Review(_) | Row::Intake(_) => None,
     }
 }
 
@@ -1252,6 +1355,18 @@ mod tests {
         })
     }
 
+    fn obs_with_id(id: &str, summary: &str, priority: &str, contract: Option<&str>) -> Row {
+        Row::Obs(ObsRow {
+            display_id: id.to_string(),
+            status: "open".to_string(),
+            priority: priority.to_string(),
+            summary: summary.to_string(),
+            updated_at: id.to_string(),
+            contract_state: contract.map(str::to_string),
+            ..Default::default()
+        })
+    }
+
     fn bucket(buckets: &[(Section, Vec<usize>)], section: Section) -> Vec<usize> {
         buckets
             .iter()
@@ -1259,6 +1374,60 @@ mod tests {
             .unwrap()
             .1
             .clone()
+    }
+
+    #[test]
+    fn dedup_collapses_same_summary_per_section_only() {
+        let rows = vec![
+            obs_with_id("L010", "same summary", "normal", None),
+            obs_with_id("L009", "same summary", "normal", None),
+            obs_with_id("L001", "same summary", "high", None),
+            obs_with_id("L002", "same summary", "high", None),
+        ];
+        let sections = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
+        let (deduped, buckets) = dedup_observation_summaries_by_section(&rows, &sections);
+        let other = bucket(&buckets, Section::ObsOther);
+        let priority = bucket(&buckets, Section::ObsOpenNoContract);
+        assert_eq!(other.len(), 1);
+        assert_eq!(priority.len(), 1);
+        assert_eq!(deduped.len(), 2);
+        match &deduped[other[0]] {
+            Row::CollapsedObs(c) => {
+                assert_eq!(c.section, Section::ObsOther);
+                assert_eq!(c.summary, "same summary");
+                assert_eq!(c.count, 2);
+                assert_eq!(c.primary_display_id, "L009");
+            }
+            got => panic!("expected collapsed obs, got {got:?}"),
+        }
+        match &deduped[priority[0]] {
+            Row::CollapsedObs(c) => {
+                assert_eq!(c.section, Section::ObsOpenNoContract);
+                assert_eq!(c.count, 2);
+                assert_eq!(c.primary_display_id, "L001");
+            }
+            got => panic!("expected collapsed obs, got {got:?}"),
+        }
+    }
+
+    #[test]
+    fn dedup_collapses_76_row_cluster_to_primary_lexicographic_id() {
+        let mut rows = Vec::new();
+        for i in (0..76).rev() {
+            rows.push(obs_with_id(&format!("L{:03}", i), "dupe cluster", "normal", None));
+        }
+        let sections = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
+        let (deduped, buckets) = dedup_observation_summaries_by_section(&rows, &sections);
+        let other = bucket(&buckets, Section::ObsOther);
+        assert_eq!(other.len(), 1);
+        match &deduped[other[0]] {
+            Row::CollapsedObs(c) => {
+                assert_eq!(c.count, 76);
+                assert_eq!(c.primary_display_id, "L000");
+                assert_eq!(c.display_ids.len(), 76);
+            }
+            got => panic!("expected collapsed obs, got {got:?}"),
+        }
     }
 
     #[test]

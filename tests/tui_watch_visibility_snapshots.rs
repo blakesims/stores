@@ -124,6 +124,14 @@ fn row_line(row: &Row) -> String {
             "{} {} priority:{} {}",
             o.display_id, o.status, o.priority, o.summary
         ),
+        Row::CollapsedObs(c) => format!(
+            "{} {} priority:{} ×{} {}",
+            c.primary_display_id,
+            c.representative.status,
+            c.representative.priority,
+            c.count,
+            c.summary
+        ),
         Row::Review(r) => format!(
             "{} review:{} task={} runner={}",
             r.display_id,
