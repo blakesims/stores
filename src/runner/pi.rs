@@ -293,10 +293,18 @@ impl Runner for PiRunner {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SHIM_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
     fn shim(script: &str) -> (tempfile::TempDir, PathBuf) {
         let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("shim.sh");
+        let shim_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-shims");
+        fs::create_dir_all(&shim_dir).unwrap();
+        let idx = SHIM_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let p = shim_dir.join(format!("pi-shim-{}-{idx}.sh", std::process::id()));
         {
             let mut f = fs::File::create(&p).unwrap();
             use std::io::Write as _;
