@@ -99,6 +99,69 @@ Still forbidden in the repair lane:
 
 If the patch touches lifecycle, schema, auth, review gates, daemon dispatch, or architecture-sensitive files, ask Pi first. Pi's approval should specify scope, tests, and follow-up observation. Use reviewer-runner as an independent read-only witness when the repair changes review-lane internals or exceeds the stated envelope.
 
+## Convergence-stall recognition (T098 precedent, 2026-05-08)
+
+The 2-hour T098 wedge taught us that "wait for the next cycle to converge" is not a strategy when the substrate itself is the broken link. Engine-controller MUST pattern-match the symptoms below and escape immediately under substrate-repair-lane authority. Patience is the wrong default in a non-convergent loop.
+
+### Recognition table
+
+Engine-controller pattern-matches a live wedge against these rows. Most rows are pre-blessed for autonomous escape under substrate-repair-lane (no per-incident Pi consult required) — see *Decision authority* below for the carve-out.
+
+| symptom | diagnosis | escape verb |
+|---|---|---|
+| Same external-review finding 2 cycles in a row AND executor transcript/commits do NOT mention the finding/file/ER id | substrate feedback-relay failure (I022-shape) | stop normal cycling; inspect executor brief + transcript via `agent_runs.transcript_path`; direct repair the task ONLY if the task fix is obvious; file/repair the relay bug as durable observation |
+| Same external-review finding 2 cycles in a row AND executor DID address it but codex still rejects | task implementation / contract scope ambiguity | manual surgical executor with finding text injected, OR Pi/Blake clarification — NOT substrate-repair lane (this would override a legitimate codex disagreement) |
+| Watchdog flips a row to `blocked` while the task's `external_reviews` row is in `pending`/`running`/`tooling_held` OR within ~30s of a terminal verdict | I023 / control-plane race | substrate-repair patch on the watchdog gate; reference `transition_history` to confirm two transitions in the same poll tick |
+| ER `tooling_held` with `attempts ≥ 3` and no `head_sha` advance | L498 / L488 stale-base persistence | manual `git rebase main` in the worktree, then let L488 retry pick up the fresh head |
+| Drive PID dead but row in {planning, plan_review, ready, executing, code_review} actionable | L186 orphan | manual `stores tasks drive <id> --pi --invoker ai_autonomous --max-iters 50` nudge |
+| Drive PID dead + ER row terminal verdict updated within ~30–60s | I023 race window (post-87f3667) | wait one daemon tick; the watchdog gate will defer. If still wedged, suspect a regression — confirm I023 fix is in the daemon binary (`ls -la /proc/<pid>/exe` and `git log main` for `87f3667`) |
+| External-review terminal verdict exists but task state does not reconcile within one daemon tick / grace window | external_review reconciler / control-plane issue | repair reconciler if obvious AND narrow, OR `tasks close-out-of-band --commit <sha>` if work already landed and Blake approves |
+| Daemon reported DEAD/stale in `stores watch` while the daemon process is alive and recent | observability heartbeat / watch-truth issue | file/repair watch logic; do NOT block execution automatically — operator-actionability lies, the engine itself is healthy |
+
+### Time budget
+
+- **Table-A patterns (matched row above):** act after confirmation, usually ≤10 min and ≤2 cheap checks (a `transition_history` query, a transcript grep). The "3+ identical cycles" rule from earlier sessions is RETIRED for convergence-stalls — a second identical cycle is sufficient signal when paired with a transcript inspection.
+- **Unknown substrate-fight patterns:** 30 minutes max to either escape or file/route an investigation subagent. Past 30 min the orchestrator is bleeding context with no forward motion.
+- **Never wait for a third identical cycle** unless a row above explicitly says "second cycle is inconclusive."
+
+### Decision authority
+
+- **Engine-controller acts without Pi for table-A narrow / mechanical repair-lane patterns.** Pi has pre-blessed substrate-repair-lane authority (see § *Substrate repair lane* above) — the recognition table extends that pre-blessing to the listed symptom→escape pairs.
+- **HARD STOP — Pi/Blake consult is required even with a table-A symptom match when the escape would touch:**
+  - Schema or lifecycle semantics (state machine edges, verb actor gates).
+  - Authority boundaries (invoker rules, U-moments, token verification).
+  - Security surfaces (token storage, secrets, sandbox boundaries).
+  - Task acceptance semantics (accept-merge subscriber, deploy chain).
+  - Broad review policy (T1/T2/T3 cycle shape, codex/path-A/path-B routing).
+- **Envelope test (heuristic, not absolute):** narrow semantic surface + targeted regression tests + no new primitive or doctrine. ">2 files" is a *smell*, not a hard rule — some narrow repairs legitimately touch tests + one module + a schema fixture.
+
+### WIP cap on convergence-stall
+
+- Engine-controller AUTO-PAUSES WIP raise when an active highest-priority task hits a table-A symptom. Do not start fresh tasks while the active task is structurally wedged — adding more rows compounds debug surface.
+- Do NOT necessarily pause already-running independent work; let other in-flight tasks complete unless they share the failing primitive.
+- **If the symptom affects all T2/T3 lanes** (I022/I023 class — feedback relay or watchdog race), CAP WIP AT 1 until the structural fix is repaired or explicitly bypassed.
+
+### Race-the-operator is invalid architecture
+
+- If correctness depends on the operator (or AI) typing a verb fast enough to beat a watchdog, reconciler, or background sweep, the control plane is broken. Fix the control plane (substrate-repair lane) or escape via grounded `tasks close-out-of-band --commit <sha>`. Do NOT make speed part of correctness.
+- T098 specifically: pre-87f3667 acceptance required racing the zombie watchdog. Pi rejected this pattern as architecturally invalid. Post-87f3667 the gate is in place; the doctrine remains.
+
+### Evidence capture (mandatory)
+
+- Every escape commit MUST name the row ids / ER ids / agent_run ids / transcript UUIDs in the commit message or a same-tick agent-comm thread post.
+- If no observation/intake row exists for the structural cause, FILE ONE before or alongside the escape commit. The escape is the workaround; the observation is the durable fix tracker.
+- Do NOT use the substrate-repair lane to "just fix it" without leaving a paper trail — the next operator must be able to reconstruct what happened.
+
+### Branch cleanup before close-out-of-band
+
+- When a substrate-stuck task accumulates scope-creep commits from auto-driven executors (e.g. T098 cycle 1 sonnet `7e6f32c` + `a6d2ce6`), `git reset --hard <rescue-sha>` BEFORE merging or closing-out-of-band. Do NOT merge accidental executor drift just because it rides on the rescue branch — clean shipped code is part of the audit trail.
+- Rebase the cleaned tip onto current `main` before merging. Use `--no-ff` so the merge commit is a discoverable substrate-repair-lane shipment record on `main`.
+
+### Reviewer-runner stays out of this SOP
+
+- Path A (substrate-native `external_reviews` → codex) remains canonical. Do NOT reach for reviewer-runner as a default escape during a convergence-stall — that pattern was retired post-T083.
+- Reviewer-runner is the fallback ONLY when the external_review path itself cannot be trusted (parser cascade fails, ER row corruption, etc.) AND Pi/Blake explicitly asks. The recognition table above is the engine-controller's first responder; reviewer-runner is the witness, not the first move.
+
 ## Revise-brief discipline (mandatory clauses)
 
 When dispatching `task-workflow:executor` for a codex REVISE, ALWAYS include both clauses below. They close the two failure modes that have surfaced 4+ times this session (T080 r1, T084 r1, T084 r2, T083 r2/r3):

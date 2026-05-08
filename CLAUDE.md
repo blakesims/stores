@@ -148,6 +148,10 @@ When a task hits `in_review`:
 4. Substantive findings, non-critical → direct-edit the worktree, commit as `<TID> codex-revise: <summary>`, re-run codex, loop until PASS.
 5. Critical / architectural findings → halt and surface to the user.
 
+### Session doctrine — 2026-05-08: convergence-stall recognition
+
+The 2-hour T098 wedge taught us: when a task is non-convergent because the substrate itself is broken (REVISE-respawn briefs missing findings, watchdog races, stale-base persistence loops), waiting for "the next cycle to fix it" is the wrong default. Engine-controller pattern-matches a small recognition table and escapes immediately under substrate-repair-lane authority — without per-incident Pi consult for table-A patterns. The "3+ identical cycles" rule from earlier sessions is RETIRED for convergence-stalls; a second identical cycle paired with a transcript inspection is sufficient signal to escape. Time budget: ≤10 min for table-A patterns, 30 min outer limit for unknown substrate-fight patterns. Race-the-operator is rejected as invalid architecture. Full table + decision rules + WIP-cap behavior live in `.claude/skills/engine-controller/SKILL.md` § *Convergence-stall recognition*.
+
 ### What NOT to do
 
 - Don't retreat to hand-editing markdown when the substrate hurts. The pain is the data.
