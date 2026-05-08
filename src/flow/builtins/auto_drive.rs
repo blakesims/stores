@@ -38,7 +38,8 @@ pub static CAS_ABORT_DRIVE_PID_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub static CAS_DELAY_HOOK_ENTERED: AtomicBool = AtomicBool::new(false);
 
 use crate::flow::builtins::{
-    dispatch_to_specialist, fire_mark_drive_failed, refresh_task_row, BuiltinResult, DispatchCtx,
+    dispatch_to_specialist, fire_mark_drive_failed, load_tasks_schema, refresh_task_row,
+    BuiltinResult, DispatchCtx,
 };
 use crate::flow::AgentsYaml;
 use crate::handlers::agents_run::{
@@ -79,6 +80,18 @@ const IN_CYCLE_STATUSES: &[&str] = &[
 
 fn is_watchdog_actionable_status(status: &str) -> bool {
     IN_CYCLE_STATUSES.contains(&status)
+}
+
+/// Returns true when `verb` is reachable from `from_status` in the tasks
+/// schema. Used by the watchdog to pre-check reachability before attempting
+/// a transition that would fail and log spurious errors. Reachability is
+/// derived from the schema's transition table, not duplicated here.
+fn verb_reachable_from(schema: &crate::schema::Schema, from_status: &str, verb: &str) -> bool {
+    schema
+        .lifecycle
+        .transitions
+        .iter()
+        .any(|t| t.verb == verb && t.from == from_status)
 }
 
 /// True if the task has an `external_reviews` control-plane row that the
@@ -778,6 +791,7 @@ pub fn sweep_drive_watchdog(
 ) -> Result<usize> {
     let mut acted = 0usize;
     let now_iso = now_iso8601();
+    let tasks_schema = load_tasks_schema()?;
     let locks: Vec<(i64, String)> = {
         let mut stmt = conn.prepare(
             "SELECT row_id, display_id FROM dispatch_locks \
@@ -964,6 +978,16 @@ pub fn sweep_drive_watchdog(
                  external_review control-plane row is in flight or within race grace",
                 display_id
             );
+            continue;
+        }
+        // Post-defer-window reachability gate: this is the sister check to
+        // the I023 ER-in-flight defer gate above. Once the defer window has
+        // lifted, the row may have already advanced to a terminal state
+        // (in_review, accepted, etc.) where mark_drive_failed is not schema-
+        // reachable. Skip silently — this is not an error, it is the normal
+        // outcome of a drive that completed successfully after the PID died.
+        // Reachability is derived from the schema, not duplicated here.
+        if !verb_reachable_from(&tasks_schema, cur_status, "mark_drive_failed") {
             continue;
         }
         match fire_mark_drive_failed(
@@ -2520,5 +2544,121 @@ mod tests {
             }
         }
         std::env::remove_var("STORES_DRIVE_CMD");
+    }
+
+    // -----------------------------------------------------------------
+    // L511: verb-reachability gate — zombie pass must not attempt
+    // mark_drive_failed on rows where the verb is not schema-reachable.
+    // -----------------------------------------------------------------
+
+    /// (a) Row at status=in_review with a dead drive_pid and no in-flight ER:
+    /// the reachability gate must fire, leaving status unchanged and writing
+    /// zero transition_history entries for mark_drive_failed.
+    #[test]
+    fn watchdog_zombie_skips_mark_drive_failed_when_not_reachable_from_in_review() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T790", "in_review", Some(dead_pid()));
+        // Use last_status='ok:wrap_completed' to exclude this lock from the
+        // pending-locks re-dispatch pass, which filters out completed wrap
+        // locks. We only want to exercise the zombie pass reachability gate.
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, \
+              last_status, finished_at, terminal_reason) \
+             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, '2026-05-03T00:00:00Z', 'test-claimer', \
+                     'ok:wrap_completed', '2026-05-03T00:00:01Z', 'ok')",
+            rusqlite::params![row_id, "T790"],
+        )
+        .unwrap();
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        // daemon_epoch predates the lock so the epoch gate allows the row through.
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-02T00:00:00Z").unwrap();
+        assert_eq!(acted, 0, "no action must be taken for in_review row");
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T790'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_review", "status must remain in_review");
+
+        let th_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T790' AND verb='mark_drive_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            th_count, 0,
+            "no mark_drive_failed transition must land for in_review row; got {th_count}"
+        );
+    }
+
+    /// (b) Row at status=executing with a dead drive_pid: mark_drive_failed
+    /// must still fire, preserving the existing L186 detection behavior.
+    #[test]
+    fn watchdog_zombie_still_fires_mark_drive_failed_from_executing() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T791", "executing", Some(dead_pid()));
+        insert_lock_closed(&conn, row_id, "T791");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "2026-05-02T00:00:00Z").unwrap();
+        assert_eq!(acted, 1, "executing zombie must be actioned");
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T791'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked", "executing zombie must flip to blocked");
+
+        let th_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T791' AND verb='mark_drive_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(th_count, 1, "exactly one mark_drive_failed must land");
+    }
+
+    /// (c) `verb_reachable_from` handles unknown statuses gracefully: returns
+    /// false (does not panic), ensuring the gate never blocks legitimate
+    /// dispatch even if a future status appears in a zombie scan row.
+    #[test]
+    fn verb_reachable_from_graceful_on_unknown_status() {
+        let schema = load_tasks_schema().unwrap();
+        // Unknown status → not reachable; must not panic.
+        assert!(
+            !verb_reachable_from(&schema, "future_unknown_status", "mark_drive_failed"),
+            "unknown status must not be mark_drive_failed-reachable"
+        );
+        // Known in-cycle status → reachable (ensures the helper returns true
+        // for legitimate cases, not just silently false for everything).
+        assert!(
+            verb_reachable_from(&schema, "executing", "mark_drive_failed"),
+            "executing must be mark_drive_failed-reachable"
+        );
+        assert!(
+            verb_reachable_from(&schema, "planning", "mark_drive_failed"),
+            "planning must be mark_drive_failed-reachable"
+        );
     }
 }
