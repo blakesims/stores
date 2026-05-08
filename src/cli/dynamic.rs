@@ -568,6 +568,7 @@ fn build_store_command(schema: &Schema) -> Command {
     // recover-stale-base is a tasks-only operator recovery verb.
     if schema.name == "tasks" {
         store_cmd = store_cmd.subcommand(build_recover_stale_base_cmd());
+        store_cmd = store_cmd.subcommand(build_reconcile_accepted_cmd());
     }
 
     // `guide` is also registered on the `gate` store (full form), which has no workflow.
@@ -928,6 +929,31 @@ fn build_retry_deploy_cmd() -> Command {
     Command::new("retry-deploy")
         .about("Retry deploy-blocked release ceremony (deploy_blocked → accepted; use after fixing deploy issue)")
         .arg(Arg::new("display_id").help("Display ID").required(true))
+}
+
+/// Build the `reconcile-accepted` command (tasks only).
+///
+/// I027 / T107 operator-grounded recovery verb: re-fire the post-accept
+/// ceremony for an `accepted` row whose work is already merged to main but
+/// whose chain (cargo-install, schema-migrate) never ran. Allowed only from
+/// `accepted` (or mid-chain `cargo_installed` for resume-after-partial).
+/// Requires ai_with_human or human invoker.
+fn build_reconcile_accepted_cmd() -> Command {
+    Command::new("reconcile-accepted")
+        .about(
+            "Reconcile a task stranded at status='accepted' whose branch is already merged \
+             to main but whose post-accept ceremony never fired (typical I027 case after \
+             retry-deploy hit a pre-I027 daemon). Re-fires accept-merge / cargo-install / \
+             schema-migrate via direct builtin invocation; the framework actor fires the \
+             mark_cargo_installed and mark_schema_migrated transitions normally. Requires \
+             --invoker ai_with_human or human; ai_autonomous is rejected. Fails loud if the \
+             branch is not merged to main (use `tasks retry-deploy` from deploy_blocked instead).",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the task (T###)")
+                .required(true),
+        )
 }
 
 /// Build the `recover-stale-base` command (tasks only).

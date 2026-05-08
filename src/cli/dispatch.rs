@@ -314,6 +314,21 @@ pub fn dispatch(
                         handlers::recover_stale_base::run_recover_stale_base(
                             &conn, er_schema, display_id, invoker,
                         )?;
+                    // reconcile-accepted is a tasks-only operator-grounded recovery verb
+                    // for I027-class strandings (accepted row, work merged, chain never fired).
+                    } else if verb == "reconcile-accepted" && store.name == "tasks" {
+                        let display_id = sub
+                            .get_one::<String>("display_id")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let stores_dir = crate::paths::stores_dir()?;
+                        let config_path = stores_dir.join("config.yaml");
+                        handlers::reconcile_accepted::run_reconcile_accepted(
+                            &conn,
+                            &config_path,
+                            display_id,
+                            invoker,
+                        )?;
                     // clusters and overdue-ready are observations-only read-only verbs (T107)
                     } else if verb == "clusters" {
                         handlers::cluster_keys::run_clusters_cmd(schema, &conn, sub, invoker)?;

@@ -745,3 +745,184 @@ fn cargo_install_cwd_fallback_rejects_wrong_crate() {
         "T996 must have zero mark_cargo_installed history rows"
     );
 }
+
+// ---------------------------------------------------------------------------
+// I027 / T107 reconcile-accepted recovery verb tests.
+// Pi msg_85be1b1c: operator-grounded recovery for `accepted` rows whose
+// post-accept ceremony never fired (typical I027 case after a pre-I027
+// retry-deploy missed the subscriber edge).
+// ---------------------------------------------------------------------------
+
+/// Actor gate: ai_autonomous must be rejected. Mirrors retry-deploy's gate.
+#[test]
+fn i027_reconcile_accepted_actor_gate_rejects_ai_autonomous() {
+    use stores::handlers::reconcile_accepted::run_reconcile_accepted;
+
+    let conn = fresh_db_with_substrate();
+    insert_accepted_task(&conn, "T900", "feat/T900-test", "/tmp/nowhere-T900");
+    let cfg = cfg_path();
+    let err = run_reconcile_accepted(&conn, &cfg, "T900", Actor::AiAutonomous.into())
+        .err()
+        .expect("ai_autonomous must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("ai_autonomous is not permitted"),
+        "expected actor gate error; got: {msg}"
+    );
+}
+
+/// Branch-not-merged guard: reconcile-accepted refuses to advance a row
+/// whose branch hasn't been merged into main. The verb is for re-firing
+/// the post-accept chain on already-merged work, not for performing the
+/// merge itself.
+#[test]
+fn i027_reconcile_accepted_rejects_unmerged_branch() {
+    use stores::handlers::reconcile_accepted::run_reconcile_accepted;
+    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    let (_tmp, repo) = setup_chain_repo("feat/T901-unmerged", "t901-unmerged");
+    let conn = fresh_db_with_substrate();
+    insert_accepted_task(
+        &conn,
+        "T901",
+        "feat/T901-unmerged",
+        repo.to_str().unwrap(),
+    );
+
+    // Branch is NOT pre-merged into main here, so reconcile-accepted must bail.
+    let cfg = cfg_path();
+    let err = run_reconcile_accepted(&conn, &cfg, "T901", Actor::AiWithHuman.into())
+        .err()
+        .expect("must bail on unmerged branch");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not merged into main"),
+        "expected unmerged-branch error; got: {msg}"
+    );
+    assert_eq!(
+        status_of(&conn, "T901"),
+        "accepted",
+        "T901 must remain at accepted (no transitions on bail)"
+    );
+    assert_eq!(
+        count_history(&conn, "T901", "mark_cargo_installed"),
+        0,
+        "T901 must have zero mark_cargo_installed history on bail"
+    );
+}
+
+/// T107-shape e2e (the case Pi msg_85be1b1c specifically required):
+/// accepted row whose branch is ALREADY merged into main but whose
+/// post-accept ceremony never fired. reconcile-accepted must re-fire
+/// the chain (accept-merge no-op, cargo-install fires
+/// mark_cargo_installed, schema-migrate fires mark_schema_migrated)
+/// without pretending the row was deploy_blocked.
+#[test]
+fn i027_reconcile_accepted_advances_accepted_to_schema_migrated_for_merged_branch() {
+    use stores::handlers::reconcile_accepted::run_reconcile_accepted;
+
+    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let cargo_home = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    std::env::set_var("CARGO_HOME", cargo_home.path());
+    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
+    let private_bin = cargo_home.path().join("private-daemon/bin/stores");
+    std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
+    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
+
+    // Build a valid cargo + git repo with the branch already merged into main —
+    // this is the T107-shape: work shipped, but substrate stranded at accepted.
+    let (_tmp, repo) = setup_chain_repo("feat/T902-merged", "t902-merged");
+    assert!(
+        git(&repo, &["merge", "--no-ff", "--no-edit", "feat/T902-merged"])
+            .status
+            .success(),
+        "pre-merge feat/T902-merged into main must succeed"
+    );
+
+    let conn = fresh_db_with_substrate();
+    insert_accepted_task(&conn, "T902", "feat/T902-merged", repo.to_str().unwrap());
+
+    // Overwrite Cargo.toml to package name=stores so cargo-install's cwd
+    // validation accepts it (mirrors the round-3 pattern in retry_deploy_stale).
+    let stores_cargo_toml =
+        "[package]\nname = \"stores\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
+         [[bin]]\nname = \"stores\"\npath = \"src/main.rs\"\n\
+         [features]\ndefault = []\nrunner-claude-code = []\n";
+    std::fs::write(repo.join("Cargo.toml"), stores_cargo_toml)
+        .expect("overwrite Cargo.toml to name=stores for cwd validation");
+
+    // Set daemon cwd to the live repo so cargo-install's cwd fallback works
+    // (the same pattern retry_deploy_stale_workspace tests use).
+    let _cwd_g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let old_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&repo).expect("set daemon cwd to live repo");
+
+    let cfg = cfg_path();
+    let result = run_reconcile_accepted(&conn, &cfg, "T902", Actor::AiWithHuman.into());
+
+    std::env::set_current_dir(&old_cwd).expect("restore cwd");
+    drop(_cwd_g);
+
+    result.expect("reconcile-accepted T902 must succeed on merged-branch accepted row");
+
+    // Final state: schema_migrated. transition_history shows the framework
+    // verbs were fired (NOT mark_deploy_blocked / NOT a synthetic flip back to
+    // deploy_blocked — the row stayed truthful at accepted → cargo_installed →
+    // schema_migrated).
+    assert_eq!(
+        status_of(&conn, "T902"),
+        "schema_migrated",
+        "T902 must reach schema_migrated via direct chain re-fire"
+    );
+    assert_eq!(
+        count_history(&conn, "T902", "mark_cargo_installed"),
+        1,
+        "T902 must have exactly one mark_cargo_installed history row (no double-fire)"
+    );
+    assert_eq!(
+        count_history(&conn, "T902", "mark_schema_migrated"),
+        1,
+        "T902 must have exactly one mark_schema_migrated history row"
+    );
+    assert_eq!(
+        count_history(&conn, "T902", "mark_deploy_blocked"),
+        0,
+        "T902 must NOT be flipped to deploy_blocked (Pi rejected synthetic-flip approach)"
+    );
+    assert_eq!(
+        count_history(&conn, "T902", "retry-deploy"),
+        0,
+        "T902 must NOT have a synthetic retry-deploy in history"
+    );
+
+    std::env::remove_var("CARGO_HOME");
+    std::env::remove_var("CARGO_TARGET_DIR");
+    std::env::remove_var("STORES_DAEMON_BIN_PATH");
+}
+
+/// Idempotency: calling reconcile-accepted on an already-schema_migrated row
+/// must fail-loud "already reconciled", not silently no-op.
+#[test]
+fn i027_reconcile_accepted_rejects_already_reconciled_row() {
+    use stores::handlers::reconcile_accepted::run_reconcile_accepted;
+
+    let conn = fresh_db_with_substrate();
+    let now = "2026-05-09T00:00:00Z";
+    let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
+         VALUES ('T903', 'schema_migrated', 'test', 't', 'feat/T903', '/tmp/T903', ?1, ?2, ?2, 'framework', 'framework')",
+        rusqlite::params![contract, now],
+    )
+    .unwrap();
+    let cfg = cfg_path();
+    let err = run_reconcile_accepted(&conn, &cfg, "T903", Actor::AiWithHuman.into())
+        .err()
+        .expect("schema_migrated row must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("already at status='schema_migrated'") || msg.contains("nothing to reconcile"),
+        "expected already-reconciled error; got: {msg}"
+    );
+}
