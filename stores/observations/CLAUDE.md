@@ -39,7 +39,7 @@ EOF
 )
 ```
 
-Required intake fields the agent must supply: `summary`, `source_agent`, `captured_at` (ISO timestamp), `captured_week` (ops label like `w18-d5`). Optional but recommended: `source_task` (the task that surfaced the friction; soft-FK, just the display id), `body` (the longer description).
+Required intake fields the agent must supply: `summary`, `source_agent`, `captured_at` (ISO timestamp). `captured_week` is optional on observations and derived on read from `captured_at` when omitted; intake guidance may still include it when available. Optional but recommended: `source_task` (the task that surfaced the friction; soft-FK, just the display id), `body` (the longer description).
 
 The substrate auto-mints an I-id (`I001`, `I002`, …) and lands the row in state `draft`. Gatekeeper routing may create an L-id observation. Use `stores observations add` directly only for the documented escape hatch above.
 
