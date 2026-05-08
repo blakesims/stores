@@ -45,7 +45,10 @@ fields:
       - {name: summary, type: text}
       - {name: open_questions, type: {list: text}}
       - {name: at, type: timestamp}
-      - {name: reviewed_plan, type: json, required: false}
+      - name: reviewed_plan
+        type: record
+        required: false
+        fields: []
   - name: cycles
     type: list_record
     fields:

@@ -64,9 +64,23 @@ An *engine* in this frame is a graph of buffers connected by subscribers. Throug
 
 The substrate's job is to enforce workflow structure and route flow through typed buffers. Implementations of checks, drives, and external tools live above the substrate and call its CLI like any other client. See `docs/philosophy.md` § *What's outside the substrate*.
 
+## Brief-at-dispatch persistence
+
+`agent_runs.brief_text TEXT` (nullable, additive) and `plan_review_log[].reviewed_plan` (JSON snapshot, nullable) are the **brief-at-dispatch persistence** primitive. Together they answer the operator question "what exactly did this agent see at dispatch?" without requiring lossy re-generation from current row state.
+
+`agent_runs.brief_text` is populated by the drive spawn handler at the moment `runner.spawn(...)` is called — capturing the bytes that `render_template_with_overlay` produced from the row state at that instant. The value is verbatim; no truncation or transformation. `plan_review_log[].reviewed_plan` is a snapshot of `tasks.plan` taken at `submit-plan-review` time; subsequent mutations to `tasks.plan` (plan-reviewer NEEDS_WORK cycles, re-submissions) cannot retroactively alter the snapshot.
+
+Cross-references:
+- **L059** — the `agent_runs` index foundation that this builds on; L503-A adds `brief_text` to the existing runs table rather than creating a separate artifact table.
+- **L504-A** — the separate slice that will enforce contracts on these persisted artifacts (prompt-length guards, required-field checks). L503-A persists; L504-A enforces. These are deliberately separate: enforcement gates require runtime integration that is out of scope for the cheap L503-A slice.
+- **L012** — the operator inspector view that will surface `agent_runs.brief_text` and related artifacts in a human-readable dashboard. L503-A makes the data durable; L012 surfaces it.
+
+The `cycles[].executor.external_review_id` soft-FK back-link (planned to correlate an executor cycle with the external_review respawn that triggered it) is deferred to a follow-up slice; see the L503-A module docstring in `src/handlers/submit.rs`.
+
 ## Changelog
 
 - **2026-05-04** — initial draft. Six named (Buffer, Transition, Subscriber, Actor, Direction, Schema). Seven missing (Loop, Aggregation, Decay, Notification, Capacity, Check, Causality). Three composition rules (engine-as-graph; specialization-by-transition; decision-routing-substrate). Surfaced by realistic-pull on 10.06 client work + the discussion captured in `docs/worklog/2026-05-04/03-primitives-and-engine-metaphor.md`.
 - **2026-05-04** (same-day addition) — added **Activity** as an 8th missing primitive (typed event for actor's attention against a row, distinct from state-changing Transitions). Surfaced twice in one session: (1) the dedup-as-search-operation question, (2) the fizzy-kanban reframe (recency / inactivity-decay needs an attention signal, not just timestamps). The substrate today captures writes; Activity is the missing capture of *reads*, *mentions*, *search-hits*. Composes with already-missing Decay, Aggregation, Causality, Notification, and the Refinement composition pattern.
 - **2026-05-06** — added **Router** as a missing primitive and codified the loops-vs-forks composition rule. Surfaced by L138/T045 gatekeeper design: raw local filings are not immature observations; they are candidate signals whose classification can fork into different buffers/terminal families.
 - **2026-05-07** — promoted **Check** from missing primitive to code-level primitive. Initial registry covers `drive_pid_recorded_or_terminal` and `gatekeeper-decision-valid`; schema validators remain `validate(...)`, and postconditions are a Check application.
+- **2026-05-09** — T111 / L503-A first slice: added **Brief-at-dispatch persistence** section naming `agent_runs.brief_text` + `plan_review_log[].reviewed_plan` as the durable artifact-pairing primitive. Closes the lossy-regeneration gap surfaced by c0f45ff/5b6a41a + I022/I027.

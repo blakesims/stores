@@ -23,6 +23,20 @@
 //! compute/run split: each verb has `pub(crate) fn compute_submit_*(...) -> Result<SubmitOutput>`
 //!   plus thin `pub fn run_submit_*(...)` printers. Tests call `compute_*` and assert on the
 //! structured output and post-call DB state.
+//!
+//! ## L503-A artifact-persistence scope
+//!
+//! L503-A persists artifacts at dispatch boundaries:
+//! - `agent_runs.brief_text`: the rendered brief stored verbatim at spawn time (wired in drive.rs).
+//! - `plan_review_log[].reviewed_plan`: snapshot of `tasks.plan` at submit-plan-review time.
+//!
+//! L503-A does NOT enforce contracts on those artifacts (L504-A's domain) and does NOT
+//! provide an operator inspector view (L012's domain).
+//!
+//! The `cycles[].executor.external_review_id` soft-FK back-link is deferred to a follow-up
+//! slice — distinguishing "cycle was triggered by external_review respawn" from "cycle exists
+//! alongside a stale REVISE ER" requires lifecycle state plumbing beyond the overlay's current
+//! semantics.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, Transaction};
@@ -4099,6 +4113,147 @@ fields:
             [],
         )
         .unwrap();
+    }
+
+    // ---------------------------------------------------------------------------
+    // L503-A Task 1.11: plan_review_log reviewed_plan snapshot tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn submit_plan_review_snapshots_reviewed_plan() {
+        let (schema, conn) = setup();
+        // Seed with a specific plan JSON.
+        insert_row_at(&conn, &schema, "plan_review", 0, 0, 2, vec![], vec![], None);
+
+        compute_submit_plan_review(
+            &schema,
+            &conn,
+            "WF001",
+            "NEEDS_WORK",
+            "needs changes",
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
+
+        let log = read_plan_review_log(&conn);
+        assert_eq!(log.len(), 1, "one log entry expected");
+        let reviewed_plan = log[0].get("reviewed_plan").expect("reviewed_plan must be present");
+        // The plan set by insert_row_at has a 'summary' key.
+        assert!(
+            reviewed_plan.is_object(),
+            "reviewed_plan must be a JSON object, got: {reviewed_plan:?}"
+        );
+        assert!(
+            reviewed_plan.get("summary").is_some() || reviewed_plan.get("phases").is_some(),
+            "reviewed_plan must match the plan set at insert time; got: {reviewed_plan:?}"
+        );
+    }
+
+    #[test]
+    fn submit_plan_review_snapshot_immune_to_post_update_plan_mutation() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "plan_review", 0, 0, 2, vec![], vec![], None);
+
+        // Capture the plan as it was at insert time.
+        let original_plan: serde_json::Value = conn
+            .query_row(
+                "SELECT plan FROM wf_tasks WHERE display_id = 'WF001'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::Value::Null);
+
+        compute_submit_plan_review(
+            &schema,
+            &conn,
+            "WF001",
+            "NEEDS_WORK",
+            "revise",
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
+
+        // Mutate plan directly — simulates a subsequent plan update.
+        conn.execute(
+            "UPDATE wf_tasks SET plan = ?1 WHERE display_id = 'WF001'",
+            rusqlite::params![r#"{"summary":"mutated plan","phases":[]}"#],
+        )
+        .unwrap();
+
+        let log = read_plan_review_log(&conn);
+        let reviewed_plan = log[0].get("reviewed_plan").expect("reviewed_plan must be present");
+        assert_eq!(
+            reviewed_plan, &original_plan,
+            "snapshot must be immune to subsequent plan mutations"
+        );
+    }
+
+    #[test]
+    fn submit_plan_review_legacy_log_without_reviewed_plan_reads_clean() {
+        let (schema, conn) = setup();
+        // Seed a row already in plan_review with a legacy log entry (no reviewed_plan key).
+        let now = now_iso8601();
+        let plan_json = r#"{"summary":"current plan","phases":[{"name":"p1"}]}"#;
+        let legacy_log = r#"[{"gate":"NEEDS_WORK","summary":"old review without snapshot"}]"#;
+        conn.execute(
+            "INSERT INTO wf_tasks (display_id, status, created_at, updated_at, \
+             created_by, updated_by, title, current_phase, current_cycle, \
+             plan, cycles, plan_review_log, blocked_reason) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                "WF001",
+                "plan_review",
+                now,
+                now,
+                "human",
+                "human",
+                "legacy task",
+                0i64,
+                0i64,
+                plan_json,
+                "[]",
+                legacy_log,
+                ""
+            ],
+        )
+        .unwrap();
+
+        // Append a new entry via compute_submit_plan_review.
+        compute_submit_plan_review(
+            &schema,
+            &conn,
+            "WF001",
+            "NEEDS_WORK",
+            "new review with snapshot",
+            None,
+            Actor::AiAutonomous,
+        )
+        .unwrap();
+
+        let log = read_plan_review_log(&conn);
+        assert_eq!(log.len(), 2, "two log entries: legacy + new");
+
+        // (1) Legacy entry is unchanged — no reviewed_plan key.
+        assert!(
+            log[0].get("reviewed_plan").is_none(),
+            "legacy entry must not have reviewed_plan key injected: {:?}",
+            log[0]
+        );
+        assert_eq!(
+            log[0].get("summary").and_then(|v| v.as_str()),
+            Some("old review without snapshot")
+        );
+
+        // (2) New entry has reviewed_plan populated.
+        let new_reviewed_plan = log[1].get("reviewed_plan").expect("new entry must have reviewed_plan");
+        assert!(
+            new_reviewed_plan.is_object(),
+            "new entry reviewed_plan must be a JSON object: {new_reviewed_plan:?}"
+        );
     }
 
     #[test]
