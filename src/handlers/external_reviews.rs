@@ -96,7 +96,6 @@ pub struct ExternalReviewGitPreflight {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalReviewRebaseConflict {
-    pub workspace_path: PathBuf,
     pub base_sha: String,
     pub head_sha: String,
     pub conflict_files: Vec<String>,
@@ -187,7 +186,6 @@ pub fn prepare_external_review_git(
         accept_merge::abort_rebase(&workspace_path);
         return Ok(ExternalReviewGitPreparation::Conflict(
             ExternalReviewRebaseConflict {
-                workspace_path,
                 base_sha: current_main,
                 head_sha,
                 conflict_files,
