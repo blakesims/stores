@@ -181,6 +181,120 @@ fn fresh_db_has_empty_substrate_migrations() {
     assert_eq!(n, 0, "fresh-DB open must not record any drift");
 }
 
+/// L503-A Task 1.12: pre-L503 agent_runs (no brief_text) gets the column added.
+#[test]
+fn version_n_db_with_legacy_agent_runs_gets_brief_text_column() {
+    let _g = ENV_GUARD.lock().unwrap();
+    let tmp = TempDir::new().unwrap();
+    let dbp = tmp.path().join("db.sqlite");
+
+    // Seed a DB that has agent_runs WITHOUT brief_text (pre-L503 shape).
+    {
+        let conn = Connection::open(&dbp).unwrap();
+        conn.execute_batch(VERSION_N_SUBSTRATE_DDL).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_runs ( \
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                 display_id TEXT NOT NULL, \
+                 phase INTEGER NOT NULL, \
+                 cycle INTEGER NOT NULL, \
+                 role TEXT NOT NULL, \
+                 model_id TEXT NOT NULL, \
+                 harness_id TEXT NOT NULL, \
+                 started_at TEXT NOT NULL, \
+                 ended_at TEXT NOT NULL, \
+                 exit_code INTEGER NOT NULL, \
+                 tokens_in INTEGER, \
+                 tokens_out INTEGER, \
+                 prompt_cache_hits INTEGER, \
+                 transcript_path TEXT NOT NULL \
+             );",
+        )
+        .unwrap();
+        // Insert a legacy row (no brief_text column yet).
+        conn.execute(
+            "INSERT INTO agent_runs \
+             (display_id, phase, cycle, role, model_id, harness_id, \
+              started_at, ended_at, exit_code, tokens_in, tokens_out, \
+              prompt_cache_hits, transcript_path) \
+             VALUES ('T000', 1, 1, 'planner', 'old-model', 'old-harness', \
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 0, \
+                     0, 0, 0, '/tmp/run.jsonl')",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Pre-fix invariant: brief_text absent.
+    {
+        let conn = Connection::open(&dbp).unwrap();
+        let cols = col_names(&conn, "agent_runs");
+        assert!(
+            !cols.iter().any(|c| c == "brief_text"),
+            "fixture must lack brief_text; got: {cols:?}"
+        );
+    }
+
+    // Open via current binary — apply_framework_drift must add brief_text.
+    let conn = db::open(&dbp).unwrap();
+
+    // (1) brief_text column is present, nullable (notnull=0).
+    let col_info: Vec<(String, String, i64)> = conn
+        .prepare("PRAGMA table_info(agent_runs)")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(1)?,  // name
+                r.get::<_, String>(2)?,  // type
+                r.get::<_, i64>(3)?,     // notnull
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    let brief_col = col_info
+        .iter()
+        .find(|(name, _, _)| name == "brief_text")
+        .expect("brief_text must be present after db::open");
+    assert_eq!(
+        brief_col.1.to_uppercase(),
+        "TEXT",
+        "brief_text type must be TEXT"
+    );
+    assert_eq!(brief_col.2, 0, "brief_text must be nullable (notnull=0)");
+
+    // (2) Legacy row brief_text is NULL (no backfill).
+    let got: Option<String> = conn
+        .query_row(
+            "SELECT brief_text FROM agent_runs WHERE display_id='T000'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(got.is_none(), "legacy row brief_text must be NULL, not backfilled");
+
+    // (3) Fresh INSERT with brief_text succeeds and round-trips.
+    conn.execute(
+        "INSERT INTO agent_runs \
+         (display_id, phase, cycle, role, model_id, harness_id, \
+          started_at, ended_at, exit_code, tokens_in, tokens_out, \
+          prompt_cache_hits, transcript_path, brief_text) \
+         VALUES ('T999', 1, 1, 'executor', 'm', 'h', \
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 0, \
+                 0, 0, 0, '/tmp/run2.jsonl', 'abc')",
+        [],
+    )
+    .unwrap();
+    let fresh: String = conn
+        .query_row(
+            "SELECT brief_text FROM agent_runs WHERE display_id='T999'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fresh, "abc", "fresh INSERT brief_text must round-trip");
+}
+
 #[test]
 fn disable_autoapply_env_var_skips_apply() {
     let _g = ENV_GUARD.lock().unwrap();

@@ -1353,6 +1353,7 @@ fn drive_loop_with_role_runner(
                     agent_role,
                     LAUNCH_ERROR_EXIT_CODE,
                     &synthetic_telemetry,
+                    Some(&brief_markdown),
                 )
                 .context("spawn-fail synthetic agent_runs insert")?;
                 // Now transition the task to blocked (same path as non-zero exit).
@@ -1387,6 +1388,7 @@ fn drive_loop_with_role_runner(
             agent_role,
             run_out.exit_code,
             &run_out.telemetry,
+            Some(&brief_markdown),
         )?;
         let spawn_elapsed = spawn_start.elapsed();
         eprintln!(
@@ -4456,6 +4458,169 @@ mod tests {
         let rendered = crate::render::render_template_with_overlay(tpl, &ctx, &overlay)
             .expect("template must render");
         assert_eq!(rendered, "diff: abc123..HEAD: 3 files changed");
+    }
+
+    // ---------------------------------------------------------------------------
+    // L503-A Task 1.10: drive spawn handler persists brief_text byte-equal to
+    // what render_template_with_overlay produces at dispatch-time row state.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn spawn_handler_persists_brief_text_byte_equal_to_rendered_brief() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        let runs_dir = _dir.path().join(".stores").join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        for role in &["planner"] {
+            std::fs::write(runs_dir.join(format!("{role}.jsonl")), "{}\n").unwrap();
+        }
+
+        insert_task(
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+
+        // Pre-compute the expected brief from the current row state — identical
+        // code path to what drive.rs executes at dispatch time.
+        let expected_brief = {
+            let (_, entry) = read_row(&schema, &conn, "T001").unwrap();
+            let workflow = schema.workflow.as_ref().unwrap();
+            let tpl_key = workflow
+                .briefing_templates
+                .get("planner")
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let tpl_content = crate::cli::dynamic::BUNDLED_STORE_TEMPLATES
+                .iter()
+                .find(|(n, _)| *n == "tasks")
+                .and_then(|(_, tmps)| tmps.iter().find(|(p, _)| *p == tpl_key.as_str()).map(|(_, c)| *c))
+                .expect("planner template must be bundled");
+            let ctx = build_context(&schema, &entry);
+            let mut overlay =
+                crate::handlers::brief::build_source_observation_overlay(&conn, &entry).unwrap();
+            for (k, v) in
+                crate::handlers::brief::build_external_review_overlay(&conn, &entry).unwrap()
+            {
+                overlay.insert(k, v);
+            }
+            render_template_with_overlay(tpl_content, &ctx, &overlay).unwrap()
+        };
+
+        // Drive one iteration (planner); max_iters=1 causes an error after the
+        // planner insert_agent_run call, which is fine — we just want the row.
+        let make_telemetry = || crate::runner::AgentRunTelemetry {
+            model_id: Some("mock-model-1".to_string()),
+            harness_id: Some("mock".to_string()),
+            started_at: Some(crate::handlers::row::now_iso8601()),
+            ended_at: Some(crate::handlers::row::now_iso8601()),
+            tokens_in: Some(0),
+            tokens_out: Some(0),
+            prompt_cache_hits: Some(0),
+            transcript_path: Some(runs_dir.join("planner.jsonl").display().to_string()),
+            stderr_log_path: None,
+        };
+        let mut planner_out = make_run_output(planner_fixture_json(), 0);
+        planner_out.telemetry = make_telemetry();
+        let runner = MockRunner::new(vec![planner_out]);
+        let _ = drive_loop(&schema, &conn, "T001", &runner, 1);
+
+        let stored_brief: Option<String> = conn
+            .query_row(
+                "SELECT brief_text FROM agent_runs WHERE display_id='T001' AND role='planner'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stored_brief = stored_brief.expect("brief_text must be non-null for planner run");
+        assert_eq!(
+            stored_brief, expected_brief,
+            "agent_runs.brief_text must be byte-equal to the brief rendered at dispatch time"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // L503-A Task 1.13: persisting brief_text must not perturb the rendering
+    // pathway — two renders of the same fixture row must be byte-equal.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn brief_rendering_byte_equal_after_persistence_cycle() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        let runs_dir = _dir.path().join(".stores").join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+
+        insert_task(
+            &conn,
+            &schema,
+            "T001",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+
+        // Helper closure to render the planner brief from the current row state.
+        let render_planner_brief = || {
+            let (_, entry) = read_row(&schema, &conn, "T001").unwrap();
+            let workflow = schema.workflow.as_ref().unwrap();
+            let tpl_key = workflow
+                .briefing_templates
+                .get("planner")
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let tpl_content = crate::cli::dynamic::BUNDLED_STORE_TEMPLATES
+                .iter()
+                .find(|(n, _)| *n == "tasks")
+                .and_then(|(_, tmps)| tmps.iter().find(|(p, _)| *p == tpl_key.as_str()).map(|(_, c)| *c))
+                .expect("planner template must be bundled");
+            let ctx = build_context(&schema, &entry);
+            let mut overlay =
+                crate::handlers::brief::build_source_observation_overlay(&conn, &entry).unwrap();
+            for (k, v) in
+                crate::handlers::brief::build_external_review_overlay(&conn, &entry).unwrap()
+            {
+                overlay.insert(k, v);
+            }
+            render_template_with_overlay(tpl_content, &ctx, &overlay).unwrap()
+        };
+
+        // First render.
+        let render1 = render_planner_brief();
+
+        // Persist the brief via insert_agent_run (simulates drive spawn-handler).
+        let telemetry = crate::runner::AgentRunTelemetry {
+            model_id: Some("mock-model".to_string()),
+            harness_id: Some("mock".to_string()),
+            started_at: Some(crate::handlers::row::now_iso8601()),
+            ended_at: Some(crate::handlers::row::now_iso8601()),
+            tokens_in: Some(0),
+            tokens_out: Some(0),
+            prompt_cache_hits: Some(0),
+            transcript_path: Some(runs_dir.join("planner.jsonl").display().to_string()),
+            stderr_log_path: None,
+        };
+        std::fs::write(runs_dir.join("planner.jsonl"), "{}\n").unwrap();
+        db::insert_agent_run(&conn, "T001", 0, 0, "planner", 0, &telemetry, Some(&render1))
+            .unwrap();
+
+        // Second render from the same fixture row — must be byte-equal.
+        let render2 = render_planner_brief();
+        assert_eq!(
+            render1, render2,
+            "brief rendering must be byte-equal before and after persistence cycle"
+        );
     }
 
     // ---------------------------------------------------------------------------

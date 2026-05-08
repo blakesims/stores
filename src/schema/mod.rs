@@ -70,9 +70,10 @@ pub enum FieldType {
         ref_store: String,
     },
     /// An opaque free-shape JSON payload stored as TEXT.  The framework does
-    /// not impose any sub-key shape; value must be parseable JSON.  Only valid
-    /// at the top level — not inside `record:` or `list_record:` sub-fields.
-    /// (T008)
+    /// not impose any sub-key shape; value must be parseable JSON.  Valid at the
+    /// top level and as a `list_record` sub-field (e.g. snapshot fields); NOT
+    /// valid inside nested `record:` sub-fields (CLI coerce_value doesn't
+    /// traverse deep record nesting).  (T008; updated Decision 1 in T111)
     Json,
 }
 
@@ -323,16 +324,12 @@ fn resolve_field_type(
 
 fn raw_to_field(r: &RawField) -> anyhow::Result<Field> {
     let ty = resolve_field_type(&r.ty, &r.enum_values, &r.fields, &r.ref_store)?;
-    // Decision 1: reject `json` inside record / list_record sub-fields.
-    // After resolving, if this field is a Record or ListRecord, check that none
-    // of its sub-fields resolved to Json.  The sub-fields were already converted
-    // by recursive `raw_to_field` calls inside `resolve_field_type`; we walk the
-    // resolved types rather than the raw list so the check is always consistent.
-    let sub_fields_to_check: Option<&Vec<Field>> = match &ty {
-        FieldType::Record(subs) | FieldType::ListRecord(subs) => Some(subs),
-        _ => None,
-    };
-    if let Some(subs) = sub_fields_to_check {
+    // Decision 1 (updated): reject `json` inside record sub-fields; allow it in
+    // list_record sub-fields where JSON-snapshot fields (e.g. reviewed_plan) are
+    // legitimate.  record-of-record nesting with json is still forbidden because
+    // the CLI coerce_value path does not traverse deep nested objects and would
+    // silently mis-encode raw-string sentinels there.
+    if let FieldType::Record(subs) = &ty {
         for sub in subs {
             if sub.ty == FieldType::Json {
                 anyhow::bail!(
@@ -1294,7 +1291,10 @@ fields:
     }
 
     #[test]
-    fn field_type_json_in_list_record_rejected() {
+    fn field_type_json_in_list_record_accepted() {
+        // Decision 1 updated: `json` is allowed as a list_record sub-field so
+        // snapshot fields like plan_review_log[].reviewed_plan can hold any JSON
+        // value (object, null, etc.) rather than being constrained to object-only.
         let yaml = r#"
 name: x
 id_format: "X{:01d}"
@@ -1307,16 +1307,9 @@ fields:
     fields:
       - name: payload
         type: json
+        required: false
 "#;
-        let err = Schema::from_yaml(yaml).unwrap_err();
-        assert!(
-            err.to_string().contains("may only appear at the top level"),
-            "json inside list_record must error with 'may only appear at the top level': {err}"
-        );
-        assert!(
-            err.to_string().contains("items.payload"),
-            "error must name the nested field path 'items.payload': {err}"
-        );
+        Schema::from_yaml(yaml).expect("json inside list_record must now be accepted");
     }
 
     // ---------------------------------------------------------------------------

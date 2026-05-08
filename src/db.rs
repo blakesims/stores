@@ -103,6 +103,7 @@ pub(crate) fn insert_agent_run(
     role: &str,
     exit_code: i32,
     telemetry: &AgentRunTelemetry,
+    brief_text: Option<&str>,
 ) -> Result<()> {
     // All required telemetry fields must be supplied by the caller. The
     // `legacy_unknown` sentinel is migration/backfill-only — callers doing
@@ -154,8 +155,8 @@ pub(crate) fn insert_agent_run(
     );
     conn.execute(
         "INSERT INTO agent_runs \
-         (display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, tokens_in, tokens_out, prompt_cache_hits, transcript_path) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         (display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, tokens_in, tokens_out, prompt_cache_hits, transcript_path, brief_text) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             display_id,
             phase,
@@ -170,6 +171,7 @@ pub(crate) fn insert_agent_run(
             telemetry.tokens_out,
             telemetry.prompt_cache_hits,
             transcript_path,
+            brief_text,
         ],
     )
     .context("insert agent_runs")?;
@@ -353,7 +355,7 @@ fields:
             transcript_path: Some("/tmp/run.jsonl".to_string()),
             stderr_log_path: None,
         };
-        insert_agent_run(&conn, "T001", 1, 2, "executor", 7, &telemetry).unwrap();
+        insert_agent_run(&conn, "T001", 1, 2, "executor", 7, &telemetry, None).unwrap();
         let row: (String, i64, i64, String, String, i64, i64, i64, String) = conn
             .query_row(
                 "SELECT display_id, phase, cycle, role, harness_id, tokens_in, tokens_out, prompt_cache_hits, transcript_path FROM agent_runs",
@@ -450,5 +452,50 @@ fields:
             policy_ref.is_none(),
             "manual transition has NULL policy_ref"
         );
+    }
+
+    // L503-A: brief_text persistence tests (Task 1.9a + 1.9b)
+
+    #[test]
+    fn insert_agent_run_persists_brief_text() {
+        let (_schema, conn) = setup_obs();
+        let telemetry = AgentRunTelemetry {
+            model_id: Some("m".to_string()),
+            harness_id: Some("mock".to_string()),
+            started_at: Some("2026-01-01T00:00:00Z".to_string()),
+            ended_at: Some("2026-01-01T00:00:01Z".to_string()),
+            tokens_in: Some(0),
+            tokens_out: Some(0),
+            prompt_cache_hits: Some(0),
+            transcript_path: Some("/tmp/run.jsonl".to_string()),
+            stderr_log_path: None,
+        };
+        let expected = "# Phase 1: Foo\nsome brief content\n";
+        insert_agent_run(&conn, "T001", 1, 1, "planner", 0, &telemetry, Some(expected)).unwrap();
+        let got: String = conn
+            .query_row("SELECT brief_text FROM agent_runs WHERE display_id='T001'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(got, expected, "brief_text must round-trip byte-equal");
+    }
+
+    #[test]
+    fn insert_agent_run_accepts_null_brief_text() {
+        let (_schema, conn) = setup_obs();
+        let telemetry = AgentRunTelemetry {
+            model_id: Some("m".to_string()),
+            harness_id: Some("mock".to_string()),
+            started_at: Some("2026-01-01T00:00:00Z".to_string()),
+            ended_at: Some("2026-01-01T00:00:01Z".to_string()),
+            tokens_in: Some(0),
+            tokens_out: Some(0),
+            prompt_cache_hits: Some(0),
+            transcript_path: Some("/tmp/run.jsonl".to_string()),
+            stderr_log_path: None,
+        };
+        insert_agent_run(&conn, "T001", 1, 1, "planner", 0, &telemetry, None).unwrap();
+        let got: Option<String> = conn
+            .query_row("SELECT brief_text FROM agent_runs WHERE display_id='T001'", [], |r| r.get(0))
+            .unwrap();
+        assert!(got.is_none(), "brief_text must be NULL when None passed");
     }
 }
