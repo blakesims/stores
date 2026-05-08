@@ -22,11 +22,10 @@
 //!   docs template for the agents it shares; drift is caught by the
 //!   `fixture_yaml_includes_t020_builtins` test in `tests/`.
 //! - **`.stores/agents.yaml`** (read at test runtime): the rendered production
-//!   subscriber config. When present (a live worktree with `.stores/` symlinks
-//!   set up), all four contracts are evaluated against this surface so that
-//!   any omission in the actual running config fails the test suite. Gracefully
-//!   skipped when the file is absent (e.g., a fresh clone without a `.stores/`
-//!   setup), so CI environments without a live substrate are unaffected.
+//!   subscriber config. Always evaluated at `cargo test` time — fails-loud if
+//!   the file is absent so that silent-omission regressions in the actual
+//!   rendered config cannot ship. In this repo, `.stores/agents.yaml` is always
+//!   present as a symlink to the live stores workspace.
 //!
 //! A failing contract fails the test suite, preventing I027/I024-class
 //! silent-omission regressions from shipping.
@@ -304,18 +303,20 @@ fn load_docs_example_agents() -> AgentsYaml {
 }
 
 /// Reads `.stores/agents.yaml` at test runtime (the rendered production
-/// subscriber config, typically a symlink in a live worktree). Returns `None`
-/// when the file is absent or the symlink is broken — graceful skip so CI
-/// environments without a live `.stores/` setup are unaffected.
-fn load_stores_agents() -> Option<AgentsYaml> {
+/// subscriber config, typically a symlink in a live worktree). Panics if the
+/// file is absent or unreadable — fails-loud so that silent-omission regressions
+/// in the actual rendered config cannot ship undetected. In this repo,
+/// `.stores/agents.yaml` is always present as a symlink to the live workspace.
+fn load_stores_agents() -> AgentsYaml {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".stores/agents.yaml");
-    match std::fs::read_to_string(&path) {
-        Ok(yaml) => Some(
-            AgentsYaml::from_yaml(&yaml)
-                .expect(".stores/agents.yaml must parse cleanly when present"),
-        ),
-        Err(_) => None,
-    }
+    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            ".stores/agents.yaml must be accessible at cargo-test time ({path}): {e}\n\
+             Ensure the .stores/ symlinks are set up in this worktree.",
+            path = path.display()
+        )
+    });
+    AgentsYaml::from_yaml(&yaml).expect(".stores/agents.yaml must parse cleanly")
 }
 
 fn load_transitions(store: &str) -> Vec<Transition> {
@@ -660,20 +661,13 @@ agents:
     }
 
     /// Smoke run against `.stores/agents.yaml` (the rendered production subscriber
-    /// config). Skips gracefully when the file is absent (e.g. a fresh clone
-    /// without a live worktree `.stores/` setup). When present, evaluates all
-    /// four contracts so that any omission in the actual running config fails
-    /// the test suite immediately — guards the third canonical surface from
-    /// the ER344 finding.
+    /// config). Always runs — fails-loud if the file is absent so that silent
+    /// omissions in the actual running config cannot ship. Evaluates all four
+    /// contracts against the live rendered surface; guards the third canonical
+    /// surface from the ER344 finding.
     #[test]
     fn all_contracts_pass_against_stores_agents_yaml() {
-        let Some(agents) = load_stores_agents() else {
-            eprintln!(
-                "SKIP: .stores/agents.yaml not accessible in this environment; \
-                 test skipped (no live worktree .stores/ setup)"
-            );
-            return;
-        };
+        let agents = load_stores_agents();
         for contract in registry() {
             let transitions = load_transitions(contract.store());
             let result = contract.evaluate(&agents, &transitions);
