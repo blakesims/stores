@@ -681,6 +681,8 @@ mod tests {
         executor: PathBuf,
         /// Emits `{"type":"result","result":"<cwd>"}` where cwd is `$(pwd)`.
         cwd_printer: PathBuf,
+        /// Emits a stream-json result event with error_max_structured_output_retries.
+        retries_exhausted: PathBuf,
     }
 
     static SHIM_DIR: OnceLock<ShimDir> = OnceLock::new();
@@ -739,6 +741,18 @@ mod tests {
                 "\nexit 0\n",
             ),
         );
+        // The retries_exhausted shim emits the Claude SDK stream-json error
+        // event. Keep it in the process-wide stable shim dir with the other
+        // exec fixtures; rewriting a per-test executable under parallel
+        // `cargo test` can intermittently fail with ETXTBSY.
+        let retries_exhausted = write(
+            "retries_exhausted",
+            concat!(
+                "#!/bin/sh\n",
+                "echo '{\"type\":\"result\",\"error\":{\"subtype\":\"error_max_structured_output_retries\",\"message\":\"retries exhausted\"},\"result\":\"\"}'\n",
+                "exit 0\n",
+            ),
+        );
 
         ShimDir {
             dir,
@@ -746,6 +760,7 @@ mod tests {
             planner,
             executor,
             cwd_printer,
+            retries_exhausted,
         }
     }
 
@@ -1201,26 +1216,7 @@ mod tests {
         let _env_guard = redirect_runs_dir();
         let workspace = env!("CARGO_MANIFEST_DIR").to_string();
 
-        // Write a shim that emits the stream-json error event for retries exhausted.
-        let shim_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("test-shims");
-        fs::create_dir_all(&shim_dir).unwrap();
-        let shim_path = shim_dir.join("retries-exhausted-shim.sh");
-        let script = concat!(
-            "#!/bin/sh\n",
-            // Emit a stream-json result event with error.subtype set.
-            "echo '{\"type\":\"result\",\"error\":{\"subtype\":\"error_max_structured_output_retries\",\"message\":\"retries exhausted\"},\"result\":\"\"}'\n",
-            "exit 0\n",
-        );
-        {
-            let mut f = fs::File::create(&shim_path).unwrap();
-            f.write_all(script.as_bytes()).unwrap();
-            f.sync_all().unwrap();
-        }
-        fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755)).unwrap();
-
-        let runner = ClaudeCodeRunner::new().with_bin(shim_path);
+        let runner = ClaudeCodeRunner::new().with_bin(shims().retries_exhausted.clone());
         let schema_text = r#"{"type":"object","required":["verdict"]}"#;
         let out = runner
             .spawn("external-review", "", "review this", Some(schema_text), Some(&workspace))

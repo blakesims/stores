@@ -214,16 +214,24 @@ fn write_happy_drive_stub(dir: &Path, db_path: &Path) -> PathBuf {
          # for drive_loop, so close the lock BEFORE flipping status so the\n\
          # test's status-based predicate can rely on the lock-closed invariant\n\
          # once it sees status='in_review'.\n\
-         sqlite3 -cmd \".timeout 10000\" {db} \"UPDATE dispatch_locks \
-           SET last_status='ok', finished_at='2026-05-04T00:00:01Z', \
-               attempts=attempts+1 \
-           WHERE store='tasks' AND display_id='$DISPLAY_ID' \
-             AND agent_name='auto-drive' AND finished_at IS NULL\"\n\
-         echo \"stub LOCK rc=$?\"\n\
-         sqlite3 -cmd \".timeout 10000\" {db} \"UPDATE tasks SET status='in_review', \
-           wrap_log='[{{\\\"summary\\\":\\\"stub-drive ok\\\"}}]', \
-           updated_at='2026-05-04T00:00:01Z' WHERE display_id='$DISPLAY_ID'\"\n\
-         echo \"stub UPDATE rc=$?\"\n",
+         rc=0\n\
+         for i in {{1..20}}; do\n\
+           sqlite3 -cmd \".timeout 30000\" {db} \"UPDATE dispatch_locks \
+             SET last_status='ok', finished_at='2026-05-04T00:00:01Z', \
+                 attempts=attempts+1 \
+             WHERE store='tasks' AND display_id='$DISPLAY_ID' \
+               AND agent_name='auto-drive' AND finished_at IS NULL\" && {{ rc=0; break; }}\n\
+           rc=$?; echo \"stub LOCK rc=$rc attempt=$i\"; sleep 0.1\n\
+         done\n\
+         test $rc -eq 0 || exit $rc\n\
+         for i in {{1..20}}; do\n\
+           sqlite3 -cmd \".timeout 30000\" {db} \"UPDATE tasks SET status='in_review', \
+             wrap_log='[{{\\\"summary\\\":\\\"stub-drive ok\\\"}}]', \
+             updated_at='2026-05-04T00:00:01Z' WHERE display_id='$DISPLAY_ID'\" && {{ rc=0; break; }}\n\
+           rc=$?; echo \"stub UPDATE rc=$rc attempt=$i\"; sleep 0.1\n\
+         done\n\
+         test $rc -eq 0 || exit $rc\n\
+         echo \"stub done\"\n",
         db = db_path.display(),
         log = log.display()
     );
