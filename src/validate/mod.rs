@@ -1461,7 +1461,7 @@ fields:
             msg.contains("unknown cluster_key 'bogus-key'"),
             "error must name bogus-key: {msg}"
         );
-        for key in crate::handlers::cluster_keys::CURATED_CLUSTER_KEYS {
+        for key in crate::handlers::cluster_keys::curated_cluster_keys() {
             assert!(
                 msg.contains(key),
                 "error must list allowed key '{key}': {msg}"
@@ -1505,7 +1505,7 @@ fields:
             msg.contains("unknown cluster_key 'bogus-update-key'"),
             "error must name bogus-update-key: {msg}"
         );
-        for key in crate::handlers::cluster_keys::CURATED_CLUSTER_KEYS {
+        for key in crate::handlers::cluster_keys::curated_cluster_keys() {
             assert!(
                 msg.contains(key),
                 "error must list allowed key '{key}': {msg}"

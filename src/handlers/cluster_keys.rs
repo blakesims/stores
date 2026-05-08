@@ -13,21 +13,11 @@ type Bucket = (String, Vec<BucketRow>);
 // Curated registry (single source of truth)
 // ---------------------------------------------------------------------------
 
-/// The 5 curated cluster_key values. This const is the authoritative list:
-/// schema.yaml declares only the field's existence; DDL CHECK and validator
-/// allowed-list are both derived from this slice at compile time.
-pub const CURATED_CLUSTER_KEYS: &[&str] = &[
-    "deploy-blocked-merge-conflict",
-    "silent-zombie-watchdog",
-    "revise-loop-non-convergent",
-    "stale-base-er",
-    "gatekeeper-front-door-stuck",
-];
-
-/// Conservative regexes for backfill classification. Each tuple is (key, pattern).
-/// Patterns are case-insensitive and designed to be mutually exclusive on
-/// unambiguous inputs; ambiguous inputs (matching >1 pattern) return None.
-pub const CURATED_CLUSTER_KEY_PATTERNS: &[(&str, &str)] = &[
+/// Unified curated registry. Each entry is (key, conservative_backfill_regex).
+/// This is the single source of truth: DDL CHECK, write validation, and backfill
+/// classification are all derived from this slice. Adding an entry here
+/// automatically updates all three without any edit to schema.yaml.
+pub const CLUSTER_REGISTRY: &[(&str, &str)] = &[
     ("deploy-blocked-merge-conflict", r"(?i)\bmerge[- ]conflict\b"),
     ("silent-zombie-watchdog", r"(?i)\bsilent[- ]zombie\b"),
     ("revise-loop-non-convergent", r"(?i)\brevise[- ]loop\b"),
@@ -35,10 +25,17 @@ pub const CURATED_CLUSTER_KEY_PATTERNS: &[(&str, &str)] = &[
     ("gatekeeper-front-door-stuck", r"(?i)\bgatekeeper\b"),
 ];
 
+/// Returns the curated cluster key names, derived from `CLUSTER_REGISTRY`.
+/// Callers use this for DDL CHECK generation, write validation, and tests.
+pub fn curated_cluster_keys() -> &'static [&'static str] {
+    static KEYS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    KEYS.get_or_init(|| CLUSTER_REGISTRY.iter().map(|(k, _)| *k).collect())
+}
+
 /// Returns the SQL CHECK clause fragment for the cluster_key column.
 /// e.g. `CHECK (cluster_key IN ('deploy-blocked-merge-conflict', ...))`
 pub fn check_clause_sql() -> String {
-    let list = CURATED_CLUSTER_KEYS
+    let list = curated_cluster_keys()
         .iter()
         .map(|k| format!("'{k}'"))
         .collect::<Vec<_>>()
@@ -49,10 +46,10 @@ pub fn check_clause_sql() -> String {
 /// Validate that `v` is one of the curated registry keys.
 /// On error, returns the canonical error message including all allowed values.
 pub fn validate_value(v: &str) -> Result<(), String> {
-    if CURATED_CLUSTER_KEYS.contains(&v) {
+    if curated_cluster_keys().contains(&v) {
         Ok(())
     } else {
-        let allowed = CURATED_CLUSTER_KEYS.join(", ");
+        let allowed = curated_cluster_keys().join(", ");
         Err(format!(
             "unknown cluster_key '{v}'; allowed values: [{allowed}]"
         ))
@@ -63,7 +60,7 @@ pub fn validate_value(v: &str) -> Result<(), String> {
 fn compiled_patterns() -> &'static Vec<(&'static str, Regex)> {
     static CACHE: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
     CACHE.get_or_init(|| {
-        CURATED_CLUSTER_KEY_PATTERNS
+        CLUSTER_REGISTRY
             .iter()
             .map(|(key, pat)| (*key, Regex::new(pat).expect("valid cluster_key regex")))
             .collect()
@@ -310,7 +307,7 @@ mod tests {
 
     #[test]
     fn validate_value_accepts_all_registry_keys() {
-        for key in CURATED_CLUSTER_KEYS {
+        for key in curated_cluster_keys() {
             assert!(
                 validate_value(key).is_ok(),
                 "registry key '{key}' must be accepted by validate_value"
@@ -325,7 +322,7 @@ mod tests {
             err.contains("unknown cluster_key 'bogus-key'"),
             "error must mention bogus-key: {err}"
         );
-        for key in CURATED_CLUSTER_KEYS {
+        for key in curated_cluster_keys() {
             assert!(
                 err.contains(key),
                 "error must list allowed key '{key}': {err}"
@@ -369,7 +366,7 @@ mod tests {
         let schema = Schema::from_yaml(OBSERVATIONS_YAML).expect("parse observations schema");
         let ddl = ddl_for(&schema);
 
-        for key in CURATED_CLUSTER_KEYS {
+        for key in curated_cluster_keys() {
             // (a) DDL CHECK contains the key
             assert!(
                 ddl.contains(key),
@@ -384,7 +381,7 @@ mod tests {
 
         // (c) bogus key error message contains all 5 keys
         let err = validate_value("never-a-real-key-xyz").unwrap_err();
-        for key in CURATED_CLUSTER_KEYS {
+        for key in curated_cluster_keys() {
             assert!(
                 err.contains(key),
                 "error message must list all keys; missing '{key}': {err}"
@@ -633,7 +630,7 @@ mod tests {
     fn check_clause_sql_contains_all_keys() {
         let sql = check_clause_sql();
         assert!(sql.starts_with("CHECK (cluster_key IN ("), "format: {sql}");
-        for key in CURATED_CLUSTER_KEYS {
+        for key in curated_cluster_keys() {
             assert!(sql.contains(key), "check clause missing '{key}': {sql}");
         }
     }

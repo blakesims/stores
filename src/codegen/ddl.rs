@@ -571,8 +571,8 @@ pub fn expected_columns(schema: &Schema) -> Vec<ExpectedColumn> {
                     .to_string();
                     // T107: observations.cluster_key gets a registry-derived CHECK
                     // constraint so SQLite enforces the allowed-list at the DB level.
-                    // Rust (CURATED_CLUSTER_KEYS) is the single source of truth; the
-                    // CHECK clause is generated from that const, not from schema.yaml.
+                    // CLUSTER_REGISTRY in cluster_keys.rs is the single source of truth;
+                    // the CHECK clause is generated from that registry, not schema.yaml.
                     if schema.name == "observations" && field.name == "cluster_key" {
                         let check = crate::handlers::cluster_keys::check_clause_sql();
                         def.push_str(&format!(" {check}"));
@@ -1073,10 +1073,10 @@ fields:
     }
 
     /// T107: cluster_key CHECK constraint in DDL lists every entry in
-    /// CURATED_CLUSTER_KEYS exactly.
+    /// CLUSTER_REGISTRY exactly.
     #[test]
     fn cluster_key_ddl_check_constraint_lists_all_curated_keys() {
-        use crate::handlers::cluster_keys::CURATED_CLUSTER_KEYS;
+        use crate::handlers::cluster_keys::curated_cluster_keys;
         let yaml = include_str!("../../stores/observations/schema.yaml");
         let schema = Schema::from_yaml(yaml).expect("observations schema must parse");
         let cols = expected_columns(&schema);
@@ -1084,7 +1084,7 @@ fields:
             .iter()
             .find(|c| c.name == "cluster_key")
             .expect("cluster_key column present");
-        for key in CURATED_CLUSTER_KEYS {
+        for key in curated_cluster_keys() {
             assert!(
                 cluster_col.full_def.contains(key),
                 "cluster_key full_def must contain registry key '{key}': {}",

@@ -459,7 +459,7 @@ fn observations_cluster_key_check_missing(conn: &Connection) -> Result<bool> {
     let Some(create_sql) = sql else {
         return Ok(false);
     };
-    let first_key = crate::handlers::cluster_keys::CURATED_CLUSTER_KEYS[0];
+    let first_key = crate::handlers::cluster_keys::curated_cluster_keys()[0];
     Ok(!create_sql.contains(first_key))
 }
 
@@ -505,7 +505,7 @@ fn rebuild_observations_with_cluster_check_sql(
         .collect::<Vec<_>>()
         .join(", ");
     // Build IN list for out-of-registry check
-    let in_list = crate::handlers::cluster_keys::CURATED_CLUSTER_KEYS
+    let in_list = crate::handlers::cluster_keys::curated_cluster_keys()
         .iter()
         .map(|k| format!("'{k}'"))
         .collect::<Vec<_>>()
