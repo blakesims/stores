@@ -154,7 +154,12 @@ pub(crate) fn compute(
 
     // Build the render context and render the template.
     let ctx = build_context(schema, &entry);
-    let overlay = build_source_observation_overlay(conn, &entry)?;
+    let mut overlay = build_source_observation_overlay(conn, &entry)?;
+    // I022 repair-lane: merge external-review REVISE backpressure overlay so the
+    // CLI `brief` verb surfaces the same external-review findings as auto-drive.
+    for (k, v) in build_external_review_overlay(conn, &entry)? {
+        overlay.insert(k, v);
+    }
     let rendered = render_template_with_overlay(&template_text, &ctx, &overlay)?;
 
     Ok(BriefOutput {
@@ -219,6 +224,83 @@ pub(crate) fn build_source_observation_overlay(
     overlay.insert(
         "source_observations".to_string(),
         serde_json::Value::Array(observations),
+    );
+    Ok(overlay)
+}
+
+/// I022 repair-lane (Pi msg_31492ff7 shape A): surface the latest REVISE-verdict
+/// `external_reviews` row for this task as `external_review_backpressure` in the
+/// brief overlay, so respawned executor / code-reviewer briefs include the
+/// codex/external-review findings text. Without this overlay, the existing
+/// `cycles[].review` Revision Context section only carries in-cycle code-reviewer
+/// backpressure; external-review REVISE fires never reach the executor, which is
+/// the bug T107 cycle-2 (run 1506) demonstrated.
+///
+/// Returns null in the overlay when no REVISE-verdict ER exists for the task —
+/// the template `{{#if}}` handles absence cleanly.
+pub(crate) fn build_external_review_overlay(
+    conn: &Connection,
+    entry: &crate::validate::EntryMap,
+) -> Result<std::collections::HashMap<String, serde_json::Value>> {
+    let mut overlay = std::collections::HashMap::new();
+    let task_display_id = entry
+        .get("display_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if task_display_id.is_empty() {
+        overlay.insert(
+            "external_review_backpressure".to_string(),
+            serde_json::Value::Null,
+        );
+        return Ok(overlay);
+    }
+
+    let mut stmt = match conn.prepare(
+        "SELECT display_id, runner, verdict, attempt, head_sha, base_sha, findings, \
+                critical_count, major_count, minor_count \
+         FROM external_reviews \
+         WHERE task_id = ?1 AND verdict = 'REVISE' \
+         ORDER BY id DESC LIMIT 1",
+    ) {
+        Ok(s) => s,
+        Err(_) => {
+            overlay.insert(
+                "external_review_backpressure".to_string(),
+                serde_json::Value::Null,
+            );
+            return Ok(overlay);
+        }
+    };
+
+    let row = stmt.query_row(rusqlite::params![task_display_id], |r| {
+        let display_id: String = r.get(0)?;
+        let runner: Option<String> = r.get(1).ok();
+        let verdict: Option<String> = r.get(2).ok();
+        let attempt: Option<i64> = r.get(3).ok();
+        let head_sha: Option<String> = r.get(4).ok();
+        let base_sha: Option<String> = r.get(5).ok();
+        let findings: Option<String> = r.get(6).ok();
+        let critical_count: Option<i64> = r.get(7).ok();
+        let major_count: Option<i64> = r.get(8).ok();
+        let minor_count: Option<i64> = r.get(9).ok();
+        Ok(serde_json::json!({
+            "display_id": display_id,
+            "runner": runner.unwrap_or_default(),
+            "verdict": verdict.unwrap_or_default(),
+            "attempt": attempt.unwrap_or(0),
+            "head_sha": head_sha.unwrap_or_default(),
+            "base_sha": base_sha.unwrap_or_default(),
+            "findings": findings.unwrap_or_default(),
+            "critical_count": critical_count.unwrap_or(0),
+            "major_count": major_count.unwrap_or(0),
+            "minor_count": minor_count.unwrap_or(0),
+        }))
+    });
+
+    overlay.insert(
+        "external_review_backpressure".to_string(),
+        row.unwrap_or(serde_json::Value::Null),
     );
     Ok(overlay)
 }
@@ -1099,6 +1181,273 @@ fields:
         assert!(
             code_reviewer.contains("UNIQUE_REVISE_DETAILS"),
             "{code_reviewer}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // I022 repair-lane: external_review overlay surfaces REVISE-verdict findings
+    // (Pi msg_31492ff7 shape A). Tests verify (a) the overlay function returns
+    // null when no ER row exists, (b) returns the latest REVISE-verdict row when
+    // multiple ER rows exist, and (c) the rendered executor template includes the
+    // findings text in the External Review Backpressure section.
+    // ---------------------------------------------------------------------------
+
+    /// Helper: create the external_reviews table directly (mirrors the substrate
+    /// schema enough for the SELECT in build_external_review_overlay).
+    fn create_external_reviews_table(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS external_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_id TEXT UNIQUE NOT NULL,
+                status TEXT NOT NULL,
+                task_id TEXT,
+                attempt INTEGER,
+                runner TEXT,
+                head_sha TEXT,
+                base_sha TEXT,
+                verdict TEXT,
+                critical_count INTEGER,
+                major_count INTEGER,
+                minor_count INTEGER,
+                findings TEXT
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn entry_with_display_id(display_id: &str) -> crate::validate::EntryMap {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("display_id".to_string(), serde_json::json!(display_id));
+        m
+    }
+
+    #[test]
+    fn build_external_review_overlay_returns_null_when_no_er_row() {
+        let schema = four_role_schema();
+        let (_dir, conn) = open_db_with_schema(&schema);
+        create_external_reviews_table(&conn);
+
+        let entry = entry_with_display_id("T999");
+        let overlay = build_external_review_overlay(&conn, &entry).unwrap();
+        let v = overlay
+            .get("external_review_backpressure")
+            .expect("overlay key present");
+        assert!(v.is_null(), "expected null when no ER row, got {v}");
+    }
+
+    #[test]
+    fn build_external_review_overlay_returns_latest_revise_row() {
+        let schema = four_role_schema();
+        let (_dir, conn) = open_db_with_schema(&schema);
+        create_external_reviews_table(&conn);
+
+        // Insert older PASS row (must be ignored), then older REVISE, then newest REVISE.
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, status, task_id, attempt, runner, \
+             head_sha, base_sha, verdict, critical_count, major_count, minor_count, findings) \
+             VALUES ('ER001','closed','T107',1,'codex','aaa111','base000','PASS',0,0,0,'OLD_PASS')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, status, task_id, attempt, runner, \
+             head_sha, base_sha, verdict, critical_count, major_count, minor_count, findings) \
+             VALUES ('ER002','revise','T107',2,'codex','bbb222','base000','REVISE',0,1,0,'OLD_REVISE_TEXT')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, status, task_id, attempt, runner, \
+             head_sha, base_sha, verdict, critical_count, major_count, minor_count, findings) \
+             VALUES ('ER003','revise','T107',6,'codex','ccc333','base111','REVISE',0,1,0,\
+             'NEWEST_REVISE_FINDINGS_KEEP_CLUSTER_KEYS_IN_ONE_REGISTRY')",
+            [],
+        )
+        .unwrap();
+
+        let entry = entry_with_display_id("T107");
+        let overlay = build_external_review_overlay(&conn, &entry).unwrap();
+        let v = overlay.get("external_review_backpressure").unwrap();
+        assert_eq!(v["display_id"], serde_json::json!("ER003"));
+        assert_eq!(v["verdict"], serde_json::json!("REVISE"));
+        assert_eq!(v["attempt"], serde_json::json!(6));
+        assert_eq!(v["head_sha"], serde_json::json!("ccc333"));
+        assert_eq!(v["base_sha"], serde_json::json!("base111"));
+        assert_eq!(v["runner"], serde_json::json!("codex"));
+        assert_eq!(
+            v["findings"],
+            serde_json::json!("NEWEST_REVISE_FINDINGS_KEEP_CLUSTER_KEYS_IN_ONE_REGISTRY")
+        );
+        assert_eq!(v["major_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn executor_template_renders_external_review_findings_in_backpressure_section() {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+        use crate::render::render_template_with_overlay;
+
+        // Load the bundled tasks schema + executor template.
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .expect("tasks schema");
+        let schema = Schema::from_yaml(tasks_yaml).unwrap();
+
+        let executor_tpl = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .and_then(|(_, ts)| {
+                ts.iter()
+                    .find(|(p, _)| *p == "templates/executor-brief.md.tpl")
+                    .map(|(_, c)| *c)
+            })
+            .expect("executor template");
+
+        // Minimal fixture entry (cycle 1, no in-cycle code-review backpressure yet).
+        let entry: crate::validate::EntryMap = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("display_id".to_string(), serde_json::json!("T107"));
+            m.insert("status".to_string(), serde_json::json!("executing"));
+            m.insert("title".to_string(), serde_json::json!("Test Task"));
+            m.insert("slug".to_string(), serde_json::json!("test-task"));
+            m.insert("current_phase".to_string(), serde_json::json!(1));
+            m.insert("current_cycle".to_string(), serde_json::json!(1));
+            m.insert(
+                "contract".to_string(),
+                serde_json::json!({
+                    "done_when": "Feature ships",
+                    "scope_in": "in",
+                    "scope_out": "out",
+                }),
+            );
+            m.insert(
+                "plan".to_string(),
+                serde_json::json!({
+                    "phases": [
+                        {
+                            "name": "P1",
+                            "objective": "do thing",
+                            "tasks": ["t1"],
+                            "acceptance_criteria": ["ac1"],
+                        }
+                    ]
+                }),
+            );
+            m.insert("cycles".to_string(), serde_json::json!([]));
+            m
+        };
+
+        let ctx = build_context(&schema, &entry);
+
+        // Hand-build the overlay matching what build_external_review_overlay produces.
+        let mut overlay: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        overlay.insert(
+            "external_review_backpressure".to_string(),
+            serde_json::json!({
+                "display_id": "ER340",
+                "runner": "codex",
+                "verdict": "REVISE",
+                "attempt": 6,
+                "head_sha": "aa65090",
+                "base_sha": "ed33d8d",
+                "critical_count": 0,
+                "major_count": 1,
+                "minor_count": 0,
+                "findings": "[major] Keep cluster keys in one registry structure — cluster_keys.rs:27-33\n\nCURATED_CLUSTER_KEY_PATTERNS still repeats the same five cluster-key strings.",
+            }),
+        );
+
+        let rendered = render_template_with_overlay(executor_tpl, &ctx, &overlay)
+            .expect("executor render");
+
+        // Section header is present.
+        assert!(
+            rendered.contains("## External Review Backpressure"),
+            "missing External Review Backpressure section in: {rendered}"
+        );
+        // ER metadata visible.
+        assert!(rendered.contains("ER340"), "missing ER id: {rendered}");
+        assert!(rendered.contains("aa65090"), "missing head_sha: {rendered}");
+        assert!(rendered.contains("ed33d8d"), "missing base_sha: {rendered}");
+        assert!(rendered.contains("codex"), "missing runner: {rendered}");
+        // Findings text is present (the literal cluster_keys.rs:27-33 fragment).
+        assert!(
+            rendered.contains("cluster_keys.rs:27-33"),
+            "missing findings filename:line in: {rendered}"
+        );
+        assert!(
+            rendered.contains("CURATED_CLUSTER_KEY_PATTERNS"),
+            "missing findings body keyword in: {rendered}"
+        );
+    }
+
+    #[test]
+    fn executor_template_omits_external_review_section_when_overlay_null() {
+        use crate::cli::dynamic::{BUNDLED_STORE_SCHEMAS, BUNDLED_STORE_TEMPLATES};
+        use crate::render::render_template_with_overlay;
+
+        let tasks_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .map(|(_, y)| *y)
+            .expect("tasks schema");
+        let schema = Schema::from_yaml(tasks_yaml).unwrap();
+
+        let executor_tpl = BUNDLED_STORE_TEMPLATES
+            .iter()
+            .find(|(n, _)| *n == "tasks")
+            .and_then(|(_, ts)| {
+                ts.iter()
+                    .find(|(p, _)| *p == "templates/executor-brief.md.tpl")
+                    .map(|(_, c)| *c)
+            })
+            .expect("executor template");
+
+        let entry: crate::validate::EntryMap = {
+            let mut m = std::collections::BTreeMap::new();
+            m.insert("display_id".to_string(), serde_json::json!("T200"));
+            m.insert("status".to_string(), serde_json::json!("executing"));
+            m.insert("title".to_string(), serde_json::json!("No-ER Task"));
+            m.insert("slug".to_string(), serde_json::json!("no-er-task"));
+            m.insert("current_phase".to_string(), serde_json::json!(1));
+            m.insert("current_cycle".to_string(), serde_json::json!(1));
+            m.insert(
+                "contract".to_string(),
+                serde_json::json!({
+                    "done_when": "x",
+                    "scope_in": "y",
+                    "scope_out": "z",
+                }),
+            );
+            m.insert(
+                "plan".to_string(),
+                serde_json::json!({
+                    "phases": [{"name": "P", "objective": "o", "tasks": [], "acceptance_criteria": []}]
+                }),
+            );
+            m.insert("cycles".to_string(), serde_json::json!([]));
+            m
+        };
+
+        let ctx = build_context(&schema, &entry);
+
+        let mut overlay: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        overlay.insert(
+            "external_review_backpressure".to_string(),
+            serde_json::Value::Null,
+        );
+
+        let rendered = render_template_with_overlay(executor_tpl, &ctx, &overlay)
+            .expect("executor render");
+
+        assert!(
+            !rendered.contains("## External Review Backpressure"),
+            "section must NOT render when overlay is null: {rendered}"
         );
     }
 

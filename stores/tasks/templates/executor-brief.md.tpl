@@ -101,6 +101,22 @@ You are in revision cycle {{current_cycle}} for this phase. Address the prior re
 _No prior code-review backpressure for this phase._
 {{/if}}
 
+{{#if external_review_backpressure}}
+## External Review Backpressure
+
+You are being respawned because an **external review** (e.g. codex, NOT the in-cycle code reviewer) returned a REVISE verdict. The findings below are from the external reviewer and are distinct from any prior in-cycle code-review backpressure shown above. Address them directly; the in-cycle code reviewer can pass while the external reviewer still rejects.
+
+- **External Review:** `{{external_review_backpressure.display_id}}` (runner=`{{external_review_backpressure.runner}}`, attempt={{external_review_backpressure.attempt}})
+- **Verdict:** {{external_review_backpressure.verdict}}
+- **Head SHA:** `{{external_review_backpressure.head_sha}}`
+- **Base SHA:** `{{external_review_backpressure.base_sha}}`
+- **Counts:** {{external_review_backpressure.critical_count}} critical, {{external_review_backpressure.major_count}} major, {{external_review_backpressure.minor_count}} minor
+
+### External Review Findings
+
+{{external_review_backpressure.findings}}
+{{/if}}
+
 ## Critical Actions (Checklist)
 1. **READ** the entire phase above before starting
 2. **EXECUTE** tasks in order — do not skip or reorder

@@ -1220,6 +1220,11 @@ fn drive_loop_with_role_runner(
             // pure build_context path.
             let mut overlay =
                 crate::handlers::brief::build_source_observation_overlay(conn, &entry)?;
+            // I022 repair-lane: merge external-review REVISE backpressure overlay so
+            // respawned executor briefs surface codex/external-review findings.
+            for (k, v) in crate::handlers::brief::build_external_review_overlay(conn, &entry)? {
+                overlay.insert(k, v);
+            }
             if agent_role == "wrap" {
                 // Extract the first executor commit from cycles[] for fallback.
                 let first_commit = entry
