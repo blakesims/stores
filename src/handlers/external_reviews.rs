@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+use crate::flow::builtins::accept_merge;
+
 use crate::flow::config::{CodexCfg, ReviewCfg};
 use crate::runner::{Runner, RunnerOutput};
 
@@ -84,6 +86,28 @@ pub struct PriorExternalReview {
     pub findings: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalReviewGitPreflight {
+    pub workspace_path: PathBuf,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub rebase_performed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalReviewRebaseConflict {
+    pub base_sha: String,
+    pub head_sha: String,
+    pub conflict_files: Vec<String>,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalReviewGitPreparation {
+    Ready(ExternalReviewGitPreflight),
+    Conflict(ExternalReviewRebaseConflict),
+}
+
 #[derive(Debug, Clone)]
 pub struct ReviewInputBundle {
     pub task_id: String,
@@ -111,6 +135,82 @@ struct TaskRow {
     wrap_log: String,
     workspace_path: Option<String>,
     branch: Option<String>,
+}
+
+pub fn prepare_external_review_git(
+    conn: &Connection,
+    task_id: &str,
+) -> std::result::Result<ExternalReviewGitPreparation, ToolingError> {
+    let task = load_task_row(conn, task_id).map_err(|e| ToolingError::new(e.to_string()))?;
+    let workspace_path = task
+        .workspace_path
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| ToolingError::new("TOOLING_FAILURE: missing workspace_path"))?;
+
+    if let Some(branch) = task.branch.as_deref().filter(|s| !s.is_empty()) {
+        git_output(&workspace_path, &["checkout", branch]).map_err(|e| {
+            ToolingError::new(format!(
+                "TOOLING_FAILURE: cannot checkout task branch '{branch}': {e}"
+            ))
+        })?;
+    }
+
+    let current_main = resolve_sha(&workspace_path, "main", "base")?;
+    let subject_rev = task.branch.as_deref().filter(|s| !s.is_empty()).unwrap_or("HEAD");
+    let branch_base = git_output(&workspace_path, &["merge-base", subject_rev, "main"])
+        .map_err(|e| ToolingError::new(format!("TOOLING_FAILURE: cannot resolve merge-base: {e}")))?
+        .trim()
+        .to_string();
+    if branch_base == current_main {
+        let head_sha = resolve_sha(&workspace_path, "HEAD", "head")?;
+        return Ok(ExternalReviewGitPreparation::Ready(
+            ExternalReviewGitPreflight {
+                workspace_path,
+                base_sha: current_main,
+                head_sha,
+                rebase_performed: false,
+            },
+        ));
+    }
+
+    // Capture the task branch tip BEFORE rebasing so that if the rebase
+    // conflicts and is aborted, head_sha on the held row reflects the
+    // branch state, not the transient rebase-in-progress HEAD.
+    let task_branch_head_sha =
+        resolve_sha(&workspace_path, "HEAD", "head").unwrap_or_else(|_| String::new());
+
+    let rebase = Command::new("git")
+        .args(["rebase", "main"])
+        .current_dir(&workspace_path)
+        .output()
+        .map_err(|e| ToolingError::new(format!("TOOLING_FAILURE: cannot spawn git rebase: {e}")))?;
+    if !rebase.status.success() {
+        let conflict_files = accept_merge::list_conflict_files(&workspace_path);
+        let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
+        accept_merge::abort_rebase(&workspace_path);
+        // Use the pre-rebase head; after abort HEAD is restored to the branch
+        // tip, but resolving again introduces a TOCTOU window — use the
+        // value we captured before git touched it.
+        return Ok(ExternalReviewGitPreparation::Conflict(
+            ExternalReviewRebaseConflict {
+                base_sha: current_main,
+                head_sha: task_branch_head_sha,
+                conflict_files,
+                stderr,
+            },
+        ));
+    }
+
+    let head_sha = resolve_sha(&workspace_path, "HEAD", "head")?;
+    Ok(ExternalReviewGitPreparation::Ready(
+        ExternalReviewGitPreflight {
+            workspace_path,
+            base_sha: current_main,
+            head_sha,
+            rebase_performed: true,
+        },
+    ))
 }
 
 pub fn load_review_input_bundle(

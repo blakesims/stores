@@ -21,8 +21,8 @@ fields:
   - {name: runner, type: enum, enum_values: [codex, pi, claude-code], required: false, description: "Configured review runner."}
   - {name: model_id, type: text, required: false, description: "Runner model identifier when available."}
   - {name: model_metadata, type: json, required: false, description: "Runner/model metadata not captured by scalar fields."}
-  - {name: base_sha, type: text, required: false, description: "Review diff base SHA."}
-  - {name: head_sha, type: text, required: false, description: "Review diff head SHA."}
+  - {name: base_sha, type: text, required: false, description: "Review diff base SHA captured at runner spawn time, after any stale-branch rebase preflight."}
+  - {name: head_sha, type: text, required: false, description: "Review diff head SHA captured at runner spawn time, after any stale-branch rebase preflight."}
   - {name: verdict, type: enum, enum_values: [PASS, REVISE, TOOLING_FAILURE], required: false, description: "Typed external-review verdict."}
   - {name: critical_count, type: integer, required: false, description: "Critical finding count."}
   - {name: major_count, type: integer, required: false, description: "Major finding count."}
@@ -37,7 +37,10 @@ fields:
   - {name: wrap_log_ref, type: text, required: false, description: "Reference to reviewed wrap_log input."}
   - {name: diff_ref, type: text, required: false, description: "Reference to reviewed diff/base/head input."}
   - {name: prior_review_ref, type: text, required: false, description: "Reference to prior review context input."}
-  - {name: findings, type: list_record, required: false, description: "Structured findings emitted by the runner.", fields: [{name: severity, type: enum, enum_values: [critical, major, minor]}, {name: summary, type: text}, {name: detail, type: text}, {name: path, type: text}, {name: line, type: integer}]}
+  - {name: held_reason, type: text, required: false, description: "Framework tooling hold reason such as cap-held, runner/tooling failure text, or stale_base_requires_rebase."}
+  - {name: next_retry_at, type: timestamp, required: false, description: "Retry eligibility for retryable tooling_held rows; stale_base_requires_rebase holds are not auto-retried."}
+  - {name: attempts, type: integer, required: false, description: "Number of daemon attempts that claimed this external review row."}
+  - {name: findings, type: list_record, required: false, description: "Structured findings emitted by the runner or tooling hold diagnostics.", fields: [{name: severity, type: enum, enum_values: [critical, major, minor]}, {name: summary, type: text}, {name: detail, type: text}, {name: path, type: text}, {name: line, type: integer}]}
 
 workflow:
   render_template: "templates/main.md.tpl"
