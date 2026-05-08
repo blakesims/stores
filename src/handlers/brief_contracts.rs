@@ -189,6 +189,20 @@ pub(crate) fn has_external_revise(overlay: &HashMap<String, Value>) -> bool {
     )
 }
 
+/// Returns the longest byte prefix of `s` that is ≤ `max_bytes` long and ends
+/// at a valid UTF-8 character boundary.  Unlike `&s[..max_bytes]`, this never
+/// panics when multi-byte characters (e.g. em-dashes) span the byte boundary.
+fn utf8_safe_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // ---------------------------------------------------------------------------
 // Contract 1 — PLANNER_REVISION_MUST_INCLUDE_REJECTED_PLAN_AND_REVIEWS
 // ---------------------------------------------------------------------------
@@ -466,11 +480,7 @@ impl BriefContract for ExecutorExternalReviseMustIncludeExternalReviewBackpressu
         }
 
         let findings = er.get("findings").and_then(|v| v.as_str()).unwrap_or("");
-        let findings_prefix = if findings.len() >= 32 {
-            &findings[..32]
-        } else {
-            findings
-        };
+        let findings_prefix = utf8_safe_prefix(findings, 32);
         if !findings_prefix.is_empty() && !rendered.contains(findings_prefix) {
             missing.push("findings text (first 32 chars)".to_string());
         }
@@ -641,6 +651,13 @@ impl BriefContract for ProvenanceLabelsMustDistinguishInternalVsExternal {
                 if let (Some(int_pos), Some(ext_pos)) =
                     (rendered.find(INTERNAL_HEADER), rendered.find(EXTERNAL_HEADER))
                 {
+                    if int_pos > ext_pos {
+                        return CheckResult::fail(
+                            id,
+                            &args,
+                            json!({"message": "sections out of order: external header appears before internal header"}),
+                        );
+                    }
                     let internal_section = &rendered[int_pos..ext_pos];
                     if internal_section.contains(findings_prefix) {
                         return CheckResult::fail(
@@ -1563,7 +1580,7 @@ mod tests {
         // Hand-construct a malformed rendered string where external findings appear
         // in the internal section (before the external header).
         let external_findings = "[major] EXTERNAL_FINDING_X — file.rs:10\n\nMore detail.";
-        let findings_prefix = &external_findings[..32];
+        let findings_prefix = utf8_safe_prefix(external_findings, 32);
 
         let malformed = format!(
             "# Brief\n\n\
