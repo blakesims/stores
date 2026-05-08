@@ -1353,6 +1353,7 @@ fn drive_loop_with_role_runner(
                     agent_role,
                     LAUNCH_ERROR_EXIT_CODE,
                     &synthetic_telemetry,
+                    Some(&brief_markdown),
                 )
                 .context("spawn-fail synthetic agent_runs insert")?;
                 // Now transition the task to blocked (same path as non-zero exit).
@@ -1387,6 +1388,7 @@ fn drive_loop_with_role_runner(
             agent_role,
             run_out.exit_code,
             &run_out.telemetry,
+            Some(&brief_markdown),
         )?;
         let spawn_elapsed = spawn_start.elapsed();
         eprintln!(

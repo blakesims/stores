@@ -103,6 +103,7 @@ pub(crate) fn insert_agent_run(
     role: &str,
     exit_code: i32,
     telemetry: &AgentRunTelemetry,
+    brief_text: Option<&str>,
 ) -> Result<()> {
     // All required telemetry fields must be supplied by the caller. The
     // `legacy_unknown` sentinel is migration/backfill-only — callers doing
@@ -154,8 +155,8 @@ pub(crate) fn insert_agent_run(
     );
     conn.execute(
         "INSERT INTO agent_runs \
-         (display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, tokens_in, tokens_out, prompt_cache_hits, transcript_path) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         (display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, tokens_in, tokens_out, prompt_cache_hits, transcript_path, brief_text) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             display_id,
             phase,
@@ -170,6 +171,7 @@ pub(crate) fn insert_agent_run(
             telemetry.tokens_out,
             telemetry.prompt_cache_hits,
             transcript_path,
+            brief_text,
         ],
     )
     .context("insert agent_runs")?;
@@ -353,7 +355,7 @@ fields:
             transcript_path: Some("/tmp/run.jsonl".to_string()),
             stderr_log_path: None,
         };
-        insert_agent_run(&conn, "T001", 1, 2, "executor", 7, &telemetry).unwrap();
+        insert_agent_run(&conn, "T001", 1, 2, "executor", 7, &telemetry, None).unwrap();
         let row: (String, i64, i64, String, String, i64, i64, i64, String) = conn
             .query_row(
                 "SELECT display_id, phase, cycle, role, harness_id, tokens_in, tokens_out, prompt_cache_hits, transcript_path FROM agent_runs",

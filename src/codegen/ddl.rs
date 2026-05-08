@@ -131,6 +131,9 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
             FrameworkColumn { name: "tokens_out", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "tokens_out INTEGER", additive: false },
             FrameworkColumn { name: "prompt_cache_hits", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "prompt_cache_hits INTEGER", additive: false },
             FrameworkColumn { name: "transcript_path", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "transcript_path TEXT NOT NULL", additive: false },
+            // L503-A: brief_text persists the rendered brief at dispatch time for observability.
+            // Nullable so existing rows (and pre-L503 DBs) retain NULL without errors.
+            FrameworkColumn { name: "brief_text", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "brief_text TEXT", additive: true },
         ],
     },
     FrameworkTable {
@@ -351,7 +354,8 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     tokens_in INTEGER,
     tokens_out INTEGER,
     prompt_cache_hits INTEGER,
-    transcript_path TEXT NOT NULL
+    transcript_path TEXT NOT NULL,
+    brief_text TEXT
 );
 CREATE TABLE IF NOT EXISTS engine_runner_heartbeats (
     iteration INTEGER NOT NULL,
