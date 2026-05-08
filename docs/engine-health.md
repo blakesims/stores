@@ -2,19 +2,20 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-07 (PM priority realignment) — The engine is now productive across a three-role operating model (substrate-agent engine controller, Pi architect, reviewer-runner external reviewer), but too much of its operating system still lives in chat. Runtime trust is largely closed or closing (T076 private install path PASS; T081 provenance PASS; T077 architecture_reviews PASS; **T083/L188 external review lane PASS — shipped 8f6ce35**). The live priority is now structural throughput: drain remaining T084 (env-id trio) + T085 (watch cockpit), then priority/file-overlap scheduling, then metrics over runner/review outcomes. Sidecar (L088/L089/L090/L091) deprioritized — closed as resolved-by L192. Keep Gatekeeper/Router (classification), Scheduler (next compatible executable work), Architect (shape), and Reviewer (implementation correctness) separate; do not merge them into one mushy triage brain.
+**Last updated:** 2026-05-08 (post-overnight cascade cleanup) — Operator-trust + actionability layers are now substantially closed. The 3-agent overnight session shipped 27 tasks; the daemon now runs on the **T076 private install path** (`~/.local/share/stores/bin/stores`, confirmed live), with the **T079 engine-runner monitor** as its core loop and the **T083 substrate-native external review lane** in production. **T086/L193** (the ER reconciler — meta-substrate fix) was hand-merged at `8bd21b6` and closed-out-of-band today; that close was the missing step that triggered last night's cascade where T084/T085/T088/T093/T095/T096 inherited rebase debt and the runner crash-looped (amplified by codex/pi rate limits — see Layer 1's open gap). All six are now rebased clean; daemon currently OFF pending Phase-6 restart. The live priority is no longer "can the engine choose, review, integrate work?" but **priority + file-overlap scheduling** (so concurrent work doesn't create rebase debt by itself) and **metrics over runner/review outcomes**.
 
 ## The picture in one sentence
 
-**The engine can now do real work, but throughput is capped by chat-shaped review/triage and crude concurrency.** The next geodesic is actionability visibility (T079), substrate-native final review (T083/L188), priority + file-overlap scheduling, then metrics that let runner/reviewer choices be made from evidence instead of vibes.
+**The engine can now choose, review, and integrate work without chat-shaped glue, but raising concurrency without priority + file-overlap routing creates rebase debt faster than throughput.** The next geodesic is the priority+file-overlap scheduler, then metrics that turn runner/reviewer choice into evidence, then a rate-limit-aware retry that distinguishes transient flake from quota-exhausted.
 
 ## Read-this-first priority ladder
 
-1. **Finish T084 / L082 (env-id trio) + T085 / L192 (`stores watch` cockpit).** Both in flight; T084 in r3 codex-revise (atomicity-claim closure), T085 daemon-driving cycle 1.
-2. **Run an observation backlog hygiene sweep.** The 46 no-contract observations are not all real work; classify/close duplicates, addressed rows, stale rows, and draft only the real contracts.
-3. **Build priority + file-overlap scheduler.** Pick the highest-priority compatible row and hold conflicts with explicit reasons; do not raise WIP by blind active-count.
-4. **Add runner/review metrics.** Use T070/T072/T083 data to compare pi vs claude and codex/pi/claude review outcomes by role/tier/duration/cost.
-5. **Then expand adapters/domains.** CodeRabbit, richer conflict domains, L006 observation runner asymmetry, and L035 typed inter-agent refs come after the review/watch/scheduler substrate is legible.
+1. **Restart the daemon + resume rebased rows (T084/T085/T088/T093/T095/T096).** All six were caught in the T086 meta-merge cascade; locally rebased clean today. Daemon is OFF; Phase 6 of the overnight cleanup plan covers restart + resume. Watch one tick to confirm the watchdog typed-closes the 6 dangling `auto-drive` locks (epoch shift triggers T040 + T050 stale-detection).
+2. **File the rate-limit-aware retry gap.** T085's 93 cycles + ~50 `P5: resubmit verified watch cockpit fixtures` commits are the smoking gun: T041's retry-on-failure rescheduler doesn't distinguish transient flake from rate-limit-exhausted. T029/L071 was supposed to type this case as `blocked:rate_limit` but `runner_crash exit_code=3` is leaking through. Tier T2.
+3. **Run an observation backlog hygiene sweep.** ~354 open observations; the gatekeeper Router holds them as `needs_human` until ratified. Classify/close duplicates (L465–L479 are 15 dupe `deploy-blocked merge conflict` entries from the cascade), addressed rows, stale rows, and draft only the real contracts. Cascade-dedup follow-up should be filed alongside.
+4. **Build priority + file-overlap scheduler.** Pick the highest-priority compatible row and hold conflicts with explicit reasons; do not raise WIP by blind active-count. The cascade is the cost evidence.
+5. **Add runner/review metrics.** Use T070/T071/T072/T083 data to compare pi vs claude and codex/pi/claude review outcomes by role/tier/duration/cost.
+6. **Then expand adapters/domains.** CodeRabbit, richer conflict domains, L006 observation runner asymmetry, and L035 typed inter-agent refs come after the scheduler + metrics substrate is legible.
 
 ## Status legend
 
@@ -52,8 +53,9 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L141 | ✅ T049/T050 | auto-drive `ok`-on-dispatch concern translated into L134 typed postcondition semantics; open-lock invariant superseded by `drive_pid_recorded_or_terminal` + watchdog on task pid |
 | L149 | ⚪ T2 | daemon/on-disk binary drift after cargo-install kills fresh auto-drive subprocesses; restart workaround; folds into L011 + L134 observability |
 | L150 | ⚪ T2 | halt/deploy-blocked subscriber mislabels blocked drive failures as deploy_blocked merge-conflict observations; another symptom of untyped terminal state / event postconditions, folded into L134/L135 |
-| L068 | ⚪ — | cross-project daemon SIGTERM (other-repo `pkill 'stores agents run'` kills mine) |
-| GAP | — | per-project daemon PID file + `stores agents status / stop` verbs |
+| L068 | ✅ T080 | cross-project daemon SIGTERM scoped per-project (cross-listed in Layer 8) |
+| GAP-stop-foreground | — | `stores agents stop` requires `--detach`-mode pidfile; foreground daemons can't be stopped via the verb. Hit during 2026-05-08 cleanup. |
+| GAP-log-fd-drift | — | `--log-file` flag doesn't redirect fd 1/2 when the daemon runs without `--detach`; configured log file goes silent while activity flows to wherever the launching shell pointed stdout. Hit during 2026-05-08 cleanup. |
 
 ### Layer 2 — State / idempotency
 
@@ -65,8 +67,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L130 | ✅ direct | resume routes blocked T2/T3 with plan=null to planning instead of ready (avoids "Phase 1 of 0" deadlock); fixed direct on main during T038 push |
 | L132 | ✅ T057 | schema validator refuses unguarded transition shadowing a guarded one (silent override risk) |
 | L133 | ✅ T054 | T1 execution shape normalized: synthesize a contract-derived single phase during skip-plan so plan is canonical rather than null/special-cased |
-| L011 | ⚪ T2 | rows don't record `stores` binary version |
-| L053 | ⚪ — | tier-A actor check bypassable via `--invoker human` from `$CLAUDECODE`-detected processes |
+| L011 | ✅ T069 | rows now record the `stores` binary version that wrote them; audit-gap closed |
+| L053 | ✅ T081 | tier-A actor check no longer bypassable via `--invoker human` from `$CLAUDECODE`-detected processes (cross-listed from Layer 6) |
 
 ### Layer 3 — Drive economics
 
@@ -97,11 +99,12 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L144 | ✅ T051 | framework-DDL drift detection/audit shipped; existing DBs learn newer SUBSTRATE_DDL columns without manual ALTER |
 | L145 | ✅ T061 | retry-deploy verb shipped: deploy_blocked → accepted re-fires accept-merge → cargo-install → schema-migrate without re-cycling work; accept_merge peer-detection guard preserves L045 solo-recovery; cargo_install cwd fallback validates stores Cargo crate (fails LOUDLY otherwise) |
 | L149 | ✅ T062 | daemon stale-exe detection + fail-loud first ship: records dev/ino at startup, tight pre-spawn guard re-checks immediately before each `run_dispatch` for `builtin:auto-drive` (TOCTOU-tight), centralized one-shot fail-loud (`STALE_HALTED` exits `poll_once_with_guard` with `Err(STALE_DAEMON_MESSAGE)`, `run_daemon` bails). Self-reexec deferred to T066/L176. Operator note in `docs/CLAUDE.md`. |
-| L150 | ⚪ T2 | halt/deploy-blocked subscriber files merge-conflict-shaped observations for rows that are merely `blocked` by drive failure (e.g. T034 silent-zombie / Pi-smoke failures). Needs typed event/terminal reason before templating operator-facing halt observations. |
+| L150 | ⚪ T2 | halt/deploy-blocked subscriber files merge-conflict-shaped observations for rows that are merely `blocked` by drive failure (e.g. T034 silent-zombie / Pi-smoke failures). T089/L196 narrowed the watchdog's terminal-state filter; the dedup-on-(task_id, conflict_signature) gap remains and was hit hard overnight (L465–L479 = 15 dupe rows from the T086 cascade). Needs typed event/terminal reason before templating operator-facing halt observations. |
 | L176 | ✅ T066 | self-reexec follow-up to L149: preserve daemon process by execing fresh binary after stale detection. Candidate-binary validation now lands via T075/L182 — the corrupted-stub-exec failure mode is closed. |
 | L181 | ⚪ T2 | `stores` CLI fail-silent: corrupted/stub binary returns exit 0 with empty stdout/stderr, violating substrate trust. |
 | L182 | ✅ T075 (D) | candidate-binary validation before self-reexec shipped (T075). The (C) half — private install path — split out as **L184** (open, ratifiable). Session SOP forbids subagent cargo-install. (D) closes the recurring stub-corruption-tricks-self-reexec class; (C)/L184 closes the corruption surface itself. |
-| L184 | ⚪ T2 | Private substrate install path: move daemon's runtime-owned binary off `~/.cargo/bin/stores` to a stores-specific location so subagent / operator `cargo install` cannot corrupt the daemon's launch path. (C) follow-up to L182. |
+| L184 | ✅ T076 | Private substrate install path shipped: daemon's runtime-owned binary moved off `~/.cargo/bin/stores` to `~/.local/share/stores/bin/stores`. Confirmed live via `/proc/$(pidof stores)/exe`. Closes the corruption surface from L182(C); subagent / operator `cargo install` no longer touches the daemon's launch path. |
+| GAP-rate-limit | ⚪ T2 | T041 retry-on-failure doesn't distinguish transient flake from rate-limit-exhausted. T029/L071 was supposed to type runner-exit-on-rate-limit as `blocked:rate_limit`, but `runner_crash exit_code=3` is leaking through. Surfaced overnight via T085's 93-cycle thrash; needs to be filed as an observation. |
 | GAP | — | acceptance-time precheck for "task touches files with uncommitted main-side changes → accept-merge will fail" |
 
 ### Layer 5 — Discovery / observability
@@ -124,18 +127,18 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 |---|---|---|
 | L013 | ✅ L185/T078 | Superseded by host-bound plaintext `~/.config/stores/approve.token` (0600) plus `approve.token.hash`; `auth init` no longer discovers SOPS/age keys. |
 | L014 | ⚪ T2 | `auth init` UX gaps (opaque binary-format error; 7-line shell ritual) |
-| L015 | ⚪ T1 | `auth show` missing `--identity` flag (asymmetric with `init`) |
+| L015 | ✅ T074 | `auth show --identity` flag shipped (now symmetric with `init`) |
 | L044 | ✅ L185/T078 | Superseded by removing the SOPS/age identity path and the L015 symlink workaround; `auth show` now reads plaintext directly. |
-| L053 | ⚪ — | tier-A actor check bypass (cross-listed from Layer 2) |
+| L053 | ✅ T081 | tier-A actor check bypass closed (cross-listed from Layer 2) |
 
 ### Layer 7 — Schema / contract substrate
 
 | obs | state | what hurts |
 |---|---|---|
-| L005 | ⚪ T1 | list-typed fields accept only single-string at update (no JSON-array input) |
+| L005 | ✅ T073 | list-typed fields on observations update now accept JSON-array input |
 | L035 | ⚪ T3 | no schema-enforced inter-agent context refs (typed agents) |
 | L019 | ⚪ T3 | no DockerRunner / standardized agent sandboxing |
-| I001 | ⚪ T1 | `required_when` parser only supports `field == literal`; needs `IN [...]` membership or `expr OR expr` composition. Surfaced from T053 codex-revise FIX 5 (filed via `stores intake add` — first real-world use of the new gatekeeper Router seam). |
+| I001 | ✅ T068 | `required_when` parser now supports `IN [...]` membership and `expr OR expr` composition (the FIX 5 surface from T053 codex-revise — first real-world use of the gatekeeper Router seam) |
 
 ### Layer 8 — Orchestration / triage discipline
 *Investigator pull-shape shipped (T038/L043) — orchestrator now has a substrate primitive for "spawn a fresh sandboxed dive on this question". Auto-resolve subscriber shipped (T037/L049). The auto-investigator-fires-on-unblock-of-open-obs primitive is still the #1 strategic weakness; ~30 open obs sit without ratified contracts and the engine can't draft them itself yet.*
@@ -155,37 +158,75 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L172 | ⚪ T3 | **deferred** post-T053: fast-track auto-execution + L135 Check primitive (P4 of T045 design); deterministic check record audit shape |
 | L173 | ⚪ T3 | **deferred** post-T053: curated cluster_key registry + watch/observability dashboards (P5 of T045 design) |
 | L072 | ⚪ — | code-reviewer REPLAN gate dead-ends as `blocked` instead of routing back to planning |
-| L023 | ⚪ T2 | observations missing `next-id` verb + JSON envelope inconsistency |
+| L023 | ✅ T092 | observations `next-id` verb + JSON envelope shape shipped |
 | L124 | ✅ T043 | `tasks abandon <id> --reason <text>` verb retires stale/superseded/duplicate/misadd rows to terminal `abandoned` without burning a drive cycle; tier-A token-mediated; idempotent; watch/TUI bucket: terminal-history (not in-flight). Allowed from 9 non-terminal states incl. complete; refused from 5 successful terminals (accepted/rejected/cargo_installed/schema_migrated/closed_out_of_band). |
 | L002 | ✅ T043 | `tasks abandon` verb provides non-destructive admin retirement (closed transitively via L124/T043 — abandoned terminal preserves row + audit reason, no .stores wipe needed) |
 | L003 | ⚪ T2 | observations list output unscannable for >2 rows |
 | L006 | ⚪ T2 | observations runner asymmetry (no drive cycle for obs) |
 | L021 | ✅ T058 | render template pulls `wrap_log` into Completion section |
 | L034 | ⚪ T1 | wrap misattributes main-ahead commits as 'rides on this branch' |
-| L186 | 🟡 T079 | **engine-runner actionability monitor (in flight)** — daemon-side loop that scans substrate-visible rows, writes a heartbeat per iteration, redispatches orphaned existing autonomous edges (e.g. tasks with `next_agent` set + dead drive_pid), and structurally records held reasons. Pi-blessed phase-1 narrow shape: visibility + redispatch only, no new policy semantics for gatekeeper/investigator/reviewer-runner/architecture_reviews; U-moments preserved. Closes the "engine stalls when ec/ec-on-main is silent" pattern Pi diagnosed at this morning's wind-down. |
+| L186 | ✅ T079 | engine-runner actionability monitor LIVE: daemon-side loop scans substrate-visible rows, writes a heartbeat per iteration, redispatches orphaned autonomous edges, and structurally records held reasons. Currently visible in `/tmp/daemon2.log` ticking `[engine-runner] iter=N saw=tasks:M intake:K obs:O actionable=A held=H dispatched=D`. Closes the "engine stalls when ec/ec-on-main is silent" pattern. |
+| L068 | ✅ T080 | cross-project daemon SIGTERM no longer blanket-kills via `pkill 'stores agents run'` (T080 added per-project scoping; cross-listed from Layer 1's GAP) |
+| L151 | ✅ T065 | auto-investigator subscriber shipped: fires investigator on `open → needs_investigation` automatically (was the GAP at the bottom of this layer; the substrate can now drain its own input queue) |
+| L188 | ✅ T083 | substrate-native external review lane shipped (cross-listed from Layer 5) |
+| L193 | ✅ T086 | external_reviews lane reconciler shipped: T2/T3 in_review tasks reconciled state-driven, not just verdict-driven; in-TX cap=running with BEGIN IMMEDIATE serialization; typed `DispatchOutcome::{Dispatched, CapHeld, RaceLost}`. Hand-merged at `8bd21b6` (chicken-and-egg meta fix) and closed-out-of-band 2026-05-08 — the missed close-out triggered the overnight cascade across T084/T085/T088/T093/T095/T096. |
+| L194 | ✅ T087 | `topology_dot_snapshot::ac2_4_dot_snapshot_matches` no longer flakes on color/fontcolor DOT ordering |
+| L196 | ✅ T089 | auto-drive-watchdog no longer spams `mark_drive_failed` on terminal tasks (T034 abandoned, T050 closed_out_of_band, T053 schema_migrated) |
+| L079 | ✅ T090 | auto-scaffold builtin captures shim stderr; operator decisions (e.g. seed-decision rationale) no longer silently dropped |
+| L041 | ✅ T091 | topology `--format auto` Z1 tasks line within 120-col contract |
+| L197 | ✅ T094 | T086 Layer 2 elapsed retry shipped: rows stuck after first failure now retry on elapsed-tooling-held |
+| L199 | ✅ T097 | external_review verdict parser tolerates codex prose (no longer requires leading PASS/REVISE/TOOLING_FAILURE token) |
+| L077 | ✅ T082 | substrate persistence for high-leverage derivation tokens: `intent_contract.hardened_*` shipped |
 | I002 | ⚪ — | **code-reviewer / codex grepping `.sqlite` raw bytes treats stale page data as live row state** — burns review cycles on false-positive transitions (T078 c1-c3 burn). Filed via intake `I002`; doctrine fix pending: SOP edit + reviewer validator forbidding raw-byte inspection of sqlite files; substitute `sqlite3 SELECT` or substrate CLI verbs. |
-| GAP | — | **auto-investigator subscriber** — fires investigator on `open → needs_investigation` automatically; partial machinery exists (L043 investigator agent) but no subscriber wires it. Engine still can't drain its own input queue. |
+| GAP-cascade-dedup | — | Subscriber should dedup `deploy-blocked: merge conflict` observations on `(task_id, conflict_signature)` to avoid the L465–L479 dupe storm seen during the 2026-05-08 T086 cascade (one obs per tick × 6 affected branches × hours = 15+ duplicate rows). Tier T1. |
 
 ## Highest-leverage next picks
 
-Operator-trust layer is largely closed or closing (T076/L184 PASS; T077/L171 PASS; T081/L053 PASS). The remaining bottleneck is no longer "can the daemon run work?" but "can the engine choose, review, and integrate work without chat-shaped glue?"
+Operator-trust + actionability layers are now substantially closed: T076/L184 ✅, T077/L171 ✅, T078/L185 ✅, T079/L186 ✅, T080/L068 ✅, T081/L053 ✅, T082/L077 ✅, T083/L188 ✅, T086/L193 ✅ (closed-out-of-band). The bottleneck is no longer "can the engine choose, review, integrate work?" — it's **"how does the engine raise concurrency without making rebase debt faster than throughput?"** and **"how does the engine pick a runner / reviewer based on evidence rather than vibes?"**.
 
-1. **Drain/merge current PASS or near-PASS work** — reduce integration pressure before widening further. Current PM pile includes T076/L184, T077/L171, T081/L053, T082/L077, plus in-flight T079/T080/T083. More WIP before review/merge drains creates rebase churn, not throughput.
-2. **T079 / L186 — Engine-runner actionability monitor** — heartbeat + held reasons + orphan/autonomous redispatch for existing autonomous edges. Narrow phase-1 only: visibility/redispatch, no new policy semantics, no U-moment automation.
-3. **T083 / L188 — Substrate-native external review lane** — typed post-wrap external review records for T2/T3; preserve current codex review behavior while allowing codex/pi/claude-code review runners; emit typed PASS/REVISE/TOOLING_FAILURE; enforce review lane caps/liveness; block T2/T3 U3 accept until required external review PASS exists. Metrics-capable data is in scope; metrics reports and CodeRabbit adapter are follow-ups.
-4. **Priority + file-overlap scheduler (GAP / file next)** — choose the highest-priority compatible row, not just the oldest or next active slot. Phase 1 should use expected/actual touched-file overlap plus current priority fields (`priority`, `priority_rank`, `scheduled_for`) and write held reasons like `held: overlaps active T083 on src/cli/dynamic.rs`. Conflict domains can come later if file-only routing misses semantic conflicts.
-5. **Metrics over runner/review outcomes** — once T083 stores typed review records, report pi-vs-claude planner/executor/reviewer effectiveness, codex/pi/claude review PASS/REVISE/TOOLING_FAILURE rates, duration, and cost. This is runner-selection feedback, not vanity analytics.
+The 2026-05-08 cascade is the cost evidence: the T086 close-out-of-band step was missed → six in-flight branches inherited the meta-merge conflict → runner crashed on stale base → T041 retried 27/35/50/55/93 times → codex/pi rate-limit further amplified the loop → 15+ dupe `deploy-blocked merge conflict` observations filed before anyone noticed.
+
+1. **Priority + file-overlap scheduler (GAP / file next)** — the cascade above is exactly what this prevents. Choose the highest-priority compatible row, not just the next active slot. Phase 1 uses expected/actual touched-file overlap plus current priority fields (`priority`, `priority_rank`, `scheduled_for`) and writes held reasons like `held: overlaps active TXXX on src/flow/external_review.rs`. Conflict domains (semantic, schema, doctrine) can come later.
+2. **Rate-limit-aware retry (`GAP-rate-limit` filed in Layer 1)** — T041's retry-on-failure is a pure backoff; T029/L071 was supposed to type the rate-limit case as `blocked:rate_limit` but `runner_crash exit_code=3` is leaking through. The 93-cycle T085 thrash is the smoking gun. Tier T2.
+3. **Cascade-dedup subscriber (`GAP-cascade-dedup` filed in Layer 8)** — when a substrate-changing task merges into main, every open branch can re-fire `deploy-blocked merge conflict` per tick. Dedup on `(task_id, conflict_signature)`. Tier T1.
+4. **Metrics over runner/review outcomes** — T070/T071/T072/T083 store typed records; report pi-vs-claude planner/executor/reviewer effectiveness, codex/pi/claude review PASS/REVISE/TOOLING_FAILURE rates, duration, and cost. Runner-selection feedback, not vanity analytics.
+5. **Observation backlog hygiene sweep** — ~354 open observations; many are stale, addressed, or duplicates (the L465+ cascade rows alone). Classify/close before drafting more contracts.
 6. **Gatekeeper/Router autonomy follow-through** — T053/L142 classifies intake; it should not become the scheduler. Keep roles separate: Gatekeeper classifies new input, Scheduler chooses next compatible executable work, Architect governs coherence, Reviewer checks implementation.
 7. **I002 — sqlite-raw-byte review false-positive doctrine fix** — forbid `grep`/`strings` against `.sqlite` files as evidence of live substrate state; use `sqlite3 SELECT` or substrate CLI verbs.
-8. **L172/L173 / CodeRabbit / richer conflict domains** — follow after the typed review lane and scheduler prove the shape.
+8. **L172/L173 / CodeRabbit / richer conflict domains** — follow after the scheduler + metrics prove the shape.
 
-Current picture: the engine's next throughput gains come from making actionability, final review, and scheduling substrate-visible. Raising the active-task cap without priority + file-overlap routing will mostly create rebase debt.
+Current picture: the engine can do real work; the next throughput gains come from making concurrency safe (file-overlap scheduler), making retry honest (rate-limit awareness), and making runner choice evidence-driven (metrics).
 
 
 ## Recently shipped
 
 | date | task | obs | what changed |
 |---|---|---|---|
+| 2026-05-08 | direct | L193 | T086 closed-out-of-band with merge SHA `8bd21b6` after manual main-merge ceremony. Closure of the missed step that triggered the overnight cascade; substrate row state now matches the on-main reality. |
+| 2026-05-07/08 | T097 | L199 | external_review verdict parser tolerates codex prose: no longer requires leading PASS/REVISE/TOOLING_FAILURE token. |
+| 2026-05-07/08 | T094 | L197 | T086 Layer 2 elapsed retry: rows stuck in tooling-held after first failure now retry on elapsed-tooling-held. |
+| 2026-05-07/08 | T092 | L023 | observations `next-id` verb shipped (CLI symmetry with tasks); `list --json` envelope shape consistent. |
+| 2026-05-07/08 | T091 | L041 | topology `--format auto` Z1 tasks line within 120-col contract. |
+| 2026-05-07/08 | T090 | L079 | auto-scaffold builtin captures shim stderr; operator decisions (e.g. seed-decision rationale) no longer silently dropped. |
+| 2026-05-07/08 | T089 | L196 | auto-drive-watchdog filters terminal task states (T034 abandoned, T050 closed_out_of_band, T053 schema_migrated) from `mark_drive_failed` spam. |
+| 2026-05-07/08 | T087 | L194 | `topology_dot_snapshot::ac2_4_dot_snapshot_matches` no longer flakes on color/fontcolor DOT ordering. |
+| 2026-05-07/08 | T086 | L193 | external_reviews lane reconciler shipped (meta-substrate fix): T2/T3 in_review reconciled state-driven, in-TX cap=running with BEGIN IMMEDIATE serialization, typed `DispatchOutcome::{Dispatched, CapHeld, RaceLost}`. Hand-merged at `8bd21b6` (chicken-and-egg: T086 fixes its own deploy gate). |
+| 2026-05-07/08 | T083 | L188 | substrate-native external review lane shipped: typed `external_reviews` post-wrap records for T2/T3; configurable `review.runner` supports codex / pi / claude-code; `review.max_parallel` lane cap; `tooling_held` reasons visible in agents/watch; T2/T3 accept blocked until current-head PASS exists; T1 stays lightweight. |
+| 2026-05-07/08 | T082 | L077 | substrate persistence for high-leverage derivation tokens: `intent_contract.hardened_*` shipped. |
+| 2026-05-07/08 | T081 | L053 | tier-A actor check no longer bypassable via `--invoker human` from `$CLAUDECODE`-detected processes. |
+| 2026-05-07/08 | T080 | L068 | cross-project daemon SIGTERM scoped per-project (no more blanket `pkill 'stores agents run'` cross-project kills). |
+| 2026-05-07/08 | T079 | L186 | engine-runner actionability monitor LIVE in daemon: heartbeat per iteration, redispatch of orphaned autonomous edges, structural held-reason recording. Phase-1 narrow shape (visibility + redispatch only; no new policy semantics; U-moments preserved). Closes the chat-shaped engine-stall pattern. |
+| 2026-05-07/08 | T078 | L185 | approval token simplified to host-bound plaintext+0600 (`~/.config/stores/approve.token`) plus `approve.token.hash` for constant-time verification; SOPS+age dropped. |
+| 2026-05-07/08 | T076 | L184 | private substrate install path shipped: daemon's runtime-owned binary moved to `~/.local/share/stores/bin/stores`; `cargo install` no longer corrupts the daemon's launch path. |
+| 2026-05-07/08 | T074 | L015 | `auth show --identity` flag shipped (symmetric with `auth init`). |
+| 2026-05-07/08 | T073 | L005 | observations update accepts JSON-array input for list-typed fields. |
+| 2026-05-07/08 | T071 | L058 | `stores metrics` CLI shipped: windowed REVISE-rate, percentile interpolation, volatile_window flag; per-task-type breakdowns. |
+| 2026-05-07/08 | T070 | L057 | per-agent-invocation telemetry shipped: spawn-fail synthetic agent_runs row with source-layer model_id; fail-loud insert; tier T1/T3 tests assert non-NULL prompt_cache_hits + post-cycle agent_runs persistence. |
+| 2026-05-07/08 | T069 | L011 | rows now record the `stores` binary version that wrote them; audit-gap during sessions closed. |
+| 2026-05-07/08 | T068 | I001 | `required_when` parser supports `IN [...]` membership and `expr OR expr` composition. |
+| 2026-05-07/08 | T066 | L176 | daemon self-reexec on stale-exe (with T075/L182 candidate validation; closes the corrupted-stub-exec failure mode). |
+| 2026-05-07/08 | T065 | L151 | auto-investigator subscriber shipped: fires investigator on `open → needs_investigation` automatically. Engine can now drain its own input queue. |
+| 2026-05-07/08 | T064 | L175 | `stores watch` rebuckets task rows so terminal/recovered/rejected exhaust no longer drowns actionable work; `--all` escape hatch preserved. |
 | 2026-05-07 | T077 | L171 | dedicated `architecture_reviews` typed store shipped as Heart/Architect phase α: A### lifecycle; interpret vs amend authority split; seven typed verdict outcomes; amend `cascade_decisions`; pure-human token-mediated `ratify-amend`; flexible-precedent `supersedes`; gatekeeper `arch_review_candidate` same-TX A### + `pending_architecture_review=true`; U1 pre-ratification gate with reframe/merge clearing; idempotent backfill from T053/L142 historical tagged candidates; render projection to `architecture-reviews/A###/main.md`. Deferred explicitly: typed Heart store, typed `actor: architect`, doc-diff projection hook, and auto-fire subscribers. |
 | 2026-05-07 | T067 | L178 | manual-drive ↔ daemon handoff fix shipped (A1-strict): `wrap_log` is NOT a control sentinel; `next_agent` is the source of truth for current-cycle wrap completion. Implementation via `force_close_auto_drive_lock_ok` writes `last_status='ok:wrap_completed'` (free-text column; CHECK-constrained typed `terminal_reason='wrap_completed'` deferred — table-recreation cost not justified for this slice). Watchdog SQL predicate distinguishes force-closed-this-invocation locks from old-handoff-still-pending-wrap locks (both have `terminal_reason='ok'` but only force-closed have `last_status='ok:wrap_completed'`). force-close ordering fix: now invoked BEFORE post-submit `--max-iters` bail (was after, allowing race to leave `in_flight:pending_next` for a legitimately-completed wrap). Two new e2e tests pin the invariants through real production paths (`watchdog_force_closed_wrap_lock_no_redispatch`, `max_iters_after_wrap_dispatch_force_closes_lock`). Codex r6 → r7: 4 findings (1 HIGH watchdog distinguisher + 2 MEDIUM ordering/test + 1 LOW projection-revert) all closed; r7 PASS at ecc68dd → 26d92a8 after post-T072 re-rebase. 1105 tests pass. Merge `3784a6f`. |
 | 2026-05-07 | T072 | L059 | runs SQL VIEW + atomic backlink with dispatch_submit shipped: new typed `runs` SQL view exposes `(display_id, phase, cycle, role, transcript_path)` over `cycles` JSON; `stores runs list/show` CLI subcommand queries the VIEW directly (decouples read surface from physical layout); transcript_path threaded through `compute_submit_execute`/`compute_submit_review` and embedded into cycles JSON in same TX as `write_status_and_fields(...).commit()` — atomicity guaranteed (Pi-critical invariant). `session_id=None` bails explicit error pre-submit (no silent default). Idempotence test correctly re-named `executor_transcript_path_consistent_under_retry` (production is append-only-with-no-dedup; the no-double-write semantics is a separate Pi-architectural call deferred). Rebase resolved T071-metrics-CLI ↔ T072-runs-CLI collision in `src/cli/{dynamic,mod}.rs` + `src/main.rs` (both subcommands coexist). Codex r6 → r7: 1 MINOR test-fidelity gap; r7 PASS at c30828f. 1099/0 lib + 3/3 runs_cli. Merge `e250e5d`. |
