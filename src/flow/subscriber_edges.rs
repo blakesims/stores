@@ -7,7 +7,7 @@
 //! every valid lifecycle transition whose `to` status matches the agent's required
 //! trigger status must appear in the agent's declared `subscribes_to` list in
 //! `agents.yaml`, OR be explicitly listed as an opted-out edge with a documented
-//! rationale. Contracts are evaluated at `cargo test` time against two canonical
+//! rationale. Contracts are evaluated at `cargo test` time against three canonical
 //! surfaces and the bundled lifecycle schemas:
 //!
 //! - **`docs/agents-yaml-example.yaml`** (compile-time embedded, always present
@@ -21,6 +21,12 @@
 //!   are evaluated against this fixture. The fixture is kept in sync with the
 //!   docs template for the agents it shares; drift is caught by the
 //!   `fixture_yaml_includes_t020_builtins` test in `tests/`.
+//! - **`.stores/agents.yaml`** (read at test runtime): the rendered production
+//!   subscriber config. When present (a live worktree with `.stores/` symlinks
+//!   set up), all four contracts are evaluated against this surface so that
+//!   any omission in the actual running config fails the test suite. Gracefully
+//!   skipped when the file is absent (e.g., a fresh clone without a `.stores/`
+//!   setup), so CI environments without a live substrate are unaffected.
 //!
 //! A failing contract fails the test suite, preventing I027/I024-class
 //! silent-omission regressions from shipping.
@@ -295,6 +301,21 @@ fn load_canonical_agents() -> AgentsYaml {
 fn load_docs_example_agents() -> AgentsYaml {
     const YAML: &str = include_str!("../../docs/agents-yaml-example.yaml");
     AgentsYaml::from_yaml(YAML).expect("docs/agents-yaml-example.yaml must parse cleanly")
+}
+
+/// Reads `.stores/agents.yaml` at test runtime (the rendered production
+/// subscriber config, typically a symlink in a live worktree). Returns `None`
+/// when the file is absent or the symlink is broken — graceful skip so CI
+/// environments without a live `.stores/` setup are unaffected.
+fn load_stores_agents() -> Option<AgentsYaml> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".stores/agents.yaml");
+    match std::fs::read_to_string(&path) {
+        Ok(yaml) => Some(
+            AgentsYaml::from_yaml(&yaml)
+                .expect(".stores/agents.yaml must parse cleanly when present"),
+        ),
+        Err(_) => None,
+    }
 }
 
 fn load_transitions(store: &str) -> Vec<Transition> {
@@ -632,6 +653,34 @@ agents:
                 result.outcome,
                 CheckOutcome::Pass,
                 "contract '{}' failed against docs/agents-yaml-example.yaml: {:?}",
+                contract.name(),
+                result.reason
+            );
+        }
+    }
+
+    /// Smoke run against `.stores/agents.yaml` (the rendered production subscriber
+    /// config). Skips gracefully when the file is absent (e.g. a fresh clone
+    /// without a live worktree `.stores/` setup). When present, evaluates all
+    /// four contracts so that any omission in the actual running config fails
+    /// the test suite immediately — guards the third canonical surface from
+    /// the ER344 finding.
+    #[test]
+    fn all_contracts_pass_against_stores_agents_yaml() {
+        let Some(agents) = load_stores_agents() else {
+            eprintln!(
+                "SKIP: .stores/agents.yaml not accessible in this environment; \
+                 test skipped (no live worktree .stores/ setup)"
+            );
+            return;
+        };
+        for contract in registry() {
+            let transitions = load_transitions(contract.store());
+            let result = contract.evaluate(&agents, &transitions);
+            assert_eq!(
+                result.outcome,
+                CheckOutcome::Pass,
+                "contract '{}' failed against .stores/agents.yaml: {:?}",
                 contract.name(),
                 result.reason
             );
