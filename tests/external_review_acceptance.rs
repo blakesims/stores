@@ -822,3 +822,75 @@ fn external_review_three_task_recurrence_rebases_each_prompt_to_current_main() {
         assert_eq!(base_sha, main_sha);
     }
 }
+
+/// ER325/ER326/ER328 (P2): On a conflicted stale rebase, `head_sha` on the
+/// `tooling_held` row MUST equal the task branch tip that existed BEFORE
+/// `git rebase main` was attempted, NOT a transient rebase-state HEAD.
+///
+/// Setup: task branch and main both edit the same line in README.md so that
+/// `git rebase main` will conflict and be aborted.  We capture the task branch
+/// tip before calling `run_review`, then assert the held row's `head_sha` matches.
+#[test]
+fn external_review_stale_conflict_tooling_held_head_sha_is_pre_rebase_tip() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let ws = git_workspace();
+
+    // Create task branch that edits the same file as main will edit later.
+    git(ws.path(), &["checkout", "-b", "task-head-sha-check"]);
+    std::fs::write(ws.path().join("README.md"), "task branch line\n").unwrap();
+    git(ws.path(), &["add", "README.md"]);
+    git(ws.path(), &["commit", "-m", "task edits README"]);
+
+    // Record the task branch tip BEFORE any rebase attempt — this is what the
+    // held row's head_sha must equal after the aborted rebase.
+    let task_branch_tip = head(ws.path());
+
+    // Advance main with a conflicting edit to the same file.
+    git(ws.path(), &["checkout", "main"]);
+    std::fs::write(ws.path().join("README.md"), "main conflicting line\n").unwrap();
+    git(ws.path(), &["add", "README.md"]);
+    git(ws.path(), &["commit", "-m", "main conflicts with task"]);
+
+    insert_task_id(&conn, "T950", ws.path(), "task-head-sha-check", "T3", "in_review");
+    insert_pending_review_for_task(&conn, "ER950", "T950", 1);
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Shim would emit PASS, but it must never be called on a conflicted rebase.
+    let invoked = tmp.path().join("invoked-head-sha.txt");
+    let sh = shim(
+        tmp.path(),
+        &format!(
+            "#!/bin/sh\necho invoked > '{}'\necho 'VERDICT: PASS'\n",
+            invoked.display()
+        ),
+    );
+    let cfg = cfg(tmp.path(), &sh);
+    run_review(&conn, &cfg, "ER950");
+
+    // The row must be tooling_held with the correct held_reason.
+    let (status, verdict, held_reason, head_sha): (String, String, String, String) = conn
+        .query_row(
+            "SELECT status, verdict, held_reason, head_sha FROM external_reviews WHERE display_id='ER950'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "tooling_held");
+    assert_eq!(verdict, "TOOLING_FAILURE");
+    assert_eq!(held_reason, "stale_base_requires_rebase");
+
+    // Core assertion (ER328): head_sha must be the pre-rebase task branch tip,
+    // not a transient rebase-in-progress commit.
+    assert_eq!(
+        head_sha, task_branch_tip,
+        "head_sha on tooling_held row ({head_sha}) must equal the task branch tip \
+         captured before git rebase ({task_branch_tip}), not a rebase-state HEAD"
+    );
+
+    // Codex shim must never have been invoked on a conflicted rebase.
+    assert!(!invoked.exists(), "codex shim must not run when rebase conflicts");
+    // Rebase state must be fully cleaned up.
+    assert!(!ws.path().join(".git/rebase-merge").exists());
+    assert!(!ws.path().join(".git/rebase-apply").exists());
+}

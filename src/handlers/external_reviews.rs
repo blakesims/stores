@@ -174,6 +174,12 @@ pub fn prepare_external_review_git(
         ));
     }
 
+    // Capture the task branch tip BEFORE rebasing so that if the rebase
+    // conflicts and is aborted, head_sha on the held row reflects the
+    // branch state, not the transient rebase-in-progress HEAD.
+    let task_branch_head_sha =
+        resolve_sha(&workspace_path, "HEAD", "head").unwrap_or_else(|_| String::new());
+
     let rebase = Command::new("git")
         .args(["rebase", "main"])
         .current_dir(&workspace_path)
@@ -181,13 +187,15 @@ pub fn prepare_external_review_git(
         .map_err(|e| ToolingError::new(format!("TOOLING_FAILURE: cannot spawn git rebase: {e}")))?;
     if !rebase.status.success() {
         let conflict_files = accept_merge::list_conflict_files(&workspace_path);
-        let head_sha = resolve_sha(&workspace_path, "HEAD", "head").unwrap_or_else(|_| String::new());
         let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
         accept_merge::abort_rebase(&workspace_path);
+        // Use the pre-rebase head; after abort HEAD is restored to the branch
+        // tip, but resolving again introduces a TOCTOU window — use the
+        // value we captured before git touched it.
         return Ok(ExternalReviewGitPreparation::Conflict(
             ExternalReviewRebaseConflict {
                 base_sha: current_main,
-                head_sha,
+                head_sha: task_branch_head_sha,
                 conflict_files,
                 stderr,
             },
