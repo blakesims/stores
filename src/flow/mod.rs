@@ -6,6 +6,8 @@
 pub mod agents_yaml;
 pub mod builtins;
 pub mod checks;
+#[cfg(test)]
+pub mod subscriber_edges;
 pub mod config;
 pub mod engine_runner;
 pub mod ntfy;
