@@ -7,10 +7,23 @@
 //! every valid lifecycle transition whose `to` status matches the agent's required
 //! trigger status must appear in the agent's declared `subscribes_to` list in
 //! `agents.yaml`, OR be explicitly listed as an opted-out edge with a documented
-//! rationale. Contracts are evaluated at `cargo test` time against the canonical
-//! `docs/agents-yaml-example.yaml` (compile-time embedded) and the bundled
-//! lifecycle schemas. A failing contract fails the test suite, preventing
-//! I027/I024-class silent-omission regressions from shipping.
+//! rationale. Contracts are evaluated at `cargo test` time against two canonical
+//! surfaces and the bundled lifecycle schemas:
+//!
+//! - **`docs/agents-yaml-example.yaml`** (compile-time embedded, always present
+//!   in the repo): the authoritative docs template for the post-accept ceremony
+//!   chain. Post-accept contracts (`accept-merge`, `cargo-install`,
+//!   `schema-migrate`) are evaluated against this file directly, so any drift
+//!   in the docs template fails the test suite.
+//! - **`tests/fixtures/agents.yaml`** (compile-time embedded, complete fixture):
+//!   includes all agents — including `auto-promote` (observations store), which
+//!   `docs/agents-yaml-example.yaml` does not yet carry. Auto-promote contracts
+//!   are evaluated against this fixture. The fixture is kept in sync with the
+//!   docs template for the agents it shares; drift is caught by the
+//!   `fixture_yaml_includes_t020_builtins` test in `tests/`.
+//!
+//! A failing contract fails the test suite, preventing I027/I024-class
+//! silent-omission regressions from shipping.
 //!
 //! This module tests subscriber-config × lifecycle *structure*; it does NOT
 //! test the correctness of individual subscriber side-effect implementations.
@@ -266,18 +279,22 @@ pub fn lookup(name: &str) -> Option<&'static dyn SubscriberEdgeContract> {
 // Test helpers (compiled only in test builds; private to this module)
 // ---------------------------------------------------------------------------
 
+/// Complete fixture including all agents (accept-merge, cargo-install,
+/// schema-migrate, auto-promote, …). Used for the auto-promote contract and
+/// the runtime non-regression test, because `docs/agents-yaml-example.yaml`
+/// does not yet carry observations-store agents.
 fn load_canonical_agents() -> AgentsYaml {
-    // tests/fixtures/agents.yaml is the complete canonical fixture: it includes
-    // all production agents (auto-promote, auto-drive, accept-merge, etc.) and
-    // is kept in sync with docs/agents-yaml-example.yaml via the existing
-    // `fixture_yaml_includes_t020_builtins` test.  We use it here rather than
-    // docs/agents-yaml-example.yaml because the docs example does not yet
-    // include the observations-store agents (auto-promote), so evaluating the
-    // auto-promote contract against it would always fail.  The i027 test in
-    // tests/flow_chain_isolation.rs pins docs/agents-yaml-example.yaml
-    // independently for the tasks-chain wiring; this module layers on top.
     const YAML: &str = include_str!("../../tests/fixtures/agents.yaml");
     AgentsYaml::from_yaml(YAML).expect("tests/fixtures/agents.yaml must parse cleanly")
+}
+
+/// Embeds the canonical docs template (`docs/agents-yaml-example.yaml`) at
+/// compile time. Post-accept contracts evaluate against this surface directly so
+/// that any omission in the docs template fails the test suite immediately.
+/// Auto-promote is NOT in the docs template yet; see `load_canonical_agents`.
+fn load_docs_example_agents() -> AgentsYaml {
+    const YAML: &str = include_str!("../../docs/agents-yaml-example.yaml");
+    AgentsYaml::from_yaml(YAML).expect("docs/agents-yaml-example.yaml must parse cleanly")
 }
 
 fn load_transitions(store: &str) -> Vec<Transition> {
@@ -524,9 +541,58 @@ agents:
     }
 
     // -----------------------------------------------------------------------
-    // (j) Smoke run: all contracts pass against canonical example
+    // Passing-fixture tests against the canonical docs template
+    // (docs/agents-yaml-example.yaml) — guards the authoritative surface
     // -----------------------------------------------------------------------
 
+    #[test]
+    fn accept_merge_passes_against_docs_agents_yaml_example() {
+        let agents = load_docs_example_agents();
+        let transitions = load_transitions("tasks");
+        let result = ACCEPT_MERGE_CONTRACT.evaluate(&agents, &transitions);
+        assert_eq!(
+            result.outcome,
+            CheckOutcome::Pass,
+            "accept-merge contract must pass against docs/agents-yaml-example.yaml; \
+             reason: {:?}",
+            result.reason
+        );
+    }
+
+    #[test]
+    fn cargo_install_passes_against_docs_agents_yaml_example() {
+        let agents = load_docs_example_agents();
+        let transitions = load_transitions("tasks");
+        let result = CARGO_INSTALL_CONTRACT.evaluate(&agents, &transitions);
+        assert_eq!(
+            result.outcome,
+            CheckOutcome::Pass,
+            "cargo-install contract must pass against docs/agents-yaml-example.yaml; \
+             reason: {:?}",
+            result.reason
+        );
+    }
+
+    #[test]
+    fn schema_migrate_passes_against_docs_agents_yaml_example() {
+        let agents = load_docs_example_agents();
+        let transitions = load_transitions("tasks");
+        let result = SCHEMA_MIGRATE_CONTRACT.evaluate(&agents, &transitions);
+        assert_eq!(
+            result.outcome,
+            CheckOutcome::Pass,
+            "schema-migrate contract must pass against docs/agents-yaml-example.yaml; \
+             reason: {:?}",
+            result.reason
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // (j) Smoke runs: all contracts pass against both canonical surfaces
+    // -----------------------------------------------------------------------
+
+    /// Smoke run against tests/fixtures/agents.yaml (complete fixture including
+    /// auto-promote). Layered drift-guard alongside a9a0c79.
     #[test]
     fn all_contracts_pass_against_canonical_example() {
         let agents = load_canonical_agents();
@@ -536,7 +602,36 @@ agents:
             assert_eq!(
                 result.outcome,
                 CheckOutcome::Pass,
-                "contract '{}' failed against canonical agents-yaml-example.yaml: {:?}",
+                "contract '{}' failed against tests/fixtures/agents.yaml: {:?}",
+                contract.name(),
+                result.reason
+            );
+        }
+    }
+
+    /// Smoke run against docs/agents-yaml-example.yaml for the three
+    /// post-accept contracts. Guards the canonical docs template directly so
+    /// drift in the docs file fails the test suite, not just the fixture.
+    /// Auto-promote is excluded here because docs/agents-yaml-example.yaml
+    /// does not yet carry observations-store agents.
+    #[test]
+    fn post_accept_contracts_pass_against_docs_agents_yaml_example() {
+        let agents = load_docs_example_agents();
+        let post_accept_names = [
+            "accept_merge_must_fire_on_every_accepted_to_status",
+            "cargo_install_must_fire_on_every_accepted_to_status",
+            "schema_migrate_must_fire_on_every_cargo_installed_to_status",
+        ];
+        for name in &post_accept_names {
+            let contract = lookup(name).unwrap_or_else(|| {
+                panic!("contract '{}' missing from registry", name)
+            });
+            let transitions = load_transitions(contract.store());
+            let result = contract.evaluate(&agents, &transitions);
+            assert_eq!(
+                result.outcome,
+                CheckOutcome::Pass,
+                "contract '{}' failed against docs/agents-yaml-example.yaml: {:?}",
                 contract.name(),
                 result.reason
             );
