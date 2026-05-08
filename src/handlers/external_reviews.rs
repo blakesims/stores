@@ -394,11 +394,21 @@ fn starts_with_leading_verdict(line: &str, verdict: &str) -> bool {
 
 fn has_revise_finding_marker(output: &str) -> bool {
     output.lines().any(|line| {
-        let lower = line.trim_start().to_ascii_lowercase();
+        let lower_owned = line.trim_start().to_ascii_lowercase();
+        let lower = strip_list_marker_prefix(&lower_owned);
         ["[critical]", "[major]", "[minor]", "[p1]", "[p2]", "[p3]"]
             .iter()
             .any(|marker| lower.starts_with(marker))
     })
+}
+
+fn strip_list_marker_prefix(line: &str) -> &str {
+    let trimmed = line
+        .strip_prefix("- ")
+        .or_else(|| line.strip_prefix("* "))
+        .or_else(|| line.strip_prefix("+ "))
+        .unwrap_or(line);
+    trimmed.trim_start()
 }
 
 fn count_severity(output: &str, severity: &str) -> usize {
@@ -752,6 +762,27 @@ mod tests {
     #[test]
     fn codex_t103_er326_shape_p2_marker_infers_revise() {
         let output = "The implementation does not satisfy the contract.\n\n[P2] parse_verdict does not infer REVISE from codex finding markers.\n";
+        let parsed = parse_codex_review_output(output).unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Revise);
+    }
+
+    #[test]
+    fn codex_markdown_list_p2_marker_infers_revise() {
+        let output = "The conflicted rebase path still persists a transient head SHA.\n\nFull review comments:\n\n- [P2] Capture held rebase head after abort — src/handlers/external_reviews.rs:193\n  On conflicted stale rebases, this records HEAD before git rebase --abort.\n";
+        let parsed = parse_codex_review_output(output).unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Revise);
+    }
+
+    #[test]
+    fn codex_markdown_list_star_major_marker_infers_revise() {
+        let output = "Findings:\n\n* [major] something is wrong here\n";
+        let parsed = parse_codex_review_output(output).unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Revise);
+    }
+
+    #[test]
+    fn codex_markdown_list_plus_critical_marker_infers_revise() {
+        let output = "Issues:\n\n+ [critical] critical problem\n";
         let parsed = parse_codex_review_output(output).unwrap();
         assert_eq!(parsed.verdict, ExternalReviewVerdict::Revise);
     }
