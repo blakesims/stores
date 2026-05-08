@@ -895,6 +895,71 @@ fn external_review_stale_conflict_tooling_held_head_sha_is_pre_rebase_tip() {
     assert!(!ws.path().join(".git/rebase-apply").exists());
 }
 
+/// L498 backfill (Pi msg_a423719b): legacy stale_base_requires_rebase rows
+/// created before the bounded-retry fix (c8d993e) have next_retry_at=NULL and
+/// are permanently held. The reconcile-loop backfill must give them a bounded
+/// next_retry_at so the existing elapsed-tooling-held retry path drains them.
+#[test]
+fn external_review_legacy_stale_base_held_row_gets_backfilled_next_retry_at() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+
+    // Insert a synthetic legacy held row with next_retry_at=NULL — same shape
+    // as ER330 in production before the c8d993e fix shipped.
+    conn.execute(
+        "INSERT INTO external_reviews (display_id, task_id, attempt, adapter, runner, status, verdict, held_reason, next_retry_at, base_sha, head_sha, created_at, updated_at) \
+         VALUES ('ER999', 'T999', 1, 'external_review', 'codex', 'tooling_held', 'TOOLING_FAILURE', 'stale_base_requires_rebase', NULL, 'oldmain', 'oldhead', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [],
+    ).unwrap();
+
+    // Run the backfill (the function the engine_runner reconcile-loop now calls).
+    stores::flow::builtins::external_review::backfill_stale_base_next_retry(&conn).unwrap();
+
+    // The legacy row should now have a non-NULL next_retry_at, preserving
+    // status=tooling_held and held_reason for operator visibility.
+    let (status, held_reason, next_retry_at): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT status, held_reason, next_retry_at FROM external_reviews WHERE display_id='ER999'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "tooling_held");
+    assert_eq!(held_reason, "stale_base_requires_rebase");
+    let next_retry = next_retry_at
+        .expect("backfill must populate next_retry_at on legacy stale_base rows");
+    assert!(!next_retry.is_empty());
+
+    // Idempotent: running again must not re-write the timestamp on rows that
+    // already have a populated next_retry_at.
+    let snapshot = next_retry.clone();
+    stores::flow::builtins::external_review::backfill_stale_base_next_retry(&conn).unwrap();
+    let unchanged: String = conn
+        .query_row(
+            "SELECT next_retry_at FROM external_reviews WHERE display_id='ER999'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(unchanged, snapshot, "backfill must not touch already-populated rows");
+
+    // Non-stale-base held rows must NOT be touched.
+    conn.execute(
+        "INSERT INTO external_reviews (display_id, task_id, attempt, adapter, runner, status, verdict, held_reason, next_retry_at, base_sha, head_sha, created_at, updated_at) \
+         VALUES ('ER998', 'T998', 1, 'external_review', 'codex', 'tooling_held', 'TOOLING_FAILURE', 'parse-fallback-needed', NULL, 'a', 'b', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [],
+    ).unwrap();
+    stores::flow::builtins::external_review::backfill_stale_base_next_retry(&conn).unwrap();
+    let other_retry: Option<String> = conn
+        .query_row(
+            "SELECT next_retry_at FROM external_reviews WHERE display_id='ER998'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(other_retry.is_none(), "non-stale-base held rows must not be backfilled");
+}
+
 /// L488 recovery gap (Pi msg_3cf7c3af): stale_base_requires_rebase rows MUST
 /// have a bounded next_retry_at so the existing T086/L197 elapsed-tooling-held
 /// retry path can drain them after the operator rebases the worktree. Prior

@@ -497,6 +497,12 @@ pub fn reconcile_pending_external_review_dispatch(
         }
     }
 
+    // Backfill bounded next_retry_at on legacy stale_base_requires_rebase rows
+    // (created before commit c8d993e) so they become eligible for the existing
+    // promote_elapsed_tooling_held retry path. Pi msg_a423719b.
+    crate::flow::builtins::external_review::backfill_stale_base_next_retry(conn)
+        .context("Layer2: backfill stale_base_requires_rebase next_retry_at")?;
+
     // Promote elapsed tooling_held rows before candidate enumeration so retry-review
     // rows re-enter the same Layer 2 pending-dispatch path on this tick.
     crate::flow::builtins::external_review::promote_elapsed_tooling_held(conn)

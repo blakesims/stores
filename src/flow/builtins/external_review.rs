@@ -418,6 +418,33 @@ fn mark_running_tx(tx: &rusqlite::Transaction<'_>, row: &ReviewRow) -> Result<us
 ///
 /// Per T079's pattern, `Transaction::new_unchecked` is used to open the
 /// transaction without requiring `&mut Connection`.
+/// Backfill bounded `next_retry_at` on legacy `stale_base_requires_rebase`
+/// rows that were created before the bounded-retry fix (commit c8d993e). Such
+/// rows have `next_retry_at IS NULL` and would otherwise stay permanently held
+/// because `promote_elapsed_tooling_held` filters on `next_retry_at <= now`.
+///
+/// Pi-directed (msg_a423719b): legacy ER330 (T098) is the proving case.
+/// Framework authority — same shape as `record_stale_base_tooling_held` but
+/// only touches rows that already exist with NULL retry timing.
+pub fn backfill_stale_base_next_retry(conn: &Connection) -> Result<()> {
+    let now = now_iso8601();
+    let next_retry_at = add_secs(&now, STALE_BASE_REBASE_RETRY_SECS).unwrap_or_else(|| now.clone());
+    let updated = conn.execute(
+        "UPDATE external_reviews \
+         SET next_retry_at = ?1, updated_at = ?2 \
+         WHERE status = 'tooling_held' \
+           AND held_reason = 'stale_base_requires_rebase' \
+           AND next_retry_at IS NULL",
+        params![next_retry_at, now],
+    )?;
+    if updated > 0 {
+        eprintln!(
+            "[external-review::backfill] stale_base_requires_rebase: {updated} row(s) given next_retry_at={next_retry_at}"
+        );
+    }
+    Ok(())
+}
+
 pub fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
     let now = now_iso8601();
 
