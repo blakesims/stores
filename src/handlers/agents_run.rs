@@ -9,7 +9,7 @@
 //! Builtins are stubbed in this phase (Phase 6 wires them).
 
 use anyhow::{anyhow, bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -1420,7 +1420,29 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                         &status_str,
                     );
                 }
-                if agent.name == "auto-drive"
+                if code != 0 {
+                    if let Some(until) = task_rate_limit_until(conn, &sub.store, row_id)? {
+                        let _ = mark_claim_rate_limit_cooldown(
+                            conn,
+                            &sub.store,
+                            row_id,
+                            &display_id,
+                            agent,
+                            &until,
+                            &status_str,
+                        );
+                    } else {
+                        let _ = mark_claim_finished_typed(
+                            conn,
+                            &sub.store,
+                            row_id,
+                            &display_id,
+                            agent,
+                            &terminal_reason,
+                            &status_str,
+                        );
+                    }
+                } else if agent.name == "auto-drive"
                     && terminal_reason == "ok"
                     && crate::flow::builtins::auto_drive::has_pending_auto_drive_work(
                         conn,
@@ -1594,7 +1616,38 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                     &status_str,
                 );
             }
-            if agent.name == "auto-drive"
+            if code != 0 {
+                if let Some(until) = task_rate_limit_until(conn, &c.store, c.row_id)? {
+                    let _ = mark_claim_rate_limit_cooldown(
+                        conn,
+                        &c.store,
+                        c.row_id,
+                        &c.display_id,
+                        agent,
+                        &until,
+                        &status_str,
+                    );
+                } else if agent.name == "auto-drive"
+                    && terminal_reason == "ok"
+                    && crate::flow::builtins::auto_drive::has_pending_auto_drive_work(
+                        conn,
+                        &c.display_id,
+                    )
+                    .unwrap_or(false)
+                {
+                    let _ = mark_auto_drive_pending_handoff(conn, &c.store, c.row_id, &c.display_id, agent);
+                } else {
+                    let _ = mark_claim_finished_typed(
+                        conn,
+                        &c.store,
+                        c.row_id,
+                        &c.display_id,
+                        agent,
+                        &terminal_reason,
+                        &status_str,
+                    );
+                }
+            } else if agent.name == "auto-drive"
                 && terminal_reason == "ok"
                 && crate::flow::builtins::auto_drive::has_pending_auto_drive_work(
                     conn,
@@ -1602,8 +1655,7 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                 )
                 .unwrap_or(false)
             {
-                let _ =
-                    mark_auto_drive_pending_handoff(conn, &c.store, c.row_id, &c.display_id, agent);
+                let _ = mark_auto_drive_pending_handoff(conn, &c.store, c.row_id, &c.display_id, agent);
             } else {
                 let _ = mark_claim_finished_typed(
                     conn,
@@ -1855,7 +1907,7 @@ pub fn ensure_dispatch_locks_typed(conn: &Connection) -> Result<()> {
         ("postcondition_args", "TEXT"),
         (
             "terminal_reason",
-            "TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown'))",
+            "TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown','rate_limit'))",
         ),
         ("next_retry_at", "TEXT"),
     ];
@@ -2432,6 +2484,51 @@ fn mark_auto_drive_pending_handoff(
     Ok(())
 }
 
+fn task_rate_limit_until(conn: &Connection, store: &str, row_id: i64) -> Result<Option<String>> {
+    if store != "tasks" {
+        return Ok(None);
+    }
+    let reason: Option<String> = match conn
+        .query_row(
+            "SELECT blocked_reason FROM tasks WHERE id=?1",
+            rusqlite::params![row_id],
+            |r| r.get(0),
+        )
+        .optional()
+    {
+        Ok(v) => v,
+        Err(e) if e.to_string().contains("no such column: blocked_reason") => None,
+        Err(e) => return Err(e.into()),
+    };
+    Ok(reason.and_then(|r| parse_rate_limit_blocked_reason(&r).map(str::to_string)))
+}
+
+fn parse_rate_limit_blocked_reason(reason: &str) -> Option<&str> {
+    let rest = reason.strip_prefix("rate_limit:")?;
+    let (_provider, until) = rest.split_once(':')?;
+    if until.len() >= 20 { Some(until) } else { None }
+}
+
+fn mark_claim_rate_limit_cooldown(
+    conn: &Connection,
+    store: &str,
+    row_id: i64,
+    display_id: &str,
+    agent: &AgentEntry,
+    until: &str,
+    last_status: &str,
+) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, \
+         terminal_reason = 'rate_limit', next_retry_at = ?3 \
+         WHERE store = ?4 AND row_id = ?5 AND agent_name = ?6",
+        rusqlite::params![last_status, now, until, store, row_id, &agent.name],
+    )?;
+    let _ = display_id;
+    Ok(())
+}
+
 fn mark_claim_finished_typed(
     conn: &Connection,
     store: &str,
@@ -2683,10 +2780,10 @@ fn find_retryable_locks(conn: &Connection, agent: &AgentEntry) -> Result<Vec<Ret
          FROM dispatch_locks dl \
          LEFT JOIN transition_history th ON th.id = dl.transition_id \
          WHERE dl.agent_name = ?1 \
-               AND dl.attempt < ?2 \
+               AND (dl.terminal_reason = 'rate_limit' OR dl.attempt < ?2) \
                AND dl.next_retry_at IS NOT NULL \
                AND dl.next_retry_at <= ?3 \
-               AND dl.terminal_reason IN ('exit_nonzero','error','silent_zombie')",
+               AND dl.terminal_reason IN ('exit_nonzero','error','silent_zombie','rate_limit')",
     )?;
     let now_iso = crate::handlers::row::now_iso8601();
     let rows = stmt.query_map(rusqlite::params![&agent.name, max, now_iso], |r| {
@@ -4621,6 +4718,83 @@ policies:
                 .is_empty(),
             "legacy_unknown must not leak to any other agent"
         );
+    }
+
+    #[test]
+    fn rate_limit_blocked_reason_schedules_cooldown_without_flake_attempt_bump() {
+        let conn = fresh_engine_runner_db();
+        insert_task_row(&conn, 810, "T810", "blocked", "T2", "feat/rate-limit");
+        conn.execute(
+            "UPDATE tasks SET blocked_reason=?1 WHERE id=810",
+            rusqlite::params!["rate_limit:anthropic:2099-01-01T00:00:00Z"],
+        )
+        .unwrap();
+        insert_history(&conn, "tasks", 810, "T810", "executing", "blocked");
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store,row_id,display_id,agent_name,transition_id,claimed_at,claimed_by,last_status,finished_at,attempts,attempt,terminal_reason,next_retry_at) \
+             VALUES ('tasks',810,'T810','auto-drive',1,'2026-01-01T00:00:00Z','daemon','running',NULL,1,1,NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        let agent = noop_agent("auto-drive", "tasks", "executing", "blocked");
+        let until = task_rate_limit_until(&conn, "tasks", 810).unwrap().unwrap();
+        mark_claim_rate_limit_cooldown(&conn, "tasks", 810, "T810", &agent, &until, "exit=3")
+            .unwrap();
+        let row: (u32, u32, String, Option<String>) = conn
+            .query_row(
+                "SELECT attempts, attempt, terminal_reason, next_retry_at FROM dispatch_locks WHERE row_id=810",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, 1, "rate-limit cooldown must not bump attempts");
+        assert_eq!(row.1, 1, "rate-limit cooldown must not bump attempt");
+        assert_eq!(row.2, "rate_limit");
+        assert_eq!(row.3.as_deref(), Some("2099-01-01T00:00:00Z"));
+        assert!(find_retryable_locks(&conn, &agent).unwrap().is_empty());
+    }
+
+    #[test]
+    fn elapsed_rate_limit_cooldown_is_single_cas_retry_candidate() {
+        let conn = fresh_engine_runner_db();
+        insert_task_row(&conn, 811, "T811", "blocked", "T2", "feat/rate-limit");
+        insert_history(&conn, "tasks", 811, "T811", "executing", "blocked");
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store,row_id,display_id,agent_name,transition_id,claimed_at,claimed_by,last_status,finished_at,attempts,attempt,terminal_reason,next_retry_at) \
+             VALUES ('tasks',811,'T811','auto-drive',1,'2026-01-01T00:00:00Z','daemon','exit=3','2026-01-01T00:00:00Z',9,9,'rate_limit','2000-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let agent = noop_agent("auto-drive", "tasks", "executing", "blocked");
+        let candidates = find_retryable_locks(&conn, &agent).unwrap();
+        assert_eq!(candidates.len(), 1, "elapsed rate-limit cooldown ignores flake max_attempts");
+        assert!(claim_for_retry(&conn, &candidates[0], "auto-drive").unwrap());
+        assert!(!claim_for_retry(&conn, &candidates[0], "auto-drive").unwrap());
+    }
+
+    // T085-style cascade guard: a future rate-limit timestamp produces zero retry
+    // candidates on repeated polls, so no tight-loop dispatch can exceed 3 cycles.
+    #[test]
+    fn rate_limit_cascade_stays_parked_across_three_poll_cycles() {
+        let conn = fresh_engine_runner_db();
+        insert_task_row(&conn, 812, "T812", "blocked", "T2", "feat/rate-limit");
+        insert_history(&conn, "tasks", 812, "T812", "executing", "blocked");
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store,row_id,display_id,agent_name,transition_id,claimed_at,claimed_by,last_status,finished_at,attempts,attempt,terminal_reason,next_retry_at) \
+             VALUES ('tasks',812,'T812','auto-drive',1,'2026-01-01T00:00:00Z','daemon','exit=3','2026-01-01T00:00:00Z',1,1,'rate_limit','2099-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let agent = noop_agent("auto-drive", "tasks", "executing", "blocked");
+        let mut dispatch_count = 0;
+        for _ in 0..3 {
+            let c = find_retryable_locks(&conn, &agent).unwrap();
+            dispatch_count += c.len();
+        }
+        assert_eq!(dispatch_count, 0);
     }
 
     /// T050 P4 AC4.2: typed exit_nonzero + elapsed next_retry_at is retryable,

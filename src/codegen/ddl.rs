@@ -90,7 +90,7 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
             FrameworkColumn { name: "heartbeat_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "heartbeat_at TEXT", additive: true },
             FrameworkColumn { name: "postcondition_id", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "postcondition_id TEXT", additive: true },
             FrameworkColumn { name: "postcondition_args", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "postcondition_args TEXT", additive: true },
-            FrameworkColumn { name: "terminal_reason", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown'))", additive: true },
+            FrameworkColumn { name: "terminal_reason", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown','rate_limit'))", additive: true },
             FrameworkColumn { name: "next_retry_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "next_retry_at TEXT", additive: true },
         ],
     },
@@ -316,7 +316,7 @@ CREATE TABLE IF NOT EXISTS dispatch_locks (
     heartbeat_at TEXT,
     postcondition_id TEXT,
     postcondition_args TEXT,
-    terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown')),
+    terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown','rate_limit')),
     next_retry_at TEXT,
     UNIQUE(store, row_id, agent_name)
 );
