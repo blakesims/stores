@@ -632,7 +632,7 @@ fields:
   - name: cluster_key
     type: text
     required: false
-    description: "Curated grouping key — NULL or one of the registry-defined values. The authoritative registry is the Rust const CURATED_CLUSTER_KEYS in src/handlers/registry.rs; this YAML declares only existence and nullability."
+    description: "Curated grouping key — NULL or one of the registry-defined values. The authoritative registry is the Rust const CURATED_CLUSTER_KEYS in the cluster-keys handler module; this YAML declares only existence and nullability."
 
   # --- Notes (free-shape JSON; T008 substrate) ---
   - name: notes

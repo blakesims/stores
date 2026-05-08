@@ -7,6 +7,8 @@ system-alert: daemon DEAD; 8 dangling locks; oldest started 8h ago
   L900  open                     priority:normal ratify ready contract 1
 ▾ ACCEPT-U3 (4)
   T400  in_review                wrap → external review: unavailable / not insta
+▾ HELD-DEPLOY (7)
+  T300  deploy:retry-deploy-recoverable tier:T2 · reason:retry-deploy-recoverabl
 ▾ HELD-INTAKE (1)
   I001  needs_info               priority:normal held:missing owner · next:recon
 ▾ HELD-AI-REVIEW (2)
