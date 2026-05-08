@@ -841,7 +841,9 @@ pub(crate) fn compute_submit_plan_review(
         );
     }
 
-    // P5-m2: Build updated log entry, including open_questions if provided
+    // P5-m2: Build updated log entry, including open_questions if provided.
+    // L503-A: snapshot tasks.plan into reviewed_plan at append time so
+    // subsequent mutations to tasks.plan cannot retroactively alter this entry.
     let mut log_entry_obj = serde_json::Map::new();
     log_entry_obj.insert("at".to_string(), Value::String(now_iso8601()));
     log_entry_obj.insert("gate".to_string(), Value::String(gate.to_string()));
@@ -852,6 +854,10 @@ pub(crate) fn compute_submit_plan_review(
             Value::Array(qs.into_iter().map(Value::String).collect()),
         );
     }
+    log_entry_obj.insert(
+        "reviewed_plan".to_string(),
+        existing.get("plan").cloned().unwrap_or(Value::Null),
+    );
     let log_entry = Value::Object(log_entry_obj);
 
     let mut log_list: Vec<Value> = existing
