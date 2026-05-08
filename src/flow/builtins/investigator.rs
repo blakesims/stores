@@ -373,6 +373,7 @@ fn validate_pull_envelope(envelope: &Value) -> Result<()> {
             .get("l_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("'duplicate_candidates[{}].l_id' must be a string", i))?;
+        #[allow(clippy::regex_creation_in_loops)]
         if !regex::Regex::new(r"^L\d{3,}$").unwrap().is_match(l_id) {
             return Err(anyhow!(
                 "'duplicate_candidates[{}].l_id' must match /^L\\d{{3,}}$/; got '{}'",
@@ -589,6 +590,7 @@ fn check_record_list(
 ///   * `notes` — merged JSON object containing duplicate_candidates,
 ///     confidence, proposed_tier, grill_question (preserves any pre-existing
 ///     keys outside this set)
+///
 /// No transition is fired; the human reviews evidence next.
 fn investigation_success_diff(
     conn: &Connection,
@@ -713,6 +715,7 @@ mod tests {
     fn fresh_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        #[allow(clippy::single_element_loop)]
         for name in ["observations"] {
             let yaml = BUNDLED_STORE_SCHEMAS
                 .iter()

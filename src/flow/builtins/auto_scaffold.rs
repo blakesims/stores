@@ -260,8 +260,7 @@ fn last_nonempty_stdout_line(stdout: &[u8]) -> String {
     String::from_utf8_lossy(stdout)
         .lines()
         .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .last()
+        .rfind(|l: &&str| !l.is_empty())
         .unwrap_or("")
         .to_string()
 }

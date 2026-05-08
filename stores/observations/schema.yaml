@@ -584,13 +584,13 @@ fields:
             description: "Identifier in the external system"
 
   # --- Risk & policy taxonomy (T052) ---
-  # P2 schema-prep for the gatekeeper (L142). The four fields promote the
-  # (risk_class, approval_policy, risk_flags, cluster_key) tuple from prose
-  # in docs/risk-and-cluster-taxonomy.md into typed columns so risk and
-  # policy are queryable / enforceable / audit-able. Conservative defaults
-  # apply to every existing row at migration time and to every new row when
-  # the CLI does not supply an override. actor: ai_with_human gates explicit
-  # writes — autonomous filing cannot supply these flags.
+  # P2 schema-prep for the gatekeeper (L142). The four risk/policy fields plus
+  # the curated grouping field promote risk taxonomy from prose in
+  # docs/risk-and-cluster-taxonomy.md into typed columns so risk and policy
+  # are queryable / enforceable / audit-able. Conservative defaults apply to
+  # every existing row at migration time and to every new row when the CLI does
+  # not supply an override. actor: ai_with_human gates explicit writes on the
+  # risk/policy fields — autonomous filing cannot supply these flags.
   - name: risk_class
     type: enum
     enum_values: [low, normal, architecture, security, authority]
@@ -632,9 +632,7 @@ fields:
   - name: cluster_key
     type: text
     required: false
-    actor: ai_with_human
-    pattern: '^[a-z][a-z0-9-]{2,40}$'
-    description: "Optional cluster key linking related observations (slug-like)"
+    description: "Curated grouping key — NULL or one of the registry-defined values. The authoritative registry is the Rust const CURATED_CLUSTER_KEYS in the cluster-keys handler module; this YAML declares only existence and nullability."
 
   # --- Notes (free-shape JSON; T008 substrate) ---
   - name: notes

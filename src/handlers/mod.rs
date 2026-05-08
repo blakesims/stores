@@ -5,6 +5,7 @@ pub mod agents_run;
 pub mod agents_stop;
 pub mod architecture_reviews;
 pub mod architecture_reviews_backfill;
+pub mod cluster_keys;
 pub mod external_reviews;
 pub mod brief;
 pub mod drive;

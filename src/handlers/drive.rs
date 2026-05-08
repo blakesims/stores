@@ -300,6 +300,7 @@ fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
     Some(ymd_hms_to_epoch(y, mo, d, h, mi, se))
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     let s = secs % 60;
     let total_min = secs / 60;
@@ -350,6 +351,7 @@ fn unix_to_ymd_hms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     )
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn ymd_hms_to_epoch(y: u32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> i64 {
     fn is_leap(y: u32) -> bool {
         (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
@@ -548,6 +550,7 @@ fn iso_subtract_secs(secs: u64) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn is_leap(y: u32) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
@@ -2085,6 +2088,7 @@ mod tests {
     }
 
     /// Insert a minimal task row in `planning` state.
+    #[allow(clippy::too_many_arguments)]
     fn insert_task(
         conn: &Connection,
         schema: &Schema,
@@ -2605,7 +2609,8 @@ mod tests {
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
 
         // Query all telemetry fields for post-drive assertions (Finding 3).
-        let rows: Vec<(String, i64, i64, String, String, String, String, String, i64, String, Option<i64>, Option<i64>, Option<i64>)> = conn
+        type RunRow = (String, i64, i64, String, String, String, String, String, i64, String, Option<i64>, Option<i64>, Option<i64>);
+        let rows: Vec<RunRow> = conn
             .prepare(
                 "SELECT display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, transcript_path, tokens_in, tokens_out, prompt_cache_hits \
                  FROM agent_runs ORDER BY id",
@@ -3432,7 +3437,7 @@ mod tests {
             tp.display()
         );
         assert!(
-            tp.to_str().map_or(false, |s| s.contains(".stores")),
+            tp.to_str().is_some_and(|s| s.contains(".stores")),
             "transcript_path must be under .stores/runs/: {}",
             tp.display()
         );

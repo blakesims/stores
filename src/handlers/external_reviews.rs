@@ -558,6 +558,7 @@ pub fn build_review_runner(review: &ReviewCfg, codex: &CodexCfg) -> Result<Box<d
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_external_review_attempt(
     conn: &Connection,
     review_display_id: &str,

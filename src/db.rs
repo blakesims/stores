@@ -176,6 +176,7 @@ pub(crate) fn insert_agent_run(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn insert_transition_history(
     tx: &Transaction,
     store: &str,

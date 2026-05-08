@@ -641,6 +641,7 @@ pub fn reconcile_pending_external_review_dispatch(
 
 /// Scan and execute only existing autonomous task re-drive edges. Non-task
 /// actionable rows remain observation-only for this phase.
+#[allow(clippy::too_many_arguments)]
 pub fn scan_record_and_redrive_tasks(
     conn: &Connection,
     schemas: ScannerSchemas<'_>,
@@ -1017,15 +1018,10 @@ fn scan_observations(conn: &Connection, schema: &Schema) -> Result<Vec<Classifie
             contract_state == "draft" || approved_by.is_none() || approved_at.is_none();
         let (classification, held_reason) = if arch_surface {
             ("held".to_string(), Some("needs_architect".to_string()))
-        } else if awaiting_human_contract {
+        } else if awaiting_human_contract
+            || matches!(status.as_str(), "investigated" | "confirmed" | "ready")
+        {
             ("held".to_string(), Some("needs_human".to_string()))
-        } else if matches!(status.as_str(), "investigated" | "confirmed" | "ready") {
-            ("held".to_string(), Some("needs_human".to_string()))
-        } else if status == "needs_investigation" {
-            (
-                "held".to_string(),
-                Some("no_built_in_entrypoint".to_string()),
-            )
         } else {
             (
                 "held".to_string(),

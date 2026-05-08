@@ -59,7 +59,7 @@ pub fn build_context(schema: &Schema, entry: &EntryMap) -> Value {
     // Derive `current_phase_idx` — current_phase minus 1 (for 0-based {{#each}} index matching).
     let plan_phases_count = entry
         .get("plan")
-        .and_then(|v| parse_json_if_string(v))
+        .and_then(parse_json_if_string)
         .and_then(|v| v.get("phases").and_then(|p| p.as_array()).map(|a| a.len()))
         .unwrap_or(0);
     obj.insert(
@@ -84,7 +84,7 @@ pub fn build_context(schema: &Schema, entry: &EntryMap) -> Value {
     // Derive `cycles_have_reviews` — true if any cycle has a non-null review.
     let cycles_have_reviews = entry
         .get("cycles")
-        .and_then(|v| parse_json_if_string(v))
+        .and_then(parse_json_if_string)
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default()
         .iter()

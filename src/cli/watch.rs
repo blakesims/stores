@@ -246,6 +246,7 @@ fn render_frame(
 
 #[derive(Debug)]
 #[cfg(test)]
+#[allow(dead_code)]
 struct TaskRow {
     display_id: String,
     status: String,
@@ -282,6 +283,7 @@ const STATUS_COL_WIDTH: usize = 16;
 
 #[derive(Debug)]
 #[cfg(test)]
+#[allow(dead_code)]
 struct ObsRow {
     display_id: String,
     status: String,
@@ -291,6 +293,7 @@ struct ObsRow {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn query_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
     let mut stmt = conn.prepare(
         "SELECT display_id, status, COALESCE(title, ''), claimed_by, COALESCE(updated_at, ''),
@@ -314,6 +317,7 @@ fn query_tasks(conn: &Connection) -> Result<Vec<TaskRow>> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn query_observations(conn: &Connection) -> Result<Vec<ObsRow>> {
     let mut stmt = conn.prepare(
         "SELECT display_id, status, COALESCE(priority, ''), COALESCE(summary, ''), COALESCE(updated_at, '')
@@ -388,6 +392,7 @@ fn render_tui_collapsed_obs_line(c: &crate::tui::data::CollapsedObsRow) -> Strin
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn render_task_line(t: &TaskRow) -> String {
     let claimed = t
         .claimed_by
@@ -414,6 +419,7 @@ fn render_task_line(t: &TaskRow) -> String {
 /// format when phase data is partial, and to a bare colored state name
 /// otherwise.
 #[cfg(test)]
+#[allow(dead_code)]
 fn format_task_status(t: &TaskRow) -> String {
     let bare_color = task_status_color(&t.status);
     let wrap = |s: &str| format!("{bare_color}{s}{ANSI_RESET}");
@@ -549,6 +555,7 @@ fn visible_width(s: &str) -> usize {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn render_obs_line(o: &ObsRow) -> String {
     let status_color = obs_status_color(&o.status);
     let priority_color = match o.priority.as_str() {
@@ -599,6 +606,7 @@ fn obs_status_color(s: &str) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn is_terminal_task_status(s: &str) -> bool {
     matches!(s, "complete" | "rejected")
 }

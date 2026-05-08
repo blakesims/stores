@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Bundled skills — embedded at compile time (option a)
@@ -54,7 +54,7 @@ fn skills_dir(global: bool) -> Result<PathBuf> {
     }
 }
 
-fn skill_path(base: &PathBuf, name: &str) -> PathBuf {
+fn skill_path(base: &Path, name: &str) -> PathBuf {
     base.join(name).join("SKILL.md")
 }
 
@@ -193,7 +193,7 @@ mod tests {
         base
     }
 
-    fn write_skill_to(base: &PathBuf, name: &str, content: &str) {
+    fn write_skill_to(base: &Path, name: &str, content: &str) {
         let p = skill_path(base, name);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(&p, content).unwrap();
@@ -203,7 +203,7 @@ mod tests {
     // Helpers that operate on an explicit base dir (avoid env side-effects)
     // -----------------------------------------------------------------------
 
-    fn install_to(name: &str, base: &PathBuf, silent: bool) -> Result<()> {
+    fn install_to(name: &str, base: &Path, silent: bool) -> Result<()> {
         let content = BUNDLED_SKILLS
             .iter()
             .find(|(n, _)| *n == name)

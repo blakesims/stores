@@ -82,7 +82,7 @@ fn ac2_1_duplicate_candidates_required_when_duplicate() {
         "decision": "duplicate",
         "confidence": "high",
         "rationale": "Already filed.",
-        "cluster_key": "dispatch-lifecycle"
+        "cluster_key": "gatekeeper-front-door-stuck"
         // duplicate_candidates absent → must fail
     });
     let errs = stores::validate::gatekeeper_decision::validate_gatekeeper_decision(&v)
@@ -212,7 +212,7 @@ fn ac2_3_valid_route_mirrors_risk_flags_and_cluster_key() {
         "rationale": "Stale PID cleanup needed.",
         "tier_hint": "T2",
         "risk_flags": ["small_local_fix"],
-        "cluster_key": "dispatch-lifecycle"
+        "cluster_key": "gatekeeper-front-door-stuck"
     })
     .to_string();
 
@@ -245,7 +245,7 @@ fn ac2_3_valid_route_mirrors_risk_flags_and_cluster_key() {
         risk_flags_raw.contains("small_local_fix"),
         "risk_flags must contain small_local_fix; got: {risk_flags_raw}"
     );
-    assert_eq!(cluster_key, "dispatch-lifecycle");
+    assert_eq!(cluster_key, "gatekeeper-front-door-stuck");
 }
 
 // ---- AC2.4: derive_risk_class / derive_approval_policy matrix ----
@@ -340,7 +340,7 @@ fn ac2_5_decision_metadata_populated_after_route() {
         "rationale": "Stale lock files need cleanup.",
         "tier_hint": "T2",
         "risk_flags": ["small_local_fix"],
-        "cluster_key": "dispatch-lifecycle"
+        "cluster_key": "gatekeeper-front-door-stuck"
     })
     .to_string();
 
@@ -372,7 +372,7 @@ fn ac2_5_decision_metadata_populated_after_route() {
     assert_eq!(
         meta.get("matched_cluster_key")
             .and_then(|v| v.as_str()),
-        Some("dispatch-lifecycle"),
+        Some("gatekeeper-front-door-stuck"),
         "matched_cluster_key must be set"
     );
     assert_eq!(
@@ -556,7 +556,7 @@ fn route_decision_mismatch_between_cli_and_json_rejected() {
         "rationale": "Mismatch test.",
         "tier_hint": "T2",
         "risk_flags": ["small_local_fix"],
-        "cluster_key": "dispatch-lifecycle"
+        "cluster_key": "gatekeeper-front-door-stuck"
     }).to_string();
 
     let matches = cmd.get_matches_from([
@@ -610,7 +610,7 @@ fn p3_normal_observation_auto_create_integration() {
         "rationale": "Test route without pre-supplied routed_to_observation.",
         "tier_hint": "T2",
         "risk_flags": ["small_local_fix"],
-        "cluster_key": "dispatch-lifecycle"
+        "cluster_key": "gatekeeper-front-door-stuck"
     }).to_string();
 
     let matches = cmd.get_matches_from([

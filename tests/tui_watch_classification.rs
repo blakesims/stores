@@ -114,7 +114,7 @@ fn tui_watch_classification_silent_zombie_routes_to_default_visible_zombie_secti
 
 #[test]
 fn tui_watch_classification_classifies_required_historical_noise_patterns() {
-    let cases = vec![
+    let cases = [
         task("T001", "blocked", Some("silent_zombie: pid dead")),
         task(
             "T002",

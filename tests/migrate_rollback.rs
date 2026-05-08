@@ -13,7 +13,7 @@
 //!   3. Call `migrate::run_migrate(true)` and assert:
 //!      (i)  it returns `Err` (transaction rolled back).
 //!      (ii) the post-failure DB state matches the pre-call state — in
-//!           particular, the `body` column was NOT partially applied.
+//!      particular, the `body` column was NOT partially applied.
 
 use rusqlite::Connection;
 use std::path::PathBuf;

@@ -96,6 +96,7 @@ pub enum BackoffKind {
     Exponential,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for BackoffKind {
     fn default() -> Self {
         BackoffKind::Linear

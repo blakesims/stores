@@ -301,7 +301,7 @@ pub fn dispatch(
                     }
                 }
                 Some((verb, sub)) => {
-                    // recover-stale-base is a tasks-only operator recovery verb.
+                    // recover-stale-base is a tasks-only operator recovery verb (T105).
                     if verb == "recover-stale-base" && store.name == "tasks" {
                         let display_id = sub
                             .get_one::<String>("display_id")
@@ -314,6 +314,11 @@ pub fn dispatch(
                         handlers::recover_stale_base::run_recover_stale_base(
                             &conn, er_schema, display_id, invoker,
                         )?;
+                    // clusters and overdue-ready are observations-only read-only verbs (T107)
+                    } else if verb == "clusters" {
+                        handlers::cluster_keys::run_clusters_cmd(schema, &conn, sub, invoker)?;
+                    } else if verb == "overdue-ready" {
+                        handlers::cluster_keys::run_overdue_ready_cmd(schema, &conn, sub, invoker)?;
                     // override-risk and override-policy are observations-only non-transition verbs
                     } else if verb == "override-risk" {
                         handlers::overrides::run_override_risk(schema, &conn, sub, invoker)?;

@@ -196,7 +196,7 @@ fn live_app() -> App {
 }
 
 fn render_snapshot_text(app: &mut App) -> String {
-    let backend = TestBackend::new(80, 24);
+    let backend = TestBackend::new(80, 26);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| render::draw(f, app)).unwrap();
     let buf = terminal.backend().buffer().clone();

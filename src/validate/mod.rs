@@ -107,6 +107,7 @@ pub fn validate_with_authority(
     }
 
     validate_observations_source_pair(schema, entry, &op, &mut errors);
+    validate_observations_cluster_key(schema, entry, &op, &mut errors);
 
     // Walk all fields recursively. Required/enum/pattern checks run against the
     // full merged entry; actor checks run against actor_entry (diff-only for
@@ -209,6 +210,58 @@ fn validate_observations_source_pair(
     }
 }
 
+/// Validate `cluster_key` for observations writes. Fires when the diff or
+/// entry contains `cluster_key` with a non-null value not in the curated
+/// registry. Applies to Add, Update, Transition, and all Submit ops.
+fn validate_observations_cluster_key(
+    schema: &Schema,
+    entry: &EntryMap,
+    op: &Op,
+    errors: &mut Vec<ValidationError>,
+) {
+    if schema.name != "observations" {
+        return;
+    }
+
+    // Determine whether cluster_key is part of this write's diff.
+    let diff_has_key = match op {
+        Op::Add => entry.contains_key("cluster_key"),
+        Op::Update(diff)
+        | Op::Transition(_, diff)
+        | Op::SubmitPlan(diff)
+        | Op::SubmitExecute(diff) => diff.contains_key("cluster_key"),
+        Op::SubmitPlanReview(_, diff) | Op::SubmitReview(_, diff) => {
+            diff.contains_key("cluster_key")
+        }
+    };
+
+    if !diff_has_key {
+        return;
+    }
+
+    let value = match entry.get("cluster_key") {
+        Some(v) => v,
+        None => return,
+    };
+    // NULL / absent → allowed (field is optional)
+    if value.is_null() {
+        return;
+    }
+    let s = match value.as_str() {
+        Some(s) => s,
+        None => return,
+    };
+
+    if let Err(msg) = crate::handlers::cluster_keys::validate_value(s) {
+        errors.push(ValidationError {
+            field_path: vec!["cluster_key".to_string()],
+            rule: error::RuleKind::Enum,
+            message: msg,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_field_recursive(
     field: &crate::schema::Field,
     entry: &EntryMap,
@@ -432,6 +485,7 @@ fn push_invalid_shape(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_field(
     field: &crate::schema::Field,
     entry: &EntryMap,
@@ -1357,6 +1411,123 @@ fields:
             "message backwards-compat check failed; got: {}",
             entries_errs[0].message
         );
+    }
+
+    // ---- T107: cluster_key validation tests ----
+
+    const OBSERVATIONS_YAML_FOR_VALIDATE: &str =
+        include_str!("../../stores/observations/schema.yaml");
+
+    fn obs_schema() -> Schema {
+        Schema::from_yaml(OBSERVATIONS_YAML_FOR_VALIDATE).unwrap()
+    }
+
+    fn base_obs_entry() -> EntryMap {
+        let mut m = EntryMap::new();
+        m.insert("summary".into(), str_val("test observation"));
+        m.insert("source".into(), str_val("dev"));
+        m.insert("priority".into(), str_val("normal"));
+        m.insert("captured_at".into(), str_val("2026-05-08T00:00:00Z"));
+        m.insert("captured_week".into(), str_val("w19-d4"));
+        m
+    }
+
+    #[test]
+    fn cluster_key_valid_on_add_accepted() {
+        let s = obs_schema();
+        let mut entry = base_obs_entry();
+        entry.insert(
+            "cluster_key".into(),
+            str_val("deploy-blocked-merge-conflict"),
+        );
+        validate(&s, &entry, Op::Add, Actor::AiAutonomous.into())
+            .expect("valid cluster_key on Add must pass");
+    }
+
+    #[test]
+    fn cluster_key_bogus_on_add_rejected_with_allowed_list() {
+        let s = obs_schema();
+        let mut entry = base_obs_entry();
+        entry.insert("cluster_key".into(), str_val("bogus-key"));
+        let errs = validate(&s, &entry, Op::Add, Actor::AiAutonomous.into())
+            .unwrap_err();
+        let ck_errs: Vec<&ValidationError> = errs
+            .iter()
+            .filter(|e| e.field_path == vec!["cluster_key".to_string()])
+            .collect();
+        assert_eq!(ck_errs.len(), 1, "expected 1 cluster_key error");
+        let msg = &ck_errs[0].message;
+        assert!(
+            msg.contains("unknown cluster_key 'bogus-key'"),
+            "error must name bogus-key: {msg}"
+        );
+        for key in crate::handlers::cluster_keys::curated_cluster_keys() {
+            assert!(
+                msg.contains(key),
+                "error must list allowed key '{key}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn cluster_key_valid_on_update_accepted() {
+        let s = obs_schema();
+        let mut merged = base_obs_entry();
+        merged.insert(
+            "cluster_key".into(),
+            str_val("silent-zombie-watchdog"),
+        );
+        let mut diff = EntryMap::new();
+        diff.insert(
+            "cluster_key".into(),
+            str_val("silent-zombie-watchdog"),
+        );
+        validate(&s, &merged, Op::Update(diff), Actor::AiAutonomous.into())
+            .expect("valid cluster_key on Update must pass");
+    }
+
+    #[test]
+    fn cluster_key_bogus_on_update_rejected_with_allowed_list() {
+        let s = obs_schema();
+        let mut merged = base_obs_entry();
+        merged.insert("cluster_key".into(), str_val("bogus-update-key"));
+        let mut diff = EntryMap::new();
+        diff.insert("cluster_key".into(), str_val("bogus-update-key"));
+        let errs = validate(&s, &merged, Op::Update(diff), Actor::AiAutonomous.into())
+            .unwrap_err();
+        let ck_errs: Vec<&ValidationError> = errs
+            .iter()
+            .filter(|e| e.field_path == vec!["cluster_key".to_string()])
+            .collect();
+        assert_eq!(ck_errs.len(), 1, "expected 1 cluster_key error on Update");
+        let msg = &ck_errs[0].message;
+        assert!(
+            msg.contains("unknown cluster_key 'bogus-update-key'"),
+            "error must name bogus-update-key: {msg}"
+        );
+        for key in crate::handlers::cluster_keys::curated_cluster_keys() {
+            assert!(
+                msg.contains(key),
+                "error must list allowed key '{key}': {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn cluster_key_null_on_add_accepted() {
+        let s = obs_schema();
+        let mut entry = base_obs_entry();
+        entry.insert("cluster_key".into(), serde_json::Value::Null);
+        validate(&s, &entry, Op::Add, Actor::AiAutonomous.into())
+            .expect("null cluster_key on Add must pass");
+    }
+
+    #[test]
+    fn cluster_key_absent_on_add_accepted() {
+        let s = obs_schema();
+        let entry = base_obs_entry();
+        validate(&s, &entry, Op::Add, Actor::AiAutonomous.into())
+            .expect("absent cluster_key on Add must pass");
     }
 }
 

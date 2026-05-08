@@ -352,7 +352,7 @@ fn minimal_fixture_has_required_fields() {
     let map = v.as_mapping().expect("fixture must be a YAML mapping");
     for field in &["summary", "source_agent", "captured_at", "captured_week"] {
         assert!(
-            map.contains_key(&serde_yaml::Value::String(field.to_string())),
+            map.contains_key(&serde_yaml::Value::String((*field).to_string()) as &dyn serde_yaml::mapping::Index),
             "fixture must contain required field: {field}"
         );
     }
