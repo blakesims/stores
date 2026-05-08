@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Print a single entry as human-readable text.
 /// Nested Records are indented under their key. For observations, a non-null
@@ -147,17 +148,139 @@ fn value_display(v: &Value) -> String {
     }
 }
 
-/// Print a list of entries as human-readable text.
-pub fn print_list_text(display_id: &str, entry: &BTreeMap<String, Value>) {
-    print!("{display_id}  ");
-    // One-line summary: print scalar fields only
-    for (k, v) in entry {
-        match v {
-            Value::Object(_) | Value::Null => {}
-            other => print!("{k}={} ", value_display(other)),
+/// Print a list of entries as the default scannable human-readable table.
+pub fn print_list_table(entries: &[BTreeMap<String, Value>]) {
+    print!("{}", list_table_text(entries));
+}
+
+/// Render entries as a table using the detected terminal width for summary truncation.
+pub fn list_table_text(entries: &[BTreeMap<String, Value>]) -> String {
+    list_table_text_with_width(entries, terminal_width())
+}
+
+/// Render entries as a table using an explicit terminal width for deterministic tests.
+pub fn list_table_text_with_width(entries: &[BTreeMap<String, Value>], width: usize) -> String {
+    const HEADERS: [&str; 5] = ["display_id", "status", "priority", "source", "summary"];
+    let rows: Vec<[String; 5]> = entries.iter().map(standard_list_row).collect();
+
+    let mut widths = [
+        HEADERS[0].len(),
+        HEADERS[1].len(),
+        HEADERS[2].len(),
+        HEADERS[3].len(),
+    ];
+    for row in &rows {
+        for i in 0..4 {
+            widths[i] = widths[i].max(UnicodeWidthStr::width(row[i].as_str()));
         }
     }
-    println!();
+
+    let fixed_width: usize = widths.iter().sum::<usize>() + (HEADERS.len() - 1) * 2;
+    let summary_width = width.saturating_sub(fixed_width).max(1);
+
+    let mut out = String::new();
+    push_table_row(
+        &mut out,
+        &[
+            HEADERS[0].to_string(),
+            HEADERS[1].to_string(),
+            HEADERS[2].to_string(),
+            HEADERS[3].to_string(),
+            HEADERS[4].to_string(),
+        ],
+        &widths,
+    );
+    for mut row in rows {
+        row[4] = truncate_to_width(&row[4], summary_width);
+        push_table_row(&mut out, &row, &widths);
+    }
+    out
+}
+
+fn push_table_row(out: &mut String, row: &[String; 5], widths: &[usize; 4]) {
+    for i in 0..4 {
+        push_padded_cell(out, &row[i], widths[i]);
+        out.push_str("  ");
+    }
+    out.push_str(&row[4]);
+    out.push('\n');
+}
+
+fn push_padded_cell(out: &mut String, cell: &str, width: usize) {
+    out.push_str(cell);
+    let cell_width = UnicodeWidthStr::width(cell);
+    for _ in 0..width.saturating_sub(cell_width) {
+        out.push(' ');
+    }
+}
+
+fn terminal_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|w| *w > 0)
+        .or_else(|| {
+            crossterm::terminal::size()
+                .ok()
+                .map(|(cols, _)| usize::from(cols))
+                .filter(|w| *w > 0)
+        })
+        .unwrap_or(80)
+}
+
+fn standard_list_row(entry: &BTreeMap<String, Value>) -> [String; 5] {
+    [
+        scalar_cell(entry.get("display_id")),
+        scalar_cell(entry.get("status")),
+        scalar_cell(entry.get("priority")),
+        scalar_cell(entry.get("source")),
+        summary_or_title(entry),
+    ]
+}
+
+fn summary_or_title(entry: &BTreeMap<String, Value>) -> String {
+    let summary = scalar_cell(entry.get("summary"));
+    if summary.is_empty() {
+        scalar_cell(entry.get("title"))
+    } else {
+        summary
+    }
+}
+
+fn scalar_cell(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => one_line(s),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_to_width(s: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= width {
+        return s.to_string();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+
+    let content_width = width - 1;
+    let mut used = 0;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > content_width {
+            break;
+        }
+        used += ch_width;
+        out.push(ch);
+    }
+    out.push('…');
+    out
 }
 
 /// Print a single entry as JSON.
@@ -183,14 +306,125 @@ pub fn print_value_json(value: &Value) {
     );
 }
 
-/// Print a list of entries as JSON array.
+/// Print a list of entries as a JSON array without altering entry shape.
 pub fn print_list_json(entries: &[BTreeMap<String, Value>]) {
+    println!("{}", list_json_text(entries));
+}
+
+/// Render entries as a pretty JSON array, preserving all decoded fields untruncated.
+pub fn list_json_text(entries: &[BTreeMap<String, Value>]) -> String {
     let arr: Vec<Value> = entries
         .iter()
         .map(|e| Value::Object(e.iter().map(|(k, v)| (k.clone(), v.clone())).collect()))
         .collect();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_else(|_| "[]".to_string())
-    );
+    serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(fields: &[(&str, Value)]) -> BTreeMap<String, Value> {
+        fields
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn list_table_has_header_and_one_data_line_per_entry() {
+        let entries = vec![
+            entry(&[
+                ("display_id", Value::String("L001".into())),
+                ("status", Value::String("new".into())),
+                ("priority", Value::String("high".into())),
+                ("source", Value::String("cli".into())),
+                ("summary", Value::String("first".into())),
+                ("body", Value::String("body should not render".into())),
+            ]),
+            entry(&[
+                ("display_id", Value::String("L002".into())),
+                ("status", Value::String("triaged".into())),
+                ("priority", Value::String("low".into())),
+                ("source", Value::String("api".into())),
+                ("summary", Value::String("second".into())),
+            ]),
+        ];
+
+        let text = list_table_text_with_width(&entries, 120);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("display_id"));
+        assert!(lines[0].contains("status"));
+        assert!(lines[0].contains("priority"));
+        assert!(lines[0].contains("source"));
+        assert!(lines[0].contains("summary"));
+        assert!(lines[1].contains("L001"));
+        assert!(lines[2].contains("L002"));
+        assert!(!text.contains("body should not render"));
+    }
+
+    #[test]
+    fn long_summary_truncates_to_supplied_width() {
+        let entries = vec![entry(&[
+            ("display_id", Value::String("L001".into())),
+            ("status", Value::String("new".into())),
+            ("priority", Value::String("high".into())),
+            ("source", Value::String("cli".into())),
+            (
+                "summary",
+                Value::String("abcdefghijklmnopqrstuvwxyz".into()),
+            ),
+        ])];
+
+        let text = list_table_text_with_width(&entries, 45);
+        let data = text.lines().nth(1).unwrap();
+        assert!(data.ends_with('…'), "data line should be truncated: {data}");
+        assert!(!data.contains("abcdefghijklmnopqrstuvwxyz"));
+    }
+
+    #[test]
+    fn title_fallback_is_used_for_task_like_rows() {
+        let entries = vec![entry(&[
+            ("display_id", Value::String("T001".into())),
+            ("status", Value::String("open".into())),
+            ("title", Value::String("task title fallback".into())),
+        ])];
+
+        let text = list_table_text_with_width(&entries, 120);
+        assert!(text.contains("task title fallback"));
+    }
+
+    #[test]
+    fn wide_summary_truncates_by_terminal_cells_not_char_count() {
+        let entries = vec![entry(&[
+            ("display_id", Value::String("L001".into())),
+            ("status", Value::String("new".into())),
+            ("priority", Value::String("high".into())),
+            ("source", Value::String("cli".into())),
+            ("summary", Value::String("漢字漢字漢字tail".into())),
+        ])];
+
+        let text = list_table_text_with_width(&entries, 46);
+        let data = text.lines().nth(1).unwrap();
+        assert!(
+            data.ends_with("漢字漢…"),
+            "data line should be cell-truncated: {data}"
+        );
+        assert!(!data.contains("漢字漢字漢字tail"));
+    }
+
+    #[test]
+    fn missing_priority_and_source_are_blank() {
+        let entries = vec![entry(&[
+            ("display_id", Value::String("T001".into())),
+            ("status", Value::String("open".into())),
+            ("title", Value::String("task title".into())),
+        ])];
+
+        let text = list_table_text_with_width(&entries, 120);
+        let data = text.lines().nth(1).unwrap();
+        assert!(data.starts_with("T001        open"));
+        assert!(data.contains("task title"));
+    }
 }

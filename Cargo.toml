@@ -28,6 +28,7 @@ ratatui = "0.28"
 crossterm = "0.28"
 tempfile = "3"
 chrono = { version = "0.4", features = ["std"], default-features = false }
+unicode-width = "0.1"
 
 [features]
 default = ["runner-claude-code", "runner-pi"]

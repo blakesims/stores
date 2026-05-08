@@ -1590,6 +1590,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror",
+ "unicode-width",
  "uuid",
 ]
 

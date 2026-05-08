@@ -235,13 +235,7 @@ pub fn run(
     if json_flag {
         output::print_list_json(&entries);
     } else {
-        for entry in &entries {
-            let did = entry
-                .get("display_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            output::print_list_text(did, entry);
-        }
+        output::print_list_table(&entries);
     }
 
     Ok(())
@@ -740,5 +734,47 @@ fields:
                 other
             ),
         }
+    }
+    #[test]
+    fn json_regression_preserves_full_decoded_entry_shape() {
+        let mut entry = std::collections::BTreeMap::new();
+        entry.insert(
+            "display_id".to_string(),
+            serde_json::Value::String("L001".into()),
+        );
+        entry.insert(
+            "status".to_string(),
+            serde_json::Value::String("new".into()),
+        );
+        entry.insert(
+            "priority".to_string(),
+            serde_json::Value::String("high".into()),
+        );
+        entry.insert(
+            "source".to_string(),
+            serde_json::Value::String("cli".into()),
+        );
+        entry.insert(
+            "summary".to_string(),
+            serde_json::Value::String("complete untruncated summary value".into()),
+        );
+        entry.insert(
+            "body".to_string(),
+            serde_json::Value::String("complete decoded body value".into()),
+        );
+        entry.insert(
+            "evidence".to_string(),
+            serde_json::json!({"external_refs": [{"system": "github", "id": "1"}]}),
+        );
+
+        let json_text = crate::output::list_json_text(&[entry]);
+        let parsed: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+        let row = parsed.as_array().unwrap().first().unwrap();
+
+        assert_eq!(row["summary"], "complete untruncated summary value");
+        assert_eq!(row["body"], "complete decoded body value");
+        assert_eq!(row["evidence"]["external_refs"][0]["system"], "github");
+        assert!(json_text.trim_start().starts_with('['));
+        assert!(!json_text.contains("display_id  status  priority  source  summary"));
     }
 }
