@@ -918,23 +918,7 @@ fn rate_limit_blocked_until(reason: &str) -> Option<&str> {
 }
 
 fn is_iso8601_cooldown(s: &str) -> bool {
-    let b = s.as_bytes();
-    if b.len() < 20
-        || b.get(4) != Some(&b'-')
-        || b.get(7) != Some(&b'-')
-        || b.get(10) != Some(&b'T')
-        || b.get(13) != Some(&b':')
-        || b.get(16) != Some(&b':')
-    {
-        return false;
-    }
-    b[0..4].iter().all(u8::is_ascii_digit)
-        && b[5..7].iter().all(u8::is_ascii_digit)
-        && b[8..10].iter().all(u8::is_ascii_digit)
-        && b[11..13].iter().all(u8::is_ascii_digit)
-        && b[14..16].iter().all(u8::is_ascii_digit)
-        && b[17..19].iter().all(u8::is_ascii_digit)
-        && (s.ends_with('Z') || s[19..].contains('+') || s[19..].contains('-'))
+    chrono::DateTime::parse_from_rfc3339(s).is_ok()
 }
 
 fn external_review_backfill_reason(conn: &Connection, task_row_id: i64) -> Result<Option<String>> {
@@ -1426,6 +1410,22 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn rate_limit_blocked_until_requires_strict_rfc3339_timestamp() {
+        assert_eq!(
+            rate_limit_blocked_until("rate_limit:anthropic:not-an-iso8601-timestamp"),
+            None
+        );
+        assert_eq!(
+            rate_limit_blocked_until("rate_limit:anthropic:2026-01-01T00:00:00junk+"),
+            None
+        );
+        assert_eq!(
+            rate_limit_blocked_until("rate_limit:anthropic:2026-01-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z")
+        );
     }
 
     #[test]
