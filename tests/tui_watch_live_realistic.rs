@@ -1,12 +1,11 @@
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use rusqlite::{params, Connection};
+use std::time::{SystemTime, UNIX_EPOCH};
 use stores::tui::app::StatusBar;
 use stores::tui::daemon::Liveness;
-use stores::tui::data::{cockpit_model, ExternalReviewState, Row, Section};
 use stores::tui::sort::Sort;
 use stores::tui::{render, App, TuiOpts};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const CLUSTER_COUNTS: [usize; 7] = [76, 47, 40, 35, 31, 28, 24];
 const SNAPSHOT: &str = include_str!("fixtures/watch/live_realistic.snap");
@@ -195,71 +194,36 @@ fn live_app() -> App {
     app
 }
 
-fn render_snapshot_text(app: &App) -> String {
-    let model = cockpit_model(&app.rows, ExternalReviewState::default());
-    let mut out = format!(
-        "daemon:DEAD\nlanes: execution={} review={} accept={} held={} active={} priority={}\nexternal review: unavailable / not installed\n\n",
-        model.execution, model.review, model.accept, model.held, model.active, model.priority
-    );
-    let oldest = app.system_health.oldest_claimed_at_epoch.unwrap();
-    let age_hours = now_epoch().saturating_sub(oldest) / 3600;
-    out.push_str(&format!(
-        "system-alert: daemon DEAD; {} dangling locks; oldest started {}h ago\n",
-        app.system_health.unfinished_dispatch_locks, age_hours
-    ));
-    for (section, indices) in &app.sections {
-        if indices.is_empty() {
+fn render_snapshot_text(app: &mut App) -> String {
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| render::draw(f, app)).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    let mut lines = Vec::new();
+    for y in 0..buf.area.height {
+        let mut line = String::new();
+        for x in 0..buf.area.width {
+            line.push_str(buf[(x, y)].symbol());
+        }
+        let line = line.trim_end().to_string();
+        if line == "stores watch · cockpit"
+            || line.starts_with("j/k move")
+            || line.starts_with("sort:")
+        {
             continue;
         }
-        out.push_str(&format!("{} ({})\n", section.label(), indices.len()));
-        for &idx in indices {
-            out.push_str(&snapshot_row(&app.rows[idx]));
-            out.push('\n');
-        }
+        lines.push(line);
     }
-    out
-}
-
-fn snapshot_row(row: &Row) -> String {
-    match row {
-        Row::Task(t) => format!(
-            "{} {} {}{}",
-            t.display_id,
-            t.status,
-            t.title,
-            t.blocked_reason
-                .as_deref()
-                .map(|r| format!(" reason:{r}"))
-                .unwrap_or_default()
-        ),
-        Row::Obs(o) => format!(
-            "{} {} priority:{} {}",
-            o.display_id, o.status, o.priority, o.summary
-        ),
-        Row::CollapsedObs(c) => format!(
-            "{} {} priority:{} ×{} {}",
-            c.primary_display_id,
-            c.representative.status,
-            c.representative.priority,
-            c.count,
-            c.summary
-        ),
-        Row::Review(r) => format!("{} review:{} task={}", r.display_id, r.status, r.task_id),
-        Row::Intake(i) => format!(
-            "{} {} priority:{} {} held:{}",
-            i.display_id,
-            i.status,
-            i.priority.as_deref().unwrap_or("normal"),
-            i.summary,
-            i.held_reason.as_deref().unwrap_or("unknown")
-        ),
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
     }
+    format!("{}\n", lines.join("\n"))
 }
 
 #[test]
 fn tui_watch_live_realistic_snapshot_and_budget() {
     let mut app = live_app();
-    let got = render_snapshot_text(&app);
+    let got = render_snapshot_text(&mut app);
     assert_eq!(got, SNAPSHOT);
 
     let body_lines: Vec<&str> = got.lines().skip(4).collect();
@@ -268,20 +232,20 @@ fn tui_watch_live_realistic_snapshot_and_budget() {
         "{}",
         body_lines[0]
     );
-    let visible_body_rows = body_lines
-        .iter()
-        .filter(|line| {
-            !line.starts_with("system-alert:")
-                && !Section::ALL.iter().any(|s| line.starts_with(s.label()))
-        })
-        .count();
-    assert!(visible_body_rows <= 30, "visible body rows: {visible_body_rows}\n{got}");
+    assert!(
+        body_lines.len() <= 30,
+        "visible body lines after header: {}\n{got}",
+        body_lines.len()
+    );
 
     let badge_lines: Vec<&str> = got.lines().filter(|line| line.contains('×')).collect();
     assert_eq!(badge_lines.len(), 7, "{badge_lines:#?}");
     for count in CLUSTER_COUNTS {
         assert_eq!(
-            badge_lines.iter().filter(|line| line.contains(&format!("×{count} "))).count(),
+            badge_lines
+                .iter()
+                .filter(|line| line.contains(&format!("×{count} ")))
+                .count(),
             1,
             "missing or duplicate ×{count}: {badge_lines:#?}"
         );
@@ -298,8 +262,4 @@ fn tui_watch_live_realistic_snapshot_and_budget() {
     assert!(got.contains("RATIFY-U1"));
     assert!(got.contains("ACCEPT-U3"));
     assert!(got.contains("HELD-INTAKE"));
-
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| render::draw(f, &mut app)).unwrap();
 }

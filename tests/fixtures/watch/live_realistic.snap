@@ -1,38 +1,23 @@
-daemon:DEAD
+daemon:DEAD · cap active 15/15
 lanes: execution=0 review=6 accept=0 held=10 active=291 priority=0
 external review: unavailable / not installed
 
 system-alert: daemon DEAD; 8 dangling locks; oldest started 8h ago
-RATIFY-U1 (3)
-L900 open priority:normal ratify ready contract 1
-L901 open priority:normal ratify ready contract 2
-L902 open priority:normal ratify ready contract 3
-ACCEPT-U3 (4)
-T400 in_review accept gate 400
-T401 in_review accept gate 401
-T402 in_review accept gate 402
-T403 in_review accept gate 403
-HELD-DEPLOY (7)
-T300 deploy_blocked deploy recovery T300 reason:retry-deploy-recoverable
-T301 deploy_blocked deploy recovery T301 reason:retry-deploy-recoverable
-T302 deploy_blocked deploy recovery T302 reason:retry-deploy-recoverable
-T303 deploy_blocked deploy recovery T303 reason:retry-deploy-recoverable
-T304 deploy_blocked deploy recovery T304 reason:retry-deploy-recoverable
-T305 deploy_blocked deploy recovery T305 reason:retry-deploy-recoverable
-T306 deploy_blocked deploy recovery T306 reason:retry-deploy-recoverable
-HELD-INTAKE (1)
-I001 needs_info priority:normal intake needs routing held:missing owner
-HELD-AI-REVIEW (2)
-T500 plan_review planner AI review
-T501 code_review code AI review
-HELD-ZOMBIE (2)
-T600 blocked silent zombie one reason:silent_zombie:pid_dead
-T601 blocked silent zombie two reason:drive_failed:silent_zombie_pid_dead
-OBSERVATIONS (7)
-L001 open priority:normal ×76 deploy-blocked: task T300 merge conflict
-L077 open priority:normal ×47 deploy-blocked: task T301 merge conflict
-L124 open priority:normal ×40 deploy-blocked: task T302 merge conflict
-L164 open priority:normal ×35 deploy-blocked: task T303 merge conflict
-L199 open priority:normal ×31 deploy-blocked: task T304 merge conflict
-L230 open priority:normal ×28 deploy-blocked: task T305 merge conflict
-L258 open priority:normal ×24 deploy-blocked: task T306 merge conflict
+▾ RATIFY-U1 (3)
+  L900  open                     priority:normal ratify ready contract 1
+▾ ACCEPT-U3 (4)
+  T400  in_review                wrap → external review: unavailable / not insta
+▾ HELD-INTAKE (1)
+  I001  needs_info               priority:normal held:missing owner · next:recon
+▾ HELD-AI-REVIEW (2)
+  T500  plan_review              plan ◐ tier:T2 · planner AI review
+▾ HELD-ZOMBIE (2)
+  T600  blocked:unknown          tier:T2 · reason:silent_zombie:pid_dead · silen
+▾ OBSERVATIONS (7)
+  L001  open                     priority:normal ×76 deploy-blocked: task T300 m
+  L077  open                     priority:normal ×47 deploy-blocked: task T301 m
+  L124  open                     priority:normal ×40 deploy-blocked: task T302 m
+  L164  open                     priority:normal ×35 deploy-blocked: task T303 m
+  L199  open                     priority:normal ×31 deploy-blocked: task T304 m
+  L230  open                     priority:normal ×28 deploy-blocked: task T305 m
+  L258  open                     priority:normal ×24 deploy-blocked: task T306 m

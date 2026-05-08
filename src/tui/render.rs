@@ -9,7 +9,7 @@ use ratatui::Frame;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::app::{App, FlatRow, Mode};
-use super::data::{blocked_reason_class, cockpit_model, ExternalReviewState, Row};
+use super::data::{blocked_reason_class, cockpit_model, ExternalReviewState, Row, Section};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     if app.mode == Mode::Detail {
@@ -20,44 +20,51 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // Search-mode adds an extra 1-line input bar above the status bar.
     let search_bar = if app.mode == Mode::Search { 1 } else { 0 };
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),             // rows pane
-            Constraint::Length(1),          // selected-row footer
-            Constraint::Length(search_bar), // search input
-            Constraint::Length(1),          // hint line
-            Constraint::Length(1),          // status bar
-        ])
-        .split(f.area());
+    if mission_compact_mode(app) {
+        app.viewport_height = f.area().height.saturating_sub(1).max(1) as usize;
+        let flat = app.flat_rows();
+        clamp_scroll(app, flat.len());
+        draw_rows(f, app, &flat, f.area());
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),             // rows pane
+                Constraint::Length(1),          // selected-row footer
+                Constraint::Length(search_bar), // search input
+                Constraint::Length(1),          // hint line
+                Constraint::Length(1),          // status bar
+            ])
+            .split(f.area());
 
-    let rows_area = chunks[0];
-    // Reserve one line of the rows pane per non-empty section header (and
-    // collapsed sections still get a header). For viewport math we count
-    // the row body lines, not headers.
-    let viewport = rows_area.height.saturating_sub(0) as usize;
-    app.viewport_height = viewport.max(1);
+        let rows_area = chunks[0];
+        // Reserve one line of the rows pane per non-empty section header (and
+        // collapsed sections still get a header). For viewport math we count
+        // the row body lines, not headers.
+        let viewport = rows_area.height.saturating_sub(0) as usize;
+        app.viewport_height = viewport.max(1);
 
-    let flat = app.flat_rows();
-    clamp_scroll(app, flat.len());
+        let flat = app.flat_rows();
+        clamp_scroll(app, flat.len());
 
-    draw_rows(f, app, &flat, rows_area);
-    super::footer::render(f, app, chunks[1]);
+        draw_rows(f, app, &flat, rows_area);
+        super::footer::render(f, app, chunks[1]);
 
-    if app.mode == Mode::Search {
-        draw_search_bar(f, app, chunks[2]);
+        if app.mode == Mode::Search {
+            draw_search_bar(f, app, chunks[2]);
+        }
+
+        let hint = super::help::hint_for(app.mode);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(Color::DarkGray),
+            ))),
+            chunks[3],
+        );
+
+        super::status_bar::render(f, app, chunks[4]);
     }
-
-    let hint = super::help::hint_for(app.mode);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            hint,
-            Style::default().fg(Color::DarkGray),
-        ))),
-        chunks[3],
-    );
-
-    super::status_bar::render(f, app, chunks[4]);
 
     if app.mode == Mode::Filter {
         draw_filter_palette(f, app);
@@ -150,7 +157,13 @@ fn clamp_scroll(app: &mut App, total: usize) {
 fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
     // Render only the viewport window (virtualized). Section headers are
     // emitted lazily as the window crosses a section boundary.
-    let window = visible_window(app, flat);
+    let compact_window;
+    let window = if mission_compact_mode(app) {
+        compact_window = mission_compact_window(app, flat);
+        compact_window.as_slice()
+    } else {
+        visible_window(app, flat)
+    };
     let mut items: Vec<ListItem> = cockpit_header_items(app);
     if let Some(alert) = system_alert_item(app) {
         items.push(alert);
@@ -196,6 +209,38 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
             .title("stores watch · cockpit"),
     );
     f.render_widget(list, area);
+}
+
+fn mission_compact_mode(app: &App) -> bool {
+    matches!(
+        app.status_bar.daemon_liveness,
+        super::daemon::Liveness::Dead
+    ) && app.system_health.unfinished_dispatch_locks > 0
+        && app
+            .rows
+            .iter()
+            .any(|row| matches!(row, Row::CollapsedObs(_)))
+}
+
+fn mission_compact_window(app: &App, flat: &[FlatRow]) -> Vec<FlatRow> {
+    let mut out = Vec::new();
+    let wanted_single = [
+        Section::ObsRatifiable,
+        Section::TasksAcceptU3,
+        Section::IntakeHeld,
+        Section::TasksHeldAiReview,
+        Section::TasksHeldZombie,
+    ];
+    for section in wanted_single {
+        if let Some(fr) = flat.iter().find(|fr| app.sections[fr.section].0 == section) {
+            out.push(*fr);
+        }
+    }
+    out.extend(flat.iter().copied().filter(|fr| {
+        app.sections[fr.section].0 == Section::ObsOther
+            && matches!(app.rows.get(fr.abs), Some(Row::CollapsedObs(_)))
+    }));
+    out
 }
 
 fn system_alert_item(app: &App) -> Option<ListItem<'static>> {
@@ -379,7 +424,10 @@ fn obs_spans(
         ),
         Span::raw(" "),
         Span::raw(format!("priority:{}{} ", o.priority, badge)),
-        Span::raw(truncate(&format!("{}{}", summary_prefix, obs_snippet(o)), 60)),
+        Span::raw(truncate(
+            &format!("{}{}", summary_prefix, obs_snippet(o)),
+            60,
+        )),
     ]
 }
 
