@@ -3,30 +3,33 @@ lanes: execution=1 review=1 accept=3 held=8 active=7 priority=3
 external review: unavailable / not installed
 ACTIVE WORK (1)
 T010 executing ▮▱ ··· in-flight
-HELD (4)
-T001 blocked silent_zombie reason:silent_zombie
-T002 blocked drive_failed:silent_zombie_pid_dead reason:drive_failed:silent_zombie_pid_dead
+RATIFY-U1 (0)
+ACCEPT-U3 (0)
+HELD-BLOCKED (2)
 T020 blocked rate_limit reason:rate_limit
 T021 blocked transient_infra reason:transient_infra
-HELD (1)
+HELD-DEPLOY (1)
 T022 deploy_blocked retry-deploy-recoverable reason:retry-deploy-recoverable
-HELD (2)
+HELD-TRIAGE (2)
 T023 deploy_blocked opaque reason:opaque
 T024 blocked unknown reason:unknown
-ACCEPT (3)
+HELD-INTAKE (1)
+I001 needs_info priority:high intake needs answer held:missing owner
+HELD-AI-REVIEW (1)
+T011 code_review ▰◐▱ ●●· in-flight
+HELD-ZOMBIE (2)
+T001 blocked silent_zombie reason:silent_zombie
+T002 blocked drive_failed:silent_zombie_pid_dead reason:drive_failed:silent_zombie_pid_dead
+TERMINAL (3)
 T003 cargo_installed ✓ deploy accept_installed_inert reason:accept_installed_inert
 T004 schema_migrated ✓ deploy accept_installed_inert reason:accept_installed_inert
 T030 accepted ✓ accepted terminal reason:terminal
-REVIEW (1)
-T011 code_review ▰◐▱ ●●· in-flight
 PRIORITY (2)
 L002 open priority:high deploy-blocked: task T999 merge conflict
 T012 ready in-flight
-OBSERVATIONS/INTAKE (2)
+OBSERVATIONS (2)
 L001 open priority:normal deploy-blocked: task T003 merge conflict
 L003 open priority:normal operator note
-EXTERNAL REVIEW · HELD/RUNNING (0)
-OBSERVATIONS/INTAKE (0)
-HELD (1)
-I001 needs_info priority:high intake needs answer held:missing owner
-OBSERVATIONS/INTAKE (0)
+INTAKE-OPEN (0)
+INTAKE-ROUTED (0)
+EXTERNAL-REVIEW (0)

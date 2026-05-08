@@ -66,7 +66,12 @@ pub fn run(interval_ms: u64, show_all_history: bool) -> Result<()> {
     }
 }
 
-fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history: bool) -> Result<String> {
+fn render_frame(
+    conn: &Connection,
+    db: &Path,
+    interval_ms: u64,
+    show_all_history: bool,
+) -> Result<String> {
     let mut out = String::with_capacity(4096);
 
     let now = local_clock_string();
@@ -77,20 +82,30 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
 
     // ---- TASKS -----------------------------------------------------------
     let rows = crate::tui::data::load_rows(conn).unwrap_or_default();
-    let ((task_visible, task_total), (obs_visible, obs_total)) = crate::tui::data::surface_counts(&rows, show_all_history);
+    let ((task_visible, task_total), (obs_visible, obs_total)) =
+        crate::tui::data::surface_counts(&rows, show_all_history);
     let sections = crate::tui::data::classify_with_options(
         &rows,
-        crate::tui::data::WatchClassifyOptions { show_all_history, ..Default::default() },
+        crate::tui::data::WatchClassifyOptions {
+            show_all_history,
+            ..Default::default()
+        },
     );
 
-    let mut task_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {
-        crate::tui::data::Section::TasksActionableCurrentWork
-        | crate::tui::data::Section::TasksBlockedNeedsAction
-        | crate::tui::data::Section::TasksDeployRecovery
-        | crate::tui::data::Section::TasksNeedsTriage
-        | crate::tui::data::Section::TasksRecentlyTerminal => idxs.clone(),
-        _ => Vec::new(),
-    }).collect();
+    let mut task_indices: Vec<usize> = sections
+        .iter()
+        .flat_map(|(sec, idxs)| match sec {
+            crate::tui::data::Section::TasksActionableCurrentWork
+            | crate::tui::data::Section::TasksAcceptU3
+            | crate::tui::data::Section::TasksBlockedNeedsAction
+            | crate::tui::data::Section::TasksDeployRecovery
+            | crate::tui::data::Section::TasksNeedsTriage
+            | crate::tui::data::Section::TasksHeldAiReview
+            | crate::tui::data::Section::TasksHeldZombie
+            | crate::tui::data::Section::TasksRecentlyTerminal => idxs.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
     task_indices.sort_by_key(|&i| match &rows[i] {
         crate::tui::data::Row::Task(t) => (task_status_rank(&t.status), t.display_id.clone()),
         _ => (u8::MAX, String::new()),
@@ -108,15 +123,21 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
             }
         }
         if task_indices.len() > 20 {
-            out.push_str(&format!("  {ANSI_DIM}... {} more{ANSI_RESET}\n", task_indices.len() - 20));
+            out.push_str(&format!(
+                "  {ANSI_DIM}... {} more{ANSI_RESET}\n",
+                task_indices.len() - 20
+            ));
         }
     }
 
     // ---- EXTERNAL REVIEWS -----------------------------------------------
-    let review_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {
-        crate::tui::data::Section::ExternalReviewLane => idxs.clone(),
-        _ => Vec::new(),
-    }).collect();
+    let review_indices: Vec<usize> = sections
+        .iter()
+        .flat_map(|(sec, idxs)| match sec {
+            crate::tui::data::Section::ExternalReviewLane => idxs.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
     if !review_indices.is_empty() {
         out.push('\n');
         out.push_str(&format!("{ANSI_BOLD}EXTERNAL REVIEWS{ANSI_RESET}\n"));
@@ -139,12 +160,15 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
 
     // ---- OBSERVATIONS ----------------------------------------------------
     out.push('\n');
-    let mut obs_indices: Vec<usize> = sections.iter().flat_map(|(sec, idxs)| match sec {
-        crate::tui::data::Section::ObsRatifiable
-        | crate::tui::data::Section::ObsOpenNoContract
-        | crate::tui::data::Section::ObsOther => idxs.clone(),
-        _ => Vec::new(),
-    }).collect();
+    let mut obs_indices: Vec<usize> = sections
+        .iter()
+        .flat_map(|(sec, idxs)| match sec {
+            crate::tui::data::Section::ObsRatifiable
+            | crate::tui::data::Section::ObsOpenNoContract
+            | crate::tui::data::Section::ObsOther => idxs.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
     obs_indices.sort_by(|&a, &b| match (&rows[a], &rows[b]) {
         (crate::tui::data::Row::Obs(a), crate::tui::data::Row::Obs(b)) => {
             let ra = if a.status == "open" { 0 } else { 1 };
@@ -166,7 +190,10 @@ fn render_frame(conn: &Connection, db: &Path, interval_ms: u64, show_all_history
             }
         }
         if obs_indices.len() > 10 {
-            out.push_str(&format!("  {ANSI_DIM}... {} more{ANSI_RESET}\n", obs_indices.len() - 10));
+            out.push_str(&format!(
+                "  {ANSI_DIM}... {} more{ANSI_RESET}\n",
+                obs_indices.len() - 10
+            ));
         }
     }
 

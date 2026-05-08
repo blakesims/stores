@@ -59,7 +59,10 @@ fn state_matches(state: &str, row: &Row, section: Section) -> bool {
         // Saved-view aliases: route through section classification so the
         // filter palette can be opened with a preset and the same predicate
         // works for keypresses 1/2/3.
-        "ratifiable" => section == Section::ObsRatifiable,
+        "ratifiable" | "ratify_u1" => section == Section::ObsRatifiable,
+        "accept_u3" => section == Section::TasksAcceptU3,
+        "ai_review" | "held_ai_review" => section == Section::TasksHeldAiReview,
+        "silent_zombie" | "held_zombie" => section == Section::TasksHeldZombie,
         "actionable_current_work" | "in_flight" => section == Section::TasksActionableCurrentWork,
         "deploy_recovery" | "deploy_blocked" => section == Section::TasksDeployRecovery,
         "blocked_needs_action" => section == Section::TasksBlockedNeedsAction,
