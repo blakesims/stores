@@ -65,10 +65,28 @@ fn git_workspace() -> tempfile::TempDir {
     tmp
 }
 
+fn git(workspace: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn head(workspace: &Path) -> String {
+    rev_parse(workspace, "HEAD")
+}
+
+fn rev_parse(workspace: &Path, rev: &str) -> String {
     String::from_utf8(
         std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
+            .args(["rev-parse", rev])
             .current_dir(workspace)
             .output()
             .unwrap()
@@ -92,6 +110,54 @@ fn insert_task(conn: &Connection, workspace: &Path, tier: &str, status: &str) {
             json!([{"executive_summary":"wrapped"}]).to_string(),
         ],
     ).unwrap();
+}
+
+fn insert_task_id(
+    conn: &Connection,
+    id: &str,
+    workspace: &Path,
+    branch: &str,
+    tier: &str,
+    status: &str,
+) {
+    conn.execute(
+        "INSERT INTO tasks (display_id,status,title,slug,workspace_path,branch,tier_hint,contract,plan,cycles,wrap_log,current_phase,current_cycle,created_at,updated_at,created_by,updated_by)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'[]',?10,1,1,'2026-05-07T00:00:00Z','2026-05-07T00:00:00Z','test','test')",
+        rusqlite::params![
+            id,
+            status,
+            format!("Review task {id}"),
+            format!("review-task-{}", id.to_ascii_lowercase()),
+            workspace.display().to_string(),
+            branch,
+            tier,
+            json!({"done_when":"done","scope_in":"in","scope_out":"out"}).to_string(),
+            json!({"phases":[{"name":"p1"}]}).to_string(),
+            json!([{"executive_summary":"wrapped"}]).to_string(),
+        ],
+    ).unwrap();
+}
+
+fn insert_pending_review_for_task(conn: &Connection, review_id: &str, task_id: &str, attempt: i64) {
+    conn.execute(
+        "INSERT INTO external_reviews (display_id,status,task_id,attempt,adapter,created_at,updated_at,created_by,updated_by) VALUES (?1,'pending',?2,?3,'external_review','2026-05-07T00:00:00Z','2026-05-07T00:00:00Z','test','test')",
+        rusqlite::params![review_id, task_id, attempt],
+    )
+    .unwrap();
+}
+
+fn run_review(conn: &Connection, cfg: &Path, review_id: &str) {
+    let a = agents();
+    external_review::run(
+        &json!({"display_id": review_id}),
+        &DispatchCtx {
+            conn,
+            agents: &a,
+            config_path: cfg,
+            policies_hash: "",
+        },
+    )
+    .unwrap();
 }
 
 fn insert_review(
@@ -214,8 +280,7 @@ fn external_review_accept_precheck_t1_without_review_succeeds() {
 fn external_review_accept_precheck_tooling_failure_does_not_satisfy_accept() {
     let conn = Connection::open_in_memory().unwrap();
     let schema = install_db(&conn);
-    conn.execute_batch("ALTER TABLE external_reviews ADD COLUMN held_reason TEXT")
-        .unwrap();
+    let _ = conn.execute_batch("ALTER TABLE external_reviews ADD COLUMN held_reason TEXT");
     let ws = git_workspace();
     insert_task(&conn, ws.path(), "T3", "in_review");
     insert_review(
@@ -581,4 +646,173 @@ fn insert_task_bare(conn: &Connection, workspace: &std::path::Path, tier: &str, 
     )
     .unwrap();
     let _ = status; // status is in a separate column; insert above doesn't have it
+}
+
+#[test]
+fn external_review_already_current_captures_current_main_and_unchanged_head() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let ws = git_workspace();
+    git(ws.path(), &["checkout", "-b", "task-current"]);
+    std::fs::write(ws.path().join("task.txt"), "task\n").unwrap();
+    git(ws.path(), &["add", "task.txt"]);
+    git(ws.path(), &["commit", "-m", "task"]);
+    let pre_head = head(ws.path());
+    let current_main = rev_parse(ws.path(), "main");
+    insert_task_id(&conn, "T901", ws.path(), "task-current", "T3", "in_review");
+    insert_pending_review_for_task(&conn, "ER901", "T901", 1);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let prompt = tmp.path().join("prompt-current.txt");
+    let sh = shim(
+        tmp.path(),
+        &format!("#!/bin/sh\ncat > '{}'\necho 'VERDICT: PASS'\n", prompt.display()),
+    );
+    let cfg = cfg(tmp.path(), &sh);
+    run_review(&conn, &cfg, "ER901");
+
+    let (status, base_sha, head_sha): (String, String, String) = conn
+        .query_row(
+            "SELECT status, base_sha, head_sha FROM external_reviews WHERE display_id='ER901'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "passed");
+    assert_eq!(base_sha, current_main);
+    assert_eq!(head_sha, pre_head);
+    assert_eq!(head(ws.path()), pre_head);
+    assert!(std::fs::read_to_string(prompt).unwrap().contains(&format!("Head SHA: {pre_head}")));
+}
+
+#[test]
+fn external_review_stale_branch_rebases_cleanly_before_codex() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let ws = git_workspace();
+    git(ws.path(), &["checkout", "-b", "task-stale"]);
+    std::fs::write(ws.path().join("task.txt"), "task\n").unwrap();
+    git(ws.path(), &["add", "task.txt"]);
+    git(ws.path(), &["commit", "-m", "task"]);
+    let old_head = head(ws.path());
+    git(ws.path(), &["checkout", "main"]);
+    std::fs::write(ws.path().join("main.txt"), "main advanced\n").unwrap();
+    git(ws.path(), &["add", "main.txt"]);
+    git(ws.path(), &["commit", "-m", "main advances"]);
+    let new_main = head(ws.path());
+
+    insert_task_id(&conn, "T902", ws.path(), "task-stale", "T3", "in_review");
+    insert_pending_review_for_task(&conn, "ER902", "T902", 1);
+    let tmp = tempfile::tempdir().unwrap();
+    let count = tmp.path().join("count.txt");
+    let sh = shim(
+        tmp.path(),
+        &format!("#!/bin/sh\ncat >/dev/null\nold=$(cat '{}' 2>/dev/null || echo 0)\nexpr $old + 1 > '{}'\necho 'VERDICT: PASS'\n", count.display(), count.display()),
+    );
+    let cfg = cfg(tmp.path(), &sh);
+    run_review(&conn, &cfg, "ER902");
+
+    let (status, base_sha, head_sha): (String, String, String) = conn
+        .query_row(
+            "SELECT status, base_sha, head_sha FROM external_reviews WHERE display_id='ER902'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "passed");
+    assert_eq!(base_sha, new_main);
+    assert_ne!(head_sha, old_head);
+    assert_eq!(head_sha, head(ws.path()));
+    assert_eq!(rev_parse(ws.path(), "task-stale"), head_sha);
+    assert_eq!(std::fs::read_to_string(count).unwrap().trim(), "1");
+}
+
+#[test]
+fn external_review_stale_branch_conflict_holds_without_codex() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let ws = git_workspace();
+    git(ws.path(), &["checkout", "-b", "task-conflict"]);
+    std::fs::write(ws.path().join("README.md"), "task edit\n").unwrap();
+    git(ws.path(), &["add", "README.md"]);
+    git(ws.path(), &["commit", "-m", "task edits readme"]);
+    git(ws.path(), &["checkout", "main"]);
+    std::fs::write(ws.path().join("README.md"), "main edit\n").unwrap();
+    git(ws.path(), &["add", "README.md"]);
+    git(ws.path(), &["commit", "-m", "main edits readme"]);
+    let new_main = head(ws.path());
+
+    insert_task_id(&conn, "T903", ws.path(), "task-conflict", "T3", "in_review");
+    insert_pending_review_for_task(&conn, "ER903", "T903", 1);
+    let tmp = tempfile::tempdir().unwrap();
+    let invoked = tmp.path().join("invoked.txt");
+    let sh = shim(
+        tmp.path(),
+        &format!("#!/bin/sh\necho invoked > '{}'\necho 'VERDICT: PASS'\n", invoked.display()),
+    );
+    let cfg = cfg(tmp.path(), &sh);
+    run_review(&conn, &cfg, "ER903");
+
+    let (status, verdict, held_reason, base_sha): (String, String, String, String) = conn
+        .query_row(
+            "SELECT status, verdict, held_reason, base_sha FROM external_reviews WHERE display_id='ER903'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "tooling_held");
+    assert_eq!(verdict, "TOOLING_FAILURE");
+    assert_eq!(held_reason, "stale_base_requires_rebase");
+    assert_eq!(base_sha, new_main);
+    assert!(!invoked.exists(), "codex shim must not run on conflicted rebase");
+    assert!(!ws.path().join(".git/rebase-merge").exists());
+    assert!(!ws.path().join(".git/rebase-apply").exists());
+}
+
+#[test]
+fn external_review_three_task_recurrence_rebases_each_prompt_to_current_main() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let ws = git_workspace();
+    let tmp = tempfile::tempdir().unwrap();
+    let prompt_dir = tmp.path().join("prompts");
+    std::fs::create_dir_all(&prompt_dir).unwrap();
+    let sh = shim(
+        tmp.path(),
+        &format!("#!/bin/sh\ncat > '{}/prompt-'$STORES_REVIEW_ID'.txt'\nif ! grep -q \"Base SHA: $EXPECT_BASE\" '{}/prompt-'$STORES_REVIEW_ID'.txt'; then echo 'VERDICT: REVISE'; echo '[major] stale-base omitted current mainline code'; exit 0; fi\necho 'VERDICT: PASS'\n", prompt_dir.display(), prompt_dir.display()),
+    );
+    let cfg = cfg(tmp.path(), &sh);
+
+    for i in 1..=3 {
+        git(ws.path(), &["checkout", "main"]);
+        git(ws.path(), &["checkout", "-b", &format!("task-recur-{i}")]);
+        std::fs::write(ws.path().join(format!("task-{i}.txt")), format!("task {i}\n")).unwrap();
+        git(ws.path(), &["add", &format!("task-{i}.txt")]);
+        git(ws.path(), &["commit", "-m", &format!("task {i}")]);
+        insert_task_id(&conn, &format!("T91{i}"), ws.path(), &format!("task-recur-{i}"), "T3", "in_review");
+        insert_pending_review_for_task(&conn, &format!("ER91{i}"), &format!("T91{i}"), i as i64);
+    }
+
+    for i in 1..=3 {
+        git(ws.path(), &["checkout", "main"]);
+        std::fs::write(ws.path().join(format!("mainline-{i}.txt")), format!("mainline {i}\n")).unwrap();
+        git(ws.path(), &["add", &format!("mainline-{i}.txt")]);
+        git(ws.path(), &["commit", "-m", &format!("main advances {i}")]);
+        let main_sha = head(ws.path());
+        std::env::set_var("STORES_REVIEW_ID", format!("ER91{i}"));
+        std::env::set_var("EXPECT_BASE", &main_sha);
+        run_review(&conn, &cfg, &format!("ER91{i}"));
+        std::env::remove_var("EXPECT_BASE");
+        std::env::remove_var("STORES_REVIEW_ID");
+        let (status, verdict, base_sha): (String, String, String) = conn
+            .query_row(
+                "SELECT status, verdict, base_sha FROM external_reviews WHERE display_id=?1",
+                [format!("ER91{i}")],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "passed");
+        assert_eq!(verdict, "PASS");
+        assert_eq!(base_sha, main_sha);
+    }
 }

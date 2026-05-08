@@ -109,6 +109,7 @@ pub enum ExternalReviewGitPreparation {
     Conflict(ExternalReviewRebaseConflict),
 }
 
+#[derive(Debug, Clone)]
 pub struct ReviewInputBundle {
     pub task_id: String,
     pub done_when: String,
