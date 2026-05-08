@@ -191,6 +191,14 @@ pub fn run_overdue_ready_cmd(
     matches: &ArgMatches,
     _invoker: InvokerCtx,
 ) -> Result<()> {
+    run_overdue_ready_cmd_to(conn, matches, &mut std::io::stdout())
+}
+
+pub(crate) fn run_overdue_ready_cmd_to(
+    conn: &Connection,
+    matches: &ArgMatches,
+    out: &mut dyn std::io::Write,
+) -> Result<()> {
     let json_flag = matches.get_flag("json");
 
     let mut stmt = conn.prepare(
@@ -225,11 +233,11 @@ pub fn run_overdue_ready_cmd(
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&arr)?);
+        writeln!(out, "{}", serde_json::to_string_pretty(&arr)?)?;
     } else {
         for (display_id, task_id, captured_at, summary) in &rows {
             let tid = task_id.as_deref().unwrap_or("(none)");
-            println!("{display_id} task={tid} {captured_at} {summary}");
+            writeln!(out, "{display_id} task={tid} {captured_at} {summary}")?;
         }
     }
 
@@ -503,12 +511,10 @@ mod tests {
 
     // ---- overdue-ready fixture (AC1.6) ----
 
-    #[test]
-    fn overdue_ready_fixture() {
+    fn build_overdue_ready_fixture() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         install_schemas(&conn);
 
-        // Tasks in various states
         for (tid, status) in [
             ("T001", "accepted"),
             ("T002", "closed_out_of_band"),
@@ -520,7 +526,6 @@ mod tests {
             insert_task(&conn, tid, status);
         }
 
-        // 6 ready observations linked to each task
         for (i, (lid, tid)) in [
             ("L001", "T001"),
             ("L002", "T002"),
@@ -542,6 +547,13 @@ mod tests {
                 "summary",
             );
         }
+
+        conn
+    }
+
+    #[test]
+    fn overdue_ready_fixture() {
+        let conn = build_overdue_ready_fixture();
 
         let ids: Vec<String> = {
             let mut stmt = conn
@@ -567,6 +579,52 @@ mod tests {
         assert!(!ids.contains(&"L004".to_string()), "L004 (open) excluded");
         assert!(!ids.contains(&"L005".to_string()), "L005 (abandoned) excluded");
         assert!(!ids.contains(&"L006".to_string()), "L006 (rejected) excluded");
+    }
+
+    #[test]
+    fn overdue_ready_cmd_text_output() {
+        let conn = build_overdue_ready_fixture();
+        let matches = clap::Command::new("t")
+            .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue))
+            .get_matches_from(["t"]);
+
+        let mut out = Vec::<u8>::new();
+        run_overdue_ready_cmd_to(&conn, &matches, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+
+        // Exactly 3 terminal-success rows appear in the output
+        assert!(text.contains("L001"), "L001 (accepted) must appear");
+        assert!(text.contains("L002"), "L002 (cob) must appear");
+        assert!(text.contains("L003"), "L003 (schema_migrated) must appear");
+        assert!(!text.contains("L004"), "L004 (open) must not appear");
+        assert!(!text.contains("L005"), "L005 (abandoned) must not appear");
+        assert!(!text.contains("L006"), "L006 (rejected) must not appear");
+        assert_eq!(text.lines().count(), 3, "exactly 3 output lines");
+    }
+
+    #[test]
+    fn overdue_ready_cmd_json_output() {
+        let conn = build_overdue_ready_fixture();
+        let matches = clap::Command::new("t")
+            .arg(clap::Arg::new("json").long("json").action(clap::ArgAction::SetTrue))
+            .get_matches_from(["t", "--json"]);
+
+        let mut out = Vec::<u8>::new();
+        run_overdue_ready_cmd_to(&conn, &matches, &mut out).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let arr = parsed.as_array().expect("JSON output must be an array");
+
+        assert_eq!(arr.len(), 3, "JSON array must have exactly 3 entries");
+        let ids: Vec<&str> = arr
+            .iter()
+            .map(|v| v["display_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"L001"), "L001 in JSON");
+        assert!(ids.contains(&"L002"), "L002 in JSON");
+        assert!(ids.contains(&"L003"), "L003 in JSON");
+        assert!(!ids.contains(&"L004"), "L004 excluded from JSON");
+        assert!(!ids.contains(&"L005"), "L005 excluded from JSON");
+        assert!(!ids.contains(&"L006"), "L006 excluded from JSON");
     }
 
     // ---- check_clause_sql ----
