@@ -6,6 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::app::{App, FlatRow, Mode};
 use super::data::{blocked_reason_class, cockpit_model, ExternalReviewState, Row};
@@ -151,6 +152,9 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
     // emitted lazily as the window crosses a section boundary.
     let window = visible_window(app, flat);
     let mut items: Vec<ListItem> = cockpit_header_items(app);
+    if let Some(alert) = system_alert_item(app) {
+        items.push(alert);
+    }
     let mut last_section: Option<usize> = None;
 
     // Highlight the row currently under the cursor.
@@ -192,6 +196,34 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
             .title("stores watch · cockpit"),
     );
     f.render_widget(list, area);
+}
+
+fn system_alert_item(app: &App) -> Option<ListItem<'static>> {
+    if !matches!(
+        app.status_bar.daemon_liveness,
+        super::daemon::Liveness::Dead
+    ) {
+        return None;
+    }
+    let count = app.system_health.unfinished_dispatch_locks;
+    if count == 0 {
+        return None;
+    }
+    let oldest = app.system_health.oldest_claimed_at_epoch?;
+    let age_hours = now_epoch().saturating_sub(oldest) / 3600;
+    Some(ListItem::new(Line::from(Span::styled(
+        format!(
+            "system-alert: daemon DEAD; {count} dangling locks; oldest started {age_hours}h ago"
+        ),
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    ))))
+}
+
+fn now_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn cockpit_header_items(app: &App) -> Vec<ListItem<'static>> {
@@ -467,14 +499,32 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::{App, TuiOpts};
-    use crate::tui::data::{IntakeRow, ObsRow, Row, TaskRow};
+    use crate::tui::app::{App, StatusBar, TuiOpts};
+    use crate::tui::daemon::Liveness;
+    use crate::tui::data::{IntakeRow, ObsRow, Row, SystemHealth, TaskRow};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
 
     fn line_text(line: Line<'static>) -> String {
         line.spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>()
+    }
+
+    fn painted_buffer(app: &mut App) -> String {
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal.draw(|f| draw(f, app)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let mut painted = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                painted.push_str(buf[(x, y)].symbol());
+            }
+            painted.push('\n');
+        }
+        painted
     }
 
     fn task_row(status: &str, reason: Option<&str>) -> Row {
@@ -588,6 +638,68 @@ mod tests {
         ));
         assert!(text.contains("investigation_failed:rate_limit"), "{text}");
         assert!(text.contains("investigator failed"), "{text}");
+    }
+
+    #[test]
+    fn system_alert_item_renders_after_cockpit_header_for_dead_daemon_with_locks() {
+        let mut app = App::new(TuiOpts::default());
+        app.status_bar = StatusBar {
+            daemon_liveness: Liveness::Dead,
+            ..Default::default()
+        };
+        app.system_health = SystemHealth {
+            unfinished_dispatch_locks: 8,
+            oldest_claimed_at_epoch: Some(now_epoch() - (3 * 3600 + 10)),
+        };
+        let mut items = cockpit_header_items(&app);
+        if let Some(alert) = system_alert_item(&app) {
+            items.push(alert);
+        }
+        assert_eq!(items.len(), 5);
+
+        let backend = TestBackend::new(120, 20);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal.draw(|f| draw(f, &mut app)).expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let mut painted = String::new();
+        let mut alert_y = None;
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            if line.contains("system-alert:") {
+                alert_y = Some(y);
+            }
+            painted.push_str(&line);
+            painted.push('\n');
+        }
+        assert!(
+            painted.contains("system-alert: daemon DEAD; 8 dangling locks; oldest started 3h ago"),
+            "{painted}"
+        );
+        let y = alert_y.expect("alert row painted");
+        let first_cell = &buf[(0, y)];
+        assert_eq!(first_cell.fg, Color::Red);
+        assert!(first_cell.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn system_alert_item_absent_for_live_daemon_or_zero_locks() {
+        let mut app = App::new(TuiOpts::default());
+        app.status_bar.daemon_liveness = Liveness::Live { pid: 1 };
+        app.system_health = SystemHealth {
+            unfinished_dispatch_locks: 8,
+            oldest_claimed_at_epoch: Some(now_epoch() - 3 * 3600),
+        };
+        assert!(system_alert_item(&app).is_none());
+        assert!(!painted_buffer(&mut app).contains("system-alert:"));
+
+        let mut dead_zero = App::new(TuiOpts::default());
+        dead_zero.status_bar.daemon_liveness = Liveness::Dead;
+        dead_zero.system_health = SystemHealth::default();
+        assert!(system_alert_item(&dead_zero).is_none());
+        assert!(!painted_buffer(&mut dead_zero).contains("system-alert:"));
     }
 
     #[test]

@@ -226,6 +226,12 @@ impl Default for ExternalReviewState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SystemHealth {
+    pub unfinished_dispatch_locks: usize,
+    pub oldest_claimed_at_epoch: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CockpitModel {
     pub execution: usize,
     pub review: usize,
@@ -886,6 +892,33 @@ fn attach_recent_events(conn: &Connection, rows: &mut [Row]) -> Result<()> {
     Ok(())
 }
 
+pub fn load_system_health(conn: &Connection) -> Result<SystemHealth> {
+    if !table_exists(conn, "dispatch_locks")?
+        || !column_exists(conn, "dispatch_locks", "claimed_at")?
+        || !column_exists(conn, "dispatch_locks", "finished_at")?
+    {
+        return Ok(SystemHealth::default());
+    }
+    let (count, oldest): (usize, Option<rusqlite::types::Value>) = conn.query_row(
+        "SELECT COUNT(*), MIN(claimed_at) FROM dispatch_locks WHERE finished_at IS NULL",
+        [],
+        |r| Ok((r.get(0)?, r.get(1).ok())),
+    )?;
+    Ok(SystemHealth {
+        unfinished_dispatch_locks: count,
+        oldest_claimed_at_epoch: oldest.and_then(value_to_epoch),
+    })
+}
+
+fn value_to_epoch(value: rusqlite::types::Value) -> Option<i64> {
+    match value {
+        rusqlite::types::Value::Integer(v) => Some(v),
+        rusqlite::types::Value::Real(v) => Some(v.floor() as i64),
+        rusqlite::types::Value::Text(s) => parse_epoch(&s),
+        rusqlite::types::Value::Null | rusqlite::types::Value::Blob(_) => None,
+    }
+}
+
 pub fn load_external_review_state(conn: &Connection) -> Result<ExternalReviewState> {
     let table = if table_exists(conn, "external_reviews")? {
         Some("external_reviews")
@@ -1408,6 +1441,39 @@ mod tests {
     #[test]
     fn parse_epoch_accepts_rfc3339_prefix() {
         assert_eq!(parse_epoch("1970-01-01T00:00:00Z"), Some(0));
+    }
+
+    #[test]
+    fn load_system_health_counts_unfinished_dispatch_locks_and_oldest_claimed_at() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE dispatch_locks (display_id TEXT, claimed_at INTEGER, finished_at INTEGER);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D999', 1700009999, 1700019999);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D001', 1700000001, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D002', 1700000002, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D003', 1700000003, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D004', 1700000004, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D005', 1700000005, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D006', 1700000006, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D007', 1700000007, NULL);
+            INSERT INTO dispatch_locks (display_id, claimed_at, finished_at) VALUES ('D008', 1700000008, NULL);
+            "#,
+        )
+        .unwrap();
+
+        let health = load_system_health(&conn).unwrap();
+        assert_eq!(health.unfinished_dispatch_locks, 8);
+        assert_eq!(health.oldest_claimed_at_epoch, Some(1_700_000_001));
+    }
+
+    #[test]
+    fn load_system_health_absent_table_or_claimed_at_returns_zero() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(load_system_health(&conn).unwrap(), SystemHealth::default());
+        conn.execute_batch("CREATE TABLE dispatch_locks (finished_at INTEGER);")
+            .unwrap();
+        assert_eq!(load_system_health(&conn).unwrap(), SystemHealth::default());
     }
 
     #[test]
