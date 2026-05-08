@@ -224,12 +224,24 @@ fn mission_compact_mode(app: &App) -> bool {
 
 fn mission_compact_window(app: &App, flat: &[FlatRow]) -> Vec<FlatRow> {
     let mut out = Vec::new();
+    // Preserve one representative row per operator-actionable section so populated
+    // default work isn't hidden when compact mode triggers. TasksRecentlyTerminal
+    // (historical noise) and ObsOther (handled via the collapsed-row extend below)
+    // are the only intentional exclusions.
     let wanted_single = [
+        Section::TasksActionableCurrentWork,
         Section::ObsRatifiable,
         Section::TasksAcceptU3,
+        Section::TasksBlockedNeedsAction,
+        Section::TasksDeployRecovery,
+        Section::TasksNeedsTriage,
         Section::IntakeHeld,
         Section::TasksHeldAiReview,
         Section::TasksHeldZombie,
+        Section::ObsOpenNoContract,
+        Section::IntakeOpen,
+        Section::IntakeRouted,
+        Section::ExternalReviewLane,
     ];
     for section in wanted_single {
         if let Some(fr) = flat.iter().find(|fr| app.sections[fr.section].0 == section) {
@@ -813,6 +825,98 @@ mod tests {
         assert!(
             painted.contains("system-alert: daemon DEAD; 3 dangling locks; oldest started ?h ago"),
             "expected '?h' placeholder in alert: {painted}"
+        );
+    }
+
+    #[test]
+    fn mission_compact_window_preserves_populated_default_sections() {
+        use crate::tui::data::{CollapsedObsRow, Section};
+
+        let mut app = App::new(TuiOpts::default());
+        app.status_bar = StatusBar {
+            daemon_liveness: Liveness::Dead,
+            ..Default::default()
+        };
+        app.system_health = SystemHealth {
+            unfinished_dispatch_locks: 1,
+            oldest_claimed_at_epoch: None,
+        };
+
+        let mut rows: Vec<Row> = Vec::new();
+        let mut sections: Vec<(Section, Vec<usize>)> = Vec::new();
+        for sec in Section::ALL {
+            let abs = rows.len();
+            if sec == Section::ObsOther {
+                rows.push(Row::CollapsedObs(CollapsedObsRow {
+                    section: Section::ObsOther,
+                    summary: "dupe cluster".to_string(),
+                    count: 5,
+                    primary_display_id: "L100".to_string(),
+                    display_ids: vec!["L100".to_string(), "L101".to_string()],
+                    representative: ObsRow {
+                        display_id: "L100".to_string(),
+                        status: "open".to_string(),
+                        priority: "normal".to_string(),
+                        summary: "dupe cluster".to_string(),
+                        ..Default::default()
+                    },
+                }));
+            } else {
+                rows.push(Row::Task(TaskRow {
+                    display_id: format!("T{:03}", abs),
+                    status: "executing".to_string(),
+                    title: format!("synthetic for {:?}", sec),
+                    ..Default::default()
+                }));
+            }
+            sections.push((sec, vec![abs]));
+        }
+        app.rows = rows;
+        app.sections = sections;
+
+        assert!(
+            mission_compact_mode(&app),
+            "preconditions for compact mode (DEAD + dangling lock + collapsed obs) should hold"
+        );
+
+        let flat = app.flat_rows();
+        let window = mission_compact_window(&app, &flat);
+
+        let section_of = |fr: &FlatRow| app.sections[fr.section].0;
+        let present: std::collections::HashSet<Section> = window.iter().map(section_of).collect();
+
+        let must_contain = [
+            Section::TasksActionableCurrentWork,
+            Section::ObsRatifiable,
+            Section::TasksAcceptU3,
+            Section::TasksBlockedNeedsAction,
+            Section::TasksDeployRecovery,
+            Section::TasksNeedsTriage,
+            Section::IntakeHeld,
+            Section::TasksHeldAiReview,
+            Section::TasksHeldZombie,
+            Section::ObsOpenNoContract,
+            Section::IntakeOpen,
+            Section::IntakeRouted,
+            Section::ExternalReviewLane,
+        ];
+        for sec in must_contain {
+            assert!(
+                present.contains(&sec),
+                "compact window missing populated default section {:?}; present={:?}",
+                sec,
+                present
+            );
+        }
+        assert!(
+            window
+                .iter()
+                .any(|fr| matches!(app.rows.get(fr.abs), Some(Row::CollapsedObs(_)))),
+            "compact window must still include collapsed obs rows"
+        );
+        assert!(
+            !present.contains(&Section::TasksRecentlyTerminal),
+            "compact window must not surface TERMINAL historical noise"
         );
     }
 
