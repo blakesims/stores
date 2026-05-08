@@ -127,9 +127,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     // Conflict path: collect the conflicted file list, abort the merge,
     // flip row → deploy_blocked, ntfy, dispatch to specialist.
     let conflict_files = list_conflict_files(&main_repo);
-    let _ = Command::new("git")
-        .args(["-C", main_repo.to_str().unwrap_or("."), "merge", "--abort"])
-        .output();
+    abort_merge(&main_repo);
 
     let stderr = String::from_utf8_lossy(&merge.stderr).to_string();
     let blocked_reason = format!(
@@ -214,11 +212,11 @@ fn cargo_install_subscribed_to_accepted(ctx: &DispatchCtx) -> bool {
     })
 }
 
-fn list_conflict_files(main_repo: &Path) -> Vec<String> {
+pub(crate) fn list_conflict_files(repo: &Path) -> Vec<String> {
     let out = Command::new("git")
         .args([
             "-C",
-            main_repo.to_str().unwrap_or("."),
+            repo.to_str().unwrap_or("."),
             "diff",
             "--name-only",
             "--diff-filter=U",
@@ -232,5 +230,17 @@ fn list_conflict_files(main_repo: &Path) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+pub(crate) fn abort_merge(repo: &Path) {
+    let _ = Command::new("git")
+        .args(["-C", repo.to_str().unwrap_or("."), "merge", "--abort"])
+        .output();
+}
+
+pub(crate) fn abort_rebase(repo: &Path) {
+    let _ = Command::new("git")
+        .args(["-C", repo.to_str().unwrap_or("."), "rebase", "--abort"])
+        .output();
 }
 
