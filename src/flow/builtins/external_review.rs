@@ -38,6 +38,7 @@ use crate::validate::{self, EntryMap, Op};
 
 const REVIEW_AGENT_NAME: &str = "external-review";
 const TOOLING_RETRY_SECS: i64 = 300;
+const STALE_BASE_REBASE_RETRY_SECS: i64 = 120;
 
 #[derive(Debug, Clone)]
 struct ReviewRow {
@@ -560,6 +561,7 @@ fn record_stale_base_tooling_held(
     conflict: &ExternalReviewRebaseConflict,
 ) -> Result<()> {
     let now = now_iso8601();
+    let next_retry_at = add_secs(&now, STALE_BASE_REBASE_RETRY_SECS).unwrap_or_else(|| now.clone());
     let reason = "stale_base_requires_rebase";
     let files = if conflict.conflict_files.is_empty() {
         "<no conflict files reported>".to_string()
@@ -579,8 +581,8 @@ fn record_stale_base_tooling_held(
     })
     .to_string();
     conn.execute(
-        "UPDATE external_reviews SET status='tooling_held', verdict='TOOLING_FAILURE', held_reason=?2, next_retry_at=NULL, completed_at=?3, updated_at=?3, base_sha=?4, head_sha=?5, log_path=COALESCE(NULLIF(log_path,''), ?6), transcript_path=COALESCE(NULLIF(transcript_path,''), ?6), findings=?7 WHERE display_id=?1",
-        params![row.display_id, reason, now, conflict.base_sha, conflict.head_sha, log_ref, findings],
+        "UPDATE external_reviews SET status='tooling_held', verdict='TOOLING_FAILURE', held_reason=?2, next_retry_at=?3, completed_at=?4, updated_at=?4, base_sha=?5, head_sha=?6, log_path=COALESCE(NULLIF(log_path,''), ?7), transcript_path=COALESCE(NULLIF(transcript_path,''), ?7), findings=?8 WHERE display_id=?1",
+        params![row.display_id, reason, next_retry_at, now, conflict.base_sha, conflict.head_sha, log_ref, findings],
     )?;
     insert_review_transition(
         conn,
@@ -591,8 +593,8 @@ fn record_stale_base_tooling_held(
         None,
     )?;
     eprintln!(
-        "[external-review] task_id={} review_attempt_id={} runner={} status=tooling_held held_reason={} base_sha={} head_sha={} conflicts={} liveness=held retry=none",
-        row.task_id, row.display_id, runner, reason, conflict.base_sha, conflict.head_sha, files
+        "[external-review] task_id={} review_attempt_id={} runner={} status=tooling_held held_reason={} base_sha={} head_sha={} conflicts={} liveness=held retry={}",
+        row.task_id, row.display_id, runner, reason, conflict.base_sha, conflict.head_sha, files, next_retry_at
     );
     Ok(())
 }

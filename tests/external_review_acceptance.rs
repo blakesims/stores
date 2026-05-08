@@ -894,3 +894,51 @@ fn external_review_stale_conflict_tooling_held_head_sha_is_pre_rebase_tip() {
     assert!(!ws.path().join(".git/rebase-merge").exists());
     assert!(!ws.path().join(".git/rebase-apply").exists());
 }
+
+/// L488 recovery gap (Pi msg_3cf7c3af): stale_base_requires_rebase rows MUST
+/// have a bounded next_retry_at so the existing T086/L197 elapsed-tooling-held
+/// retry path can drain them after the operator rebases the worktree. Prior
+/// to this fix, next_retry_at=NULL meant the row was permanently held.
+#[test]
+fn external_review_stale_conflict_tooling_held_has_bounded_next_retry_at() {
+    let conn = Connection::open_in_memory().unwrap();
+    install_db(&conn);
+    let ws = git_workspace();
+
+    git(ws.path(), &["checkout", "-b", "task-retry-bounded"]);
+    std::fs::write(ws.path().join("README.md"), "task branch line\n").unwrap();
+    git(ws.path(), &["add", "README.md"]);
+    git(ws.path(), &["commit", "-m", "task edits README"]);
+
+    git(ws.path(), &["checkout", "main"]);
+    std::fs::write(ws.path().join("README.md"), "main conflicting line\n").unwrap();
+    git(ws.path(), &["add", "README.md"]);
+    git(ws.path(), &["commit", "-m", "main conflicts with task"]);
+
+    insert_task_id(&conn, "T960", ws.path(), "task-retry-bounded", "T3", "in_review");
+    insert_pending_review_for_task(&conn, "ER960", "T960", 1);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sh = shim(tmp.path(), "#!/bin/sh\necho 'VERDICT: PASS'\n");
+    let cfg = cfg(tmp.path(), &sh);
+    run_review(&conn, &cfg, "ER960");
+
+    let (status, held_reason, next_retry_at): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT status, held_reason, next_retry_at FROM external_reviews WHERE display_id='ER960'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "tooling_held");
+    assert_eq!(held_reason, "stale_base_requires_rebase");
+
+    // Core assertion: next_retry_at MUST be set (not NULL) so the
+    // elapsed-tooling-held retry path can drain the row after operator rebase.
+    let next_retry = next_retry_at
+        .expect("next_retry_at must be set so retry machinery can drain stale_base rows");
+    assert!(
+        !next_retry.is_empty(),
+        "next_retry_at must be a non-empty timestamp, got: {next_retry}"
+    );
+}
