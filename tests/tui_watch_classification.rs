@@ -96,7 +96,8 @@ fn tui_watch_classification_in_flight_rows_are_never_hidden() {
         task("T025", "ready", Some("silent_zombie")),
     ];
     let default = classify_with_options(&rows, WatchClassifyOptions::default());
-    assert_eq!(bucket(&default, Section::TasksActionableCurrentWork).len(), 6);
+    assert_eq!(bucket(&default, Section::TasksActionableCurrentWork).len(), 3);
+    assert_eq!(bucket(&default, Section::ObsRatifiable).len(), 3);
 }
 
 #[test]

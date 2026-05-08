@@ -1,0 +1,34 @@
+Intake detail · I700
+
+Summary / story
+  summary: intake story
+  story: operator intake body
+
+Priority / risk
+  priority: —
+  risk: touches_lifecycle
+  cluster: watch
+
+Status
+  needs_info
+
+Contract / routing state
+  decision: needs_recon
+  routed observation: L701
+  routed arch review: —
+
+Next action / held reason
+  next: recon needed
+  held: missing evidence
+
+Recon question / evidence
+  question: what evidence exists?
+  evidence: evidence.md
+
+Recent events
+  tasks ready -> executing via start at 2026-05-01
+
+Artifact pointers
+  source task: T701
+  source agent: —
+  duplicate_of: —

@@ -4,7 +4,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{App, Mode};
-use super::data::Row;
 use super::filter::FilterPalette;
 use super::search::SearchState;
 use super::sidecar::SidecarScope;
@@ -20,20 +19,14 @@ pub fn on_key(app: &mut App, ev: KeyEvent) -> KeyOutcome {
         Mode::Normal => normal(app, ev),
         Mode::Filter => filter_mode(app, ev),
         Mode::Search => search_mode(app, ev),
+        Mode::Detail => detail_mode(app, ev),
         Mode::ObsDraftConfirm => obs_draft_confirm_mode(app, ev),
     }
 }
 
 /// Display id of the row currently under the cursor (or None).
 fn current_display_id(app: &App) -> Option<String> {
-    let flat = app.flat_rows();
-    let cursor = app.current_flat()?;
-    let fr = flat.get(cursor)?;
-    Some(match &app.rows[fr.abs] {
-        Row::Task(t) => t.display_id.clone(),
-        Row::Obs(o) => o.display_id.clone(),
-        Row::Review(r) => r.display_id.clone(),
-    })
+    app.current_row().map(|r| r.display_id().to_string())
 }
 
 fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
@@ -92,6 +85,12 @@ fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
         }
         (KeyCode::Char('N'), _) => {
             app.search_prev();
+            KeyOutcome::Continue
+        }
+
+        // Detail drilldown.
+        (KeyCode::Enter, _) => {
+            app.open_detail_for_current();
             KeyOutcome::Continue
         }
 
@@ -155,6 +154,28 @@ fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
             KeyOutcome::Continue
         }
 
+        _ => KeyOutcome::Continue,
+    }
+}
+
+fn detail_mode(app: &mut App, ev: KeyEvent) -> KeyOutcome {
+    match ev.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.close_detail();
+            KeyOutcome::Continue
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            if let Some(d) = app.detail.as_mut() {
+                d.scroll_offset = d.scroll_offset.saturating_add(1);
+            }
+            KeyOutcome::Continue
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let Some(d) = app.detail.as_mut() {
+                d.scroll_offset = d.scroll_offset.saturating_sub(1);
+            }
+            KeyOutcome::Continue
+        }
         _ => KeyOutcome::Continue,
     }
 }
@@ -343,6 +364,30 @@ mod tests {
     #[test]
     fn quits_on_q() {
         let mut app = fresh_app();
+        assert_eq!(on_key(&mut app, key(KeyCode::Char('q'))), KeyOutcome::Quit);
+    }
+
+    #[test]
+    fn enter_enters_detail_esc_returns_without_write_request() {
+        let mut app = fresh_app();
+        assert_eq!(on_key(&mut app, key(KeyCode::Enter)), KeyOutcome::Continue);
+        assert_eq!(app.mode, Mode::Detail);
+        assert!(app.detail.is_some());
+        assert!(app.pending_spawn.is_none());
+        assert!(app.obs_draft_filing_request.is_none());
+
+        assert_eq!(on_key(&mut app, key(KeyCode::Esc)), KeyOutcome::Continue);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.detail.is_none());
+    }
+
+    #[test]
+    fn q_in_detail_returns_to_normal_q_in_normal_quits() {
+        let mut app = fresh_app();
+        on_key(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Detail);
+        assert_eq!(on_key(&mut app, key(KeyCode::Char('q'))), KeyOutcome::Continue);
+        assert_eq!(app.mode, Mode::Normal);
         assert_eq!(on_key(&mut app, key(KeyCode::Char('q'))), KeyOutcome::Quit);
     }
 

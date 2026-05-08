@@ -44,6 +44,7 @@ pub fn render_text(app: &App) -> String {
         Mode::Normal => "NORMAL",
         Mode::Filter => "FILTER",
         Mode::Search => "SEARCH",
+        Mode::Detail => "DETAIL",
         Mode::ObsDraftConfirm => "OBS-CONFIRM",
     };
     let base = format!(

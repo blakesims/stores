@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use super::daemon::Liveness;
 use super::data::{
-    classify_with_options, is_terminal_task_status, Row, Section, WatchClassifyOptions,
+    classify_with_options, is_terminal_task_status, ExternalReviewState, Row, Section,
+    WatchClassifyOptions,
 };
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
@@ -44,8 +45,26 @@ pub enum Mode {
     Normal,
     Filter,
     Search,
+    Detail,
     /// Confirm popup after an obs-drafting side-car returned with a draft.
     ObsDraftConfirm,
+}
+
+/// Row type captured when opening a read-only drilldown page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailKind {
+    Task,
+    Observation,
+    Review,
+    Intake,
+}
+
+/// Selected read-only drilldown target and page scroll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailSelection {
+    pub display_id: String,
+    pub kind: DetailKind,
+    pub scroll_offset: usize,
 }
 
 /// Pending obs-drafting decision: the side-car wrote a draft to disk and
@@ -100,6 +119,7 @@ pub struct App {
     pub sections: Vec<(Section, Vec<usize>)>,
     pub selection: Selection,
     pub mode: Mode,
+    pub detail: Option<DetailSelection>,
     pub sort: Sort,
     pub filter: FilterPredicate,
     pub filter_palette: Option<FilterPalette>,
@@ -108,6 +128,8 @@ pub struct App {
     /// is expanded (default).
     pub collapsed: HashSet<Section>,
     pub status_bar: StatusBar,
+    /// Optional T083 external-review lane state; absent tables degrade to unavailable.
+    pub external_review: ExternalReviewState,
     /// Visible-rows-per-page used by PgUp/PgDn + virtualization. Updated on
     /// each render; defaults to a sentinel until the first draw.
     pub viewport_height: usize,
@@ -180,6 +202,7 @@ impl App {
     /// Reload rows and rebuild sections (then re-apply current sort).
     pub fn refresh(&mut self, conn: &Connection) -> Result<()> {
         self.rows = super::data::load_rows(conn)?;
+        self.external_review = super::data::load_external_review_state(conn)?;
         self.sections = classify_with_options(&self.rows, self.watch_classify_options());
         self.apply_sort();
         self.recompute_status_bar();
@@ -266,6 +289,14 @@ impl App {
             }
         }
         out
+    }
+
+    /// Return the row under the current cursor.
+    pub fn current_row(&self) -> Option<&Row> {
+        let flat = self.flat_rows();
+        let cursor = self.current_flat()?;
+        let fr = flat.get(cursor)?;
+        self.rows.get(fr.abs)
     }
 
     /// Find the flat-row index of the current selection (or None when the
@@ -375,6 +406,31 @@ impl App {
         }
     }
 
+    /// Open a read-only detail page for the selected task/observation/intake row.
+    pub fn open_detail_for_current(&mut self) {
+        let Some(row) = self.current_row() else {
+            return;
+        };
+        let kind = match row {
+            Row::Task(_) => DetailKind::Task,
+            Row::Obs(_) => DetailKind::Observation,
+            Row::Review(_) => DetailKind::Review,
+            Row::Intake(_) => DetailKind::Intake,
+        };
+        self.detail = Some(DetailSelection {
+            display_id: row.display_id().to_string(),
+            kind,
+            scroll_offset: 0,
+        });
+        self.mode = Mode::Detail;
+    }
+
+    /// Leave the read-only detail page without changing substrate state.
+    pub fn close_detail(&mut self) {
+        self.detail = None;
+        self.mode = Mode::Normal;
+    }
+
     // ----------------------------------------------------------------------
 
     /// If filter/collapse made the current selection invalid, snap back to
@@ -397,7 +453,6 @@ impl App {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::super::data::TaskRow;
@@ -414,6 +469,7 @@ mod tests {
             linked_observations: Vec::new(),
             blocked_reason: None,
             blocked_reason_class: None,
+            ..Default::default()
         })
     }
 
@@ -435,7 +491,6 @@ mod tests {
         assert!(!is_terminal_task_status("executing"));
     }
 }
-
 
 fn local_clock_string() -> String {
     let secs = SystemTime::now()

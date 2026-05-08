@@ -53,6 +53,7 @@ fn updated(row: &Row) -> &str {
         Row::Task(t) => &t.updated_at,
         Row::Obs(o) => &o.updated_at,
         Row::Review(r) => r.next_retry_at.as_deref().unwrap_or(""),
+        Row::Intake(i) => &i.updated_at,
     }
 }
 
@@ -66,6 +67,7 @@ fn priority_rank(row: &Row) -> u8 {
         // Tasks don't carry an explicit priority field in the loaded row;
         // treat them as `normal` so they cluster between high and low obs.
         Row::Task(_) | Row::Review(_) => "normal",
+        Row::Intake(i) => i.priority.as_deref().unwrap_or("normal"),
     };
     match p {
         "high" => 0,
