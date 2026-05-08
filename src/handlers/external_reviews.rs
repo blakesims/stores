@@ -351,6 +351,7 @@ fn parse_verdict(output: &str) -> Result<ExternalReviewVerdict> {
             || upper.starts_with("VERDICT=PASS")
             || upper.starts_with("RESULT: PASS")
             || upper.starts_with("RESULT=PASS")
+            || starts_with_leading_verdict(&upper, "PASS")
         {
             return Ok(ExternalReviewVerdict::Pass);
         }
@@ -359,6 +360,7 @@ fn parse_verdict(output: &str) -> Result<ExternalReviewVerdict> {
             || upper.starts_with("VERDICT=REVISE")
             || upper.starts_with("RESULT: REVISE")
             || upper.starts_with("RESULT=REVISE")
+            || starts_with_leading_verdict(&upper, "REVISE")
         {
             return Ok(ExternalReviewVerdict::Revise);
         }
@@ -367,6 +369,7 @@ fn parse_verdict(output: &str) -> Result<ExternalReviewVerdict> {
             || upper.starts_with("VERDICT=TOOLING_FAILURE")
             || upper.starts_with("RESULT: TOOLING_FAILURE")
             || upper.starts_with("RESULT=TOOLING_FAILURE")
+            || starts_with_leading_verdict(&upper, "TOOLING_FAILURE")
         {
             return Ok(ExternalReviewVerdict::ToolingFailure);
         }
@@ -380,6 +383,13 @@ fn parse_verdict(output: &str) -> Result<ExternalReviewVerdict> {
         anyhow::bail!("external review output missing PASS/REVISE/TOOLING_FAILURE verdict")
     }
     anyhow::bail!("parse-fallback-needed")
+}
+
+fn starts_with_leading_verdict(line: &str, verdict: &str) -> bool {
+    line.strip_prefix(verdict)
+        .and_then(|rest| rest.chars().next())
+        .map(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation())
+        .unwrap_or(false)
 }
 
 fn has_revise_finding_marker(output: &str) -> bool {
@@ -661,6 +671,70 @@ mod tests {
     }
 
     #[test]
+    fn verdict_parser_accepts_bare_prefix_and_leading_word_prose_forms() {
+        let cases = [
+            ("PASS", ExternalReviewVerdict::Pass),
+            (
+                "PASS. The rate-limit classification is correct.",
+                ExternalReviewVerdict::Pass,
+            ),
+            ("PASS The rationale follows.", ExternalReviewVerdict::Pass),
+            ("VERDICT: PASS", ExternalReviewVerdict::Pass),
+            ("RESULT: PASS", ExternalReviewVerdict::Pass),
+            ("REVISE", ExternalReviewVerdict::Revise),
+            ("REVISE. [major] fix this.", ExternalReviewVerdict::Revise),
+            ("REVISE [major] fix this.", ExternalReviewVerdict::Revise),
+            ("VERDICT: REVISE", ExternalReviewVerdict::Revise),
+            ("RESULT: REVISE", ExternalReviewVerdict::Revise),
+            ("TOOLING_FAILURE", ExternalReviewVerdict::ToolingFailure),
+            (
+                "TOOLING_FAILURE. Runner output was unavailable.",
+                ExternalReviewVerdict::ToolingFailure,
+            ),
+            (
+                "TOOLING_FAILURE Runner output was unavailable.",
+                ExternalReviewVerdict::ToolingFailure,
+            ),
+            (
+                "VERDICT: TOOLING_FAILURE",
+                ExternalReviewVerdict::ToolingFailure,
+            ),
+            (
+                "RESULT: TOOLING_FAILURE",
+                ExternalReviewVerdict::ToolingFailure,
+            ),
+        ];
+
+        for (output, expected) in cases {
+            assert_eq!(parse_verdict(output).unwrap(), expected, "{output}");
+        }
+    }
+
+    #[test]
+    fn structured_output_path_still_ignores_text_verdict_parser() {
+        let out = RunnerOutput {
+            stdout: "PASS. prose that should not matter".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            final_message: None,
+            structured_output: Some(serde_json::json!({
+                "verdict": "REVISE",
+                "counts": {"critical": 1, "major": 2, "minor": 3}
+            })),
+            session_id: Some("s".to_string()),
+            structured_output_source: Some("test"),
+            telemetry: crate::runner::AgentRunTelemetry::default(),
+            payload_error: None,
+        };
+
+        let parsed = parse_runner_review_output(&out).unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Revise);
+        assert_eq!(parsed.counts.critical, 1);
+        assert_eq!(parsed.counts.major, 2);
+        assert_eq!(parsed.counts.minor, 3);
+    }
+
+    #[test]
     fn codex_prose_with_revise_finding_markers_infers_revise() {
         for marker in ["[P1]", "[major]", "[critical]"] {
             let output = format!("Review summary: changes required.\n{marker} fix this\n");
@@ -675,10 +749,9 @@ mod tests {
 
     #[test]
     fn codex_prose_with_result_pass_line_infers_pass() {
-        let parsed = parse_codex_review_output(
-            "Review summary: no blocking findings.\n\nResult: PASS\n",
-        )
-        .unwrap();
+        let parsed =
+            parse_codex_review_output("Review summary: no blocking findings.\n\nResult: PASS\n")
+                .unwrap();
         assert_eq!(parsed.verdict, ExternalReviewVerdict::Pass);
     }
 
