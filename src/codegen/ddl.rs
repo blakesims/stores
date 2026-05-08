@@ -28,10 +28,23 @@ pub struct FrameworkTable {
     pub columns: &'static [FrameworkColumn],
 }
 
-/// Mirror of SUBSTRATE_DDL for column-level introspection. Every table here
-/// MUST list every column declared in SUBSTRATE_DDL — drift between the two
-/// is checked by `framework_tables_match_substrate_ddl` below.
+/// Mirror of framework-owned DDL for column-level introspection. Every
+/// SUBSTRATE_DDL table here MUST list every column declared in SUBSTRATE_DDL;
+/// store-schema-owned tables may appear here only for additive framework-owned
+/// columns that must be repaired before framework subscribers run.
 pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
+    FrameworkTable {
+        name: "observations",
+        columns: &[
+            // T099: framework-written auto-file cascade dedup metadata. The
+            // observations table itself is store-schema-owned, but these three
+            // columns are required before framework `user-escalation` can run
+            // its dedup SELECT/UPDATE safely on older DBs.
+            FrameworkColumn { name: "summary_signature", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "summary_signature TEXT", additive: true },
+            FrameworkColumn { name: "dupe_count", sql_type: "INTEGER", nullable: true, default_sql: Some("1"), full_def: "dupe_count INTEGER DEFAULT 1", additive: true },
+            FrameworkColumn { name: "last_seen", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "last_seen TEXT", additive: true },
+        ],
+    },
     FrameworkTable {
         name: "transition_history",
         columns: &[
@@ -949,21 +962,27 @@ fields:
     #[test]
     fn framework_tables_match_substrate_ddl() {
         let scanned = scan_substrate_ddl_columns();
+        let substrate_backed = FRAMEWORK_DDL_TABLES
+            .iter()
+            .filter(|t| scanned.contains_key(t.name))
+            .count();
         assert_eq!(
             scanned.len(),
-            FRAMEWORK_DDL_TABLES.len(),
-            "FRAMEWORK_DDL_TABLES table count {} != SUBSTRATE_DDL table count {} (scanned: {:?})",
-            FRAMEWORK_DDL_TABLES.len(),
+            substrate_backed,
+            "SUBSTRATE_DDL table count {} != substrate-backed FRAMEWORK_DDL_TABLES count {} (scanned: {:?})",
             scanned.len(),
+            substrate_backed,
             scanned.keys().collect::<Vec<_>>()
         );
         for t in FRAMEWORK_DDL_TABLES {
-            let scanned_cols = scanned.get(t.name).unwrap_or_else(|| {
-                panic!(
-                    "table {} declared in FRAMEWORK_DDL_TABLES but not in SUBSTRATE_DDL",
+            let Some(scanned_cols) = scanned.get(t.name) else {
+                assert!(
+                    t.columns.iter().all(|c| c.additive),
+                    "non-additive table {} declared in FRAMEWORK_DDL_TABLES but not in SUBSTRATE_DDL",
                     t.name
-                )
-            });
+                );
+                continue;
+            };
             let const_cols: Vec<String> = t.columns.iter().map(|c| c.name.to_string()).collect();
             let scanned_set: std::collections::BTreeSet<&str> =
                 scanned_cols.iter().map(String::as_str).collect();
