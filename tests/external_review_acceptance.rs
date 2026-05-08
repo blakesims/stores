@@ -776,10 +776,19 @@ fn external_review_three_task_recurrence_rebases_each_prompt_to_current_main() {
     let ws = git_workspace();
     let tmp = tempfile::tempdir().unwrap();
     let prompt_dir = tmp.path().join("prompts");
+    let expected_dir = tmp.path().join("expected-bases");
+    let count_file = tmp.path().join("recurrence-count.txt");
     std::fs::create_dir_all(&prompt_dir).unwrap();
+    std::fs::create_dir_all(&expected_dir).unwrap();
     let sh = shim(
         tmp.path(),
-        &format!("#!/bin/sh\ncat > '{}/prompt-'$STORES_REVIEW_ID'.txt'\nif ! grep -q \"Base SHA: $EXPECT_BASE\" '{}/prompt-'$STORES_REVIEW_ID'.txt'; then echo 'VERDICT: REVISE'; echo '[major] stale-base omitted current mainline code'; exit 0; fi\necho 'VERDICT: PASS'\n", prompt_dir.display(), prompt_dir.display()),
+        &format!(
+            "#!/bin/sh\nset -eu\nold=$(cat '{}' 2>/dev/null || echo 0)\nnext=$(expr $old + 1)\nprintf '%s\n' $next > '{}'\nprompt='{}/prompt-'$next'.txt'\ncat > \"$prompt\"\nbase=$(sed -n 's/^Base SHA: //p' \"$prompt\")\nif [ ! -f '{}/'$base ]; then echo 'VERDICT: REVISE'; echo '[major] stale-base omitted current mainline code'; exit 0; fi\necho 'VERDICT: PASS'\n",
+            count_file.display(),
+            count_file.display(),
+            prompt_dir.display(),
+            expected_dir.display()
+        ),
     );
     let cfg = cfg(tmp.path(), &sh);
 
@@ -799,11 +808,8 @@ fn external_review_three_task_recurrence_rebases_each_prompt_to_current_main() {
         git(ws.path(), &["add", &format!("mainline-{i}.txt")]);
         git(ws.path(), &["commit", "-m", &format!("main advances {i}")]);
         let main_sha = head(ws.path());
-        std::env::set_var("STORES_REVIEW_ID", format!("ER91{i}"));
-        std::env::set_var("EXPECT_BASE", &main_sha);
+        std::fs::write(expected_dir.join(&main_sha), b"").unwrap();
         run_review(&conn, &cfg, &format!("ER91{i}"));
-        std::env::remove_var("EXPECT_BASE");
-        std::env::remove_var("STORES_REVIEW_ID");
         let (status, verdict, base_sha): (String, String, String) = conn
             .query_row(
                 "SELECT status, verdict, base_sha FROM external_reviews WHERE display_id=?1",
