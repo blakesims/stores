@@ -80,6 +80,12 @@ Review the executor's changes against the contract directly. There is no phase d
 {{/if}}
 {{/if}}{{/if}}{{/each}}
 
+## System-Anchored Review Diff
+
+Review this machine-generated `git show` for the System-captured Commit. This section is anchored to `executor.commit`, not moving `HEAD`.
+
+{{review_target_diff}}
+
 {{#if (gt current_cycle 1)}}
 ## Re-review Context
 
@@ -100,8 +106,8 @@ This is cycle {{current_cycle}} for the current phase after prior code-review ba
 {{/unless}}{{/if}}{{/if}}{{/each}}
 
 ## Critical Actions (Checklist)
-1. **CHECK** git state and provenance: `git status`, `git log --oneline -10`, and if a System-captured Commit is listed, `git show <commit> --stat`.
-2. **REVIEW THE SYSTEM-CAPTURED COMMIT** when present. Do not fail solely because an executor-claimed commit differs; `claimed_commit` is non-authoritative metadata preserved for audit and `commit` is the substrate-captured review target.
+1. **CHECK** git state and provenance: `git status`, `git log --oneline -10`, and if a System-captured Commit is listed, compare your findings against the System-Anchored Review Diff above.
+2. **REVIEW THE SYSTEM-CAPTURED COMMIT** when present. Do not review moving `HEAD` as the source of truth; `claimed_commit` is non-authoritative metadata preserved for audit and `commit` is the substrate-captured review target.
 3. **VERIFY** each acceptance criterion is implemented
 4. **RUN** tests yourself: `cargo test` or equivalent
 5. **FIND** issues thoroughly (for non-trivial changes expect 3+; explain if fewer)

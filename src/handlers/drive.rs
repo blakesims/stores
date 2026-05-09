@@ -1060,6 +1060,48 @@ pub(crate) fn compute_git_diff_summary(
     )
 }
 
+/// Compute the exact commit diff for the current executor submission, anchored
+/// to the system-captured `executor.commit` instead of whatever HEAD happens to
+/// be when the reviewer runs. This is intentionally best-effort briefing data:
+/// failures degrade to a visible placeholder so drive/render remain available.
+fn compute_review_target_diff(commit: Option<&str>, workspace_path: Option<&str>) -> String {
+    use std::process::Command;
+
+    let commit = match commit.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(commit) => commit,
+        None => return "<no system-captured executor commit>".to_string(),
+    };
+
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "show",
+        "--stat",
+        "--patch",
+        "--find-renames",
+        "--find-copies",
+        commit,
+    ]);
+    if let Some(path) = workspace_path.map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.current_dir(path);
+    }
+
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if stdout.is_empty() {
+                format!("<git show {commit} returned no output>")
+            } else {
+                format!("```diff\n{stdout}\n```")
+            }
+        }
+        Ok(out) => format!(
+            "<git show {commit} failed: {}>",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(err) => format!("<git show {commit} failed to spawn: {err}>"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main drive loop (AC3.1 / AC3.4 / AC3.5 / AC3.6 / AC3.7 / AC3.9 / AC3.10)
 // ---------------------------------------------------------------------------
@@ -1309,6 +1351,37 @@ fn drive_loop_with_role_runner(
                 overlay.insert(
                     "git_diff_summary".to_string(),
                     serde_json::Value::String(diff_summary),
+                );
+            }
+            if matches!(agent_role, "code_reviewer" | "code-reviewer") {
+                let current_phase = entry
+                    .get("current_phase")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1);
+                let current_cycle = entry
+                    .get("current_cycle")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1);
+                let review_commit = entry
+                    .get("cycles")
+                    .and_then(|v| v.as_array())
+                    .and_then(|cycles| {
+                        cycles.iter().find(|cycle| {
+                            cycle.get("phase").and_then(|v| v.as_i64()) == Some(current_phase)
+                                && cycle.get("cycle").and_then(|v| v.as_i64())
+                                    == Some(current_cycle)
+                        })
+                    })
+                    .and_then(|cycle| cycle.get("executor"))
+                    .and_then(|executor| executor.get("commit"))
+                    .and_then(|commit| commit.as_str());
+                let workspace_path = entry.get("workspace_path").and_then(|v| v.as_str());
+                overlay.insert(
+                    "review_target_diff".to_string(),
+                    serde_json::Value::String(compute_review_target_diff(
+                        review_commit,
+                        workspace_path,
+                    )),
                 );
             }
 
@@ -2201,8 +2274,8 @@ mod tests {
             &format!(
                 "INSERT INTO {name} (display_id, status, created_at, updated_at, \
                  created_by, updated_by, title, slug, tier_hint, current_phase, current_cycle, \
-                 plan, contract, cycles, plan_review_log, claimed_by, claimed_at) \
-                 VALUES (?1,?2,?3,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                 plan, contract, cycles, plan_review_log, claimed_by, claimed_at, workspace_path) \
+                 VALUES (?1,?2,?3,?3,?4,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 name = quote_ident(&schema.name)
             ),
             rusqlite::params![
@@ -2221,6 +2294,7 @@ mod tests {
                 plan_review_log_json,
                 claimed_by,
                 claimed_at,
+                env!("CARGO_MANIFEST_DIR"),
             ],
         )
         .unwrap();
@@ -4730,6 +4804,50 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
+    fn review_target_diff_uses_system_captured_commit_not_head() {
+        use std::process::Command;
+        use tempfile::tempdir;
+
+        let repo = tempdir().expect("tempdir failed");
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .status()
+                .expect("git command failed");
+            assert!(status.success(), "git {args:?} must succeed");
+        };
+
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(repo.path().join("file.txt"), "base\n").unwrap();
+        git(&["add", "file.txt"]);
+        git(&["commit", "-m", "base"]);
+        std::fs::write(repo.path().join("file.txt"), "executor\n").unwrap();
+        git(&["commit", "-am", "executor change"]);
+        let captured = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let captured = String::from_utf8_lossy(&captured.stdout).trim().to_string();
+
+        std::fs::write(repo.path().join("file.txt"), "later head\n").unwrap();
+        git(&["commit", "-am", "later head change"]);
+
+        let diff = compute_review_target_diff(Some(&captured), repo.path().to_str());
+        assert!(diff.contains("executor change"), "{diff}");
+        assert!(!diff.contains("later head change"), "{diff}");
+        assert!(diff.contains("-base"), "{diff}");
+        assert!(diff.contains("+executor"), "{diff}");
+    }
+
+    #[test]
     fn git_diff_summary_unavailable_when_no_git_and_no_commit() {
         // AC4.6: When both git merge-base and the executor commit fallback are
         // unavailable (no commit provided), compute_git_diff_summary must return
@@ -4894,6 +5012,14 @@ mod tests {
             None,
             None,
         );
+        conn.execute(
+            &format!(
+                "UPDATE {} SET workspace_path = NULL WHERE display_id = ?1",
+                crate::codegen::ddl::quote_ident(&schema.name)
+            ),
+            rusqlite::params!["T001"],
+        )
+        .unwrap();
 
         // Queue has one response; if spawn is called, remaining_count drops to 0.
         let runner = MockRunner::new(vec![make_run_output(planner_fixture_json(), 0)]);
