@@ -939,21 +939,24 @@ fn build_retry_deploy_cmd() -> Command {
 
 /// Build the `reconcile-accepted` command (tasks only).
 ///
-/// I027 / T107 operator-grounded recovery verb: re-fire the post-accept
-/// ceremony for an `accepted` row whose work is already merged to main but
-/// whose chain (cargo-install, schema-migrate) never ran. Allowed only from
-/// `accepted` (or mid-chain `cargo_installed` for resume-after-partial).
-/// Requires ai_with_human or human invoker.
+/// I027 / T107 operator-grounded recovery verb (T138 P3 update): re-fire the
+/// post-`integrated` chain (cargo-install → schema-migrate) for a row stranded
+/// at `integrated` (or mid-chain `cargo_installed`) whose branch is already
+/// merged to main. The integration lane (T138) owns the merge step now, so
+/// this verb no longer drives accept-merge. Allowed only from
+/// {integrated, cargo_installed}. Requires ai_with_human or human invoker.
 fn build_reconcile_accepted_cmd() -> Command {
     Command::new("reconcile-accepted")
         .about(
-            "Reconcile a task stranded at status='accepted' whose branch is already merged \
-             to main but whose post-accept ceremony never fired (typical I027 case after \
-             retry-deploy hit a pre-I027 daemon). Re-fires accept-merge / cargo-install / \
+            "Reconcile a task stranded at status='integrated' (or mid-chain 'cargo_installed') \
+             whose branch is already merged to main but whose stores-specific post-`integrated` \
+             chain (cargo-install / schema-migrate) never fired. Re-fires cargo-install and \
              schema-migrate via direct builtin invocation; the framework actor fires the \
-             mark_cargo_installed and mark_schema_migrated transitions normally. Requires \
+             mark_cargo_installed and mark_schema_migrated transitions normally. The integration \
+             lane (T138) owns the merge step, so this verb does NOT drive accept-merge. Requires \
              --invoker ai_with_human or human; ai_autonomous is rejected. Fails loud if the \
-             branch is not merged to main (use `tasks retry-deploy` from deploy_blocked instead).",
+             branch is not merged to main (use `tasks retry-integration` from integration_blocked \
+             for pre-integrated recovery).",
         )
         .arg(
             Arg::new("display_id")

@@ -18,9 +18,8 @@ use std::process::Command;
 
 use stores::cli::dynamic::BUNDLED_STORE_SCHEMAS;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
-use stores::flow::builtins::{accept_merge, cargo_install, schema_migrate, DispatchCtx};
-use stores::flow::{AgentsYaml, PoliciesYaml};
-use stores::handlers::{agents_run, submit};
+use stores::flow::builtins::{cargo_install, DispatchCtx};
+use stores::flow::AgentsYaml;
 use stores::schema::actor::Actor;
 use stores::schema::Schema;
 
@@ -70,33 +69,6 @@ fn setup_chain_repo(branch: &str, unique: &str) -> (tempfile::TempDir, PathBuf) 
     git(&repo, &["add", &format!("{}.txt", unique)]);
     git(&repo, &["commit", "-m", "feat"]);
     git(&repo, &["checkout", "main"]);
-
-    write_bundled_manifest(&repo);
-    (tmp, repo)
-}
-
-/// Set up a repo where `main` and `branch` diverge on `Cargo.toml`,
-/// guaranteeing a merge conflict.
-fn setup_conflict_repo(branch: &str) -> (tempfile::TempDir, PathBuf) {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = tmp.path().to_path_buf();
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cargo-install-noop");
-    copy_dir(&src, &repo);
-
-    assert!(git(&repo, &["init", "-b", "main"]).status.success());
-    git(&repo, &["config", "user.email", "test@example.com"]);
-    git(&repo, &["config", "user.name", "Test"]);
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-m", "init"]);
-
-    git(&repo, &["checkout", "-b", branch]);
-    std::fs::write(repo.join("Cargo.toml"), "branch-side\n").unwrap();
-    git(&repo, &["add", "Cargo.toml"]);
-    git(&repo, &["commit", "-m", "branch change"]);
-    git(&repo, &["checkout", "main"]);
-    std::fs::write(repo.join("Cargo.toml"), "main-side\n").unwrap();
-    git(&repo, &["add", "Cargo.toml"]);
-    git(&repo, &["commit", "-m", "main change"]);
 
     write_bundled_manifest(&repo);
     (tmp, repo)
@@ -263,416 +235,132 @@ fn ac4_2_post_accept_chain_fixture_parses() {
     );
 }
 
-/// I027 regression: pin the canonical reference template
-/// `docs/agents-yaml-example.yaml` to the post-accept ceremony's recovery
-/// edge (`deploy_blocked → accepted`).
+/// T138 P3 replacement for the legacy I027 post-accept assertion.
 ///
-/// The test fixture at `tests/fixtures/agents-yaml/post-accept-chain.yaml`
-/// had the recovery subscription all along (asserted by
-/// `ac4_2_post_accept_chain_fixture_parses` above), but new operators copy
-/// `docs/agents-yaml-example.yaml` to their own `.stores/agents.yaml`. If the
-/// canonical reference template drifts from the recovery shape, every
-/// fresh-cloned operator inherits the bug.
+/// The pre-T138 form pinned `docs/agents-yaml-example.yaml` to the old
+/// post-accept recovery edge (`deploy_blocked → accepted`). T138 retired
+/// that ceremony in favour of the generic integration lane: the merge step
+/// is now owned by the `integrate` builtin, and `cargo-install` /
+/// `schema-migrate` are stores-specific subscribers post-`integrated`.
 ///
-/// In the actual incident (T107 / I027), the running `.stores/agents.yaml`
-/// only subscribed accept-merge / cargo-install on `(in_review, accepted)`.
-/// After `tasks retry-deploy` (deploy_blocked → accepted), the daemon's
-/// subscriber-dispatch loop in `agents_run::poll_once` matches
-/// `(store, from, to)` exactly — so the missing recovery subscription
-/// silently broke the entire post-accept ceremony. Operator had to
-/// manually `git merge` and the row stayed stranded at `accepted`.
-///
-/// Pi ruling msg_7190d789: re-fire the chain on retry-deploy. This test
-/// pins the canonical template so future drift fails-loud.
-///
-/// `.stores/agents.yaml` itself is gitignored (per-project operator config)
-/// so cannot be tested here directly. Operators are expected to copy from
-/// `docs/agents-yaml-example.yaml`; pinning the example catches the drift
-/// at its source.
+/// This test pins the canonical template's NEW shape so future drift in the
+/// docs example fails-loud at the same place I027 used to bite:
+///   * `integrate` subscribes to BOTH `(accepted, integration_queued)` and
+///     `(integration_blocked, integration_queued)` — the two legal entry
+///     edges into the lane (the latter is the recovery edge written by
+///     `tasks retry-integration`).
+///   * `cargo-install` subscribes ONLY to `(integrating, integrated)` — no
+///     accepted-entry subscription, no `(integration_blocked, integrated)`
+///     edge (which doesn't exist in the schema; Phase 1 forbids it).
+///   * `schema-migrate` subscribes to `(integrated, cargo_installed)` —
+///     the source state moved from `accepted` to `integrated`.
 #[test]
-fn i027_agents_yaml_example_subscribes_post_accept_chain_to_recovery_edge() {
+fn t138_agents_yaml_example_subscribes_integration_lane_and_post_integrated_chain() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/agents-yaml-example.yaml");
     let yaml = std::fs::read_to_string(&path)
         .expect("docs/agents-yaml-example.yaml must be present");
     let parsed = AgentsYaml::from_yaml(&yaml)
         .expect("docs/agents-yaml-example.yaml must parse");
 
-    let accept = parsed
+    // accept-merge must NOT be present in the docs example any more.
+    assert!(
+        !parsed.agents.iter().any(|a| a.name == "accept-merge"),
+        "accept-merge agent must be removed from docs/agents-yaml-example.yaml under T138"
+    );
+
+    let integrate = parsed
         .agents
         .iter()
-        .find(|a| a.name == "accept-merge")
-        .expect("agents.yaml example must declare accept-merge");
+        .find(|a| a.name == "integrate")
+        .expect("docs example must declare the integrate agent (T138)");
     assert!(
-        accept
+        integrate
             .subscribes_to
             .iter()
-            .any(|s| s.transition.from == "in_review" && s.transition.to == "accepted"),
-        "accept-merge must keep the happy-path (in_review, accepted) subscription"
+            .any(|s| s.transition.from == "accepted" && s.transition.to == "integration_queued"),
+        "integrate must subscribe (accepted, integration_queued) — happy-path lane entry"
     );
     assert!(
-        accept
+        integrate
             .subscribes_to
             .iter()
-            .any(|s| s.transition.from == "deploy_blocked" && s.transition.to == "accepted"),
-        "accept-merge must subscribe (deploy_blocked, accepted) for retry-deploy recovery (I027)"
+            .any(|s| s.transition.from == "integration_blocked"
+                && s.transition.to == "integration_queued"),
+        "integrate must subscribe (integration_blocked, integration_queued) — \
+         retry-integration recovery edge (T138 replacement for the I027 retry-deploy edge)"
     );
 
     let cargo = parsed
         .agents
         .iter()
         .find(|a| a.name == "cargo-install")
-        .expect("agents.yaml example must declare cargo-install");
-    assert!(
-        cargo
-            .subscribes_to
-            .iter()
-            .any(|s| s.transition.from == "in_review" && s.transition.to == "accepted"),
-        "cargo-install must keep the happy-path (in_review, accepted) peer subscription"
-    );
-    assert!(
-        cargo
-            .subscribes_to
-            .iter()
-            .any(|s| s.transition.from == "deploy_blocked" && s.transition.to == "accepted"),
-        "cargo-install must subscribe (deploy_blocked, accepted) as peer of accept-merge on retry-deploy (I027)"
+        .expect("docs example must declare cargo-install");
+    let cargo_subs: Vec<(&str, &str)> = cargo
+        .subscribes_to
+        .iter()
+        .map(|s| (s.transition.from.as_str(), s.transition.to.as_str()))
+        .collect();
+    assert_eq!(
+        cargo_subs,
+        vec![("integrating", "integrated")],
+        "cargo-install must subscribe ONLY to (integrating, integrated) under T138; \
+         no accepted-entry subscription, no (integration_blocked, integrated) edge \
+         (Phase 1 schema forbids the latter). Got: {:?}",
+        cargo_subs
     );
 
-    // schema-migrate's edge is unaffected by I027 — it keys off cargo-install's
-    // mark_cargo_installed fire (accepted → cargo_installed).
     let migrate = parsed
         .agents
         .iter()
         .find(|a| a.name == "schema-migrate")
-        .expect("agents.yaml example must declare schema-migrate");
+        .expect("docs example must declare schema-migrate");
     assert!(
         migrate
             .subscribes_to
             .iter()
+            .any(|s| s.transition.from == "integrated" && s.transition.to == "cargo_installed"),
+        "schema-migrate must subscribe (integrated, cargo_installed) under T138 \
+         (source state moved from accepted → integrated)"
+    );
+    assert!(
+        !migrate
+            .subscribes_to
+            .iter()
             .any(|s| s.transition.from == "accepted" && s.transition.to == "cargo_installed"),
-        "schema-migrate must subscribe (accepted, cargo_installed); unchanged by I027"
+        "schema-migrate must NOT carry the legacy (accepted, cargo_installed) \
+         subscription post-T138"
     );
 }
 
-/// AC4.1: chain isolation — T100 (clean) reaches schema_migrated via the
-/// full ceremony; T101 (merge conflict) flips to deploy_blocked at the
-/// accept-merge link and does not prevent T100 from completing.
-#[test]
-fn ac4_1_chain_isolation_failure_does_not_block_peer() {
-    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    // Independent tempdir CARGO_HOME / target dir so the test does not
-    // pollute the developer's shared cargo cache.
-    let cargo_home = tempfile::tempdir().unwrap();
-    let target_dir = tempfile::tempdir().unwrap();
-    std::env::set_var("CARGO_HOME", cargo_home.path());
-    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
-    let private_bin = cargo_home.path().join("private-daemon/bin/stores");
-    std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
-    // T031 P1: schema-migrate now spawns a subprocess. Point it at the
-    // test-built binary so it picks up this branch's bundled schemas.
-    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
+// AC4.1 (T138 P3): RETIRED. Pre-T138 a test here drove the post-accept
+// ceremony directly (accept-merge → cargo-install → schema-migrate) and
+// asserted that a merge conflict on one row (accepted → deploy_blocked)
+// did not block a peer's full chain. T138 moved the merge step into the
+// generic integration lane (builtin:integrate, Phase 2) and removed the
+// `(accepted → deploy_blocked)` edge entirely — accept-merge is no longer
+// dispatched. Chain isolation in the new lane is exercised by the integrate
+// builtin's own test suite (Phase 2) and by the two-candidate integration
+// test (Phase 5).
 
-    let (_t100_tmp, t100_repo) = setup_chain_repo("feat/t100", "t100-only");
-    let (_t101_tmp, t101_repo) = setup_conflict_repo("feat/t101");
+// retry_deploy_daemon_poll_retries_post_accept_chain (T138 P3): RETIRED.
+// Pre-T138 this test exercised retry-deploy's `deploy_blocked → accepted`
+// recovery edge by replaying the accept-merge → cargo-install →
+// schema-migrate chain through `agents_run::poll_once`. T138 removed
+// accept-merge from dispatch and moved the merge step into the generic
+// integration lane (builtin:integrate). The recovery shape is now
+// `tasks retry-integration` (`integration_blocked → integration_queued`),
+// covered by the integrate builtin's own test suite (Phase 2).
 
-    let conn = fresh_db_with_substrate();
-    insert_accepted_task(&conn, "T100", "feat/t100", t100_repo.to_str().unwrap());
-    insert_accepted_task(&conn, "T101", "feat/t101", t101_repo.to_str().unwrap());
-
-    let agents = AgentsYaml::default_empty();
-    let cfg = cfg_path();
-    let ctx = DispatchCtx {
-        conn: &conn,
-        agents: &agents,
-        config_path: &cfg,
-        policies_hash: "",
-    };
-
-    // --- T101 chain (conflict): accept-merge flips to deploy_blocked. ---
-    let row_t101 = task_row_json(&conn, "T101");
-    accept_merge::run(&row_t101, &ctx).expect("accept-merge T101 returns Ok even on conflict");
-    assert_eq!(
-        status_of(&conn, "T101"),
-        "deploy_blocked",
-        "T101 must flip to deploy_blocked on merge conflict"
-    );
-
-    // --- T100 chain (clean): full three-link ceremony must complete. ---
-    let row_t100 = task_row_json(&conn, "T100");
-    let code = accept_merge::run(&row_t100, &ctx).expect("accept-merge T100");
-    assert_eq!(code, 0);
-    assert_eq!(
-        status_of(&conn, "T100"),
-        "accepted",
-        "T100 stays at accepted after clean merge"
-    );
-
-    // Refresh row (status unchanged but defensive against future schema additions).
-    let row_t100 = task_row_json(&conn, "T100");
-    let code = cargo_install::run(&row_t100, &ctx).expect("cargo-install T100");
-    assert_eq!(code, 0, "cargo-install T100 must succeed on noop fixture");
-    assert_eq!(status_of(&conn, "T100"), "cargo_installed");
-
-    let row_t100 = task_row_json(&conn, "T100");
-    let code = schema_migrate::run(&row_t100, &ctx).expect("schema-migrate T100");
-    assert_eq!(code, 0);
-    assert_eq!(
-        status_of(&conn, "T100"),
-        "schema_migrated",
-        "T100 must reach schema_migrated"
-    );
-
-    // Audit rows for T100's full chain.
-    assert_eq!(
-        count_history(&conn, "T100", "mark_cargo_installed"),
-        1,
-        "T100 must have one mark_cargo_installed history row"
-    );
-    assert_eq!(
-        count_history(&conn, "T100", "mark_schema_migrated"),
-        1,
-        "T100 must have one mark_schema_migrated history row"
-    );
-
-    // T101 must NOT have advanced past deploy_blocked.
-    assert_eq!(
-        count_history(&conn, "T101", "mark_cargo_installed"),
-        0,
-        "T101 must not have mark_cargo_installed (chain halted at accept-merge)"
-    );
-    assert_eq!(
-        count_history(&conn, "T101", "mark_schema_migrated"),
-        0,
-        "T101 must not have mark_schema_migrated"
-    );
-    assert_eq!(
-        count_history(&conn, "T101", "mark_deploy_blocked"),
-        1,
-        "T101 must have one mark_deploy_blocked history row"
-    );
-
-    std::env::remove_var("CARGO_HOME");
-    std::env::remove_var("CARGO_TARGET_DIR");
-    std::env::remove_var("STORES_DAEMON_BIN_PATH");
-}
-
-/// retry-deploy writes deploy_blocked→accepted; daemon polling observes that
-/// edge and re-runs the normal accept-merge/cargo-install/schema-migrate chain.
-#[test]
-fn retry_deploy_daemon_poll_retries_post_accept_chain() {
-    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let cargo_home = tempfile::tempdir().unwrap();
-    let target_dir = tempfile::tempdir().unwrap();
-    std::env::set_var("CARGO_HOME", cargo_home.path());
-    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
-    let private_bin = cargo_home.path().join("private-daemon/bin/stores");
-    std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
-    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
-
-    let (_tmp, repo) = setup_chain_repo("feat/retry", "retry-only");
-    let conn = fresh_db_with_substrate();
-    insert_accepted_task(&conn, "T200", "feat/retry", repo.to_str().unwrap());
-    conn.execute(
-        "UPDATE tasks SET status='deploy_blocked', blocked_reason='fixed before retry' WHERE display_id='T200'",
-        [],
-    )
-    .unwrap();
-
-    let task_schema = Schema::from_yaml(
-        BUNDLED_STORE_SCHEMAS
-            .iter()
-            .find(|(n, _)| *n == "tasks")
-            .map(|(_, y)| *y)
-            .unwrap(),
-    )
-    .unwrap();
-    submit::run_retry_deploy(&task_schema, &conn, "T200", Actor::AiWithHuman.into()).unwrap();
-    assert_eq!(status_of(&conn, "T200"), "accepted");
-
-    let yaml = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/agents-yaml/post-accept-chain.yaml"),
-    )
-    .unwrap();
-    let agents = AgentsYaml::from_yaml(&yaml).unwrap();
-    let policies = PoliciesYaml::from_yaml("policies: []\n").unwrap();
-    let cfg = cfg_path();
-
-    let n1 = agents_run::poll_once(&conn, &agents, &policies, &cfg, "retry-test", "").unwrap();
-    assert!(
-        n1 >= 3,
-        "retry edge should dispatch accept-merge, cargo-install, and schema-migrate through subscriber polling; got {n1}"
-    );
-    assert_eq!(status_of(&conn, "T200"), "schema_migrated");
-    assert_eq!(count_history(&conn, "T200", "retry-deploy"), 1);
-    assert_eq!(count_history(&conn, "T200", "mark_cargo_installed"), 1);
-    assert_eq!(count_history(&conn, "T200", "mark_schema_migrated"), 1);
-
-    let workflow_dispatches: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM dispatch_locks WHERE display_id='T200' AND agent_name IN ('planner','executor','code_reviewer','plan_reviewer')",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(workflow_dispatches, 0);
-
-    std::env::remove_var("CARGO_HOME");
-    std::env::remove_var("CARGO_TARGET_DIR");
-    std::env::remove_var("STORES_DAEMON_BIN_PATH");
-}
-
-/// T061 codex-revise round 2: stale-workspace retry-deploy chain.
-///
-/// Setup: T997 in deploy_blocked, branch `feat/T997-stale` already merged
-/// into main, workspace cleaned (stale path). Daemon cwd is the live main
-/// repo.
-///
-/// Assert:
-///   - accept_merge no-ops (branch already merged, cargo-install peer
-///     present — round-1 guard prevents mark_cargo_installed).
-///   - cargo_install detects stale workspace, falls back to cwd, ACTUALLY
-///     runs and fires mark_cargo_installed.
-///   - Row reaches `cargo_installed` (not stranded at `accepted`).
-///   - transition_history shows mark_cargo_installed with invoker='framework'.
-#[test]
-fn retry_deploy_stale_workspace_cargo_install_cwd_fallback() {
-    let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let cargo_home = tempfile::tempdir().unwrap();
-    let target_dir = tempfile::tempdir().unwrap();
-    std::env::set_var("CARGO_HOME", cargo_home.path());
-    std::env::set_var("CARGO_TARGET_DIR", target_dir.path());
-    let private_bin = cargo_home.path().join("private-daemon/bin/stores");
-    std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
-    std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
-
-    // Build a valid cargo repo + git repo that has the branch already merged.
-    let (tmp, repo) = setup_chain_repo("feat/T997-stale", "t997-stale-unique");
-
-    // Pre-merge the branch into main so accept-merge's already-merged probe
-    // returns true.
-    assert!(
-        git(&repo, &["merge", "--no-ff", "--no-edit", "feat/T997-stale"])
-            .status
-            .success(),
-        "pre-merge feat/T997-stale into main must succeed"
-    );
-
-    let conn = fresh_db_with_substrate();
-
-    // Stale workspace path — worktree was cleaned after the original merge.
-    let stale_workspace = tmp.path().join("worktrees/T997-gone");
-    insert_accepted_task(
-        &conn,
-        "T997",
-        "feat/T997-stale",
-        stale_workspace.to_str().unwrap(),
-    );
-
-    // Simulate retry-deploy: mark row deploy_blocked then retry.
-    conn.execute(
-        "UPDATE tasks SET status='deploy_blocked', blocked_reason='prior cargo failure' WHERE display_id='T997'",
-        [],
-    )
-    .unwrap();
-
-    let task_schema = Schema::from_yaml(
-        BUNDLED_STORE_SCHEMAS
-            .iter()
-            .find(|(n, _)| *n == "tasks")
-            .map(|(_, y)| *y)
-            .unwrap(),
-    )
-    .unwrap();
-    submit::run_retry_deploy(&task_schema, &conn, "T997", Actor::AiWithHuman.into()).unwrap();
-    assert_eq!(status_of(&conn, "T997"), "accepted");
-
-    // Use production agents.yaml fixture (cargo-install is a peer subscriber
-    // on deploy_blocked→accepted) so the accept-merge peer-detection guard fires.
-    let yaml = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/agents-yaml/post-accept-chain.yaml"),
-    )
-    .unwrap();
-    let agents = AgentsYaml::from_yaml(&yaml).unwrap();
-    let cfg = cfg_path();
-
-    // Set daemon cwd to the live repo so cargo-install's cwd fallback works.
-    // Round-3: the cwd validation now requires Cargo.toml [package] name = "stores".
-    // The noop fixture uses a different name, so overwrite it before cd-ing in.
-    let stores_cargo_toml =
-        "[package]\nname = \"stores\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\
-         [[bin]]\nname = \"stores\"\npath = \"src/main.rs\"\n\
-         [features]\ndefault = []\nrunner-claude-code = []\n";
-    std::fs::write(repo.join("Cargo.toml"), stores_cargo_toml)
-        .expect("overwrite Cargo.toml to name=stores for cwd validation");
-
-    let _cwd_g = cwd_lock().lock().unwrap_or_else(|e| e.into_inner());
-    let old_cwd = std::env::current_dir().unwrap();
-    std::env::set_current_dir(&repo).expect("set daemon cwd to live repo");
-
-    let ctx = DispatchCtx {
-        conn: &conn,
-        agents: &agents,
-        config_path: &cfg,
-        policies_hash: "",
-    };
-
-    // Step 1: accept-merge — branch already merged, cargo-install peer present.
-    // Must no-op (not fire mark_cargo_installed). Row stays at accepted.
-    let row = task_row_json(&conn, "T997");
-    let am_rc = accept_merge::run(&row, &ctx).expect("accept-merge T997");
-    assert_eq!(am_rc, 0, "accept-merge must succeed (no-op)");
-    assert_eq!(
-        status_of(&conn, "T997"),
-        "accepted",
-        "accept-merge must not advance row when cargo-install peer present"
-    );
-    assert_eq!(
-        count_history(&conn, "T997", "mark_cargo_installed"),
-        0,
-        "accept-merge must not fire mark_cargo_installed when cargo-install peer present"
-    );
-
-    // Step 2: cargo-install — stale workspace, falls back to cwd (the live repo),
-    // runs install, fires mark_cargo_installed. Row advances to cargo_installed.
-    let row = task_row_json(&conn, "T997");
-    let ci_rc = cargo_install::run(&row, &ctx).expect("cargo-install T997");
-
-    std::env::set_current_dir(&old_cwd).expect("restore cwd");
-    drop(_cwd_g);
-
-    assert_eq!(ci_rc, 0, "cargo-install must succeed via cwd fallback");
-
-    // Row must have advanced to cargo_installed (not stranded at accepted).
-    assert_eq!(
-        status_of(&conn, "T997"),
-        "cargo_installed",
-        "T997 must reach cargo_installed (not stranded at accepted)"
-    );
-
-    // mark_cargo_installed must appear in transition_history with invoker=framework.
-    assert_eq!(
-        count_history(&conn, "T997", "mark_cargo_installed"),
-        1,
-        "T997 must have exactly one mark_cargo_installed history row"
-    );
-    let invoker: String = conn
-        .query_row(
-            "SELECT invoker FROM transition_history \
-             WHERE store='tasks' AND display_id='T997' AND verb='mark_cargo_installed'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        invoker, "framework",
-        "mark_cargo_installed must be fired by framework actor"
-    );
-
-    std::env::remove_var("CARGO_HOME");
-    std::env::remove_var("CARGO_TARGET_DIR");
-    std::env::remove_var("STORES_DAEMON_BIN_PATH");
-}
+// retry_deploy_stale_workspace_cargo_install_cwd_fallback (T138 P3): RETIRED.
+// Pre-T138 this test asserted that after retry-deploy (deploy_blocked →
+// accepted), accept-merge no-oped on an already-merged branch and
+// cargo-install fell back to cwd to fire `mark_cargo_installed`. Under
+// T138, accept-merge is no longer dispatched and cargo-install's source
+// state moved from `accepted` to `integrated` (it subscribes only to
+// (integrating → integrated)). The cwd-fallback behaviour itself is still
+// exercised directly in `cargo_install_cwd_fallback_rejects_wrong_crate`
+// below and inside the integrate builtin's tests; the orchestration shape
+// this test pinned is gone.
 
 /// T061 codex-revise round 3: cwd fallback must reject non-stores Cargo crates.
 ///
