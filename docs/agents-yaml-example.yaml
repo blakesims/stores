@@ -1,0 +1,203 @@
+# Reference `.stores/agents.yaml` — the post-accept ceremony.
+#
+# After a human-fired `tasks accept`, three subscribers chain in dependency
+# order:
+#
+#   1. builtin:accept-merge   (T014) — fast-merge the row's `branch` into main.
+#   2. builtin:cargo-install  (T019) — refresh the `stores` binary.
+#   3. builtin:schema-migrate (T019) — apply additive DB migrations.
+#
+# Each link only fires after its predecessor reports success:
+#   - accept-merge subscribes to in_review→accepted (the human accept verb)
+#     and deploy_blocked→accepted (operator retry-deploy recovery).
+#   - cargo-install subscribes to the same accepted-entry edges as a peer; it runs
+#     after accept-merge within the same poll iteration (declaration order
+#     is dispatch order) and on success fires mark_cargo_installed
+#     (accepted→cargo_installed).
+#   - schema-migrate subscribes to accepted→cargo_installed (cargo-install's
+#     output transition) and on success fires mark_schema_migrated.
+#
+# Failure at any link halts the chain: the row flips to `deploy_blocked`
+# (cargo_installed→deploy_blocked or accepted→deploy_blocked) with stderr
+# captured in `blocked_reason`, ntfy fires, and the row is dispatched to
+# `deployment_specialist` (default: `builtin:user-escalation`). Ordinary
+# `blocked` rows use `stores tasks resume`; deploy_blocked rows use
+# `stores tasks retry-deploy` after fixing the issue, or
+# `stores tasks close-out-of-band --commit <sha>` for manual recovery.
+
+agents:
+  - name: accept-merge
+    subscribes_to:
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+      - store: tasks
+        transition: { from: deploy_blocked, to: accepted }
+    command: "builtin:accept-merge"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 3, backoff: linear }
+
+  - name: cargo-install
+    subscribes_to:
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+      - store: tasks
+        transition: { from: deploy_blocked, to: accepted }
+    command: "builtin:cargo-install"
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+    command_args:
+      features:
+        - runner-claude-code
+
+  - name: schema-migrate
+    subscribes_to:
+      - store: tasks
+        transition: { from: accepted, to: cargo_installed }
+    command: "builtin:schema-migrate"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  - name: auto-resolve-observation
+    subscribes_to:
+      - store: tasks
+        transition: { from: cargo_installed, to: schema_migrated }
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+      - store: tasks
+        transition: { from: deploy_blocked, to: accepted }
+      - store: tasks
+        transition: { from: planning, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: plan_review, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: ready, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: executing, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: code_review, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: blocked, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: complete, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: in_review, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: rejected, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: deploy_blocked, to: closed_out_of_band }
+    command: "builtin:auto-resolve-observation"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  - name: user-escalation
+    subscribes_to:
+      - store: tasks
+        transition: { from: accepted, to: deploy_blocked }
+      - store: tasks
+        transition: { from: cargo_installed, to: deploy_blocked }
+    command: "builtin:user-escalation"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  # T022 — auto-drive. Fires on the row-creation arrival edge ('' → planning)
+  # only when `workspace_path` is set on the row (the predicate gate skips
+  # rows scaffolded without an isolated worktree). The daemon spawns
+  # `stores tasks drive <id>` detached so the polling loop continues; concurrency
+  # is capped by `drive.max_parallel` in .stores/config.yaml below.
+  # T038 — investigator. Routes a freshly-flipped open→needs_investigation
+  # observation to a dedicated subagent that emits a PULL-SHAPED evidence
+  # envelope (NOT a draft contract). The builtin parses the envelope, runs
+  # a status guard (no-op if the row moved on), and persists evidence to
+  # `investigation_note` + `notes`. The human ratifies the contract next —
+  # the investigator does not pre-decide acceptance, scope, or done-when.
+  - name: investigator
+    subscribes_to:
+      - store: observations
+        transition: { from: open, to: needs_investigation }
+    command: "builtin:investigator"
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  - name: auto-drive
+    subscribes_to:
+      - store: tasks
+        transition: { from: "", to: planning }
+        predicate:
+          op: "!="
+          left: "$workspace_path"
+          right: ""
+    command: "builtin:auto-drive"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  - name: external-review
+    subscribes_to:
+      - store: external_reviews
+        transition: { from: "", to: pending }
+      - store: external_reviews
+        transition: { from: tooling_held, to: pending }
+    command: "builtin:external-review"
+    claim_window_secs: 1800
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  # T053 P4 — intake gatekeeper. Production is shell-out: the command renders
+  # a bundled brief, asks the configured agent CLI for one JSON decision, then
+  # calls `stores intake route` (the single P1 routing verb). All six decisions
+  # — including `arch_review_candidate` — flow through `route`; the dedicated
+  # `architecture_reviews` store / `escalated` lifecycle is deferred to L171.
+  # Tests may replace this with `builtin:gatekeeper-stub` to avoid LLM IO.
+  - name: gatekeeper
+    subscribes_to:
+      - store: intake
+        transition: { from: draft, to: triaging }
+    command: >-
+      sh -c 'tmp=$(mktemp); stores intake brief "$STORES_DISPLAY_ID" --for gatekeeper | claude --print > "$tmp"; decision=$(jq -r .decision "$tmp"); stores intake route "$STORES_DISPLAY_ID" --decision "$decision" --gatekeeper-decision-json-from-file "$tmp" --invoker ai_autonomous'
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+  - name: recon
+    subscribes_to:
+      - store: intake
+        transition: { from: triaging, to: needs_info }
+    command: "stores intake brief ${STORES_DISPLAY_ID} --for recon | claude --print | sh"
+    claim_window_secs: 600
+    retry_policy: { max_attempts: 1, backoff: linear }
+
+deployment_specialist: user-escalation
+
+# ---------------------------------------------------------------------------
+# .stores/config.yaml — supplemental
+# ---------------------------------------------------------------------------
+# These keys live in `.stores/config.yaml` (NOT this file). Documented here so
+# operators can find every project-tunable knob in one place.
+#
+# ntfy:
+#   url: https://ntfy.example/your-topic    # falls back to $STORES_NTFY_URL
+#
+# scaffold:
+#   command: "./dev scaffold {display_id}"  # auto-scaffold subscriber (T020)
+#
+# drive:
+#   max_parallel: 1   # auto-drive concurrency cap. Default: 1.
+#                     # Caps how many `tasks drive` subprocesses the daemon
+#                     # will spawn concurrently. Raise on multi-worktree setups
+#                     # where parallel drives are safe.
+#
+# review:
+#   runner: codex      # codex, pi, or claude-code. Default: codex.
+#   max_parallel: 1    # external-review lane concurrency cap. Default: 1.
+#   timeout_secs: 1800
+#   model: gpt-5-codex # optional runner/model metadata persisted on review rows.
+# codex:
+#   command: codex
+#   args: ["review", "--stdin"]
+#
+# Pi review runner example:
+# review: { runner: pi, max_parallel: 1, timeout_secs: 1800, model: pi-review }
+#
+# Claude Code review runner example:
+# review: { runner: claude-code, max_parallel: 1, timeout_secs: 1800, model: sonnet }
+#
+# T2/T3 accept precheck: a current-head external_reviews PASS is required.
+# REVISE routes back to executor; TOOLING_FAILURE becomes tooling_held with
+# held_reason/next_retry_at visible to agents-run/watch logs.
