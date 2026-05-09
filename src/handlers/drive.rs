@@ -1338,23 +1338,33 @@ fn drive_loop_with_role_runner(
         // Extract workspace_path from the task row (same pattern as branch above).
         let workspace_path = entry.get("workspace_path").and_then(|v| v.as_str());
 
-        // Validate: if set but path does not exist OR is not a directory, error before spawn
-        // (no silent fallback). exists()-only would let a regular file slip through and defer
-        // failure to spawn-time when current_dir() rejects it as a non-directory infra error.
-        if let Some(p) = workspace_path {
-            let path = std::path::Path::new(p);
-            if !path.exists() {
-                anyhow::bail!(
-                    "[{display_id}] workspace_path '{p}' does not exist; \
-                     set a valid path or remove the field"
-                );
-            }
-            if !path.is_dir() {
-                anyhow::bail!(
-                    "[{display_id}] workspace_path '{p}' is not a directory; \
-                     set a valid directory path or remove the field"
-                );
-            }
+        // Fail closed: mutating drive roles must never inherit the operator's cwd
+        // just because tasks.workspace_path is missing/empty. Auto-drive already
+        // gates on a non-empty workspace_path; manual `stores tasks drive` must
+        // provide the same isolation guarantee before any runner can spawn.
+        let workspace_path = match workspace_path.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => p,
+            None => anyhow::bail!(
+                "[{display_id}] workspace_path is empty; refusing to drive from inherited cwd. \
+                 create/set a task worktree before running `stores tasks drive`"
+            ),
+        };
+
+        // Validate path exists and is a directory before spawn. exists()-only would
+        // let a regular file slip through and defer failure to spawn-time when
+        // current_dir() rejects it as a non-directory infra error.
+        let path = std::path::Path::new(workspace_path);
+        if !path.exists() {
+            anyhow::bail!(
+                "[{display_id}] workspace_path '{workspace_path}' does not exist; \
+                 set a valid task worktree before running `stores tasks drive`"
+            );
+        }
+        if !path.is_dir() {
+            anyhow::bail!(
+                "[{display_id}] workspace_path '{workspace_path}' is not a directory; \
+                 set a valid task worktree before running `stores tasks drive`"
+            );
         }
 
         // Pre-spawn announcement: runners block until the child exits, so without
@@ -1373,7 +1383,7 @@ fn drive_loop_with_role_runner(
             system_prompt,
             &brief_markdown,
             schema_text,
-            workspace_path,
+            Some(workspace_path),
         ) {
             Ok(out) => out,
             Err(spawn_err) => {
@@ -1387,7 +1397,7 @@ fn drive_loop_with_role_runner(
                 // Write an error transcript stub under workspace .stores/runs/ so
                 // transcript_path is a real file (required by insert_agent_run).
                 let error_transcript_path = write_spawn_error_transcript(
-                    workspace_path,
+                    Some(workspace_path),
                     display_id,
                     agent_role,
                     &spawn_err,
@@ -2671,7 +2681,21 @@ mod tests {
         drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
 
         // Query all telemetry fields for post-drive assertions (Finding 3).
-        type RunRow = (String, i64, i64, String, String, String, String, String, i64, String, Option<i64>, Option<i64>, Option<i64>);
+        type RunRow = (
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        );
         let rows: Vec<RunRow> = conn
             .prepare(
                 "SELECT display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, transcript_path, tokens_in, tokens_out, prompt_cache_hits \
@@ -4562,7 +4586,11 @@ mod tests {
             let tpl_content = crate::cli::dynamic::BUNDLED_STORE_TEMPLATES
                 .iter()
                 .find(|(n, _)| *n == "tasks")
-                .and_then(|(_, tmps)| tmps.iter().find(|(p, _)| *p == tpl_key.as_str()).map(|(_, c)| *c))
+                .and_then(|(_, tmps)| {
+                    tmps.iter()
+                        .find(|(p, _)| *p == tpl_key.as_str())
+                        .map(|(_, c)| *c)
+                })
                 .expect("planner template must be bundled");
             let ctx = build_context(&schema, &entry);
             let mut overlay =
@@ -4644,7 +4672,11 @@ mod tests {
             let tpl_content = crate::cli::dynamic::BUNDLED_STORE_TEMPLATES
                 .iter()
                 .find(|(n, _)| *n == "tasks")
-                .and_then(|(_, tmps)| tmps.iter().find(|(p, _)| *p == tpl_key.as_str()).map(|(_, c)| *c))
+                .and_then(|(_, tmps)| {
+                    tmps.iter()
+                        .find(|(p, _)| *p == tpl_key.as_str())
+                        .map(|(_, c)| *c)
+                })
                 .expect("planner template must be bundled");
             let ctx = build_context(&schema, &entry);
             let mut overlay =
@@ -4673,8 +4705,17 @@ mod tests {
             stderr_log_path: None,
         };
         std::fs::write(runs_dir.join("planner.jsonl"), "{}\n").unwrap();
-        db::insert_agent_run(&conn, "T001", 0, 0, "planner", 0, &telemetry, Some(&render1))
-            .unwrap();
+        db::insert_agent_run(
+            &conn,
+            "T001",
+            0,
+            0,
+            "planner",
+            0,
+            &telemetry,
+            Some(&render1),
+        )
+        .unwrap();
 
         // Second render from the same fixture row — must be byte-equal.
         let render2 = render_planner_brief();
@@ -4814,14 +4855,8 @@ mod tests {
         );
 
         // The feature commit must appear in "On this branch", not in "On base".
-        let on_branch_section = result
-            .split("### On base/main")
-            .next()
-            .unwrap_or("");
-        let on_base_section = result
-            .split("### On base/main")
-            .nth(1)
-            .unwrap_or("");
+        let on_branch_section = result.split("### On base/main").next().unwrap_or("");
+        let on_base_section = result.split("### On base/main").nth(1).unwrap_or("");
 
         assert!(
             on_branch_section.contains("add feature-file"),
@@ -4841,9 +4876,10 @@ mod tests {
     // AC1.6: workspace_path spawn-time tests
     // ---------------------------------------------------------------------------
 
-    /// AC1.6: row with no workspace_path — runner records None for the cwd arg.
+    /// Lane 0 / 2026-05-09 incident fix: row with no workspace_path must fail
+    /// closed before spawn. Runners must never inherit the operator's cwd.
     #[test]
-    fn workspace_path_unset_uses_inherited_cwd() {
+    fn workspace_path_unset_fails_closed_before_spawn() {
         let schema = tasks_schema();
         let (_dir, conn) = open_db(&schema);
 
@@ -4859,22 +4895,28 @@ mod tests {
             None,
         );
 
-        // T072 r6: executor and code-reviewer must have session_id (MINOR 1).
-        let runner = MockRunner::new(vec![
-            make_run_output(planner_fixture_json(), 0),
-            make_run_output(plan_reviewer_fixture_json(), 0),
-            make_run_output_with_session(executor_fixture_json(), 0, "wp-unset-exec"),
-            make_run_output_with_session(code_reviewer_fixture_json(), 0, "wp-unset-review"),
-            make_run_output(wrap_fixture_json(), 0),
-        ]);
+        // Queue has one response; if spawn is called, remaining_count drops to 0.
+        let runner = MockRunner::new(vec![make_run_output(planner_fixture_json(), 0)]);
 
-        drive_loop(&schema, &conn, "T001", &runner, 50).expect("drive_loop should succeed");
-
-        let paths = runner.workspace_paths_seen();
-        // All spawns (planner, plan_reviewer, executor, code_reviewer, wrap) should record None.
+        let err = drive_loop(&schema, &conn, "T001", &runner, 50)
+            .expect_err("drive_loop must reject empty workspace_path before spawn");
+        let msg = err.to_string();
         assert!(
-            paths.iter().all(|p| p.is_none()),
-            "all workspace_paths_seen must be None when workspace_path is unset, got: {paths:?}"
+            msg.contains("T001"),
+            "error must contain display_id, got: {msg}"
+        );
+        assert!(
+            msg.contains("workspace_path is empty"),
+            "error must explain empty workspace_path, got: {msg}"
+        );
+        assert!(
+            msg.contains("refusing to drive from inherited cwd"),
+            "error must make cwd inheritance refusal explicit, got: {msg}"
+        );
+        assert_eq!(
+            runner.remaining_count(),
+            1,
+            "runner queue must be undrained (no spawn should have occurred)"
         );
     }
 
