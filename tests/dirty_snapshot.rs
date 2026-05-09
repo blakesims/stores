@@ -93,8 +93,8 @@ fn record_accepted_at(conn: &Connection, row_id: i64, display_id: &str, occurred
 
 /// Seed the audit-doc dirty snapshot: T001–T018 legacy accepted, T081 (ceremony
 /// gap), T122 (needs operator review), T125/T127 (deploy ceremony pending),
-/// T138 (awaiting integration in BOTH activation states — once active, once
-/// inactive), T139 (active engine work), plus representative bulk-class rows
+/// T138 (live cleanup baseline: schema_migrated/historical), synthetic accepted
+/// integration rows in both activation states, T139 (active engine work), plus representative bulk-class rows
 /// (schema_migrated, abandoned, closed_out_of_band, blocked, rejected). Plus
 /// observations rows pinning the cross-store linkage shape — they live in the
 /// observations store but exist here so the fixture DB carries the same shape
@@ -126,24 +126,34 @@ fn seed_dirty_snapshot(conn: &Connection) {
     let t127 = insert_task(conn, "T127", "accepted", "inactive", "", "T2", None);
     record_accepted_at(conn, t127, "T127", "2026-05-06T12:00:00Z");
 
-    // ---- T138 — AwaitingIntegration in BOTH activation states ----
-    // The audit doc fixture pins T138 as the integration-lane row. We seed
-    // T138 as the active arm and T138_INACTIVE as the inactive arm so the
-    // would_run-vs-inactive split is exercised end-to-end. T138's
-    // linked_observations carries L538/L540 — the cross-store linkage shape
-    // the audit doc names.
+    // ---- T138 — live cleanup baseline: TerminalSuccessModern / historical ----
+    // Phase 6 repair accepted the live reality that T138 is already
+    // schema_migrated/historical. Preserve its linked_observations payload in
+    // plan-start JSON so the cross-store linkage shape remains visible.
     insert_task(
         conn,
         "T138",
+        "schema_migrated",
+        "inactive",
+        "feat/T138-integration-lane",
+        "T2",
+        Some(r#"["L538","L540"]"#),
+    );
+
+    // Synthetic accepted rows still pin the activation-driven AwaitingIntegration
+    // split without pretending live T138 is still awaiting integration.
+    insert_task(
+        conn,
+        "T138_ACCEPTED_ACTIVE",
         "accepted",
         "active",
-        "feat/T138-integration-lane",
+        "feat/T138-integration-lane-active",
         "T2",
         Some(r#"["L538","L540"]"#),
     );
     insert_task(
         conn,
-        "T138_INACTIVE",
+        "T138_ACCEPTED_INACTIVE",
         "accepted",
         "inactive",
         "feat/T138-integration-lane-inactive",
@@ -350,13 +360,20 @@ fn dirty_snapshot_t125_t127_classify_as_deploy_ceremony_pending() {
 }
 
 #[test]
-fn dirty_snapshot_t138_classifies_as_awaiting_integration_in_both_activation_states() {
+fn dirty_snapshot_t138_is_historical_and_synthetic_rows_cover_awaiting_integration_split() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join(".stores").join("db.sqlite");
     create_fixture_db(&db_path);
     let conn = Connection::open(&db_path).expect("open db");
 
-    let active = classify_row(&conn, "T138", &AlwaysUnmerged);
+    let t138 = classify_row(&conn, "T138", &AlwaysUnmerged);
+    assert!(
+        matches!(t138, Disposition::TerminalSuccessModern),
+        "live T138 fixture must classify as historical schema_migrated; got {t138:?}"
+    );
+    assert_eq!(t138.plan_start_bucket(), PlanStartBucket::Historical);
+
+    let active = classify_row(&conn, "T138_ACCEPTED_ACTIVE", &AlwaysUnmerged);
     assert_eq!(
         active,
         Disposition::AwaitingIntegration {
@@ -365,7 +382,7 @@ fn dirty_snapshot_t138_classifies_as_awaiting_integration_in_both_activation_sta
     );
     assert_eq!(active.plan_start_bucket(), PlanStartBucket::WouldRun);
 
-    let inactive = classify_row(&conn, "T138_INACTIVE", &AlwaysUnmerged);
+    let inactive = classify_row(&conn, "T138_ACCEPTED_INACTIVE", &AlwaysUnmerged);
     assert_eq!(
         inactive,
         Disposition::AwaitingIntegration {
@@ -528,16 +545,20 @@ fn dirty_snapshot_plan_start_emits_documented_buckets_with_required_fixture_rows
     // T125 / T127 → needs_operator (DeployCeremonyPending)
     assert!(needs_op.contains(&"T125".to_string()));
     assert!(needs_op.contains(&"T127".to_string()));
-    // T138 active → would_run; T138_INACTIVE → inactive
+    // Live T138 → historical; synthetic accepted rows cover activation split.
+    assert!(
+        hist.contains(&"T138".to_string()),
+        "T138 must land in historical; historical={hist:?}"
+    );
     let wr = bucket_ids("would_run");
     assert!(
-        wr.contains(&"T138".to_string()),
-        "T138 (active) must land in would_run; would_run={wr:?}"
+        wr.contains(&"T138_ACCEPTED_ACTIVE".to_string()),
+        "T138_ACCEPTED_ACTIVE must land in would_run; would_run={wr:?}"
     );
     let inactive = bucket_ids("inactive");
     assert!(
-        inactive.contains(&"T138_INACTIVE".to_string()),
-        "T138_INACTIVE must land in inactive; inactive={inactive:?}"
+        inactive.contains(&"T138_ACCEPTED_INACTIVE".to_string()),
+        "T138_ACCEPTED_INACTIVE must land in inactive; inactive={inactive:?}"
     );
     // T139 → would_run
     assert!(wr.contains(&"T139".to_string()));
@@ -596,10 +617,10 @@ fn dirty_snapshot_t138_linked_observations_preserved_through_plan_start_json() {
     create_fixture_db(&db_path);
 
     let v = run_plan_start_json(tmp.path());
-    // The activation-active T138 row lives in would_run; the inactive arm
-    // lives in inactive. Both must carry through the linked_observations
-    // payload from the seeded row (audit doc names L538, L540 as the cross-
-    // store linkage shape).
+    // Live T138 now lives in historical, and the synthetic accepted rows cover
+    // the would_run/inactive activation split. All carry through the
+    // linked_observations payload from the seeded row (audit doc names L538,
+    // L540 as the cross-store linkage shape).
     let bucket_entry = |bucket: &str, id: &str| -> Option<Value> {
         v.get(bucket).and_then(|x| x.as_array()).and_then(|arr| {
             arr.iter()
@@ -608,10 +629,16 @@ fn dirty_snapshot_t138_linked_observations_preserved_through_plan_start_json() {
         })
     };
 
-    let active_entry =
-        bucket_entry("would_run", "T138").expect("T138 (active) must appear in would_run JSON");
-    let inactive_entry = bucket_entry("inactive", "T138_INACTIVE")
-        .expect("T138_INACTIVE must appear in inactive JSON");
+    let t138_entry =
+        bucket_entry("historical", "T138").expect("T138 must appear in historical JSON");
+    let active_entry = bucket_entry("would_run", "T138_ACCEPTED_ACTIVE")
+        .expect("T138_ACCEPTED_ACTIVE must appear in would_run JSON");
+    let inactive_entry = bucket_entry("inactive", "T138_ACCEPTED_INACTIVE")
+        .expect("T138_ACCEPTED_INACTIVE must appear in inactive JSON");
+    assert_eq!(
+        t138_entry.get("status").and_then(|s| s.as_str()),
+        Some("schema_migrated")
+    );
     assert_eq!(
         active_entry.get("status").and_then(|s| s.as_str()),
         Some("accepted")
@@ -619,6 +646,19 @@ fn dirty_snapshot_t138_linked_observations_preserved_through_plan_start_json() {
     assert_eq!(
         inactive_entry.get("status").and_then(|s| s.as_str()),
         Some("accepted")
+    );
+
+    let t138_linked = t138_entry
+        .get("linked_observations")
+        .and_then(|v| v.as_array())
+        .expect("plan-start JSON entry must include linked_observations array");
+    let t138_linked: Vec<String> = t138_linked
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        t138_linked.contains(&"L538".to_string()) && t138_linked.contains(&"L540".to_string()),
+        "T138 plan-start JSON must preserve linked_observations [L538, L540]; got {t138_linked:?}"
     );
 
     let active_linked = active_entry
