@@ -1352,6 +1352,27 @@ fn build_add_cmd(leaves: &[crate::schema::flatten::LeafArg<'_>], schema: &Schema
             ))
             .required(false),
     );
+    // T140 P2: --activate shorthand on `tasks add`. Without the flag, newly
+    // created task rows land at activation='inactive' (schema default); with
+    // --activate they land at 'active'. The activation field's actor gate
+    // (ai_with_human) means --activate combined with --invoker ai_autonomous
+    // is rejected fail-loud by the validator. No new authority gate here —
+    // the schema is the enforcement surface.
+    if schema.name == "tasks" {
+        cmd = cmd.arg(
+            Arg::new("activate")
+                .long("activate")
+                .action(ArgAction::SetTrue)
+                .help(
+                    "Mint the task at activation='active' (combustion-ready). \
+                     Without this flag, the row lands at activation='inactive' \
+                     and must be armed via `tasks activate <id> --reason <text>`. \
+                     Requires --invoker ai_with_human or --invoker human; the \
+                     activation field's actor gate rejects ai_autonomous.",
+                )
+                .required(false),
+        );
+    }
     // T013 P2: --lock-contract shorthand on observations add. Atomically
     // finalises a drafted intent_contract at add time: sets
     // intent_contract.contract_state = "ready", auto-fills drafted_at/

@@ -13,10 +13,20 @@ agents:
         transition:
           from: accepted
           to: integration_queued
+        # T140 P2: gate on per-row activation. Only `active` rows enter the
+        # integration lane; inactive rows queue but never combust.
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
       - store: tasks
         transition:
           from: integration_blocked
           to: integration_queued
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
     command: "builtin:integrate"
     claim_window_secs: 1800
     retry_policy:
@@ -109,10 +119,19 @@ agents:
         transition:
           from: ""
           to: planning
+        # T140 P2: ignition gate. The row must have a workspace AND be
+        # active before auto-drive combusts. AllOf composes the two
+        # predicates (the AST does not support compound expressions
+        # natively, but exposes the boolean composer).
         predicate:
-          op: "!="
-          left: "$workspace_path"
-          right: ""
+          op: all_of
+          all:
+            - op: "!="
+              left: "$workspace_path"
+              right: ""
+            - op: "=="
+              left: "$activation"
+              right: "active"
     command: "builtin:auto-drive"
     claim_window_secs: 300
     retry_policy:

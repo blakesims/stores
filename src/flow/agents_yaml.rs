@@ -410,12 +410,33 @@ agents:
             .predicate
             .as_ref()
             .expect("auto-drive subscription must carry a predicate");
+        // T140 P2: the auto-drive predicate is now an AllOf composing the
+        // workspace_path != "" gate (T022 P2) with the activation == 'active'
+        // gate. Both inner predicates must be present.
         match pred {
-            crate::flow::predicate::PredicateExpr::Neq { left, right } => {
-                assert_eq!(left.as_str(), Some("$workspace_path"));
-                assert_eq!(right.as_str(), Some(""));
+            crate::flow::predicate::PredicateExpr::AllOf { all } => {
+                let has_workspace_neq = all.iter().any(|p| matches!(
+                    p,
+                    crate::flow::predicate::PredicateExpr::Neq { left, right }
+                    if left.as_str() == Some("$workspace_path") && right.as_str() == Some("")
+                ));
+                let has_activation_eq = all.iter().any(|p| matches!(
+                    p,
+                    crate::flow::predicate::PredicateExpr::Eq { left, right }
+                    if left.as_str() == Some("$activation") && right.as_str() == Some("active")
+                ));
+                assert!(
+                    has_workspace_neq,
+                    "AllOf must contain workspace_path != '' (T022 P2 contract); got: {:?}",
+                    all
+                );
+                assert!(
+                    has_activation_eq,
+                    "AllOf must contain activation == 'active' (T140 P2 contract); got: {:?}",
+                    all
+                );
             }
-            other => panic!("expected Neq predicate, got {:?}", other),
+            other => panic!("expected AllOf predicate, got {:?}", other),
         }
     }
 

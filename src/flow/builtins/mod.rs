@@ -76,13 +76,11 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
         "auto-resolve-observation" => Some(auto_resolve_observation::run(row, ctx)),
         "auto-scaffold" => Some(auto_scaffold::run(row, ctx)),
         "cargo-install" => Some(cargo_install::run(row, ctx)),
-        "external-review" => Some(
-            external_review::run(row, ctx).map(|outcome| match outcome {
-                external_review::DispatchOutcome::Dispatched => 0,
-                external_review::DispatchOutcome::CapHeld => 0,
-                external_review::DispatchOutcome::RaceLost => 0,
-            }),
-        ),
+        "external-review" => Some(external_review::run(row, ctx).map(|outcome| match outcome {
+            external_review::DispatchOutcome::Dispatched => 0,
+            external_review::DispatchOutcome::CapHeld => 0,
+            external_review::DispatchOutcome::RaceLost => 0,
+        })),
         "gatekeeper-stub" => Some(gatekeeper_stub::run(row, ctx)),
         "integrate" => Some(integrate::run(row, ctx)),
         "investigator" => Some(investigator::run(row, ctx)),
@@ -1450,6 +1448,122 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "in_review", "row must remain at in_review");
+    }
+
+    /// T140 P2 / Task 2.6 / AC2.2: every `pub mod X;` declaration in this
+    /// file must be classified in docs/subscriber-classes.md with exactly
+    /// one of the five class labels. Adding a new builtin without updating
+    /// the doc is a fail-loud error.
+    #[test]
+    fn subscriber_class_taxonomy_complete() {
+        const BUILTINS_MOD_RS: &str = include_str!("mod.rs");
+        const SUBSCRIBER_CLASSES_MD: &str = include_str!("../../../docs/subscriber-classes.md");
+        const ALLOWED_CLASSES: &[&str] = &[
+            "work_starting",
+            "safety_reconcile",
+            "ceremony_post_accept",
+            "observation_lifecycle",
+            "deprecated_internal",
+        ];
+
+        // Parse `pub mod X;` declarations.
+        let mut declared: Vec<String> = Vec::new();
+        for line in BUILTINS_MOD_RS.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("pub mod ") {
+                if let Some(name) = rest.split(';').next() {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        declared.push(name.to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            !declared.is_empty(),
+            "expected at least one `pub mod X;` in src/flow/builtins/mod.rs"
+        );
+
+        // Parse the markdown table: rows starting with '|' whose first cell
+        // is a backticked module name.
+        use std::collections::HashMap;
+        let mut doc: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+        for raw in SUBSCRIBER_CLASSES_MD.lines() {
+            let line = raw.trim();
+            if !line.starts_with('|') {
+                continue;
+            }
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("module") && lower.contains("class") {
+                continue;
+            }
+            if line
+                .chars()
+                .all(|c| c == '|' || c == '-' || c == ' ' || c == ':')
+            {
+                continue;
+            }
+            let cells: Vec<&str> = line
+                .trim_matches('|')
+                .split('|')
+                .map(|s| s.trim())
+                .collect();
+            if cells.len() < 2 {
+                continue;
+            }
+            let mod_name = cells[0].trim_matches('`').trim();
+            if mod_name.is_empty() {
+                continue;
+            }
+            let class_cell = cells[1];
+
+            let classes: Vec<String> = ALLOWED_CLASSES
+                .iter()
+                .filter(|c| {
+                    let c = **c;
+                    class_cell
+                        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                        .any(|tok| tok == c)
+                })
+                .map(|s| (*s).to_string())
+                .collect();
+
+            let entry = doc.entry(mod_name.to_string()).or_insert((0, Vec::new()));
+            entry.0 += 1;
+            for c in classes {
+                if !entry.1.contains(&c) {
+                    entry.1.push(c);
+                }
+            }
+        }
+
+        let mut errors: Vec<String> = Vec::new();
+        for m in &declared {
+            match doc.get(m) {
+                None => errors.push(format!("missing in doc: `{m}`")),
+                Some((count, _)) if *count > 1 => {
+                    errors.push(format!("duplicate row in doc: `{m}` x{count}"))
+                }
+                Some((_, classes)) if classes.is_empty() => {
+                    errors.push(format!("no class label for `{m}`"))
+                }
+                Some((_, classes)) if classes.len() > 1 => {
+                    errors.push(format!("multiple class labels for `{m}`: {classes:?}"))
+                }
+                _ => {}
+            }
+        }
+        for k in doc.keys() {
+            if !declared.contains(k) {
+                errors.push(format!("stale doc row `{k}`: no matching pub mod"));
+            }
+        }
+
+        assert!(
+            errors.is_empty(),
+            "subscriber-class taxonomy drift:\n  - {}",
+            errors.join("\n  - ")
+        );
     }
 
     /// T138 P3 AC3.5: `dispatch_builtin("accept-merge", …)` must return

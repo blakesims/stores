@@ -46,10 +46,7 @@ pub(crate) fn run_with_promote_fn<F>(row: &Value, ctx: &DispatchCtx, promote_fn:
 where
     F: FnOnce(&Connection, &str, &str, &str, &str, &Value, &Value) -> Result<String>,
 {
-    let obs_display_id = row
-        .get("display_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let obs_display_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
     if obs_display_id.is_empty() {
         eprintln!("[auto-promote] observation row missing display_id; skipping");
         return Ok(1);
@@ -152,8 +149,7 @@ where
                     ctx.config_path,
                     NotifyEvent {
                         row_id: obs_display_id.to_string(),
-                        transition_attempted: "observations: confirmed→ready (auto-promote)"
-                            .into(),
+                        transition_attempted: "observations: confirmed→ready (auto-promote)".into(),
                         policy_id_or_actor_halt:
                             "auto-promote: silent fail (no tasks row after promote ok)".into(),
                         summary: format!(
@@ -246,11 +242,17 @@ fn promote(
         rusqlite::types::Value::Text(tier_hint.to_string())
     };
 
+    // T140 P2: auto-promoted tasks land at activation='inactive' explicitly.
+    // The schema column DEFAULT would also yield 'inactive', but writing the
+    // value into the SQL keeps the gate visible to anyone auditing the
+    // auto-promote source — it pairs with the `--activate` flag on direct
+    // `tasks add` (also defaults to inactive). Operator must `tasks activate`
+    // before drive/integrate combust.
     tx.execute(
         "INSERT INTO tasks \
          (display_id, status, title, slug, tier_hint, contract, linked_observations, \
-          created_at, updated_at, created_by, updated_by) \
-         VALUES (?1, 'planning', ?2, ?3, ?4, ?5, ?6, ?7, ?7, 'ai_autonomous', 'ai_autonomous')",
+          activation, created_at, updated_at, created_by, updated_by) \
+         VALUES (?1, 'planning', ?2, ?3, ?4, ?5, ?6, 'inactive', ?7, ?7, 'ai_autonomous', 'ai_autonomous')",
         rusqlite::params![
             "__PLACEHOLDER__",
             title,
@@ -476,7 +478,11 @@ mod tests {
         Value::Object(obj)
     }
 
-    fn ctx_for<'a>(conn: &'a Connection, agents: &'a AgentsYaml, cfg: &'a std::path::Path) -> DispatchCtx<'a> {
+    fn ctx_for<'a>(
+        conn: &'a Connection,
+        agents: &'a AgentsYaml,
+        cfg: &'a std::path::Path,
+    ) -> DispatchCtx<'a> {
         DispatchCtx {
             conn,
             agents,
@@ -528,7 +534,10 @@ mod tests {
         assert_eq!(tier.as_deref(), Some("T3"));
 
         let contract: Value = serde_json::from_str(&contract_str).unwrap();
-        let done_when = contract.get("done_when").and_then(|v| v.as_str()).unwrap_or("");
+        let done_when = contract
+            .get("done_when")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(
             done_when.contains("fix the X bug"),
             "done_when must carry objective; got: {done_when}"
@@ -621,7 +630,10 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 2, "a NEW tasks row must be created (T-foo + the new one)");
+        assert_eq!(
+            n, 2,
+            "a NEW tasks row must be created (T-foo + the new one)"
+        );
 
         let (new_task_id, linked_str): (String, String) = conn
             .query_row(
@@ -740,7 +752,12 @@ mod tests {
         let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
         assert_eq!(res, 0);
 
-        let (status, tier, plan_json, plan_source): (String, Option<String>, Option<String>, Option<String>) = conn
+        let (status, tier, plan_json, plan_source): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
             .query_row(
                 "SELECT status, tier_hint, plan, plan_source FROM tasks LIMIT 1",
                 [],
@@ -800,14 +817,54 @@ mod tests {
         assert_eq!(res, 0);
 
         let (status, tier): (String, Option<String>) = conn
-            .query_row(
-                "SELECT status, tier_hint FROM tasks LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+            .query_row("SELECT status, tier_hint FROM tasks LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(tier.as_deref(), Some("T2"));
-        assert_eq!(status, "planning", "T2 task must stay at planning (planner dispatches there)");
+        assert_eq!(
+            status, "planning",
+            "T2 task must stay at planning (planner dispatches there)"
+        );
+    }
+
+    /// T140 P2 / Task 2.4 / AC2.8: auto-promoted tasks land at
+    /// activation='inactive'. The INSERT statement explicitly lists the
+    /// activation column (verified by grepping the source) so the gate is
+    /// visible to anyone reading auto_promote.rs without needing to
+    /// remember the schema DEFAULT.
+    #[test]
+    fn auto_promote_inactive_default() {
+        // Pre-condition: assert the INSERT statement explicitly lists the
+        // activation column — protects against silently relying on the
+        // schema default.
+        let src = include_str!("auto_promote.rs");
+        assert!(
+            src.contains("activation,") && src.contains("'inactive'"),
+            "auto_promote.rs INSERT must explicitly list activation column \
+             and bind 'inactive'; the schema DEFAULT alone is insufficient"
+        );
+
+        let conn = fresh_db();
+        insert_ready_obs(&conn, "L501");
+        let row = obs_row_json(&conn, "L501");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0);
+
+        let activation: String = conn
+            .query_row(
+                "SELECT activation FROM tasks WHERE \
+                 linked_observations LIKE '%L501%' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            activation, "inactive",
+            "auto-promoted tasks must land at activation='inactive'"
+        );
     }
 
     #[test]
@@ -881,7 +938,11 @@ mod tests {
 
         // (a) A new tasks row at planning must exist.
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM tasks WHERE status = 'planning'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'planning'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 1, "exactly one new planning task must be minted");
 
@@ -913,7 +974,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(obs_task_id, new_task_id, "obs.task_id must point at the new task");
+        assert_eq!(
+            obs_task_id, new_task_id,
+            "obs.task_id must point at the new task"
+        );
 
         // (d) T-old is untouched (still abandoned).
         let old_status: String = conn
@@ -1007,7 +1071,10 @@ mod tests {
         insert_ready_obs(&conn, "L300");
 
         // (a) no tasks at all → false
-        assert!(!linked_obs_has_active_task(&conn, "L300"), "(a) no tasks must return false");
+        assert!(
+            !linked_obs_has_active_task(&conn, "L300"),
+            "(a) no tasks must return false"
+        );
 
         // (b) insert a non-abandoned task linking L300 → true
         let now = "2026-05-09T00:00:00Z";
@@ -1020,7 +1087,10 @@ mod tests {
             rusqlite::params![now],
         )
         .unwrap();
-        assert!(linked_obs_has_active_task(&conn, "L300"), "(b) active task must return true");
+        assert!(
+            linked_obs_has_active_task(&conn, "L300"),
+            "(b) active task must return true"
+        );
 
         // (c) flip status to abandoned → false
         conn.execute(
@@ -1028,7 +1098,10 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(!linked_obs_has_active_task(&conn, "L300"), "(c) only abandoned must return false");
+        assert!(
+            !linked_obs_has_active_task(&conn, "L300"),
+            "(c) only abandoned must return false"
+        );
     }
 
     /// Regression test for the L087 silent-zombie shape: when the promote_fn
@@ -1049,17 +1122,17 @@ mod tests {
         let row = obs_row_json(&conn, "L300");
 
         // Fake promote: returns Ok without inserting any row.
-        let fake_promote = |_conn: &Connection,
-                            obs_id: &str,
-                            _title: &str,
-                            _slug: &str,
-                            _tier: &str,
-                            _contract: &Value,
-                            _linked: &Value|
-         -> anyhow::Result<String> { Ok(format!("T999-phantom-for-{obs_id}")) };
+        let fake_promote =
+            |_conn: &Connection,
+             obs_id: &str,
+             _title: &str,
+             _slug: &str,
+             _tier: &str,
+             _contract: &Value,
+             _linked: &Value|
+             -> anyhow::Result<String> { Ok(format!("T999-phantom-for-{obs_id}")) };
 
-        let code = run_with_promote_fn(&row, &ctx_for(&conn, &agents, &cfg), fake_promote)
-            .unwrap();
+        let code = run_with_promote_fn(&row, &ctx_for(&conn, &agents, &cfg), fake_promote).unwrap();
 
         // (a) Must return a non-zero exit code (expect 2).
         assert_ne!(code, 0, "silent-zombie fake must return non-zero exit code");
@@ -1072,12 +1145,14 @@ mod tests {
         assert_eq!(n, 0, "fake promote must not leave any tasks row");
 
         // (c) Verify helper still returns false post-call.
-        assert!(!linked_obs_has_active_task(&conn, "L300"), "verify helper must return false after silent fail");
+        assert!(
+            !linked_obs_has_active_task(&conn, "L300"),
+            "verify helper must return false after silent fail"
+        );
 
         // AC1.6: second call with the real promote must succeed and create exactly one row.
         let row2 = obs_row_json(&conn, "L300");
-        let code2 = run_with_promote_fn(&row2, &ctx_for(&conn, &agents, &cfg), promote)
-            .unwrap();
+        let code2 = run_with_promote_fn(&row2, &ctx_for(&conn, &agents, &cfg), promote).unwrap();
         assert_eq!(code2, 0, "real promote must succeed on the second call");
 
         let n2: i64 = conn
@@ -1104,17 +1179,17 @@ mod tests {
         let agents = AgentsYaml::default_empty();
         let row = obs_row_json(&conn, "L300");
 
-        let fake_promote = |_conn: &Connection,
-                            obs_id: &str,
-                            _title: &str,
-                            _slug: &str,
-                            _tier: &str,
-                            _contract: &Value,
-                            _linked: &Value|
-         -> anyhow::Result<String> { Ok(format!("T999-phantom-for-{obs_id}")) };
+        let fake_promote =
+            |_conn: &Connection,
+             obs_id: &str,
+             _title: &str,
+             _slug: &str,
+             _tier: &str,
+             _contract: &Value,
+             _linked: &Value|
+             -> anyhow::Result<String> { Ok(format!("T999-phantom-for-{obs_id}")) };
 
-        let code = run_with_promote_fn(&row, &ctx_for(&conn, &agents, &cfg), fake_promote)
-            .unwrap();
+        let code = run_with_promote_fn(&row, &ctx_for(&conn, &agents, &cfg), fake_promote).unwrap();
         assert_ne!(code, 0, "silent-zombie fake must return non-zero exit code");
 
         let events = mock.events();

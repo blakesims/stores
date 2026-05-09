@@ -26,6 +26,13 @@ pub enum PredicateExpr {
     NotIn { left: Value, right: Value },
     #[serde(rename = "matches")]
     Matches { left: Value, right: Value },
+    /// T140 P2: compose predicates with logical AND so a single subscription
+    /// can require multiple row-state preconditions (e.g. workspace_path set
+    /// AND activation flipped to 'active'). All inner predicates must
+    /// evaluate true for the AllOf to evaluate true; an empty list evaluates
+    /// true (vacuously).
+    #[serde(rename = "all_of")]
+    AllOf { all: Vec<PredicateExpr> },
 }
 
 pub fn eval(expr: &PredicateExpr, row: &Value) -> Result<bool> {
@@ -63,6 +70,14 @@ pub fn eval(expr: &PredicateExpr, row: &Value) -> Result<bool> {
                 .ok_or_else(|| anyhow!("'matches' rhs must be a string regex, got {}", r))?;
             let re = Regex::new(pat).map_err(|e| anyhow!("invalid regex '{}': {}", pat, e))?;
             Ok(re.is_match(s))
+        }
+        PredicateExpr::AllOf { all } => {
+            for inner in all {
+                if !eval(inner, row)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
         }
     }
 }
@@ -118,13 +133,20 @@ pub fn from_yaml(s: &str) -> Result<PredicateExpr> {
 
 #[allow(dead_code)]
 pub(crate) fn ensure_valid(expr: &PredicateExpr) -> Result<()> {
-    // Compile any regex eagerly.
-    if let PredicateExpr::Matches { right, .. } = expr {
-        if let Some(s) = right.as_str() {
-            Regex::new(s).map_err(|e| anyhow!("invalid regex '{}': {}", s, e))?;
-        } else {
-            bail!("matches rhs must be a string");
+    match expr {
+        PredicateExpr::Matches { right, .. } => {
+            if let Some(s) = right.as_str() {
+                Regex::new(s).map_err(|e| anyhow!("invalid regex '{}': {}", s, e))?;
+            } else {
+                bail!("matches rhs must be a string");
+            }
         }
+        PredicateExpr::AllOf { all } => {
+            for inner in all {
+                ensure_valid(inner)?;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -230,5 +252,77 @@ mod tests {
         let y = "op: \"==\"\nleft: \"$status\"\nright: \"in_review\"\n";
         let e = from_yaml(y).unwrap();
         assert!(eval(&e, &row()).unwrap());
+    }
+
+    /// T140 P2 / Task 2.2: confirm `$activation` path lookup resolves the
+    /// top-level `activation` field on the row JSON. The substrate's
+    /// activation predicate (added to `auto-drive` and `integrate`
+    /// subscribers in this phase) depends on this path-lookup behavior.
+    #[test]
+    fn activation_path_lookup_eval() {
+        let active = json!({"activation": "active", "status": "planning"});
+        let inactive = json!({"activation": "inactive", "status": "planning"});
+        let missing = json!({"status": "planning"});
+
+        let pred = PredicateExpr::Eq {
+            left: json!("$activation"),
+            right: json!("active"),
+        };
+        assert!(eval(&pred, &active).unwrap(), "active row must match");
+        assert!(
+            !eval(&pred, &inactive).unwrap(),
+            "inactive row must not match"
+        );
+        assert!(
+            !eval(&pred, &missing).unwrap(),
+            "missing column must not match (fail-closed)"
+        );
+    }
+
+    /// T140 P2: AllOf composes multiple predicates with logical AND. Empty
+    /// list is vacuously true; first false short-circuits.
+    #[test]
+    fn all_of_composes_with_and() {
+        let r = json!({"activation": "active", "workspace_path": "/tmp/wt"});
+
+        let both_true = PredicateExpr::AllOf {
+            all: vec![
+                PredicateExpr::Neq {
+                    left: json!("$workspace_path"),
+                    right: json!(""),
+                },
+                PredicateExpr::Eq {
+                    left: json!("$activation"),
+                    right: json!("active"),
+                },
+            ],
+        };
+        assert!(eval(&both_true, &r).unwrap());
+
+        let one_false = PredicateExpr::AllOf {
+            all: vec![
+                PredicateExpr::Neq {
+                    left: json!("$workspace_path"),
+                    right: json!(""),
+                },
+                PredicateExpr::Eq {
+                    left: json!("$activation"),
+                    right: json!("inactive"),
+                },
+            ],
+        };
+        assert!(!eval(&one_false, &r).unwrap());
+
+        let empty = PredicateExpr::AllOf { all: vec![] };
+        assert!(eval(&empty, &r).unwrap(), "empty AllOf is vacuously true");
+    }
+
+    /// AllOf round-trips through YAML so agents.yaml can express it.
+    #[test]
+    fn all_of_yaml_round_trip() {
+        let y = "op: all_of\nall:\n  - op: \"!=\"\n    left: \"$workspace_path\"\n    right: \"\"\n  - op: \"==\"\n    left: \"$activation\"\n    right: \"active\"\n";
+        let e = from_yaml(y).unwrap();
+        let r = json!({"workspace_path": "/tmp/wt", "activation": "active"});
+        assert!(eval(&e, &r).unwrap());
     }
 }

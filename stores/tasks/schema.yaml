@@ -222,7 +222,14 @@ lifecycle:
     # holds the integrating slot substrate-wide. Concurrent attempts surface
     # as SQLite ConstraintViolation, which the integrate builtin treats as
     # capacity-busy and returns Ok(0). T138 P1.
-    - {from: integration_queued, to: integrating, verb: start-integration, actor: framework}
+    #
+    # T140 P2: dual gating on activation. The integrate subscriber's
+    # predicate (`activation == 'active'` in agents.yaml) is the primary
+    # gate; this schema guard is defense-in-depth so any framework caller
+    # bypassing the subscriber still cannot advance an inactive row through
+    # the integration lane. The row stays at integration_queued without
+    # error; plan-start surfaces it in the `inactive` bucket (P4).
+    - {from: integration_queued, to: integrating, verb: start-integration, actor: framework, guard: "activation == 'active'"}
 
     # integrating → integrated (framework, fired by builtin:integrate after a
     # successful refresh-against-main, pre-land check, and merge/push to main).

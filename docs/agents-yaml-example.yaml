@@ -63,8 +63,19 @@ agents:
     subscribes_to:
       - store: tasks
         transition: { from: accepted, to: integration_queued }
+        # T140 P2: per-row activation gate on the work-starting class.
+        # Inactive rows enqueue (so plan-start surfaces them) but never
+        # enter the integration lane until an operator activates them.
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
       - store: tasks
         transition: { from: integration_blocked, to: integration_queued }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
     command: "builtin:integrate"
     claim_window_secs: 1800
     retry_policy: { max_attempts: 1, backoff: linear }
@@ -155,10 +166,18 @@ agents:
     subscribes_to:
       - store: tasks
         transition: { from: "", to: planning }
+        # T140 P2: ignition gate. workspace_path must be set AND the row
+        # must be active before auto-drive combusts. all_of composes the
+        # two predicates with logical AND.
         predicate:
-          op: "!="
-          left: "$workspace_path"
-          right: ""
+          op: all_of
+          all:
+            - op: "!="
+              left: "$workspace_path"
+              right: ""
+            - op: "=="
+              left: "$activation"
+              right: "active"
     command: "builtin:auto-drive"
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }

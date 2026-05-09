@@ -120,10 +120,7 @@ impl IntegrateCfg {
 }
 
 pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
-    let display_id = row
-        .get("display_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let display_id = row.get("display_id").and_then(|v| v.as_str()).unwrap_or("");
     let branch = row.get("branch").and_then(|v| v.as_str()).unwrap_or("");
     let workspace_path = row
         .get("workspace_path")
@@ -299,11 +296,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
                     ("pre_land_check_summary", Value::String(msg.clone())),
                 ],
             )?;
-            fire_mark_integration_blocked(
-                ctx,
-                display_id,
-                &format!("rebase_conflict: {}", msg),
-            )?;
+            fire_mark_integration_blocked(ctx, display_id, &format!("rebase_conflict: {}", msg))?;
             return Ok(0);
         }
         RefreshOutcome::StaleBase(msg) => {
@@ -327,10 +320,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let candidate_head_after = match git_rev_parse(&workspace_buf, branch) {
         Ok(s) => s,
         Err(e) => {
-            let summary = format!(
-                "git rev-parse {} (post-refresh) failed: {}",
-                branch, e
-            );
+            let summary = format!("git rev-parse {} (post-refresh) failed: {}", branch, e);
             update_last_attempt(
                 ctx.conn,
                 display_id,
@@ -340,11 +330,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
                     ("pre_land_check_summary", Value::String(summary.clone())),
                 ],
             )?;
-            fire_mark_integration_blocked(
-                ctx,
-                display_id,
-                &format!("merge_failure: {}", summary),
-            )?;
+            fire_mark_integration_blocked(ctx, display_id, &format!("merge_failure: {}", summary))?;
             return Ok(0);
         }
     };
@@ -469,11 +455,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
                     ("pre_land_check_summary", Value::String(summary.clone())),
                 ],
             )?;
-            fire_mark_integration_blocked(
-                ctx,
-                display_id,
-                &format!("merge_failure: {}", summary),
-            )?;
+            fire_mark_integration_blocked(ctx, display_id, &format!("merge_failure: {}", summary))?;
             return Ok(0);
         }
     }
@@ -553,11 +535,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
                     ("pre_land_check_summary", Value::String(summary.clone())),
                 ],
             )?;
-            fire_mark_integration_blocked(
-                ctx,
-                display_id,
-                &format!("push_failure: {}", summary),
-            )?;
+            fire_mark_integration_blocked(ctx, display_id, &format!("push_failure: {}", summary))?;
             return Ok(0);
         }
     }
@@ -677,7 +655,8 @@ fn update_last_attempt(
     }
     // SQLite's `json_set(json, path1, val1, path2, val2, ...)` updates each
     // path in turn. Build the call dynamically.
-    let mut sql = String::from("UPDATE tasks SET integration_attempts = json_set(integration_attempts");
+    let mut sql =
+        String::from("UPDATE tasks SET integration_attempts = json_set(integration_attempts");
     let mut params_vec: Vec<rusqlite::types::Value> = Vec::with_capacity(fields.len() * 2 + 1);
     for (i, (k, v)) in fields.iter().enumerate() {
         let path_idx = 2 + i * 2;
@@ -714,10 +693,7 @@ struct PassedEr {
     head_sha: Option<String>,
 }
 
-fn latest_passed_er_row(
-    conn: &rusqlite::Connection,
-    task_id: &str,
-) -> Result<Option<PassedEr>> {
+fn latest_passed_er_row(conn: &rusqlite::Connection, task_id: &str) -> Result<Option<PassedEr>> {
     let row = conn
         .query_row(
             "SELECT display_id, base_sha, head_sha FROM external_reviews \
@@ -750,11 +726,7 @@ fn supersede_external_review(ctx: &DispatchCtx, er_display_id: &str) -> Result<(
     .with_context(|| format!("supersede external_review {}", er_display_id))
 }
 
-fn fire_mark_integration_blocked(
-    ctx: &DispatchCtx,
-    display_id: &str,
-    reason: &str,
-) -> Result<()> {
+fn fire_mark_integration_blocked(ctx: &DispatchCtx, display_id: &str, reason: &str) -> Result<()> {
     let mut diff: BTreeMap<String, Value> = BTreeMap::new();
     diff.insert(
         "integration_blocked_reason".to_string(),
@@ -985,10 +957,7 @@ fn run_pre_land(cmd: &str, workspace: &Path, timeout_secs: u64) -> std::result::
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!(
-                        "pre_land_check timeout after {}s",
-                        timeout_secs
-                    ));
+                    return Err(format!("pre_land_check timeout after {}s", timeout_secs));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -1054,17 +1023,16 @@ mod tests {
         git(repo, &["checkout", "main"]);
     }
 
-    fn insert_queued_task(
-        conn: &Connection,
-        display_id: &str,
-        branch: &str,
-        workspace_path: &str,
-    ) {
+    fn insert_queued_task(conn: &Connection, display_id: &str, branch: &str, workspace_path: &str) {
         let now = "2026-05-09T00:00:00Z";
         let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        // T140 P2: integrate test rows must be activation='active' so the
+        // schema guard on `start-integration` allows the capacity-claim
+        // transition. The integration lane only runs on active rows; an
+        // inactive row stays at integration_queued.
         conn.execute(
-            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, 'integration_queued', 'test', 't', ?2, ?3, ?4, ?5, ?5, 'framework', 'framework')",
+            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, activation, contract, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'integration_queued', 'test', 't', ?2, ?3, 'active', ?4, ?5, ?5, 'framework', 'framework')",
             rusqlite::params![display_id, branch, workspace_path, contract, now],
         )
         .unwrap();
@@ -1110,9 +1078,9 @@ mod tests {
             let jv = match v {
                 rusqlite::types::Value::Null => Value::Null,
                 rusqlite::types::Value::Integer(i) => Value::from(i),
-                rusqlite::types::Value::Real(f) => Value::from(
-                    serde_json::Number::from_f64(f).unwrap_or(0.into()),
-                ),
+                rusqlite::types::Value::Real(f) => {
+                    Value::from(serde_json::Number::from_f64(f).unwrap_or(0.into()))
+                }
                 rusqlite::types::Value::Text(s) => Value::String(s),
                 rusqlite::types::Value::Blob(b) => {
                     Value::String(String::from_utf8_lossy(&b).to_string())
@@ -1126,11 +1094,7 @@ mod tests {
     #[test]
     fn pre_land_check_large_stdout_does_not_deadlock() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = run_pre_land(
-            "python3 - <<'PY'\nprint('x' * 200000)\nPY",
-            tmp.path(),
-            5,
-        );
+        let result = run_pre_land("python3 - <<'PY'\nprint('x' * 200000)\nPY", tmp.path(), 5);
         assert!(
             result.is_ok(),
             "large stdout from a successful pre_land_check must not fill a pipe and timeout: {result:?}"
@@ -1421,22 +1385,18 @@ mod tests {
         let (_tmp, repo) = init_repo();
         add_branch_with_change(&repo, "feat/e", "feat.txt", "feat\n");
         // Capture current branch HEAD then advance the branch by another commit.
-        let er_head = String::from_utf8_lossy(
-            &git(&repo, &["rev-parse", "feat/e"]).stdout,
-        )
-        .trim()
-        .to_string();
+        let er_head = String::from_utf8_lossy(&git(&repo, &["rev-parse", "feat/e"]).stdout)
+            .trim()
+            .to_string();
         // Advance candidate so it diverges from the ER's recorded head.
         git(&repo, &["checkout", "feat/e"]);
         std::fs::write(repo.join("feat2.txt"), "more\n").unwrap();
         git(&repo, &["add", "feat2.txt"]);
         git(&repo, &["commit", "-m", "more"]);
         git(&repo, &["checkout", "main"]);
-        let main_sha = String::from_utf8_lossy(
-            &git(&repo, &["rev-parse", "main"]).stdout,
-        )
-        .trim()
-        .to_string();
+        let main_sha = String::from_utf8_lossy(&git(&repo, &["rev-parse", "main"]).stdout)
+            .trim()
+            .to_string();
 
         insert_queued_task(&conn, "T500", "feat/e", repo.to_str().unwrap());
         // ER's base_sha equals main_sha (so stale_base check passes), but
@@ -1720,8 +1680,7 @@ mod tests {
         let mut entries: Vec<(String, String, String)> = Vec::new();
         for i in 0..branches.len() {
             let tid = format!("T9{:02}", i);
-            let base =
-                json_extract_str(&conn, &tid, "$[#-1].base_main_sha").unwrap_or_default();
+            let base = json_extract_str(&conn, &tid, "$[#-1].base_main_sha").unwrap_or_default();
             let landed =
                 json_extract_str(&conn, &tid, "$[#-1].landed_main_sha").unwrap_or_default();
             assert!(!base.is_empty() && !landed.is_empty(), "{} SHAs empty", tid);
@@ -1745,13 +1704,12 @@ mod tests {
         }
         // Walk forward: successor.base must equal current.landed.
         while visited.len() < entries.len() {
-            let next = by_base
-                .get(&current.2)
-                .cloned()
-                .unwrap_or_else(|| panic!(
+            let next = by_base.get(&current.2).cloned().unwrap_or_else(|| {
+                panic!(
                     "no successor whose base equals predecessor landed {}",
                     current.2
-                ));
+                )
+            });
             assert_eq!(
                 next.1, current.2,
                 "{} base_main_sha must equal predecessor {} landed_main_sha",
@@ -1774,11 +1732,10 @@ mod tests {
         let (_tmp, repo) = init_repo();
         add_branch_with_change(&repo, "feat/i", "feat.txt", "feat\n");
         // Sanity: add_branch_with_change leaves the worktree on main.
-        let starting = String::from_utf8_lossy(
-            &git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).stdout,
-        )
-        .trim()
-        .to_string();
+        let starting =
+            String::from_utf8_lossy(&git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).stdout)
+                .trim()
+                .to_string();
         assert_eq!(starting, "main");
 
         insert_queued_task(&conn, "T1000", "feat/i", repo.to_str().unwrap());
@@ -1830,16 +1787,13 @@ mod tests {
         add_branch_with_change(&repo, "feat/h", "feat.txt", "feat\n");
         // Capture the original "main" SHA (which the ER row will reference
         // as base_sha) and the candidate's pre-test HEAD.
-        let orphaned_base = String::from_utf8_lossy(
-            &git(&repo, &["rev-parse", "main"]).stdout,
-        )
-        .trim()
-        .to_string();
-        let candidate_head_before = String::from_utf8_lossy(
-            &git(&repo, &["rev-parse", "feat/h"]).stdout,
-        )
-        .trim()
-        .to_string();
+        let orphaned_base = String::from_utf8_lossy(&git(&repo, &["rev-parse", "main"]).stdout)
+            .trim()
+            .to_string();
+        let candidate_head_before =
+            String::from_utf8_lossy(&git(&repo, &["rev-parse", "feat/h"]).stdout)
+                .trim()
+                .to_string();
         // Force-rewrite main: orphan the original SHA.
         git(&repo, &["checkout", "--orphan", "fresh"]);
         git(&repo, &["rm", "-rf", "."]);
@@ -1847,15 +1801,20 @@ mod tests {
         git(&repo, &["add", "fresh.txt"]);
         git(&repo, &["commit", "-m", "fresh init"]);
         git(&repo, &["branch", "-M", "fresh", "main"]);
-        let new_main = String::from_utf8_lossy(
-            &git(&repo, &["rev-parse", "main"]).stdout,
-        )
-        .trim()
-        .to_string();
+        let new_main = String::from_utf8_lossy(&git(&repo, &["rev-parse", "main"]).stdout)
+            .trim()
+            .to_string();
         assert_ne!(orphaned_base, new_main);
 
         insert_queued_task(&conn, "T800", "feat/h", repo.to_str().unwrap());
-        insert_passed_er(&conn, "ER800", "T800", 1, &orphaned_base, &candidate_head_before);
+        insert_passed_er(
+            &conn,
+            "ER800",
+            "T800",
+            1,
+            &orphaned_base,
+            &candidate_head_before,
+        );
 
         let row = task_row_json(&conn, "T800");
         let agents = integrate_agents_yaml("true");
@@ -1900,18 +1859,14 @@ mod tests {
             "integration_blocked_reason must contain 'stale_base'"
         );
         // (v) main HEAD unchanged
-        let post_main = String::from_utf8_lossy(
-            &git(&repo, &["rev-parse", "main"]).stdout,
-        )
-        .trim()
-        .to_string();
+        let post_main = String::from_utf8_lossy(&git(&repo, &["rev-parse", "main"]).stdout)
+            .trim()
+            .to_string();
         assert_eq!(post_main, new_main, "main HEAD must be unchanged");
         // (vi) candidate branch HEAD unchanged
-        let post_branch = String::from_utf8_lossy(
-            &git(&repo, &["rev-parse", "feat/h"]).stdout,
-        )
-        .trim()
-        .to_string();
+        let post_branch = String::from_utf8_lossy(&git(&repo, &["rev-parse", "feat/h"]).stdout)
+            .trim()
+            .to_string();
         assert_eq!(
             post_branch, candidate_head_before,
             "candidate branch HEAD must be unchanged"

@@ -191,6 +191,21 @@ pub fn run(
         }
     }
 
+    // T140 P2: --activate flag on tasks add. When present, write
+    // activation='active' into the entry; absent, the schema column DEFAULT
+    // ('inactive') is materialised post-validation. The activation field is
+    // actor: ai_with_human, so passing --activate under --invoker
+    // ai_autonomous trips the actor gate inside validate::validate below
+    // (fail-loud: no row is inserted, the user sees a validation error).
+    let activate_flag =
+        matches.try_contains_id("activate").unwrap_or(false) && matches.get_flag("activate");
+    if activate_flag && schema.name == "tasks" {
+        entry.insert(
+            "activation".to_string(),
+            Value::String("active".to_string()),
+        );
+    }
+
     // Run validator
     validate::validate(schema, &entry, Op::Add, invoker)
         .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
@@ -497,21 +512,35 @@ pub(crate) fn add_row_in_tx(
     let now = now_iso8601();
 
     entry.insert("status".to_string(), Value::String(initial_status.clone()));
-    entry.entry("created_at".to_string()).or_insert_with(|| Value::String(now.clone()));
-    entry.entry("updated_at".to_string()).or_insert_with(|| Value::String(now.clone()));
-    entry.entry("created_by".to_string()).or_insert_with(|| Value::String(invoker_str.clone()));
-    entry.entry("updated_by".to_string()).or_insert_with(|| Value::String(invoker_str.clone()));
+    entry
+        .entry("created_at".to_string())
+        .or_insert_with(|| Value::String(now.clone()));
+    entry
+        .entry("updated_at".to_string())
+        .or_insert_with(|| Value::String(now.clone()));
+    entry
+        .entry("created_by".to_string())
+        .or_insert_with(|| Value::String(invoker_str.clone()));
+    entry
+        .entry("updated_by".to_string())
+        .or_insert_with(|| Value::String(invoker_str.clone()));
 
-    validate::validate(schema, &entry, Op::Add, invoker.into()).map_err(|errs| {
-        anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
-    })?;
+    validate::validate(schema, &entry, Op::Add, invoker.into())
+        .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
     let mut col_names = vec!["display_id".to_string()];
     let mut placeholders = vec!["?1".to_string()];
-    let mut values: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text("__PLACEHOLDER__".to_string())];
+    let mut values: Vec<rusqlite::types::Value> =
+        vec![rusqlite::types::Value::Text("__PLACEHOLDER__".to_string())];
     let mut param_idx = 2usize;
 
-    for common in ["status", "created_at", "updated_at", "created_by", "updated_by"] {
+    for common in [
+        "status",
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+    ] {
         if let Some(Value::String(s)) = entry.get(common) {
             col_names.push(common.to_string());
             placeholders.push(format!("?{param_idx}"));
@@ -524,7 +553,9 @@ pub(crate) fn add_row_in_tx(
         if field.name == "display_id" {
             continue;
         }
-        let Some(val) = entry.get(&field.name) else { continue; };
+        let Some(val) = entry.get(&field.name) else {
+            continue;
+        };
         col_names.push(field.name.clone());
         placeholders.push(format!("?{param_idx}"));
         param_idx += 1;
@@ -545,7 +576,9 @@ pub(crate) fn add_row_in_tx(
                 };
                 values.push(rusqlite::types::Value::Integer(i));
             }
-            FieldType::Integer => values.push(rusqlite::types::Value::Integer(val.as_i64().unwrap_or(0))),
+            FieldType::Integer => {
+                values.push(rusqlite::types::Value::Integer(val.as_i64().unwrap_or(0)))
+            }
             _ => {
                 let s = match val {
                     Value::String(s) => s.clone(),
@@ -568,7 +601,10 @@ pub(crate) fn add_row_in_tx(
     let rowid = tx.last_insert_rowid();
     let display_id = id_format::render(&schema.id_format, rowid);
     tx.execute(
-        &format!("UPDATE {} SET display_id = ?1 WHERE id = ?2", quote_ident(&schema.name)),
+        &format!(
+            "UPDATE {} SET display_id = ?1 WHERE id = ?2",
+            quote_ident(&schema.name)
+        ),
         rusqlite::params![display_id, rowid],
     )
     .context("add_row_in_tx: mint display_id")?;
@@ -612,15 +648,21 @@ pub(crate) fn add_row_in_tx_with_authority(
     let now = now_iso8601();
 
     entry.insert("status".to_string(), Value::String(initial_status.clone()));
-    entry.entry("created_at".to_string()).or_insert_with(|| Value::String(now.clone()));
-    entry.entry("updated_at".to_string()).or_insert_with(|| Value::String(now.clone()));
-    entry.entry("created_by".to_string()).or_insert_with(|| Value::String(invoker_str.clone()));
-    entry.entry("updated_by".to_string()).or_insert_with(|| Value::String(invoker_str.clone()));
+    entry
+        .entry("created_at".to_string())
+        .or_insert_with(|| Value::String(now.clone()));
+    entry
+        .entry("updated_at".to_string())
+        .or_insert_with(|| Value::String(now.clone()));
+    entry
+        .entry("created_by".to_string())
+        .or_insert_with(|| Value::String(invoker_str.clone()));
+    entry
+        .entry("updated_by".to_string())
+        .or_insert_with(|| Value::String(invoker_str.clone()));
 
     validate::validate_with_authority(schema, &entry, Op::Add, invoker.into(), Some(authority))
-        .map_err(|errs| {
-            anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs))
-        })?;
+        .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
     let mut col_names = vec!["display_id".to_string()];
     let mut placeholders = vec!["?1".to_string()];
@@ -628,7 +670,13 @@ pub(crate) fn add_row_in_tx_with_authority(
         vec![rusqlite::types::Value::Text("__PLACEHOLDER__".to_string())];
     let mut param_idx = 2usize;
 
-    for common in ["status", "created_at", "updated_at", "created_by", "updated_by"] {
+    for common in [
+        "status",
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+    ] {
         if let Some(Value::String(s)) = entry.get(common) {
             col_names.push(common.to_string());
             placeholders.push(format!("?{param_idx}"));
@@ -2105,9 +2153,7 @@ fields:
                  WHERE store='observations' AND display_id='L001' ORDER BY id",
             )
             .unwrap()
-            .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -2137,7 +2183,10 @@ fields:
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(status, "ready", "row must land at 'ready' after lock-contract");
+        assert_eq!(
+            status, "ready",
+            "row must land at 'ready' after lock-contract"
+        );
 
         // transition_history contains the create row + the synthetic walk + ratify.
         let rows: Vec<(String, String, String, String)> = conn
@@ -2146,18 +2195,52 @@ fields:
                  WHERE store='observations' AND display_id='L001' ORDER BY id",
             )
             .unwrap()
-            .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
         // create + investigate + confirm + ratify = 4 rows
-        assert_eq!(rows.len(), 4, "expected 4 transition_history rows; got {rows:?}");
-        assert_eq!(rows[0], ("".to_string(), "open".to_string(), "create".to_string(), "human".to_string()));
-        assert_eq!(rows[1], ("open".to_string(), "investigating".to_string(), "investigate".to_string(), "framework".to_string()));
-        assert_eq!(rows[2], ("investigating".to_string(), "confirmed".to_string(), "confirm".to_string(), "human".to_string()));
-        assert_eq!(rows[3], ("confirmed".to_string(), "ready".to_string(), "ratify".to_string(), "framework".to_string()));
+        assert_eq!(
+            rows.len(),
+            4,
+            "expected 4 transition_history rows; got {rows:?}"
+        );
+        assert_eq!(
+            rows[0],
+            (
+                "".to_string(),
+                "open".to_string(),
+                "create".to_string(),
+                "human".to_string()
+            )
+        );
+        assert_eq!(
+            rows[1],
+            (
+                "open".to_string(),
+                "investigating".to_string(),
+                "investigate".to_string(),
+                "framework".to_string()
+            )
+        );
+        assert_eq!(
+            rows[2],
+            (
+                "investigating".to_string(),
+                "confirmed".to_string(),
+                "confirm".to_string(),
+                "human".to_string()
+            )
+        );
+        assert_eq!(
+            rows[3],
+            (
+                "confirmed".to_string(),
+                "ready".to_string(),
+                "ratify".to_string(),
+                "framework".to_string()
+            )
+        );
     }
 
     // T027 P2 (Task 2.3 / AC2.4): a T1 row scaffolded via add is observable as
@@ -2208,16 +2291,19 @@ workflow:
         let ddl = crate::codegen::ddl::ddl_for(&schema);
         conn.execute_batch(&ddl).unwrap();
 
-        let matches = build_test_add_cmd(&schema)
-            .get_matches_from(["add", "--title", "t1 task", "--tier-hint", "T1"]);
+        let matches = build_test_add_cmd(&schema).get_matches_from([
+            "add",
+            "--title",
+            "t1 task",
+            "--tier-hint",
+            "T1",
+        ]);
         run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
 
         let status: String = conn
-            .query_row(
-                "SELECT status FROM wf_add_when WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT status FROM wf_add_when WHERE id = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(
             status, "ready",
@@ -2225,15 +2311,18 @@ workflow:
         );
 
         // Inverse: a T3 row stays at planning.
-        let matches3 = build_test_add_cmd(&schema)
-            .get_matches_from(["add", "--title", "t3 task", "--tier-hint", "T3"]);
+        let matches3 = build_test_add_cmd(&schema).get_matches_from([
+            "add",
+            "--title",
+            "t3 task",
+            "--tier-hint",
+            "T3",
+        ]);
         run(&schema, &conn, &matches3, Actor::Human.into()).unwrap();
         let status3: String = conn
-            .query_row(
-                "SELECT status FROM wf_add_when WHERE id = 2",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT status FROM wf_add_when WHERE id = 2", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(
             status3, "planning",
