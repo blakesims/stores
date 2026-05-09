@@ -1700,6 +1700,22 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
         eprintln!("[daemon] drive watchdog sweep error: {}", e);
     }
 
+    // Sweep intake draft rows through the production gatekeeper Router.
+    // Panics and errors are isolated so a drain failure cannot crash the daemon.
+    let drain_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::flow::builtins::gatekeeper_router_drain::run_drain_sweep(
+            conn,
+            agents,
+            config_path,
+            &policies.hash,
+        )
+    }));
+    match drain_result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => eprintln!("[gatekeeper-router-drain] sweep error: {}", e),
+        Err(_payload) => eprintln!("[gatekeeper-router-drain] sweep panicked; daemon continuing"),
+    }
+
     // Panics inside the engine-runner iteration (e.g. in classification, DDL
     // query, or heartbeat write) must not crash the daemon's main poll loop.
     // Catch all panics here and log without payload content (payload may

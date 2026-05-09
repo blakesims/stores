@@ -29,6 +29,8 @@ pub mod auto_resolve_observation;
 pub mod auto_scaffold;
 pub mod cargo_install;
 pub mod external_review;
+pub mod gatekeeper_router;
+pub mod gatekeeper_router_drain;
 pub mod gatekeeper_stub;
 pub mod investigator;
 pub mod schema_migrate;
