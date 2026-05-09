@@ -4471,7 +4471,8 @@ mod tests {
         let (_dir, conn) = open_db(&schema);
         let runs_dir = _dir.path().join(".stores").join("runs");
         std::fs::create_dir_all(&runs_dir).unwrap();
-        for role in &["planner"] {
+        {
+            let role = "planner";
             std::fs::write(runs_dir.join(format!("{role}.jsonl")), "{}\n").unwrap();
         }
 
