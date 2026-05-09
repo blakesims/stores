@@ -146,6 +146,10 @@ fn main() -> Result<()> {
             };
             cli::metrics::run(args)?;
         }
+        Some(("runner-stats", sub)) => {
+            let json = *sub.get_one::<bool>("json").unwrap_or(&false) || matches.get_flag("json");
+            cli::runner_stats::run(json)?;
+        }
         Some(("engine", sub)) => {
             match sub.subcommand() {
                 Some(("locks", lsub)) => {

@@ -6,6 +6,7 @@ pub mod dynamic;
 pub mod init;
 pub mod metrics;
 pub mod runs;
+pub mod runner_stats;
 pub mod setup;
 pub mod skills;
 pub mod topology;

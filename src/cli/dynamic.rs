@@ -277,6 +277,17 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .help("Override wall-clock 'now' for duration windows (RFC3339); makes output deterministic"),
                 ),
         )
+        // Runner/model telemetry rollup
+        .subcommand(
+            Command::new("runner-stats")
+                .about("Summarize agent_runs by role, harness, and model")
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .action(ArgAction::SetTrue)
+                        .help("Render JSON output"),
+                ),
+        )
         // Engine operator diagnostics
         .subcommand(
             Command::new("engine")

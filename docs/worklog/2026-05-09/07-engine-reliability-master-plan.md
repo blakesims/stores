@@ -277,15 +277,16 @@ Likely follow-ups:
 | 2026-05-09 | Queue-curator audit updated with full row-level mapping (§10). |
 | 2026-05-09 | Manual-main candidates identified: locks inspector, telemetry, rate-limit typing, T1 fast path measurement. |
 | 2026-05-09 | First manual-main slice shipped locally: `stores engine locks` read-only dispatch_locks inspector. Current live DB: live=0, retry_wait=0, stale_blocking=0, orphaned=0, fresh_failure=4 (T081/T122/T018 accepted-row ceremony failures), stale_harmless=1093. Tests: `cargo test --lib cli::engine::tests --quiet`; `cargo check --quiet`. |
+| 2026-05-09 | Second manual-main slice added: `stores runner-stats` summarizes `agent_runs` by role × harness × model with run counts, failures, durations, and token totals. Live read exposed current economics: pi executor/wrap have high failure counts; claude-code executor/planner runs are slower but currently all exit 0 in the aggregate. Tests: `cargo test --lib cli::runner_stats::tests --quiet`; `cargo check --quiet`. |
 
 ## Immediate next actions
 
 1. Monitor T140 plan review; ensure plan includes full DB cleanup/remap, not just logic changes.
 2. Monitor T139 phase 3 executor; keep cockpit work moving.
 3. Next manual-main slice candidates:
-   - expose runner/model telemetry more clearly; or
    - add rate-limit typed classification/status display; or
-   - refine `stores engine locks` with age filtering / JSON consumers after T140 needs are clearer.
+   - refine `stores engine locks` with age filtering / JSON consumers after T140 needs are clearer; or
+   - add task-scoped runner stats / recent failures once `runner-stats` has proven useful.
 4. Keep queue-curator's audit doc linked as T140 fixture/input.
 5. Do not raw-SQL mutate `.stores/db.sqlite`; all cleanup goes through substrate verbs or T140 primitives.
 
