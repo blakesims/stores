@@ -762,8 +762,7 @@ fn i027_reconcile_accepted_actor_gate_rejects_ai_autonomous() {
     insert_accepted_task(&conn, "T900", "feat/T900-test", "/tmp/nowhere-T900");
     let cfg = cfg_path();
     let err = run_reconcile_accepted(&conn, &cfg, "T900", Actor::AiAutonomous.into())
-        .err()
-        .expect("ai_autonomous must be rejected");
+        .expect_err("ai_autonomous must be rejected");
     let msg = err.to_string();
     assert!(
         msg.contains("ai_autonomous is not permitted"),
@@ -792,8 +791,7 @@ fn i027_reconcile_accepted_rejects_unmerged_branch() {
     // Branch is NOT pre-merged into main here, so reconcile-accepted must bail.
     let cfg = cfg_path();
     let err = run_reconcile_accepted(&conn, &cfg, "T901", Actor::AiWithHuman.into())
-        .err()
-        .expect("must bail on unmerged branch");
+        .expect_err("must bail on unmerged branch");
     let msg = err.to_string();
     assert!(
         msg.contains("not merged into main"),
@@ -918,8 +916,7 @@ fn i027_reconcile_accepted_rejects_already_reconciled_row() {
     .unwrap();
     let cfg = cfg_path();
     let err = run_reconcile_accepted(&conn, &cfg, "T903", Actor::AiWithHuman.into())
-        .err()
-        .expect("schema_migrated row must be rejected");
+        .expect_err("schema_migrated row must be rejected");
     let msg = err.to_string();
     assert!(
         msg.contains("already at status='schema_migrated'") || msg.contains("nothing to reconcile"),
