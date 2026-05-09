@@ -10,6 +10,8 @@ Manual cleanup restored the queue to a trusted baseline, but exposed a second pr
 
 The goal is to split work into lanes so Blake and the operator agent can move quickly on safe/control work while the engine handles durable, review-worthy implementation in the background.
 
+**Important handover framing:** this SOP is not primarily a T138 handoff. T138/L538 is already in the engine lane as background work. The point for a new operator agent is to know what code/work to do manually with Blake on main, what to put into the engine instead, and what to monitor in the background engine task without taking it over.
+
 ## Lane A — Operator lane: do here
 
 Use the main thread for work that is local, reversible, operator-facing, and easy to inspect.
@@ -91,6 +93,29 @@ Before starting work, ask:
 
 ## Current application
 
-- `T138` from `L538` is correctly Lane C: background single-row drive, planner/executor on Opus, operator supervises.
+### Background engine work — observe, do not take over
+
+- `T138` from `L538` is already Lane C: background single-row drive, planner/executor on Opus.
+- Operator/new-agent should periodically observe `stores tasks status T138`, `stores tasks next-action T138`, and the log under `logs/manual-engine/`, but should not start another drive, broad daemon, or independent lifecycle action unless Blake explicitly asks.
+- Stop and surface if T138 becomes `blocked`, loops on repeated review findings, hits silent_zombie/drive_failed, reaches `in_review`/external-review/U3, or shows contract drift.
+
+### Manual work with Blake — the main purpose of this SOP
+
+Use the main thread for fast meta-substrate work that improves Blake's operator experience while T138 runs elsewhere. Good candidates:
+
+- clarify/update docs, SOPs, handovers, engine-health
+- inspect and explain queue/engine status
+- add narrow control/inspection commands
+- fix small obvious bugs with focused tests
+- improve errors/watch/status surfaces
+- file or disposition observations/intake with explicit grounding
+- make emergency safety repairs when the engine itself is unsafe
+
+Do not route all such work into the engine by default. The whole point is to preserve a fast operator/repair lane alongside the background engine lane.
+
+### Work to put into the engine instead
+
+Use the engine for durable or risky implementation: schema/lifecycle changes, subscriber/daemon behavior, large multi-file features, runner infrastructure, integration-lane implementation, scheduler/telemetry systems, and anything that needs independent planning/review artifacts.
+
 - T1 ceremony fast path is a high-priority future design item: preserve correctness without making tiny fixes pay full T2/T3 ceremony.
 - Engine-health now names the upstream bottleneck as trust: safe lifecycle transitions, right-sized ceremony, legible control surfaces, and measured runner choices.
