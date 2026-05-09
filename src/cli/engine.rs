@@ -115,7 +115,8 @@ pub fn load_lock_status_report(conn: &Connection, db_path: PathBuf) -> Result<Lo
     let mut rows = Vec::new();
     for raw in raw_rows {
         let raw = raw?;
-        let row_status = row_status(conn, &raw.store, raw.row_id)?.unwrap_or_else(|| "<missing>".to_string());
+        let row_status =
+            row_status(conn, &raw.store, raw.row_id)?.unwrap_or_else(|| "<missing>".to_string());
         rows.push(classify_lock_row(raw, row_status));
     }
 
@@ -184,14 +185,23 @@ fn classify_lock_row(raw: RawLockRow, row_status: String) -> LockStatusRow {
             )
         }
     } else if retry_wait {
-        ("retry_wait", "terminal failure is scheduled/eligible for retry handling")
+        (
+            "retry_wait",
+            "terminal failure is scheduled/eligible for retry handling",
+        )
     } else if matches!(
         raw.terminal_reason.as_str(),
         "exit_nonzero" | "error" | "silent_zombie" | "timeout" | "halted" | "rate_limit"
     ) {
-        ("fresh_failure", "terminal failure needs operator or retry attention")
+        (
+            "fresh_failure",
+            "terminal failure needs operator or retry attention",
+        )
     } else {
-        ("stale_harmless", "terminal lock history; should not block dispatch")
+        (
+            "stale_harmless",
+            "terminal lock history; should not block dispatch",
+        )
     };
 
     LockStatusRow {
@@ -217,7 +227,10 @@ fn row_status(conn: &Connection, store: &str, row_id: i64) -> Result<Option<Stri
     if !table_exists(conn, store)? {
         return Ok(None);
     }
-    let sql = format!("SELECT status FROM \"{}\" WHERE id=?1", store.replace('"', ""));
+    let sql = format!(
+        "SELECT status FROM \"{}\" WHERE id=?1",
+        store.replace('"', "")
+    );
     conn.query_row(&sql, [row_id], |r| r.get(0))
         .optional()
         .map_err(Into::into)
@@ -226,7 +239,14 @@ fn row_status(conn: &Connection, store: &str, row_id: i64) -> Result<Option<Stri
 fn is_terminal_row_status(status: &str) -> bool {
     matches!(
         status,
-        "abandoned" | "closed_out_of_band" | "schema_migrated" | "rejected" | "resolved" | "wont_fix" | "passed" | "superseded"
+        "abandoned"
+            | "closed_out_of_band"
+            | "schema_migrated"
+            | "rejected"
+            | "resolved"
+            | "wont_fix"
+            | "passed"
+            | "superseded"
     )
 }
 
@@ -301,7 +321,11 @@ fn print_lock_status_text(report: &LockStatusReport) {
 }
 
 fn empty_dash(s: &str) -> &str {
-    if s.is_empty() { "-" } else { s }
+    if s.is_empty() {
+        "-"
+    } else {
+        s
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +348,7 @@ pub struct PlanStartEntry {
     pub activation: String,
     pub disposition: String,
     pub title: String,
+    pub linked_observations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -397,7 +422,8 @@ fn load_plan_start(conn: &Connection) -> Result<BucketsWithMeta> {
 
     let mut stmt = conn.prepare(
         "SELECT id, display_id, COALESCE(status,''), COALESCE(activation,'inactive'),
-                COALESCE(branch,''), COALESCE(tier_hint,''), COALESCE(title,'')
+                COALESCE(branch,''), COALESCE(tier_hint,''), COALESCE(title,''),
+                COALESCE(linked_observations,'[]')
          FROM tasks
          ORDER BY display_id ASC",
     )?;
@@ -410,6 +436,7 @@ fn load_plan_start(conn: &Connection) -> Result<BucketsWithMeta> {
         branch: String,
         tier_hint: String,
         title: String,
+        linked_observations: String,
     }
 
     let raw_rows = stmt
@@ -422,6 +449,7 @@ fn load_plan_start(conn: &Connection) -> Result<BucketsWithMeta> {
                 branch: r.get(4)?,
                 tier_hint: r.get(5)?,
                 title: r.get(6)?,
+                linked_observations: r.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -429,12 +457,13 @@ fn load_plan_start(conn: &Connection) -> Result<BucketsWithMeta> {
     let mut buckets = BucketsWithMeta::default();
 
     for raw in raw_rows {
+        let linked_observations = parse_linked_observations(&raw.linked_observations);
         let mut row_json = json!({
             "display_id": raw.display_id,
             "status": raw.status,
             "activation": raw.activation,
             "branch": raw.branch,
-            "linked_observations": [],
+            "linked_observations": linked_observations,
         });
         if let Some(at) = accepted_at_map.get(&raw.id) {
             row_json["accepted_at"] = json!(at);
@@ -450,6 +479,7 @@ fn load_plan_start(conn: &Connection) -> Result<BucketsWithMeta> {
             activation: raw.activation,
             disposition: disposition_kind,
             title: raw.title,
+            linked_observations,
         };
         let row = PlanStartRow {
             entry,
@@ -466,6 +496,10 @@ fn load_plan_start(conn: &Connection) -> Result<BucketsWithMeta> {
     }
 
     Ok(buckets)
+}
+
+fn parse_linked_observations(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()
 }
 
 fn disposition_kind(d: &Disposition) -> String {

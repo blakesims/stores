@@ -473,7 +473,13 @@ fn dirty_snapshot_plan_start_emits_documented_buckets_with_required_fixture_rows
     keys.sort();
     assert_eq!(
         keys,
-        vec!["blocked", "historical", "inactive", "needs_operator", "would_run"]
+        vec![
+            "blocked",
+            "historical",
+            "inactive",
+            "needs_operator",
+            "would_run"
+        ]
     );
 
     let bucket_ids = |key: &str| -> Vec<String> {
@@ -490,10 +496,16 @@ fn dirty_snapshot_plan_start_emits_documented_buckets_with_required_fixture_rows
             .collect()
     };
 
-    let total_rows: usize = ["would_run", "inactive", "needs_operator", "blocked", "historical"]
-        .iter()
-        .map(|k| bucket_ids(k).len())
-        .sum();
+    let total_rows: usize = [
+        "would_run",
+        "inactive",
+        "needs_operator",
+        "blocked",
+        "historical",
+    ]
+    .iter()
+    .map(|k| bucket_ids(k).len())
+    .sum();
     assert!(
         total_rows >= 30,
         "fixture must seed ≥30 rows across all 5 plan-start buckets; got {total_rows}"
@@ -551,16 +563,28 @@ fn dirty_snapshot_plan_start_emits_documented_buckets_with_required_fixture_rows
     // duplicate-bucketing) and at least 5 buckets contain at least one row.
     let mut seen = std::collections::HashSet::new();
     let mut non_empty = 0usize;
-    for k in ["would_run", "inactive", "needs_operator", "blocked", "historical"] {
+    for k in [
+        "would_run",
+        "inactive",
+        "needs_operator",
+        "blocked",
+        "historical",
+    ] {
         let ids = bucket_ids(k);
         if !ids.is_empty() {
             non_empty += 1;
         }
         for id in ids {
-            assert!(seen.insert(id.clone()), "duplicate display_id {id} across buckets");
+            assert!(
+                seen.insert(id.clone()),
+                "duplicate display_id {id} across buckets"
+            );
         }
     }
-    assert_eq!(non_empty, 5, "all 5 buckets must be non-empty in the dirty snapshot");
+    assert_eq!(
+        non_empty, 5,
+        "all 5 buckets must be non-empty in the dirty snapshot"
+    );
 }
 
 // ---------- AC6.1 (c) — linked_observations preservation ----------
@@ -577,24 +601,15 @@ fn dirty_snapshot_t138_linked_observations_preserved_through_plan_start_json() {
     // payload from the seeded row (audit doc names L538, L540 as the cross-
     // store linkage shape).
     let bucket_entry = |bucket: &str, id: &str| -> Option<Value> {
-        v.get(bucket)
-            .and_then(|x| x.as_array())
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|e| e.get("display_id").and_then(|d| d.as_str()) == Some(id))
-                    .cloned()
-            })
+        v.get(bucket).and_then(|x| x.as_array()).and_then(|arr| {
+            arr.iter()
+                .find(|e| e.get("display_id").and_then(|d| d.as_str()) == Some(id))
+                .cloned()
+        })
     };
 
-    // Note: src/cli/engine.rs::load_plan_start currently emits a fixed
-    // schema (display_id, status, activation, disposition, title) and does
-    // not propagate linked_observations into the JSON entry. To pin the
-    // requirement, this test reads linked_observations directly from the
-    // fixture DB and asserts the row is present in the bucket the plan-start
-    // emits — proving the field SURVIVES the seeding round-trip and the
-    // plan-start invocation does not hide T138.
-    let active_entry = bucket_entry("would_run", "T138")
-        .expect("T138 (active) must appear in would_run JSON");
+    let active_entry =
+        bucket_entry("would_run", "T138").expect("T138 (active) must appear in would_run JSON");
     let inactive_entry = bucket_entry("inactive", "T138_INACTIVE")
         .expect("T138_INACTIVE must appear in inactive JSON");
     assert_eq!(
@@ -606,19 +621,31 @@ fn dirty_snapshot_t138_linked_observations_preserved_through_plan_start_json() {
         Some("accepted")
     );
 
-    // Read linked_observations directly from the seeded DB and assert the
-    // T138 row carries L538/L540 (proving the seed round-tripped that field).
-    let conn = Connection::open(&db_path).expect("open db");
-    let linked: String = conn
-        .query_row(
-            "SELECT COALESCE(linked_observations,'[]') FROM tasks WHERE display_id='T138'",
-            [],
-            |r| r.get(0),
-        )
-        .expect("select linked_observations");
-    let parsed: Vec<String> = serde_json::from_str(&linked).expect("parse list_fk");
+    let active_linked = active_entry
+        .get("linked_observations")
+        .and_then(|v| v.as_array())
+        .expect("plan-start JSON entry must include linked_observations array");
+    let active_linked: Vec<String> = active_linked
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
     assert!(
-        parsed.contains(&"L538".to_string()) && parsed.contains(&"L540".to_string()),
-        "T138 row must preserve linked_observations [L538, L540]; got {parsed:?}"
+        active_linked.contains(&"L538".to_string())
+            && active_linked.contains(&"L540".to_string()),
+        "T138 plan-start JSON must preserve linked_observations [L538, L540]; got {active_linked:?}"
+    );
+
+    let inactive_linked = inactive_entry
+        .get("linked_observations")
+        .and_then(|v| v.as_array())
+        .expect("plan-start JSON entry must include linked_observations array");
+    let inactive_linked: Vec<String> = inactive_linked
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        inactive_linked.contains(&"L538".to_string())
+            && inactive_linked.contains(&"L540".to_string()),
+        "T138_INACTIVE plan-start JSON must preserve linked_observations [L538, L540]; got {inactive_linked:?}"
     );
 }
