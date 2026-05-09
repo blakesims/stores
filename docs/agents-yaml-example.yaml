@@ -25,12 +25,19 @@
 #      success fires `mark_schema_migrated`.
 #
 # `stale_base` vs `stale_external_review` are distinct typed integration
-# blockers: `stale_base` means the candidate's recorded base SHA no longer
-# matches main HEAD before refresh; `stale_external_review` means the
-# external_reviews PASS no longer applies to the candidate head after
-# refresh (the freshness re-check fired). Both route to
-# `integration_blocked` for human-grounded retry via `retry-integration`
-# (integration_blocked→integration_queued).
+# blockers. `stale_base` is a PRE-REBASE check: the lane runs
+# `git merge-base --is-ancestor <reviewed_base_sha> <main_branch>` against
+# the latest passed external_review's base_sha BEFORE running rebase or
+# advancing main; if the reviewed base is no longer reachable from main
+# (force-push / history rewrite suspected), the ER is superseded and the
+# row routes to `integration_blocked` with outcome 'stale_base' WITHOUT
+# touching main. `stale_external_review` is the POST-REBASE counterpart:
+# after a clean refresh, the reviewed head_sha no longer matches the
+# candidate head, the ER is superseded, and the row routes to
+# `integration_blocked` with outcome 'stale_external_review'. Both
+# blockers recover via human-grounded `retry-integration`
+# (integration_blocked→integration_queued). See `docs/integration-lane.md`
+# for the full lifecycle, configuration shape, and outcome enum.
 #
 # cargo-install and schema-migrate are stores-repo-specific subscribers.
 # A different repo wiring this surface would NOT include cargo-install or

@@ -47,6 +47,8 @@ This is an architecture-coherence rule, not only a code-location rule. A client-
 
 Current example: 10.06 may own `accept-merge-real.sh`, `.gate-baseline.yaml`, `./dev test gate`, worktree naming, and known-flake policy. The stores substrate owns the integration lane: accepted-candidate queueing, capacity-1 mutation of `main`, freshness checks, typed `integration_blocked` routing, external-review freshness, and durable base/head/main provenance. The 10.06 script should be treated as a repo-specific adapter until the substrate integration-lane adapter contract is explicit; do not build a competing client-side queue, scheduler, retry loop, task DAG, or file-overlap dispatcher.
 
+**Integration lane (T138) — substrate-vs-adapter, verbatim.** Substrate owns the integration lane (queueing, capacity-1, refresh, freshness, typed integration_blocked, provenance). Client repos must not implement competing queues, schedulers, retry loops, task DAGs, or file-overlap dispatchers; they wire post-integrated subscribers (cargo install, deploy, cleanup, observation resolution) only. See `docs/integration-lane.md` for the lifecycle, configuration shape, freshness contract, stale_base vs stale_external_review distinction, and the JSON-column `integration_attempts` provenance schema.
+
 When documenting cross-repo dogfood work, name ledgers explicitly to avoid ID collisions: e.g. `substrate:T123` / `substrate:L528-integration-lane` versus `10.06:L528-auth.setup`.
 
 ## Pointers
