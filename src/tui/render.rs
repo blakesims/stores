@@ -9,7 +9,10 @@ use ratatui::Frame;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::app::{App, FlatRow, Mode};
-use super::data::{blocked_reason_class, cockpit_model, ExternalReviewState, Row, Section};
+use super::data::{
+    blocked_reason_class, cockpit_model, recent_exhaust, store_flow_model, ExternalReviewState,
+    Row, Section, StoreFlowModel, StoreLane,
+};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     if app.mode == Mode::Detail {
@@ -29,29 +32,34 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(1),             // rows pane
-                Constraint::Length(1),          // selected-row footer
+                Constraint::Length(4),          // store-flow top strip (5 cards)
+                Constraint::Min(1),             // focused table | side detail
+                Constraint::Length(1),          // recent-exhaust strip
                 Constraint::Length(search_bar), // search input
                 Constraint::Length(1),          // hint line
                 Constraint::Length(1),          // status bar
             ])
             .split(f.area());
 
-        let rows_area = chunks[0];
-        // Reserve one line of the rows pane per non-empty section header (and
-        // collapsed sections still get a header). For viewport math we count
-        // the row body lines, not headers.
-        let viewport = rows_area.height.saturating_sub(0) as usize;
-        app.viewport_height = viewport.max(1);
+        draw_store_strip(f, app, chunks[0]);
 
+        let middle = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Ratio(13, 23), Constraint::Ratio(10, 23)])
+            .split(chunks[1]);
+        let focused_area = middle[0];
+        let detail_area = middle[1];
+
+        app.viewport_height = (focused_area.height as usize).max(1);
         let flat = app.flat_rows();
         clamp_scroll(app, flat.len());
 
-        draw_rows(f, app, &flat, rows_area);
-        super::footer::render(f, app, chunks[1]);
+        draw_focused_table(f, app, focused_area);
+        draw_selected_detail(f, app, detail_area);
+        draw_recent_exhaust(f, app, chunks[2]);
 
         if app.mode == Mode::Search {
-            draw_search_bar(f, app, chunks[2]);
+            draw_search_bar(f, app, chunks[3]);
         }
 
         let hint = super::help::hint_for(app.mode);
@@ -60,10 +68,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 hint,
                 Style::default().fg(Color::DarkGray),
             ))),
-            chunks[3],
+            chunks[4],
         );
 
-        super::status_bar::render(f, app, chunks[4]);
+        super::status_bar::render(f, app, chunks[5]);
     }
 
     if app.mode == Mode::Filter {
@@ -155,15 +163,10 @@ fn clamp_scroll(app: &mut App, total: usize) {
 }
 
 fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
-    // Render only the viewport window (virtualized). Section headers are
-    // emitted lazily as the window crosses a section boundary.
-    let compact_window;
-    let window = if mission_compact_mode(app) {
-        compact_window = mission_compact_window(app, flat);
-        compact_window.as_slice()
-    } else {
-        visible_window(app, flat)
-    };
+    // Mission-compact emergency view: keep the legacy header so the operator
+    // sees lanes + daemon liveness in the same buffer as the system alert.
+    let compact_window = mission_compact_window(app, flat);
+    let window = compact_window.as_slice();
     let mut items: Vec<ListItem> = cockpit_header_items(app);
     if let Some(alert) = system_alert_item(app) {
         items.push(alert);
@@ -209,6 +212,296 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
             .title("stores watch · cockpit"),
     );
     f.render_widget(list, area);
+}
+
+/// Render the 5-card store-flow strip across the top of the cockpit. Each
+/// card shows the lane label, a primary count, and a one-line status
+/// breakdown drawn from [`StoreFlowModel`]. The focused lane gets a cyan
+/// border; unfocused lanes are dim.
+fn draw_store_strip(f: &mut Frame, app: &App, area: Rect) {
+    let model = store_flow_model(
+        &app.rows,
+        &app.system_health,
+        &app.status_bar.daemon_liveness,
+        &app.external_review,
+    );
+    let cells = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 5); 5])
+        .split(area);
+    for (i, lane) in StoreLane::ALL.iter().enumerate() {
+        draw_store_card(f, *lane, app.focused_store == *lane, &model, cells[i]);
+    }
+}
+
+fn draw_store_card(
+    f: &mut Frame,
+    lane: StoreLane,
+    focused: bool,
+    model: &StoreFlowModel,
+    area: Rect,
+) {
+    let (border_style, title_style) = if focused {
+        (
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(format!(" {} ", lane.label()), title_style));
+    let (primary, breakdown) = lane_card_lines(lane, model);
+    let primary_style = if focused {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let body = Paragraph::new(vec![
+        Line::from(Span::styled(primary, primary_style)),
+        Line::from(Span::styled(
+            breakdown,
+            Style::default().fg(Color::DarkGray),
+        )),
+    ])
+    .block(block);
+    f.render_widget(body, area);
+}
+
+fn lane_card_lines(lane: StoreLane, model: &StoreFlowModel) -> (String, String) {
+    match lane {
+        StoreLane::Intake => {
+            let i = &model.intake;
+            let open = i.draft + i.triaging + i.needs_info;
+            (
+                format!("open: {open}"),
+                format!("needs_info {} · routed {}", i.needs_info, i.routed),
+            )
+        }
+        StoreLane::Observations => {
+            let o = &model.observations;
+            (
+                format!("open: {}", o.open),
+                format!("invest {} · ready {}", o.investigating, o.ready),
+            )
+        }
+        StoreLane::Tasks => {
+            let t = &model.tasks;
+            let review = t.plan_review + t.code_review + t.in_review;
+            (
+                format!("active: {}", t.active),
+                format!("held {} · review {}", t.held, review),
+            )
+        }
+        StoreLane::ExternalReviews => {
+            let r = &model.external_reviews;
+            (
+                format!("running: {}", r.running),
+                format!(
+                    "pending {} · revise {} · held {}",
+                    r.pending, r.revise, r.tooling_held
+                ),
+            )
+        }
+        StoreLane::EngineHealth => {
+            let e = &model.engine;
+            let primary = if e.daemon_live {
+                "daemon LIVE".to_string()
+            } else {
+                "daemon DEAD ⚠".to_string()
+            };
+            let age = match e.oldest_lock_age_secs {
+                Some(secs) if secs >= 3600 => format!("oldest {}h", secs / 3600),
+                Some(secs) if secs >= 60 => format!("oldest {}m", secs / 60),
+                Some(_) => "oldest <1m".to_string(),
+                None => "oldest —".to_string(),
+            };
+            (primary, format!("locks {} · {}", e.unfinished_locks, age))
+        }
+    }
+}
+
+/// Render the focused-lane table (or engine panel when `EngineHealth` is
+/// focused). Emits the section-grouped row list restricted to the focused
+/// lane via `app.flat_rows()`, prefixed by the system-alert when the daemon
+/// is dead.
+fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
+    if app.focused_store == StoreLane::EngineHealth {
+        draw_engine_panel(f, app, area);
+        return;
+    }
+    let flat = app.flat_rows();
+    // Hide TasksRecentlyTerminal from the focused-table view — terminal task
+    // history belongs in the recent-exhaust strip, not the main rows.
+    let window = visible_window(app, &flat);
+    let mut items: Vec<ListItem> = Vec::new();
+    if let Some(alert) = system_alert_item(app) {
+        items.push(alert);
+    }
+    let mut last_section: Option<usize> = None;
+    let cursor = app.current_flat();
+    for (i, fr) in window.iter().enumerate() {
+        let sec_kind = app.sections.get(fr.section).map(|(s, _)| *s);
+        if sec_kind == Some(Section::TasksRecentlyTerminal) {
+            continue;
+        }
+        if last_section != Some(fr.section) {
+            if let Some((sec, indices)) = app.sections.get(fr.section) {
+                let collapsed = app.collapsed.contains(sec);
+                let glyph = if collapsed { "▸" } else { "▾" };
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!("{glyph} {} ({})", sec.label(), indices.len()),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ))));
+            }
+            last_section = Some(fr.section);
+        }
+        let absolute_idx = app.scroll_offset + i;
+        let selected = cursor == Some(absolute_idx);
+        items.push(ListItem::new(format_row_line(
+            &app.rows[fr.abs],
+            selected,
+            &app.external_review,
+        )));
+    }
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  (no rows in this lane)",
+            Style::default().fg(Color::DarkGray),
+        ))));
+    }
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::NONE)
+            .title(format!(" {} ", app.focused_store.label())),
+    );
+    f.render_widget(list, area);
+}
+
+/// Engine-health panel: daemon liveness, dispatch-lock counts, oldest-lock
+/// age, and an agent_runs note. No row list — this lane is a system-state
+/// surface, not a row store.
+fn draw_engine_panel(f: &mut Frame, app: &App, area: Rect) {
+    let model = store_flow_model(
+        &app.rows,
+        &app.system_health,
+        &app.status_bar.daemon_liveness,
+        &app.external_review,
+    );
+    let e = &model.engine;
+    let daemon_line = if e.daemon_live {
+        Line::from(Span::styled(
+            "daemon: LIVE",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "daemon: DEAD ⚠",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+    };
+    let locks_line = Line::from(Span::raw(format!(
+        "unfinished_locks: {}",
+        e.unfinished_locks
+    )));
+    let oldest_line = Line::from(Span::raw(match e.oldest_lock_age_secs {
+        Some(secs) if secs >= 3600 => format!("oldest_lock_age: {}h", secs / 3600),
+        Some(secs) if secs >= 60 => format!("oldest_lock_age: {}m", secs / 60),
+        Some(_) => "oldest_lock_age: <1m".to_string(),
+        None => "oldest_lock_age: —".to_string(),
+    }));
+    let runs_line = Line::from(Span::styled(
+        format!("agent_runs (recent): {} (not yet wired)", e.agent_runs_recent),
+        Style::default().fg(Color::DarkGray),
+    ));
+    let alert_lines: Vec<Line<'static>> = if !e.daemon_live && e.unfinished_locks > 0 {
+        vec![Line::from(Span::styled(
+            format!(
+                "system-alert: daemon DEAD; {} dangling locks",
+                e.unfinished_locks
+            ),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))]
+    } else {
+        Vec::new()
+    };
+    let mut lines = vec![daemon_line, locks_line, oldest_line, runs_line];
+    if !alert_lines.is_empty() {
+        lines.push(Line::from(""));
+        lines.extend(alert_lines);
+    }
+    let body = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::NONE)
+            .title(" ENGINE · system health "),
+    );
+    f.render_widget(body, area);
+}
+
+/// Render the side detail pane for the currently selected row. When the
+/// focused lane has no selectable row (empty lane / EngineHealth) the pane
+/// displays the no-row placeholder.
+fn draw_selected_detail(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" detail ");
+    let lines: Vec<Line<'static>> = if app.focused_store == StoreLane::EngineHealth {
+        vec![Line::from(Span::styled(
+            "— no row selected —",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else if let Some(row) = app.current_row() {
+        let pane_height = area.height.saturating_sub(2).max(1) as usize;
+        super::detail::lines_for_row(row, app)
+            .into_iter()
+            .take(pane_height)
+            .map(Line::from)
+            .collect()
+    } else {
+        vec![Line::from(Span::styled(
+            "— no row selected —",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    };
+    let body = Paragraph::new(lines).block(block);
+    f.render_widget(body, area);
+}
+
+/// One-line strip: up to `limit` recent terminal task ids joined by " · ".
+/// Renders a placeholder when the recent-exhaust list is empty.
+fn draw_recent_exhaust(f: &mut Frame, app: &App, area: Rect) {
+    let exhaust = recent_exhaust(&app.rows, 5);
+    let text = if exhaust.is_empty() {
+        "— no recent exhaust —".to_string()
+    } else {
+        let parts: Vec<String> = exhaust
+            .iter()
+            .filter_map(|row| match row {
+                Row::Task(t) => Some(format!("{} {}", t.display_id, t.status)),
+                _ => None,
+            })
+            .collect();
+        format!("recent exhaust · {}", parts.join(" · "))
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::DarkGray),
+        ))),
+        area,
+    );
 }
 
 fn mission_compact_mode(app: &App) -> bool {
@@ -1087,6 +1380,260 @@ mod tests {
              [{}, {}) after PgDn",
             app.scroll_offset,
             app.scroll_offset + app.viewport_height,
+        );
+    }
+
+    // ----- Phase 3 cockpit-render tests -------------------------------------
+
+    use crate::tui::data::{classify, ReviewRow, StoreLane};
+    use ratatui::buffer::Buffer;
+
+    /// Build an app populated across all five lanes (intake / obs / tasks /
+    /// reviews + system_health for engine), with one terminal task so the
+    /// recent-exhaust strip has content.
+    fn cockpit_fixture_app() -> App {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![
+            Row::Intake(IntakeRow {
+                display_id: "I001".to_string(),
+                status: "draft".to_string(),
+                summary: "intake row".to_string(),
+                ..Default::default()
+            }),
+            Row::Obs(ObsRow {
+                display_id: "L001".to_string(),
+                status: "open".to_string(),
+                priority: "normal".to_string(),
+                summary: "obs row".to_string(),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T100".to_string(),
+                status: "executing".to_string(),
+                title: "active task".to_string(),
+                ..Default::default()
+            }),
+            // Terminal task — must appear in recent-exhaust, NOT in tasks lane main rows.
+            Row::Task(TaskRow {
+                display_id: "T200".to_string(),
+                status: "accepted".to_string(),
+                title: "done task".to_string(),
+                updated_at: "2026-05-09".to_string(),
+                ..Default::default()
+            }),
+            Row::Review(ReviewRow {
+                display_id: "E001".to_string(),
+                task_id: "T100".to_string(),
+                status: "running".to_string(),
+                runner: "codex".to_string(),
+                ..Default::default()
+            }),
+        ];
+        app.sections = classify(&app.rows);
+        app.status_bar = StatusBar {
+            daemon_liveness: Liveness::Live { pid: 4242 },
+            ..Default::default()
+        };
+        app.system_health = SystemHealth {
+            unfinished_dispatch_locks: 3,
+            oldest_claimed_at_epoch: Some(now_epoch() - 7200),
+        };
+        app.apply_sort();
+        app.viewport_height = 10;
+        app
+    }
+
+    fn paint(app: &mut App, w: u16, h: u16) -> Buffer {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal.draw(|f| draw(f, app)).expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_to_string(buf: &Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Locate the column where a card's left border sits by scanning row 0
+    /// (top strip top border) for `┌`. Returns one column per card found.
+    fn card_left_borders(buf: &Buffer) -> Vec<u16> {
+        let mut cols = Vec::new();
+        for x in 0..buf.area.width {
+            if buf[(x, 0)].symbol() == "┌" {
+                cols.push(x);
+            }
+        }
+        cols
+    }
+
+    /// AC3.1(a) / AC3.2: top strip paints all five lane labels.
+    #[test]
+    fn cockpit_top_strip_paints_all_five_lane_labels() {
+        let mut app = cockpit_fixture_app();
+        let buf = paint(&mut app, 120, 30);
+        let painted = buffer_to_string(&buf);
+        // Top region is rows 0..4 (the 5-card strip).
+        let top_region: String = painted.lines().take(4).collect::<Vec<_>>().join("\n");
+        for label in ["INTAKE", "OBSERVATIONS", "TASKS", "EXTERNAL", "ENGINE"] {
+            assert!(
+                top_region.contains(label),
+                "missing top-strip label {label:?} in top region:\n{top_region}\n\nfull buffer:\n{painted}"
+            );
+        }
+    }
+
+    /// AC3.1(b): focused-lane card border is cyan; unfocused are dim.
+    #[test]
+    fn cockpit_focused_card_has_distinct_border_style() {
+        let mut app = cockpit_fixture_app();
+        // Default focus = Tasks (index 2 in StoreLane::ALL).
+        let buf = paint(&mut app, 120, 30);
+        let cols = card_left_borders(&buf);
+        assert_eq!(cols.len(), 5, "expected 5 cards, found cols {:?}", cols);
+        let focused_col = cols[2];
+        let other_col = cols[0];
+        let focused_cell = &buf[(focused_col, 0)];
+        let other_cell = &buf[(other_col, 0)];
+        assert_eq!(
+            focused_cell.fg,
+            Color::Cyan,
+            "focused card border must be cyan, got {:?}",
+            focused_cell.fg
+        );
+        assert_ne!(
+            other_cell.fg,
+            Color::Cyan,
+            "non-focused card border must NOT be cyan, got {:?}",
+            other_cell.fg
+        );
+    }
+
+    /// AC3.1(c) / AC3.3: terminal task ids appear in the recent-exhaust strip
+    /// and NOT in the focused-table region (which hides terminal history).
+    #[test]
+    fn cockpit_recent_exhaust_strip_shows_terminal_ids_not_in_main_rows() {
+        let mut app = cockpit_fixture_app();
+        let buf = paint(&mut app, 120, 30);
+        let painted = buffer_to_string(&buf);
+        let lines: Vec<&str> = painted.lines().collect();
+        // Last lines: status bar (h-1), hint (h-2), exhaust (h-3) (no search bar).
+        let exhaust_line = lines[lines.len() - 3];
+        assert!(
+            exhaust_line.contains("T200"),
+            "exhaust strip must include terminal task id T200; got: {exhaust_line}"
+        );
+        assert!(
+            exhaust_line.contains("accepted"),
+            "exhaust strip must show terminal status; got: {exhaust_line}"
+        );
+        // Focused-table region (between top strip y=4 and exhaust y=h-3).
+        let middle: String = lines[4..lines.len() - 3].join("\n");
+        assert!(
+            !middle.contains("T200"),
+            "terminal task id T200 must NOT appear in focused-table region:\n{middle}"
+        );
+    }
+
+    /// AC3.1(c)/AC3.3 placeholder branch: empty exhaust shows the placeholder.
+    #[test]
+    fn cockpit_recent_exhaust_strip_placeholder_when_no_terminal_rows() {
+        let mut app = cockpit_fixture_app();
+        // Drop the terminal task.
+        app.rows.retain(|r| !matches!(r, Row::Task(t) if t.status == "accepted"));
+        app.sections = classify(&app.rows);
+        app.apply_sort();
+        let buf = paint(&mut app, 120, 30);
+        let painted = buffer_to_string(&buf);
+        let lines: Vec<&str> = painted.lines().collect();
+        let exhaust_line = lines[lines.len() - 3];
+        assert!(
+            exhaust_line.contains("— no recent exhaust —"),
+            "expected exhaust placeholder; got: {exhaust_line}"
+        );
+    }
+
+    /// AC3.1(d): EngineHealth focus paints the engine panel — daemon status
+    /// text and lock counts in the focused-table region.
+    #[test]
+    fn cockpit_engine_focus_paints_daemon_status_and_lock_counts() {
+        let mut app = cockpit_fixture_app();
+        // DEAD daemon to surface the system-alert variant of the engine panel.
+        app.status_bar.daemon_liveness = Liveness::Dead;
+        app.focused_store = StoreLane::EngineHealth;
+        app.selection = crate::tui::app::Selection::default();
+        let buf = paint(&mut app, 120, 30);
+        let painted = buffer_to_string(&buf);
+        let lines: Vec<&str> = painted.lines().collect();
+        let middle: String = lines[4..lines.len() - 3].join("\n");
+        assert!(
+            middle.contains("daemon: DEAD"),
+            "engine panel must show daemon status; got middle:\n{middle}"
+        );
+        assert!(
+            middle.contains("unfinished_locks: 3"),
+            "engine panel must show lock count; got middle:\n{middle}"
+        );
+        // Side detail pane shows the no-row placeholder for engine focus.
+        assert!(
+            middle.contains("— no row selected —"),
+            "engine focus must show no-row placeholder in detail pane; got:\n{middle}"
+        );
+    }
+
+    /// AC3.1(e): Right-key (l) moves the focused card to the next lane and
+    /// the painted cyan border follows.
+    #[test]
+    fn cockpit_right_key_changes_visibly_highlighted_lane() {
+        let mut app = cockpit_fixture_app();
+        // Default focus is Tasks (col index 2). Cyan border at cols[2] only.
+        let buf = paint(&mut app, 120, 30);
+        let cols = card_left_borders(&buf);
+        assert_eq!(buf[(cols[2], 0)].fg, Color::Cyan);
+
+        // Press 'l' (right) → focus advances to ExternalReviews (cols[3]).
+        crate::tui::input::on_key(
+            &mut app,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('l'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+        assert_eq!(app.focused_store, StoreLane::ExternalReviews);
+
+        let buf2 = paint(&mut app, 120, 30);
+        let cols2 = card_left_borders(&buf2);
+        assert_eq!(buf2[(cols2[3], 0)].fg, Color::Cyan, "focus should follow to col 3");
+        assert_ne!(
+            buf2[(cols2[2], 0)].fg,
+            Color::Cyan,
+            "old focus at col 2 must lose cyan border"
+        );
+    }
+
+    /// AC3.6 invariant restated as a render-layer assertion: with focused
+    /// store = Tasks, terminal task rows do not appear in the main-row region.
+    #[test]
+    fn cockpit_tasks_lane_excludes_terminal_rows_from_main_table() {
+        let mut app = cockpit_fixture_app();
+        // Sanity: fixture has T200 (accepted, terminal) + T100 (executing).
+        let buf = paint(&mut app, 120, 30);
+        let painted = buffer_to_string(&buf);
+        let lines: Vec<&str> = painted.lines().collect();
+        let middle: String = lines[4..lines.len() - 3].join("\n");
+        assert!(
+            middle.contains("T100"),
+            "active task T100 should be in focused-table region:\n{middle}"
+        );
+        assert!(
+            !middle.contains("T200"),
+            "terminal task T200 must NOT be in focused-table region (TasksRecentlyTerminal classification hidden):\n{middle}"
         );
     }
 }
