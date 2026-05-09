@@ -25,6 +25,37 @@ pub fn run(
 
     // Build diff entry from args
     let mut diff = build_entry_map(schema, |cli_name| {
+        // --acceptance-from-file: read one criterion per line (observations only)
+        if cli_name == "acceptance"
+            && matches
+                .try_contains_id("acceptance-from-file")
+                .unwrap_or(false)
+        {
+            if let Some(path) = matches.get_one::<String>("acceptance-from-file") {
+                let lines: Vec<String> = if path == "-" {
+                    use std::io::Read;
+                    let mut s = String::new();
+                    std::io::stdin().read_to_string(&mut s).ok();
+                    s.lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(str::to_string)
+                        .collect()
+                } else {
+                    std::fs::read_to_string(path)
+                        .map(|s| {
+                            s.lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                if !lines.is_empty() {
+                    return Some(lines);
+                }
+            }
+        }
+
         let from_file_key = format!("{cli_name}-from-file");
         if matches.try_contains_id(&from_file_key).unwrap_or(false) {
             if let Some(path) = matches.get_one::<String>(&from_file_key) {
@@ -313,5 +344,115 @@ fields:
         let upd_matches = upd_cmd.get_matches_from(["update", "L001", "--risk-flags", "A"]);
         run(&schema, &conn, &upd_matches, Actor::AiWithHuman.into()).unwrap();
         assert_eq!(stored_risk_flags(&conn), vec!["A"]);
+    }
+
+    // T117: structured error for invalid list-field value (names flag + rejected value)
+    #[test]
+    fn t117_invalid_list_value_error_names_flag_and_rejected_value() {
+        let (schema, conn) = observations_setup();
+        let upd_cmd = build_cmd(&schema, "update", true);
+        // dangling escape triggers split_csvish error
+        let upd_matches = upd_cmd.get_matches_from(["update", "L001", "--risk-flags", r"bad\"]);
+        let err = run(&schema, &conn, &upd_matches, Actor::AiWithHuman.into()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--risk-flags"),
+            "error must name the flag '--risk-flags'; got: {msg}"
+        );
+        assert!(
+            msg.contains(r"bad\"),
+            "error must include the rejected value; got: {msg}"
+        );
+    }
+
+    // T117: --acceptance-from-file on observations update
+    const OBS_ACCEPTANCE_SCHEMA: &str = r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: summary
+    type: text
+  - name: acceptance
+    type:
+      list: text
+"#;
+
+    fn acceptance_setup() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(OBS_ACCEPTANCE_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let ddl = crate::codegen::ddl::ddl_for(&schema);
+        conn.execute_batch(&ddl).unwrap();
+        let add_cmd = build_cmd(&schema, "add", false);
+        let add_matches = add_cmd.get_matches_from(["add", "--summary", "row"]);
+        crate::handlers::add::run(&schema, &conn, &add_matches, Actor::Human.into()).unwrap();
+        (schema, conn)
+    }
+
+    fn stored_acceptance(conn: &Connection) -> Vec<String> {
+        let raw: String = conn
+            .query_row(
+                "SELECT acceptance FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Vec<String>>(&raw).unwrap()
+    }
+
+    fn build_update_cmd_with_acceptance_from_file(schema: &Schema) -> clap::Command {
+        let mut cmd = build_cmd(schema, "update", true);
+        cmd = cmd.arg(
+            clap::Arg::new("acceptance-from-file")
+                .long("acceptance-from-file")
+                .required(false),
+        );
+        cmd
+    }
+
+    #[test]
+    fn t117_acceptance_from_file_writes_lines_as_list() {
+        let (schema, conn) = acceptance_setup();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "criterion one\ncriterion two\ncriterion three\n",
+        )
+        .unwrap();
+
+        let upd_cmd = build_update_cmd_with_acceptance_from_file(&schema);
+        let upd_matches = upd_cmd.get_matches_from([
+            "update",
+            "L001",
+            "--acceptance-from-file",
+            tmp.path().to_str().unwrap(),
+        ]);
+        run(&schema, &conn, &upd_matches, Actor::Human.into()).unwrap();
+        assert_eq!(
+            stored_acceptance(&conn),
+            vec!["criterion one", "criterion two", "criterion three"]
+        );
+    }
+
+    #[test]
+    fn t117_acceptance_from_file_skips_blank_lines() {
+        let (schema, conn) = acceptance_setup();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "first\n\nsecond\n   \nthird\n").unwrap();
+
+        let upd_cmd = build_update_cmd_with_acceptance_from_file(&schema);
+        let upd_matches = upd_cmd.get_matches_from([
+            "update",
+            "L001",
+            "--acceptance-from-file",
+            tmp.path().to_str().unwrap(),
+        ]);
+        run(&schema, &conn, &upd_matches, Actor::Human.into()).unwrap();
+        assert_eq!(
+            stored_acceptance(&conn),
+            vec!["first", "second", "third"]
+        );
     }
 }

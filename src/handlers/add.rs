@@ -29,6 +29,37 @@ pub fn run(
 
     // Build entry from CLI args
     let mut entry = build_entry_map(schema, |cli_name| {
+        // --acceptance-from-file: read one criterion per line (observations only)
+        if cli_name == "acceptance"
+            && matches
+                .try_contains_id("acceptance-from-file")
+                .unwrap_or(false)
+        {
+            if let Some(path) = matches.get_one::<String>("acceptance-from-file") {
+                let lines: Vec<String> = if path == "-" {
+                    use std::io::Read;
+                    let mut s = String::new();
+                    std::io::stdin().read_to_string(&mut s).ok();
+                    s.lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(str::to_string)
+                        .collect()
+                } else {
+                    std::fs::read_to_string(path)
+                        .map(|s| {
+                            s.lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                if !lines.is_empty() {
+                    return Some(lines);
+                }
+            }
+        }
+
         // --<name>-from-file takes precedence (single-element vec carrying the file body).
         let from_file_key = format!("{cli_name}-from-file");
         if matches.try_contains_id(&from_file_key).unwrap_or(false) {
@@ -2208,5 +2239,62 @@ workflow:
             status3, "planning",
             "T3 row stays at planning (no when=T1-true follow-on fires)"
         );
+    }
+
+    // T117: --acceptance-from-file on observations add
+
+    const OBS_ACCEPTANCE_SCHEMA: &str = r#"
+name: observations
+id_format: "L{:03d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: summary
+    type: text
+  - name: acceptance
+    type:
+      list: text
+"#;
+
+    fn build_add_cmd_with_acceptance_from_file(schema: &Schema) -> clap::Command {
+        let mut cmd = build_test_add_cmd(schema);
+        cmd = cmd.arg(
+            clap::Arg::new("acceptance-from-file")
+                .long("acceptance-from-file")
+                .required(false),
+        );
+        cmd
+    }
+
+    #[test]
+    fn t117_add_acceptance_from_file_writes_lines_as_list() {
+        let schema = Schema::from_yaml(OBS_ACCEPTANCE_SCHEMA).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "ac one\nac two\nac three\n").unwrap();
+
+        let cmd = build_add_cmd_with_acceptance_from_file(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--summary",
+            "test row",
+            "--acceptance-from-file",
+            tmp.path().to_str().unwrap(),
+        ]);
+        run(&schema, &conn, &matches, Actor::Human.into()).unwrap();
+
+        let raw: String = conn
+            .query_row(
+                "SELECT acceptance FROM observations WHERE display_id = 'L001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stored: Vec<String> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored, vec!["ac one", "ac two", "ac three"]);
     }
 }
