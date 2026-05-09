@@ -2,12 +2,15 @@
 
 **Date:** 2026-05-09
 **Type:** adhoc plan
+**Status:** done
 
 ## One-Loop Objective
 
 Clear all stale/stuck active tasks so the substrate can safely resume normal operation. Use manual/meta-substrate rescue where needed after the T118/T122 incidents: preserve useful work, avoid blind retry loops, add or document only the smallest observability/escape hatches needed for runner failure, and leave the queue in a legible state before restarting broad dogfood automation.
 
 ## Loop TODO
+
+Status: ✅ completed. The stale rescue set (`T117`, `T121`, `T122`) is cleared; see Final Rescue Status below.
 
 1. **Re-establish current state**
    - Read `docs/worklog/2026-05-09/01-engine-rescue-sketch-plan.md` first.

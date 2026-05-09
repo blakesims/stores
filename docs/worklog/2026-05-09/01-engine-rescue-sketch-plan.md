@@ -3,9 +3,17 @@
 **Date:** 2026-05-09
 **Type:** note
 
-## Next Loop Plan
+## Current Status
 
-Continue with the focused meta-substrate rescue loop in `docs/worklog/2026-05-09/02-meta-substrate-rescue-plan.md`. That plan is the handoff for the next context: clear/preserve T122 without another blind code-reviewer retry, add minimal failed-role observability, document a manual review escape hatch, and address generated projection hygiene enough to unblock rebases.
+Meta-substrate rescue loop is complete; details are in `docs/worklog/2026-05-09/02-meta-substrate-rescue-plan.md`.
+
+Concise outcome:
+
+- `T117` cleared: stale silent-zombie row was resumed, rebased, manually reviewed PASS, wrapped, accepted, merged (`bdaf46a`), cargo-installed, and reached `schema_migrated`.
+- `T122` cleared: useful subscriber-edge work was rebased, stale external-review base recovered, validated, accepted, merged (`07766bd`), deploy retry cleared, and reached `accepted`.
+- `T121` cleared: no executor code existed and latest plan review remained `NEEDS_WORK`; row was abandoned with a rescue rationale so it no longer blocks queue health.
+- Validation passed for rescued worktrees; `cargo install --path . --features runner-claude-code,runner-pi --locked --force` succeeded on main after merges.
+- Caveat: a later `stores agents run --once` resumed broader queue automation and scaffolded/started newer rows (`T124+`). The daemon has since been stopped to pause new creations while existing drive subprocesses continue.
 
 ## Sketch TODO
 
@@ -14,7 +22,7 @@ Continue with the focused meta-substrate rescue loop in `docs/worklog/2026-05-09
 3. **Salvage/manual-finish useful work** — patch reviewer findings directly in task worktrees where code exists; run tests; commit task-branch fixes. ✅ T120 shipped; T122 useful work checkpointed at `62519e7` and is back in `code_review`.
 4. **Reproduce lifecycle bug with tests** — encode the `T118` failure: non-empty but rejected plan + planning-block resume must not enter executor. ✅ tests added in `src/handlers/submit.rs`.
 5. **Install guardrails** — executor start requires non-empty plan plus latest relevant plan review `READY`; phase advancement requires prior phase execution/review success. ✅ guardrail/test commits on main: `bca5fd7`, `86b0614`, `e9ba39e`, plus fixture fix `8dfdad1`.
-6. **Clear queue deliberately** — merge/accept/close shipped rows; abandon contaminated/superseded rows; resolve duplicate observations and dangling locks. ⏳ next operational focus: T122 review/merge, T121 disposition, T117 disposition, duplicate ready observation cleanup.
+6. **Clear queue deliberately** — merge/accept/close shipped rows; abandon contaminated/superseded rows; resolve duplicate observations and dangling locks. ✅ rescue set cleared: T117/T122 shipped, T121 abandoned. Broader duplicate/new-row cleanup remains normal queue work.
 7. **Follow-up observability** — separately redesign/fix `stores watch` so it shows operator-actionable state instead of noisy internal buckets. ⏳ still pending; should be a dedicated follow-up after queue is safe.
 
 ## Current Snapshot
