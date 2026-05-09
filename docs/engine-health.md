@@ -2,19 +2,19 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-09 manual-control recovery. The live queue was drained to a trusted baseline: T014 and T116 reached `schema_migrated`; T108/T126/T128/T123/T134–T137 were retired; source-observation remint risks were closed; T124 shipped; T125/T127 were accepted after fresh ER PASS. New narrow primitive: `stores external_reviews run <ERID>` (`06403b5`). Critical safety fix: resume now always returns `blocked → planning` (`9f11fc5`) after T123 proved the old non-empty-plan path could execute a rejected/stale plan. Replacement integration-lane work is now L538/T138, with planner/executor set to Opus and driven as a single-row background subprocess.
+**Last updated:** 2026-05-09 watch/flowtop direction. The live queue was drained to a trusted baseline earlier today: T014 and T116 reached `schema_migrated`; T108/T126/T128/T123/T134–T137 were retired; source-observation remint risks were closed; T124 shipped; T125/T127 were accepted after fresh ER PASS. New narrow primitive: `stores external_reviews run <ERID>` (`06403b5`). Critical safety fix: resume now always returns `blocked → planning` (`9f11fc5`) after T123 proved the old non-empty-plan path could execute a rejected/stale plan. Replacement integration-lane work is L538/T138 and is now deep in execution under single-row background control. The next concrete observability path is L540/T139: Phase 1 of the `stores watch` read-only store-flow cockpit, grounded by the new `docs/ui-ux.md` doctrine and HTML mockups in `docs/worklog/2026-05-09/watch-mockups/`.
 
 ## The picture in one sentence
 
-**The engine can now be manually stabilized and can ship real work, but operator trust is still bounded by ceremony cost, resume/drive safety, and weak observability.** The immediate queue is clean; the upstream problem is control-plane fidelity: typed safety invariants before agent work, right-sized ceremony, pipeline-shaped watch surfaces, and empirical runner/model selection.
+**The engine can now be manually stabilized and can ship real work, but operator trust is still bounded by ceremony cost, lifecycle safety visibility, and weak observability.** The immediate queue is clean; the upstream problem is control-plane fidelity: typed safety invariants before agent work, right-sized ceremony, store-flow watch surfaces, and empirical runner/model selection.
 
 ## Read-this-first priority ladder
 
-1. **Drive L538/T138 as the clean replacement integration-lane contract, but under manual single-row control.** It supersedes abandoned T123/L528 and fixes the overfit: generic lane stops at `mark_integrated`; repo adapters own pre-land checks and post-land ceremony. Current run is background single-row, not broad daemon.
-2. **Resume/drive safety invariants before throughput.** `9f11fc5` made `resume` conservative (`blocked → planning`). Next safety work is proving no other lifecycle edge can execute stale/rejected work, and making this visible in watch/status.
-3. **Right-sized ceremony / T1 fast path.** T116 was a tiny exact-token matcher but consumed multiple long cycles. The engine preserved correctness, but at the wrong cost. Design a lightweight path with focused tests/review for local cosmetic work.
-4. **Empirical runner/model selection.** We changed T138 planner/executor to Opus based on judgment, not data. Capture role×runner×model, prompt/config hash, duration, token/cost, and outcome so model choice stops being vibes.
-5. **Watch/actionability truth.** `stores watch` still needs pipeline-shaped buckets: intake → observation triage → ratifiable contract → task execution/review → external review → accept/deploy → terminal history. It must expose daemon state, stale locks, held reasons, and safe next action.
+1. **Let L538/T138 finish under manual single-row control.** It supersedes abandoned T123/L528 and fixes the overfit: generic lane stops at `mark_integrated`; repo adapters own pre-land checks and post-land ceremony. Current run is background single-row, not broad daemon.
+2. **Ship L540/T139 watch cockpit Phase 1 through the engine.** `stores watch` should become a store-flow cockpit, not a raw task/observation dump. `docs/ui-ux.md` is now the durable doctrine; T139 is the implementation row.
+3. **Resume/drive safety invariants before throughput.** `9f11fc5` made `resume` conservative (`blocked → planning`). Next quick main-lane improvement: make status/watch/next-action clearly expose why a row is safe/unsafe to resume, and distinguish stale lock debris from live work.
+4. **Right-sized ceremony / T1 fast path.** T116 was a tiny exact-token matcher but consumed multiple long cycles. The engine preserved correctness, but at the wrong cost. Design a lightweight path with focused tests/review for local cosmetic work.
+5. **Empirical runner/model selection.** We changed T138 planner/executor to Opus based on judgment, not data. Capture role×runner×model, prompt/config hash, duration, token/cost, and outcome so model choice stops being vibes.
 6. **Native intake triage / draft drain.** Intake drafts remain a backlog. The front door needs to route/dedupe/escalate without queue-curator hand curation.
 7. **Auto-resolve / auto-promote edge hardening.** Manual cleanup closed the current remint holes, but the subscriber model still needs accepted/closed_out_of_band auto-resolve coverage and safe abandoned-task re-ratify semantics.
 8. **Manual-control primitives.** `external_reviews run <ERID>` helped. Need equivalent narrow verbs/status surfaces for single-row promote/scaffold/drive/review without daemon startup sweeps.
@@ -193,7 +193,7 @@ This doc is operational, but it should carry the architect's current strategic m
 
 1. **Control-plane safety before autonomy:** lifecycle invariants must make unsafe transitions impossible independent of model quality. T123/I033 is the proof.
 2. **Right-sized ceremony:** tiny safe repairs need a fast path; high-risk work still needs full contract/review/accept gates.
-3. **Front-door fidelity:** make intake/observations/watch pipeline-shaped and legible rather than a flat mixed list.
+3. **Front-door fidelity:** make intake/observations/watch store-flow-shaped and legible rather than a flat mixed list. `docs/ui-ux.md` and L540/T139 now define the first concrete implementation path.
 4. **Architect systematization:** route architecture-gray work to `architecture_reviews` against project Heart/Philosophy/Primitives; keep local agents local and Architect global.
 5. **Empirical engine telemetry:** make runner/model/harness/prompt choices measurable. Capture tokens/cost, prompt/config hashes, role/harness/model, wall time, outcomes, and experiment grouping before trying statistical inference.
 6. **Safe throughput:** once the queue is trustworthy, add priority + file-overlap scheduling so concurrency does not manufacture rebase debt.
@@ -202,16 +202,17 @@ This doc is operational, but it should carry the architect's current strategic m
 
 Operator-trust + actionability layers are much stronger after the 2026-05-08 recovery batch. The bottleneck has shifted: **the engine can finish work better than it can understand, sort, and visualize incoming work.** The next throughput gains come from front-of-engine fidelity, right-sized ceremony, empirical telemetry, then scheduler throughput.
 
-1. **L538/T138 integration lane v2** — current clean high-leverage task; keep it single-row/manual-controlled and review contract drift aggressively.
-2. **T1 ceremony fast path** — T116 shows the system is correct-ish but too expensive for small fixes.
-3. **Watch/actionability truth** — distinguish internal code review, external review, final human review, held zombies, stale locks, and safe next action.
-4. **Metrics instrumentation P1** — make runner/model/prompt choices empirical before further tuning Opus vs Sonnet vs Pi vs Codex.
-5. **Native intake triage / draft drain** — reduce dependency on ad hoc queue-curator sweeps.
-6. **Auto-resolve/auto-promote subscriber edges** — prevent ready-row residue and remint windows from recurring.
-7. **Manual narrow-control verbs** — more `external_reviews run <ERID>`-style single-row operations; fewer daemon startup sweeps.
-8. **Priority + file-overlap scheduler** — after visibility and safety are solid.
+1. **L538/T138 integration lane v2** — current clean high-leverage task; let it finish single-row/manual-controlled and review contract drift aggressively.
+2. **L540/T139 watch store-flow cockpit P1** — current clean observability task; implement the read-only store strip + focused table + selected detail shape from `docs/ui-ux.md`.
+3. **Quick main-lane engine improvement:** add a narrow status/inspection surface for stale dispatch locks vs live work. The daemon/locks warning keeps appearing, but the operator needs to know impact: harmless stale debris, live claimed work, or subscriber-blocking fault.
+4. **T1 ceremony fast path** — T116 shows the system is correct-ish but too expensive for small fixes.
+5. **Metrics instrumentation P1** — make runner/model/prompt choices empirical before further tuning Opus vs Sonnet vs Pi vs Codex.
+6. **Native intake triage / draft drain** — reduce dependency on ad hoc queue-curator sweeps.
+7. **Auto-resolve/auto-promote subscriber edges** — prevent ready-row residue and remint windows from recurring.
+8. **Manual narrow-control verbs** — more `external_reviews run <ERID>`-style single-row operations; fewer daemon startup sweeps.
+9. **Priority + file-overlap scheduler** — after visibility and safety are solid.
 
-Current picture: the queue is clean and the engine can do real work, but the upstream bottleneck is trust: safe lifecycle transitions, right-sized ceremony, legible control surfaces, and measured runner choices.
+Current picture: the queue is clean and the engine can do real work, but the upstream bottleneck is trust: safe lifecycle transitions, right-sized ceremony, legible control surfaces, and measured runner choices. The best quick main-thread improvement is not to implement T139 directly, but to add a small inspection primitive/status surface that explains stale dispatch locks and daemon/manual-engine impact in operator language.
 
 
 ## Recently shipped
