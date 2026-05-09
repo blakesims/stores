@@ -19,6 +19,22 @@ North star: starting the engine should feel like turning a key in a checked cock
 
 ## Program lanes
 
+### Lane 0 — Drive/worktree isolation fail-closed (direct fix now required)
+
+**Goal:** no mutating role agent may run in the main repo by accidental cwd inheritance. A task drive must either use an explicit `tasks.workspace_path` or fail closed before spawning planner/executor/reviewer processes.
+
+**Incident captured 2026-05-09:** T140 was manually started from `/home/blake/repos/experiments/stores` while its `tasks.workspace_path` was empty. `stores tasks drive` validates `workspace_path` only when present, then passes `None` to the runners. The Claude/Pi/Codex runners resolve `None` as `std::env::current_dir()`, so T140 agents inherited the main worktree. T139 did not have this problem because its row had `workspace_path=/home/blake/repos/experiments/stores-T139-watch-store-flow-cockpit-skeleton` and auto/manual drive ran from there.
+
+**Required direct fix:**
+
+1. `stores tasks drive <id>` must fail closed for mutating roles when `workspace_path` is empty or missing. No silent fallback to process cwd.
+2. If an escape hatch is needed for emergency/operator-lane work, make it explicit and noisy (for example `--allow-current-worktree`), print the resolved cwd, and record that choice in run/drive telemetry.
+3. Drive preflight/status/watch/plan-start should surface `workspace_path empty` as **not ignition-ready** / **unsafe to combust**.
+4. Task creation/scaffold paths for engine-driven tasks should create or require a task worktree before the row can be driven.
+5. Add tests for: empty `workspace_path` rejects normal `tasks drive`; invalid path rejects; valid path is passed to the runner; any explicit escape hatch is opt-in and logged.
+
+**Current containment:** T140's drive parent and current phase-3 executor were SIGSTOP'd to prevent further main-worktree mutation while preserving already-computed work in process memory. Resume only after deciding whether to salvage/commit current main WIP or move the task to a proper T140 worktree.
+
 ### Lane 1 — Ignition-ready engine surface (T140)
 
 **Goal:** when T140 completes, the current engine DB is clean/remapped enough that the engine can be started intentionally, with activation as the safety trigger.
@@ -295,18 +311,20 @@ Likely follow-ups:
 | 2026-05-09 | Second manual-main slice added: `stores runner-stats` summarizes `agent_runs` by role × harness × model with run counts, failures, durations, and token totals. Added `--display-id` for task-scoped reads; T139 currently shows planner/executor on claude-code Opus and reviewers on Pi, all exit 0 so far. Live aggregate exposed current economics: pi executor/wrap have high failure counts; claude-code executor/planner runs are slower but currently all exit 0 in the aggregate. Tests: `cargo test --lib cli::runner_stats::tests --quiet`; `cargo check --quiet`. |
 | 2026-05-09 | Added provenance-hardening follow-up to this plan after T140 cycle 1 burned a REVISE on an invalid executor-reported commit SHA. Desired fix: `submit-execute` captures/validates workspace HEAD itself and reviewers inspect immutable recorded commits. |
 | 2026-05-09 | Implemented first provenance-hardening slice: `submit-execute` now captures workspace `HEAD` when `tasks.workspace_path` is readable, stores it as authoritative `executor.commit`, preserves mismatching model-provided SHA as `executor.claimed_commit` plus `executor.commit_resolution`, and code-reviewer brief now tells reviewers to treat system-captured commit as authoritative. Tests: `cargo test --lib submit_execute --quiet`; `cargo check --quiet`. Remaining hardening: make reviewer diff/checkouts fully commit-anchored instead of moving-HEAD. |
+| 2026-05-09 | Discovered a serious drive/worktree isolation hole: manual `stores tasks drive T140` ran from main because T140 had empty `workspace_path`, and runners fall back to inherited cwd when passed `None`. Added Lane 0 direct fix above. Containment: SIGSTOP'd T140 drive PID 901217 and child executor PID 1303849; T139 remains isolated in its own worktree. |
 
 ## Immediate next actions
 
-1. Monitor T140 plan review; ensure plan includes full DB cleanup/remap, not just logic changes.
-2. Monitor T139 phase 3 executor; keep cockpit work moving.
-3. Next manual-main slice candidates:
+1. Implement Lane 0 drive/worktree isolation fail-closed behavior directly before resuming T140: normal `tasks drive` must reject empty `workspace_path` instead of inheriting main cwd.
+2. Decide T140 salvage path while its drive/executor are paused: either preserve/commit current main WIP intentionally, or transplant to a proper T140 worktree before continuing.
+3. Monitor T139 phase 3 executor; keep cockpit work moving.
+4. Next manual-main slice candidates:
    - add submit-execute commit provenance validation / system-captured HEAD; or
    - add rate-limit typed classification/status display; or
    - refine `stores engine locks` with age filtering / JSON consumers after T140 needs are clearer; or
    - add recent-runner-failure drilldown once `runner-stats` has proven useful.
-4. Keep queue-curator's audit doc linked as T140 fixture/input.
-5. Do not raw-SQL mutate `.stores/db.sqlite`; all cleanup goes through substrate verbs or T140 primitives.
+5. Keep queue-curator's audit doc linked as T140 fixture/input.
+6. Do not raw-SQL mutate `.stores/db.sqlite`; all cleanup goes through substrate verbs or T140 primitives.
 
 ## Parking lot
 
