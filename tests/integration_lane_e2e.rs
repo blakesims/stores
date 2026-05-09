@@ -29,7 +29,7 @@ use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use stores::flow::agents_yaml::{Subscription, TransitionEdge};
 use stores::flow::policies_yaml::PoliciesYaml;
 use stores::flow::{AgentEntry, AgentsYaml, RetryPolicy};
-use stores::handlers::agents_run::poll_once;
+use stores::handlers::agents_run::{poll_once_with_guard, FsBinaryIdentityProvider};
 use stores::handlers::framework_migrate::ensure_integration_singleton_index;
 use stores::schema::Schema;
 
@@ -281,10 +281,13 @@ fn cfg_path() -> PathBuf {
     PathBuf::from("/tmp/stores-test-no-config-integration-lane-e2e.yaml")
 }
 
-/// Drive `poll_once` repeatedly until `predicate` holds or `max_iters`
-/// elapse. Returns the iteration count at success. After every poll we run
-/// `between_polls(conn)` so callers can sample invariants such as the
-/// singleton constraint on `status='integrating'`.
+/// Drive `poll_once_with_guard` repeatedly until `predicate` holds or
+/// `max_iters` elapse. Returns the iteration count at success. After every
+/// poll we run `between_polls(conn)` so callers can sample invariants such
+/// as the singleton constraint on `status='integrating'`. AC5.4 / AC5.8
+/// require this helper to drive the daemon dispatch path mechanically — we
+/// call `poll_once_with_guard::<FsBinaryIdentityProvider>` with `None` for
+/// the exe guard, matching the daemon's invocation shape.
 fn drive_daemon_until<F, B>(
     conn: &Connection,
     agents: &AgentsYaml,
@@ -300,7 +303,16 @@ where
     let cfg = cfg_path();
     for i in 0..max_iters {
         between_polls(conn);
-        let _ = poll_once(conn, agents, &policies, &cfg, "test-claimer", "epoch").unwrap();
+        let _ = poll_once_with_guard::<FsBinaryIdentityProvider>(
+            conn,
+            agents,
+            &policies,
+            &cfg,
+            "test-claimer",
+            "epoch",
+            None,
+        )
+        .unwrap();
         between_polls(conn);
         if predicate(conn) {
             return i + 1;
@@ -351,22 +363,17 @@ fn serialized_two_candidate_landing_via_daemon_poll() {
         max_observed.get()
     );
 
-    // Determine integration order from the SHA chain (started_at is only
-    // second-precision so we cannot rely on timestamp ordering).
+    // T100 (A) was seeded first → its (accepted, integration_queued)
+    // transition_history row has a lower id → poll_once_with_guard
+    // dispatches it first (the inner SELECT orders by id ASC). The singleton
+    // index on status='integrating' then forces T101 (B) to wait until A
+    // releases. Therefore B's base_main_sha must equal A's landed_main_sha.
     let a_landed = attempts_field(&conn, "T100", "last", "landed_main_sha").unwrap();
-    let a_base = attempts_field(&conn, "T100", "last", "base_main_sha").unwrap();
-    let b_landed = attempts_field(&conn, "T101", "last", "landed_main_sha").unwrap();
     let b_base = attempts_field(&conn, "T101", "last", "base_main_sha").unwrap();
-
-    // Whichever row landed first, the other must have its base_main_sha equal
-    // to the predecessor's landed_main_sha. Test for both possible orderings.
-    let ordered_first_a = a_landed == b_base;
-    let ordered_first_b = b_landed == a_base;
-    assert!(
-        ordered_first_a || ordered_first_b,
-        "AC5.4: successor base_main_sha must equal predecessor landed_main_sha; \
-         got A.base={} A.landed={} B.base={} B.landed={}",
-        a_base, a_landed, b_base, b_landed
+    assert_eq!(
+        b_base, a_landed,
+        "AC5.4: B (T101) base_main_sha must equal A (T100) landed_main_sha — \
+         B must be validated against the main head produced by A"
     );
 }
 
@@ -637,7 +644,16 @@ fn post_integrated_handoff_repo_specific_variant_b_no_subscriber() {
     let policies = empty_policies();
     let cfg = cfg_path();
     for _ in 0..5 {
-        let _ = poll_once(&conn, &agents, &policies, &cfg, "test-claimer", "epoch").unwrap();
+        let _ = poll_once_with_guard::<FsBinaryIdentityProvider>(
+            &conn,
+            &agents,
+            &policies,
+            &cfg,
+            "test-claimer",
+            "epoch",
+            None,
+        )
+        .unwrap();
     }
     assert_eq!(task_status(&conn, "T800"), "integrated");
 
@@ -785,35 +801,72 @@ fn copy_dir(src: &Path, dst: &Path) {
 fn integration_attempts_provenance_happy_path_and_retry() {
     let conn = fresh_db();
     let (_tmp, repo) = init_two_commit_repo();
-    add_branch_with_unique_change(&repo, "feat/prov", "prov.txt", "prov\n");
+    add_branch_with_unique_change(&repo, "feat/prov-hp", "prov_hp.txt", "hp\n");
+    add_branch_with_unique_change(&repo, "feat/prov-rt", "prov_rt.txt", "rt\n");
 
-    seed_queued_task(&conn, "T900", "feat/prov", repo.to_str().unwrap());
-
-    // First attempt: pre_land_check fails → integration_blocked, attempt #1.
-    let agents_fail = integrate_only_agents("false", false, "origin");
-    drive_daemon_until(&conn, &agents_fail, 5, |_| {}, |c| {
-        task_status(c, "T900") == "integration_blocked"
+    // ── Part 1 (AC5.7 first half): single happy-path attempt → length 1.
+    // T900 integrates cleanly; the provenance ledger has exactly one entry
+    // with attempt_no=1 and outcome='integrated'.
+    seed_queued_task(&conn, "T900", "feat/prov-hp", repo.to_str().unwrap());
+    let agents_pass = integrate_only_agents("true", false, "origin");
+    drive_daemon_until(&conn, &agents_pass, 5, |_| {}, |c| {
+        task_status(c, "T900") == "integrated"
     });
-    assert_eq!(attempts_count(&conn, "T900"), 1);
+    assert_eq!(
+        attempts_count(&conn, "T900"),
+        1,
+        "AC5.7: after the first happy-path attempt, length must be 1"
+    );
     assert_eq!(attempts_field_int(&conn, "T900", "0", "attempt_no"), Some(1));
     assert_eq!(
         attempts_field(&conn, "T900", "0", "outcome").as_deref(),
+        Some("integrated"),
+        "AC5.7: first happy-path attempt must record outcome='integrated'"
+    );
+    for f in [
+        "base_main_sha",
+        "candidate_head_before",
+        "candidate_head_after",
+        "landed_main_sha",
+    ] {
+        let v = attempts_field(&conn, "T900", "0", f).unwrap_or_default();
+        assert!(
+            !v.is_empty() && v.len() >= 7,
+            "AC5.7: $[0].{} must be populated on the happy-path attempt; got: {:?}",
+            f,
+            v
+        );
+    }
+
+    // ── Part 2 (AC5.7 second half): retry semantics — failure-then-success
+    // appends a fresh entry with attempt_no=2, preserving the prior failure.
+    // T901 first hits pre_land_check → integration_blocked, then we
+    // synthesize the retry edge and re-poll with a passing check.
+    seed_queued_task(&conn, "T901", "feat/prov-rt", repo.to_str().unwrap());
+    let agents_fail = integrate_only_agents("false", false, "origin");
+    drive_daemon_until(&conn, &agents_fail, 5, |_| {}, |c| {
+        task_status(c, "T901") == "integration_blocked"
+    });
+    assert_eq!(attempts_count(&conn, "T901"), 1);
+    assert_eq!(attempts_field_int(&conn, "T901", "0", "attempt_no"), Some(1));
+    assert_eq!(
+        attempts_field(&conn, "T901", "0", "outcome").as_deref(),
         Some("pre_land_check_failed")
     );
 
-    // Synthesize a retry: the schema declares retry-integration as
-    // ai_with_human, which the framework helper cannot fire. Force the row
-    // back to integration_queued and append a fresh transition_history row
-    // matching the integrate subscription's recovery edge so poll can
-    // re-dispatch.
+    // Synthesize a retry: schema declares retry-integration as ai_with_human
+    // (out of reach for the framework helper). Force back to
+    // integration_queued and append the recovery transition_history row so
+    // the integrate subscription on (integration_blocked, integration_queued)
+    // can re-dispatch.
     conn.execute(
-        "UPDATE tasks SET status='integration_queued' WHERE display_id='T900'",
+        "UPDATE tasks SET status='integration_queued' WHERE display_id='T901'",
         [],
     )
     .unwrap();
     let row_id: i64 = conn
         .query_row(
-            "SELECT id FROM tasks WHERE display_id='T900'",
+            "SELECT id FROM tasks WHERE display_id='T901'",
             [],
             |r| r.get(0),
         )
@@ -821,7 +874,7 @@ fn integration_attempts_provenance_happy_path_and_retry() {
     conn.execute(
         "INSERT INTO transition_history \
          (store, row_id, display_id, from_status, to_status, verb, invoker, occurred_at) \
-         VALUES ('tasks', ?1, 'T900', 'integration_blocked', 'integration_queued', \
+         VALUES ('tasks', ?1, 'T901', 'integration_blocked', 'integration_queued', \
                  'retry-integration', 'ai_with_human', '2026-05-09T01:00:00Z')",
         rusqlite::params![row_id],
     )
@@ -831,13 +884,13 @@ fn integration_attempts_provenance_happy_path_and_retry() {
     // production retry path reuses the lock via claim_for_retry; for this
     // direct-driven test we clear the lock so try_claim succeeds afresh.
     conn.execute(
-        "DELETE FROM dispatch_locks WHERE display_id='T900' AND agent_name='integrate'",
+        "DELETE FROM dispatch_locks WHERE display_id='T901' AND agent_name='integrate'",
         [],
     )
     .unwrap();
 
-    // Re-wire the integrate agent to subscribe to the recovery edge for
-    // this poll loop and to use a passing pre_land_check.
+    // Re-wire the integrate agent to subscribe to the recovery edge with a
+    // passing pre_land_check.
     let mut args = serde_yaml::Mapping::new();
     args.insert(
         serde_yaml::Value::String("pre_land_check".into()),
@@ -863,34 +916,38 @@ fn integration_attempts_provenance_happy_path_and_retry() {
     };
 
     drive_daemon_until(&conn, &agents_retry, 10, |_| {}, |c| {
-        task_status(c, "T900") == "integrated"
+        task_status(c, "T901") == "integrated"
     });
 
-    // AC5.7: array length 2; attempt_no values exactly {1, 2}.
-    assert_eq!(attempts_count(&conn, "T900"), 2);
-    assert_eq!(attempts_field_int(&conn, "T900", "0", "attempt_no"), Some(1));
-    assert_eq!(attempts_field_int(&conn, "T900", "1", "attempt_no"), Some(2));
-    // First entry's failure outcome is preserved.
+    // AC5.7: post-retry → length 2 with attempt_no values exactly {1, 2}.
     assert_eq!(
-        attempts_field(&conn, "T900", "0", "outcome").as_deref(),
-        Some("pre_land_check_failed")
+        attempts_count(&conn, "T901"),
+        2,
+        "AC5.7: after retry, length must be 2"
     );
-    // Second entry is the success.
+    assert_eq!(attempts_field_int(&conn, "T901", "0", "attempt_no"), Some(1));
+    assert_eq!(attempts_field_int(&conn, "T901", "1", "attempt_no"), Some(2));
+    // Prior failure preserved at $[0].
     assert_eq!(
-        attempts_field(&conn, "T900", "1", "outcome").as_deref(),
+        attempts_field(&conn, "T901", "0", "outcome").as_deref(),
+        Some("pre_land_check_failed"),
+        "AC5.7: prior failure outcome must be preserved at $[0]"
+    );
+    // New success appended at $[1].
+    assert_eq!(
+        attempts_field(&conn, "T901", "1", "outcome").as_deref(),
         Some("integrated")
     );
-    // All SHA fields populated on the success entry.
     for f in [
         "base_main_sha",
         "candidate_head_before",
         "candidate_head_after",
         "landed_main_sha",
     ] {
-        let v = attempts_field(&conn, "T900", "1", f).unwrap_or_default();
+        let v = attempts_field(&conn, "T901", "1", f).unwrap_or_default();
         assert!(
             !v.is_empty() && v.len() >= 7,
-            "AC5.7: $[1].{} must be populated; got: {:?}",
+            "AC5.7: $[1].{} must be populated on the retry-success entry; got: {:?}",
             f,
             v
         );
