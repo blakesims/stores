@@ -5,6 +5,9 @@ ACTIVE WORK (1)
 T010 executing ▮▱ ··· in-flight
 RATIFY-U1 (0)
 ACCEPT-U3 (0)
+INTEGRATION (0)
+INTEGRATED (0)
+HELD-INTEGRATION (0)
 HELD-BLOCKED (2)
 T020 blocked rate_limit reason:rate_limit
 T021 blocked transient_infra reason:transient_infra

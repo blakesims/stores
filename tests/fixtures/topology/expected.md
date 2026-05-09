@@ -26,6 +26,10 @@ stateDiagram-v2
   in_review --> closed_out_of_band :  H! close-out-of-band
   rejected --> closed_out_of_band :  H! close-out-of-band
   deploy_blocked --> closed_out_of_band :  H! close-out-of-band
+  integration_queued --> closed_out_of_band :  H! close-out-of-band
+  integrating --> closed_out_of_band :  H! close-out-of-band
+  integration_blocked --> closed_out_of_band :  H! close-out-of-band
+  integrated --> closed_out_of_band :  H! close-out-of-band
   planning --> plan_review :  A submit-plan
   planning --> ready :  F skip-plan
   plan_review --> ready :  A submit-plan-review [READY]
@@ -40,17 +44,20 @@ stateDiagram-v2
   code_review --> blocked :  A submit-review [REVISE]
   code_review --> blocked :  A submit-review [FAIL]
   blocked --> planning :  H+ resume
-  blocked --> ready :  H+ resume
   planning --> blocked :  F mark_drive_failed
   plan_review --> blocked :  F mark_drive_failed
   ready --> blocked :  F mark_drive_failed
   executing --> blocked :  F mark_drive_failed
   code_review --> blocked :  F mark_drive_failed
-  accepted --> deploy_blocked :  F mark_deploy_blocked
-  deploy_blocked --> accepted :  H+ retry-deploy
-  accepted --> cargo_installed :  F mark_cargo_installed
+  accepted --> integration_queued :  F enqueue-integration
+  integration_queued --> integrating :  F start-integration
+  integrating --> integrated :  F mark_integrated
+  integrating --> integration_blocked :  F mark_integration_blocked
+  integration_blocked --> integration_queued :  H+ retry-integration
+  integrated --> cargo_installed :  F mark_cargo_installed
   cargo_installed --> schema_migrated :  F mark_schema_migrated
   cargo_installed --> deploy_blocked :  F mark_deploy_blocked
+  deploy_blocked --> accepted :  H+ retry-deploy
   complete --> in_review :  F request_review
   in_review --> executing :  F submit-external-review [REVISE]
   in_review --> accepted :  H! accept
@@ -65,6 +72,10 @@ stateDiagram-v2
   in_review --> abandoned :  H! abandon
   deploy_blocked --> abandoned :  H! abandon
   complete --> abandoned :  H! abandon
+  integration_queued --> abandoned :  H! abandon
+  integrating --> abandoned :  H! abandon
+  integration_blocked --> abandoned :  H! abandon
+  integrated --> abandoned :  H! abandon
 ```
 
 ---
@@ -81,6 +92,7 @@ stateDiagram-v2
   investigating --> investigation_failed :  F investigation-failed
   open --> wont_fix :  H+ wont_fix
   open --> resolved :  A close_as_addressed
+  ready --> resolved :  A close_as_addressed
   investigating --> confirmed :  H+ confirm
   confirmed --> ready :  F ratify
   investigating --> needs_info :  A request_info
@@ -89,6 +101,7 @@ stateDiagram-v2
   confirmed --> in_progress :  A claim
   in_progress --> resolved :  A resolve
   confirmed --> wont_fix :  H+ wont_fix
+  ready --> wont_fix :  H+ wont_fix
   open --> resolved :  F auto_resolve
   investigating --> resolved :  F auto_resolve
   confirmed --> resolved :  F auto_resolve
@@ -131,5 +144,6 @@ stateDiagram-v2
   complete --> in_review :  F ⇒ auto
   state "wrap" as in_review_role_0_wrap
   in_review --> in_review_role_0_wrap :  A → wrap
+  accepted --> integration_queued :  F ⇒ auto
 ```
 
