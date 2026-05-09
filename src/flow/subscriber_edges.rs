@@ -7,8 +7,8 @@
 //! every valid lifecycle transition whose `to` status matches the agent's required
 //! trigger status must appear in the agent's declared `subscribes_to` list in
 //! `agents.yaml`, OR be explicitly listed as an opted-out edge with a documented
-//! rationale. Contracts are evaluated at `cargo test` time against three canonical
-//! surfaces and the bundled lifecycle schemas:
+//! rationale. Contracts are evaluated at `cargo test` time against two committed
+//! canonical surfaces and the bundled lifecycle schemas:
 //!
 //! - **`docs/agents-yaml-example.yaml`** (compile-time embedded, always present
 //!   in the repo): the authoritative docs template for the post-T138 ceremony
@@ -22,11 +22,14 @@
 //!   are evaluated against this fixture. The fixture is kept in sync with the
 //!   docs template for the agents it shares; drift is caught by the
 //!   `fixture_yaml_includes_t020_builtins` test in `tests/`.
-//! - **`.stores/agents.yaml`** (read at test runtime): the rendered production
-//!   subscriber config. Always evaluated at `cargo test` time — fails-loud if
-//!   the file is absent so that silent-omission regressions in the actual
-//!   rendered config cannot ship. In this repo, `.stores/agents.yaml` is always
-//!   present as a symlink to the live stores workspace.
+//!
+//! Both surfaces are committed and `include_str!`'d at compile time so the
+//! contracts run reproducibly in any checkout. The previous third surface —
+//! a runtime read of `.stores/agents.yaml` — was removed because `.stores/`
+//! is gitignored, the symlink was a per-worktree operator artifact, and in
+//! this repo it always pointed back to one of the two committed surfaces
+//! (so the smoke test added no independent signal while making `cargo test`
+//! depend on uncommitted local state).
 //!
 //! A failing contract fails the test suite, preventing I027/I024-class
 //! silent-omission regressions from shipping.
@@ -308,23 +311,6 @@ fn load_canonical_agents() -> AgentsYaml {
 fn load_docs_example_agents() -> AgentsYaml {
     const YAML: &str = include_str!("../../docs/agents-yaml-example.yaml");
     AgentsYaml::from_yaml(YAML).expect("docs/agents-yaml-example.yaml must parse cleanly")
-}
-
-/// Reads `.stores/agents.yaml` at test runtime (the rendered production
-/// subscriber config, typically a symlink in a live worktree). Panics if the
-/// file is absent or unreadable — fails-loud so that silent-omission regressions
-/// in the actual rendered config cannot ship undetected. In this repo,
-/// `.stores/agents.yaml` is always present as a symlink to the live workspace.
-fn load_stores_agents() -> AgentsYaml {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".stores/agents.yaml");
-    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!(
-            ".stores/agents.yaml must be accessible at cargo-test time ({path}): {e}\n\
-             Ensure the .stores/ symlinks are set up in this worktree.",
-            path = path.display()
-        )
-    });
-    AgentsYaml::from_yaml(&yaml).expect(".stores/agents.yaml must parse cleanly")
 }
 
 fn load_transitions(store: &str) -> Vec<Transition> {
@@ -715,27 +701,6 @@ agents:
                 result.outcome,
                 CheckOutcome::Pass,
                 "contract '{}' failed against docs/agents-yaml-example.yaml: {:?}",
-                contract.name(),
-                result.reason
-            );
-        }
-    }
-
-    /// Smoke run against `.stores/agents.yaml` (the rendered production subscriber
-    /// config). Always runs — fails-loud if the file is absent so that silent
-    /// omissions in the actual running config cannot ship. Evaluates all four
-    /// contracts against the live rendered surface; guards the third canonical
-    /// surface from the ER344 finding.
-    #[test]
-    fn all_contracts_pass_against_stores_agents_yaml() {
-        let agents = load_stores_agents();
-        for contract in registry() {
-            let transitions = load_transitions(contract.store());
-            let result = contract.evaluate(&agents, &transitions);
-            assert_eq!(
-                result.outcome,
-                CheckOutcome::Pass,
-                "contract '{}' failed against .stores/agents.yaml: {:?}",
                 contract.name(),
                 result.reason
             );
