@@ -1,3 +1,5 @@
+<!-- ARCHIVED: Historical context only. Not a current executable contract or active doctrine. See docs/CLAUDE.md for active durable docs. -->
+
 # Stores Framework — Handoff v0.1 → v0.2
 
 **Date:** 2026-04-26

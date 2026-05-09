@@ -1,3 +1,5 @@
+<!-- ARCHIVED: Historical context only. Not a current executable contract or active doctrine. See docs/CLAUDE.md for active durable docs. -->
+
 # POC: stores auto-scaffold integration with 10.06 `./dev`
 
 **Date:** 2026-05-05

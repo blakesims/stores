@@ -1,3 +1,4 @@
+# ARCHIVED EXAMPLE: historical agents.yaml reference; not current executable config. See .stores/agents.yaml and docs/agents-and-policies.md.
 # Reference `.stores/agents.yaml` — the post-accept ceremony.
 #
 # After a human-fired `tasks accept`, three subscribers chain in dependency

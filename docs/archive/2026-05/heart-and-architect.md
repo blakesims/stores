@@ -1,3 +1,5 @@
+<!-- ARCHIVED: Historical context only. Not a current executable contract or active doctrine. See docs/CLAUDE.md for active durable docs. -->
+
 # Heart & Architect
 
 **Path:** `docs/heart-and-architect.md`

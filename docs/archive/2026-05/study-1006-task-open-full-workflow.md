@@ -1,3 +1,5 @@
+<!-- ARCHIVED: Historical context only. Not a current executable contract or active doctrine. See docs/CLAUDE.md for active durable docs. -->
+
 # Study: 10.06 `task:open` end-to-end, mapped to the `stores` substrate
 
 **Author:** subagent dispatched 2026-05-05
