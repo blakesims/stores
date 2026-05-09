@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod engine;
 pub mod auth;
 pub mod dispatch;
 pub mod dynamic;

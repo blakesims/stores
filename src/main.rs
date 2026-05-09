@@ -146,6 +146,22 @@ fn main() -> Result<()> {
             };
             cli::metrics::run(args)?;
         }
+        Some(("engine", sub)) => {
+            match sub.subcommand() {
+                Some(("locks", lsub)) => {
+                    let json = *lsub.get_one::<bool>("json").unwrap_or(&false)
+                        || matches.get_flag("json");
+                    cli::engine::run_locks(json)?;
+                }
+                _ => {
+                    let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
+                    if let Some(engine_cmd) = cmd2.find_subcommand_mut("engine") {
+                        engine_cmd.print_help()?;
+                        println!();
+                    }
+                }
+            }
+        }
         Some(("runs", sub)) => {
             use cli::runs::{run as runs_run, RunsCmd};
             let cmd = match sub.subcommand() {

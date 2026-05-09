@@ -276,13 +276,16 @@ Likely follow-ups:
 | 2026-05-09 | T140 created and driven; expanded to full ignition-ready cleanup/remap + activation gate. |
 | 2026-05-09 | Queue-curator audit updated with full row-level mapping (§10). |
 | 2026-05-09 | Manual-main candidates identified: locks inspector, telemetry, rate-limit typing, T1 fast path measurement. |
+| 2026-05-09 | First manual-main slice shipped locally: `stores engine locks` read-only dispatch_locks inspector. Current live DB: live=0, retry_wait=0, stale_blocking=0, orphaned=0, fresh_failure=4 (T081/T122/T018 accepted-row ceremony failures), stale_harmless=1093. Tests: `cargo test --lib cli::engine::tests --quiet`; `cargo check --quiet`. |
 
 ## Immediate next actions
 
 1. Monitor T140 plan review; ensure plan includes full DB cleanup/remap, not just logic changes.
 2. Monitor T139 phase 3 executor; keep cockpit work moving.
-3. Pick one manual-main slice after T140 plan stabilizes:
-   - strongest first pick: read-only `stores locks status` / `stores engine health`.
+3. Next manual-main slice candidates:
+   - expose runner/model telemetry more clearly; or
+   - add rate-limit typed classification/status display; or
+   - refine `stores engine locks` with age filtering / JSON consumers after T140 needs are clearer.
 4. Keep queue-curator's audit doc linked as T140 fixture/input.
 5. Do not raw-SQL mutate `.stores/db.sqlite`; all cleanup goes through substrate verbs or T140 primitives.
 

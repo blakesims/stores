@@ -277,6 +277,21 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .help("Override wall-clock 'now' for duration windows (RFC3339); makes output deterministic"),
                 ),
         )
+        // Engine operator diagnostics
+        .subcommand(
+            Command::new("engine")
+                .about("Operator diagnostics for engine startup and dispatch health")
+                .subcommand(
+                    Command::new("locks")
+                        .about("Classify dispatch_locks as live, retrying, stale, orphaned, or failed")
+                        .arg(
+                            Arg::new("json")
+                                .long("json")
+                                .action(ArgAction::SetTrue)
+                                .help("Render JSON output"),
+                        ),
+                ),
+        )
         // Runs transcript index/query surface
         .subcommand(
             Command::new("runs")
