@@ -445,16 +445,13 @@ pub fn obs_visibility_class(
 
 fn is_silent_zombie_reason(reason: &str) -> bool {
     let reason = reason.trim().to_ascii_lowercase();
-    // Exact canonical tokens and known drive_failed variants; the colon-namespace
-    // form "silent_zombie:<detail>" is also accepted as a namespaced extension,
-    // but plain suffix attachment (silent_zombieish) is not.
     matches!(
         reason.as_str(),
         "silent_zombie"
             | "drive_failed:silent_zombie"
             | "drive_failed:silent_zombie_pid_dead"
             | "drive_failed:pid_never_recorded"
-    ) || reason.starts_with("silent_zombie:")
+    )
 }
 
 fn is_recoverable_deploy_reason(reason: &str) -> bool {
@@ -1787,8 +1784,8 @@ mod tests {
         // known drive_failed variants (real substrate data)
         assert!(is_silent_zombie_reason("drive_failed:silent_zombie_pid_dead"));
         assert!(is_silent_zombie_reason("drive_failed:pid_never_recorded"));
-        // colon-namespace form ("silent_zombie: pid dead")
-        assert!(is_silent_zombie_reason("silent_zombie: pid dead"));
+        // colon-namespace form must NOT match (not in canonical set)
+        assert!(!is_silent_zombie_reason("silent_zombie: pid dead"));
         // case and whitespace tolerance (trimmed + lowercased)
         assert!(is_silent_zombie_reason("  Silent_Zombie  "));
         // plain suffix attachment must NOT match (the regression this test locks)
