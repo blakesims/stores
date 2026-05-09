@@ -1802,11 +1802,17 @@ pub(crate) fn compute_resume(
     let mut txt_fields: BTreeMap<String, String> = BTreeMap::new();
     txt_fields.insert("blocked_reason".to_string(), String::new());
 
-    // T054: route plan-empty rows back to planning regardless of tier so the
-    // planning on-entry cascade re-fires idempotently. For T1 rows that
-    // case is the contract-synthesis path (skip-plan synthesizes a one-phase
-    // plan, then ready → executing); for T2/T3 rows the planner is
-    // re-dispatched. Plan-populated rows resume to ready as before.
+    // T054/I033: resume may only route to ready/executing when the row has an
+    // executable plan. "plan is non-empty" is insufficient: T118 proved a row
+    // can have a non-empty *rejected* plan, then block during revision planning;
+    // resuming that shape to ready executes an invalid plan. For T2/T3 rows,
+    // require latest plan_review_log.gate == READY. T1 keeps the contract-is-plan
+    // path because skip-plan synthesizes its executable plan from the contract.
+    let tier_hint = existing
+        .get("tier_hint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let is_t1 = tier_hint == "T1";
     let plan_is_empty = existing
         .get("plan")
         .map(|v| match v {
@@ -1816,7 +1822,28 @@ pub(crate) fn compute_resume(
             _ => false,
         })
         .unwrap_or(true);
-    let resume_target = if plan_is_empty { "planning" } else { "ready" };
+    let latest_plan_review_ready = existing
+        .get("plan_review_log")
+        .and_then(|v| match v {
+            serde_json::Value::Array(items) => items.last().cloned(),
+            serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
+                .ok()
+                .and_then(|parsed| parsed.as_array().and_then(|items| items.last().cloned())),
+            _ => None,
+        })
+        .and_then(|last| {
+            last.get("gate")
+                .and_then(|v| v.as_str())
+                .map(|gate| gate == "READY")
+        })
+        .unwrap_or(false);
+    let resume_target = if plan_is_empty {
+        "planning"
+    } else if is_t1 || latest_plan_review_ready {
+        "ready"
+    } else {
+        "planning"
+    };
 
     // Step 8: write blocked → resume_target
     write_status_and_fields(
@@ -3595,14 +3622,15 @@ fields:
         let contract = r#"{"done_when":"fixed","scope_in":"resume","scope_out":"none"}"#;
         let plan = r#"{"phases":[{"name":"phase 1"}]}"#;
         let dead_pid = 0x7fff_fffe_i64;
+        let plan_review_log = r#"[{"gate":"READY","summary":"approved for execution"}]"#;
         conn.execute(
             "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
-             title, slug, branch, workspace_path, tier_hint, contract, plan, current_phase, current_cycle, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, plan_review_log, current_phase, current_cycle, \
              blocked_reason, drive_pid, drive_started_at) \
              VALUES ('T900', 'blocked', ?1, ?1, 'framework', 'framework', \
              'resume stale drive pid', 'resume-stale-drive-pid', 'feat/t900', '/tmp/no-such', 'T3', \
-             ?2, ?3, 1, 1, 'drive_failed:silent_zombie_pid_dead', ?4, ?1)",
-            rusqlite::params![now, contract, plan, dead_pid],
+             ?2, ?3, ?4, 1, 1, 'drive_failed:silent_zombie_pid_dead', ?5, ?1)",
+            rusqlite::params![now, contract, plan, plan_review_log, dead_pid],
         )
         .unwrap();
         let row_id = conn.last_insert_rowid();
@@ -3717,6 +3745,116 @@ fields:
         assert_eq!(from_s, "blocked");
         assert_eq!(to_s, "planning");
         assert_eq!(verb, "resume");
+    }
+
+    /// I033 regression: a T2/T3 row with a non-empty but latest-rejected plan
+    /// must not resume blocked → ready → executing. The T118 failure shape was:
+    /// planner produced a plan, plan_reviewer returned NEEDS_WORK, the revision
+    /// planner drive died in planning, and resume saw plan != NULL and executed
+    /// the rejected old plan. Latest NEEDS_WORK must route back to planning.
+    #[test]
+    fn resume_with_non_empty_rejected_plan_routes_to_planning_for_non_t1() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+
+        let now = "2026-05-09T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        let rejected_plan = r#"{"phases":[{"name":"phase 1","tasks":["old rejected task"]}]}"#;
+        let plan_review_log = r#"[{"gate":"NEEDS_WORK","summary":"old plan rejected","reviewed_plan":{"phases":[{"name":"phase 1"}]}}]"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, plan_review_log, \
+             current_phase, current_cycle, blocked_reason) \
+             VALUES ('T903', 'blocked', ?1, ?1, 'framework', 'framework', \
+             'blocked after rejected planning revision', 'blocked-rejected-plan', 'feat/t903', '/tmp/no-such', 'T2', \
+             ?2, ?3, ?4, NULL, NULL, 'drive_failed:silent_zombie_pid_dead')",
+            rusqlite::params![now, contract, rejected_plan, plan_review_log],
+        )
+        .unwrap();
+
+        let out = compute_resume(&task_schema, &conn, "T903", Actor::AiWithHuman).unwrap();
+        assert_eq!(
+            out.new_status, "planning",
+            "non-T1 with latest plan review NEEDS_WORK must resume to planning, not ready/executing"
+        );
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T903'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "planning");
+
+        let (from_s, to_s, verb): (String, String, String) = conn
+            .query_row(
+                "SELECT from_status, to_status, verb FROM transition_history \
+                 WHERE display_id='T903' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(from_s, "blocked");
+        assert_eq!(to_s, "planning");
+        assert_eq!(verb, "resume");
+    }
+
+    /// Positive counterpart: a non-empty plan with latest READY review is still
+    /// executable after a transient execution/watchdog block. This preserves
+    /// the valid T122 shape: plan_review READY happened before executing.
+    #[test]
+    fn resume_with_non_empty_ready_plan_keeps_ready_path_for_non_t1() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+
+        let now = "2026-05-09T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        let approved_plan = r#"{"phases":[{"name":"phase 1","tasks":["approved task"]}]}"#;
+        let plan_review_log = r#"[{"gate":"NEEDS_WORK","summary":"first draft rejected"},{"gate":"READY","summary":"revision approved","reviewed_plan":{"phases":[{"name":"phase 1"}]}}]"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, plan_review_log, \
+             current_phase, current_cycle, blocked_reason) \
+             VALUES ('T904', 'blocked', ?1, ?1, 'framework', 'framework', \
+             'blocked after ready plan', 'blocked-ready-plan', 'feat/t904', '/tmp/no-such', 'T2', \
+             ?2, ?3, ?4, 1, 1, 'drive_failed:stale_binary_inode')",
+            rusqlite::params![now, contract, approved_plan, plan_review_log],
+        )
+        .unwrap();
+
+        let out = compute_resume(&task_schema, &conn, "T904", Actor::AiWithHuman).unwrap();
+        assert_eq!(
+            out.new_status, "executing",
+            "non-T1 with latest plan review READY may resume through ready to executing"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM tasks WHERE display_id='T904'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
+            "executing"
+        );
     }
 
     /// L130 corollary: T1 row with plan=NULL is the contract-is-plan case
