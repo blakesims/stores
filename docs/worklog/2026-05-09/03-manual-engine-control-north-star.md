@@ -170,6 +170,30 @@ Last verified snapshot after manual-control work:
 6. **Stale dispatch_locks audit** — 16 unfinished `auto-drive` locks with no live processes; understand whether current watchdog/daemon guards safely ignore them before any broad restart.
 7. **Do not broad-restart daemon** until Phase 1 queue cleanup and Phase 2 narrow-control procedures are complete.
 
+## Handover Prep
+
+If context is cleared, give the next agent this worklog plus the queue-curator triage report.
+
+Essential state to preserve:
+
+- Manual-control north star: high-trust 5-wide throughput, but current mode is frozen/manual until the queue is clean and control primitives are safe.
+- Daemon/drive state at last check: no daemon and no live `stores tasks drive` processes. Do not broad-restart daemon.
+- New narrow primitive exists on main and installed binary: `stores external_reviews run <ERID>` from commit `06403b5`. Use this instead of `stores agents run --once` for single ER rows.
+- `stores agents run --once` is unsafe in manual-control mode: it runs startup sweeps plus engine-runner/watchdog, not just agents.yaml subscribers.
+- `T125` and `T127` are accepted after rebase + fresh ER PASS.
+- Remaining priority rows: `T124` in_review, `T126` blocked FAIL, `T128` blocked, `T134`–`T137` blocked remints, holds `T108`/`T116`/`T123`.
+- Observation cleanup remains important: source-observation remint risks (`L034`, `L513`, `L514`, `L515`, `L520`) and new drive-failed obs (`L532`–`L536`).
+- Stale unfinished `auto-drive` dispatch_locks exist; do not raw-SQL write/delete them. Treat them as a pre-restart audit item.
+- Untracked generated projection dirs remain and should not be swept with `git add -A`: `tasks/active/T802-test-task/`, `tasks/active/T803-test-task/`, `tasks/planning/T801-test-task/`.
+
+Suggested next-agent first moves:
+
+1. Read this worklog and the queue-curator triage report.
+2. Verify process state: `pgrep -af 'stores agents run|stores tasks drive' || true`.
+3. Verify live queue with `stores tasks status` for `T124 T126 T128 T134 T135 T136 T137 T108 T116 T123`.
+4. Start with the triage report's fastest safe mechanical cleanup, but do not execute lifecycle verbs without Blake grounding where required.
+5. If `T124` needs ER, create/locate the ER row and use `stores external_reviews run <ERID>`, not daemon.
+
 ## Done When
 
 - We have a documented manual-control procedure for progressing selected rows without broad daemon pickup.
