@@ -50,6 +50,8 @@ In autonomous mode, your loop on the open-observation queue is:
 
 **Default posture: observe the daemon driving; intervene only when it can't.**
 
+When Blake says to pause the engine, treat it as a control-plane freeze: no new ratifications, no new tasks, no re-mints, no resumes/abandons/accepts unless Blake explicitly authorizes a specific row. Do not kill the daemon or already-running child drives unless instructed. Preserve evidence and produce a paused-state inventory (active drives, blocked/contaminated tasks, daemon PID, recent silent_zombie/stale-binary rows, worktrees).
+
 How auto-drive works: the daemon polls `tasks` rows and on a state transition (planning→ready, ready→executing, code_review→in_review, etc.) fires `[auto-drive] Tnnn: spawned drive pid=…`. The drive subprocess runs `tasks drive Tnnn` against its configured runner, dispatches the right subagent, and exits when the cycle hands off. Daemon then re-fires on the next transition.
 
 **Known gap (L186):** if a drive subprocess dies mid-cycle (session kill, crash) but the task is still in an actionable state with `next_agent` set, the daemon does NOT detect the orphan and re-spawn. L186 (engine-runner monitor primitive) is the durable fix.
@@ -80,9 +82,25 @@ If the daemon itself is dead or stale (exe path shows `(deleted)`), restart it b
 - Quote Pi rulings verbatim in subagent briefs. If a subagent proposes a different interpretation, halt and ask Pi.
 - **Doc-only work does NOT promote to a substrate task.** The drive cycle (planner → plan-reviewer → executor → code-reviewer → wrap → codex → accept-merge) is too heavy for doc edits. If an observation's contract is doc-only (`docs/**`, `*.md`, SKILL prompts, README), route to pi-architect or engine-controller direct-commit instead — observation can be closed by direct-commit reference. The substrate's audit trail for direct-commit doc work is the git log + the linked-observation reference in the commit message.
 
-## Substrate repair lane
+## Substrate repair lane / Blake manual-main escalation
 
-When the substrate workflow is blocked by a substrate bug, engine-controller may bypass full task ceremony and patch `main` directly if ALL conditions hold:
+When the substrate workflow is blocked by a substrate bug, first decide whether it is an engine-control-plane issue Blake should fix manually on `main`.
+
+**Blake manual-main escalation is the default for small, concrete meta-substrate blockers.** If a bug blocks or contaminates throughput and has a narrow fix shape, do NOT spend full workflow cycles by default. Package it for Blake:
+
+- exact failing command/state and affected task/obs ids;
+- suspected file(s) / function(s);
+- minimal proposed fix shape;
+- tests/verification to run;
+- why the normal workflow would waste cycles or contaminate results.
+
+Then stand aside while Blake repairs on `main`. After Blake lands the fix, verify it, close/fold the corresponding observation/intake, and resume only lifecycle-clean rows.
+
+Escalate-to-Blake examples: resume/transition guard bugs, daemon/runner/dispatch defects causing broad silent_zombie contamination, accept/integration/deploy ceremony bugs blocking multiple rows, watch/status lies that impair operation, and token/auth durability issues that block human-grounded writes.
+
+Keep routine task implementation bugs, normal external-review REVISEs, ordinary merge conflicts, and non-blocking cleanup inside the substrate workflow.
+
+If Blake is unavailable or explicitly delegates the repair lane to engine-controller, engine-controller may bypass full task ceremony and patch `main` directly if ALL conditions hold:
 
 1. The substrate itself is blocking progress (review parser loop, stale external_review recovery row, daemon/review lane broken, accepted task broken in production due to migration/drift).
 2. The fix is narrow, mechanical, and testable (ideally 1-2 files; no broad refactor).

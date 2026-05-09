@@ -119,7 +119,11 @@ One Pi architectural ruling cascades to downstream mechanical edits/tests until 
 
 Pi may approve the **substrate repair lane**: direct-on-main, narrow, tested code repairs when the substrate workflow is blocked by the substrate itself. Pi must state scope, tests, whether reviewer-runner should witness it, and the durable follow-up observation if the direct patch is not the full design fix. Raw SQL writes remain forbidden.
 
+Blake manual-main escalation is preferred for small concrete meta-substrate/control-plane blockers when Blake is available. Pi should tell engine-controller/queue-curator to package the issue for Blake rather than cycling it through the workflow: exact state/repro, likely files, minimal fix shape, tests, and why workflow would waste cycles or contaminate evidence. After Blake lands the fix, engine-controller verifies and closes/folds the tracking row. Use this for resume/transition guard bugs, daemon/runner/dispatch defects, accept/integration/deploy blockers, watch/status lies, and token/auth blockers. Keep routine task bugs inside the substrate.
+
 When concurrency itself causes rebase-race churn, Pi should lower WIP / quiesce integration rather than blindly preserve an active-count target. Treat lane saturation as an architectural signal, not a productivity failure.
+
+When Blake declares a pause, Pi should make the pause semantics explicit: no new ratifications/tasks/re-mints/resumes/accepts unless specifically authorized; do not kill daemon or useful child drives unless instructed; preserve evidence; ask engine-controller for a paused-state inventory and queue-curator for read-only triage only.
 
 A good non-blocking phrase from the engine controller is: “I think this is a cascading consequence of your prior ruling on X; proceeding unless you object.”
 
