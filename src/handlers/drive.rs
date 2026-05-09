@@ -924,36 +924,47 @@ fn build_role_runner(args: &DriveArgs) -> Result<Box<dyn RoleRunner>> {
 }
 
 // ---------------------------------------------------------------------------
-// git diff summary helper (AC4.5 / AC4.6)
+// git diff summary helper (AC4.5 / AC4.6 / T124)
 // ---------------------------------------------------------------------------
 
-/// Compute a human-readable diff summary for the wrap brief.
+/// Compute a direction-aware diff summary for the wrap brief.
 ///
-/// Since-ref formula (Decision Matrix row (j)):
-/// 1. Try `git merge-base HEAD master` — covers the common case where `HEAD` is
-///    a feature branch diverging from `master`.
-/// 2. Fallback: use `first_executor_commit` (the first executor commit on this
-///    task) as `<since-ref>` if provided and non-empty.
-/// 3. Final fallback: return `"<git diff unavailable>"` and log a warning to
-///    stderr.
+/// Base-branch resolution order (T124 — prevents misattribution of main-ahead
+/// commits as "rides on this branch"):
+/// 1. `BASE_BRANCH` env var (allows override without code changes).
+/// 2. `base_branch` parameter (caller-supplied hint).
+/// 3. Try "main", then "master" as defaults.
 ///
-/// The diff body is `git log --oneline <since-ref>..HEAD` followed by
-/// `git diff --stat <since-ref>..HEAD`.
+/// Since-ref formula:
+/// 1. Try `git merge-base HEAD <resolved_base>`.
+/// 2. Fallback: use `first_executor_commit` if provided and non-empty.
+/// 3. Final fallback: return `"<git diff unavailable>"`.
+///
+/// Output has TWO labeled sections so the wrap agent can attribute commits
+/// correctly without relying on diff-stat direction alone:
+/// - "On this branch": `git log --oneline <since-ref>..HEAD` + `git diff --stat`
+/// - "On base (not on this branch)": `git log --oneline HEAD..<resolved_base>`
 ///
 /// All shell-out happens here in `drive.rs`; `src/render/context.rs` is never
 /// involved (render stays pure `(schema, entry) → Value`).
 ///
-/// AC4.6: On any failure (no git binary, not a repo, no master branch, detached
+/// AC4.6: On any failure (no git binary, not a repo, no base branch, detached
 /// HEAD), the function returns `"<git diff unavailable>"` rather than erroring.
 pub(crate) fn compute_git_diff_summary(
-    branch: Option<&str>,
+    base_branch: Option<&str>,
     first_executor_commit: Option<&str>,
+    workspace_path: Option<&str>,
 ) -> String {
     use std::process::Command;
 
     // Helper: run a git command and return trimmed stdout on exit-0, else None.
     let run_git = |args: &[&str]| -> Option<String> {
-        let out = Command::new("git").args(args).output().ok()?;
+        let mut cmd = Command::new("git");
+        cmd.args(args);
+        if let Some(path) = workspace_path.filter(|s| !s.is_empty()) {
+            cmd.current_dir(path);
+        }
+        let out = cmd.output().ok()?;
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if s.is_empty() {
@@ -966,16 +977,34 @@ pub(crate) fn compute_git_diff_summary(
         }
     };
 
-    // Step 1: try git merge-base HEAD <branch>.
-    // branch comes from the row's `branch` field (set when drive dispatches the wrap agent).
-    // Falls back to "master" if the row has no branch field set.
-    let branch_to_use = branch.unwrap_or("master");
-    let since_ref = run_git(&["merge-base", "HEAD", branch_to_use]).or_else(|| {
-        // Step 2: fallback to first executor commit.
-        first_executor_commit
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-    });
+    // Resolve the base branch. BASE_BRANCH env var wins; then parameter; then
+    // try "main" followed by "master" as defaults.
+    let resolved_base: String = std::env::var("BASE_BRANCH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| base_branch.filter(|s| !s.is_empty()).map(|s| s.to_string()))
+        .unwrap_or_else(|| "main".to_string());
+
+    // Step 1: try git merge-base HEAD <resolved_base>.
+    // If resolved_base is "main" but the repo uses "master", also try that and
+    // carry the successful fallback into the base-ahead range/labels below.
+    let mut effective_base = resolved_base.clone();
+    let since_ref = run_git(&["merge-base", "HEAD", &resolved_base])
+        .or_else(|| {
+            if resolved_base == "main" {
+                run_git(&["merge-base", "HEAD", "master"]).inspect(|_| {
+                    effective_base = "master".to_string();
+                })
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            // Step 2: fallback to first executor commit.
+            first_executor_commit
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        });
 
     let since_ref = match since_ref {
         Some(r) => r,
@@ -991,14 +1020,28 @@ pub(crate) fn compute_git_diff_summary(
         }
     };
 
-    // Build: `git log --oneline <since-ref>..HEAD` + `git diff --stat <since-ref>..HEAD`.
-    let range = format!("{since_ref}..HEAD");
-    let log_part = run_git(&["log", "--oneline", &range])
+    // Section 1: commits on this branch (not on base) — what the executor shipped.
+    let branch_range = format!("{since_ref}..HEAD");
+    let branch_log = run_git(&["log", "--oneline", &branch_range])
         .unwrap_or_else(|| "(no commits since branch point)".to_string());
-    let stat_part =
-        run_git(&["diff", "--stat", &range]).unwrap_or_else(|| "(no file changes)".to_string());
+    let branch_stat = run_git(&["diff", "--stat", &branch_range])
+        .unwrap_or_else(|| "(no file changes)".to_string());
 
-    format!("```\n{log_part}\n\n{stat_part}\n```")
+    // Section 2: commits on base that are NOT on this branch — shown so the
+    // wrap agent does not misattribute main-ahead work as belonging to this task.
+    let base_ahead_range = format!("HEAD..{effective_base}");
+    let base_ahead_log = run_git(&["log", "--oneline", &base_ahead_range])
+        .unwrap_or_else(|| "(none — base is not ahead of this branch)".to_string());
+
+    format!(
+        "```\n\
+        ### On this branch (not on base/{effective_base}):\n\
+        {branch_log}\n\n\
+        {branch_stat}\n\n\
+        ### On base/{effective_base} (not on this branch — do NOT attribute to this task):\n\
+        {base_ahead_log}\n\
+        ```"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1239,13 +1282,14 @@ fn drive_loop_with_role_runner(
                     .and_then(|c| c.as_str())
                     .map(|s| s.to_string());
 
-                let branch = entry
-                    .get("branch")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
+                // T124: pass None as base_branch so compute_git_diff_summary resolves
+                // from BASE_BRANCH env var or defaults (main/master). The task row's
+                // `branch` field holds the FEATURE branch name, not the base branch —
+                // passing it would cause git merge-base HEAD <feature-branch> == HEAD,
+                // producing an empty since-ref and a blank diff.
+                let workspace_path = entry.get("workspace_path").and_then(|v| v.as_str());
                 let diff_summary =
-                    compute_git_diff_summary(branch.as_deref(), first_commit.as_deref());
+                    compute_git_diff_summary(None, first_commit.as_deref(), workspace_path);
                 overlay.insert(
                     "git_diff_summary".to_string(),
                     serde_json::Value::String(diff_summary),
@@ -4643,7 +4687,7 @@ mod tests {
         //
         // The invariant we assert: the function always returns a non-empty string
         // and never panics.
-        let result = compute_git_diff_summary(None, None);
+        let result = compute_git_diff_summary(None, None, None);
         assert!(
             !result.is_empty(),
             "compute_git_diff_summary must return non-empty string"
@@ -4656,10 +4700,124 @@ mod tests {
         // the fallback path must return a non-empty diff string (may be the
         // unavailable placeholder if the commit doesn't exist in this repo).
         // The invariant: returns non-empty, no panic.
-        let result = compute_git_diff_summary(None, Some("HEAD~2"));
+        let result = compute_git_diff_summary(None, Some("HEAD~2"), None);
         assert!(
             !result.is_empty(),
             "compute_git_diff_summary with fallback commit must return non-empty string"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // T124: direction-aware diff summary regression test
+    // ---------------------------------------------------------------------------
+
+    /// T124: When main has commits ahead of the feature branch that touch files
+    /// the branch didn't touch, compute_git_diff_summary must:
+    ///   - label the branch's own commits under "On this branch"
+    ///   - label main-ahead commits under "On base" with a do-not-attribute note
+    ///   - NOT include main-ahead commits in the "On this branch" section
+    ///
+    /// This prevents the wrap agent from misattributing main-ahead work as
+    /// belonging to the task being wrapped.
+    #[test]
+    fn git_diff_summary_direction_labeled_sections() {
+        use std::process::Command;
+        use tempfile::tempdir;
+
+        // Serialize CWD changes against other tests.
+        let _cwd_guard = crate::paths::test_cwd_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let old_cwd = std::env::current_dir().expect("must have cwd");
+        let tmp = tempdir().expect("tempdir failed");
+        let repo = tmp.path();
+
+        // Helper: run a git command in the repo dir, ignore output.
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .status()
+                .expect("git command failed");
+            assert!(status.success(), "git {args:?} must succeed");
+        };
+
+        // Set up repo: init on 'main', add initial commit.
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(repo.join("readme.txt"), "init").unwrap();
+        git(&["add", "readme.txt"]);
+        git(&["commit", "-m", "initial"]);
+
+        // Feature branch: add a commit touching feature-file.txt.
+        git(&["checkout", "-b", "feat/task"]);
+        std::fs::write(repo.join("feature-file.txt"), "feature work").unwrap();
+        git(&["add", "feature-file.txt"]);
+        git(&["commit", "-m", "feat: add feature-file"]);
+
+        // Back to main: add a commit touching main-file.txt (NOT on feature branch).
+        git(&["checkout", "main"]);
+        std::fs::write(repo.join("main-file.txt"), "main work").unwrap();
+        git(&["add", "main-file.txt"]);
+        git(&["commit", "-m", "main: add main-file"]);
+
+        // Back to feature branch for the wrap perspective.
+        git(&["checkout", "feat/task"]);
+
+        // Run compute_git_diff_summary from the feature branch CWD.
+        std::env::set_current_dir(repo).expect("set_current_dir to repo");
+        // Temporarily unset BASE_BRANCH in case the outer env has it.
+        let base_branch_saved = std::env::var("BASE_BRANCH").ok();
+        std::env::remove_var("BASE_BRANCH");
+
+        let result = compute_git_diff_summary(Some("main"), None, None);
+        // Restore env and CWD.
+        if let Some(val) = base_branch_saved {
+            std::env::set_var("BASE_BRANCH", val);
+        }
+        std::env::set_current_dir(&old_cwd).expect("restore cwd");
+
+        // The output must include both section labels.
+        assert!(
+            result.contains("On this branch"),
+            "output must contain 'On this branch' section; got:\n{result}"
+        );
+        assert!(
+            result.contains("On base/main"),
+            "output must contain 'On base/main' section; got:\n{result}"
+        );
+        assert!(
+            result.contains("do NOT attribute"),
+            "base-ahead section must carry the do-not-attribute note; got:\n{result}"
+        );
+
+        // The feature commit must appear in "On this branch", not in "On base".
+        let on_branch_section = result
+            .split("### On base/main")
+            .next()
+            .unwrap_or("");
+        let on_base_section = result
+            .split("### On base/main")
+            .nth(1)
+            .unwrap_or("");
+
+        assert!(
+            on_branch_section.contains("add feature-file"),
+            "feature commit must appear in 'On this branch' section; branch section:\n{on_branch_section}"
+        );
+        assert!(
+            !on_branch_section.contains("add main-file"),
+            "main-ahead commit must NOT appear in 'On this branch' section; branch section:\n{on_branch_section}"
+        );
+        assert!(
+            on_base_section.contains("add main-file"),
+            "main-ahead commit must appear in 'On base/main' section; base section:\n{on_base_section}"
         );
     }
 
