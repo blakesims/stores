@@ -61,6 +61,30 @@ agents:
     subscribes_to:
       - store: tasks
         transition: { from: cargo_installed, to: schema_migrated }
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+      - store: tasks
+        transition: { from: deploy_blocked, to: accepted }
+      - store: tasks
+        transition: { from: planning, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: plan_review, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: ready, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: executing, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: code_review, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: blocked, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: complete, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: in_review, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: rejected, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: deploy_blocked, to: closed_out_of_band }
     command: "builtin:auto-resolve-observation"
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }

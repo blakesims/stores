@@ -1166,6 +1166,9 @@ pub fn run_daemon(args: RunArgs) -> Result<()> {
         if let Err(e) = crate::flow::builtins::auto_resolve_observation::startup_sweep(&sweep_ctx) {
             eprintln!("[startup-sweep] error: {:#}", e);
         }
+        if let Err(e) = crate::flow::builtins::auto_promote::startup_sweep(&sweep_ctx) {
+            eprintln!("[startup-sweep] auto-promote error: {:#}", e);
+        }
     }
 
     let mut iter = 0usize;

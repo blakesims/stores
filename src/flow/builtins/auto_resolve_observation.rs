@@ -194,15 +194,17 @@ fn warn_orphan(ctx: &DispatchCtx, task_id: &str, obs_id: &str) {
 
 use rusqlite::OptionalExtension;
 
-/// Startup-sweep: replay `auto_resolve` for every `tasks.status='schema_migrated'`
-/// row that still has unresolved entries in `linked_observations`. Idempotent —
-/// already-resolved obs are skipped via `ResolveOutcome::AlreadyResolved`.
-/// Always emits `[startup-sweep] resolved N linked obs` (N>=0). Errors per-task
-/// are logged and swallowed so the daemon proceeds to its first poll iteration.
+/// Startup-sweep: replay `auto_resolve` for every terminal-success task row
+/// (`status IN (schema_migrated, accepted, closed_out_of_band)`) that still has
+/// unresolved entries in `linked_observations`. Idempotent — already-resolved
+/// obs are skipped via `ResolveOutcome::AlreadyResolved`. Emits a per-row
+/// `[startup-sweep] auto-resolve <task> → <obs> (was <prev>)` line for each
+/// obs actually moved, plus the aggregate `[startup-sweep] resolved N linked obs`
+/// summary. Errors per-task are logged and swallowed so the daemon proceeds.
 pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
     let mut stmt = ctx.conn.prepare(
         "SELECT t.display_id FROM tasks t \
-         WHERE t.status = 'schema_migrated' \
+         WHERE t.status IN ('schema_migrated','accepted','closed_out_of_band') \
          AND t.linked_observations IS NOT NULL \
          AND t.linked_observations != '' \
          AND t.linked_observations != 'null' \
@@ -221,7 +223,7 @@ pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
 
     let mut total_resolved = 0usize;
     for task_id in &task_ids {
-        let before = count_resolved_linked(ctx.conn, task_id);
+        let pre = unresolved_linked_obs(ctx.conn, task_id);
         let Some(row) = crate::flow::builtins::refresh_task_row(ctx.conn, task_id) else {
             eprintln!(
                 "[startup-sweep] {}: task row vanished mid-sweep; skipping",
@@ -233,24 +235,48 @@ pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
             eprintln!("[startup-sweep] {}: subscriber errored: {:#}", task_id, e);
             continue;
         }
-        let after = count_resolved_linked(ctx.conn, task_id);
-        total_resolved += after.saturating_sub(before);
+        for (obs_id, prev_status) in &pre {
+            let now_resolved: bool = ctx
+                .conn
+                .query_row(
+                    "SELECT status FROM observations WHERE display_id = ?1",
+                    rusqlite::params![obs_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .map(|s| s == "resolved")
+                .unwrap_or(false);
+            if now_resolved {
+                eprintln!(
+                    "[startup-sweep] auto-resolve {} → {} (was {})",
+                    task_id, obs_id, prev_status
+                );
+                total_resolved += 1;
+            }
+        }
     }
 
     eprintln!("[startup-sweep] resolved {} linked obs", total_resolved);
     Ok(total_resolved)
 }
 
-fn count_resolved_linked(conn: &rusqlite::Connection, task_display_id: &str) -> usize {
-    conn.query_row(
-        "SELECT COUNT(*) FROM tasks t, json_each(t.linked_observations) je \
+fn unresolved_linked_obs(
+    conn: &rusqlite::Connection,
+    task_display_id: &str,
+) -> Vec<(String, String)> {
+    let mut stmt = match conn.prepare(
+        "SELECT o.display_id, o.status \
+         FROM tasks t, json_each(t.linked_observations) je \
          JOIN observations o ON o.display_id = je.value \
-         WHERE t.display_id = ?1 AND o.status = 'resolved'",
-        rusqlite::params![task_display_id],
-        |r| r.get::<_, i64>(0),
-    )
-    .map(|n| n as usize)
-    .unwrap_or(0)
+         WHERE t.display_id = ?1 AND o.status != 'resolved'",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map(rusqlite::params![task_display_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -588,5 +614,106 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "wont_fix", "row must not have been force-flipped");
+    }
+
+    fn insert_task_at_status(conn: &Connection, display_id: &str, status: &str, commit: &str, linked: &str) {
+        let now = "2026-05-09T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        let cycles = format!(r#"[{{"executor":{{"commit":"{}"}}}}]"#, commit);
+        conn.execute(
+            "INSERT INTO tasks \
+             (display_id, status, title, slug, branch, workspace_path, contract, \
+              linked_observations, cycles, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, ?2, 't', 'ts', 'feat/ts', '/tmp/ws', ?3, ?4, ?5, ?6, ?6, 'ai_autonomous', 'ai_autonomous')",
+            rusqlite::params![display_id, status, contract, linked, cycles, now],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn auto_resolve_fires_on_accepted_task() {
+        let conn = fresh_db();
+        insert_obs(&conn, "L210", "ready", None);
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
+
+        let row = serde_json::json!({
+            "display_id": "T210",
+            "status": "accepted",
+            "linked_observations": ["L210"],
+            "cycles": [{"executor": {"commit": "sha-accepted"}}],
+        });
+        let code = run(&row, &ctx(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(code, 0);
+
+        let (status, resolution): (String, String) = conn
+            .query_row(
+                "SELECT status, resolution FROM observations WHERE display_id = 'L210'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "resolved");
+        assert_eq!(resolution, "sha-accepted");
+    }
+
+    #[test]
+    fn auto_resolve_fires_on_closed_out_of_band_task() {
+        let conn = fresh_db();
+        insert_obs(&conn, "L211", "ready", None);
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
+
+        let row = serde_json::json!({
+            "display_id": "T211",
+            "status": "closed_out_of_band",
+            "linked_observations": ["L211"],
+            "cycles": [{"executor": {"commit": "sha-oob"}}],
+        });
+        let code = run(&row, &ctx(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(code, 0);
+
+        let (status, resolution): (String, String) = conn
+            .query_row(
+                "SELECT status, resolution FROM observations WHERE display_id = 'L211'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "resolved");
+        assert_eq!(resolution, "sha-oob");
+    }
+
+    #[test]
+    fn startup_sweep_resolves_accepted_and_closed_out_of_band_cohorts() {
+        let conn = fresh_db();
+        // I024-class: one accepted task, one closed_out_of_band task, each with one unresolved obs.
+        insert_obs(&conn, "L301", "ready", None);
+        insert_obs(&conn, "L302", "ready", None);
+        insert_task_at_status(&conn, "T301", "accepted", "sha-acc-301", r#"["L301"]"#);
+        insert_task_at_status(&conn, "T302", "closed_out_of_band", "sha-oob-302", r#"["L302"]"#);
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");
+        let dctx = ctx(&conn, &agents, &cfg);
+
+        let n = startup_sweep(&dctx).unwrap();
+        assert_eq!(n, 2, "sweep must resolve both I024-class obs");
+
+        for (obs, sha) in [("L301", "sha-acc-301"), ("L302", "sha-oob-302")] {
+            let (status, resolution): (String, String) = conn
+                .query_row(
+                    "SELECT status, resolution FROM observations WHERE display_id = ?1",
+                    rusqlite::params![obs],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "resolved", "{} must be resolved", obs);
+            assert_eq!(resolution, sha, "{} resolution must match task commit", obs);
+        }
+
+        // Idempotent: second sweep returns 0.
+        let n2 = startup_sweep(&dctx).unwrap();
+        assert_eq!(n2, 0, "second sweep must be a no-op");
     }
 }
