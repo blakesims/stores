@@ -528,8 +528,8 @@ fn build_store_command(schema: &Schema) -> Command {
         "retry-deploy",
     ];
 
-    let mut store_cmd = Command::new(schema.name.clone())
-        .about(format!("Operate on the '{}' store", schema.name));
+    let mut store_cmd =
+        Command::new(schema.name.clone()).about(format!("Operate on the '{}' store", schema.name));
     if schema.name == "architecture_reviews" {
         store_cmd = store_cmd
             .visible_alias("architecture-reviews")
@@ -569,6 +569,12 @@ fn build_store_command(schema: &Schema) -> Command {
     if schema.name == "tasks" {
         store_cmd = store_cmd.subcommand(build_recover_stale_base_cmd());
         store_cmd = store_cmd.subcommand(build_reconcile_accepted_cmd());
+    }
+
+    // external_reviews run is a narrow operator-control verb: dispatch exactly
+    // one review row without daemon startup sweeps/watchdog/engine-runner.
+    if schema.name == "external_reviews" {
+        store_cmd = store_cmd.subcommand(build_external_review_run_cmd());
     }
 
     // `guide` is also registered on the `gate` store (full form), which has no workflow.
@@ -954,6 +960,13 @@ fn build_reconcile_accepted_cmd() -> Command {
                 .help("Display ID of the task (T###)")
                 .required(true),
         )
+}
+
+/// Build the `external_reviews run` command.
+fn build_external_review_run_cmd() -> Command {
+    Command::new("run")
+        .about("Run exactly one external_review row without daemon startup sweeps/watchdog/engine-runner")
+        .arg(Arg::new("display_id").help("ER### display ID").required(true))
 }
 
 /// Build the `recover-stale-base` command (tasks only).

@@ -302,15 +302,22 @@ pub fn dispatch(
                 }
                 Some((verb, sub)) => {
                     // recover-stale-base is a tasks-only operator recovery verb (T105).
-                    if verb == "recover-stale-base" && store.name == "tasks" {
+                    if verb == "run" && store.name == "external_reviews" {
                         let display_id = sub
                             .get_one::<String>("display_id")
                             .map(|s| s.as_str())
                             .unwrap_or("");
-                        let er_schema =
-                            schemas.get("external_reviews").ok_or_else(|| {
-                                anyhow::anyhow!("external_reviews schema not loaded")
-                            })?;
+                        handlers::external_review_run::run_external_review_row(
+                            schema, &conn, display_id,
+                        )?;
+                    } else if verb == "recover-stale-base" && store.name == "tasks" {
+                        let display_id = sub
+                            .get_one::<String>("display_id")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let er_schema = schemas
+                            .get("external_reviews")
+                            .ok_or_else(|| anyhow::anyhow!("external_reviews schema not loaded"))?;
                         handlers::recover_stale_base::run_recover_stale_base(
                             &conn, er_schema, display_id, invoker,
                         )?;
