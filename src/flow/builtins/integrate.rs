@@ -773,10 +773,10 @@ fn fire_mark_integration_blocked(
     .with_context(|| format!("firing mark_integration_blocked for {}", display_id))
 }
 
-/// Block before any in-progress entry was written. Used for the early
-/// branch/workspace_path/main-repo-resolution failure modes that happen
-/// after the capacity claim but before we know enough to write a useful
-/// integration_attempts entry. The slot is released by mark_integration_blocked.
+/// Block before the normal in-progress entry was written. Used for the early
+/// branch/workspace_path/main-repo-resolution failure modes that happen after
+/// the capacity claim. Even these paths must append a completed provenance
+/// entry so every typed integration_blocked row has attempt evidence.
 fn block_with_outcome(
     ctx: &DispatchCtx,
     display_id: &str,
@@ -784,6 +784,22 @@ fn block_with_outcome(
     summary: &str,
     _entry_present: Option<()>,
 ) -> Result<()> {
+    let now = now_iso8601();
+    let attempt_no = current_attempt_count(ctx.conn, display_id)? + 1;
+    let entry = json!({
+        "attempt_no": attempt_no,
+        "started_at": now,
+        "base_main_sha": "",
+        "candidate_head_before": "",
+        "candidate_head_after": "",
+        "landed_main_sha": "",
+        "refresh_strategy": "",
+        "pre_land_check_summary": summary,
+        "reviewed_base_sha": "",
+        "outcome": outcome,
+        "completed_at": now_iso8601(),
+    });
+    append_attempt_entry(ctx.conn, display_id, &entry)?;
     fire_mark_integration_blocked(ctx, display_id, &format!("{}: {}", outcome, summary))
 }
 
@@ -1210,6 +1226,44 @@ mod tests {
         assert_eq!(
             pre_count, post_count,
             "loser row must not gain an integration_attempts entry"
+        );
+    }
+
+    #[test]
+    fn early_block_after_capacity_claim_records_attempt_provenance() {
+        let conn = fresh_db();
+        let (_tmp, repo) = init_repo();
+        insert_queued_task(&conn, "T150", "", repo.to_str().unwrap());
+
+        let row = task_row_json(&conn, "T150");
+        let agents = integrate_agents_yaml("true");
+        let cfg = cfg_path();
+        let ctx = DispatchCtx {
+            conn: &conn,
+            agents: &agents,
+            config_path: &cfg,
+            policies_hash: "",
+        };
+
+        let res = run(&row, &ctx).unwrap();
+        assert_eq!(res, 0);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T150'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "integration_blocked");
+        assert_eq!(json_array_len(&conn, "T150"), 1);
+        assert_eq!(
+            json_extract_str(&conn, "T150", "$[0].outcome").as_deref(),
+            Some("merge_failure")
+        );
+        assert!(
+            json_extract_str(&conn, "T150", "$[0].pre_land_check_summary")
+                .unwrap_or_default()
+                .contains("branch field empty")
         );
     }
 
