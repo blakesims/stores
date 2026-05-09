@@ -552,9 +552,15 @@ fn push_failure_routes_to_integration_blocked() {
         attempts_field(&conn, "T600", "last", "outcome").as_deref(),
         Some("push_failure")
     );
+    let base_main = attempts_field(&conn, "T600", "last", "base_main_sha")
+        .expect("integration_attempts[last].base_main_sha must be recorded for push_failure");
+    assert_eq!(
+        base_main, pre_main,
+        "sanity: recorded base_main_sha must equal pre-test main HEAD"
+    );
     let post_main = rev_parse(&repo, "main");
     assert_eq!(
-        post_main, pre_main,
+        post_main, base_main,
         "AC5.6: local main HEAD must equal base_main_sha after push_failure rollback"
     );
 }
