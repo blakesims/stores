@@ -121,7 +121,19 @@ pub fn cycle_dots(current_cycle: i64, max_cycles: i64) -> String {
 
 fn fallback_status(t: &TaskRow) -> String {
     let _ = (t.current_phase, t.total_phases, t.current_cycle);
-    t.status.clone()
+    match t.status.as_str() {
+        "planning" if t.drive_pid.is_some() => "planner running".to_string(),
+        "planning"
+            if t.workspace_path
+                .as_deref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false) =>
+        {
+            "not started".to_string()
+        }
+        "planning" => "not scaffolded".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn terminal_stage(status: &str) -> Option<String> {
@@ -170,6 +182,19 @@ mod tests {
         );
         assert!(!p.visual);
         assert_eq!(p.text, "executing");
+    }
+
+    #[test]
+    fn planning_rows_show_started_vs_not_started() {
+        let mut not_started = task("T3", "planning", None, None, None);
+        not_started.workspace_path = Some("/tmp/worktree".to_string());
+        let p = task_progress(&not_started, &ExternalReviewState::default());
+        assert_eq!(p.text, "not started");
+
+        let mut running = not_started.clone();
+        running.drive_pid = Some(12345);
+        let p = task_progress(&running, &ExternalReviewState::default());
+        assert_eq!(p.text, "planner running");
     }
 
     #[test]

@@ -482,6 +482,20 @@ fn task_snippet(t: &super::data::TaskRow) -> String {
     if let Some(tier) = t.tier_hint.as_deref().filter(|s| !s.is_empty()) {
         parts.push(format!("tier:{tier}"));
     }
+    if t.status == "planning" {
+        if let Some(pid) = t.drive_pid {
+            parts.push(format!("drive_pid:{pid}"));
+        } else if t
+            .workspace_path
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
+            parts.push("owner:none".to_string());
+        } else {
+            parts.push("workspace:none".to_string());
+        }
+    }
     if matches!(t.status.as_str(), "blocked" | "deploy_blocked") {
         if let Some(reason) = t.blocked_reason.as_deref().filter(|s| !s.is_empty()) {
             parts.push(format!("reason:{reason}"));

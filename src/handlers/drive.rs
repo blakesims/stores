@@ -521,12 +521,28 @@ pub fn run_drive(schema: &Schema, args: DriveArgs) -> Result<()> {
     // Resolve the task id.
     let display_id = resolve_task_id(schema, &conn, &args)?;
 
+    // Record manual drive ownership immediately so `stores watch` can distinguish
+    // "planner is running" from "planning row has not been started". Auto-drive
+    // also writes these fields from its subscriber path; this direct write covers
+    // operator-started/manual `stores tasks drive` invocations.
+    record_drive_owner(&conn, &display_id)?;
+
     // Select runner(s). CLI flags force one runner for all roles; otherwise
     // .stores/config.yaml may choose per-role runners.
     let runner = build_role_runner(&args)?;
 
     // Drive the loop.
     drive_loop_with_role_runner(schema, &conn, &display_id, runner.as_ref(), args.max_iters)
+}
+
+fn record_drive_owner(conn: &Connection, display_id: &str) -> Result<()> {
+    let now = crate::handlers::row::now_iso8601();
+    let pid = std::process::id() as i64;
+    conn.execute(
+        "UPDATE tasks SET drive_pid = ?1, drive_started_at = ?2, updated_at = ?2 WHERE display_id = ?3",
+        rusqlite::params![pid, now, display_id],
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
