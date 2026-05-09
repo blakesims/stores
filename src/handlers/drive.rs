@@ -953,12 +953,18 @@ fn build_role_runner(args: &DriveArgs) -> Result<Box<dyn RoleRunner>> {
 pub(crate) fn compute_git_diff_summary(
     base_branch: Option<&str>,
     first_executor_commit: Option<&str>,
+    workspace_path: Option<&str>,
 ) -> String {
     use std::process::Command;
 
     // Helper: run a git command and return trimmed stdout on exit-0, else None.
     let run_git = |args: &[&str]| -> Option<String> {
-        let out = Command::new("git").args(args).output().ok()?;
+        let mut cmd = Command::new("git");
+        cmd.args(args);
+        if let Some(path) = workspace_path.filter(|s| !s.is_empty()) {
+            cmd.current_dir(path);
+        }
+        let out = cmd.output().ok()?;
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if s.is_empty() {
@@ -1281,8 +1287,9 @@ fn drive_loop_with_role_runner(
                 // `branch` field holds the FEATURE branch name, not the base branch —
                 // passing it would cause git merge-base HEAD <feature-branch> == HEAD,
                 // producing an empty since-ref and a blank diff.
+                let workspace_path = entry.get("workspace_path").and_then(|v| v.as_str());
                 let diff_summary =
-                    compute_git_diff_summary(None, first_commit.as_deref());
+                    compute_git_diff_summary(None, first_commit.as_deref(), workspace_path);
                 overlay.insert(
                     "git_diff_summary".to_string(),
                     serde_json::Value::String(diff_summary),
@@ -4680,7 +4687,7 @@ mod tests {
         //
         // The invariant we assert: the function always returns a non-empty string
         // and never panics.
-        let result = compute_git_diff_summary(None, None);
+        let result = compute_git_diff_summary(None, None, None);
         assert!(
             !result.is_empty(),
             "compute_git_diff_summary must return non-empty string"
@@ -4693,7 +4700,7 @@ mod tests {
         // the fallback path must return a non-empty diff string (may be the
         // unavailable placeholder if the commit doesn't exist in this repo).
         // The invariant: returns non-empty, no panic.
-        let result = compute_git_diff_summary(None, Some("HEAD~2"));
+        let result = compute_git_diff_summary(None, Some("HEAD~2"), None);
         assert!(
             !result.is_empty(),
             "compute_git_diff_summary with fallback commit must return non-empty string"
@@ -4769,8 +4776,7 @@ mod tests {
         let base_branch_saved = std::env::var("BASE_BRANCH").ok();
         std::env::remove_var("BASE_BRANCH");
 
-        let result = compute_git_diff_summary(Some("main"), None);
-
+        let result = compute_git_diff_summary(Some("main"), None, None);
         // Restore env and CWD.
         if let Some(val) = base_branch_saved {
             std::env::set_var("BASE_BRANCH", val);
