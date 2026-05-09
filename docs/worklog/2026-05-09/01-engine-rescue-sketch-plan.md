@@ -134,8 +134,19 @@ Manual branch validation:
 - `cargo clippy --all-targets -- -D warnings` now passes in `/home/blake/repos/experiments/stores-T122-auto-promoted-l523`.
 - Targeted tests pass: `cargo test auto_promote -- --nocapture`, `cargo test auto_resolve -- --nocapture`, `cargo test subscriber_edges -- --nocapture`.
 - Full `cargo test --lib` in the T122 worktree then exposed a mainline guardrail-test fixture bug: `ac5_14_blocked_to_ready_recovery` expected execution without seeding a latest READY plan review. Fixed on main in `8dfdad1 test: align resume recovery fixture with plan approval guard`; `cargo test --lib` passes on main after that fix.
+- Attempted to rebase T122 onto the `8dfdad1` mainline fix, but the worktree has unstaged/generated task projection noise (`tasks/active/*`, `tasks/planning/*`) so `git rebase main` refused. Do not `git add -A`; cleanup must be targeted or done by engine-op with awareness of generated artifacts.
 
-Conclusion: T122 code is not currently known-bad. The blocking symptom is the code-reviewer/drive repeatedly silent-zombieing before verdict, while manual compile/lint/targeted tests pass. Before another substrate retry, rebase T122 onto `8dfdad1` (worktree has generated task projection noise that prevented a clean rebase during this note) or manually apply the fixture fix, then prefer manual/Codex review or close-out-of-band if the code-reviewer keeps dying.
+Conclusion: T122 code is not currently known-bad. The blocking symptom is the code-reviewer/drive repeatedly silent-zombieing before verdict, while manual compile/lint/targeted tests pass. Before another substrate retry, rebase T122 onto `8dfdad1` (or manually apply the fixture fix), then prefer manual/Codex review or close-out-of-band if the substrate code-reviewer keeps dying.
+
+### 2026-05-09 meta-substrate manual work candidates
+
+These are small, direct repairs/docs that help the substrate recover without starting another full dogfood cycle while the engine is unstable:
+
+1. **Code-reviewer silent-zombie observability.** File/implement a narrow diagnostic for drive deaths during a role dispatch: persist attempted role (`next_agent`/role), child command/session id, last transcript path, and exit/signal if known. Current evidence can only infer code-reviewer died because status was `code_review`; no `agent_runs` row is written for the failed code-reviewer attempt.
+2. **Manual review escape hatch.** Add or document a supported path for "human/Codex reviewed this blocked code_review row" that appends a review entry and advances safely, instead of requiring `close-out-of-band` or a fragile resume loop. This would preserve audit while handling runner failure.
+3. **Generated projection hygiene.** Add a cleanup/status command or ignore policy for generated `tasks/...` projection noise in task worktrees. T122 could not rebase because generated task markdown/dirs were dirty; this is operational friction for rescue.
+4. **Maintenance mode semantics.** Define a command/state that pauses new auto-spawns/watchdog escalation while allowing selected child drives or manual verbs. Today's "paused" state was ambiguous: existing drives kept mutating rows.
+5. **Watch/flowtop follow-up.** L529 now captures the bigger observability redesign. Short-term, fix `stores watch` to stop mixing resolved observations into RATIFY buckets and expose true daemon/drive liveness before the full flowtop project.
 
 ## Next Actions
 
