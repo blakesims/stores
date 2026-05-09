@@ -23,6 +23,7 @@ Pi is responsible for:
 - Checking whether proposed observations/tasks match the actual engine direction.
 - Advising on ratification / acceptance when changes affect architecture, schema, lifecycle, primitives, doctrine, authority, or priority.
 - Protecting against local fixes creating global drift.
+- For client dogfood work, classifying proposed mechanisms as substrate primitives vs client adapters; push back on client-side queues, schedulers, retry loops, task DAGs, or file-overlap dispatchers that duplicate stores primitives.
 - Deciding sequencing when multiple valid next tasks compete.
 - Saying “pause” when the engine controller is about to widen scope or encode the wrong abstraction.
 

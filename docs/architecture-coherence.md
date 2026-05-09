@@ -35,8 +35,23 @@ Future work in T045 (the gatekeeper / intake / architecture-review layer) is gro
 - **When architecture review fires.** Risk-flag triggers, cluster thresholds, pre-ratification gates, periodic sweeps, post-accept batches — all stand on the claim that local correctness checks (tests, code review, contract ratification) do not catch architectural drift, so a separate trigger surface is required.
 - **What fast-track is allowed for.** Fast-track is safe only when the change provably cannot affect coherence: docs typos, snapshot regens, narrow display tweaks. Anything touching authority, lifecycle, schema core, subscriber semantics, or runner boundary is forbidden from fast-track because those are the surfaces where local correctness most reliably hides architectural drift.
 
+## Client adapter boundary: substrate primitives vs repo-specific wiring
+
+When stores is dogfooded inside a real client repo, separate **substrate primitives** from **client adapters** before writing doctrine, scripts, or worklogs.
+
+Rule of thumb:
+
+> If another repo using stores would need the mechanism, it belongs in the substrate. If it encodes one repo's commands, gates, baselines, branch conventions, deployment policy, or cleanup ritual, it belongs in that repo's adapter.
+
+This is an architecture-coherence rule, not only a code-location rule. A client-side workaround can be locally correct and still create global drift if it implements a substrate primitive in shell because the substrate is temporarily incomplete.
+
+Current example: 10.06 may own `accept-merge-real.sh`, `.gate-baseline.yaml`, `./dev test gate`, worktree naming, and known-flake policy. The stores substrate owns the integration lane: accepted-candidate queueing, capacity-1 mutation of `main`, freshness checks, typed `integration_blocked` routing, external-review freshness, and durable base/head/main provenance. The 10.06 script should be treated as a repo-specific adapter until the substrate integration-lane adapter contract is explicit; do not build a competing client-side queue, scheduler, retry loop, task DAG, or file-overlap dispatcher.
+
+When documenting cross-repo dogfood work, name ledgers explicitly to avoid ID collisions: e.g. `substrate:T123` / `substrate:L528-integration-lane` versus `10.06:L528-auth.setup`.
+
 ## Pointers
 
 - Brainstorm and proposed mechanism: `docs/worklog/2026-05-06/06-gatekeeper-architecture-observability.md`.
 - Substrate boundary doctrine: `docs/philosophy.md` § *What's outside the substrate*.
 - Tier vs. risk decoupling: see worklog 06 § *Tier is not risk*.
+- Client adapter boundary: this doc § *Client adapter boundary: substrate primitives vs repo-specific wiring*.
