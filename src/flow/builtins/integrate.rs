@@ -936,7 +936,7 @@ fn run_pre_land(cmd: &str, workspace: &Path, timeout_secs: u64) -> std::result::
         .arg("-c")
         .arg(cmd)
         .current_dir(workspace)
-        .stdout(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
     {
@@ -1105,6 +1105,20 @@ mod tests {
             obj.insert(name.clone(), jv);
         }
         Value::Object(obj)
+    }
+
+    #[test]
+    fn pre_land_check_large_stdout_does_not_deadlock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = run_pre_land(
+            "python3 - <<'PY'\nprint('x' * 200000)\nPY",
+            tmp.path(),
+            5,
+        );
+        assert!(
+            result.is_ok(),
+            "large stdout from a successful pre_land_check must not fill a pipe and timeout: {result:?}"
+        );
     }
 
     fn integrate_agents_yaml(pre_land_check: &str) -> AgentsYaml {

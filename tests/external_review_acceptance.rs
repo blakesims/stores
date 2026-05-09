@@ -528,7 +528,7 @@ fn external_review_e2e_tooling_failure_held_visible_and_accept_blocked() {
 fn external_review_payload_error_persists_telemetry_before_err_return() {
     let conn = install_db_bare();
     let ws = git_workspace();
-    insert_task_bare(&conn, ws.path(), "T3", "in_review");
+    insert_task_bare(&conn, ws.path(), "T900", "in_review");
     conn.execute("INSERT INTO external_reviews (display_id,status,task_id,attempt,adapter,created_at,updated_at,created_by,updated_by) VALUES ('ER940','running','T900',1,'external_review','2026-05-07T00:00:00Z','2026-05-07T00:00:00Z','test','test')", []).unwrap();
 
     // Shim exits 1 → codex runner sets payload_error; stdout is non-empty so

@@ -227,9 +227,13 @@ lifecycle:
     - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human}
 
     # integrated → cargo_installed (framework, fired by builtin:cargo-install
-    # on success). The ONLY post-integrated edge stores subscribes to. Other
-    # repos opt out by not wiring cargo-install. T138 P1.
+    # on success). The ONLY post-integrated success edge stores subscribes to.
+    # Other repos opt out by not wiring cargo-install. T138 P1.
     - {from: integrated, to: cargo_installed, verb: mark_cargo_installed, actor: framework}
+    # integrated → deploy_blocked (framework, fired by builtin:cargo-install on
+    # stores-specific post-land build/candidate failure). Integration already
+    # landed in main; this is deploy/release recovery, not retry-integration.
+    - {from: integrated, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework}
 
     # cargo_installed → schema_migrated (framework, fired by builtin:schema-migrate on success)
     - {from: cargo_installed, to: schema_migrated, verb: mark_schema_migrated, actor: framework}

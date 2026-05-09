@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -97,6 +97,22 @@ fn write_run_file(
     Ok(path)
 }
 
+fn spawn_with_text_busy_retry(cmd: &mut Command, bin: &std::path::Path) -> Result<std::process::Child> {
+    let mut last_err = None;
+    for _ in 0..5 {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.kind() == ErrorKind::ExecutableFileBusy => {
+                last_err = Some(e);
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(e).with_context(|| format!("failed to launch `{}`", bin.display())),
+        }
+    }
+    Err(last_err.expect("retry loop must record ETXTBSY"))
+        .with_context(|| format!("failed to launch `{}`", bin.display()))
+}
+
 fn wait_with_timeout(
     child: &mut std::process::Child,
     timeout: Duration,
@@ -158,9 +174,7 @@ impl Runner for CodexRunner {
         }
 
         let started_at = crate::handlers::row::now_iso8601();
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("failed to launch `{}`", self.bin.display()))?;
+        let mut child = spawn_with_text_busy_retry(&mut cmd, &self.bin)?;
         child
             .stdin
             .as_mut()

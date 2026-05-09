@@ -843,13 +843,11 @@ mod tests {
     }
 
     /// AC2.3 / test (j): cargo-install fails on a fixture with a deliberate
-    /// compile error. T138 P3: cargo-install now runs from `integrated`; the
-    /// schema no longer carries a (integrated, deploy_blocked) edge, so the
-    /// builtin's `mark_deploy_blocked` attempt surfaces as an `Err` with the
-    /// cargo failure context. The row stays at `integrated`, and the existing
-    /// private binary is untouched (no promotion over good binary on failure).
+    /// compile error. T138 codex-revise: cargo-install now runs from
+    /// `integrated`, and build/candidate failures must route to deploy_blocked
+    /// rather than leaving the row stranded at integrated.
     #[test]
-    fn j_cargo_install_failure_surfaces_error_and_does_not_promote() {
+    fn j_cargo_install_failure_routes_to_deploy_blocked_and_does_not_promote() {
         let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("STORES_NTFY_URL", "https://test.local");
         let _mock = install_mock();
@@ -882,8 +880,8 @@ mod tests {
 
         let res = cargo_install::run(&row, &ctx);
         assert!(
-            res.is_err(),
-            "cargo-install on a failing build from `integrated` must surface an Err; got Ok"
+            res.is_ok(),
+            "cargo-install build failure from `integrated` must route to deploy_blocked; got {res:?}"
         );
 
         let status: String = conn
@@ -894,8 +892,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            status, "integrated",
-            "row must remain at integrated when failure routing is unavailable"
+            status, "deploy_blocked",
+            "row must route to deploy_blocked on cargo-install failure"
         );
 
         assert_eq!(
@@ -955,14 +953,13 @@ mod tests {
             policies_hash: "",
         };
 
-        // T138 P3: cargo-install on `integrated` cannot route to deploy_blocked
-        // (no schema edge for that source state); the failure surfaces as Err
-        // and the row stays at integrated, with the existing private binary
-        // untouched.
+        // T138 codex-revise: cargo-install on `integrated` routes candidate
+        // validation failures to deploy_blocked without promoting over the
+        // existing private binary.
         let res = cargo_install::run(&row, &ctx);
         assert!(
-            res.is_err(),
-            "cargo-install with an invalid candidate from `integrated` must surface an Err; got Ok"
+            res.is_ok(),
+            "cargo-install with an invalid candidate from `integrated` must route to deploy_blocked; got {res:?}"
         );
         let status: String = conn
             .query_row(
@@ -972,8 +969,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            status, "integrated",
-            "row must remain at integrated when failure routing is unavailable"
+            status, "deploy_blocked",
+            "row must route to deploy_blocked when candidate validation fails"
         );
         assert_eq!(std::fs::read(&private_bin).unwrap(), existing_private);
 

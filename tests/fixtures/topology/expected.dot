@@ -71,6 +71,7 @@ digraph stores_topology {
     "z1_tasks__integrating" -> "z1_tasks__integration_blocked" [label=" F\nmark_integration_blocked", color=gray, fontcolor=gray];
     "z1_tasks__integration_blocked" -> "z1_tasks__integration_queued" [label=" H+\nretry-integration", color=gold, fontcolor=gold];
     "z1_tasks__integrated" -> "z1_tasks__cargo_installed" [label=" F\nmark_cargo_installed", color=gray, fontcolor=gray];
+    "z1_tasks__integrated" -> "z1_tasks__deploy_blocked" [label=" F\nmark_deploy_blocked", color=gray, fontcolor=gray];
     "z1_tasks__cargo_installed" -> "z1_tasks__schema_migrated" [label=" F\nmark_schema_migrated", color=gray, fontcolor=gray];
     "z1_tasks__cargo_installed" -> "z1_tasks__deploy_blocked" [label=" F\nmark_deploy_blocked", color=gray, fontcolor=gray];
     "z1_tasks__deploy_blocked" -> "z1_tasks__accepted" [label=" H+\nretry-deploy", color=gold, fontcolor=gold];
