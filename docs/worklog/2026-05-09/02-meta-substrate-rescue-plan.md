@@ -5,7 +5,7 @@
 
 ## One-Loop Objective
 
-Complete one manual/meta-substrate rescue loop that makes the engine safer to operate after the T118/T122 incidents: preserve useful T122 work, add the smallest observability/escape hatches needed for runner failure, and leave the queue in a legible state without starting another full dogfood cycle while the substrate is unstable.
+Clear all stale/stuck active tasks so the substrate can safely resume normal operation. Use manual/meta-substrate rescue where needed after the T118/T122 incidents: preserve useful work, avoid blind retry loops, add or document only the smallest observability/escape hatches needed for runner failure, and leave the queue in a legible state before restarting broad dogfood automation.
 
 ## Loop TODO
 
@@ -15,28 +15,25 @@ Complete one manual/meta-substrate rescue loop that makes the engine safer to op
    - Check active rows: `stores tasks status T122`, `stores tasks status T121`, `stores tasks status T117`.
    - Confirm latest important main commits exist: `bca5fd7`, `86b0614`, `e9ba39e`, `8dfdad1`, `597f15d`, `b19bdf0`.
 
-2. **Clear or preserve T122 without another blind code-reviewer loop**
-   - Inspect T122 row and worktree:
-     - row: `stores tasks status T122`; transition history for T122; `cycles[]` for executor submissions.
-     - worktree: `/home/blake/repos/experiments/stores-T122-auto-promoted-l523`.
-   - Clean/rebase carefully:
-     - Do **not** `git add -A` or reset generated task projection noise.
-     - If needed, ask Blake/engine-op before deleting generated `tasks/...` files.
-     - Goal: rebase T122 onto main containing `8dfdad1` or manually apply the fixture fix.
-   - Validate T122 code manually:
+2. **Clear T122 from `in_review` without another blind code-reviewer loop**
+   - Current verified state as of this plan revision:
+     - `stores tasks status T122` reports `status=in_review phase=1/1 cycle=1 next=wrap blocked=false`.
+     - `stores tasks show T122 --json` shows a manual code-review `PASS` in `cycles[2].review` and a wrap run has completed.
+     - `agent_runs` now includes `code_reviewer` and `wrap` rows for T122, so the earlier "no verdict" state is stale.
+     - worktree: `/home/blake/repos/experiments/stores-T122-auto-promoted-l523`; current branch has generated `tasks/...` projection noise, so do **not** `git add -A` or broad-reset generated files.
+   - Next action: route T122 through the human-grounded in-review decision path (`accept`/`reject` as appropriate, or close-out-of-band only if that is the explicit chosen rescue path). Do not send it through another autonomous code-reviewer retry unless a fresh source-code/CLI check proves the manual PASS/wrap state is invalid.
+   - If additional validation is needed before acceptance, run targeted checks in the T122 worktree without staging generated projection noise:
      - `cargo clippy --all-targets -- -D warnings`
      - `cargo test --lib`
      - `cargo test auto_promote -- --nocapture`
      - `cargo test auto_resolve -- --nocapture`
      - `cargo test subscriber_edges -- --nocapture`
-   - If validation passes, prefer audited manual/Codex review or close-out-of-band over another substrate code-reviewer retry, because T122 has repeated code-reviewer silent-zombies and no verdict.
 
-3. **Add minimal failed-role observability**
-   - Problem: T122 code-reviewer died before an `agent_runs` row existed, so operators infer failure from task state rather than seeing attempted role/session/transcript.
-   - Find dispatch/run insertion points in `src/handlers/drive.rs` and runner boundary code.
-   - Add the smallest testable behavior: when a role dispatch starts or fails before structured submission, persist enough evidence to identify `display_id`, `role`, `phase`, `cycle`, `started_at`, `ended_at`, nonzero/synthetic exit, and transcript/session path if known.
-   - Prefer a synthetic `agent_runs` row or equivalent existing telemetry path; avoid schema changes unless unavoidable.
-   - Test with existing mock/drive tests or add a focused unit test proving failed code-reviewer dispatch leaves an inspectable run record.
+3. **Audit the remaining failed-role observability gap before adding code**
+   - Source check found `src/handlers/drive.rs` already writes synthetic `agent_runs` telemetry for runner spawn/launch failures (`LAUNCH_ERROR_EXIT_CODE = -1`, `write_spawn_error_transcript`, `derive_spawn_fail_model_id`, and `spawn_failure_creates_synthetic_agent_runs_row`). Normal runner returns are also persisted before exit/error handling.
+   - Therefore do **not** implement a duplicate synthetic-row path without narrowing the gap first.
+   - Remaining possible gap to confirm: watchdog-level silent zombies where the detached drive process dies before `drive.rs` reaches a role spawn / `insert_agent_run` call, or dies between pre-spawn announcement and durable telemetry. If this remains unobservable, add the smallest testable evidence at the auto-drive/watchdog boundary: attempted `display_id`, inferred/current `role`, `phase`, `cycle`, drive pid, start time, failure time/reason, and log/transcript path if known.
+   - Prefer extending existing `agent_runs`, `transition_history.actor_note`, or dispatch-lock telemetry over schema changes unless unavoidable.
 
 4. **Add/document manual review escape hatch**
    - Problem: blocked `code_review` rows with useful code and dead reviewer have no clean audited path except repeated resume or close-out-of-band.
@@ -79,7 +76,8 @@ Complete one manual/meta-substrate rescue loop that makes the engine safer to op
 
 ## Done When
 
-- T122 is either safely cleared/closed or preserved with a precise next action that does not require another blind reviewer retry.
-- Operators can inspect failed role dispatch evidence instead of guessing from silent_zombie state, or a concrete observation/task is filed if implementation is too large for this loop.
+- All stale/stuck active tasks are either safely cleared, accepted/rejected/abandoned/closed, or preserved with a precise next action that does not require blind retry loops.
+- T122 is cleared from `in_review` through the human-grounded review decision path or explicitly documented as the remaining blocker.
+- Operators can inspect failed drive/role dispatch evidence instead of guessing from silent_zombie state, or the remaining observability gap is precisely filed if implementation is too large for this loop.
 - The manual review/close-out path for blocked reviewer rows is documented enough for engine-op to use.
 - Worklog notes (`01` and this `02`) accurately reflect final state and next steps.
