@@ -282,6 +282,12 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
             Command::new("runner-stats")
                 .about("Summarize agent_runs by role, harness, and model")
                 .arg(
+                    Arg::new("display_id")
+                        .long("display-id")
+                        .help("Restrict stats to a single task display ID")
+                        .required(false),
+                )
+                .arg(
                     Arg::new("json")
                         .long("json")
                         .action(ArgAction::SetTrue)

@@ -18,11 +18,11 @@ pub struct RunnerStatsRow {
     pub tokens_out: i64,
 }
 
-pub fn run(json: bool) -> Result<()> {
+pub fn run(json: bool, display_id: Option<&str>) -> Result<()> {
     let db_path = paths::db_path()?;
     let conn = Connection::open(&db_path)
         .with_context(|| format!("opening stores db {}", db_path.display()))?;
-    let rows = load_runner_stats(&conn)?;
+    let rows = load_runner_stats(&conn, display_id)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
     } else {
@@ -31,12 +31,17 @@ pub fn run(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn load_runner_stats(conn: &Connection) -> Result<Vec<RunnerStatsRow>> {
+pub fn load_runner_stats(conn: &Connection, display_id: Option<&str>) -> Result<Vec<RunnerStatsRow>> {
     if !table_exists(conn, "agent_runs")? {
         return Ok(Vec::new());
     }
 
-    let mut stmt = conn.prepare(
+    let filter = if display_id.is_some() {
+        "WHERE display_id = ?1"
+    } else {
+        ""
+    };
+    let sql = format!(
         "SELECT role,
                 COALESCE(harness_id, ''),
                 COALESCE(model_id, ''),
@@ -48,26 +53,34 @@ pub fn load_runner_stats(conn: &Connection) -> Result<Vec<RunnerStatsRow>> {
                 SUM(COALESCE(tokens_in, 0)) AS tokens_in,
                 SUM(COALESCE(tokens_out, 0)) AS tokens_out
          FROM agent_runs
+         {filter}
          GROUP BY role, COALESCE(harness_id, ''), COALESCE(model_id, '')
-         ORDER BY role, runs DESC, harness_id, model_id",
-    )?;
+         ORDER BY role, runs DESC, harness_id, model_id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(RunnerStatsRow {
-                role: r.get(0)?,
-                harness_id: r.get(1)?,
-                model_id: r.get(2)?,
-                runs: r.get(3)?,
-                ok: r.get(4)?,
-                failed: r.get(5)?,
-                avg_duration_secs: r.get(6)?,
-                max_duration_secs: r.get(7)?,
-                tokens_in: r.get(8)?,
-                tokens_out: r.get(9)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let map_row = |r: &rusqlite::Row<'_>| {
+        Ok(RunnerStatsRow {
+            role: r.get(0)?,
+            harness_id: r.get(1)?,
+            model_id: r.get(2)?,
+            runs: r.get(3)?,
+            ok: r.get(4)?,
+            failed: r.get(5)?,
+            avg_duration_secs: r.get(6)?,
+            max_duration_secs: r.get(7)?,
+            tokens_in: r.get(8)?,
+            tokens_out: r.get(9)?,
+        })
+    };
+
+    let rows = if let Some(display_id) = display_id {
+        stmt.query_map([display_id], map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        stmt.query_map([], map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
     Ok(rows)
 }
 
@@ -136,7 +149,7 @@ mod tests {
         )
         .unwrap();
 
-        let rows = load_runner_stats(&conn).unwrap();
+        let rows = load_runner_stats(&conn, None).unwrap();
         let executor = rows.iter().find(|r| r.role == "executor").unwrap();
         assert_eq!(executor.harness_id, "claude-code");
         assert_eq!(executor.model_id, "opus");

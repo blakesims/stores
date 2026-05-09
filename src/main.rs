@@ -148,7 +148,7 @@ fn main() -> Result<()> {
         }
         Some(("runner-stats", sub)) => {
             let json = *sub.get_one::<bool>("json").unwrap_or(&false) || matches.get_flag("json");
-            cli::runner_stats::run(json)?;
+            cli::runner_stats::run(json, sub.get_one::<String>("display_id").map(|s| s.as_str()))?;
         }
         Some(("engine", sub)) => {
             match sub.subcommand() {
