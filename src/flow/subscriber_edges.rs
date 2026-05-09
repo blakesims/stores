@@ -738,8 +738,8 @@ agents:
         in_review_accepted.sort_unstable();
         assert_eq!(
             in_review_accepted,
-            vec!["accept-merge", "cargo-install"],
-            "(in_review → accepted) must dispatch exactly accept-merge and cargo-install"
+            vec!["accept-merge", "auto-resolve-observation", "cargo-install"],
+            "(in_review → accepted) must dispatch accept-merge, auto-resolve-observation, and cargo-install"
         );
 
         let mut deploy_blocked_accepted =
@@ -747,8 +747,8 @@ agents:
         deploy_blocked_accepted.sort_unstable();
         assert_eq!(
             deploy_blocked_accepted,
-            vec!["accept-merge", "cargo-install"],
-            "(deploy_blocked → accepted) must dispatch exactly accept-merge and cargo-install"
+            vec!["accept-merge", "auto-resolve-observation", "cargo-install"],
+            "(deploy_blocked → accepted) must dispatch accept-merge, auto-resolve-observation, and cargo-install"
         );
 
         let cargo_installed_subscribers =

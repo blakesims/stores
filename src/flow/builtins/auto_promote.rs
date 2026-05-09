@@ -32,13 +32,15 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         return Ok(1);
     }
 
-    // Idempotency guard: if any tasks row already lists this obs in
-    // linked_observations, treat as already promoted.
+    // Idempotency guard: if any non-abandoned tasks row already lists this obs
+    // in linked_observations, treat as already promoted. Abandoned tasks are
+    // excluded so re-ratifying an obs whose only linking task was abandoned
+    // triggers a fresh promotion.
     let already_promoted: bool = ctx
         .conn
         .query_row(
             "SELECT 1 FROM tasks, json_each(tasks.linked_observations) je \
-             WHERE je.value = ?1 LIMIT 1",
+             WHERE je.value = ?1 AND tasks.status != 'abandoned' LIMIT 1",
             rusqlite::params![obs_display_id],
             |_| Ok(true),
         )
@@ -264,6 +266,90 @@ fn promote(
 
     tx.commit().context("commit auto-promote")?;
     Ok(new_display_id)
+}
+
+/// Refresh an `observations` row by display_id and return it as a JSON object.
+fn refresh_obs_row(conn: &rusqlite::Connection, display_id: &str) -> Option<Value> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM observations WHERE display_id = ?1")
+        .ok()?;
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query(rusqlite::params![display_id]).ok()?;
+    let row = rows.next().ok()??;
+    let mut obj = serde_json::Map::new();
+    for (i, name) in cols.iter().enumerate() {
+        let v: rusqlite::types::Value = row.get(i).ok()?;
+        let jv = match v {
+            rusqlite::types::Value::Null => Value::Null,
+            rusqlite::types::Value::Integer(n) => Value::from(n),
+            rusqlite::types::Value::Real(f) => {
+                Value::from(serde_json::Number::from_f64(f).unwrap_or(0.into()))
+            }
+            rusqlite::types::Value::Text(s) => Value::String(s),
+            rusqlite::types::Value::Blob(b) => {
+                Value::String(String::from_utf8_lossy(&b).to_string())
+            }
+        };
+        obj.insert(name.clone(), jv);
+    }
+    Some(Value::Object(obj))
+}
+
+/// Startup-sweep: re-fire `auto-promote` for every observation that is
+/// `status='ready'`, has a `task_id` set, but whose only linking task(s) are
+/// abandoned — i.e. the I025 cohort. Idempotent: a second run sees the
+/// freshly-minted non-abandoned task and the NOT EXISTS clause filters it out.
+/// Emits `[startup-sweep] auto-promote <obs> (prior task abandoned)` per row
+/// plus `[startup-sweep] auto-promote re-minted N task(s)` summary.
+pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
+    let mut stmt = ctx.conn.prepare(
+        "SELECT display_id FROM observations \
+         WHERE status = 'ready' \
+         AND task_id IS NOT NULL \
+         AND NOT EXISTS ( \
+            SELECT 1 FROM tasks t, json_each(t.linked_observations) je \
+            WHERE je.value = observations.display_id \
+            AND t.status != 'abandoned' \
+         )",
+    )?;
+    let obs_ids: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+
+    let mut minted = 0usize;
+    for obs_id in &obs_ids {
+        let Some(row) = refresh_obs_row(ctx.conn, obs_id) else {
+            eprintln!(
+                "[startup-sweep] auto-promote {}: obs row vanished mid-sweep; skipping",
+                obs_id
+            );
+            continue;
+        };
+        eprintln!(
+            "[startup-sweep] auto-promote {} (prior task abandoned)",
+            obs_id
+        );
+        match run(&row, ctx) {
+            Ok(0) => minted += 1,
+            Ok(code) => {
+                eprintln!(
+                    "[startup-sweep] auto-promote {}: run returned {}; skipping count",
+                    obs_id, code
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[startup-sweep] auto-promote {}: subscriber errored: {:#}",
+                    obs_id, e
+                );
+            }
+        }
+    }
+
+    eprintln!("[startup-sweep] auto-promote re-minted {} task(s)", minted);
+    Ok(minted)
 }
 
 #[cfg(test)]
@@ -671,6 +757,180 @@ mod tests {
         let row = serde_json::json!({"display_id": ""});
         let res = crate::flow::builtins::dispatch_builtin("auto-promote", &row, &ctx);
         assert!(res.is_some(), "auto-promote keyword must resolve");
+    }
+
+    fn insert_abandoned_task(conn: &Connection, display_id: &str, linked_obs: &[&str]) {
+        let linked = serde_json::to_string(&linked_obs).unwrap();
+        let now = "2026-05-09T00:00:00Z";
+        conn.execute(
+            "INSERT INTO tasks \
+             (display_id, status, title, slug, contract, linked_observations, \
+              created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'abandoned', 'abandoned task', 'abandoned-task', '{}', ?2, \
+                     ?3, ?3, 'ai_autonomous', 'ai_autonomous')",
+            rusqlite::params![display_id, linked, now],
+        )
+        .unwrap();
+    }
+
+    fn insert_obs_with_task_id(conn: &Connection, display_id: &str, task_id: &str) {
+        let ic = serde_json::json!({
+            "contract_state": "ready",
+            "objective": "fix the Y bug",
+            "type": "work",
+            "in_scope": ["fix module B"],
+            "out_of_scope": [],
+            "acceptance": ["test_y passes"],
+            "tier_hint": "T3",
+            "approved_by": "blake",
+            "approved_at": "2026-05-09T00:00:00Z",
+        });
+        conn.execute(
+            "INSERT INTO observations \
+             (display_id, status, summary, source, priority, captured_at, captured_week, \
+              task_id, intent_contract, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'ready', 're-ratify candidate', 'dev', 'normal', ?2, 'w-test', \
+                     ?3, ?4, ?2, ?2, 'human', 'human')",
+            rusqlite::params![
+                display_id,
+                "2026-05-09T00:00:00Z",
+                task_id,
+                serde_json::to_string(&ic).unwrap(),
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn auto_promote_fires_on_abandoned_task_re_ratify() {
+        // Setup: abandoned task T-old links obs L100; obs has ratified contract.
+        // Verifies the contracted re-ratify edge: when the only linking task is
+        // abandoned, run() mints a fresh task and rewrites obs.task_id.
+        let conn = fresh_db();
+        insert_abandoned_task(&conn, "T-old", &["L100"]);
+        insert_obs_with_task_id(&conn, "L100", "T-old");
+
+        let row = obs_row_json(&conn, "L100");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0, "auto-promote must succeed for re-ratified obs");
+
+        // (a) A new tasks row at planning must exist.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE status = 'planning'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "exactly one new planning task must be minted");
+
+        // Get the new task's display_id.
+        let new_task_id: String = conn
+            .query_row(
+                "SELECT display_id FROM tasks WHERE status != 'abandoned' LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // (b) linked_observations of the new task contains L100.
+        let linked_str: String = conn
+            .query_row(
+                "SELECT linked_observations FROM tasks WHERE display_id = ?1",
+                rusqlite::params![&new_task_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let linked: Value = serde_json::from_str(&linked_str).unwrap();
+        assert_eq!(linked, serde_json::json!(["L100"]));
+
+        // (c) obs.task_id rewritten from T-old to the new task.
+        let obs_task_id: String = conn
+            .query_row(
+                "SELECT task_id FROM observations WHERE display_id = 'L100'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(obs_task_id, new_task_id, "obs.task_id must point at the new task");
+
+        // (d) T-old is untouched (still abandoned).
+        let old_status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id = 'T-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_status, "abandoned", "T-old must remain abandoned");
+    }
+
+    #[test]
+    fn auto_promote_startup_sweep_idempotent() {
+        // Same I025 cohort shape: one ready obs L100 linked to one abandoned task T-old.
+        // First sweep mints 1; second sweep mints 0.
+        let conn = fresh_db();
+        insert_abandoned_task(&conn, "T-old", &["L100"]);
+        insert_obs_with_task_id(&conn, "L100", "T-old");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let dctx = ctx_for(&conn, &agents, &cfg);
+
+        let n1 = startup_sweep(&dctx).unwrap();
+        assert_eq!(n1, 1, "first sweep must re-mint exactly one task");
+
+        let n2 = startup_sweep(&dctx).unwrap();
+        assert_eq!(n2, 0, "second sweep must be a no-op");
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "exactly T-old + new task must exist");
+    }
+
+    #[test]
+    fn auto_promote_skips_when_existing_non_abandoned_task_links_obs() {
+        // L511/L512 non-regression: a planning task T-live already lists L200
+        // in linked_observations. run() must skip (return 0 without minting).
+        let conn = fresh_db();
+
+        let now = "2026-05-09T00:00:00Z";
+        conn.execute(
+            "INSERT INTO tasks \
+             (display_id, status, title, slug, contract, linked_observations, \
+              created_at, updated_at, created_by, updated_by) \
+             VALUES ('T-live', 'planning', 'live task', 'live-task', '{}', '[\"L200\"]', \
+                     ?1, ?1, 'ai_autonomous', 'ai_autonomous')",
+            rusqlite::params![now],
+        )
+        .unwrap();
+
+        insert_obs_with_task_id(&conn, "L200", "T-live");
+        // Point obs.task_id at T-live to make the situation realistic.
+        conn.execute(
+            "UPDATE observations SET task_id = 'T-live' WHERE display_id = 'L200'",
+            [],
+        )
+        .unwrap();
+
+        let row = obs_row_json(&conn, "L200");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0, "run must return 0 (already promoted)");
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "no new task must be minted; only T-live exists");
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id = 'T-live'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "planning", "T-live must remain unchanged");
     }
 
 }
