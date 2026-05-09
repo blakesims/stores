@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Tiny human intent inlet for stores.
+
+This intentionally writes to .stores/human-inbox.jsonl instead of the schema-enforced
+SQLite stores. It is a capture buffer: freeform human intent first, autonomous
+triage/shaping later.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def git_root() -> Path:
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+        return Path(out)
+    except Exception:
+        return Path.cwd()
+
+
+def inbox_path() -> Path:
+    override = os.environ.get("STORES_HUMAN_INBOX_PATH")
+    if override:
+        return Path(override)
+    return git_root() / ".stores" / "human-inbox.jsonl"
+
+
+def load_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for i, line in enumerate(path.read_text().splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"invalid JSONL in {path}:{i}: {e}")
+    return rows
+
+
+def save_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="human-inbox.", suffix=".jsonl", dir=str(path.parent))
+    with os.fdopen(fd, "w") as f:
+        for row in rows:
+            f.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
+
+
+def next_id(rows: list[dict[str, Any]]) -> str:
+    max_n = 0
+    for row in rows:
+        m = re.fullmatch(r"H(\d{3,})", str(row.get("id", "")))
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return f"H{max_n + 1:03d}"
+
+
+def first_line(text: str) -> str:
+    for line in text.splitlines():
+        s = line.strip()
+        if s:
+            return s[:120]
+    return "(empty human intent)"
+
+
+def read_body(args_text: list[str]) -> str:
+    if args_text:
+        return " ".join(args_text).strip() + "\n"
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip() + "\n"
+    editor = os.environ.get("EDITOR", "${VISUAL:-nano}")
+    if editor == "${VISUAL:-nano}":
+        editor = os.environ.get("VISUAL", "nano")
+    with tempfile.NamedTemporaryFile("w+", suffix=".md") as f:
+        f.write("# Write freeform intent/frustration/request below. Lines starting with # are ignored.\n\n")
+        f.flush()
+        subprocess.check_call([editor, f.name])
+        f.seek(0)
+        body = "".join(line for line in f.readlines() if not line.startswith("#")).strip()
+    if not body:
+        raise SystemExit("empty body; not adding")
+    return body + "\n"
+
+
+def find_row(rows: list[dict[str, Any]], id_: str) -> dict[str, Any]:
+    for row in rows:
+        if row.get("id") == id_:
+            return row
+    raise SystemExit(f"no such human inbox id: {id_}")
+
+
+def sort_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    priority_weight = {"urgent": 3, "high": 2, "normal": 1, "low": 0}
+    return sorted(
+        rows,
+        key=lambda r: (
+            r.get("status") != "open",
+            -priority_weight.get(str(r.get("priority", "high")), 2),
+            -int(r.get("bump_count", 0) or 0),
+            str(r.get("last_bumped_at") or r.get("created_at") or ""),
+        ),
+        reverse=False,
+    )
+
+
+def cmd_add(args: argparse.Namespace) -> None:
+    path = inbox_path()
+    rows = load_rows(path)
+    body = read_body(args.text)
+    ts = now_iso()
+    row = {
+        "id": next_id(rows),
+        "created_at": ts,
+        "updated_at": ts,
+        "last_bumped_at": None,
+        "bump_count": 0,
+        "priority": args.priority,
+        "status": "open",
+        "summary": first_line(body),
+        "body": body,
+        "source": "human",
+        "schema_version": 1,
+    }
+    rows.append(row)
+    save_rows(path, rows)
+    print(f"added {row['id']}: {row['summary']}")
+    print(f"stored outside schema-enforced stores at {path}")
+
+
+def cmd_ls(args: argparse.Namespace) -> None:
+    rows = load_rows(inbox_path())
+    if not args.all:
+        rows = [r for r in rows if r.get("status") == "open"]
+    for row in sort_rows(rows):
+        bumped = f" bump={row.get('bump_count', 0)}" if row.get("bump_count", 0) else ""
+        print(f"{row.get('id')}  {row.get('created_at')}  {row.get('priority','high'):6}  {row.get('status','open'):7}{bumped}  {row.get('summary','')}")
+
+
+def cmd_show(args: argparse.Namespace) -> None:
+    row = find_row(load_rows(inbox_path()), args.id)
+    print(json.dumps(row, indent=2, ensure_ascii=False, sort_keys=True))
+
+
+def cmd_bump(args: argparse.Namespace) -> None:
+    path = inbox_path()
+    rows = load_rows(path)
+    row = find_row(rows, args.id)
+    ts = now_iso()
+    row["bump_count"] = int(row.get("bump_count", 0) or 0) + 1
+    row["last_bumped_at"] = ts
+    row["updated_at"] = ts
+    if row.get("status") != "open":
+        row["status"] = "open"
+    save_rows(path, rows)
+    print(f"bumped {row['id']} to {row['bump_count']}: {row.get('summary','')}")
+
+
+def cmd_status(args: argparse.Namespace, status: str) -> None:
+    path = inbox_path()
+    rows = load_rows(path)
+    row = find_row(rows, args.id)
+    row["status"] = status
+    row["updated_at"] = now_iso()
+    save_rows(path, rows)
+    print(f"{status} {row['id']}: {row.get('summary','')}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Human-first intent inlet for stores")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    add = sub.add_parser("add", help="add freeform human intent; opens $EDITOR if no text/stdin")
+    add.add_argument("text", nargs="*")
+    add.add_argument("--priority", choices=["urgent", "high", "normal", "low"], default="high")
+    add.set_defaults(func=cmd_add)
+
+    ls = sub.add_parser("ls", help="list open human intent items")
+    ls.add_argument("--all", action="store_true")
+    ls.set_defaults(func=cmd_ls)
+
+    show = sub.add_parser("show", help="show one item as JSON")
+    show.add_argument("id")
+    show.set_defaults(func=cmd_show)
+
+    bump = sub.add_parser("bump", help="bump an item back to the top")
+    bump.add_argument("id")
+    bump.set_defaults(func=cmd_bump)
+
+    done = sub.add_parser("done", help="mark item done")
+    done.add_argument("id")
+    done.set_defaults(func=lambda a: cmd_status(a, "done"))
+
+    park = sub.add_parser("park", help="park item without deleting")
+    park.add_argument("id")
+    park.set_defaults(func=lambda a: cmd_status(a, "parked"))
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

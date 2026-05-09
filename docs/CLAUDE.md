@@ -34,6 +34,21 @@ Update active docs only when a shipped change alters lifecycle/schema/subscriber
 - `docs/archive/2026-05/` — historical handoffs, 10.06 studies/POCs, and deferred constitutional-governance thesis material. Not current contract.
 - `examples/agents-yaml-example.yaml` — historical/reference example, not executable config.
 
+## Human intent inlet
+
+Use `bin/stores-human` for Blake-first freeform intent capture while the substrate inlet remains agent-shaped:
+
+```bash
+bin/stores-human add        # opens $EDITOR
+bin/stores-human add "freeform gripe/request"
+bin/stores-human ls
+bin/stores-human bump H001
+bin/stores-human show H001
+bin/stores-human done H001
+```
+
+It writes JSONL to `.stores/human-inbox.jsonl`, which is intentionally outside the schema-enforced SQLite stores and ignored by git. Tags/classification are deferred to substrate triage; the human-facing input stays freeform.
+
 ## Agents daemon stale executable note
 
 After `cargo install`, `stores agents run` detects when its launch-path executable identity no longer matches the in-memory daemon binary and self-reexecs into the launch-path binary, preserving the original daemon argv (including `--invoker`, `--detach`, `--log-file`, and poll flags). Operators and wrappers should not perform an additional manual restart unless the fallback fail-loud log appears: `daemon binary stale after cargo install; restart required`.
