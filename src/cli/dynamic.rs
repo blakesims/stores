@@ -307,6 +307,16 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .action(ArgAction::SetTrue)
                                 .help("Render JSON output"),
                         ),
+                )
+                .subcommand(
+                    Command::new("plan-start")
+                        .about("Print the ignition plan: classify every tasks row into would-run, inactive, needs-operator, blocked, historical")
+                        .arg(
+                            Arg::new("json")
+                                .long("json")
+                                .action(ArgAction::SetTrue)
+                                .help("Render JSON output"),
+                        ),
                 ),
         )
         // Runs transcript index/query surface

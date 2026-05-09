@@ -1,8 +1,14 @@
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension};
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
+use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::handlers::disposition::{
+    operator_disposition, Disposition, GitBranchStateSource, PlanStartBucket,
+};
 use crate::paths;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -296,6 +302,303 @@ fn print_lock_status_text(report: &LockStatusReport) {
 
 fn empty_dash(s: &str) -> &str {
     if s.is_empty() { "-" } else { s }
+}
+
+// ---------------------------------------------------------------------------
+// engine plan-start — ignition plan surface (T140 P4)
+//
+// Read-only end-to-end: open the substrate DB with SQLITE_OPEN_READ_ONLY,
+// classify every tasks row via handlers::disposition::operator_disposition,
+// group by Disposition::plan_start_bucket(), and render either a tabular
+// text surface (default) or a JSON document (--json) with exactly the five
+// contract-named buckets: would_run, inactive, needs_operator, blocked,
+// historical. plan-start MUST NOT trigger startup sweeps, daemon ticks, or
+// any side-effecting subscriber — the operator runs it before turning the
+// engine on, to see exactly what would combust.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PlanStartEntry {
+    pub display_id: String,
+    pub status: String,
+    pub activation: String,
+    pub disposition: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PlanStartBuckets {
+    pub would_run: Vec<PlanStartEntry>,
+    pub inactive: Vec<PlanStartEntry>,
+    pub needs_operator: Vec<PlanStartEntry>,
+    pub blocked: Vec<PlanStartEntry>,
+    pub historical: Vec<PlanStartEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct PlanStartRow {
+    entry: PlanStartEntry,
+    tier_hint: String,
+    label: String,
+}
+
+pub fn run_plan_start(json: bool) -> Result<()> {
+    let db_path = paths::db_path()?;
+    // Read-only end-to-end: opens the DB with SQLITE_OPEN_READ_ONLY so plan-start
+    // cannot mutate substrate state even by accident. (T140 P4 contract; matches
+    // the same pattern used by `stores watch` and the TUI.)
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("opening stores db {} read-only", db_path.display()))?;
+
+    let buckets_with_meta = load_plan_start(&conn)?;
+
+    if json {
+        let buckets = strip_meta(&buckets_with_meta);
+        println!("{}", serde_json::to_string_pretty(&buckets)?);
+    } else {
+        print_plan_start_text(&buckets_with_meta);
+    }
+    Ok(())
+}
+
+fn strip_meta(rows: &BucketsWithMeta) -> PlanStartBuckets {
+    let extract = |bucket: &Vec<PlanStartRow>| -> Vec<PlanStartEntry> {
+        bucket.iter().map(|r| r.entry.clone()).collect()
+    };
+    PlanStartBuckets {
+        would_run: extract(&rows.would_run),
+        inactive: extract(&rows.inactive),
+        needs_operator: extract(&rows.needs_operator),
+        blocked: extract(&rows.blocked),
+        historical: extract(&rows.historical),
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct BucketsWithMeta {
+    would_run: Vec<PlanStartRow>,
+    inactive: Vec<PlanStartRow>,
+    needs_operator: Vec<PlanStartRow>,
+    blocked: Vec<PlanStartRow>,
+    historical: Vec<PlanStartRow>,
+}
+
+fn load_plan_start(conn: &Connection) -> Result<BucketsWithMeta> {
+    if !table_exists(conn, "tasks")? {
+        return Ok(BucketsWithMeta::default());
+    }
+    let accepted_at_map = load_accepted_at_map(conn)?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let branch_state = GitBranchStateSource::new(cwd, "main");
+    let today = wall_clock_today();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, display_id, COALESCE(status,''), COALESCE(activation,'inactive'),
+                COALESCE(branch,''), COALESCE(tier_hint,''), COALESCE(title,'')
+         FROM tasks
+         ORDER BY display_id ASC",
+    )?;
+
+    struct Raw {
+        id: i64,
+        display_id: String,
+        status: String,
+        activation: String,
+        branch: String,
+        tier_hint: String,
+        title: String,
+    }
+
+    let raw_rows = stmt
+        .query_map([], |r| {
+            Ok(Raw {
+                id: r.get(0)?,
+                display_id: r.get(1)?,
+                status: r.get(2)?,
+                activation: r.get(3)?,
+                branch: r.get(4)?,
+                tier_hint: r.get(5)?,
+                title: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut buckets = BucketsWithMeta::default();
+
+    for raw in raw_rows {
+        let mut row_json = json!({
+            "display_id": raw.display_id,
+            "status": raw.status,
+            "activation": raw.activation,
+            "branch": raw.branch,
+            "linked_observations": [],
+        });
+        if let Some(at) = accepted_at_map.get(&raw.id) {
+            row_json["accepted_at"] = json!(at);
+        }
+        let disposition = operator_disposition(&row_json, today, &branch_state);
+        let bucket = disposition.plan_start_bucket();
+        let label = disposition.display_label().to_string();
+        let disposition_kind = disposition_kind(&disposition);
+
+        let entry = PlanStartEntry {
+            display_id: raw.display_id,
+            status: raw.status,
+            activation: raw.activation,
+            disposition: disposition_kind,
+            title: raw.title,
+        };
+        let row = PlanStartRow {
+            entry,
+            tier_hint: raw.tier_hint,
+            label,
+        };
+        match bucket {
+            PlanStartBucket::WouldRun => buckets.would_run.push(row),
+            PlanStartBucket::Inactive => buckets.inactive.push(row),
+            PlanStartBucket::NeedsOperator => buckets.needs_operator.push(row),
+            PlanStartBucket::Blocked => buckets.blocked.push(row),
+            PlanStartBucket::Historical => buckets.historical.push(row),
+        }
+    }
+
+    Ok(buckets)
+}
+
+fn disposition_kind(d: &Disposition) -> String {
+    // Use the serde-tag form: serialize and pull `kind`. Stable wire string.
+    match serde_json::to_value(d).ok().and_then(|v| {
+        v.get("kind")
+            .and_then(|k| k.as_str())
+            .map(|s| s.to_string())
+    }) {
+        Some(s) => s,
+        None => "Unknown".to_string(),
+    }
+}
+
+/// Build a map of tasks.id → accepted_at (max occurred_at across
+/// transition_history rows with to_status='accepted'). Missing tasks have no
+/// entry; callers leave `accepted_at` unset on the row JSON.
+fn load_accepted_at_map(conn: &Connection) -> Result<BTreeMap<i64, String>> {
+    let mut map = BTreeMap::new();
+    if !table_exists(conn, "transition_history")? {
+        return Ok(map);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT row_id, MAX(occurred_at)
+         FROM transition_history
+         WHERE store='tasks' AND to_status='accepted'
+         GROUP BY row_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let row_id: i64 = r.get(0)?;
+        let at: Option<String> = r.get(1)?;
+        Ok((row_id, at))
+    })?;
+    for r in rows {
+        let (row_id, at) = r?;
+        if let Some(at) = at {
+            map.insert(row_id, at);
+        }
+    }
+    Ok(map)
+}
+
+const BUCKET_ORDER: &[(PlanStartBucket, &str, &str)] = &[
+    (
+        PlanStartBucket::WouldRun,
+        "would_run",
+        "tasks the engine will combust on activation",
+    ),
+    (
+        PlanStartBucket::Inactive,
+        "inactive",
+        "rows opted out of combustion via activation",
+    ),
+    (
+        PlanStartBucket::NeedsOperator,
+        "needs_operator",
+        "operator decision required before engine handles",
+    ),
+    (
+        PlanStartBucket::Blocked,
+        "blocked",
+        "blocked rows awaiting human recovery",
+    ),
+    (
+        PlanStartBucket::Historical,
+        "historical",
+        "terminal exhaust; not in the active lane",
+    ),
+];
+
+fn print_plan_start_text(rows: &BucketsWithMeta) {
+    let n_would = rows.would_run.len();
+    let n_inact = rows.inactive.len();
+    let n_op = rows.needs_operator.len();
+    let n_block = rows.blocked.len();
+    let n_hist = rows.historical.len();
+    println!(
+        "engine ignition plan: {n_would} would-run · {n_inact} inactive · {n_op} needs-operator · {n_block} blocked · {n_hist} historical"
+    );
+    println!();
+
+    for (bucket, key, blurb) in BUCKET_ORDER {
+        let bucket_rows: &Vec<PlanStartRow> = match bucket {
+            PlanStartBucket::WouldRun => &rows.would_run,
+            PlanStartBucket::Inactive => &rows.inactive,
+            PlanStartBucket::NeedsOperator => &rows.needs_operator,
+            PlanStartBucket::Blocked => &rows.blocked,
+            PlanStartBucket::Historical => &rows.historical,
+        };
+        println!("{} ({}): {}", key, bucket_rows.len(), blurb);
+        for r in bucket_rows {
+            let tier = if r.tier_hint.is_empty() {
+                "-".to_string()
+            } else {
+                r.tier_hint.clone()
+            };
+            println!(
+                "  {:<6} [{}] {:<22} {:<8} {:<36} {}",
+                r.entry.display_id,
+                tier,
+                truncate(&r.entry.status, 22),
+                r.entry.activation,
+                truncate(&r.label, 36),
+                truncate(&r.entry.title, 60),
+            );
+        }
+        println!();
+    }
+}
+
+/// Wall-clock "today" anchor for [`operator_disposition`]. The disposition
+/// function only consults this transitively (the cutoff comparison reads
+/// `accepted_at`, not `today`), so the precise resolution doesn't matter —
+/// we just need a real DateTime<Utc>. Built without chrono's `clock` feature
+/// by routing through `std::time::SystemTime`.
+fn wall_clock_today() -> DateTime<Utc> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    DateTime::<Utc>::from_timestamp(secs, 0).unwrap_or_else(|| {
+        DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is a valid DateTime")
+    })
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
 }
 
 #[cfg(test)]

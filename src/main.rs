@@ -157,6 +157,14 @@ fn main() -> Result<()> {
                         || matches.get_flag("json");
                     cli::engine::run_locks(json)?;
                 }
+                Some(("plan-start", psub)) => {
+                    let json = *psub.get_one::<bool>("json").unwrap_or(&false)
+                        || matches.get_flag("json");
+                    // Read-only end-to-end: plan-start opens the DB read-only and
+                    // must NOT trigger startup sweeps, daemon ticks, or any
+                    // side-effecting subscriber. (T140 P4 contract.)
+                    cli::engine::run_plan_start(json)?;
+                }
                 _ => {
                     let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
                     if let Some(engine_cmd) = cmd2.find_subcommand_mut("engine") {
