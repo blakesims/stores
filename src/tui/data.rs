@@ -136,6 +136,14 @@ pub struct TaskRow {
     pub drive_started_at: Option<String>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub recent_events: Vec<RecentEvent>,
+    /// T140 P5: per-row activation flag, used by `stores watch` to compute
+    /// the operator-disposition glyph. `None` means the substrate did not
+    /// expose the column (legacy schema); render falls back to "inactive".
+    pub activation: Option<String>,
+    /// T140 P5: latest `accepted_at` recovered from `transition_history`,
+    /// used by the disposition function to distinguish historical-legacy
+    /// from deploy-ceremony-pending accepted rows.
+    pub accepted_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -570,7 +578,8 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         "SELECT display_id, status, {title}, {claimed_by}, {updated_at}, {tier_hint}, {linked_observations}, {blocked_reason}, \
                 {current_phase}, {current_cycle}, {total_phases}, {plan_source}, \
                 {contract_executive_intent}, {contract_done_when}, {contract_scope_in}, {contract_scope_out}, \
-                {plan_review_log}, {cycles}, {wrap_log}, {branch}, {workspace_path}, {drive_pid}, {drive_started_at} FROM tasks",
+                {plan_review_log}, {cycles}, {wrap_log}, {branch}, {workspace_path}, {drive_pid}, {drive_started_at}, \
+                {activation}, rowid FROM tasks",
         title = sql_col(&task_cols, "title", "''"),
         claimed_by = sql_col(&task_cols, "claimed_by", "NULL"),
         updated_at = sql_col(&task_cols, "updated_at", "''"),
@@ -592,7 +601,32 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         workspace_path = sql_col(&task_cols, "workspace_path", "NULL"),
         drive_pid = sql_col(&task_cols, "drive_pid", "NULL"),
         drive_started_at = sql_col(&task_cols, "drive_started_at", "NULL"),
+        activation = sql_col(&task_cols, "activation", "NULL"),
     );
+
+    // T140 P5: pre-load accepted_at for every task in one shot from
+    // transition_history, so the watch render can populate TaskRow.accepted_at
+    // without N+1 queries. Map row_id → max(occurred_at) where to_status='accepted'.
+    // Skip silently when transition_history is absent or lacks the row_id column
+    // (legacy / cockpit-test schemas).
+    let accepted_at_map: std::collections::HashMap<i64, String> = if table_exists(conn, "transition_history")?
+        && column_exists(conn, "transition_history", "row_id")?
+    {
+        let mut stmt = conn.prepare(
+            "SELECT row_id, MAX(occurred_at) FROM transition_history \
+             WHERE store='tasks' AND to_status='accepted' GROUP BY row_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let row_id: i64 = r.get(0)?;
+            let at: Option<String> = r.get(1)?;
+            Ok((row_id, at))
+        })?;
+        rows.flatten()
+            .filter_map(|(rid, at)| at.map(|s| (rid, s)))
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
     let mut stmt = conn.prepare(&task_sql)?;
     let task_iter = stmt.query_map([], |r| {
         let linked_raw: String = r.get(6)?;
@@ -601,6 +635,8 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         let workspace_path: Option<String> = r.get(20).ok().flatten();
         let drive_pid: Option<i64> = r.get(21).ok().flatten();
         let drive_started_at: Option<String> = r.get(22).ok().flatten();
+        let activation: Option<String> = r.get(23).ok().flatten();
+        let row_id: i64 = r.get(24)?;
         let display_id: String = r.get(0)?;
         Ok(TaskRow {
             display_id: display_id.clone(),
@@ -635,6 +671,8 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             drive_started_at,
             artifact_pointers: Vec::new(),
             recent_events: Vec::new(),
+            activation,
+            accepted_at: accepted_at_map.get(&row_id).cloned(),
         })
     })?;
     for r in task_iter.flatten() {

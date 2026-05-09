@@ -16,11 +16,16 @@
 //!  - No interactive features (filter, sort, drill-in).
 
 use anyhow::{bail, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
+use serde_json::json;
 use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::handlers::disposition::{
+    operator_disposition, BranchStateSource, PlanStartBucket,
+};
 use crate::paths::db_path;
 
 const ANSI_CLEAR_HOME: &str = "\x1b[2J\x1b[H";
@@ -284,6 +289,62 @@ const GLYPH_DOT_AVAILABLE: char = '·';
 /// (10) with headroom for the longest non-cycling label, "reviewing plan" (14).
 const STATUS_COL_WIDTH: usize = 16;
 
+// T140 P5: ignition-readiness glyphs surfacing the operator_disposition
+// plan-start bucket per row. Additive to existing watch columns; the legacy
+// status text remains in place so dashboards / scripts that grep for it
+// don't regress.
+const GLYPH_WOULD_RUN: char = '★';
+const GLYPH_INACTIVE: char = '·';
+const GLYPH_NEEDS_OPERATOR: char = '?';
+const GLYPH_BLOCKED: char = '⏸';
+const GLYPH_HISTORICAL: char = ' ';
+
+/// Always-Err [`BranchStateSource`] — `operator_disposition` treats branch
+/// errors conservatively as "still in flight", which is the right
+/// fallback for a 1Hz watch render that should not spawn a `git` process
+/// per row per tick.
+struct NoBranchProbe;
+impl BranchStateSource for NoBranchProbe {
+    fn branch_unmerged(&self, branch: &str) -> Result<bool> {
+        anyhow::bail!("watch render skips git probes (branch={branch})")
+    }
+}
+
+fn watch_today() -> DateTime<Utc> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    DateTime::<Utc>::from_timestamp(secs, 0).unwrap_or_else(|| {
+        DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is a valid DateTime")
+    })
+}
+
+/// Compute the ignition-readiness glyph for a single watch row. Single
+/// source of truth — the `Disposition` enum lives in `handlers::disposition`
+/// and the bucket mapping is `Disposition::plan_start_bucket`.
+fn task_disposition_glyph(t: &crate::tui::data::TaskRow) -> char {
+    let mut row_json = json!({
+        "display_id": t.display_id,
+        "status": t.status,
+        "activation": t.activation.clone().unwrap_or_else(|| "inactive".to_string()),
+        "branch": t.branch.clone().unwrap_or_default(),
+        "linked_observations": t.linked_observations,
+    });
+    if let Some(at) = &t.accepted_at {
+        row_json["accepted_at"] = json!(at);
+    }
+    let disp = operator_disposition(&row_json, watch_today(), &NoBranchProbe);
+    match disp.plan_start_bucket() {
+        PlanStartBucket::WouldRun => GLYPH_WOULD_RUN,
+        PlanStartBucket::Inactive => GLYPH_INACTIVE,
+        PlanStartBucket::NeedsOperator => GLYPH_NEEDS_OPERATOR,
+        PlanStartBucket::Blocked => GLYPH_BLOCKED,
+        PlanStartBucket::Historical => GLYPH_HISTORICAL,
+    }
+}
+
 #[derive(Debug)]
 #[cfg(test)]
 #[allow(dead_code)]
@@ -354,8 +415,11 @@ fn render_tui_task_line(t: &crate::tui::data::TaskRow) -> String {
     let status_str = format!("{}{}{}", task_status_color(&t.status), t.status, ANSI_RESET);
     let pad = STATUS_COL_WIDTH.saturating_sub(visible_width(&status_str));
     let pad_str = " ".repeat(pad);
+    // T140 P5: ignition-readiness glyph derived from operator_disposition.
+    // Additive — the legacy status text and existing columns are unchanged.
+    let glyph = task_disposition_glyph(t);
     format!(
-        "  {ANSI_CYAN}{:<5}{ANSI_RESET} {status_str}{pad_str} {:<50}{claimed} {ANSI_DIM}{updated}{ANSI_RESET}\n",
+        "  {glyph} {ANSI_CYAN}{:<5}{ANSI_RESET} {status_str}{pad_str} {:<50}{claimed} {ANSI_DIM}{updated}{ANSI_RESET}\n",
         t.display_id, title
     )
 }
