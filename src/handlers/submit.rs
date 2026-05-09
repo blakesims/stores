@@ -1857,48 +1857,12 @@ pub(crate) fn compute_resume(
     let mut txt_fields: BTreeMap<String, String> = BTreeMap::new();
     txt_fields.insert("blocked_reason".to_string(), String::new());
 
-    // T054/I033: resume may only route to ready/executing when the row has an
-    // executable plan. "plan is non-empty" is insufficient: T118 proved a row
-    // can have a non-empty *rejected* plan, then block during revision planning;
-    // resuming that shape to ready executes an invalid plan. For T2/T3 rows,
-    // require latest plan_review_log.gate == READY. T1 keeps the contract-is-plan
-    // path because skip-plan synthesizes its executable plan from the contract.
-    let tier_hint = existing
-        .get("tier_hint")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let is_t1 = tier_hint == "T1";
-    let plan_is_empty = existing
-        .get("plan")
-        .map(|v| match v {
-            serde_json::Value::Null => true,
-            serde_json::Value::String(s) => s.trim().is_empty(),
-            serde_json::Value::Object(m) => m.is_empty(),
-            _ => false,
-        })
-        .unwrap_or(true);
-    let latest_plan_review_ready = existing
-        .get("plan_review_log")
-        .and_then(|v| match v {
-            serde_json::Value::Array(items) => items.last().cloned(),
-            serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
-                .ok()
-                .and_then(|parsed| parsed.as_array().and_then(|items| items.last().cloned())),
-            _ => None,
-        })
-        .and_then(|last| {
-            last.get("gate")
-                .and_then(|v| v.as_str())
-                .map(|gate| gate == "READY")
-        })
-        .unwrap_or(false);
-    let resume_target = if plan_is_empty {
-        "planning"
-    } else if is_t1 || latest_plan_review_ready {
-        "ready"
-    } else {
-        "planning"
-    };
+    // I033/T123: resume must never jump directly back to ready/executing.
+    // A non-empty plan can be a rejected/stale plan; executing it contaminates
+    // the task. The schema now declares only blocked → planning for resume, and
+    // the handler mirrors that conservative policy. Planner re-entry is cheaper
+    // than executing an invalid plan.
+    let resume_target = "planning";
 
     // Step 8: write blocked → resume_target
     write_status_and_fields(
@@ -3580,11 +3544,11 @@ fields:
     }
 
     // ---------------------------------------------------------------------------
-    // AC5.14: BLOCKED → READY recovery via compute_resume
+    // AC5.14: BLOCKED → PLANNING recovery via compute_resume
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn ac5_14_blocked_to_ready_recovery() {
+    fn ac5_14_blocked_to_planning_recovery() {
         let (schema, conn) = setup();
 
         // Set up: blocked at phase 1, cycle 4 (after 4th REVISE), with audit trail and stale blocked_reason
@@ -3639,13 +3603,13 @@ fields:
         // Call through compute_resume (production code path, not raw helpers)
         let out = compute_resume(&schema, &conn, "WF001", Actor::AiWithHuman).unwrap();
 
-        assert_eq!(out.new_status, "executing");
+        assert_eq!(out.new_status, "planning");
         assert!(out.summary.contains("WF001"));
 
         assert_eq!(
             read_status(&conn),
-            "executing",
-            "after resume, status must be executing"
+            "planning",
+            "after resume, status must return to planning"
         );
         assert_eq!(
             read_i64(&conn, "current_phase"),
@@ -3751,7 +3715,7 @@ fields:
         .unwrap();
 
         let out = compute_resume(&task_schema, &conn, "T900", Actor::AiWithHuman).unwrap();
-        assert_eq!(out.new_status, "executing");
+        assert_eq!(out.new_status, "planning");
 
         let (status, reason, pid): (String, Option<String>, Option<i64>) = conn
             .query_row(
@@ -3760,7 +3724,7 @@ fields:
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(status, "executing");
+        assert_eq!(status, "planning");
         assert!(reason.unwrap_or_default().is_empty());
         assert!(pid.is_none(), "resume must clear stale drive_pid");
 
@@ -3789,7 +3753,7 @@ fields:
                 |r| r.get::<_, String>(0),
             )
             .unwrap(),
-            "executing"
+            "planning"
         );
     }
 
@@ -3917,11 +3881,11 @@ fields:
         assert_eq!(verb, "resume");
     }
 
-    /// Positive counterpart: a non-empty plan with latest READY review is still
-    /// executable after a transient execution/watchdog block. This preserves
-    /// the valid T122 shape: plan_review READY happened before executing.
+    /// Even a non-empty plan with latest READY review returns to planning.
+    /// This conservative policy avoids schema/handler drift and makes resume
+    /// safe for stale or misclassified plans.
     #[test]
-    fn resume_with_non_empty_ready_plan_keeps_ready_path_for_non_t1() {
+    fn resume_with_non_empty_ready_plan_routes_to_planning_for_non_t1() {
         let task_schema =
             Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
         let obs_schema =
@@ -3951,8 +3915,8 @@ fields:
 
         let out = compute_resume(&task_schema, &conn, "T904", Actor::AiWithHuman).unwrap();
         assert_eq!(
-            out.new_status, "executing",
-            "non-T1 with latest plan review READY may resume through ready to executing"
+            out.new_status, "planning",
+            "non-T1 resume must return to planning even when an old plan was READY"
         );
         assert_eq!(
             conn.query_row(
@@ -3961,7 +3925,7 @@ fields:
                 |r| r.get::<_, String>(0),
             )
             .unwrap(),
-            "executing"
+            "planning"
         );
     }
 

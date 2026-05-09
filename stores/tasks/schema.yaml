@@ -152,13 +152,14 @@ lifecycle:
     # FAIL: code-reviewer hard-fail goes to blocked
     - {from: code_review, to: blocked, verb: submit-review, actor: ai_autonomous, requires_gate: FAIL}
 
-    # blocked recovery: resume continues the work cycle. Plan-empty rows go
-    # back through planning; plan-populated rows resume ready→executing.
+    # blocked recovery: resume always returns to planning. This is deliberately
+    # conservative: a non-empty plan can be a rejected/stale plan (I033/T123),
+    # and schema guards cannot inspect latest plan-review verdict reliably.
+    # Planner re-entry is cheaper than executing a rejected plan.
     # deploy_blocked is release-ceremony recovery, not work-cycle resume:
     # use retry-deploy after fixing the deploy issue, or close-out-of-band
     # when manually recovered outside the substrate.
-    - {from: blocked, to: planning, verb: resume, actor: ai_with_human, guard: "plan.length == 0"}
-    - {from: blocked, to: ready, verb: resume, actor: ai_with_human}
+    - {from: blocked, to: planning, verb: resume, actor: ai_with_human}
 
     # {planning, plan_review, ready, executing, code_review} → blocked (framework, fired by auto-drive subscriber on drive failure)
     - {from: planning, to: blocked, verb: mark_drive_failed, actor: framework}
