@@ -43,7 +43,8 @@ use crate::flow::builtins::{
 };
 use crate::flow::AgentsYaml;
 use crate::handlers::agents_run::{
-    mark_claim_finished, mark_claim_silent_zombie, pid_is_alive, spawn_detached_drive,
+    drive_pid_exe_is_stale, mark_claim_finished, mark_claim_silent_zombie, pid_is_alive,
+    spawn_detached_drive,
 };
 use crate::handlers::row::now_iso8601;
 
@@ -77,6 +78,11 @@ const IN_CYCLE_STATUSES: &[&str] = &[
     "code_review",
     "in_review",
 ];
+
+/// Typed reason token for the stale-binary-inode watchdog detection path.
+/// Exact-token matchable per L180 discipline: single source of truth for the
+/// `drive_failed:stale_binary_inode` `blocked_reason` suffix.
+pub(crate) const STALE_BINARY_REASON: &str = "stale_binary_inode";
 
 fn is_watchdog_actionable_status(status: &str) -> bool {
     IN_CYCLE_STATUSES.contains(&status)
@@ -762,6 +768,16 @@ fn annotate_drive_failed_history(conn: &Connection, display_id: &str, note: &str
     }
 }
 
+/// Build the structured log line emitted when the watchdog detects a live
+/// drive subprocess whose exe inode was replaced on disk. Isolated here so
+/// tests can assert its contents directly without stderr capture.
+pub(crate) fn stale_exe_log_line(display_id: &str, pid: i64) -> String {
+    format!(
+        "[auto-drive-watchdog] {display_id}: drive_pid={pid} stale_binary_inode \
+         (/proc/{pid}/exe -> deleted); marking drive_failed"
+    )
+}
+
 /// Sweep open `dispatch_locks` for `agent_name='auto-drive'`. For each lock
 /// whose grandchild PID is no longer alive, reconcile based on the task row's
 /// status:
@@ -811,6 +827,51 @@ pub fn sweep_drive_watchdog(
         let pid = row.get("drive_pid").and_then(|v| v.as_i64()).unwrap_or(0);
         if pid <= 0 {
             // Spawn UPDATE not yet committed; defer until next sweep.
+            continue;
+        }
+        if pid_is_alive(pid as i32) && drive_pid_exe_is_stale(pid as i32) {
+            eprintln!("{}", stale_exe_log_line(&display_id, pid));
+            let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if !is_watchdog_actionable_status(status)
+                || task_has_active_external_review_lane(conn, &display_id, &now_iso)
+            {
+                continue;
+            }
+            let ctx = DispatchCtx {
+                conn,
+                agents,
+                config_path,
+                policies_hash,
+            };
+            let agent = agents.agents.iter().find(|a| a.name == "auto-drive");
+            match fire_mark_drive_failed(
+                conn,
+                &display_id,
+                "drive_failed",
+                policies_hash,
+                Some(STALE_BINARY_REASON),
+            ) {
+                Ok(()) => {
+                    annotate_drive_failed_history(conn, &display_id, STALE_BINARY_REASON);
+                    dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog-stale-exe");
+                    let _ = mark_claim_silent_zombie(
+                        conn,
+                        "tasks",
+                        row_id,
+                        agent,
+                        "auto-drive",
+                        STALE_BINARY_REASON,
+                    );
+                    acted += 1;
+                    handled.insert(display_id.clone());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[auto-drive-watchdog] {}: mark_drive_failed stale-exe failed: {:#}",
+                        display_id, e
+                    );
+                }
+            }
             continue;
         }
         if pid_is_alive(pid as i32) {
@@ -2660,5 +2721,188 @@ mod tests {
             verb_reachable_from(&schema, "planning", "mark_drive_failed"),
             "planning must be mark_drive_failed-reachable"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Stale-binary-inode watchdog tests (Tasks 1.6, 1.7, 1.8)
+    // -----------------------------------------------------------------
+
+    /// Pure-string test: stale_exe_log_line emits drive_pid, proc path, and
+    /// stale_binary_inode on a single line. No cfg gate — pure function.
+    #[test]
+    fn stale_exe_log_line_carries_pid_and_proc_path() {
+        let s = stale_exe_log_line("T999", 12345);
+        assert!(
+            s.contains("stale_binary_inode"),
+            "log line must contain stale_binary_inode; got: {s}"
+        );
+        assert!(
+            s.contains("drive_pid=12345"),
+            "log line must contain drive_pid=12345; got: {s}"
+        );
+        assert!(
+            s.contains("/proc/12345/exe"),
+            "log line must contain /proc/12345/exe; got: {s}"
+        );
+    }
+
+    /// Teardown guard: sends SIGKILL to the wrapped PID on drop so spawned
+    /// children never leak past a test.
+    #[cfg(target_os = "linux")]
+    struct KillOnDrop(u32);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0 as i32, libc::SIGKILL);
+            }
+        }
+    }
+
+    /// AC1.2 / AC1.5: alive drive PID whose exe inode is deleted → watchdog
+    /// marks the task drive_failed:stale_binary_inode within one tick.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watchdog_alive_pid_with_deleted_exe_marks_stale_binary_inode() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sleep_copy = tmp.path().join("sleep_copy");
+        std::fs::copy("/bin/sleep", &sleep_copy).expect("copy /bin/sleep");
+
+        let mut child = std::process::Command::new(&sleep_copy)
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep copy");
+        let child_pid = child.id();
+        let _guard = KillOnDrop(child_pid);
+
+        std::fs::remove_file(&sleep_copy).expect("remove sleep copy");
+
+        // Poll until the kernel marks /proc/<pid>/exe with " (deleted)".
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if crate::handlers::agents_run::drive_pid_exe_is_stale(child_pid as i32) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "drive_pid_exe_is_stale never returned true within 1s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T795", "executing", Some(child_pid as i64));
+        insert_lock(&conn, row_id, "T795");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+        assert_eq!(acted, 1, "watchdog must act on stale-exe alive PID");
+
+        // AC1.5: exact token form.
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T795'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked");
+        assert_eq!(
+            reason.as_deref(),
+            Some("drive_failed:stale_binary_inode"),
+            "blocked_reason must be exact-token drive_failed:stale_binary_inode"
+        );
+
+        // Lock must be closed as silent_zombie.
+        let (finished_at, terminal_reason): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT finished_at, terminal_reason FROM dispatch_locks WHERE row_id=?1",
+                rusqlite::params![row_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(finished_at.is_some(), "lock must be closed (finished_at IS NOT NULL)");
+        assert_eq!(
+            terminal_reason.as_deref(),
+            Some("silent_zombie"),
+            "terminal_reason must be silent_zombie"
+        );
+
+        // transition_history must have a mark_drive_failed row with actor_note.
+        let actor_note: Option<String> = conn
+            .query_row(
+                "SELECT actor_note FROM transition_history \
+                 WHERE display_id='T795' AND verb='mark_drive_failed' \
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            actor_note.as_deref(),
+            Some("stale_binary_inode"),
+            "transition_history actor_note must be stale_binary_inode"
+        );
+
+        // Reap: kill explicitly so wait() returns immediately; guard is backup.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// AC1.3: alive drive PID whose exe is NOT deleted → watchdog leaves the
+    /// row untouched (acted == 0, status still 'executing').
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watchdog_alive_pid_with_fresh_exe_no_flip() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sleep_copy = tmp.path().join("sleep_fresh");
+        std::fs::copy("/bin/sleep", &sleep_copy).expect("copy /bin/sleep");
+
+        let mut child = std::process::Command::new(&sleep_copy)
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep copy");
+        let child_pid = child.id();
+        let _guard = KillOnDrop(child_pid);
+
+        // Deliberately do NOT delete the copy.
+
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T796", "executing", Some(child_pid as i64));
+        insert_lock(&conn, row_id, "T796");
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+        assert_eq!(acted, 0, "fresh-exe alive PID must not be touched");
+
+        let (status, blocked_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T796'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "executing", "row must remain executing");
+        assert!(blocked_reason.is_none(), "blocked_reason must be NULL");
+
+        let finished_at: Option<String> = conn
+            .query_row(
+                "SELECT finished_at FROM dispatch_locks WHERE row_id=?1",
+                rusqlite::params![row_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(finished_at.is_none(), "lock must remain open");
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

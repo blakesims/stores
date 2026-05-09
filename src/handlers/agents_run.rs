@@ -3061,6 +3061,33 @@ pub(crate) fn pid_is_zombie(_pid: i32) -> bool {
     false
 }
 
+/// True when a live drive subprocess's executable inode has been replaced on
+/// disk — i.e. `/proc/<pid>/exe` resolves to a path ending with ` (deleted)`,
+/// the kernel marker for an unlinked exe inode.
+///
+/// Also returns true if `read_link` fails with `NotFound` while `pid_is_alive`
+/// still holds — the proc entry vanished under us (a race). Returns false for
+/// `PermissionDenied` and all other errors so foreign-uid live processes are
+/// never flipped. On non-Linux the function always returns false (parity with
+/// `pid_is_zombie`).
+#[cfg(target_os = "linux")]
+pub(crate) fn drive_pid_exe_is_stale(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let exe_path = format!("/proc/{pid}/exe");
+    match std::fs::read_link(&exe_path) {
+        Ok(target) => target.to_string_lossy().ends_with(" (deleted)"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => pid_is_alive(pid),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn drive_pid_exe_is_stale(_pid: i32) -> bool {
+    false
+}
+
 /// Count tasks rows whose `drive_pid` is set to a still-running process.
 /// Used by the daemon's `poll_once` cap-check (Task 4.5).
 #[allow(dead_code)]
@@ -5352,6 +5379,17 @@ policies:
             elapsed < Duration::from_millis(500),
             "sleep_interruptible should return promptly when SHUTDOWN flips; elapsed={:?}",
             elapsed
+        );
+    }
+
+    /// Cross-platform contract: drive_pid_exe_is_stale always returns false on
+    /// non-Linux (no /proc). Gated on not-linux so it only runs off-platform.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn drive_pid_exe_is_stale_returns_false_off_linux() {
+        assert!(
+            !drive_pid_exe_is_stale(std::process::id() as i32),
+            "drive_pid_exe_is_stale must always return false on non-Linux"
         );
     }
 
