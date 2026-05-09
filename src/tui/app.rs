@@ -690,4 +690,59 @@ mod tests {
         assert_eq!(app.selection, Selection::default());
         assert_eq!(app.scroll_offset, 0);
     }
+
+    #[test]
+    fn flat_rows_lane_invariant_holds_after_cycle_focus_across_all_lanes() {
+        // AC2.3: After cycle_focus, app.flat_rows() must contain only rows
+        // whose store_lane_for_row matches app.focused_store. Verified across
+        // all five lanes by exercising cycle_focus as the state transition.
+        let mut app = five_lane_app();
+        assert_eq!(app.focused_store, StoreLane::Tasks);
+
+        // Walk forward through all five lanes via cycle_focus(1) and assert
+        // the invariant after each transition.
+        let mut visited_forward: Vec<StoreLane> = Vec::new();
+        for _ in 0..StoreLane::ALL.len() {
+            let lane = app.focused_store;
+            let flat = app.flat_rows();
+            for fr in &flat {
+                let row = &app.rows[fr.abs];
+                assert_eq!(
+                    store_lane_for_row(row),
+                    lane,
+                    "flat_rows must only emit rows whose store_lane_for_row matches focused_store ({:?})",
+                    lane
+                );
+            }
+            visited_forward.push(lane);
+            app.cycle_focus(1);
+        }
+        // All five distinct lanes were visited and invariant held for each.
+        let mut sorted_forward = visited_forward.clone();
+        sorted_forward.sort_by_key(|l| StoreLane::ALL.iter().position(|x| x == l).unwrap());
+        let mut all_lanes: Vec<StoreLane> = StoreLane::ALL.to_vec();
+        all_lanes.sort_by_key(|l| StoreLane::ALL.iter().position(|x| x == l).unwrap());
+        assert_eq!(sorted_forward, all_lanes);
+
+        // And reverse: cycle_focus(-1) preserves the invariant too.
+        let mut visited_backward: Vec<StoreLane> = Vec::new();
+        for _ in 0..StoreLane::ALL.len() {
+            let lane = app.focused_store;
+            let flat = app.flat_rows();
+            for fr in &flat {
+                let row = &app.rows[fr.abs];
+                assert_eq!(
+                    store_lane_for_row(row),
+                    lane,
+                    "flat_rows lane invariant must hold after cycle_focus(-1) on lane {:?}",
+                    lane
+                );
+            }
+            visited_backward.push(lane);
+            app.cycle_focus(-1);
+        }
+        let mut sorted_backward = visited_backward.clone();
+        sorted_backward.sort_by_key(|l| StoreLane::ALL.iter().position(|x| x == l).unwrap());
+        assert_eq!(sorted_backward, all_lanes);
+    }
 }
