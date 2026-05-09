@@ -1,11 +1,13 @@
 //! T140 P4: integration coverage for `stores engine plan-start`.
 //!
-//! Seeds a fixture DB spanning every plan-start bucket (≥10 rows across all
-//! 5 buckets), then exercises the binary's text and JSON output. Also pins
-//! the activation-driven WouldRun-vs-Inactive split for the integration lane
-//! (the reviewer-flagged AC4.6 gap) and verifies that running plan-start
-//! does NOT mutate the DB (tasks-table content hash + transition_history row
-//! count are byte-identical before and after).
+//! Seeds a fixture DB spanning every plan-start bucket (13 rows across all
+//! 5 buckets), then exercises the binary's text and JSON output. Pins the
+//! activation-driven WouldRun-vs-Inactive split for the integration lane via
+//! status='accepted' + unmerged branch rows (T504 active → would_run, T512
+//! inactive → inactive — the AC4.6 spec) plus the parallel
+//! integration_queued/integration_blocked rows. Verifies that running
+//! plan-start does NOT mutate the DB (tasks-table content hash +
+//! transition_history row count are byte-identical before and after).
 
 use rusqlite::Connection;
 use serde_json::Value;
@@ -97,6 +99,21 @@ fn seed_rows(conn: &Connection) {
         None,
         Some("T2"),
     );
+    // - AC4.6 active arm: status='accepted' + unmerged branch + activation=active
+    //   → AwaitingIntegration { activation_active: true } → would_run.
+    //   The fixture cwd is not a git repo, so the binary's GitBranchStateSource
+    //   errors on `git merge-base --is-ancestor`; the classifier's conservative
+    //   fallback treats the non-empty branch field as still in the integration
+    //   lane (covered by the disposition unit tests).
+    let id_acc_active = insert_task(
+        conn,
+        "T504",
+        "accepted",
+        Some("active"),
+        Some("feat/T504-active-unmerged"),
+        Some("T2"),
+    );
+    record_accepted_at(conn, id_acc_active, "T504", "2026-05-08T10:00:00Z");
 
     // inactive bucket
     // - EngineActionable + activation=inactive (planning)
@@ -110,6 +127,17 @@ fn seed_rows(conn: &Connection) {
         None,
         Some("T2"),
     );
+    // - AC4.6 inactive arm: status='accepted' + unmerged branch + activation=inactive
+    //   → AwaitingIntegration { activation_active: false } → inactive.
+    let id_acc_inactive = insert_task(
+        conn,
+        "T512",
+        "accepted",
+        Some("inactive"),
+        Some("feat/T512-inactive-unmerged"),
+        Some("T2"),
+    );
+    record_accepted_at(conn, id_acc_inactive, "T512", "2026-05-08T10:00:00Z");
 
     // needs_operator bucket
     // - DeployCeremonyPending (status=integrated)
@@ -128,7 +156,7 @@ fn seed_rows(conn: &Connection) {
     insert_task(conn, "T530", "blocked", Some("inactive"), None, Some("T3"));
 
     // historical bucket
-    // - HistoricalTerminalLegacy (status=accepted, pre-cutoff)
+    // - HistoricalTerminalLegacy (status=accepted, pre-cutoff, no branch)
     let id_legacy = insert_task(conn, "T540", "accepted", Some("inactive"), None, Some("T3"));
     record_accepted_at(conn, id_legacy, "T540", "2026-04-01T12:00:00Z");
     // - TerminalSuccessModern (schema_migrated)
@@ -233,12 +261,12 @@ fn plan_start_text_mode_emits_summary_and_section_headers_in_order() {
 
     // Top-line summary contains all five bucket counts.
     assert!(
-        stdout.contains("engine ignition plan: 3 would-run"),
-        "summary must report 3 would-run; got:\n{stdout}"
+        stdout.contains("engine ignition plan: 4 would-run"),
+        "summary must report 4 would-run; got:\n{stdout}"
     );
     assert!(
-        stdout.contains("2 inactive"),
-        "summary must report 2 inactive; got:\n{stdout}"
+        stdout.contains("3 inactive"),
+        "summary must report 3 inactive; got:\n{stdout}"
     );
     assert!(
         stdout.contains("2 needs-operator"),
@@ -322,16 +350,27 @@ fn plan_start_bucket_assignments_match_fixture_dispositions() {
     wr.sort();
     assert_eq!(
         wr,
-        vec!["T501".to_string(), "T502".to_string(), "T503".to_string()],
-        "would_run must contain ActiveEngineWork + active EngineActionable + active AwaitingIntegration"
+        vec![
+            "T501".to_string(),
+            "T502".to_string(),
+            "T503".to_string(),
+            "T504".to_string(),
+        ],
+        "would_run must contain ActiveEngineWork + active EngineActionable + \
+         active AwaitingIntegration (integration_queued) + active accepted-with-unmerged-branch"
     );
 
     let mut inactive = bucket_ids("inactive");
     inactive.sort();
     assert_eq!(
         inactive,
-        vec!["T510".to_string(), "T511".to_string()],
-        "inactive must contain inactive EngineActionable + inactive AwaitingIntegration"
+        vec![
+            "T510".to_string(),
+            "T511".to_string(),
+            "T512".to_string(),
+        ],
+        "inactive must contain inactive EngineActionable + inactive AwaitingIntegration \
+         (integration_blocked) + inactive accepted-with-unmerged-branch"
     );
 
     let mut needs_op = bucket_ids("needs_operator");
@@ -356,8 +395,18 @@ fn plan_start_bucket_assignments_match_fixture_dispositions() {
         "historical must contain legacy accepted + schema_migrated + abandoned"
     );
 
-    // AC4.6 — activation-driven split for the integration lane is pinned
-    // by T503 (active → would_run) vs T511 (inactive → inactive).
+    // AC4.6 (as written): the activation-driven split is pinned by
+    // status='accepted' + unmerged branch rows: T504 (active → would_run) and
+    // T512 (inactive → inactive). The integration_queued/blocked rows (T503,
+    // T511) provide the same split for the older-status path.
+    assert!(
+        bucket_ids("would_run").contains(&"T504".to_string()),
+        "T504 (status=accepted, branch unmerged, activation=active) must land in would_run"
+    );
+    assert!(
+        bucket_ids("inactive").contains(&"T512".to_string()),
+        "T512 (status=accepted, branch unmerged, activation=inactive) must land in inactive"
+    );
     assert!(
         bucket_ids("would_run").contains(&"T503".to_string()),
         "T503 (integration_queued, activation=active) must land in would_run"

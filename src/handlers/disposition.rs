@@ -298,6 +298,18 @@ pub fn operator_disposition(
         }
         "complete" | "cargo_installed" | "integrated" => Disposition::DeployCeremonyPending,
         "accepted" => {
+            // AC4.6: accepted rows still carrying an unmerged branch are in
+            // the integration lane, gated by activation. Only when the branch
+            // is missing or definitively merged do we fall through to the
+            // legacy/ceremony classification. Err from the branch source is
+            // treated conservatively as "still in the integration lane" — the
+            // branch field's presence is the signal.
+            if let Some(b) = branch {
+                match branch_state.branch_unmerged(b) {
+                    Ok(false) => {} // merged → fall through to legacy/ceremony rules
+                    _ => return Disposition::AwaitingIntegration { activation_active },
+                }
+            }
             let cutoff = parse_iso(LEGACY_ACCEPTED_CUTOFF_RFC3339)
                 .expect("LEGACY_ACCEPTED_CUTOFF_RFC3339 must be a valid RFC3339 instant");
             let accepted_at = row_str(row, "accepted_at").and_then(parse_iso);
@@ -694,6 +706,89 @@ mod tests {
         assert_eq!(
             operator_disposition(&row, today(), &mock),
             Disposition::DeployCeremonyPending
+        );
+    }
+
+    // ---- AC4.6 — accepted + unmerged branch is the integration lane ----
+
+    /// AC4.6 (active arm): status='accepted', activation='active', branch
+    /// unmerged → AwaitingIntegration { activation_active: true } → would_run.
+    #[test]
+    fn accepted_with_unmerged_branch_active_classifies_as_awaiting_integration_active() {
+        let mock = MockBranchState::with(&[("feat/accepted-active", true)]);
+        let mut row = fixture_row("T308", "accepted");
+        row["activation"] = json!("active");
+        row["branch"] = json!("feat/accepted-active");
+        // Even with a post-cutoff accepted_at, the unmerged branch keeps the
+        // row in the integration lane rather than DeployCeremonyPending.
+        row["accepted_at"] = json!("2026-05-08T10:00:00Z");
+        assert_eq!(
+            operator_disposition(&row, today(), &mock),
+            Disposition::AwaitingIntegration {
+                activation_active: true,
+            }
+        );
+    }
+
+    /// AC4.6 (inactive arm): status='accepted', activation='inactive', branch
+    /// unmerged → AwaitingIntegration { activation_active: false } → inactive.
+    #[test]
+    fn accepted_with_unmerged_branch_inactive_classifies_as_awaiting_integration_inactive() {
+        let mock = MockBranchState::with(&[("feat/accepted-inactive", true)]);
+        let mut row = fixture_row("T309", "accepted");
+        row["activation"] = json!("inactive");
+        row["branch"] = json!("feat/accepted-inactive");
+        row["accepted_at"] = json!("2026-05-08T10:00:00Z");
+        assert_eq!(
+            operator_disposition(&row, today(), &mock),
+            Disposition::AwaitingIntegration {
+                activation_active: false,
+            }
+        );
+    }
+
+    /// Accepted row whose branch is definitively merged falls through to the
+    /// existing legacy/ceremony classification (post-cutoff →
+    /// DeployCeremonyPending here).
+    #[test]
+    fn accepted_with_merged_branch_falls_through_to_ceremony_or_legacy() {
+        let mock = MockBranchState::with(&[("feat/shipped", false)]);
+        let mut row = fixture_row("T310", "accepted");
+        row["branch"] = json!("feat/shipped");
+        row["accepted_at"] = json!("2026-05-08T10:00:00Z");
+        assert_eq!(
+            operator_disposition(&row, today(), &mock),
+            Disposition::DeployCeremonyPending
+        );
+    }
+
+    /// Accepted row with empty branch field is unaffected by the new path.
+    /// Pre-cutoff accepted_at → HistoricalTerminalLegacy.
+    #[test]
+    fn accepted_with_empty_branch_uses_legacy_cutoff_logic() {
+        let mock = MockBranchState::empty();
+        let mut row = fixture_row("T311", "accepted");
+        row["accepted_at"] = json!("2026-04-01T00:00:00Z");
+        assert_eq!(
+            operator_disposition(&row, today(), &mock),
+            Disposition::HistoricalTerminalLegacy
+        );
+    }
+
+    /// Accepted row with a non-empty branch but the branch source erroring
+    /// (e.g. not a git repo) is treated conservatively as still in the
+    /// integration lane — the branch field's presence is the signal.
+    #[test]
+    fn accepted_with_branch_source_error_falls_into_integration_lane() {
+        let mock = MockBranchState::empty(); // unknown branch → Err
+        let mut row = fixture_row("T312", "accepted");
+        row["activation"] = json!("inactive");
+        row["branch"] = json!("feat/unknown-to-mock");
+        assert_eq!(
+            operator_disposition(&row, today(), &mock),
+            Disposition::AwaitingIntegration {
+                activation_active: false,
+            }
         );
     }
 
