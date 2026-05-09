@@ -101,7 +101,7 @@ fn seed_db() -> Connection {
         "T600",
         "blocked",
         "silent zombie one",
-        Some("silent_zombie:pid_dead"),
+        Some("silent_zombie"),
     );
     insert_task(
         &conn,
