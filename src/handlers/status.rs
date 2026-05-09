@@ -33,14 +33,16 @@
 /// `--max-iters` (hidden) caps loop iterations; tests pass a small value to
 /// avoid sleeping.
 use anyhow::{bail, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::db;
+use crate::handlers::disposition::{operator_disposition, GitBranchStateSource};
 use crate::paths::db_path;
 
 // ---------------------------------------------------------------------------
@@ -362,6 +364,112 @@ pub fn should_print(prev_key: Option<&StateKey>, new_key: &StateKey) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// T140 P5: disposition surfacing
+// ---------------------------------------------------------------------------
+
+/// Fetch the row JSON shape `operator_disposition` consumes for a single
+/// task, tolerant to legacy schemas that omit the `activation` /
+/// `accepted_at` columns. The returned JSON always contains
+/// `display_id`, `status`, `activation`, `branch`, and `linked_observations`
+/// keys; `accepted_at` is included when discoverable from
+/// `transition_history`.
+fn fetch_disposition_row_json(conn: &Connection, display_id: &str) -> Result<Value> {
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(tasks)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let activation_expr = if cols.iter().any(|c| c == "activation") {
+        "COALESCE(activation,'inactive')"
+    } else {
+        "'inactive'"
+    };
+    let branch_expr = if cols.iter().any(|c| c == "branch") {
+        "COALESCE(branch,'')"
+    } else {
+        "''"
+    };
+    let sql = format!(
+        "SELECT id, {activation_expr}, {branch_expr} FROM tasks WHERE display_id = ?1"
+    );
+    let (row_id, activation, branch): (i64, String, String) = conn.query_row(
+        &sql,
+        rusqlite::params![display_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+
+    let mut row_json = json!({
+        "display_id": display_id,
+        "activation": activation,
+        "branch": branch,
+        "linked_observations": [],
+    });
+
+    // accepted_at is recovered from transition_history (matches engine.rs
+    // load_accepted_at_map). Absent / missing transition_history → leave unset.
+    if let Ok(true) = table_exists(conn, "transition_history") {
+        let at: Option<String> = conn
+            .query_row(
+                "SELECT MAX(occurred_at) FROM transition_history \
+                 WHERE store='tasks' AND row_id=?1 AND to_status='accepted'",
+                rusqlite::params![row_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap_or(None);
+        if let Some(at) = at {
+            row_json["accepted_at"] = json!(at);
+        }
+    }
+
+    Ok(row_json)
+}
+
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        rusqlite::params![table],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+fn wall_clock_today() -> DateTime<Utc> {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    DateTime::<Utc>::from_timestamp(secs, 0).unwrap_or_else(|| {
+        DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is a valid DateTime")
+    })
+}
+
+/// Compute and print the `Activation:` and `Disposition:` lines that
+/// surface `handlers::disposition::operator_disposition` to the operator.
+/// Single source of truth — no disposition-keyword strings appear here;
+/// the rendered label is always sourced from `Disposition::display_label`.
+fn print_task_disposition(conn: &Connection, task: &TaskState, status: &str) {
+    let row_json = match fetch_disposition_row_json(conn, &task.display_id) {
+        Ok(mut v) => {
+            // Prefer the live status from TaskState (the row we just fetched)
+            // over re-querying.
+            v["status"] = json!(status);
+            v
+        }
+        Err(_) => return,
+    };
+    let activation = row_json
+        .get("activation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("inactive")
+        .to_string();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let branch_state = GitBranchStateSource::new(cwd, "main");
+    let disposition = operator_disposition(&row_json, wall_clock_today(), &branch_state);
+    println!("Activation: {activation}");
+    println!("Disposition: {}", disposition.display_label());
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -380,6 +488,11 @@ pub fn run_status(args: StatusArgs) -> Result<()> {
             Some(id) => {
                 let task = fetch_task(&conn, id)?;
                 println!("{}", compute_status_frame(&task));
+                // T140 P5: surface the operator_disposition label so the
+                // reader does not need to mentally re-derive it from raw
+                // status. Single source of truth — display_label() lives
+                // in handlers::disposition.
+                print_task_disposition(&conn, &task, &task.status);
             }
             None => {
                 let tasks = fetch_all_tasks(&conn)?;
@@ -411,6 +524,7 @@ fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
                 let key = task.state_key();
                 if should_print(prev_keys.get(id), &key) {
                     println!("{}", compute_status_frame(&task));
+                    print_task_disposition(&conn, &task, &task.status);
                     prev_keys.insert(id.clone(), key.clone());
                 }
                 if is_awaiting_human(&task.status) {
