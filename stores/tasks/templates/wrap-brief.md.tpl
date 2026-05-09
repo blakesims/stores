@@ -39,7 +39,11 @@
 
 ---
 
-## Diff (since branch)
+## Diff (direction-aware)
+
+Two labeled sections below. Attribute only commits from "On this branch" to
+this task. Commits listed under "On base" rode in on main and must NOT be
+described as deliverables of this task.
 
 {{{git_diff_summary}}}
 

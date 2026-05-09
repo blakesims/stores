@@ -100,18 +100,34 @@ subsystems.
 ## Stage 2: Codebase Spot-Check (optional but recommended)
 
 For non-trivial tasks, a brief spot-check with the authorised read-only tools
-confirms the executor's claims:
+confirms the executor's claims.
+
+**IMPORTANT — read git log in BOTH directions before attributing commits.** The
+`git_diff_summary` in your brief already has two labeled sections; verify with
+the git tools when in doubt:
 
 ```bash
-# What commits landed on this branch?
-git log --oneline master..HEAD
+# What commits landed on this branch (not on base)?
+git log --oneline main..HEAD   # these belong to this task
 
-# Which files changed?
-git diff --stat master..HEAD
+# What commits are on base but NOT on this branch?
+# Do NOT attribute these to this task — they are main-ahead work.
+git log --oneline HEAD..main
 
-# Spot-check a specific file if the review flag it as risky
+# Which files changed on this branch?
+git diff --stat main..HEAD
+
+# Spot-check a specific file if the review flagged it as risky
 git show HEAD:src/path/to/file.rs | head -50
 ```
+
+The `git_diff_summary` section in your brief is structured as:
+- **"On this branch"**: commits and stat for `<since-ref>..HEAD` — executor's work.
+- **"On base (not on this branch)"**: commits for `HEAD..main` — main-ahead work
+  that MUST NOT be described as part of this task's deliverable.
+
+If a file appears in the diff-stat but the commit that changed it is listed in
+the "On base" section, that change rides on main, not this branch.
 
 You are NOT required to read every changed file. Focus on the highest-risk
 changes identified in REVISE cycles or flagged by the code-reviewer.
