@@ -159,6 +159,19 @@ fn insert_accepted_task(conn: &Connection, display_id: &str, branch: &str, works
     .unwrap();
 }
 
+/// T138 P3: helper for tests that need to seed a row directly into the
+/// post-integrated state (the new legal source for reconcile-accepted).
+fn insert_integrated_task(conn: &Connection, display_id: &str, branch: &str, workspace_path: &str) {
+    let now = "2026-05-03T00:00:00Z";
+    let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
+         VALUES (?1, 'integrated', 'test', 't', ?2, ?3, ?4, ?5, ?5, 'framework', 'framework')",
+        rusqlite::params![display_id, branch, workspace_path, contract, now],
+    )
+    .unwrap();
+}
+
 fn task_row_json(conn: &Connection, display_id: &str) -> Value {
     let mut stmt = conn
         .prepare("SELECT * FROM tasks WHERE display_id = ?1")
@@ -771,9 +784,11 @@ fn i027_reconcile_accepted_actor_gate_rejects_ai_autonomous() {
 }
 
 /// Branch-not-merged guard: reconcile-accepted refuses to advance a row
-/// whose branch hasn't been merged into main. The verb is for re-firing
-/// the post-accept chain on already-merged work, not for performing the
-/// merge itself.
+/// whose branch hasn't been merged into main. T138 P3: the verb's source
+/// statuses are now {integrated, cargo_installed} — an integrated row
+/// always has its branch on main (the lane fast-merged it), but defensive
+/// programming retains the merged-into-main check for handcrafted/legacy
+/// rows that may have been advanced out-of-band.
 #[test]
 fn i027_reconcile_accepted_rejects_unmerged_branch() {
     use stores::handlers::reconcile_accepted::run_reconcile_accepted;
@@ -781,14 +796,15 @@ fn i027_reconcile_accepted_rejects_unmerged_branch() {
 
     let (_tmp, repo) = setup_chain_repo("feat/T901-unmerged", "t901-unmerged");
     let conn = fresh_db_with_substrate();
-    insert_accepted_task(
+    insert_integrated_task(
         &conn,
         "T901",
         "feat/T901-unmerged",
         repo.to_str().unwrap(),
     );
 
-    // Branch is NOT pre-merged into main here, so reconcile-accepted must bail.
+    // Branch is NOT pre-merged into main here, so reconcile-accepted must bail
+    // even though the row's status sits at the new legal source `integrated`.
     let cfg = cfg_path();
     let err = run_reconcile_accepted(&conn, &cfg, "T901", Actor::AiWithHuman.into())
         .expect_err("must bail on unmerged branch");
@@ -799,8 +815,8 @@ fn i027_reconcile_accepted_rejects_unmerged_branch() {
     );
     assert_eq!(
         status_of(&conn, "T901"),
-        "accepted",
-        "T901 must remain at accepted (no transitions on bail)"
+        "integrated",
+        "T901 must remain at integrated (no transitions on bail)"
     );
     assert_eq!(
         count_history(&conn, "T901", "mark_cargo_installed"),
@@ -809,14 +825,19 @@ fn i027_reconcile_accepted_rejects_unmerged_branch() {
     );
 }
 
-/// T107-shape e2e (the case Pi msg_85be1b1c specifically required):
-/// accepted row whose branch is ALREADY merged into main but whose
-/// post-accept ceremony never fired. reconcile-accepted must re-fire
-/// the chain (accept-merge no-op, cargo-install fires
-/// mark_cargo_installed, schema-migrate fires mark_schema_migrated)
+/// T107-shape e2e (T138 P3 update): integrated row whose branch is
+/// already on main but whose stores-specific post-`integrated` chain
+/// never fired. reconcile-accepted must re-fire cargo-install
+/// (mark_cargo_installed) and schema-migrate (mark_schema_migrated)
 /// without pretending the row was deploy_blocked.
+///
+/// Pre-T138 this test seeded an `accepted` row and re-ran the full
+/// post-accept ceremony (accept-merge → cargo-install → schema-migrate).
+/// Post-T138 the integration lane owns the merge step, so reconcile-accepted
+/// no longer drives accept-merge — its scope shrinks to the post-integrated
+/// chain.
 #[test]
-fn i027_reconcile_accepted_advances_accepted_to_schema_migrated_for_merged_branch() {
+fn i027_reconcile_accepted_advances_integrated_to_schema_migrated_for_merged_branch() {
     use stores::handlers::reconcile_accepted::run_reconcile_accepted;
 
     let _env = cargo_env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -829,7 +850,8 @@ fn i027_reconcile_accepted_advances_accepted_to_schema_migrated_for_merged_branc
     std::env::set_var("STORES_BIN", env!("CARGO_BIN_EXE_stores"));
 
     // Build a valid cargo + git repo with the branch already merged into main —
-    // this is the T107-shape: work shipped, but substrate stranded at accepted.
+    // this is the T107-shape: work shipped (lane fast-merged), but stores-specific
+    // post-integrated chain stranded at `integrated`.
     let (_tmp, repo) = setup_chain_repo("feat/T902-merged", "t902-merged");
     assert!(
         git(&repo, &["merge", "--no-ff", "--no-edit", "feat/T902-merged"])
@@ -839,7 +861,7 @@ fn i027_reconcile_accepted_advances_accepted_to_schema_migrated_for_merged_branc
     );
 
     let conn = fresh_db_with_substrate();
-    insert_accepted_task(&conn, "T902", "feat/T902-merged", repo.to_str().unwrap());
+    insert_integrated_task(&conn, "T902", "feat/T902-merged", repo.to_str().unwrap());
 
     // Overwrite Cargo.toml to package name=stores so cargo-install's cwd
     // validation accepts it (mirrors the round-3 pattern in retry_deploy_stale).
@@ -862,12 +884,11 @@ fn i027_reconcile_accepted_advances_accepted_to_schema_migrated_for_merged_branc
     std::env::set_current_dir(&old_cwd).expect("restore cwd");
     drop(_cwd_g);
 
-    result.expect("reconcile-accepted T902 must succeed on merged-branch accepted row");
+    result.expect("reconcile-accepted T902 must succeed on merged-branch integrated row");
 
     // Final state: schema_migrated. transition_history shows the framework
-    // verbs were fired (NOT mark_deploy_blocked / NOT a synthetic flip back to
-    // deploy_blocked — the row stayed truthful at accepted → cargo_installed →
-    // schema_migrated).
+    // verbs were fired (NOT mark_deploy_blocked / NOT a synthetic flip back —
+    // the row stayed truthful at integrated → cargo_installed → schema_migrated).
     assert_eq!(
         status_of(&conn, "T902"),
         "schema_migrated",

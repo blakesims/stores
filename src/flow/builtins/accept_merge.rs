@@ -1,11 +1,31 @@
-//! `builtin:accept-merge` — fast-merge a task's branch into the project
-//! main branch when the task transitions `in_review → accepted`.
+//! `builtin:accept-merge` — DEPRECATED in T138 P3.
 //!
-//! Clean merge: row stays `accepted`, daemon records success.
-//! Conflict: row → `deploy_blocked` (framework-actor transition), `ntfy`
-//! fires, and the row is dispatched to `agents.yaml::deployment_specialist`
-//! (default: `builtin:user-escalation`).
-//! Missing branch: log warning, leave row as-is.
+//! T138 replaces the `accept-merge` subscriber with the generic integration
+//! lane (`builtin:integrate`): `accepted → integration_queued → integrating
+//! → integrated`. The integrate lane owns refresh-against-main, the
+//! pre-land check, the actual merge, and typed `integration_blocked`
+//! routing. Repo-specific post-`integrated` work (e.g. cargo-install,
+//! schema-migrate in this repo) hangs off the `integrated` state.
+//!
+//! What stays in this module post-T138:
+//! - The git helpers `abort_merge`, `abort_rebase`, `list_conflict_files`,
+//!   `is_branch_merged_into_main`, and `resolve_main_repo_for_check` are
+//!   re-used by `builtin:integrate` (`crate::flow::builtins::integrate`).
+//!   They are deliberately kept `pub(crate)` here rather than duplicated.
+//! - `accept_merge::run` is no longer dispatched (the
+//!   `"accept-merge" => Some(accept_merge::run)` arm is gone from
+//!   `dispatch_builtin`, and the `postcondition_for_builtin` mapping is
+//!   removed). It is retained as a `pub fn` only because the legacy
+//!   `agents backfill` CLI (`src/handlers/agents_backfill.rs`) still calls
+//!   it for one-off batch fast-merges of stranded `accepted` rows. New
+//!   code should NOT call this function — use the integrate lane instead.
+//!
+//! Pre-T138 behaviour (kept for the legacy callers above): clean merge —
+//! row stays `accepted`. Conflict — row → `deploy_blocked`. Missing
+//! branch — log and leave row as-is. Note that the `(accepted →
+//! deploy_blocked)` schema edge was retired by Phase 1 of T138; the
+//! conflict path therefore now surfaces an `Err` from
+//! `fire_mark_deploy_blocked` rather than transitioning the row.
 
 use anyhow::Context;
 use serde_json::Value;

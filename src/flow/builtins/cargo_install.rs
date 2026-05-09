@@ -1,4 +1,11 @@
-//! `builtin:cargo-install` — refresh the stores-private daemon binary after a task is merged.
+//! `builtin:cargo-install` — refresh the stores-private daemon binary after
+//! the generic integration lane lands a candidate.
+//!
+//! T138 P3: this is now a stores-repo-specific subscriber on
+//! (integrating → integrated). The source state expectation is `integrated`
+//! (post-T138; previously `accepted`). On success it fires
+//! `mark_cargo_installed` (integrated → cargo_installed); the
+//! schema-migrate subscriber takes over from there.
 //!
 //! Builds into an isolated cargo install root, validates the candidate `stores`
 //! binary, then atomically promotes it to the private daemon binary path.

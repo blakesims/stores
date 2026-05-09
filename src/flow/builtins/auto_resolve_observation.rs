@@ -1,12 +1,20 @@
 //! `builtin:auto-resolve-observation` — close observations linked to a
 //! successfully shipped task.
 //!
-//! Subscribes to the terminal-success post-deploy transition
-//! (`tasks: cargo_installed → schema_migrated`). For every display id in
-//! `tasks.linked_observations`, marks the matching observation as
-//! `status='resolved'` with `resolution=<task commit>`. Already-resolved rows
-//! are skipped without mutation; missing observation rows warn and ntfy but do
-//! not fail the subscriber.
+//! T138 P3: subscribes to the integration-lane success edge
+//! (`tasks: integrating → integrated`) — i.e. as soon as the candidate
+//! lands on main — plus the legacy stores-specific terminal-success edge
+//! (`tasks: cargo_installed → schema_migrated`) and every closed-out-of-band
+//! edge. The post-T138 lane fires `mark_integrated` first; later
+//! repo-specific subscribers (cargo-install / schema-migrate) chain off
+//! the `integrated` state. Linked-observation resolution is now anchored
+//! to the lane's success edge so it doesn't depend on repo-specific
+//! post-`integrated` subscribers being configured.
+//!
+//! For every display id in `tasks.linked_observations`, marks the matching
+//! observation as `status='resolved'` with `resolution=<task commit>`.
+//! Already-resolved rows are skipped without mutation; missing observation
+//! rows warn and ntfy but do not fail the subscriber.
 
 use anyhow::Result;
 use serde_json::Value;
@@ -185,7 +193,10 @@ fn warn_orphan(ctx: &DispatchCtx, task_id: &str, obs_id: &str) {
     eprintln!("[auto-resolve-observation] warning: {summary}");
     let event = NotifyEvent {
         row_id: task_id.to_string(),
-        transition_attempted: "tasks: cargo_installed→schema_migrated".to_string(),
+        // T138 P3: the canonical success edge is now (integrating → integrated);
+        // the cargo_installed→schema_migrated and accepted-entry edges remain
+        // alternate triggers for legacy / repo-specific subscriber chains.
+        transition_attempted: "tasks: integrating→integrated".to_string(),
         policy_id_or_actor_halt: "auto-resolve-observation: orphan linked_observations".to_string(),
         summary,
     };
@@ -195,16 +206,21 @@ fn warn_orphan(ctx: &DispatchCtx, task_id: &str, obs_id: &str) {
 use rusqlite::OptionalExtension;
 
 /// Startup-sweep: replay `auto_resolve` for every terminal-success task row
-/// (`status IN (schema_migrated, accepted, closed_out_of_band)`) that still has
-/// unresolved entries in `linked_observations`. Idempotent — already-resolved
-/// obs are skipped via `ResolveOutcome::AlreadyResolved`. Emits a per-row
+/// (`status IN (schema_migrated, integrated, cargo_installed, accepted,
+/// closed_out_of_band)`) that still has unresolved entries in
+/// `linked_observations`. T138 P3 includes `integrated` and `cargo_installed`
+/// here so the sweep catches rows that landed on main via the integration
+/// lane but stranded mid-chain in the stores-specific post-`integrated`
+/// subscribers. `accepted` is retained for legacy/handcrafted rows that
+/// pre-date the lane. Idempotent — already-resolved obs are skipped via
+/// `ResolveOutcome::AlreadyResolved`. Emits a per-row
 /// `[startup-sweep] auto-resolve <task> → <obs> (was <prev>)` line for each
 /// obs actually moved, plus the aggregate `[startup-sweep] resolved N linked obs`
 /// summary. Errors per-task are logged and swallowed so the daemon proceeds.
 pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
     let mut stmt = ctx.conn.prepare(
         "SELECT t.display_id FROM tasks t \
-         WHERE t.status IN ('schema_migrated','accepted','closed_out_of_band') \
+         WHERE t.status IN ('schema_migrated','integrated','cargo_installed','accepted','closed_out_of_band') \
          AND t.linked_observations IS NOT NULL \
          AND t.linked_observations != '' \
          AND t.linked_observations != 'null' \

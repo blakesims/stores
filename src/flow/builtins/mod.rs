@@ -1,9 +1,18 @@
 //! Built-in subscribers shipped with the autonomous flow engine.
 //!
-//! `accept-merge` handles `tasks: in_review → accepted` by fast-merging the
-//! row's `branch` into the project main branch. On merge conflict it flips
-//! the row to `deploy_blocked` and dispatches the row to the configured
-//! `deployment_specialist` (default: `builtin:user-escalation`).
+//! T138 P3: `integrate` is the generic integration-lane subscriber on
+//! `(accepted → integration_queued)` and
+//! `(integration_blocked → integration_queued)`. It refreshes the
+//! candidate against current main, runs the configured pre-land check,
+//! fast-merges into main, and fires `mark_integrated` (or
+//! `mark_integration_blocked` with a typed reason). Repo-specific
+//! post-`integrated` subscribers (e.g. `cargo-install` and
+//! `schema-migrate` in this repo) hang off the `integrated` state.
+//!
+//! `accept-merge` is the pre-T138 pre-integration-lane subscriber. It is
+//! no longer dispatched (see `dispatch_builtin` and the deprecation note
+//! at the top of `accept_merge.rs`); the helpers in that module are
+//! re-used by `integrate`.
 //!
 //! `user-escalation` handles `deploy_blocked` rows by filing a substrate
 //! observation that points back at the blocked task.
@@ -51,12 +60,17 @@ pub struct DispatchCtx<'a> {
 /// non-fatal to the daemon loop).
 pub type BuiltinResult = Result<i32>;
 
-/// Dispatch a builtin keyword like `"builtin:accept-merge"`. Returns
+/// Dispatch a builtin keyword like `"builtin:integrate"`. Returns
 /// `Ok(None)` for unknown keywords so the caller can fall back to the
 /// shell-command path or log "unknown builtin".
+///
+/// T138 P3 AC3.5: the `accept-merge` keyword is intentionally NOT
+/// registered here — the integrate lane (`builtin:integrate`) supersedes
+/// it. `dispatch_builtin("accept-merge", …)` returns `None`. The
+/// `accept_merge::run` function is still callable from legacy
+/// non-subscriber callers (see `accept_merge.rs`'s deprecation note).
 pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option<BuiltinResult> {
     match keyword {
-        "accept-merge" => Some(accept_merge::run(row, ctx)),
         "auto-drive" => Some(auto_drive::run(row, ctx)),
         "auto-promote" => Some(auto_promote::run(row, ctx)),
         "auto-resolve-observation" => Some(auto_resolve_observation::run(row, ctx)),
@@ -465,6 +479,25 @@ mod tests {
         conn.last_insert_rowid()
     }
 
+    /// T138 P3: post-Phase-1 the cargo-install subscriber expects the row to
+    /// be at `integrated` (not `accepted`); this helper seeds rows directly
+    /// into that state so the cargo-install tests reflect the new source.
+    fn insert_integrated_task(
+        conn: &Connection,
+        display_id: &str,
+        branch: &str,
+        workspace_path: &str,
+    ) -> i64 {
+        let now = "2026-05-03T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'integrated', 'test', 't', ?2, ?3, ?4, ?5, ?5, 'framework', 'framework')",
+            rusqlite::params![display_id, branch, workspace_path, contract, now],
+        ).unwrap();
+        conn.last_insert_rowid()
+    }
+
     fn task_row_json(conn: &Connection, display_id: &str) -> Value {
         let mut stmt = conn
             .prepare("SELECT * FROM tasks WHERE display_id = ?1")
@@ -546,140 +579,47 @@ mod tests {
         );
     }
 
-    /// AC6.3 / test (j) + AC6.5: conflict → row=deploy_blocked, blocked_reason
-    /// names the conflicting file, MockNotifier captured the deploy_blocked event.
-    #[test]
-    fn j_accept_merge_conflict_and_ntfy() {
-        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("STORES_NTFY_URL", "https://test.local");
-        let mock = install_mock();
+    // T138 P3: removed `j_accept_merge_conflict_and_ntfy` and
+    // `k_deploy_blocked_transition_mechanics`. Both exercised the
+    // accept-merge → deploy_blocked routing on `accepted` rows. Phase 1
+    // dropped the `(accepted, deploy_blocked)` schema edge (the integration
+    // lane now owns merge/refresh; cargo_installed→deploy_blocked is the
+    // only mark_deploy_blocked source). The integrate-lane equivalents are
+    // covered by `flow::builtins::integrate` tests; the cargo-install
+    // failure surface is covered by
+    // `j_cargo_install_failure_surfaces_error_and_does_not_promote`.
 
-        let (_tmp, repo) = init_repo();
-        // Make main and branch diverge on the SAME file.
-        git(&repo, &["checkout", "-b", "feat/conflict"]);
-        std::fs::write(repo.join("file.txt"), "branch-side\n").unwrap();
-        git(&repo, &["add", "file.txt"]);
-        git(&repo, &["commit", "-m", "branch change"]);
-        git(&repo, &["checkout", "main"]);
-        std::fs::write(repo.join("file.txt"), "main-side\n").unwrap();
-        git(&repo, &["add", "file.txt"]);
-        git(&repo, &["commit", "-m", "main change"]);
-
-        let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(&conn, "T101", "feat/conflict", repo.to_str().unwrap());
-        let row = task_row_json(&conn, "T101");
-        let agents = AgentsYaml {
-            agents: vec![],
-            // Don't auto-dispatch a specialist — we test that path separately.
-            deployment_specialist: None,
-        };
-        let cfg = cfg_path();
-        let ctx = DispatchCtx {
-            conn: &conn,
-            agents: &agents,
-            config_path: &cfg,
-            policies_hash: "feedface",
-        };
-
-        accept_merge::run(&row, &ctx).unwrap();
-
-        let (status, reason): (String, Option<String>) = conn
-            .query_row(
-                "SELECT status, blocked_reason FROM tasks WHERE display_id='T101'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            status, "deploy_blocked",
-            "row must transition to deploy_blocked"
-        );
-        let reason = reason.unwrap_or_default();
-        assert!(
-            reason.contains("file.txt"),
-            "blocked_reason must cite conflict file; got: {reason}"
-        );
-
-        // ntfy captured the deploy_blocked event.
-        let evs = mock.events();
-        assert!(
-            evs.iter()
-                .any(|(_, e)| e.row_id == "T101"
-                    && e.transition_attempted.contains("deploy_blocked")),
-            "expected deploy_blocked ntfy event; got: {:?}",
-            evs
-        );
-
-        // policies_hash threaded into transition_history.
-        let phash: Option<String> = conn
-            .query_row(
-                "SELECT policies_hash FROM transition_history \
-                 WHERE store='tasks' AND display_id='T101' AND verb='mark_deploy_blocked'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(phash.as_deref(), Some("feedface"));
-
-        std::env::remove_var("STORES_NTFY_URL");
-    }
-
-    /// AC test (k): bare deploy_blocked transition mechanics — call the
-    /// internal helper on an accepted row and verify the lifecycle moves.
-    #[test]
-    fn k_deploy_blocked_transition_mechanics() {
-        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
-        let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(&conn, "T200", "feat/y", "/tmp/no-such");
-
-        // Direct call into the helper that accept-merge uses on conflict.
-        accept_merge_test_helper_fire(&conn, "T200", "manual reason: x.rs", "");
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM tasks WHERE display_id='T200'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "deploy_blocked");
-
-        // transition_history records an audit row with verb=mark_deploy_blocked
-        // and invoker=framework.
-        let (verb, invoker): (String, String) = conn
-            .query_row(
-                "SELECT verb, invoker FROM transition_history \
-                 WHERE store='tasks' AND display_id='T200'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(verb, "mark_deploy_blocked");
-        assert_eq!(invoker, "framework");
-    }
-
-    /// T046: a subscriber that exits non-zero on the in_review→accepted edge
-    /// must be routed to deploy_blocked by the framework subscriber-runner,
-    /// with the exit code recorded in transition_history.actor_note. Pre-T046
-    /// the row silently parked at `accepted` with the merge unlanded.
+    /// T046 (T138 P3 update): a subscriber that exits non-zero on the
+    /// (integrated → cargo_installed) edge must be routed to deploy_blocked by
+    /// the framework subscriber-runner, with the exit code recorded in
+    /// transition_history.actor_note. Pre-T138 this scenario tested the
+    /// `accept-merge` failure on (in_review → accepted); post-Phase-1 the
+    /// schema's only `mark_deploy_blocked` source is `cargo_installed`, fired
+    /// when schema-migrate fails on the `(cargo_installed → schema_migrated)`
+    /// edge. The route_failure logic itself is unchanged — only the source
+    /// state and subscriber name shift.
     #[test]
     fn t046_subscriber_nonzero_exit_routes_to_deploy_blocked() {
         let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
         let (conn, _t, _o) = fresh_db_with_tasks();
-        // Row sits at `accepted` (post in_review→accepted), as it would be
-        // when accept-merge claimed the dispatch and is about to run.
-        insert_accepted_task(&conn, "T046", "feat/x", "/tmp/no-such-workspace");
+        // Row sits at `cargo_installed` (post integrated→cargo_installed), as
+        // it would be when schema-migrate claimed the dispatch and is about to run.
+        insert_cargo_installed_task(&conn, "T046", "/tmp/no-such-workspace");
 
-        // Stub the subscriber-runner's failure path: row is at `accepted`,
+        // Stub the subscriber-runner's failure path: row is at `cargo_installed`,
         // dispatch returned exit=11. The framework must fire mark_deploy_blocked
-        // and stamp actor_note with the exit code.
+        // and stamp actor_note with the exit code. The schema-migrate
+        // subscription edge in the post-T138 agents.yaml is
+        // (integrated → cargo_installed) — i.e. subscription.to = "cargo_installed",
+        // matching current_status so the route gate fires.
         crate::handlers::agents_run::route_failure_to_deploy_blocked(
             &conn,
             "tasks",
             "T046",
-            "accept-merge",
+            "schema-migrate",
             "exit=11",
             "feedface",
-            "accepted",
+            "cargo_installed",
         );
 
         let (status, reason): (String, Option<String>) = conn
@@ -691,11 +631,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             status, "deploy_blocked",
-            "non-zero subscriber exit must route accepted → deploy_blocked"
+            "non-zero subscriber exit must route cargo_installed → deploy_blocked"
         );
         let reason = reason.unwrap_or_default();
         assert!(
-            reason.contains("accept-merge") && reason.contains("exit=11"),
+            reason.contains("schema-migrate") && reason.contains("exit=11"),
             "blocked_reason must cite agent + exit code; got: {reason}"
         );
 
@@ -711,7 +651,7 @@ mod tests {
         assert_eq!(invoker, "framework");
         let note = note.unwrap_or_default();
         assert!(
-            note.contains("agent=accept-merge") && note.contains("exit=11"),
+            note.contains("agent=schema-migrate") && note.contains("exit=11"),
             "actor_note must record agent + exit code; got: {note}"
         );
         assert_eq!(phash.as_deref(), Some("feedface"));
@@ -802,51 +742,9 @@ mod tests {
         );
     }
 
-    /// Test-only thin wrapper around the private fire_mark_deploy_blocked.
-    /// We expose it via a small re-export so the test stays in this module.
-    fn accept_merge_test_helper_fire(
-        conn: &Connection,
-        display_id: &str,
-        reason: &str,
-        phash: &str,
-    ) {
-        // Re-implement the same helper so tests don't import a private fn:
-        // simpler to drive the conflict path end-to-end via accept-merge with
-        // a guaranteed-conflict repo, but for the bare mechanics test we go
-        // through accept-merge with a workspace_path that resolves to an
-        // empty repo where the branch is unknown — that path returns Ok
-        // without flipping. So instead we drive the flip directly via the
-        // public dispatch path: build a repo that conflicts, run accept-merge.
-        let (_tmp, repo) = init_repo();
-        git(&repo, &["checkout", "-b", "feat/y"]);
-        std::fs::write(repo.join("file.txt"), "x\n").unwrap();
-        git(&repo, &["add", "file.txt"]);
-        git(&repo, &["commit", "-m", "branch"]);
-        git(&repo, &["checkout", "main"]);
-        std::fs::write(repo.join("file.txt"), "y\n").unwrap();
-        git(&repo, &["add", "file.txt"]);
-        git(&repo, &["commit", "-m", "main"]);
-        // Update workspace_path to point at the live repo for this test.
-        conn.execute(
-            "UPDATE tasks SET workspace_path = ?1 WHERE display_id = ?2",
-            rusqlite::params![repo.to_str().unwrap(), display_id],
-        )
-        .unwrap();
-        let row = task_row_json(conn, display_id);
-        let agents = AgentsYaml {
-            agents: vec![],
-            deployment_specialist: None,
-        };
-        let cfg = cfg_path();
-        let ctx = DispatchCtx {
-            conn,
-            agents: &agents,
-            config_path: &cfg,
-            policies_hash: phash,
-        };
-        accept_merge::run(&row, &ctx).unwrap();
-        let _ = reason;
-    }
+    // T138 P3: removed `accept_merge_test_helper_fire` (the only caller was
+    // `k_deploy_blocked_transition_mechanics`, which itself was removed when
+    // the (accepted, deploy_blocked) schema edge was retired in Phase 1).
 
     /// Copy a tests/fixtures cargo project into a fresh temp dir and `git
     /// init` the result so `resolve_main_repo` finds it. Returns the
@@ -883,8 +781,9 @@ mod tests {
     }
 
     /// AC2.2 / test (i): cargo-install succeeds on a clean fixture, fires
-    /// `mark_cargo_installed` (framework actor), and the row advances to
-    /// `cargo_installed`.
+    /// `mark_cargo_installed` (framework actor), and the row advances from
+    /// `integrated` to `cargo_installed` (T138 P3: source state is
+    /// `integrated`, not `accepted`).
     #[test]
     fn i_cargo_install_clean_chains_to_mark_cargo_installed() {
         let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -898,7 +797,7 @@ mod tests {
         std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
 
         let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(&conn, "T400", "feat/x", repo.to_str().unwrap());
+        insert_integrated_task(&conn, "T400", "feat/x", repo.to_str().unwrap());
         let row = task_row_json(&conn, "T400");
         let agents = empty_agents_yaml();
         let cfg = cfg_path();
@@ -944,13 +843,16 @@ mod tests {
     }
 
     /// AC2.3 / test (j): cargo-install fails on a fixture with a deliberate
-    /// compile error → row=deploy_blocked, blocked_reason carries the cargo
-    /// stderr tail, ntfy fires.
+    /// compile error. T138 P3: cargo-install now runs from `integrated`; the
+    /// schema no longer carries a (integrated, deploy_blocked) edge, so the
+    /// builtin's `mark_deploy_blocked` attempt surfaces as an `Err` with the
+    /// cargo failure context. The row stays at `integrated`, and the existing
+    /// private binary is untouched (no promotion over good binary on failure).
     #[test]
-    fn j_cargo_install_failure_flips_deploy_blocked() {
+    fn j_cargo_install_failure_surfaces_error_and_does_not_promote() {
         let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("STORES_NTFY_URL", "https://test.local");
-        let mock = install_mock();
+        let _mock = install_mock();
 
         let (_tmp, repo) = init_cargo_repo("cargo-install-broken");
         let cargo_home = tempfile::tempdir().unwrap();
@@ -964,7 +866,7 @@ mod tests {
         let existing_private = std::fs::read(&private_bin).unwrap();
 
         let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(&conn, "T401", "feat/y", repo.to_str().unwrap());
+        insert_integrated_task(&conn, "T401", "feat/y", repo.to_str().unwrap());
         let row = task_row_json(&conn, "T401");
         let agents = AgentsYaml {
             agents: vec![],
@@ -978,38 +880,28 @@ mod tests {
             policies_hash: "cafebabe",
         };
 
-        cargo_install::run(&row, &ctx).unwrap();
+        let res = cargo_install::run(&row, &ctx);
+        assert!(
+            res.is_err(),
+            "cargo-install on a failing build from `integrated` must surface an Err; got Ok"
+        );
 
-        let (status, reason): (String, Option<String>) = conn
+        let status: String = conn
             .query_row(
-                "SELECT status, blocked_reason FROM tasks WHERE display_id='T401'",
+                "SELECT status FROM tasks WHERE display_id='T401'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(status, "deploy_blocked");
-        let reason = reason.unwrap_or_default();
-        assert!(
-            reason.contains("error[E") || reason.contains("error:"),
-            "blocked_reason must carry cargo stderr; got: {reason}"
+        assert_eq!(
+            status, "integrated",
+            "row must remain at integrated when failure routing is unavailable"
         );
-        assert!(
-            reason.contains(repo.to_str().unwrap()) || reason.contains("cargo-install-broken"),
-            "blocked_reason must reference the failing crate path; got: {reason}"
-        );
+
         assert_eq!(
             std::fs::read(&private_bin).unwrap(),
             existing_private,
             "cargo/candidate failure must not promote over existing private binary"
-        );
-
-        let evs = mock.events();
-        assert!(
-            evs.iter()
-                .any(|(_, e)| e.row_id == "T401"
-                    && e.transition_attempted.contains("deploy_blocked")),
-            "expected deploy_blocked ntfy event; got: {:?}",
-            evs
         );
 
         std::env::remove_var("STORES_NTFY_URL");
@@ -1049,7 +941,7 @@ mod tests {
         std::env::set_var("STORES_DAEMON_BIN_PATH", &private_bin);
 
         let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(&conn, "T402", "feat/z", repo.to_str().unwrap());
+        insert_integrated_task(&conn, "T402", "feat/z", repo.to_str().unwrap());
         let row = task_row_json(&conn, "T402");
         let agents = AgentsYaml {
             agents: vec![],
@@ -1063,18 +955,26 @@ mod tests {
             policies_hash: "",
         };
 
-        cargo_install::run(&row, &ctx).unwrap();
-        let (status, reason): (String, Option<String>) = conn
+        // T138 P3: cargo-install on `integrated` cannot route to deploy_blocked
+        // (no schema edge for that source state); the failure surfaces as Err
+        // and the row stays at integrated, with the existing private binary
+        // untouched.
+        let res = cargo_install::run(&row, &ctx);
+        assert!(
+            res.is_err(),
+            "cargo-install with an invalid candidate from `integrated` must surface an Err; got Ok"
+        );
+        let status: String = conn
             .query_row(
-                "SELECT status, blocked_reason FROM tasks WHERE display_id='T402'",
+                "SELECT status FROM tasks WHERE display_id='T402'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(status, "deploy_blocked");
-        assert!(reason
-            .unwrap_or_default()
-            .contains("invalid stores candidate"));
+        assert_eq!(
+            status, "integrated",
+            "row must remain at integrated when failure routing is unavailable"
+        );
         assert_eq!(std::fs::read(&private_bin).unwrap(), existing_private);
 
         std::env::remove_var("CARGO_HOME");
@@ -1370,77 +1270,12 @@ mod tests {
         }
     }
 
-    /// T024 P1: accept-merge short-circuits to mark_cargo_installed when the
-    /// branch is already merged into main and the worktree at workspace_path
-    /// has been cleaned (resolve_main_repo returns None). The probe falls
-    /// back to the daemon cwd, sees the merge-base, fires the transition,
-    /// and returns Ok(0) without attempting fetch/merge on the stale path.
-    #[test]
-    fn m_accept_merge_noop_when_branch_already_merged_and_workspace_gone() {
-        let _g = lock().lock().unwrap_or_else(|e| e.into_inner());
-        let _cwd_g = crate::paths::test_cwd_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        let (tmp, repo) = init_repo();
-        // Build a fast-forwarded branch then merge it into main. After this
-        // `merge-base --is-ancestor feat/already-merged main` is true.
-        git(&repo, &["checkout", "-b", "feat/already-merged"]);
-        std::fs::write(repo.join("ff.txt"), "ff\n").unwrap();
-        git(&repo, &["add", "ff.txt"]);
-        git(&repo, &["commit", "-m", "ff change"]);
-        git(&repo, &["checkout", "main"]);
-        let m = git(
-            &repo,
-            &["merge", "--no-ff", "--no-edit", "feat/already-merged"],
-        );
-        assert!(m.status.success(), "pre-merge into main failed: {:?}", m);
-
-        // Move daemon cwd into the live main repo BEFORE accept_merge::run.
-        let old_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&repo).expect("set_current_dir failed");
-
-        // Stale workspace_path: worktree was cleaned up after the merge.
-        let gone = tmp.path().join("worktrees/T999-gone");
-        let (conn, _t, _o) = fresh_db_with_tasks();
-        insert_accepted_task(&conn, "T999", "feat/already-merged", gone.to_str().unwrap());
-        let row = task_row_json(&conn, "T999");
-        let agents = empty_agents_yaml();
-        let cfg = cfg_path();
-        let ctx = DispatchCtx {
-            conn: &conn,
-            agents: &agents,
-            config_path: &cfg,
-            policies_hash: "",
-        };
-
-        let res = accept_merge::run(&row, &ctx);
-
-        // Restore cwd before any panic from assertions below.
-        std::env::set_current_dir(&old_cwd).expect("restore cwd failed");
-
-        assert_eq!(res.unwrap(), 0);
-
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM tasks WHERE display_id='T999'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "cargo_installed");
-
-        let (verb, invoker): (String, String) = conn
-            .query_row(
-                "SELECT verb, invoker FROM transition_history \
-                 WHERE store='tasks' AND display_id='T999' AND verb='mark_cargo_installed'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(verb, "mark_cargo_installed");
-        assert_eq!(invoker, "framework");
-    }
+    // T138 P3: removed `m_accept_merge_noop_when_branch_already_merged_and_workspace_gone`.
+    // It exercised accept-merge's no-op short-circuit firing
+    // `mark_cargo_installed` on an `accepted → cargo_installed` direct edge.
+    // Phase 1 retired that edge; the integration lane now mediates the
+    // candidate-already-on-main case via the integrate builtin's
+    // pre-merge ancestry check, which fires `mark_integrated` instead.
 
     /// T061 / L145 codex-revise: when branch is already merged AND cargo-install
     /// is a peer subscriber on the same accepted-entry edge (retry-deploy chain),
@@ -1618,5 +1453,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "in_review", "row must remain at in_review");
+    }
+
+    /// T138 P3 AC3.5: `dispatch_builtin("accept-merge", …)` must return
+    /// `None` — the keyword is no longer registered now that the integrate
+    /// lane owns the merge step. The accept-merge module's helpers are
+    /// still callable via `pub(crate)` for the integrate builtin's reuse.
+    #[test]
+    fn dispatch_builtin_accept_merge_keyword_unregistered() {
+        let (conn, _t, _o) = fresh_db_with_tasks();
+        let agents = empty_agents_yaml();
+        let cfg = cfg_path();
+        let ctx = DispatchCtx {
+            conn: &conn,
+            agents: &agents,
+            config_path: &cfg,
+            policies_hash: "",
+        };
+        let row = serde_json::json!({"display_id": "T_dispatch_test"});
+        assert!(
+            dispatch_builtin("accept-merge", &row, &ctx).is_none(),
+            "T138 P3 AC3.5: dispatch_builtin(\"accept-merge\", …) must return None"
+        );
+        // Sanity: the integrate keyword IS registered (post-T138 successor).
+        assert!(
+            dispatch_builtin("integrate", &row, &ctx).is_some(),
+            "dispatch_builtin(\"integrate\", …) must remain registered"
+        );
     }
 }

@@ -1,36 +1,38 @@
-# Sample .stores/agents.yaml fixture — complete post-accept ceremony chain.
+# Sample .stores/agents.yaml fixture — generic integration lane plus the
+# stores-specific post-`integrated` chain.
 #
-# Kept in sync with docs/agents-yaml-example.yaml for post-accept agents
-# (accept-merge, cargo-install, schema-migrate) plus observations-store agents
-# (auto-promote) that the docs example does not yet carry.  The subscriber-edge
-# contracts in src/flow/subscriber_edges.rs evaluate against this file.
+# Kept in sync with docs/agents-yaml-example.yaml for the post-integrate
+# agents (integrate, cargo-install, schema-migrate, auto-resolve-observation)
+# plus observations-store agents (auto-promote) that the docs example does
+# not yet carry. The subscriber-edge contracts in
+# src/flow/subscriber_edges.rs evaluate against this file.
 agents:
-  - name: accept-merge
+  - name: integrate
     subscribes_to:
       - store: tasks
         transition:
-          from: in_review
-          to: accepted
+          from: accepted
+          to: integration_queued
       - store: tasks
         transition:
-          from: deploy_blocked
-          to: accepted
-    command: "builtin:accept-merge"
-    claim_window_secs: 300
+          from: integration_blocked
+          to: integration_queued
+    command: "builtin:integrate"
+    claim_window_secs: 1800
     retry_policy:
-      max_attempts: 3
+      max_attempts: 1
       backoff: linear
+    command_args:
+      pre_land_check: "cargo check --quiet"
+      refresh_strategy: rebase
+      allow_push: false
 
   - name: cargo-install
     subscribes_to:
       - store: tasks
         transition:
-          from: in_review
-          to: accepted
-      - store: tasks
-        transition:
-          from: deploy_blocked
-          to: accepted
+          from: integrating
+          to: integrated
     command: "builtin:cargo-install"
     claim_window_secs: 600
     retry_policy:
@@ -125,12 +127,8 @@ agents:
           to: schema_migrated
       - store: tasks
         transition:
-          from: in_review
-          to: accepted
-      - store: tasks
-        transition:
-          from: deploy_blocked
-          to: accepted
+          from: integrating
+          to: integrated
       - store: tasks
         transition:
           from: planning

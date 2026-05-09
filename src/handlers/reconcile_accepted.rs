@@ -1,31 +1,34 @@
 //! `stores tasks reconcile-accepted` — operator-grounded recovery for
-//! `accepted` rows whose post-accept ceremony never fired.
+//! post-`integrated` rows whose stores-specific post-land subscribers
+//! never fired.
 //!
-//! T107 / I027 precedent: a row hit `deploy_blocked` (e.g. dirty main
-//! worktree blocked accept-merge), the operator cleaned up and ran
-//! `tasks retry-deploy`, but the daemon's accept-merge / cargo-install
-//! subscribers strictly hooked on `(in_review, accepted)` not
-//! `(deploy_blocked, accepted)`, so the recovery edge silently never
-//! re-fired the chain. The operator then merged the branch manually.
-//! Result: row stranded at `accepted` with work shipped.
+//! Background. T107 / I027 originated this verb to recover `accepted` rows
+//! whose pre-T138 post-accept ceremony (accept-merge → cargo-install →
+//! schema-migrate) never fired — typically after a pre-I027 retry-deploy
+//! missed a subscriber edge. T138 replaces the post-accept chain with the
+//! generic integration lane: `accepted → integration_queued → integrating
+//! → integrated`. The integration lane (builtin:integrate) now owns the
+//! merge step, so reconcile-accepted no longer drives accept-merge —
+//! integrate does the merge and fires `mark_integrated`.
 //!
-//! This verb re-fires the post-accept chain by directly invoking the
-//! existing builtins (`accept_merge::run` / `cargo_install::run` /
-//! `schema_migrate::run`). It does NOT mark terminal states itself; the
-//! builtins fire `mark_cargo_installed` / `mark_schema_migrated` through
-//! the framework actor, exactly as the daemon would.
+//! Post-T138 scope: this verb re-fires the **stores-specific
+//! post-`integrated` chain** when it stranded mid-flight. The legal source
+//! statuses are `{integrated, cargo_installed}`; from `integrated` the verb
+//! re-runs cargo-install (which fires `mark_cargo_installed`) and then
+//! schema-migrate (which fires `mark_schema_migrated`); from
+//! `cargo_installed` it re-runs schema-migrate only.
 //!
-//! Per Pi msg_85be1b1c (2026-05-08):
-//! - Allowed only from `accepted` (or mid-chain `cargo_installed` for
-//!   resume-after-partial).
-//! - Branch must already be merged to main; this verb does NOT merge.
-//!   Operators who haven't merged yet should use `tasks retry-deploy`
-//!   from `deploy_blocked` (now correctly subscribed via I027) or merge
-//!   the branch manually first.
-//! - Idempotent: schema_migrated → fail-loud "already reconciled";
-//!   cargo_installed → skip cargo-install step, run schema-migrate only.
-//! - Operator-grounded authority: ai_with_human or human only.
-//!   ai_autonomous is rejected (mirrors retry-deploy's actor gate).
+//! Authority + idempotence rules unchanged from T107:
+//! - Operator-grounded: `ai_with_human` or `human` only; `ai_autonomous`
+//!   rejected (mirrors retry-deploy's actor gate).
+//! - Branch must already be merged into main; this verb does NOT merge.
+//!   Operators whose work isn't on main yet should use the integration
+//!   lane (`tasks retry-integration` from `integration_blocked`) — the
+//!   lane is the only legitimate path to advance unmerged work past
+//!   `integration_queued`.
+//! - Idempotent: `schema_migrated` source rejected fail-loud
+//!   ("already reconciled"); `cargo_installed` skips cargo-install and
+//!   runs schema-migrate only.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
@@ -33,7 +36,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::flow::builtins::{accept_merge, cargo_install, schema_migrate, DispatchCtx};
+use crate::flow::builtins::{cargo_install, schema_migrate, DispatchCtx};
 use crate::flow::AgentsYaml;
 use crate::schema::actor::{Actor, InvokerCtx};
 
@@ -65,9 +68,11 @@ pub fn run_reconcile_accepted(
             task_id
         );
     }
-    if status != "accepted" && status != "cargo_installed" {
+    if status != "integrated" && status != "cargo_installed" {
         bail!(
-            "reconcile-accepted: task {} has status='{}', expected 'accepted' or 'cargo_installed'",
+            "reconcile-accepted: task {} has status='{}', expected 'integrated' or 'cargo_installed'. \
+             T138 moved merge into the integration lane — pre-`integrated` recovery now flows through \
+             `tasks retry-integration` (integration_blocked → integration_queued), not this verb.",
             task_id,
             status
         );
@@ -82,10 +87,10 @@ pub fn run_reconcile_accepted(
     if !branch_merged_to_main(workspace_path, branch) {
         bail!(
             "reconcile-accepted: task {}'s branch '{}' is not merged into main. \
-             This verb only reconciles rows whose work is already on main. \
-             Either merge the branch manually first, or use `tasks retry-deploy` \
-             from a deploy_blocked state (post-I027 the daemon's subscriber chain \
-             will re-fire correctly).",
+             This verb only reconciles rows whose work is already on main; T138 routed merge work \
+             into the integration lane. If the candidate hasn't landed yet, retry the lane via \
+             `tasks retry-integration` (integration_blocked → integration_queued); only use this verb \
+             for stores-specific post-`integrated` chain recovery.",
             task_id,
             branch
         );
@@ -107,23 +112,8 @@ pub fn run_reconcile_accepted(
         policies_hash: "",
     };
 
-    if status == "accepted" {
-        accept_merge::run(&row, &ctx).with_context(|| {
-            format!(
-                "reconcile-accepted: accept-merge step failed for {}",
-                task_id
-            )
-        })?;
-    }
-
-    let row_after_merge = read_task_row(conn, task_id)?;
-    let status_after_merge = row_after_merge
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    if status_after_merge == "accepted" {
-        cargo_install::run(&row_after_merge, &ctx).with_context(|| {
+    if status == "integrated" {
+        cargo_install::run(&row, &ctx).with_context(|| {
             format!(
                 "reconcile-accepted: cargo-install step failed for {}",
                 task_id

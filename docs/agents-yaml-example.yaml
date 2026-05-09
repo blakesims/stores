@@ -1,47 +1,75 @@
-# Reference `.stores/agents.yaml` — the post-accept ceremony.
+# Reference `.stores/agents.yaml` — the generic integration lane plus the
+# stores-specific post-`integrated` chain (T138).
 #
-# After a human-fired `tasks accept`, three subscribers chain in dependency
-# order:
+# Post-T138 ceremony for an `accepted` row:
 #
-#   1. builtin:accept-merge   (T014) — fast-merge the row's `branch` into main.
-#   2. builtin:cargo-install  (T019) — refresh the `stores` binary.
-#   3. builtin:schema-migrate (T019) — apply additive DB migrations.
+#   1. accepted → integration_queued (framework on_entry; enqueues the row).
+#   2. builtin:integrate (this file) — the generic, repo-agnostic
+#      integration lane. Subscribes to (accepted→integration_queued) and
+#      (integration_blocked→integration_queued). Atomically claims the
+#      capacity-1 `integrating` slot, refreshes the candidate against
+#      current main via the configured `refresh_strategy`, re-checks the
+#      candidate's external_review HEAD freshness, runs the configured
+#      `pre_land_check` command, fast-merges into main, and on success
+#      fires `mark_integrated`. Failure surfaces as
+#      `mark_integration_blocked` with a typed `integration_blocked_reason`
+#      (rebase_conflict | stale_base | stale_external_review |
+#      pre_land_check_failed | merge_failure | push_failure). The
+#      integration lane records single-record provenance per attempt in
+#      `tasks.integration_attempts`.
+#   3. builtin:cargo-install (T019, repo-specific) — refresh the stores
+#      binary. Subscribes ONLY to (integrating→integrated). On success
+#      fires `mark_cargo_installed` (integrated→cargo_installed).
+#   4. builtin:schema-migrate (T019, repo-specific) — apply additive DB
+#      migrations. Subscribes to (integrated→cargo_installed) and on
+#      success fires `mark_schema_migrated`.
 #
-# Each link only fires after its predecessor reports success:
-#   - accept-merge subscribes to in_review→accepted (the human accept verb)
-#     and deploy_blocked→accepted (operator retry-deploy recovery).
-#   - cargo-install subscribes to the same accepted-entry edges as a peer; it runs
-#     after accept-merge within the same poll iteration (declaration order
-#     is dispatch order) and on success fires mark_cargo_installed
-#     (accepted→cargo_installed).
-#   - schema-migrate subscribes to accepted→cargo_installed (cargo-install's
-#     output transition) and on success fires mark_schema_migrated.
+# `stale_base` vs `stale_external_review` are distinct typed integration
+# blockers: `stale_base` means the candidate's recorded base SHA no longer
+# matches main HEAD before refresh; `stale_external_review` means the
+# external_reviews PASS no longer applies to the candidate head after
+# refresh (the freshness re-check fired). Both route to
+# `integration_blocked` for human-grounded retry via `retry-integration`
+# (integration_blocked→integration_queued).
 #
-# Failure at any link halts the chain: the row flips to `deploy_blocked`
-# (cargo_installed→deploy_blocked or accepted→deploy_blocked) with stderr
-# captured in `blocked_reason`, ntfy fires, and the row is dispatched to
-# `deployment_specialist` (default: `builtin:user-escalation`). Ordinary
-# `blocked` rows use `stores tasks resume`; deploy_blocked rows use
-# `stores tasks retry-deploy` after fixing the issue, or
-# `stores tasks close-out-of-band --commit <sha>` for manual recovery.
+# cargo-install and schema-migrate are stores-repo-specific subscribers.
+# A different repo wiring this surface would NOT include cargo-install or
+# schema-migrate; it would hang its own post-integrated chain off
+# (integrating→integrated). The integration lane itself is generic and
+# fires nothing repo-specific after `integrated`.
+#
+# NOTE: there is no (integration_blocked→integrated) edge in the schema —
+# integration retries must re-traverse integration_queued → integrating
+# → integrated so the integrate lane and post-integrated subscribers
+# fire on the recovery path. cargo-install therefore subscribes ONLY to
+# (integrating→integrated), never to (integration_blocked→integrated).
+#
+# Failure at the cargo-install or schema-migrate link still flips the row
+# to `deploy_blocked` with `blocked_reason` populated, ntfy fires, and the
+# row is dispatched to `deployment_specialist` (default
+# `builtin:user-escalation`). `stores tasks retry-deploy` recovers the
+# release-ceremony chain; `stores tasks retry-integration` recovers the
+# integration lane.
 
 agents:
-  - name: accept-merge
+  - name: integrate
     subscribes_to:
       - store: tasks
-        transition: { from: in_review, to: accepted }
+        transition: { from: accepted, to: integration_queued }
       - store: tasks
-        transition: { from: deploy_blocked, to: accepted }
-    command: "builtin:accept-merge"
-    claim_window_secs: 300
-    retry_policy: { max_attempts: 3, backoff: linear }
+        transition: { from: integration_blocked, to: integration_queued }
+    command: "builtin:integrate"
+    claim_window_secs: 1800
+    retry_policy: { max_attempts: 1, backoff: linear }
+    command_args:
+      pre_land_check: "cargo check --quiet"
+      refresh_strategy: rebase
+      allow_push: false
 
   - name: cargo-install
     subscribes_to:
       - store: tasks
-        transition: { from: in_review, to: accepted }
-      - store: tasks
-        transition: { from: deploy_blocked, to: accepted }
+        transition: { from: integrating, to: integrated }
     command: "builtin:cargo-install"
     claim_window_secs: 600
     retry_policy: { max_attempts: 1, backoff: linear }
@@ -62,9 +90,7 @@ agents:
       - store: tasks
         transition: { from: cargo_installed, to: schema_migrated }
       - store: tasks
-        transition: { from: in_review, to: accepted }
-      - store: tasks
-        transition: { from: deploy_blocked, to: accepted }
+        transition: { from: integrating, to: integrated }
       - store: tasks
         transition: { from: planning, to: closed_out_of_band }
       - store: tasks

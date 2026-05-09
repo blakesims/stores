@@ -11,10 +11,11 @@
 //! surfaces and the bundled lifecycle schemas:
 //!
 //! - **`docs/agents-yaml-example.yaml`** (compile-time embedded, always present
-//!   in the repo): the authoritative docs template for the post-accept ceremony
-//!   chain. Post-accept contracts (`accept-merge`, `cargo-install`,
-//!   `schema-migrate`) are evaluated against this file directly, so any drift
-//!   in the docs template fails the test suite.
+//!   in the repo): the authoritative docs template for the post-T138 ceremony
+//!   (generic integration lane + stores-specific post-`integrated` chain).
+//!   Post-integrate contracts (`integrate`, `cargo-install`, `schema-migrate`)
+//!   are evaluated against this file directly, so any drift in the docs
+//!   template fails the test suite.
 //! - **`tests/fixtures/agents.yaml`** (compile-time embedded, complete fixture):
 //!   includes all agents — including `auto-promote` (observations store), which
 //!   `docs/agents-yaml-example.yaml` does not yet carry. Auto-promote contracts
@@ -191,41 +192,47 @@ pub trait SubscriberEdgeContract: Sync {
 // Contract implementations
 // ---------------------------------------------------------------------------
 
-struct AcceptMergeContract;
+struct IntegrateContract;
 struct CargoInstallContract;
 struct SchemaMigrateContract;
 struct AutoPromoteContract;
 
-impl SubscriberEdgeContract for AcceptMergeContract {
+impl SubscriberEdgeContract for IntegrateContract {
     fn name(&self) -> &'static str {
-        "accept_merge_must_fire_on_every_accepted_to_status"
+        "integrate_must_fire_on_every_integration_queued_to_status"
     }
     fn store(&self) -> &'static str {
         "tasks"
     }
     fn required_to_status(&self) -> &'static str {
-        "accepted"
+        "integration_queued"
     }
     fn agent_name(&self) -> &'static str {
-        "accept-merge"
+        "integrate"
     }
 }
 
 impl SubscriberEdgeContract for CargoInstallContract {
     fn name(&self) -> &'static str {
-        "cargo_install_must_fire_on_every_accepted_to_status"
+        // T138 P3: cargo-install moved off the (accepted-entry) edges and
+        // is now a stores-repo-specific subscriber on (integrating→integrated).
+        "cargo_install_must_fire_on_every_integrated_to_status"
     }
     fn store(&self) -> &'static str {
         "tasks"
     }
     fn required_to_status(&self) -> &'static str {
-        "accepted"
+        "integrated"
     }
     fn agent_name(&self) -> &'static str {
         "cargo-install"
     }
 }
 
+// T138 P3: schema-migrate's required_to_status is unchanged
+// (`cargo_installed`), but the only transition reaching that status is now
+// `integrated → cargo_installed` (fired by cargo-install) — the prior direct
+// `accepted → cargo_installed` edge has been removed by Phase 1 of T138.
 impl SubscriberEdgeContract for SchemaMigrateContract {
     fn name(&self) -> &'static str {
         "schema_migrate_must_fire_on_every_cargo_installed_to_status"
@@ -260,13 +267,13 @@ impl SubscriberEdgeContract for AutoPromoteContract {
 // Registry
 // ---------------------------------------------------------------------------
 
-static ACCEPT_MERGE_CONTRACT: AcceptMergeContract = AcceptMergeContract;
+static INTEGRATE_CONTRACT: IntegrateContract = IntegrateContract;
 static CARGO_INSTALL_CONTRACT: CargoInstallContract = CargoInstallContract;
 static SCHEMA_MIGRATE_CONTRACT: SchemaMigrateContract = SchemaMigrateContract;
 static AUTO_PROMOTE_CONTRACT: AutoPromoteContract = AutoPromoteContract;
 
 static REGISTRY: &[&dyn SubscriberEdgeContract] = &[
-    &ACCEPT_MERGE_CONTRACT,
+    &INTEGRATE_CONTRACT,
     &CARGO_INSTALL_CONTRACT,
     &SCHEMA_MIGRATE_CONTRACT,
     &AUTO_PROMOTE_CONTRACT,
@@ -284,7 +291,7 @@ pub fn lookup(name: &str) -> Option<&'static dyn SubscriberEdgeContract> {
 // Test helpers (compiled only in test builds; private to this module)
 // ---------------------------------------------------------------------------
 
-/// Complete fixture including all agents (accept-merge, cargo-install,
+/// Complete fixture including all agents (integrate, cargo-install,
 /// schema-migrate, auto-promote, …). Used for the auto-promote contract and
 /// the runtime non-regression test, because `docs/agents-yaml-example.yaml`
 /// does not yet carry observations-store agents.
@@ -294,9 +301,10 @@ fn load_canonical_agents() -> AgentsYaml {
 }
 
 /// Embeds the canonical docs template (`docs/agents-yaml-example.yaml`) at
-/// compile time. Post-accept contracts evaluate against this surface directly so
-/// that any omission in the docs template fails the test suite immediately.
-/// Auto-promote is NOT in the docs template yet; see `load_canonical_agents`.
+/// compile time. Post-integrate contracts evaluate against this surface
+/// directly so that any omission in the docs template fails the test suite
+/// immediately. Auto-promote is NOT in the docs template yet; see
+/// `load_canonical_agents`.
 fn load_docs_example_agents() -> AgentsYaml {
     const YAML: &str = include_str!("../../docs/agents-yaml-example.yaml");
     AgentsYaml::from_yaml(YAML).expect("docs/agents-yaml-example.yaml must parse cleanly")
@@ -356,19 +364,19 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "accept_merge_must_fire_on_every_accepted_to_status",
-                "cargo_install_must_fire_on_every_accepted_to_status",
+                "integrate_must_fire_on_every_integration_queued_to_status",
+                "cargo_install_must_fire_on_every_integrated_to_status",
                 "schema_migrate_must_fire_on_every_cargo_installed_to_status",
                 "auto_promote_must_fire_on_every_observation_ready_state",
             ],
             "registry order must match declaration order"
         );
         assert!(
-            lookup("accept_merge_must_fire_on_every_accepted_to_status").is_some(),
-            "lookup must find accept_merge contract"
+            lookup("integrate_must_fire_on_every_integration_queued_to_status").is_some(),
+            "lookup must find integrate contract"
         );
         assert!(
-            lookup("cargo_install_must_fire_on_every_accepted_to_status").is_some(),
+            lookup("cargo_install_must_fire_on_every_integrated_to_status").is_some(),
             "lookup must find cargo_install contract"
         );
         assert!(
@@ -390,14 +398,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn accept_merge_passes_against_canonical_example() {
+    fn integrate_passes_against_canonical_example() {
         let agents = load_canonical_agents();
         let transitions = load_transitions("tasks");
-        let result = ACCEPT_MERGE_CONTRACT.evaluate(&agents, &transitions);
+        let result = INTEGRATE_CONTRACT.evaluate(&agents, &transitions);
         assert_eq!(
             result.outcome,
             CheckOutcome::Pass,
-            "accept-merge contract should pass; reason: {:?}",
+            "integrate contract should pass; reason: {:?}",
             result.reason
         );
     }
@@ -447,44 +455,93 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn accept_merge_fails_when_subscription_dropped() {
-        // Drop (deploy_blocked → accepted); agent retains only (in_review → accepted).
-        let yaml = r#"
+    fn integrate_fails_when_either_entry_subscription_dropped() {
+        // T138 P3 AC3.6: the integrate contract requires BOTH entry edges into
+        // integration_queued — (accepted, integration_queued) and
+        // (integration_blocked, integration_queued). Dropping either one fails.
+
+        // (1) Both subscriptions present → contract passes.
+        let yaml_both = r#"
 agents:
-  - name: accept-merge
+  - name: integrate
     subscribes_to:
       - store: tasks
-        transition: { from: in_review, to: accepted }
-    command: "builtin:accept-merge"
+        transition: { from: accepted, to: integration_queued }
+      - store: tasks
+        transition: { from: integration_blocked, to: integration_queued }
+    command: "builtin:integrate"
 "#;
-        let agents = parse_inline_agents(yaml);
+        let agents = parse_inline_agents(yaml_both);
         let transitions = load_transitions("tasks");
-        let result = ACCEPT_MERGE_CONTRACT.evaluate(&agents, &transitions);
+        let result = INTEGRATE_CONTRACT.evaluate(&agents, &transitions);
+        assert_eq!(
+            result.outcome,
+            CheckOutcome::Pass,
+            "integrate contract must pass when both entry edges are subscribed; reason: {:?}",
+            result.reason
+        );
+
+        // (2) Drop (integration_blocked → integration_queued).
+        let yaml_drop_retry = r#"
+agents:
+  - name: integrate
+    subscribes_to:
+      - store: tasks
+        transition: { from: accepted, to: integration_queued }
+    command: "builtin:integrate"
+"#;
+        let agents = parse_inline_agents(yaml_drop_retry);
+        let result = INTEGRATE_CONTRACT.evaluate(&agents, &transitions);
         assert_eq!(
             result.outcome,
             CheckOutcome::Fail,
-            "contract must fail when (deploy_blocked, accepted) subscription is absent"
+            "contract must fail when (integration_blocked, integration_queued) subscription is absent"
         );
         let reason = result.reason.unwrap();
         let missing = reason["missing_edges"].as_array().expect("missing_edges must be an array");
         assert!(
             missing
                 .iter()
-                .any(|e| e["from"] == "deploy_blocked" && e["to"] == "accepted"),
-            "expected (deploy_blocked, accepted) in missing_edges; got: {:?}",
+                .any(|e| e["from"] == "integration_blocked" && e["to"] == "integration_queued"),
+            "expected (integration_blocked, integration_queued) in missing_edges; got: {:?}",
+            missing
+        );
+
+        // (3) Drop (accepted → integration_queued).
+        let yaml_drop_accept = r#"
+agents:
+  - name: integrate
+    subscribes_to:
+      - store: tasks
+        transition: { from: integration_blocked, to: integration_queued }
+    command: "builtin:integrate"
+"#;
+        let agents = parse_inline_agents(yaml_drop_accept);
+        let result = INTEGRATE_CONTRACT.evaluate(&agents, &transitions);
+        assert_eq!(
+            result.outcome,
+            CheckOutcome::Fail,
+            "contract must fail when (accepted, integration_queued) subscription is absent"
+        );
+        let reason = result.reason.unwrap();
+        let missing = reason["missing_edges"].as_array().expect("missing_edges must be an array");
+        assert!(
+            missing
+                .iter()
+                .any(|e| e["from"] == "accepted" && e["to"] == "integration_queued"),
+            "expected (accepted, integration_queued) in missing_edges; got: {:?}",
             missing
         );
     }
 
     #[test]
     fn cargo_install_fails_when_subscription_dropped() {
-        // Drop (deploy_blocked → accepted); agent retains only (in_review → accepted).
+        // T138 P3: the only edge into `integrated` is (integrating, integrated).
+        // Drop it; agent has no subscriptions.
         let yaml = r#"
 agents:
   - name: cargo-install
-    subscribes_to:
-      - store: tasks
-        transition: { from: in_review, to: accepted }
+    subscribes_to: []
     command: "builtin:cargo-install"
 "#;
         let agents = parse_inline_agents(yaml);
@@ -493,15 +550,15 @@ agents:
         assert_eq!(
             result.outcome,
             CheckOutcome::Fail,
-            "contract must fail when (deploy_blocked, accepted) subscription is absent"
+            "contract must fail when (integrating, integrated) subscription is absent"
         );
         let reason = result.reason.unwrap();
         let missing = reason["missing_edges"].as_array().expect("missing_edges must be an array");
         assert!(
             missing
                 .iter()
-                .any(|e| e["from"] == "deploy_blocked" && e["to"] == "accepted"),
-            "expected (deploy_blocked, accepted) in missing_edges; got: {:?}",
+                .any(|e| e["from"] == "integrating" && e["to"] == "integrated"),
+            "expected (integrating, integrated) in missing_edges; got: {:?}",
             missing
         );
     }
@@ -511,7 +568,7 @@ agents:
         // Drop (integrated → cargo_installed); agent has no subscriptions.
         // T138 P1: the prior accepted→cargo_installed direct edge is gone;
         // post-T138, the only transition reaching cargo_installed is
-        // integrated→cargo_installed, fired by the integrate builtin via
+        // integrated→cargo_installed, fired by builtin:cargo-install via
         // mark_cargo_installed.
         let yaml = r#"
 agents:
@@ -572,14 +629,14 @@ agents:
     // -----------------------------------------------------------------------
 
     #[test]
-    fn accept_merge_passes_against_docs_agents_yaml_example() {
+    fn integrate_passes_against_docs_agents_yaml_example() {
         let agents = load_docs_example_agents();
         let transitions = load_transitions("tasks");
-        let result = ACCEPT_MERGE_CONTRACT.evaluate(&agents, &transitions);
+        let result = INTEGRATE_CONTRACT.evaluate(&agents, &transitions);
         assert_eq!(
             result.outcome,
             CheckOutcome::Pass,
-            "accept-merge contract must pass against docs/agents-yaml-example.yaml; \
+            "integrate contract must pass against docs/agents-yaml-example.yaml; \
              reason: {:?}",
             result.reason
         );
@@ -636,19 +693,19 @@ agents:
     }
 
     /// Smoke run against docs/agents-yaml-example.yaml for the three
-    /// post-accept contracts. Guards the canonical docs template directly so
+    /// post-integrate contracts. Guards the canonical docs template directly so
     /// drift in the docs file fails the test suite, not just the fixture.
     /// Auto-promote is excluded here because docs/agents-yaml-example.yaml
     /// does not yet carry observations-store agents.
     #[test]
-    fn post_accept_contracts_pass_against_docs_agents_yaml_example() {
+    fn post_integrate_contracts_pass_against_docs_agents_yaml_example() {
         let agents = load_docs_example_agents();
-        let post_accept_names = [
-            "accept_merge_must_fire_on_every_accepted_to_status",
-            "cargo_install_must_fire_on_every_accepted_to_status",
+        let post_integrate_names = [
+            "integrate_must_fire_on_every_integration_queued_to_status",
+            "cargo_install_must_fire_on_every_integrated_to_status",
             "schema_migrate_must_fire_on_every_cargo_installed_to_status",
         ];
-        for name in &post_accept_names {
+        for name in &post_integrate_names {
             let contract = lookup(name).unwrap_or_else(|| {
                 panic!("contract '{}' missing from registry", name)
             });
@@ -730,37 +787,48 @@ agents:
     /// as `src/handlers/agents_run.rs` (which queries transition_history by
     /// store + from_status + to_status and iterates agent.subscribes_to).
     ///
-    /// If T110 had accidentally drifted the canonical agents.yaml or the runtime
-    /// match shape, this test fails-loud — equivalent to the contract's
-    /// "transition-history pre-and-post on a fixture task" non-regression check.
+    /// Post-T138: the integration-lane entry edges dispatch the `integrate`
+    /// builtin (and only that builtin); the post-integrated edge dispatches
+    /// `cargo-install` and `auto-resolve-observation`; cargo_installed →
+    /// schema_migrated dispatches `schema-migrate` (and auto-resolve).
     #[test]
-    fn subscribers_fire_unchanged_for_accepted_entry_edges() {
+    fn subscribers_fire_unchanged_for_integration_lane_edges() {
         let agents = load_canonical_agents();
 
-        let mut in_review_accepted =
-            agents_matching_edge(&agents, "tasks", "in_review", "accepted");
-        in_review_accepted.sort_unstable();
+        let mut accepted_to_queued =
+            agents_matching_edge(&agents, "tasks", "accepted", "integration_queued");
+        accepted_to_queued.sort_unstable();
         assert_eq!(
-            in_review_accepted,
-            vec!["accept-merge", "auto-resolve-observation", "cargo-install"],
-            "(in_review → accepted) must dispatch accept-merge, auto-resolve-observation, and cargo-install"
+            accepted_to_queued,
+            vec!["integrate"],
+            "(accepted → integration_queued) must dispatch only the integrate builtin"
         );
 
-        let mut deploy_blocked_accepted =
-            agents_matching_edge(&agents, "tasks", "deploy_blocked", "accepted");
-        deploy_blocked_accepted.sort_unstable();
+        let mut blocked_to_queued =
+            agents_matching_edge(&agents, "tasks", "integration_blocked", "integration_queued");
+        blocked_to_queued.sort_unstable();
         assert_eq!(
-            deploy_blocked_accepted,
-            vec!["accept-merge", "auto-resolve-observation", "cargo-install"],
-            "(deploy_blocked → accepted) must dispatch accept-merge, auto-resolve-observation, and cargo-install"
+            blocked_to_queued,
+            vec!["integrate"],
+            "(integration_blocked → integration_queued) must dispatch only the integrate builtin"
         );
 
-        let cargo_installed_subscribers =
-            agents_matching_edge(&agents, "tasks", "accepted", "cargo_installed");
+        let mut integrated_subscribers =
+            agents_matching_edge(&agents, "tasks", "integrating", "integrated");
+        integrated_subscribers.sort_unstable();
+        assert_eq!(
+            integrated_subscribers,
+            vec!["auto-resolve-observation", "cargo-install"],
+            "(integrating → integrated) must dispatch cargo-install and auto-resolve-observation"
+        );
+
+        let mut cargo_installed_subscribers =
+            agents_matching_edge(&agents, "tasks", "integrated", "cargo_installed");
+        cargo_installed_subscribers.sort_unstable();
         assert_eq!(
             cargo_installed_subscribers,
             vec!["schema-migrate"],
-            "(accepted → cargo_installed) must dispatch exactly schema-migrate"
+            "(integrated → cargo_installed) must dispatch exactly schema-migrate"
         );
     }
 }
