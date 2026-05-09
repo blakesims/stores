@@ -65,6 +65,9 @@ const KNOWN_KEYS: &[&str] = &[
     "cluster_key",
     "missing_info_question",
     "recommended_next",
+    "source_agent",
+    "evidence",
+    "timestamp",
 ];
 
 /// Validate a `gatekeeper_decision_json` payload.
@@ -305,6 +308,31 @@ pub fn validate_gatekeeper_decision(value: &Value) -> Result<(), Vec<String>> {
                 MAX_RECOMMENDED_NEXT,
                 r.len()
             ));
+        }
+    }
+
+    // source_agent: optional, must be a non-empty string when present
+    if let Some(v) = obj.get("source_agent") {
+        match v.as_str() {
+            Some(s) if !s.is_empty() => {}
+            Some(_) => errors.push("source_agent must be a non-empty string".to_string()),
+            None => errors.push("source_agent must be a non-empty string".to_string()),
+        }
+    }
+
+    // evidence: optional, must be a JSON array when present
+    if let Some(v) = obj.get("evidence") {
+        if !v.is_array() {
+            errors.push("evidence must be a JSON array".to_string());
+        }
+    }
+
+    // timestamp: optional, must be a non-empty string when present
+    if let Some(v) = obj.get("timestamp") {
+        match v.as_str() {
+            Some(s) if !s.is_empty() => {}
+            Some(_) => errors.push("timestamp must be a non-empty string".to_string()),
+            None => errors.push("timestamp must be a non-empty string".to_string()),
         }
     }
 
@@ -773,5 +801,60 @@ mod tests {
         let v = json!("not an object");
         let errs = validate_gatekeeper_decision(&v).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("must be a JSON object")), "{:?}", errs);
+    }
+
+    // ---- V1-V4: additive source_agent / evidence / timestamp extension ----
+
+    #[test]
+    fn v1_source_agent_evidence_timestamp_passes() {
+        let v = json!({
+            "decision": "reject_noise",
+            "confidence": "low",
+            "rationale": "matched noise heuristic",
+            "source_agent": "gatekeeper_router_drain",
+            "evidence": [],
+            "timestamp": "2026-05-09T12:00:00Z"
+        });
+        validate_gatekeeper_decision(&v).unwrap();
+    }
+
+    #[test]
+    fn v2_source_agent_non_string_fails() {
+        let v = json!({
+            "decision": "reject_noise",
+            "confidence": "low",
+            "rationale": "x",
+            "source_agent": 42
+        });
+        let errs = validate_gatekeeper_decision(&v).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("source_agent")),
+            "expected error naming source_agent; got: {:?}", errs
+        );
+    }
+
+    #[test]
+    fn v3_evidence_object_not_array_fails() {
+        let v = json!({
+            "decision": "reject_noise",
+            "confidence": "low",
+            "rationale": "x",
+            "evidence": {"key": "val"}
+        });
+        let errs = validate_gatekeeper_decision(&v).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("evidence")),
+            "expected error naming evidence; got: {:?}", errs
+        );
+    }
+
+    #[test]
+    fn v4_existing_valid_helpers_still_pass() {
+        validate_gatekeeper_decision(&valid_fast_track()).unwrap();
+        validate_gatekeeper_decision(&valid_normal_observation()).unwrap();
+        validate_gatekeeper_decision(&valid_needs_info()).unwrap();
+        validate_gatekeeper_decision(&valid_duplicate()).unwrap();
+        validate_gatekeeper_decision(&valid_reject_noise()).unwrap();
+        validate_gatekeeper_decision(&valid_arch_review()).unwrap();
     }
 }
