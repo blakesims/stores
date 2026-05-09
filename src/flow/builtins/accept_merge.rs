@@ -162,7 +162,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
 /// `main_repo`. The CLI form in scope_in (`git branch --merged main | grep
 /// <branch>`) is an English description; `merge-base --is-ancestor` is the
 /// robust mechanical equivalent (exit 0 = ancestor/merged, non-zero = not).
-fn is_branch_merged_into_main(main_repo: &Path, branch: &str) -> bool {
+pub(crate) fn is_branch_merged_into_main(main_repo: &Path, branch: &str) -> bool {
     Command::new("git")
         .args([
             "-C",

@@ -32,6 +32,7 @@ pub mod external_review;
 pub mod gatekeeper_router;
 pub mod gatekeeper_router_drain;
 pub mod gatekeeper_stub;
+pub mod integrate;
 pub mod investigator;
 pub mod schema_migrate;
 pub mod user_escalation;
@@ -69,6 +70,7 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
             }),
         ),
         "gatekeeper-stub" => Some(gatekeeper_stub::run(row, ctx)),
+        "integrate" => Some(integrate::run(row, ctx)),
         "investigator" => Some(investigator::run(row, ctx)),
         "schema-migrate" => Some(schema_migrate::run(row, ctx)),
         "user-escalation" => Some(user_escalation::run(row, ctx)),
@@ -86,6 +88,7 @@ pub fn postcondition_for_builtin(keyword: &str) -> Option<&'static str> {
         "auto-scaffold" => Some("task_workspace_exists"),
         "auto-drive" => Some("drive_pid_recorded_or_terminal"),
         "cargo-install" => Some("cargo_installed_state"),
+        "integrate" => Some("integrated_state"),
         "schema-migrate" => Some("schema_migrated_state"),
         _ => None,
     }

@@ -27,6 +27,7 @@ pub enum PostconditionId {
     DrivePidRecordedOrTerminal,
     CargoInstalledState,
     SchemaMigratedState,
+    IntegratedState,
     Other(String),
 }
 
@@ -38,6 +39,7 @@ impl PostconditionId {
             PostconditionId::DrivePidRecordedOrTerminal => "drive_pid_recorded_or_terminal",
             PostconditionId::CargoInstalledState => "cargo_installed_state",
             PostconditionId::SchemaMigratedState => "schema_migrated_state",
+            PostconditionId::IntegratedState => "integrated_state",
             PostconditionId::Other(s) => s.as_str(),
         }
     }
@@ -49,6 +51,7 @@ impl PostconditionId {
             "drive_pid_recorded_or_terminal" => PostconditionId::DrivePidRecordedOrTerminal,
             "cargo_installed_state" => PostconditionId::CargoInstalledState,
             "schema_migrated_state" => PostconditionId::SchemaMigratedState,
+            "integrated_state" => PostconditionId::IntegratedState,
             other => PostconditionId::Other(other.to_string()),
         }
     }
@@ -64,6 +67,7 @@ pub fn lookup(id: &str) -> Option<PostconditionFn> {
         "drive_pid_recorded_or_terminal" => Some(drive_pid_recorded_or_terminal),
         "cargo_installed_state" => Some(cargo_installed_state),
         "schema_migrated_state" => Some(schema_migrated_state),
+        "integrated_state" => Some(integrated_state),
         _ => None,
     }
 }
@@ -150,6 +154,30 @@ pub fn cargo_installed_state(
         arg_str(args, "display_id").ok_or_else(|| anyhow::anyhow!("missing arg: display_id"))?;
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM tasks WHERE display_id = ?1 AND status = 'cargo_installed'",
+        rusqlite::params![display_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// True iff the integrate dispatch_lock can be stamped terminal-ok: the row
+/// is at `integrated` (the verb's normal terminal) OR has progressed past it
+/// (cargo_installed / schema_migrated / deploy_blocked) OR has parked at
+/// `integration_blocked` (typed lane-blocking outcome) OR was retired
+/// (abandoned / closed_out_of_band).
+///
+/// Args: `{"display_id": "T123"}`.
+pub fn integrated_state(
+    conn: &Connection,
+    args: &Value,
+    _ctx: Option<&Value>,
+) -> Result<bool> {
+    let display_id =
+        arg_str(args, "display_id").ok_or_else(|| anyhow::anyhow!("missing arg: display_id"))?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE display_id = ?1 AND status IN \
+         ('integrated','integration_blocked','cargo_installed','schema_migrated',\
+          'deploy_blocked','abandoned','closed_out_of_band')",
         rusqlite::params![display_id],
         |r| r.get(0),
     )?;
@@ -298,6 +326,7 @@ mod tests {
             "drive_pid_recorded_or_terminal",
             "cargo_installed_state",
             "schema_migrated_state",
+            "integrated_state",
         ] {
             assert!(lookup(id).is_some(), "lookup({}) returned None", id);
         }
@@ -313,6 +342,7 @@ mod tests {
             "drive_pid_recorded_or_terminal",
             "cargo_installed_state",
             "schema_migrated_state",
+            "integrated_state",
         ] {
             assert_eq!(PostconditionId::parse(id).as_str(), id);
         }
