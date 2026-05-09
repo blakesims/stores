@@ -9,7 +9,7 @@
 2. **Audit active rows** — track `T117`, `T120`, `T121`, `T122` by lifecycle state, branch diff, review output, and whether work is salvageable. ✅ T120/T122 audited; T121/T117 remain blocked decisions.
 3. **Salvage/manual-finish useful work** — patch reviewer findings directly in task worktrees where code exists; run tests; commit task-branch fixes. ✅ T120 shipped; T122 useful work checkpointed at `62519e7` and is back in `code_review`.
 4. **Reproduce lifecycle bug with tests** — encode the `T118` failure: non-empty but rejected plan + planning-block resume must not enter executor. ✅ tests added in `src/handlers/submit.rs`.
-5. **Install guardrails** — executor start requires non-empty plan plus latest relevant plan review `READY`; phase advancement requires prior phase execution/review success. ✅ three guardrail commits on main: `bca5fd7`, `86b0614`, `e9ba39e`.
+5. **Install guardrails** — executor start requires non-empty plan plus latest relevant plan review `READY`; phase advancement requires prior phase execution/review success. ✅ guardrail/test commits on main: `bca5fd7`, `86b0614`, `e9ba39e`, plus fixture fix `8dfdad1`.
 6. **Clear queue deliberately** — merge/accept/close shipped rows; abandon contaminated/superseded rows; resolve duplicate observations and dangling locks. ⏳ next operational focus: T122 review/merge, T121 disposition, T117 disposition, duplicate ready observation cleanup.
 7. **Follow-up observability** — separately redesign/fix `stores watch` so it shows operator-actionable state instead of noisy internal buckets. ⏳ still pending; should be a dedicated follow-up after queue is safe.
 
@@ -22,7 +22,7 @@
   - `T117` — T1 `blocked`, `drive_failed:silent_zombie_pid_dead`; no plan-review path because T1 skip-plan. Needs decision: inspect branch/useful work, then resume or abandon/remint.
   - `T120` — ✅ shipped/cleared to `schema_migrated`; merge commit `b707e1a` plus T120 commits `8193050`, `40370ac`.
   - `T121` — T2 `blocked`, `drive_failed:stale_binary_inode`; latest plan review is NEEDS_WORK after repeated planning loops, no code committed. With fixed resume semantics it should route to planning, but likely needs manual contract/plan disposition rather than another blind cycle.
-  - `T122` — T2 `code_review`, phase 1 cycle 1; lifecycle-clean: NEEDS_WORK → revised plan → READY → execution, then stale/silent drive blocks, then resumed after guardrails. Useful work checkpointed at `62519e7`; now waiting for code-reviewer verdict / follow-up.
+  - `T122` — T2 currently `blocked` again after repeated code-reviewer drive silent-zombies. Lifecycle remains clean and useful work is checkpointed/rebased as commit `48c07ac` on top of main `aa5ec45`, but code-reviewer has not produced a verdict (`code_review_log_len=0`). Manual validation found the branch diff itself builds/lints after rebase; the remaining issue is runner/code-reviewer instability plus one mainline guardrail fixture that was fixed in `8dfdad1`.
 
 ### 2026-05-09 active-row audit update
 
@@ -119,12 +119,30 @@ Validation run:
 - `cargo test --lib submit_review -- --nocapture` → 4 passed.
 - Regression bundle: `cargo test --lib resume_ -- --nocapture`, `cargo test --lib follow_on -- --nocapture`, and `cargo test --lib submit_review -- --nocapture` all pass.
 
+### 2026-05-09 T122 investigation update
+
+T122 state after engine-op retry:
+
+- Row returned to `blocked`, `blocked_reason=drive_failed:silent_zombie_pid_dead`, `drive_pid=1449456` dead.
+- Transition history shows repeated pattern: resume → executing → submit-execute → code_review → watchdog silent_zombie. No code-reviewer verdict landed.
+- `agent_runs` has planner/plan-reviewer/executor rows only; no successful code-reviewer row for T122. `cycles[]` has two executor submissions for commit `62519e7`/rebased `48c07ac` and no review entries.
+- T122 branch was rebased by engine-op: `HEAD=48c07ac T122 manual-rescue: re-fire observation subscriber edges`, base `aa5ec45`.
+
+Manual branch validation:
+
+- Initial `cargo clippy --all-targets -- -D warnings` showed the old `src/handlers/drive.rs:4474` single-element loop warning, indicating the branch needed the T120 clippy fix / rebase. After re-checking post-rebase, the file had the fixed block and clippy passed.
+- `cargo clippy --all-targets -- -D warnings` now passes in `/home/blake/repos/experiments/stores-T122-auto-promoted-l523`.
+- Targeted tests pass: `cargo test auto_promote -- --nocapture`, `cargo test auto_resolve -- --nocapture`, `cargo test subscriber_edges -- --nocapture`.
+- Full `cargo test --lib` in the T122 worktree then exposed a mainline guardrail-test fixture bug: `ac5_14_blocked_to_ready_recovery` expected execution without seeding a latest READY plan review. Fixed on main in `8dfdad1 test: align resume recovery fixture with plan approval guard`; `cargo test --lib` passes on main after that fix.
+
+Conclusion: T122 code is not currently known-bad. The blocking symptom is the code-reviewer/drive repeatedly silent-zombieing before verdict, while manual compile/lint/targeted tests pass. Before another substrate retry, rebase T122 onto `8dfdad1` (worktree has generated task projection noise that prevented a clean rebase during this note) or manually apply the fixture fix, then prefer manual/Codex review or close-out-of-band if the code-reviewer keeps dying.
+
 ## Next Actions
 
-1. **Observe/clear T122 first.** It is currently `code_review` and has the best chance of finishing cleanly. If reviewer passes, let it wrap/external-review/accept. If reviewer revises, patch the T122 branch manually or let one controlled executor cycle run.
+1. **Clear T122 manually or with a lighter review path.** It is blocked again after repeated code-reviewer silent-zombies, but manual clippy/targeted tests pass and no code-review verdict exists. Next concrete move: rebase T122 onto `8dfdad1`, run `cargo test --lib` plus targeted tests, then use manual/Codex review or close-out-of-band if the substrate code-reviewer continues to die.
 2. **Decide T121 deliberately.** It is blocked with latest plan review NEEDS_WORK and no code. Fixed resume should send it to planning, but repeated NEEDS_WORK suggests manual contract/plan tightening or abandon/remint may be better than another autonomous loop.
 3. **Decide T117.** It is T1 blocked by silent_zombie. Inspect branch/worktree first; if useful, resume after fixed binary is active; if not, abandon/remint.
-4. **Install/propagate latest guardrail commits.** Main now has `bca5fd7`, `86b0614`, `e9ba39e`; ensure the active `stores` binary includes all three before broad resume/restart.
+4. **Install/propagate latest guardrail commits.** Main now has `bca5fd7`, `86b0614`, `e9ba39e`, `8dfdad1`; ensure the active `stores` binary includes all four before broad resume/restart.
 5. **Queue cleanup after active rows settle.** Resolve duplicate ready observations from re-mints (`L489/L518`, `L513/L520`, `L515/L523` shape), abandon contaminated/superseded tasks, inspect dangling locks.
 
 ## Follow-ups
