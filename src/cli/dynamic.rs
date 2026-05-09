@@ -584,6 +584,10 @@ fn build_store_command(schema: &Schema) -> Command {
     if schema.name == "tasks" {
         store_cmd = store_cmd.subcommand(build_recover_stale_base_cmd());
         store_cmd = store_cmd.subcommand(build_reconcile_accepted_cmd());
+        // T140 P1: activation primitive — `tasks activate` / `tasks deactivate`.
+        store_cmd = store_cmd
+            .subcommand(build_activate_cmd())
+            .subcommand(build_deactivate_cmd());
     }
 
     // external_reviews run is a narrow operator-control verb: dispatch exactly
@@ -1584,6 +1588,58 @@ fn build_list_cmd(schema: &Schema) -> Command {
 /// Build the `schema` command.
 fn build_schema_cmd() -> Command {
     Command::new("schema").about("Print the schema for this store")
+}
+
+/// Build `tasks activate` command (T140 P1, tasks only).
+/// Flips activation to 'active'. Requires --reason (recorded as actor_note).
+fn build_activate_cmd() -> Command {
+    Command::new("activate")
+        .about(
+            "Arm a tasks row for combustion (sets activation='active'). \
+             Requires --reason; tier-B (--invoker ai_with_human or human; \
+             ai_autonomous is rejected).",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the task")
+                .required(true),
+        )
+        .arg(
+            Arg::new("reason")
+                .long("reason")
+                .value_name("text")
+                .help(
+                    "Required reason for arming the row \
+                     (recorded in transition_history.actor_note)",
+                )
+                .required(true),
+        )
+}
+
+/// Build `tasks deactivate` command (T140 P1, tasks only).
+/// Flips activation to 'inactive'. Requires --reason (recorded as actor_note).
+fn build_deactivate_cmd() -> Command {
+    Command::new("deactivate")
+        .about(
+            "Disarm a tasks row (sets activation='inactive'). \
+             Requires --reason; tier-B (--invoker ai_with_human or human; \
+             ai_autonomous is rejected).",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the task")
+                .required(true),
+        )
+        .arg(
+            Arg::new("reason")
+                .long("reason")
+                .value_name("text")
+                .help(
+                    "Required reason for disarming the row \
+                     (recorded in transition_history.actor_note)",
+                )
+                .required(true),
+        )
 }
 
 /// Build `override-risk` command (observations only).

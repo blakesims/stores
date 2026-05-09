@@ -17,6 +17,25 @@ fields:
     enum_values: [T1, T2, T3]
     required: false
     description: "Triage tier (T1|T2|T3); inheritable from linked_observations when unanimous, else required explicitly"
+  # T140 P1: per-row activation gate. The "ignition primitive" for the engine —
+  # combustion-class subscribers (drive dispatch, integration lane) gate on
+  # activation='active'; safety/reconcile subscribers stay ungated. Default
+  # 'inactive' means newly created or migrated rows do not auto-combust; the
+  # operator must arm them with `tasks activate <id> --reason <text>`. Migration
+  # from older DBs preserves currently-running work by backfilling IN_FLIGHT
+  # statuses to 'active' (see handlers::framework_migrate::IN_FLIGHT_STATES).
+  # actor: ai_with_human gates explicit writes — autonomous flow cannot toggle
+  # this field, only the operator (or tier-A token-mediated AI). The activate /
+  # deactivate CLI verbs require --reason and persist it as
+  # transition_history.actor_note for audit. P2 wires the gating; P1 only ships
+  # the column and the verbs.
+  - name: activation
+    type: enum
+    enum_values: [active, inactive]
+    required: false
+    actor: ai_with_human
+    default: 'inactive'
+    description: "Per-row activation gate (active|inactive, default inactive). Combustion-class subscribers gate on this in P2; P1 ships the column and the activate/deactivate verbs only."
   - name: contract
     type: record
     fields:

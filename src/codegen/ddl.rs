@@ -46,6 +46,25 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
         ],
     },
     FrameworkTable {
+        name: "tasks",
+        columns: &[
+            // T140 P1: per-row activation gate. The tasks table itself is
+            // store-schema-owned, but `activation` is registered here as an
+            // additive FrameworkColumn so older DBs (no activation column) get
+            // ALTERed up by `apply_framework_drift`. NOT NULL DEFAULT 'inactive'
+            // — additive-safe via the DEFAULT. Backfill of currently-running
+            // rows to 'active' is handled in `framework_migrate::backfill_tasks_activation`.
+            FrameworkColumn {
+                name: "activation",
+                sql_type: "TEXT",
+                nullable: false,
+                default_sql: Some("'inactive'"),
+                full_def: "activation TEXT NOT NULL DEFAULT 'inactive' CHECK(activation IN ('active','inactive'))",
+                additive: true,
+            },
+        ],
+    },
+    FrameworkTable {
         name: "transition_history",
         columns: &[
             FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },

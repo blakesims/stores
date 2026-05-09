@@ -346,6 +346,12 @@ pub fn dispatch(
                         handlers::overrides::run_override_risk(schema, &conn, sub, invoker)?;
                     } else if verb == "override-policy" {
                         handlers::overrides::run_override_policy(schema, &conn, sub, invoker)?;
+                    // T140 P1: activate / deactivate are tasks-only non-transition
+                    // verbs that flip the `activation` column without touching status.
+                    } else if verb == "activate" && store.name == "tasks" {
+                        handlers::activate::run_activate(schema, &conn, sub, invoker)?;
+                    } else if verb == "deactivate" && store.name == "tasks" {
+                        handlers::activate::run_deactivate(schema, &conn, sub, invoker)?;
                     } else if schema.lifecycle.transitions.iter().any(|t| t.verb == verb) {
                         if verb == "reject" {
                             // reject requires --reason (clap enforces required=true at parse time).

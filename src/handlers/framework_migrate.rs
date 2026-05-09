@@ -13,6 +13,17 @@ use serde::Serialize;
 
 use crate::codegen::ddl::{quote_ident, FrameworkColumn, FRAMEWORK_DDL_TABLES};
 
+/// T140 P1: in-flight task statuses. Rows whose status is in this set at
+/// migration time are backfilled to `activation='active'` so currently-running
+/// work continues seamlessly across a binary upgrade. Every other status
+/// (planning, plan_review, ready, blocked, deploy_blocked, accepted,
+/// integration_queued, integration_blocked, complete, in_review,
+/// cargo_installed, schema_migrated, integrated, rejected, abandoned,
+/// closed_out_of_band) backfills to `activation='inactive'` via the column's
+/// DDL DEFAULT. P3 reuses this constant as the gating predicate for
+/// combustion-class subscribers — single source of truth.
+pub const IN_FLIGHT_STATES: &[&str] = &["executing", "code_review", "integrating"];
+
 /// Name of the partial UNIQUE index that enforces the integration-lane
 /// capacity-1 invariant on the `tasks` table. T138 P1.
 ///
@@ -130,12 +141,16 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
     let applied_at = crate::handlers::row::now_iso8601();
 
     let mut applied: Vec<AppliedFrameworkMigration> = Vec::with_capacity(drift.additive.len());
+    let mut backfill_tasks_activation = false;
     for (table, col) in &drift.additive {
         let ddl = format!(
             "ALTER TABLE {} ADD COLUMN {};",
             quote_ident(table),
             col.full_def
         );
+        if table == "tasks" && col.name == "activation" {
+            backfill_tasks_activation = true;
+        }
         applied.push(AppliedFrameworkMigration {
             table_name: table.clone(),
             column_name: col.name.to_string(),
@@ -169,6 +184,26 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
                 m.column_name,
                 m.ddl_applied,
             ])?;
+        }
+        // T140 P1: when the activation column was just added, walk the
+        // IN_FLIGHT_STATES backfill so currently-running work stays armed.
+        // Every other row already received `activation='inactive'` via the
+        // DDL DEFAULT applied by ALTER. Idempotent on a second boot because
+        // the column will not be in `drift.additive` once present.
+        if backfill_tasks_activation {
+            let placeholders = std::iter::repeat("?")
+                .take(IN_FLIGHT_STATES.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "UPDATE tasks SET activation='active' WHERE status IN ({placeholders})"
+            );
+            let params: Vec<&dyn rusqlite::ToSql> = IN_FLIGHT_STATES
+                .iter()
+                .map(|s| s as &dyn rusqlite::ToSql)
+                .collect();
+            tx.execute(&sql, params.as_slice())
+                .context("T140 P1: backfill tasks.activation for IN_FLIGHT_STATES")?;
         }
     }
     tx.commit()
