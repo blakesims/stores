@@ -82,6 +82,26 @@ Validation run:
 - `cargo test --lib resume_ -- --nocapture` → 13 passed.
 - `cargo test --lib follow_on -- --nocapture` → 6 passed.
 
+### 2026-05-09 ready→executing guard update
+
+Work path: `src/handlers/submit.rs`.
+
+Tests added near existing `fire_on_entry_follow_ons_*` tests:
+
+- `fire_on_entry_follow_ons_ready_refuses_rejected_plan_for_non_t1` — constructs a T2 row already in `ready` with a non-empty plan but latest `plan_review_log.gate = NEEDS_WORK`; directly fires `fire_on_entry_follow_ons(..., "ready")` and asserts it errors with the executable-plan requirement and leaves status at `ready`.
+- `fire_on_entry_follow_ons_ready_allows_latest_ready_plan_for_non_t1` — constructs the same shape but with latest gate `READY`; asserts ready on-entry advances to `executing` and sets phase/cycle to `1/1`.
+
+Implementation changed:
+
+- Added `entry_has_executable_plan(entry)` helper. It requires a non-empty plan plus either T1 `plan_source == "contract_synthesized"` or latest `plan_review_log.gate == "READY"`.
+- `fire_on_entry_follow_ons` now refuses the framework `start` transition (`ready → executing`) when `entry_has_executable_plan` is false. This makes executor-start itself enforce the invariant, not just `resume`.
+
+Validation run:
+
+- `cargo test --lib fire_on_entry_follow_ons_ready -- --nocapture` → 2 passed.
+- `cargo test --lib resume_ -- --nocapture` → 13 passed.
+- `cargo test --lib follow_on -- --nocapture` → 8 passed.
+
 ## Follow-ups
 
 - Design explicit maintenance/freeze mode semantics: pause daemon spawns/watchdog without necessarily killing useful child drives.

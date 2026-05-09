@@ -542,6 +542,16 @@ pub fn fire_on_entry_follow_ons(
                 }
             }
 
+            if follow_on_t.verb == "start"
+                && state == "ready"
+                && target_state == "executing"
+                && !entry_has_executable_plan(&current_entry)
+            {
+                bail!(
+                    "framework-fired start refused for {display_id}: ready → executing requires an executable plan (T1 contract-synthesized plan or latest plan_review_log.gate == READY)"
+                );
+            }
+
             // Compute framework fields for entering target_state
             let (fw_fields, mut txt_fields) =
                 compute_on_entry_framework_fields(schema, target_state, &current_entry);
@@ -606,6 +616,41 @@ pub fn fire_on_entry_follow_ons(
 /// - `ready → executing` (on-entry follow-on from plan_review READY):
 ///   sets current_phase = 1, current_cycle = 1 ONLY if current_phase == 0
 ///   (distinguishes initial plan approval from resume, where current_phase is preserved).
+fn entry_has_executable_plan(entry: &EntryMap) -> bool {
+    let tier_hint = entry.get("tier_hint").and_then(|v| v.as_str()).unwrap_or("");
+    let plan_source = entry.get("plan_source").and_then(|v| v.as_str()).unwrap_or("");
+    let plan_is_empty = entry
+        .get("plan")
+        .map(|v| match v {
+            Value::Null => true,
+            Value::String(s) => s.trim().is_empty(),
+            Value::Object(m) => m.is_empty(),
+            _ => false,
+        })
+        .unwrap_or(true);
+    if plan_is_empty {
+        return false;
+    }
+    if tier_hint == "T1" && plan_source == "contract_synthesized" {
+        return true;
+    }
+    entry
+        .get("plan_review_log")
+        .and_then(|v| match v {
+            Value::Array(items) => items.last().cloned(),
+            Value::String(s) => serde_json::from_str::<Value>(s)
+                .ok()
+                .and_then(|parsed| parsed.as_array().and_then(|items| items.last().cloned())),
+            _ => None,
+        })
+        .and_then(|last| {
+            last.get("gate")
+                .and_then(|v| v.as_str())
+                .map(|gate| gate == "READY")
+        })
+        .unwrap_or(false)
+}
+
 fn compute_on_entry_framework_fields(
     _schema: &Schema,
     target_state: &str,
@@ -5460,6 +5505,87 @@ workflow:
         for input in [&plan, &plan2, &plan3, &plan4] {
             assert_eq!(input["phases"].as_array().unwrap().len(), 1);
         }
+    }
+
+    #[test]
+    fn fire_on_entry_follow_ons_ready_refuses_rejected_plan_for_non_t1() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+
+        let now = "2026-05-09T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        let plan = r#"{"phases":[{"name":"phase 1"}]}"#;
+        let plan_review_log = r#"[{"gate":"NEEDS_WORK","summary":"plan rejected"}]"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, plan_review_log, current_phase, current_cycle) \
+             VALUES ('T912', 'ready', ?1, ?1, 'framework', 'framework', \
+             'rejected plan at ready', 'rejected-plan-ready', 'feat/t912', '/tmp/no', 'T2', \
+             ?2, ?3, ?4, 0, 0)",
+            rusqlite::params![now, contract, plan, plan_review_log],
+        )
+        .unwrap();
+        let row_id = conn.last_insert_rowid();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let err = fire_on_entry_follow_ons(&tx, &task_schema, "T912", row_id, "ready")
+            .expect_err("ready → executing must refuse a latest-rejected plan");
+        assert!(
+            err.to_string().contains("requires an executable plan"),
+            "error should explain executable-plan requirement: {err}"
+        );
+        drop(tx);
+
+        let status: String = conn
+            .query_row("SELECT status FROM tasks WHERE display_id = 'T912'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "ready", "failed follow-on must not enter executing");
+    }
+
+    #[test]
+    fn fire_on_entry_follow_ons_ready_allows_latest_ready_plan_for_non_t1() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+
+        let now = "2026-05-09T00:00:00Z";
+        let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
+        let plan = r#"{"phases":[{"name":"phase 1"}]}"#;
+        let plan_review_log = r#"[{"gate":"NEEDS_WORK","summary":"first rejected"},{"gate":"READY","summary":"approved"}]"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, plan_review_log, current_phase, current_cycle) \
+             VALUES ('T913', 'ready', ?1, ?1, 'framework', 'framework', \
+             'ready plan at ready', 'ready-plan-ready', 'feat/t913', '/tmp/no', 'T2', \
+             ?2, ?3, ?4, 0, 0)",
+            rusqlite::params![now, contract, plan, plan_review_log],
+        )
+        .unwrap();
+        let row_id = conn.last_insert_rowid();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        fire_on_entry_follow_ons(&tx, &task_schema, "T913", row_id, "ready").unwrap();
+        tx.commit().unwrap();
+
+        let (status, phase, cycle): (String, i64, i64) = conn
+            .query_row(
+                "SELECT status, current_phase, current_cycle FROM tasks WHERE display_id = 'T913'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "executing");
+        assert_eq!(phase, 1);
+        assert_eq!(cycle, 1);
     }
 
     #[test]
