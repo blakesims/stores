@@ -117,20 +117,22 @@ Candidate patterns to verify from source/CLI before use:
 
 ## Current Known Queue Shape
 
-Last verified snapshot after engine-op pause:
+Last verified snapshot after manual-control work:
 
 - Daemon: stopped.
-- Drives: reaped.
-- Monitors: stopped except agent-comm watch.
-- `T125`: `in_review`, ER357 PASS; likely ready for Blake/U3 accept.
-- `T127`: `in_review`, ER358 PASS; likely ready for Blake/U3 accept.
-- `T124`: `in_review`, has executor commit + wrap; no ER row found yet; needs manual review or narrow ER path.
+- Drives: reaped / no live `stores tasks drive` processes.
+- External reviews: no `pending` / `running` / `tooling_held` rows.
+- Dispatch locks: DB still has stale unfinished `auto-drive` locks (16 observed), but no matching live processes.
+- `T125`: accepted after rebase + fresh ER359 PASS at current head.
+- `T127`: accepted after rebase + fresh ER360 PASS at current head.
+- `T124`: `in_review`, has executor commit + wrap; no ER row found yet; next likely manual review or create/run a narrow ER attempt.
 - `T126`: `blocked`, substantive code-review FAIL; needs salvage-vs-abandon decision.
 - `T123`: `blocked`, stale-binary/I033 contamination risk; hold.
 - `T116`: `blocked`, T1 silent_zombie; hold until WIP low.
 - `T108`: `blocked`, contract drift / repeated NEEDS_WORK; needs revise or abandon/remint decision.
-- `T128`: was `executing`; engine-op says all drives reaped including T128; needs fresh status check before action.
-- `T134`–`T137`: fresh planning remints caused by auto-promote startup sweep after abandoned tasks; zero cycles; likely queue-curation candidates, not automatic drive candidates.
+- `T128`: now `blocked` (`drive_failed:silent_zombie_pid_dead`) after reaped drive; inspect before action.
+- `T134`–`T137`: startup-sweep remints now `blocked` (`drive_failed:silent_zombie_pid_dead`) after killed/reaped drives; likely queue-curation candidates, not automatic drive candidates.
+- Observations: 43 open, 13 ready, 1 investigating, 473 resolved, 6 wont_fix. New drive-failed opens include `L532`–`L536` for `T128`/`T134`–`T137`.
 
 ## Guardrails
 
@@ -146,6 +148,27 @@ Last verified snapshot after engine-op pause:
 2. Confirm live task statuses from CLI.
 3. Inspect config/source for any supported pause/maintenance/narrow-dispatch knobs.
 4. Decide the first safe manual move with Blake.
+
+## Work Completed This Iteration
+
+- Confirmed `stores agents run --once` is a broad daemon tick, not a narrow subscriber dispatch. Even with a reduced `.stores/agents.yaml`, it still runs hardcoded startup sweeps and engine-runner/watchdog logic.
+- Used Blake's token to accept `T125` and `T127`, but only after rebasing each branch onto current `main` and refreshing external review at the new branch head.
+- Added a narrow control primitive directly on `main`: `stores external_reviews run <ERID>`.
+  - Commit: `06403b5 repair: add narrow external review run verb`.
+  - Purpose: run exactly one external review row without daemon startup sweeps, auto-promote, auto-drive, watchdog, or engine-runner.
+  - Validation: `cargo test --lib external_review -- --nocapture`, `cargo clippy --lib --tests -- -D warnings`, `cargo install --path . --features runner-claude-code,runner-pi --locked --force`.
+- Discovered the narrow ER verb currently has no pending row to trial; `T124` is the next likely candidate if/when an ER row is created.
+- Confirmed the engine is paused but DB state is still messy: blocked remints, drive-failed observations, stale unfinished dispatch locks, and one in-review task remain.
+
+## Next Priorities
+
+1. **T124 review/accept path** — inspect branch, create/run ER using the new narrow verb or do manual review, then accept/reject deliberately.
+2. **T126 disposition** — substantive FAIL; decide salvage revise vs abandon+sharpen.
+3. **T134–T137 cleanup** — fresh remints now blocked after reaped drives; likely abandon or explicitly hold, depending on whether their linked observations still represent desired work.
+4. **T128 disposition** — blocked silent_zombie after commitless executor summary; inspect and decide close/abandon/remint.
+5. **Observation cleanup** — especially L532–L536 new drive-failed observations and stale L524–L531 drive/deploy-failed noise.
+6. **Stale dispatch_locks audit** — 16 unfinished `auto-drive` locks with no live processes; understand whether current watchdog/daemon guards safely ignore them before any broad restart.
+7. **Do not broad-restart daemon** until Phase 1 queue cleanup and Phase 2 narrow-control procedures are complete.
 
 ## Done When
 
