@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>stores watch / flowtop mockups</title>
+  <style>
+    :root { color-scheme: dark; --bg:#070b10; --panel:#0d141d; --panel2:#101a25; --line:#203040; --fg:#d7e2ee; --muted:#6f8193; --green:#62d26f; --cyan:#48c7ff; --yellow:#ffd166; --orange:#ff9f43; --red:#ff5c70; --purple:#c084fc; --blue:#60a5fa; }
+    * { box-sizing: border-box; }
+    body { margin:0; background: radial-gradient(circle at top, #101826, #06080c 50%); color:var(--fg); font:14px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    main { max-width: 1180px; margin: 32px auto; padding: 0 20px 60px; }
+    h1 { font: 700 28px/1.1 system-ui, sans-serif; margin:0 0 8px; }
+    p { color: var(--muted); max-width: 860px; }
+    .grid { display:grid; grid-template-columns: repeat(3,1fr); gap:18px; margin-top:24px; }
+    a.card { text-decoration:none; color:inherit; display:block; border:1px solid var(--line); background:linear-gradient(180deg,var(--panel),#090d13); border-radius:16px; padding:18px; min-height:170px; box-shadow:0 20px 60px #0008; }
+    a.card:hover { border-color: var(--cyan); transform: translateY(-1px); }
+    .tag { color:#071014; background:var(--cyan); border-radius:999px; padding:3px 8px; font-weight:700; display:inline-block; margin-bottom:12px; }
+    h2 { margin:0 0 8px; font:700 18px/1.1 system-ui,sans-serif; }
+    .mini { margin-top:14px; color:var(--muted); white-space:pre; font-size:12px; }
+  </style>
+</head>
+<body><main>
+  <h1>stores watch → flowtop mockups</h1>
+  <p>Three web mockups for a TUI-first cockpit. These are deliberately terminal-shaped: fixed-grid panels, glyph bars, minimal chrome, and keyboard/drilldown affordances.</p>
+  <section class="grid">
+    <a class="card" href="flowtop-pipeline.html"><span class="tag">A</span><h2>Flowtop Pipeline</h2><p>Main object is the substrate funnel: rate, depth, age, and pressure at every stage.</p><div class="mini">INTAKE → OBS → CONTRACT → TASK → REVIEW → SHIP
+ 21⚠     34⚠     3◆      1●      ↻3      +3</div></a>
+    <a class="card" href="pressure-heatmap.html"><span class="tag">B</span><h2>Pressure Heatmap</h2><p>Systemic health first: architectural pressure, backlogs, failure classes, and trends.</p><div class="mini">obs backlog       ████████░░
+plan rejection    ████░░░░░░
+daemon health     ██████████</div></a>
+    <a class="card" href="process-btop.html"><span class="tag">C</span><h2>Process btop</h2><p>Closest to btop: active agents/processes, runners, elapsed time, logs, and row drilldown.</p><div class="mini">T138 exec P1/6 opus 12m plan×3
+T116 held       -   6h zombie</div></a>
+  </section>
+</main></body></html>

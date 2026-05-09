@@ -1,0 +1,43 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pressure Heatmap</title><style>
+:root{--bg:#06070b;--p:#0d1118;--p2:#151820;--line:#2b3340;--fg:#e5e7eb;--mut:#7d8793;--g:#65db76;--c:#52d3ff;--y:#f8d66d;--o:#ff9b4a;--r:#ff5268;--m:#b982ff}*{box-sizing:border-box}body{margin:0;background:#04060a;color:var(--fg);font:13px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.screen{width:1180px;height:760px;margin:24px auto;padding:12px;background:linear-gradient(180deg,#11131b,#06070b);border:1px solid #394252;border-radius:18px;box-shadow:0 30px 100px #000}.panel{background:linear-gradient(180deg,var(--p2),var(--p));border:1px solid var(--line);border-radius:12px;padding:10px;overflow:hidden}.title{color:#aeb7c2;font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:11px;margin-bottom:8px}.top{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:10px}.ok{color:var(--g)}.cyan{color:var(--c)}.warn{color:var(--y)}.orange{color:var(--o)}.bad{color:var(--r)}.purp{color:var(--m)}.mut{color:var(--mut)}.main{display:grid;grid-template-columns:1.12fr .88fr;gap:10px;margin-top:10px}.heat{height:432px}.row{display:grid;grid-template-columns:178px 1fr 54px 82px;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid #202938}.spark{letter-spacing:-1px;font-size:18px}.bar{height:14px;border-radius:99px;background:#151f2c;overflow:hidden;box-shadow:inset 0 0 0 1px #263548}.bar i{display:block;height:100%;background:var(--g)}.bar.y i{background:linear-gradient(90deg,var(--g),var(--y))}.bar.o i{background:linear-gradient(90deg,var(--y),var(--o))}.bar.r i{background:linear-gradient(90deg,var(--o),var(--r))}.score{text-align:right;font-weight:800}.matrix{display:grid;grid-template-columns:repeat(12,1fr);gap:3px;margin-top:10px}.cell{height:20px;border-radius:4px;background:#172232}.c1{background:#143322}.c2{background:#4a3a14}.c3{background:#613115}.c4{background:#69202d}.side{height:432px}.minirow{display:grid;grid-template-columns:80px 1fr 40px;gap:8px;padding:5px 0;border-bottom:1px solid #202938}.bottom{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.box{height:122px}.kbd{border:1px solid #465466;border-radius:4px;padding:1px 5px;color:#d7dde5}.pill{border-radius:999px;padding:2px 7px;background:#1b2635}.legend{display:flex;gap:12px;color:var(--mut);margin-top:7px}.lg{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:4px;vertical-align:-2px}
+</style></head><body><div class="screen">
+ <div class="top">
+  <div class="panel"><div class="title">Engine risk summary</div><span class="bad">HIGH</span> stale locks · <span class="warn">ELEVATED</span> backlog age · <span class="ok">CLEAR</span> deploy<br><span class="mut">This design starts with “where is pressure accumulating?” rather than row lists.</span></div>
+  <div class="panel"><div class="title">Active</div><span class="cyan">T138</span> exec P1/6 · opus · 12m · <span class="pill warn">plan×3</span><br><span class="mut">flow continues; no Blake gate</span></div>
+  <div class="panel"><div class="title">Controls</div><span class="kbd">Tab</span> map/process/logs <span class="kbd">Enter</span> explain cell<br><span class="mut">read-only first · actions later</span></div>
+ </div>
+ <div class="main">
+  <div class="panel heat"><div class="title">Pressure heatmap · rolling 24h</div>
+   <div class="row mut"><b>signal</b><b>pressure</b><b>score</b><b>trend</b></div>
+   <div class="row"><span>daemon / locks</span><div class="bar r"><i style="width:100%"></i></div><span class="score bad">100</span><span class="spark bad">██████</span></div>
+   <div class="row"><span>obs backlog age</span><div class="bar o"><i style="width:76%"></i></div><span class="score orange">76</span><span class="spark orange">▃▄▅▆▇█</span></div>
+   <div class="row"><span>intake backlog age</span><div class="bar o"><i style="width:68%"></i></div><span class="score orange">68</span><span class="spark orange">▂▃▄▆▆▇</span></div>
+   <div class="row"><span>plan rejection loop</span><div class="bar y"><i style="width:42%"></i></div><span class="score warn">42</span><span class="spark warn">▁▂▄▆▃▁</span></div>
+   <div class="row"><span>human approvals</span><div class="bar y"><i style="width:24%"></i></div><span class="score warn">24</span><span class="spark warn">▁▁▂▂▁▁</span></div>
+   <div class="row"><span>code review loops</span><div class="bar"><i style="width:5%"></i></div><span class="score ok">05</span><span class="spark ok">▁▁▁▁▁▁</span></div>
+   <div class="row"><span>deploy / ship failures</span><div class="bar"><i style="width:0%"></i></div><span class="score ok">00</span><span class="spark ok">▁▁▁▁▁▁</span></div>
+   <div class="row"><span>runner rate limits</span><div class="bar"><i style="width:0%"></i></div><span class="score ok">00</span><span class="spark ok">▁▁▁▁▁▁</span></div>
+   <div class="legend"><span><i class="lg c1"></i>normal</span><span><i class="lg c2"></i>watch</span><span><i class="lg c3"></i>pressure</span><span><i class="lg c4"></i>critical</span></div>
+   <div class="matrix">
+    <i class="cell c1"></i><i class="cell c1"></i><i class="cell c2"></i><i class="cell c2"></i><i class="cell c3"></i><i class="cell c4"></i><i class="cell c4"></i><i class="cell c4"></i><i class="cell c3"></i><i class="cell c2"></i><i class="cell c1"></i><i class="cell c1"></i>
+    <i class="cell c1"></i><i class="cell c1"></i><i class="cell c1"></i><i class="cell c2"></i><i class="cell c2"></i><i class="cell c3"></i><i class="cell c3"></i><i class="cell c2"></i><i class="cell c2"></i><i class="cell c1"></i><i class="cell c1"></i><i class="cell c1"></i>
+    <i class="cell c1"></i><i class="cell c1"></i><i class="cell c1"></i><i class="cell c1"></i><i class="cell c1"></i><i class="cell c2"></i><i class="cell c1"></i><i class="cell c1"></i><i class="cell c1"></i><i class="cell c1"></i><i class="cell c1"></i><i class="cell c1"></i>
+   </div>
+  </div>
+  <div class="panel side"><div class="title">Top contributors</div>
+   <div class="minirow mut"><b>kind</b><b>source</b><b>score</b></div>
+   <div class="minirow"><span class="bad">locks</span><span>16 unfinished dispatch_locks; daemon dead</span><span class="bad">100</span></div>
+   <div class="minirow"><span class="orange">obs</span><span>34 open; inflow > close rate</span><span class="orange">76</span></div>
+   <div class="minirow"><span class="orange">intake</span><span>21 drafts; gatekeeper not draining</span><span class="orange">68</span></div>
+   <div class="minirow"><span class="warn">plan</span><span>T138 needed 4 plan attempts</span><span class="warn">42</span></div>
+   <br><div class="title">Flow mini-map</div>
+   <div style="font-size:20px;line-height:1.9">INTAKE <span class="orange">▇</span> → OBS <span class="orange">▇</span> → CONTRACT <span class="purp">▂</span> → TASK <span class="cyan">●</span> → REVIEW <span class="ok">▁</span> → SHIP <span class="ok">▃</span></div>
+   <br><div class="title">Interpretation</div>
+   <span class="mut">This view is for detecting systemic architectural pain at a glance. It sacrifices per-row detail until drilldown.</span>
+  </div>
+ </div>
+ <div class="bottom">
+  <div class="panel box"><div class="title">Recent terminal strip</div><span class="ok">T137 schema_migrated</span> 08:31 · <span class="ok">T136 closed_oob</span> 07:55 · <span class="mut">T135 abandoned</span> 06:10<br><br><span class="mut">Only recent exhaust is shown; full history hidden behind filters.</span></div>
+  <div class="panel box"><div class="title">Selected signal: plan rejection loop</div>T138 plan rejections: <span class="warn">×3</span><br>last cause: provenance SQL AC referenced table but design uses JSON list_record<br><span class="mut">Enter would open reviewed-plan/reviewer feedback timeline.</span></div>
+ </div>
+</div></body></html>
