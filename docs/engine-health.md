@@ -2,7 +2,7 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-09 watch/flowtop direction. The live queue was drained to a trusted baseline earlier today: T014 and T116 reached `schema_migrated`; T108/T126/T128/T123/T134–T137 were retired; source-observation remint risks were closed; T124 shipped; T125/T127 were accepted after fresh ER PASS. New narrow primitive: `stores external_reviews run <ERID>` (`06403b5`). Critical safety fix: resume now always returns `blocked → planning` (`9f11fc5`) after T123 proved the old non-empty-plan path could execute a rejected/stale plan. Replacement integration-lane work is L538/T138 and is now deep in execution under single-row background control. The next concrete observability path is L540/T139: Phase 1 of the `stores watch` read-only store-flow cockpit, grounded by the new `docs/ui-ux.md` doctrine and HTML mockups in `docs/worklog/2026-05-09/watch-mockups/`.
+**Last updated:** 2026-05-09 engine-control incident update. Watch/flowtop direction is now durable (`docs/ui-ux.md`, T139), T138's generic integration lane shipped, and T140 is in flight on the ignition-ready activation/cleanup path. Two new safety findings dominate the current risk picture: (1) manual `tasks drive` inherited main cwd when `workspace_path` was empty, letting T140 agents dirty main; direct fail-closed fix is implemented on branch `fix/drive-worktree-fail-closed` (`ec087fe`) and T140 has been moved to its own worktree; (2) L543/10.06 found daemon self-reexec can jump from PATH's fresh 0.6.0 binary to stale canonical `~/.local/share/stores/bin/stores` 0.5.0, leaving the daemon stopped / unable to dispatch `builtin:integrate`. Until the canonical binary is synced or self-reexec target selection is repaired, broad daemon automation is not trustworthy; prefer single-row/manual control and do not disturb the 10.06 quick-fix lane.
 
 ## The picture in one sentence
 
@@ -10,16 +10,18 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Read-this-first priority ladder
 
-1. **Let L538/T138 finish under manual single-row control.** It supersedes abandoned T123/L528 and fixes the overfit: generic lane stops at `mark_integrated`; repo adapters own pre-land checks and post-land ceremony. Current run is background single-row, not broad daemon.
-2. **Ship L540/T139 watch cockpit Phase 1 through the engine.** `stores watch` should become a store-flow cockpit, not a raw task/observation dump. `docs/ui-ux.md` is now the durable doctrine; T139 is the implementation row.
-3. **Resume/drive safety invariants before throughput.** `9f11fc5` made `resume` conservative (`blocked → planning`). Next quick main-lane improvement: make status/watch/next-action clearly expose why a row is safe/unsafe to resume, and distinguish stale lock debris from live work.
-4. **Right-sized ceremony / T1 fast path.** T116 was a tiny exact-token matcher but consumed multiple long cycles. The engine preserved correctness, but at the wrong cost. Design a lightweight path with focused tests/review for local cosmetic work.
-5. **Empirical runner/model selection.** We changed T138 planner/executor to Opus based on judgment, not data. Capture role×runner×model, prompt/config hash, duration, token/cost, and outcome so model choice stops being vibes.
-6. **Native intake triage / draft drain.** Intake drafts remain a backlog. The front door needs to route/dedupe/escalate without queue-curator hand curation.
-7. **Auto-resolve / auto-promote edge hardening.** Manual cleanup closed the current remint holes, but the subscriber model still needs accepted/closed_out_of_band auto-resolve coverage and safe abandoned-task re-ratify semantics.
-8. **Manual-control primitives.** `external_reviews run <ERID>` helped. Need equivalent narrow verbs/status surfaces for single-row promote/scaffold/drive/review without daemon startup sweeps.
-9. **Stale lock / zombie cleanup observability.** Stale `dispatch_locks` were restart-safe but opaque. Watch/status should distinguish harmless stale debris from live work.
-10. **Priority + file-overlap scheduler.** Only after the queue is clean and visible; otherwise concurrency manufactures stale-base/rebase debt.
+1. **Unblock daemon binary identity (L543 / 10.06) without disturbing active task worktrees.** The daemon currently reexecs from fresh PATH 0.6.0 into stale canonical 0.5.0, so `builtin:integrate` is unavailable and accepted rows will not merge automatically. 10.06 is pursuing the quick fix: sync the canonical binary. Do not run competing `cargo install` / daemon restart experiments from this lane.
+2. **Land drive/worktree isolation fail-closed.** Manual `tasks drive` must reject empty `workspace_path`; runners must never inherit main cwd. Direct fix exists on `fix/drive-worktree-fail-closed` (`ec087fe`) with focused tests; merge after review, then backport/update any running operator scripts.
+3. **Let T140 continue only in its dedicated worktree.** T140 has moved to `/home/blake/repos/experiments/stores-T140-engine-ignition-cleanup-activation-gate`; main was cleaned. Do not rebase/clean that worktree while its drive is active.
+4. **Ship L540/T139 watch cockpit Phase 1 through the engine.** `stores watch` should become a store-flow cockpit, not a raw task/observation dump. `docs/ui-ux.md` is now the durable doctrine; T139 is the implementation row.
+5. **Resume/drive safety invariants before throughput.** `9f11fc5` made `resume` conservative (`blocked → planning`). Next quick main-lane improvement: make status/watch/next-action clearly expose why a row is safe/unsafe to resume, and distinguish stale lock debris from live work.
+6. **Right-sized ceremony / T1 fast path.** T116 was a tiny exact-token matcher but consumed multiple long cycles. The engine preserved correctness, but at the wrong cost. Design a lightweight path with focused tests/review for local cosmetic work.
+7. **Empirical runner/model selection.** We changed T138 planner/executor to Opus based on judgment, not data. Capture role×runner×model, prompt/config hash, duration, token/cost, and outcome so model choice stops being vibes.
+8. **Native intake triage / draft drain.** Intake drafts remain a backlog. The front door needs to route/dedupe/escalate without queue-curator hand curation.
+9. **Auto-resolve / auto-promote edge hardening.** Manual cleanup closed the current remint holes, but the subscriber model still needs accepted/closed_out_of_band auto-resolve coverage and safe abandoned-task re-ratify semantics.
+10. **Manual-control primitives.** `external_reviews run <ERID>` helped. Need equivalent narrow verbs/status surfaces for single-row promote/scaffold/drive/review without daemon startup sweeps.
+11. **Stale lock / zombie cleanup observability.** Stale `dispatch_locks` were restart-safe but opaque. Watch/status should distinguish harmless stale debris from live work.
+12. **Priority + file-overlap scheduler.** Only after the queue is clean and visible; otherwise concurrency manufactures stale-base/rebase debt.
 
 ## Status legend
 
@@ -36,7 +38,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 ## Layer-by-layer state
 
 ### Layer 1 — Runtime / dispatch reliability
-*Drive-loop reliability now substantially solid. Watchdog catches silent zombies + ignores pre-deploy stale pids; retry-on-failure reschedules transient flakes. L134/T050 typed dispatch lifecycle shipped, folding L141/T049-style implicit lock-state concerns into postconditions + typed terminal reasons. Remaining drag is narrower: stale daemon binary detection, orphan cleanup, and per-project daemon control.*
+*Drive-loop reliability is stronger, but two control-plane gaps are now top-of-stack. Watchdog catches silent zombies + ignores pre-deploy stale pids; retry-on-failure reschedules transient flakes. However, L543 shows stale daemon binary self-reexec can downgrade a fresh 0.6.0 launch into canonical 0.5.0, disabling new builtins; and the T140 incident showed manual drive could inherit main cwd when `workspace_path` was empty. Treat both as safety blockers before broad daemon automation.*
 
 | obs | state | what hurts |
 |---|---|---|
@@ -56,6 +58,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L134 | ✅ T050 | typed dispatch_locks lifecycle umbrella: postcondition_id+args, daemon_epoch, terminal_reason, next_retry_at; shipped via close-out-of-band after codex PASS/rebase reconciliation |
 | L141 | ✅ T049/T050 | auto-drive `ok`-on-dispatch concern translated into L134 typed postcondition semantics; open-lock invariant superseded by `drive_pid_recorded_or_terminal` + watchdog on task pid |
 | L149 | ⚪ T2 | daemon/on-disk binary drift after cargo-install kills fresh auto-drive subprocesses; restart workaround; folds into L011 + L134 observability |
+| L543 | 🟢 direct/10.06 | daemon self-reexec chooses stale canonical `~/.local/share/stores/bin/stores` 0.5.0 after starting fresh PATH 0.6.0; `builtin:integrate` unavailable and daemon stops. 10.06 quick-fix lane is syncing canonical binary; avoid competing daemon/binary changes here. |
+| GAP-drive-worktree-required | 🟢 direct | manual `stores tasks drive` accepted empty `workspace_path` and runners inherited process cwd, dirtying main during T140. Direct fail-closed fix exists on `fix/drive-worktree-fail-closed` (`ec087fe`): reject empty/missing workspace before spawn; valid path still propagates. |
 | L150 | ⚪ T2 | halt/deploy-blocked subscriber mislabels blocked drive failures as deploy_blocked merge-conflict observations; another symptom of untyped terminal state / event postconditions, folded into L134/L135 |
 | L068 | ✅ T080 | cross-project daemon SIGTERM scoped per-project (cross-listed in Layer 8) |
 | GAP-stop-foreground | — | `stores agents stop` requires `--detach`-mode pidfile; foreground daemons can't be stopped via the verb. Hit during 2026-05-08 cleanup. |
@@ -224,6 +228,8 @@ Current picture: the queue is clean and the engine can do real work, but the ups
 | 2026-05-09 | T116 | L180 | T1 exact-token silent_zombie matcher shipped after manual-control drive. Final diff tightens `src/tui/data.rs`, updates watch classification tests and live-realistic fixture. Shows correctness benefit of review but excessive ceremony cost for tiny fixes. |
 | 2026-05-09 | T124 | L034 | Direction-aware wrap diff attribution shipped: branch/base sections, workspace-local git diff computation, master fallback fix. Codex caught two substantive issues before accept. Merge `94357a1`; schema repair for ready-observation disposition `575615b`. |
 | 2026-05-09 | cleanup | L034/L087/L110/L485/L489/L499/L513/L514/L515/L519/L520/L525/L527/L530/L532-L537 | Manual queue cleanup closed remint holes and residue rows. T014/T116 reached `schema_migrated`; T108/T126/T128/T123/T134-T137 retired; L538/T138 created as clean integration-lane replacement. |
+| 2026-05-09 | direct | — | T140 main-cwd incident contained: old main drive resumed to a rate-limit block, T140 moved to `/home/blake/repos/experiments/stores-T140-engine-ignition-cleanup-activation-gate`, `workspace_path`/branch set via `tasks update`, and main cleaned after committing docs. Direct fail-closed fix implemented separately on `fix/drive-worktree-fail-closed` (`ec087fe`). |
+| 2026-05-09 | direct/10.06 | L543 | Daemon binary identity regression surfaced: fresh PATH 0.6.0 daemon self-reexecs into stale canonical 0.5.0, so integrate lane cannot dispatch. 10.06 owns quick fix (sync canonical binary); this lane should not run cargo-install or daemon restart experiments that race it. |
 | 2026-05-09 | direct | — | Narrow external review primitive `stores external_reviews run <ERID>` added (`06403b5`) so one ER row can run without daemon startup sweeps / auto-drive / watchdog side effects. |
 | 2026-05-08 | T113 | L512 | user_escalation builtin templates branch on row.status: deploy_blocked → existing 'deploy-blocked: merge conflict' template; blocked → new 'drive-failed: silent_zombie' template referencing `tasks resume` recovery. Closes the L509/L510 misframing where silent_zombie auto-obs were filed with deploy_blocked merge-conflict prose. T1 contract-is-plan, 1 cycle. Merge `cdf0861`, fix `b9c4d5c`. |
 | 2026-05-08 | T112 | L511 | auto-drive-watchdog-zombie subscriber gates mark_drive_failed dispatch on schema reachability before retrying. Eliminates ~600-line/12-min log spam loops on rows whose status (in_review / accepted / etc) lies outside mark_drive_failed's reachable from-set. Daemon binary self-reexec'd post-cargo-install; spam confirmed gone in production logs. T1, 1 cycle. Merge `39845da`, fix `42b1e79`. |

@@ -33,7 +33,17 @@ North star: starting the engine should feel like turning a key in a checked cock
 4. Task creation/scaffold paths for engine-driven tasks should create or require a task worktree before the row can be driven.
 5. Add tests for: empty `workspace_path` rejects normal `tasks drive`; invalid path rejects; valid path is passed to the runner; any explicit escape hatch is opt-in and logged.
 
-**Current containment:** T140's drive parent and current phase-3 executor were SIGSTOP'd to prevent further main-worktree mutation while preserving already-computed work in process memory. Resume only after deciding whether to salvage/commit current main WIP or move the task to a proper T140 worktree.
+**Current containment:** T140 was moved to `/home/blake/repos/experiments/stores-T140-engine-ignition-cleanup-activation-gate`, `tasks.workspace_path` and `tasks.branch` were set via `stores tasks update`, and drive was restarted from that worktree. Main was cleaned after committing the durable docs. Direct fail-closed code exists on branch `fix/drive-worktree-fail-closed` (`ec087fe`) and should be reviewed/merged before any more manual task drives without a verified worktree.
+
+### Lane 0b — Daemon binary identity / stale canonical self-reexec (L543 / 10.06)
+
+**Goal:** daemon startup must execute the intended current binary. A fresh `stores agents run` from PATH must not self-reexec into an older canonical install path.
+
+**Incident captured 2026-05-09 by 10.06:** PATH resolves `~/.cargo/bin/stores` at 0.6.0, but daemon stale-binary detection reexecs into `~/.local/share/stores/bin/stores`, which is still 0.5.0. The stale canonical daemon then lacks `builtin:integrate`, emits schema-era errors such as `gatekeeper-router-drain sweep error: no such table: intake`, and leaves integration/merge automation stopped.
+
+**Current ownership:** 10.06 owns the quick fix: sync the canonical binary. This lane must not run competing `cargo install`, canonical-binary writes, or daemon restart experiments while 10.06 is unblocking T314 Phase 1.
+
+**Required follow-up after the quick fix:** make self-reexec target selection and version validation fail-loud and observable: show PATH binary vs canonical binary, versions, dev/ino, and selected exec target in daemon health/doctor output; reject downgrades; add a regression test where canonical is stale and PATH is fresh.
 
 ### Lane 1 — Ignition-ready engine surface (T140)
 
@@ -311,20 +321,22 @@ Likely follow-ups:
 | 2026-05-09 | Second manual-main slice added: `stores runner-stats` summarizes `agent_runs` by role × harness × model with run counts, failures, durations, and token totals. Added `--display-id` for task-scoped reads; T139 currently shows planner/executor on claude-code Opus and reviewers on Pi, all exit 0 so far. Live aggregate exposed current economics: pi executor/wrap have high failure counts; claude-code executor/planner runs are slower but currently all exit 0 in the aggregate. Tests: `cargo test --lib cli::runner_stats::tests --quiet`; `cargo check --quiet`. |
 | 2026-05-09 | Added provenance-hardening follow-up to this plan after T140 cycle 1 burned a REVISE on an invalid executor-reported commit SHA. Desired fix: `submit-execute` captures/validates workspace HEAD itself and reviewers inspect immutable recorded commits. |
 | 2026-05-09 | Implemented first provenance-hardening slice: `submit-execute` now captures workspace `HEAD` when `tasks.workspace_path` is readable, stores it as authoritative `executor.commit`, preserves mismatching model-provided SHA as `executor.claimed_commit` plus `executor.commit_resolution`, and code-reviewer brief now tells reviewers to treat system-captured commit as authoritative. Tests: `cargo test --lib submit_execute --quiet`; `cargo check --quiet`. Remaining hardening: make reviewer diff/checkouts fully commit-anchored instead of moving-HEAD. |
-| 2026-05-09 | Discovered a serious drive/worktree isolation hole: manual `stores tasks drive T140` ran from main because T140 had empty `workspace_path`, and runners fall back to inherited cwd when passed `None`. Added Lane 0 direct fix above. Containment: SIGSTOP'd T140 drive PID 901217 and child executor PID 1303849; T139 remains isolated in its own worktree. |
+| 2026-05-09 | Discovered a serious drive/worktree isolation hole: manual `stores tasks drive T140` ran from main because T140 had empty `workspace_path`, and runners fall back to inherited cwd when passed `None`. Added Lane 0 direct fix above. Containment progressed from SIGSTOP to safe move: T140 now runs in `/home/blake/repos/experiments/stores-T140-engine-ignition-cleanup-activation-gate`; main is clean; direct fail-closed fix exists on `fix/drive-worktree-fail-closed` (`ec087fe`). |
+| 2026-05-09 | 10.06 surfaced L543: daemon self-reexec can downgrade fresh PATH 0.6.0 into stale canonical 0.5.0, disabling `builtin:integrate` and stopping merge automation. 10.06 owns the quick canonical-binary sync; this lane should not touch daemon install/restart until that finishes. |
 
 ## Immediate next actions
 
-1. Implement Lane 0 drive/worktree isolation fail-closed behavior directly before resuming T140: normal `tasks drive` must reject empty `workspace_path` instead of inheriting main cwd.
-2. Decide T140 salvage path while its drive/executor are paused: either preserve/commit current main WIP intentionally, or transplant to a proper T140 worktree before continuing.
-3. Monitor T139 phase 3 executor; keep cockpit work moving.
-4. Next manual-main slice candidates:
+1. Do not disturb 10.06's L543 quick fix: avoid `cargo install`, canonical binary writes, or daemon restart experiments from this lane until the canonical 0.6.0 sync is complete.
+2. Review/merge Lane 0 drive/worktree isolation fail-closed branch `fix/drive-worktree-fail-closed` (`ec087fe`): normal `tasks drive` must reject empty `workspace_path` instead of inheriting main cwd.
+3. Monitor T140 in its dedicated worktree only; do not rebase/clean that worktree while drive is active.
+4. Monitor T139 phase 3 executor; keep cockpit work moving.
+5. Next manual-main slice candidates:
    - add submit-execute commit provenance validation / system-captured HEAD; or
    - add rate-limit typed classification/status display; or
    - refine `stores engine locks` with age filtering / JSON consumers after T140 needs are clearer; or
    - add recent-runner-failure drilldown once `runner-stats` has proven useful.
-5. Keep queue-curator's audit doc linked as T140 fixture/input.
-6. Do not raw-SQL mutate `.stores/db.sqlite`; all cleanup goes through substrate verbs or T140 primitives.
+6. Keep queue-curator's audit doc linked as T140 fixture/input.
+7. Do not raw-SQL mutate `.stores/db.sqlite`; all cleanup goes through substrate verbs or T140 primitives.
 
 ## Parking lot
 
