@@ -82,6 +82,23 @@ fields:
   - {name: blocked_reason, type: text}
   - {name: abandoned_reason, type: text, required: false, actor: framework}
   - {name: abandoned_at, type: timestamp, required: false, actor: framework}
+  - {name: integration_blocked_reason, type: text, required: false, actor: framework, description: "Typed failure mode recorded when the integration lane routes to integration_blocked: rebase_conflict | stale_base | stale_external_review | pre_land_check_failed | merge_failure | push_failure."}
+  - name: integration_attempts
+    type: list_record
+    actor: framework
+    description: "Append-only audit of integration lane attempts (one entry per integrating-state entry). Stored as a JSON array column on the tasks row."
+    fields:
+      - {name: attempt_no, type: integer}
+      - {name: base_main_sha, type: text}
+      - {name: candidate_head_before, type: text}
+      - {name: candidate_head_after, type: text}
+      - {name: landed_main_sha, type: text}
+      - {name: refresh_strategy, type: text}
+      - {name: pre_land_check_summary, type: text}
+      - {name: reviewed_base_sha, type: text, description: "base_sha of the passed external_review checked for stale_base; null if no ER, or for stale_external_review path where head — not base — is the divergence."}
+      - {name: outcome, type: enum, enum_values: [integrated, rebase_conflict, stale_base, stale_external_review, pre_land_check_failed, merge_failure, push_failure]}
+      - {name: started_at, type: timestamp}
+      - {name: completed_at, type: timestamp}
   - {name: drive_pid, type: integer, required: false, actor: framework}
   - {name: drive_started_at, type: timestamp, required: false, actor: framework}
   - name: wrap_log
@@ -95,7 +112,7 @@ fields:
       - {name: at, type: timestamp}
 
 lifecycle:
-  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected, deploy_blocked, cargo_installed, schema_migrated, closed_out_of_band, abandoned]
+  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected, deploy_blocked, integration_queued, integrating, integration_blocked, integrated, cargo_installed, schema_migrated, closed_out_of_band, abandoned]
   initial_state: planning
   transitions:
     # close-out-of-band: tier-A recovery terminal for tasks whose work merged
@@ -114,6 +131,10 @@ lifecycle:
     - {from: in_review, to: closed_out_of_band, verb: close-out-of-band, actor: human}
     - {from: rejected, to: closed_out_of_band, verb: close-out-of-band, actor: human}
     - {from: deploy_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: integration_queued, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: integrating, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: integration_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: integrated, to: closed_out_of_band, verb: close-out-of-band, actor: human}
 
     # planning → plan_review (submit-plan)
     - {from: planning, to: plan_review, verb: submit-plan, actor: ai_autonomous}
@@ -168,18 +189,55 @@ lifecycle:
     - {from: executing, to: blocked, verb: mark_drive_failed, actor: framework}
     - {from: code_review, to: blocked, verb: mark_drive_failed, actor: framework}
 
-    # accepted → deploy_blocked (framework, fired by accept-merge agent on conflict)
-    - {from: accepted, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework}
-    # deploy_blocked recovery: retry the release ceremony from the accepted edge
-    # after fixing the underlying deploy issue. Do not use resume here.
-    - {from: deploy_blocked, to: accepted, verb: retry-deploy, actor: ai_with_human}
+    # accepted → integration_queued (framework, fired on-entry to enqueue the
+    # generic integration lane). Replaces the prior direct accepted →
+    # cargo_installed edge: post-accept work is now serialized through the
+    # integration lane (queued → integrating → integrated), and post-integrated
+    # repo-specific verbs (cargo-install, schema-migrate) hang off the
+    # integrated state. T138 P1.
+    - {from: accepted, to: integration_queued, verb: enqueue-integration, actor: framework}
 
-    # accepted → cargo_installed (framework, fired by builtin:cargo-install on success)
-    - {from: accepted, to: cargo_installed, verb: mark_cargo_installed, actor: framework}
+    # integration_queued → integrating (framework, fired by builtin:integrate
+    # when capacity is free). The capacity-1 partial UNIQUE index on
+    # tasks(status) WHERE status='integrating' guarantees at most one row
+    # holds the integrating slot substrate-wide. Concurrent attempts surface
+    # as SQLite ConstraintViolation, which the integrate builtin treats as
+    # capacity-busy and returns Ok(0). T138 P1.
+    - {from: integration_queued, to: integrating, verb: start-integration, actor: framework}
+
+    # integrating → integrated (framework, fired by builtin:integrate after a
+    # successful refresh-against-main, pre-land check, and merge/push to main).
+    # Subscribers (e.g. stores' cargo-install) hang off the integrated state.
+    # T138 P1.
+    - {from: integrating, to: integrated, verb: mark_integrated, actor: framework}
+
+    # integrating → integration_blocked (framework, fired by builtin:integrate
+    # when refresh-against-main, pre-land check, or merge/push fails). The
+    # integration_blocked_reason field records the typed failure mode
+    # (rebase_conflict, stale_base, stale_external_review, pre_land_check_failed,
+    # merge_failure, push_failure). T138 P1.
+    - {from: integrating, to: integration_blocked, verb: mark_integration_blocked, actor: framework}
+
+    # integration_blocked → integration_queued (ai_with_human, retry the
+    # integration after the human has resolved the underlying conflict /
+    # stale-review / pre-land failure). NOTE: there is intentionally NO
+    # integration_blocked → integrated direct edge — retry must re-traverse
+    # integration_queued → integrating → integrated so subscribers fire on the
+    # same edge for first attempts and retries. T138 P1.
+    - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human}
+
+    # integrated → cargo_installed (framework, fired by builtin:cargo-install
+    # on success). The ONLY post-integrated edge stores subscribes to. Other
+    # repos opt out by not wiring cargo-install. T138 P1.
+    - {from: integrated, to: cargo_installed, verb: mark_cargo_installed, actor: framework}
+
     # cargo_installed → schema_migrated (framework, fired by builtin:schema-migrate on success)
     - {from: cargo_installed, to: schema_migrated, verb: mark_schema_migrated, actor: framework}
     # cargo_installed → deploy_blocked (framework, fired by builtin:schema-migrate on failure)
     - {from: cargo_installed, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework}
+    # deploy_blocked recovery: retry the release ceremony from the accepted edge
+    # after fixing the underlying deploy issue. Do not use resume here.
+    - {from: deploy_blocked, to: accepted, verb: retry-deploy, actor: ai_with_human}
 
     # complete → in_review (framework on-entry follow-on)
     - {from: complete, to: in_review, verb: request_review, actor: framework}
@@ -204,6 +262,10 @@ lifecycle:
     - {from: in_review, to: abandoned, verb: abandon, actor: human}
     - {from: deploy_blocked, to: abandoned, verb: abandon, actor: human}
     - {from: complete, to: abandoned, verb: abandon, actor: human}
+    - {from: integration_queued, to: abandoned, verb: abandon, actor: human}
+    - {from: integrating, to: abandoned, verb: abandon, actor: human}
+    - {from: integration_blocked, to: abandoned, verb: abandon, actor: human}
+    - {from: integrated, to: abandoned, verb: abandon, actor: human}
 
 workflow:
   max_revise_cycles: 3
@@ -250,3 +312,9 @@ workflow:
       - transition_to: in_review
     in_review:
       - dispatch_agent: wrap
+    accepted:
+      - transition_to: integration_queued
+    integration_queued: []
+    integrating: []
+    integration_blocked: []
+    integrated: []

@@ -52,7 +52,7 @@ agents:
   - name: schema-migrate
     subscribes_to:
       - store: tasks
-        transition: { from: accepted, to: cargo_installed }
+        transition: { from: integrated, to: cargo_installed }
     command: "builtin:schema-migrate"
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }

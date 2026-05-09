@@ -1599,4 +1599,205 @@ fields:
             "tier_hint must have no actor (writable by any invoker)"
         );
     }
+
+    // ----- T138 P1: integration lane states / transitions / fields -------
+
+    fn bundled_tasks_schema() -> Schema {
+        let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "tasks")
+            .map(|(_, content)| *content)
+            .expect("tasks schema must be in BUNDLED_STORE_SCHEMAS");
+        Schema::from_yaml(yaml).expect("tasks schema must parse")
+    }
+
+    /// AC1.2 (a): the four new integration-lane states are present in
+    /// lifecycle.states.
+    #[test]
+    fn t138_p1_integration_lane_states_present() {
+        let schema = bundled_tasks_schema();
+        for expected in [
+            "integration_queued",
+            "integrating",
+            "integration_blocked",
+            "integrated",
+        ] {
+            assert!(
+                schema.lifecycle.states.iter().any(|s| s == expected),
+                "missing state: {expected}; states: {:?}",
+                schema.lifecycle.states
+            );
+        }
+    }
+
+    /// AC1.2 (b): the seven integration-lane verbs are declared as transition
+    /// verbs in tasks lifecycle.
+    #[test]
+    fn t138_p1_integration_lane_verbs_present() {
+        let schema = bundled_tasks_schema();
+        let verbs: std::collections::HashSet<&str> = schema
+            .lifecycle
+            .transitions
+            .iter()
+            .map(|t| t.verb.as_str())
+            .collect();
+        for v in [
+            "enqueue-integration",
+            "start-integration",
+            "mark_integrated",
+            "mark_integration_blocked",
+            "retry-integration",
+            "mark_cargo_installed",
+            "supersede",
+        ] {
+            // 'supersede' lives on external_reviews, not tasks; check below
+            // separately. Skip here.
+            if v == "supersede" {
+                continue;
+            }
+            assert!(
+                verbs.contains(v),
+                "missing verb: {v}; verbs: {:?}",
+                verbs.iter().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// AC1.3: NO transition exists with from='accepted' and to='cargo_installed'.
+    /// AC1.3: NO transition exists with from='integration_blocked' and
+    /// to='integrated'.
+    #[test]
+    fn t138_p1_no_legacy_or_shortcut_transitions() {
+        let schema = bundled_tasks_schema();
+        let has_accepted_to_cargo = schema
+            .lifecycle
+            .transitions
+            .iter()
+            .any(|t| t.from == "accepted" && t.to == "cargo_installed");
+        assert!(
+            !has_accepted_to_cargo,
+            "transition (accepted, cargo_installed) must NOT exist post-T138"
+        );
+        let has_blocked_to_integrated = schema
+            .lifecycle
+            .transitions
+            .iter()
+            .any(|t| t.from == "integration_blocked" && t.to == "integrated");
+        assert!(
+            !has_blocked_to_integrated,
+            "transition (integration_blocked, integrated) must NOT exist; retry must re-traverse integration_queued → integrating → integrated"
+        );
+    }
+
+    /// AC1.4: tasks schema declares integration_blocked_reason (text scalar)
+    /// and integration_attempts (list_record) with the documented sub-field
+    /// shape including reviewed_base_sha and outcome enum values stale_base
+    /// and push_failure.
+    #[test]
+    fn t138_p1_integration_provenance_fields_present() {
+        let schema = bundled_tasks_schema();
+
+        let blocked_reason = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "integration_blocked_reason")
+            .expect("integration_blocked_reason field must be present");
+        assert_eq!(
+            blocked_reason.ty,
+            FieldType::Text,
+            "integration_blocked_reason must be text scalar; got {:?}",
+            blocked_reason.ty
+        );
+        assert_eq!(
+            blocked_reason.actor,
+            Some(Actor::Framework),
+            "integration_blocked_reason must have actor: framework"
+        );
+
+        let attempts = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "integration_attempts")
+            .expect("integration_attempts field must be present");
+        let subs = match &attempts.ty {
+            FieldType::ListRecord(s) => s,
+            other => panic!("integration_attempts must be list_record, got {:?}", other),
+        };
+        assert_eq!(
+            attempts.actor,
+            Some(Actor::Framework),
+            "integration_attempts must have actor: framework"
+        );
+
+        let sub_names: std::collections::HashSet<&str> =
+            subs.iter().map(|f| f.name.as_str()).collect();
+        for name in [
+            "attempt_no",
+            "base_main_sha",
+            "candidate_head_before",
+            "candidate_head_after",
+            "landed_main_sha",
+            "refresh_strategy",
+            "pre_land_check_summary",
+            "reviewed_base_sha",
+            "outcome",
+            "started_at",
+            "completed_at",
+        ] {
+            assert!(
+                sub_names.contains(name),
+                "integration_attempts missing sub-field: {name}; got: {:?}",
+                sub_names
+            );
+        }
+
+        let outcome = subs
+            .iter()
+            .find(|f| f.name == "outcome")
+            .expect("outcome sub-field");
+        let outcome_vals = match &outcome.ty {
+            FieldType::Enum(v) => v,
+            other => panic!("outcome must be enum, got {:?}", other),
+        };
+        for v in [
+            "integrated",
+            "rebase_conflict",
+            "stale_base",
+            "stale_external_review",
+            "pre_land_check_failed",
+            "merge_failure",
+            "push_failure",
+        ] {
+            assert!(
+                outcome_vals.iter().any(|s| s == v),
+                "outcome enum missing variant '{v}'; values: {:?}",
+                outcome_vals
+            );
+        }
+    }
+
+    /// AC1.6 (companion): the bundled external_reviews schema declares the
+    /// (passed → superseded, supersede, framework) transition, used by the
+    /// integrate builtin to invalidate stale PASSes (stale_base /
+    /// stale_external_review paths).
+    #[test]
+    fn t138_p1_external_reviews_passed_to_superseded_transition_present() {
+        let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "external_reviews")
+            .map(|(_, content)| *content)
+            .expect("external_reviews schema must be in BUNDLED_STORE_SCHEMAS");
+        let schema = Schema::from_yaml(yaml).expect("external_reviews schema must parse");
+        let t = schema
+            .lifecycle
+            .transitions
+            .iter()
+            .find(|t| t.from == "passed" && t.to == "superseded" && t.verb == "supersede")
+            .expect("external_reviews must declare (passed, superseded, supersede)");
+        assert_eq!(
+            t.actor,
+            Some(Actor::Framework),
+            "(passed, superseded, supersede) actor must be framework"
+        );
+    }
 }

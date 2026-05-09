@@ -12,6 +12,7 @@ lifecycle:
     - {from: running, to: tooling_held, verb: record-tooling-failure, actor: framework}
     - {from: pending, to: superseded, verb: supersede, actor: framework}
     - {from: running, to: superseded, verb: supersede, actor: framework}
+    - {from: passed, to: superseded, verb: supersede, actor: framework}
     - {from: tooling_held, to: superseded, verb: supersede, actor: framework}
     - {from: tooling_held, to: pending, verb: retry-review, actor: framework}
 

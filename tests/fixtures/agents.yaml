@@ -41,7 +41,7 @@ agents:
     subscribes_to:
       - store: tasks
         transition:
-          from: accepted
+          from: integrated
           to: cargo_installed
     command: "builtin:schema-migrate"
     claim_window_secs: 300

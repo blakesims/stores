@@ -508,7 +508,11 @@ agents:
 
     #[test]
     fn schema_migrate_fails_when_subscription_dropped() {
-        // Drop (accepted → cargo_installed); agent has no subscriptions.
+        // Drop (integrated → cargo_installed); agent has no subscriptions.
+        // T138 P1: the prior accepted→cargo_installed direct edge is gone;
+        // post-T138, the only transition reaching cargo_installed is
+        // integrated→cargo_installed, fired by the integrate builtin via
+        // mark_cargo_installed.
         let yaml = r#"
 agents:
   - name: schema-migrate
@@ -521,15 +525,15 @@ agents:
         assert_eq!(
             result.outcome,
             CheckOutcome::Fail,
-            "contract must fail when (accepted, cargo_installed) subscription is absent"
+            "contract must fail when (integrated, cargo_installed) subscription is absent"
         );
         let reason = result.reason.unwrap();
         let missing = reason["missing_edges"].as_array().expect("missing_edges must be an array");
         assert!(
             missing
                 .iter()
-                .any(|e| e["from"] == "accepted" && e["to"] == "cargo_installed"),
-            "expected (accepted, cargo_installed) in missing_edges; got: {:?}",
+                .any(|e| e["from"] == "integrated" && e["to"] == "cargo_installed"),
+            "expected (integrated, cargo_installed) in missing_edges; got: {:?}",
             missing
         );
     }

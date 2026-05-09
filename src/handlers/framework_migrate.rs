@@ -13,6 +13,45 @@ use serde::Serialize;
 
 use crate::codegen::ddl::{quote_ident, FrameworkColumn, FRAMEWORK_DDL_TABLES};
 
+/// Name of the partial UNIQUE index that enforces the integration-lane
+/// capacity-1 invariant on the `tasks` table. T138 P1.
+///
+/// At most one row substrate-wide can hold `status='integrating'`. Concurrent
+/// `start-integration` attempts surface as a SQLite UNIQUE ConstraintViolation
+/// at the schema layer, which the integrate builtin treats as capacity-busy
+/// (returns Ok(0)) rather than as a runtime error.
+pub const INTEGRATION_SINGLETON_INDEX: &str = "idx_tasks_integration_singleton";
+
+/// SQL for the partial UNIQUE index. Index value `1` is constant for every
+/// row that matches the WHERE predicate, so the UNIQUE constraint reduces to
+/// "at most one row may match". Idempotent (`IF NOT EXISTS`); safe to run on
+/// every boot. T138 P1.
+pub const INTEGRATION_SINGLETON_INDEX_DDL: &str = concat!(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_integration_singleton ",
+    "ON tasks((1)) WHERE status='integrating'"
+);
+
+/// Create the integration-lane capacity-1 partial UNIQUE index on `tasks` if
+/// the `tasks` table exists. The `tasks` store is installed separately from
+/// the substrate tables, so we guard the CREATE INDEX with a table-existence
+/// check (mirrors `ensure_runs_view_if_tasks_exists`). Idempotent. T138 P1.
+pub fn ensure_integration_singleton_index(conn: &Connection) -> Result<()> {
+    let tasks_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !tasks_exists {
+        return Ok(());
+    }
+    conn.execute_batch(INTEGRATION_SINGLETON_INDEX_DDL)
+        .context("create idx_tasks_integration_singleton")?;
+    Ok(())
+}
+
 /// Drift between SUBSTRATE_DDL (compiled-in) and the live DB. Currently the
 /// substrate only emits additive migrations; type changes / drops are out of
 /// scope.
@@ -77,6 +116,12 @@ pub fn compute_framework_drift(conn: &Connection) -> Result<FrameworkDrift> {
 /// applied column in `substrate_migrations`. Returns the materialised audit
 /// rows. No-op (returns empty Vec) when there is no drift.
 pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMigration>> {
+    // T138 P1: ensure the integration-lane capacity-1 partial UNIQUE index on
+    // `tasks` exists before the column drift loop runs. Independent of the
+    // additive-column flow (this is a CREATE INDEX, not an ALTER), idempotent,
+    // and a no-op when the `tasks` table is absent.
+    ensure_integration_singleton_index(conn)?;
+
     let drift = compute_framework_drift(conn)?;
     if drift.additive.is_empty() {
         return Ok(Vec::new());
@@ -182,6 +227,115 @@ mod tests {
                 ("last_seen", "TEXT", "last_seen TEXT", true),
             ]
         );
+    }
+
+    // ---- T138 P1: integration-lane capacity-1 partial UNIQUE index --------
+
+    /// Build a fresh in-memory DB containing the substrate tables AND the
+    /// bundled tasks-store table (status column included). Used by the index
+    /// tests below; mirrors `ddl_for(tasks_schema)` against
+    /// `Connection::open_in_memory`.
+    fn fresh_db_with_tasks() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        let schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        conn.execute_batch(&ddl_for(&schema)).unwrap();
+        conn
+    }
+
+    /// AC1.5: framework_migrate handler creates the partial UNIQUE index
+    /// `idx_tasks_integration_singleton` on tasks(status) WHERE
+    /// status='integrating'. Verified via sqlite_master introspection.
+    #[test]
+    fn t138_p1_integration_singleton_index_created() {
+        let conn = fresh_db_with_tasks();
+        // Mirror the boot-time apply: drift + index ensure runs on every open.
+        apply_framework_drift(&conn).unwrap();
+
+        let sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master \
+                 WHERE type='index' AND name='idx_tasks_integration_singleton'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        let sql = sql.expect("idx_tasks_integration_singleton must exist");
+        let upper = sql.to_ascii_uppercase();
+        assert!(upper.contains("UNIQUE"), "index must be UNIQUE: {sql}");
+        assert!(
+            upper.contains("WHERE STATUS='INTEGRATING'")
+                || upper.contains("WHERE STATUS = 'INTEGRATING'"),
+            "index must filter on status='integrating': {sql}"
+        );
+    }
+
+    /// AC1.5: two rows attempting to UPDATE status='integrating' simultaneously
+    /// result in exactly one success and one ConstraintViolation. The partial
+    /// UNIQUE index makes the integrating slot a substrate-wide singleton at
+    /// the schema level — concurrent ticks no longer rely on best-effort
+    /// SELECT-then-INSERT.
+    #[test]
+    fn t138_p1_integration_singleton_index_enforces_capacity_one() {
+        let conn = fresh_db_with_tasks();
+        apply_framework_drift(&conn).unwrap();
+
+        // Seed two rows in integration_queued.
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, slug, created_at, updated_at, created_by, updated_by) \
+             VALUES ('T801', 'integration_queued', 't1', 't1', '2026-05-09T00:00:00Z', '2026-05-09T00:00:00Z', 'framework', 'framework')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, slug, created_at, updated_at, created_by, updated_by) \
+             VALUES ('T802', 'integration_queued', 't2', 't2', '2026-05-09T00:00:00Z', '2026-05-09T00:00:00Z', 'framework', 'framework')",
+            [],
+        ).unwrap();
+
+        // First UPDATE to 'integrating' must succeed.
+        let r1 =
+            conn.execute("UPDATE tasks SET status='integrating' WHERE display_id='T801'", []);
+        assert!(r1.is_ok(), "first UPDATE to integrating must succeed: {r1:?}");
+
+        // Second UPDATE to 'integrating' must fail with ConstraintViolation.
+        let r2 =
+            conn.execute("UPDATE tasks SET status='integrating' WHERE display_id='T802'", []);
+        let err = r2.expect_err("second UPDATE to integrating must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.to_ascii_uppercase().contains("UNIQUE")
+                || msg.to_ascii_uppercase().contains("CONSTRAINT"),
+            "error must surface UNIQUE/constraint violation: {msg}"
+        );
+
+        // Sanity: only T801 holds the integrating slot.
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status='integrating'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "exactly one row may hold status='integrating'");
+    }
+
+    /// `ensure_integration_singleton_index` is idempotent — repeated calls do
+    /// not error and do not produce duplicate index entries.
+    #[test]
+    fn t138_p1_ensure_integration_singleton_index_is_idempotent() {
+        let conn = fresh_db_with_tasks();
+        ensure_integration_singleton_index(&conn).unwrap();
+        ensure_integration_singleton_index(&conn).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name='idx_tasks_integration_singleton'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "exactly one index named idx_tasks_integration_singleton");
     }
 
     #[test]
