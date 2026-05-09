@@ -5,24 +5,24 @@
 
 ## Sketch TODO
 
-1. **Stabilize the scene** — keep daemon/auto-spawn paused; do not resume blocked rows; let currently useful child drives finish only if they remain lifecycle-clean.
-2. **Audit active rows** — track `T117`, `T120`, `T121`, `T122` by lifecycle state, branch diff, review output, and whether work is salvageable.
-3. **Salvage/manual-finish useful work** — patch reviewer findings directly in task worktrees where code exists; run tests; commit task-branch fixes.
-4. **Reproduce lifecycle bug with tests** — encode the `T118` failure: non-empty but rejected plan + planning-block resume must not enter executor.
-5. **Install guardrails** — executor start requires non-empty plan plus latest relevant plan review `READY`; phase advancement requires prior phase execution/review success.
-6. **Clear queue deliberately** — merge/accept/close shipped rows; abandon contaminated/superseded rows; resolve duplicate observations and dangling locks.
-7. **Follow-up observability** — separately redesign/fix `stores watch` so it shows operator-actionable state instead of noisy internal buckets.
+1. **Stabilize the scene** — keep daemon/auto-spawn paused; do not resume blocked rows blindly; let useful child drives continue only when lifecycle-clean. ✅ initial audit done; stale-binary watchdog now catches old drive binaries.
+2. **Audit active rows** — track `T117`, `T120`, `T121`, `T122` by lifecycle state, branch diff, review output, and whether work is salvageable. ✅ T120/T122 audited; T121/T117 remain blocked decisions.
+3. **Salvage/manual-finish useful work** — patch reviewer findings directly in task worktrees where code exists; run tests; commit task-branch fixes. ✅ T120 shipped; T122 useful work checkpointed at `62519e7` and is back in `code_review`.
+4. **Reproduce lifecycle bug with tests** — encode the `T118` failure: non-empty but rejected plan + planning-block resume must not enter executor. ✅ tests added in `src/handlers/submit.rs`.
+5. **Install guardrails** — executor start requires non-empty plan plus latest relevant plan review `READY`; phase advancement requires prior phase execution/review success. ✅ three guardrail commits on main: `bca5fd7`, `86b0614`, `e9ba39e`.
+6. **Clear queue deliberately** — merge/accept/close shipped rows; abandon contaminated/superseded rows; resolve duplicate observations and dangling locks. ⏳ next operational focus: T122 review/merge, T121 disposition, T117 disposition, duplicate ready observation cleanup.
+7. **Follow-up observability** — separately redesign/fix `stores watch` so it shows operator-actionable state instead of noisy internal buckets. ⏳ still pending; should be a dedicated follow-up after queue is safe.
 
 ## Current Snapshot
 
-- Engine/daemon auto-spawn is paused by Blake, but existing child drives were still alive during audit.
-- Confirmed contaminated historical row: `T118` resumed `blocked → ready → executing` after NEEDS_WORK plan reviews.
+- Engine/daemon auto-spawn was paused by Blake during the first audit; engine-op later resumed only selected rows.
+- Confirmed contaminated historical row: `T118` resumed `blocked → ready → executing` after NEEDS_WORK plan reviews; this is now covered by guardrail tests/fixes.
 - Confirmed planner revision-context fix is present in recent planner briefs: revision runs include both rejected plan and prior reviews.
-- Current task focus:
-  - `T117` — T1, now `blocked`, watchdog `silent_zombie_pid_dead`; no plan-review path because T1 skip-plan.
-  - `T120` — T2, lifecycle-clean so far: NEEDS_WORK → revised plan → `READY` → execution → code_review → executor clippy fix → `in_review`; branch has commits `8193050` and `40370ac`, likely first merge/accept candidate after manual review.
-  - `T121` — T2, planning loop; three NEEDS_WORK reviews on mechanically-tightened Test 6 replacement; no code committed yet, likely needs manual plan/contract decision rather than more autonomous cycling.
-  - `T122` — T2, lifecycle-clean so far: NEEDS_WORK → revised plan → `READY` → executing; branch has uncommitted work in auto-promote/auto-resolve areas and should be inspected before it advances further.
+- Current task focus as of 04:26Z:
+  - `T117` — T1 `blocked`, `drive_failed:silent_zombie_pid_dead`; no plan-review path because T1 skip-plan. Needs decision: inspect branch/useful work, then resume or abandon/remint.
+  - `T120` — ✅ shipped/cleared to `schema_migrated`; merge commit `b707e1a` plus T120 commits `8193050`, `40370ac`.
+  - `T121` — T2 `blocked`, `drive_failed:stale_binary_inode`; latest plan review is NEEDS_WORK after repeated planning loops, no code committed. With fixed resume semantics it should route to planning, but likely needs manual contract/plan disposition rather than another blind cycle.
+  - `T122` — T2 `code_review`, phase 1 cycle 1; lifecycle-clean: NEEDS_WORK → revised plan → READY → execution, then stale/silent drive blocks, then resumed after guardrails. Useful work checkpointed at `62519e7`; now waiting for code-reviewer verdict / follow-up.
 
 ### 2026-05-09 active-row audit update
 
@@ -118,6 +118,14 @@ Validation run:
 
 - `cargo test --lib submit_review -- --nocapture` → 4 passed.
 - Regression bundle: `cargo test --lib resume_ -- --nocapture`, `cargo test --lib follow_on -- --nocapture`, and `cargo test --lib submit_review -- --nocapture` all pass.
+
+## Next Actions
+
+1. **Observe/clear T122 first.** It is currently `code_review` and has the best chance of finishing cleanly. If reviewer passes, let it wrap/external-review/accept. If reviewer revises, patch the T122 branch manually or let one controlled executor cycle run.
+2. **Decide T121 deliberately.** It is blocked with latest plan review NEEDS_WORK and no code. Fixed resume should send it to planning, but repeated NEEDS_WORK suggests manual contract/plan tightening or abandon/remint may be better than another autonomous loop.
+3. **Decide T117.** It is T1 blocked by silent_zombie. Inspect branch/worktree first; if useful, resume after fixed binary is active; if not, abandon/remint.
+4. **Install/propagate latest guardrail commits.** Main now has `bca5fd7`, `86b0614`, `e9ba39e`; ensure the active `stores` binary includes all three before broad resume/restart.
+5. **Queue cleanup after active rows settle.** Resolve duplicate ready observations from re-mints (`L489/L518`, `L513/L520`, `L515/L523` shape), abandon contaminated/superseded tasks, inspect dangling locks.
 
 ## Follow-ups
 
