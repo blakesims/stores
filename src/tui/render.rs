@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn mission_compact_window_preserves_populated_default_sections() {
-        use crate::tui::data::{CollapsedObsRow, Section};
+        use crate::tui::data::{CollapsedObsRow, Section, StoreLane};
 
         let mut app = App::new(TuiOpts::default());
         app.status_bar = StatusBar {
@@ -909,8 +909,15 @@ mod tests {
             "preconditions for compact mode (DEAD + dangling lock + collapsed obs) should hold"
         );
 
-        let flat = app.flat_rows();
-        let window = mission_compact_window(&app, &flat);
+        // Cockpit lanes filter App::flat_rows by focused_store; collect the
+        // compact-window output across every lane to validate the union of
+        // populated sections.
+        let mut window: Vec<FlatRow> = Vec::new();
+        for lane in StoreLane::ALL {
+            app.focused_store = lane;
+            let flat = app.flat_rows();
+            window.extend(mission_compact_window(&app, &flat));
+        }
 
         let section_of = |fr: &FlatRow| app.sections[fr.section].0;
         let present: std::collections::HashSet<Section> = window.iter().map(section_of).collect();

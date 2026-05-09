@@ -111,6 +111,12 @@ impl StoreLane {
     }
 }
 
+impl Default for StoreLane {
+    fn default() -> Self {
+        StoreLane::Tasks
+    }
+}
+
 /// Watch task classification knobs. Default hides stale terminal exhaust
 /// older than 48 hours and caps recent terminal rows to the 5 newest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
