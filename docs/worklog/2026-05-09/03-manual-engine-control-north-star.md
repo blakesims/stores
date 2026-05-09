@@ -194,6 +194,14 @@ Suggested next-agent first moves:
 4. Start with the triage report's fastest safe mechanical cleanup, but do not execute lifecycle verbs without Blake grounding where required.
 5. If `T124` needs ER, create/locate the ER row and use `stores external_reviews run <ERID>`, not daemon.
 
+## 2026-05-09 Update — cleanup complete, replacement path
+
+- Queue cleanup shipped: `T014` and `T116` reached `schema_migrated`; `T108`, `T126`, `T128`, `T123`, `T134`–`T137` are abandoned; linked cleanup observations were resolved/wont_fix; remint-risk query returns no rows.
+- `T123/L528` are intentionally retired after unsafe resume-to-executing exposed the I033 class again. Do not revive abandoned `T123`.
+- Resume safety repaired on main: `9f11fc5 repair: make resume return to planning`; `resume` now only routes `blocked → planning`.
+- Architect created replacement draft `L538` (`open`, contract draft, T3): generic integration lane + repo adapters, no auto-promote risk until ratified.
+- Recommended next shape: ratify/harden `L538`, let auto-promote create a fresh task, and have engine-controller drive that row in a separate thread with this thread supervising U-moments.
+
 ## Done When
 
 - We have a documented manual-control procedure for progressing selected rows without broad daemon pickup.
