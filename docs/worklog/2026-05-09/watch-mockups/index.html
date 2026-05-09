@@ -31,4 +31,16 @@ daemon health     ██████████</div></a>
     <a class="card" href="process-btop.html"><span class="tag">C</span><h2>Process btop</h2><p>Closest to btop: active agents/processes, runners, elapsed time, logs, and row drilldown.</p><div class="mini">T138 exec P1/6 opus 12m plan×3
 T116 held       -   6h zombie</div></a>
   </section>
+  <h1 style="margin-top:32px">Round 2: flowgraph refinements</h1>
+  <p>These incorporate feedback: aggregate nodes, non-linear branches, review-loop graphics, and task detail only after selection.</p>
+  <section class="grid">
+    <a class="card" href="flowgraph-first.html"><span class="tag">D</span><h2>Flowgraph-first</h2><p>Non-linear engine map with branches to drop, architecture review, blocks, and ship sinks.</p><div class="mini">INTAKE ┬ drop
+       ├ arch
+       └ OBS → CONTRACT → PLAN ⇄ EXEC ⇄ REVIEW → SHIP</div></a>
+    <a class="card" href="flowgraph-process-split.html"><span class="tag">E</span><h2>Flowgraph + Process Split</h2><p>Candidate default: aggregate flow strip on top, btop-like process table below, selected detail at right.</p><div class="mini">FLOW: aggregate depth/rate/loops
+TABLE: selected rows
+DETAIL: lifecycle + logs</div></a>
+    <a class="card" href="review-loop-microscope.html"><span class="tag">F</span><h2>Review-loop Microscope</h2><p>Task drilldown view showing plan-review and per-phase code-review failures graphically.</p><div class="mini">plan:  ✕ ✕ ✕ ✓
+phase: [1●] [2···] [3···] [4···]</div></a>
+  </section>
 </main></body></html>
