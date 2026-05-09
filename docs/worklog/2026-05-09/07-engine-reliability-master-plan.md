@@ -133,9 +133,9 @@ Suggested first slice:
 
 Out of scope for first slice: cleanup/delete locks automatically.
 
-### Lane 3 — Runner/model telemetry (manual-main candidate if additive)
+### Lane 3 — Runner/model telemetry + provenance (manual-main candidate if additive)
 
-**Goal:** stop choosing models/runners by vibes.
+**Goal:** stop choosing models/runners by vibes and stop burning review cycles on mechanically invalid executor metadata.
 
 Useful fields/surfaces:
 
@@ -165,6 +165,21 @@ Safe manual slices:
 3. Add metrics view for role×runner×model outcomes.
 
 Risk boundary: do not change model routing policy in the same manual patch.
+
+#### Commit provenance hardening
+
+The system should capture/validate executor commit hashes itself. Do not rely on a model to type a 40-character SHA correctly.
+
+Desired behavior:
+
+| behavior | why |
+|---|---|
+| `submit-execute` resolves actual `HEAD` from `tasks.workspace_path` when possible | review target becomes machine-captured, not model-reported |
+| supplied `--commit` is validated with `git show <sha>` before accepting the submission | invalid metadata cannot burn a code-review cycle |
+| if supplied SHA differs from workspace `HEAD`, fail loud or record both claimed/resolved under explicit policy | prevents ambiguous moving-target reviews |
+| code reviewer/external reviewer reviews the recorded valid commit, not whatever HEAD happens to be later | eliminates reverse-race with manual-main work |
+
+This is a high-priority follow-up because T140 cycle 1 burned a REVISE solely on an invalid executor-reported commit SHA while the actual implementation satisfied the ACs.
 
 ### Lane 4 — Rate-limit handling (manual-main candidate if narrow)
 
@@ -278,12 +293,14 @@ Likely follow-ups:
 | 2026-05-09 | Manual-main candidates identified: locks inspector, telemetry, rate-limit typing, T1 fast path measurement. |
 | 2026-05-09 | First manual-main slice shipped locally: `stores engine locks` read-only dispatch_locks inspector. Current live DB: live=0, retry_wait=0, stale_blocking=0, orphaned=0, fresh_failure=4 (T081/T122/T018 accepted-row ceremony failures), stale_harmless=1093. Tests: `cargo test --lib cli::engine::tests --quiet`; `cargo check --quiet`. |
 | 2026-05-09 | Second manual-main slice added: `stores runner-stats` summarizes `agent_runs` by role × harness × model with run counts, failures, durations, and token totals. Added `--display-id` for task-scoped reads; T139 currently shows planner/executor on claude-code Opus and reviewers on Pi, all exit 0 so far. Live aggregate exposed current economics: pi executor/wrap have high failure counts; claude-code executor/planner runs are slower but currently all exit 0 in the aggregate. Tests: `cargo test --lib cli::runner_stats::tests --quiet`; `cargo check --quiet`. |
+| 2026-05-09 | Added provenance-hardening follow-up to this plan after T140 cycle 1 burned a REVISE on an invalid executor-reported commit SHA. Desired fix: `submit-execute` captures/validates workspace HEAD itself and reviewers inspect immutable recorded commits. |
 
 ## Immediate next actions
 
 1. Monitor T140 plan review; ensure plan includes full DB cleanup/remap, not just logic changes.
 2. Monitor T139 phase 3 executor; keep cockpit work moving.
 3. Next manual-main slice candidates:
+   - add submit-execute commit provenance validation / system-captured HEAD; or
    - add rate-limit typed classification/status display; or
    - refine `stores engine locks` with age filtering / JSON consumers after T140 needs are clearer; or
    - add recent-runner-failure drilldown once `runner-stats` has proven useful.
