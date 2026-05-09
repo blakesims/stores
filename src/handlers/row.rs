@@ -35,7 +35,10 @@ where
             _ => continue,
         };
 
-        let value = assemble_field_value(&leaf.field.ty, &raws)?;
+        let value = assemble_field_value(&leaf.field.ty, &raws).map_err(|e| {
+            let raw_preview = raws.first().map(|s| s.as_str()).unwrap_or("");
+            anyhow::anyhow!("--{}: {} (got '{}')", leaf.cli_name, e, raw_preview)
+        })?;
 
         // Insert value at the correct depth.
         insert_at_path(&mut entry, &leaf.path, value);

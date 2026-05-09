@@ -1317,13 +1317,32 @@ fn build_add_cmd(leaves: &[crate::schema::flatten::LeafArg<'_>], schema: &Schema
                 )
                 .required(false),
         );
+        cmd = cmd.arg(
+            Arg::new("acceptance-from-file")
+                .long("acceptance-from-file")
+                .help(
+                    "Load 'acceptance' list from a file (one criterion per line; use '-' for stdin)",
+                )
+                .required(false),
+        );
     }
     cmd
 }
 
 /// Build the `update` command with leaf args + positional display_id.
-fn build_update_cmd(leaves: &[crate::schema::flatten::LeafArg<'_>], _schema: &Schema) -> Command {
-    build_leaf_cmd("update", leaves, true)
+fn build_update_cmd(leaves: &[crate::schema::flatten::LeafArg<'_>], schema: &Schema) -> Command {
+    let mut cmd = build_leaf_cmd("update", leaves, true);
+    if schema.name == "observations" {
+        cmd = cmd.arg(
+            Arg::new("acceptance-from-file")
+                .long("acceptance-from-file")
+                .help(
+                    "Load 'acceptance' list from a file (one criterion per line; use '-' for stdin)",
+                )
+                .required(false),
+        );
+    }
+    cmd
 }
 
 fn build_leaf_cmd(
