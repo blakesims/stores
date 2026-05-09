@@ -433,8 +433,17 @@ fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
                         prev_keys.insert(t.display_id.clone(), t.state_key());
                     }
                 }
-                if tasks.is_empty() {
-                    // All tasks reached terminal state
+                // `integrated` is framework-terminal when no post-integrated
+                // subscriber is wired; otherwise it's awaiting post-land and
+                // remains active. Compute active_tasks accordingly so the
+                // multi-task follow loop exits in the no-subscriber case.
+                let integrated_terminal =
+                    integrated_is_terminal_no_post_subscriber(db);
+                let active_tasks_remaining = tasks.iter().any(|t| {
+                    !(t.status == "integrated" && integrated_terminal)
+                });
+                if !active_tasks_remaining {
+                    // All remaining tasks are framework-terminal
                     return Ok(());
                 }
             }
@@ -977,6 +986,71 @@ agents:
         assert!(
             result.is_ok(),
             "follow loop should run max_iters when post-integrated subscriber wired: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_follow_loop_multi_task_exits_on_integrated_when_no_post_subscriber() {
+        // Multi-task follow (display_id=None): only an `integrated` row remains
+        // and no agents.yaml subscriber is wired off `integrated` → the row is
+        // framework-terminal and the loop must exit BEFORE max_iters.
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T150", "integrated", None, None, None, None);
+        let db_path_val = _dir.path().join("test.db");
+
+        let args = StatusArgs {
+            display_id: None,
+            follow: true,
+            interval_ms: 0,
+            // If the loop fails to treat integrated as terminal it will exhaust
+            // max_iters; we use a small bound so the test still finishes, and
+            // assert exit timing via wall-clock proxy below.
+            max_iters: 1_000_000,
+        };
+        let start = std::time::Instant::now();
+        let result = run_follow_loop(&db_path_val, args);
+        let elapsed = start.elapsed();
+        assert!(
+            result.is_ok(),
+            "multi-task follow loop should exit 0 on integrated-only with no post-subscriber: {result:?}"
+        );
+        // With interval_ms=0 a one-million-iter exhaustion takes seconds; an
+        // early exit returns in milliseconds. 500ms is a generous ceiling that
+        // still distinguishes the two regimes on slow CI hardware.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "loop should exit early, not exhaust max_iters; elapsed={elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_follow_loop_multi_task_keeps_running_on_integrated_with_post_subscriber() {
+        // Multi-task follow (display_id=None): an `integrated` row plus an
+        // agents.yaml subscriber wired off `integrated` → the row is awaiting
+        // post-land and the loop must keep polling until max_iters.
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T151", "integrated", None, None, None, None);
+        let db_path_val = _dir.path().join("test.db");
+        let agents_yaml = r#"
+agents:
+  - name: schema-migrate
+    subscribes_to:
+      - store: tasks
+        transition: { from: integrated, to: cargo_installed }
+    command: "builtin:schema-migrate"
+"#;
+        std::fs::write(_dir.path().join("agents.yaml"), agents_yaml).unwrap();
+
+        let args = StatusArgs {
+            display_id: None,
+            follow: true,
+            interval_ms: 0,
+            max_iters: 3,
+        };
+        let result = run_follow_loop(&db_path_val, args);
+        assert!(
+            result.is_ok(),
+            "multi-task follow loop should run max_iters when post-integrated subscriber wired: {result:?}"
         );
     }
 
