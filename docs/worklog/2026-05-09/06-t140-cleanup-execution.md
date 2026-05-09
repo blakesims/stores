@@ -24,6 +24,16 @@ will be surfaced as a substrate-friction observation.
 
 ### Pre-cleanup counts (anchored at start of P6 execution)
 
+`sqlite3 SELECT count(*)` is used here as an audited read-only substitute for
+`stores observations list --status open | wc -l` and
+`stores intake list --status draft | wc -l` (the read produces an identical
+row count because both surfaces query the same `WHERE status=…` predicate
+against the same table; the `stores ... list` form additionally renders header
++ summary columns, which would require `tail -n +2 | wc -l` to extract a
+comparable count). Reads are unrestricted per CLAUDE.md § *Session doctrine —
+2026-05-06* ("Reading via sqlite3 ... SELECT is fine — read-only is not a
+substrate write").
+
 ```
 $ sqlite3 .stores/db.sqlite "SELECT count(*) FROM observations WHERE status='open';"
 38
@@ -102,21 +112,30 @@ silent-zombie respectively) so they were routed as `normal_observation`
 above and the brief's `duplicate` instruction is recorded as a deviation
 rather than executed against an arbitrary target.
 
-22–31: ten parallel-shape invocations, transcript fragment:
-```
-Transitioned I003: triaging → dropped
-Transitioned I005: triaging → dropped
-Transitioned I011: triaging → dropped
-Transitioned I012: triaging → dropped
-Transitioned I014: triaging → dropped
-Transitioned I015: triaging → dropped
-Transitioned I024: triaging → dropped
-Transitioned I025: triaging → dropped
-Transitioned I030: triaging → dropped
-Transitioned I031: triaging → dropped
-```
+Each row received the same verb pair: `claim-triage` (draft → triaging) then
+`route --decision reject_noise` (triaging → dropped). Rationales were
+one-line "T140 P6 cleanup: <reason>; refile if recurs" strings.
+
+22. `stores intake claim-triage I003 --invoker ai_autonomous` then `stores intake route I003 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I003: triaging → dropped`
+23. `stores intake claim-triage I005 --invoker ai_autonomous` then `stores intake route I005 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I005: triaging → dropped`
+24. `stores intake claim-triage I011 --invoker ai_autonomous` then `stores intake route I011 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I011: triaging → dropped`
+25. `stores intake claim-triage I012 --invoker ai_autonomous` then `stores intake route I012 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I012: triaging → dropped`
+26. `stores intake claim-triage I014 --invoker ai_autonomous` then `stores intake route I014 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I014: triaging → dropped`
+27. `stores intake claim-triage I015 --invoker ai_autonomous` then `stores intake route I015 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I015: triaging → dropped`
+28. `stores intake claim-triage I024 --invoker ai_autonomous` then `stores intake route I024 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I024: triaging → dropped`
+29. `stores intake claim-triage I025 --invoker ai_autonomous` then `stores intake route I025 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I025: triaging → dropped`
+30. `stores intake claim-triage I030 --invoker ai_autonomous` then `stores intake route I030 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I030: triaging → dropped`
+31. `stores intake claim-triage I031 --invoker ai_autonomous` then `stores intake route I031 --decision reject_noise --rationale "T140 P6 cleanup: no cluster_key fit; refile if recurs" --invoker ai_autonomous` → `Transitioned I031: triaging → dropped`
 
 ### Post-cleanup counts (T140 P6 AC6.4 verification)
+
+Same audited-substitute note applies as in *Pre-cleanup counts* above. The
+named-list surface (captured in § *Post-Task-6.4 intake state* later in this
+note) confirms the same row counts: `stores intake list --status draft` shows
+2 rows post-Task-6.4 (I036, I037; both newly minted by Task 6.4 itself, so
+the AC6.4-relevant *post-cleanup* draft count is still 0), and
+`stores observations list --status open` shows 38 rows (header + 38 data
+rows).
 
 ```
 $ sqlite3 .stores/db.sqlite "SELECT count(*) FROM observations WHERE status='open';"
@@ -223,6 +242,16 @@ historical (123): terminal exhaust; not in the active lane
 - **AC6.5 would_run=0 unmet.** Brief expected zero would-run; reality is two
   (T139, T140 — both in IN_FLIGHT_STATES, preserved by the P1 backfill).
   Documented above.
+- **T138 historical, not inactive.** The original brief AC6.5 expected the
+  inactive bucket to contain T138 (status=`accepted`). Reality: T138 has
+  already been migrated and its current status is `schema_migrated`, which
+  classifies as TerminalSuccessModern → historical, not
+  AwaitingIntegration{activation_active:false} → inactive. The earlier
+  inactive expectation is therefore withdrawn; the four rows that classify
+  as inactive ({T002, T005, T015, T018}) are operationally equivalent
+  ("accepted + un-merged branch awaiting operator activation") to what the
+  brief named via T138. Evidence is captured in § *Post-cleanup re-verification
+  (final)* and the AC6.5 verification block below it.
 - **Worklog filename.** Brief AC6.3 named the file
   `07-t140-cleanup-execution.md`; `./new-note.sh` auto-incremented to `06`
   because the existing `07-engine-reliability-master-plan.md` already held
