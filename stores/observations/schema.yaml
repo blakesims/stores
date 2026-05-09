@@ -59,6 +59,10 @@ lifecycle:
       to: resolved
       verb: close_as_addressed
       actor: ai_autonomous
+    - from: ready
+      to: resolved
+      verb: close_as_addressed
+      actor: ai_autonomous
 
     # investigating → confirmed: contract must be ready before this fires (clause 2+3 backbone)
     - from: investigating
@@ -108,8 +112,12 @@ lifecycle:
       verb: resolve
       actor: ai_autonomous
 
-    # confirmed → wont_fix: bailout after investigation
+    # confirmed/ready → wont_fix: bailout after investigation or ratified-but-superseded work
     - from: confirmed
+      to: wont_fix
+      verb: wont_fix
+      actor: ai_with_human
+    - from: ready
       to: wont_fix
       verb: wont_fix
       actor: ai_with_human
