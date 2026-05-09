@@ -102,6 +102,23 @@ Validation run:
 - `cargo test --lib resume_ -- --nocapture` → 13 passed.
 - `cargo test --lib follow_on -- --nocapture` → 8 passed.
 
+### 2026-05-09 phase-advance guard update
+
+Work path: `src/handlers/submit.rs`.
+
+Test added near submit-review PASS tests:
+
+- `submit_review_refuses_phase_advance_without_executor_result` — constructs a malformed `code_review` row with a matching phase/cycle entry but no `executor` object, then asserts `compute_submit_review(..., "PASS", ...)` errors and leaves status/phase/cycle unchanged.
+
+Implementation changed:
+
+- `compute_submit_review` now checks the matching `cycles[]` entry has an `executor` object before patching review output or selecting PASS/REVISE/FAIL transitions. This makes phase advancement require a real `submit-execute` result, not merely a forged phase/cycle shell.
+
+Validation run:
+
+- `cargo test --lib submit_review -- --nocapture` → 4 passed.
+- Regression bundle: `cargo test --lib resume_ -- --nocapture`, `cargo test --lib follow_on -- --nocapture`, and `cargo test --lib submit_review -- --nocapture` all pass.
+
 ## Follow-ups
 
 - Design explicit maintenance/freeze mode semantics: pause daemon spawns/watchdog without necessarily killing useful child drives.

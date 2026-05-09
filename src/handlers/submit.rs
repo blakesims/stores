@@ -1305,6 +1305,16 @@ pub(crate) fn compute_submit_review(
         )
     })?;
 
+    let has_executor_for_current_cycle = cycles
+        .get(cycle_idx)
+        .and_then(|v| v.get("executor"))
+        .is_some_and(|v| v.is_object());
+    if !has_executor_for_current_cycle {
+        bail!(
+            "submit-review refused for {display_id}: phase {current_phase} cycle {current_cycle} has no executor result; phase advancement requires submit-execute before code review"
+        );
+    }
+
     // P5-m4: Patch the cycles entry with the review sub-record; summary and details are separate fields
     let mut review_obj_map = serde_json::Map::new();
     review_obj_map.insert("at".to_string(), Value::String(now_iso8601()));
@@ -2675,6 +2685,49 @@ workflow:
              generic current_phase >= plan.phases.length branch (and on-entry to in_review)"
         );
         assert_eq!(read_status(&conn), "in_review");
+    }
+
+    #[test]
+    fn submit_review_refuses_phase_advance_without_executor_result() {
+        let (schema, conn) = setup();
+        let malformed_cycles = vec![json!({
+            "phase": 1,
+            "cycle": 1,
+            "review": null
+        })];
+        insert_row_at(
+            &conn,
+            &schema,
+            "code_review",
+            1,
+            1,
+            2,
+            malformed_cycles,
+            vec![],
+            None,
+        );
+
+        let err = compute_submit_review(
+            &schema,
+            &conn,
+            "WF001",
+            "PASS",
+            "approved without executor",
+            None,
+            0,
+            0,
+            0,
+            Actor::AiAutonomous,
+            None,
+        )
+        .expect_err("submit-review PASS must refuse phase advancement without executor output");
+        assert!(
+            err.to_string().contains("has no executor result"),
+            "error should name missing executor result: {err}"
+        );
+        assert_eq!(read_status(&conn), "code_review");
+        assert_eq!(read_i64(&conn, "current_phase"), 1);
+        assert_eq!(read_i64(&conn, "current_cycle"), 1);
     }
 
     // ---------------------------------------------------------------------------
