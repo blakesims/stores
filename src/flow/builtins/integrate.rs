@@ -264,7 +264,25 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         }
     }
 
-    // 4. Refresh candidate. The workspace_path is a worktree on the
+    // 4. Ensure the workspace is checked out to the candidate branch BEFORE
+    //    running refresh or pre_land_check. Otherwise a workspace_path that
+    //    happens to be on `main` (or any other branch) would silently
+    //    rebase/validate the wrong tree immediately before landing.
+    if let Err(msg) = ensure_branch_checked_out(&workspace_buf, branch) {
+        update_last_attempt(
+            ctx.conn,
+            display_id,
+            &[
+                ("completed_at", Value::String(now_iso8601())),
+                ("outcome", Value::String("merge_failure".to_string())),
+                ("pre_land_check_summary", Value::String(msg.clone())),
+            ],
+        )?;
+        fire_mark_integration_blocked(ctx, display_id, &format!("merge_failure: {}", msg))?;
+        return Ok(0);
+    }
+
+    // 5. Refresh candidate. The workspace_path is now guaranteed on the
     //    candidate branch; rebase / merge runs there.
     let refresh_result = run_refresh(&workspace_buf, &cfg);
     match refresh_result {
@@ -776,28 +794,70 @@ enum RefreshOutcome {
 }
 
 fn run_refresh(workspace: &Path, cfg: &IntegrateCfg) -> RefreshOutcome {
-    let _ = cfg.refresh_timeout_secs; // refresh runs git directly; timeout is informational.
-    let args: Vec<&str> = if cfg.refresh_strategy == "merge_main" {
-        vec!["merge", &cfg.main_branch, "--no-ff", "--no-edit"]
+    let args: Vec<String> = if cfg.refresh_strategy == "merge_main" {
+        vec![
+            "merge".into(),
+            cfg.main_branch.clone(),
+            "--no-ff".into(),
+            "--no-edit".into(),
+        ]
     } else {
-        vec!["rebase", &cfg.main_branch]
+        vec!["rebase".into(), cfg.main_branch.clone()]
     };
-    let mut full: Vec<&str> = vec!["-C", workspace.to_str().unwrap_or(".")];
-    full.extend_from_slice(&args);
-    let out = match Command::new("git").args(&full).output() {
-        Ok(o) => o,
+    let mut full: Vec<String> = vec!["-C".into(), workspace.to_string_lossy().into_owned()];
+    full.extend(args.iter().cloned());
+    let mut child = match Command::new("git")
+        .args(&full)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
         Err(e) => {
             return RefreshOutcome::Conflict(format!(
                 "spawning git {} failed: {}",
                 args.join(" "),
                 e
-            ))
+            ));
         }
     };
-    if out.status.success() {
+
+    let deadline = Instant::now() + Duration::from_secs(cfg.refresh_timeout_secs.max(1));
+    let (success, stderr) = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stderr_buf = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = e.read_to_string(&mut stderr_buf);
+                }
+                break (status.success(), stderr_buf);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    crate::flow::builtins::accept_merge::abort_rebase(workspace);
+                    crate::flow::builtins::accept_merge::abort_merge(workspace);
+                    return RefreshOutcome::Conflict(format!(
+                        "{} {} timeout after {}s",
+                        cfg.refresh_strategy, cfg.main_branch, cfg.refresh_timeout_secs
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                return RefreshOutcome::Conflict(format!(
+                    "wait error during {} {}: {}",
+                    cfg.refresh_strategy, cfg.main_branch, e
+                ));
+            }
+        }
+    };
+
+    if success {
         return RefreshOutcome::Ok;
     }
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let stderr_first = stderr.lines().next().unwrap_or("").trim().to_string();
     // Defense-in-depth stale_base classification (Task 2.6 fallback).
     let lower = stderr.to_lowercase();
@@ -832,6 +892,43 @@ fn run_refresh(workspace: &Path, cfg: &IntegrateCfg) -> RefreshOutcome {
             stderr_first.as_str()
         }
     ))
+}
+
+/// Ensure `workspace` has `branch` checked out. If a different branch is
+/// active, run `git checkout <branch>`. Returns `Err` with a human-readable
+/// reason on failure (dirty tree blocking checkout, missing branch, etc.).
+fn ensure_branch_checked_out(workspace: &Path, branch: &str) -> std::result::Result<(), String> {
+    let cur = Command::new("git")
+        .args([
+            "-C",
+            workspace.to_str().unwrap_or("."),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
+        .output();
+    if let Ok(o) = cur {
+        if o.status.success() {
+            let name = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if name == branch {
+                return Ok(());
+            }
+        }
+    }
+    let co = Command::new("git")
+        .args(["-C", workspace.to_str().unwrap_or("."), "checkout", branch])
+        .output()
+        .map_err(|e| format!("spawning git checkout {} failed: {}", branch, e))?;
+    if !co.status.success() {
+        let stderr = String::from_utf8_lossy(&co.stderr).to_string();
+        return Err(format!(
+            "git checkout {} in {} failed: {}",
+            branch,
+            workspace.display(),
+            stderr.lines().next().unwrap_or("checkout failed").trim()
+        ));
+    }
+    Ok(())
 }
 
 fn run_pre_land(cmd: &str, workspace: &Path, timeout_secs: u64) -> std::result::Result<(), String> {
@@ -1386,54 +1483,271 @@ mod tests {
         );
     }
 
-    /// (g) Concurrency: serialize three queued candidates through the
-    /// integrate builtin and assert each successor's base_main_sha equals
-    /// its predecessor's landed_main_sha. Single-threaded sequencing in
-    /// this unit test; the partial UNIQUE index already covers concurrent
-    /// claim semantics in test (a).
-    #[test]
-    fn g_serial_chain_threads_sha_correctly() {
-        let conn = fresh_db();
-        let (_tmp, repo) = init_repo();
-        add_branch_with_change(&repo, "feat/g1", "g1.txt", "g1\n");
-        add_branch_with_change(&repo, "feat/g2", "g2.txt", "g2\n");
-        add_branch_with_change(&repo, "feat/g3", "g3.txt", "g3\n");
-        insert_queued_task(&conn, "T700", "feat/g1", repo.to_str().unwrap());
-        insert_queued_task(&conn, "T701", "feat/g2", repo.to_str().unwrap());
-        insert_queued_task(&conn, "T702", "feat/g3", repo.to_str().unwrap());
+    /// Set up a main repo plus N candidate worktrees inside a parent
+    /// tempdir. Returns (parent_tmpdir, main_repo, [worktree_paths]).
+    fn init_repo_with_worktrees(branches: &[&str]) -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
+        let parent = tempfile::tempdir().unwrap();
+        let repo = parent.path().join("main");
+        std::fs::create_dir(&repo).unwrap();
+        let g = git(&repo, &["init", "-b", "main"]);
+        assert!(g.status.success(), "git init failed: {:?}", g);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        std::fs::write(repo.join("file.txt"), "main\n").unwrap();
+        git(&repo, &["add", "file.txt"]);
+        git(&repo, &["commit", "-m", "init"]);
+        let mut worktrees = Vec::new();
+        for (i, br) in branches.iter().enumerate() {
+            // Create the branch from main with a unique non-conflicting change.
+            let fname = format!("cg{}.txt", i + 1);
+            git(&repo, &["checkout", "-b", br]);
+            std::fs::write(repo.join(&fname), format!("{}\n", br)).unwrap();
+            git(&repo, &["add", &fname]);
+            git(&repo, &["commit", "-m", &format!("{} commit", br)]);
+            git(&repo, &["checkout", "main"]);
+            // Add a worktree dedicated to that branch.
+            let wt = parent.path().join(format!("wt{}", i + 1));
+            let g = git(&repo, &["worktree", "add", wt.to_str().unwrap(), br]);
+            assert!(
+                g.status.success(),
+                "git worktree add failed for {}: {}",
+                br,
+                String::from_utf8_lossy(&g.stderr)
+            );
+            worktrees.push(wt);
+        }
+        (parent, repo, worktrees)
+    }
 
-        let agents = integrate_agents_yaml("true");
-        let cfg = cfg_path();
-        let mut last_landed: Option<String> = None;
-        for tid in ["T700", "T701", "T702"] {
-            let count: i64 = conn
+    fn fresh_file_db(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.busy_timeout(Duration::from_secs(10)).unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        for store in ["tasks", "external_reviews"] {
+            let yaml = BUNDLED_STORE_SCHEMAS
+                .iter()
+                .find(|(n, _)| *n == store)
+                .map(|(_, y)| *y)
+                .unwrap();
+            let schema = Schema::from_yaml(yaml).unwrap();
+            conn.execute_batch(&ddl_for(&schema)).unwrap();
+        }
+        ensure_integration_singleton_index(&conn).unwrap();
+        conn
+    }
+
+    /// (g) Concurrency: spawn ≥3 worker threads that race for the singleton
+    /// integrating slot via builtin:integrate.run. Sample
+    /// `COUNT(*) WHERE status='integrating'` on every iteration of every
+    /// worker and assert it never exceeds 1. After all candidates land,
+    /// verify each successor's `base_main_sha` equals its predecessor's
+    /// `landed_main_sha`. Uses a file-backed SQLite DB + worktrees + a
+    /// pre_land_check that holds the slot for ~200ms so workers actually
+    /// contend.
+    #[test]
+    fn g_concurrent_integration_serializes_correctly() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        use std::sync::Arc;
+
+        let branches = ["feat/cg1", "feat/cg2", "feat/cg3"];
+        let (parent, _repo, worktrees) = init_repo_with_worktrees(&branches);
+        let db_path = parent.path().join("test.db");
+
+        // Bootstrap the DB on the main thread, then drop the connection
+        // before workers open their own.
+        {
+            let conn = fresh_file_db(&db_path);
+            for (i, br) in branches.iter().enumerate() {
+                let tid = format!("T9{:02}", i);
+                insert_queued_task(&conn, &tid, br, worktrees[i].to_str().unwrap());
+            }
+        }
+
+        let max_concurrent = Arc::new(AtomicI64::new(0));
+        let db_path_arc: Arc<PathBuf> = Arc::new(db_path.clone());
+
+        // pre_land_check: extend the integrating window so other workers
+        // observe contention. ~200ms is plenty for 3 threads on a fast box.
+        let cmd = "sleep 0.2 && true";
+
+        let handles: Vec<_> = (0..branches.len())
+            .map(|i| {
+                let dbp = db_path_arc.clone();
+                let mc = max_concurrent.clone();
+                let tid = format!("T9{:02}", i);
+                std::thread::spawn(move || {
+                    // Bounded retry loop; each call either wins the slot
+                    // and integrates, or short-circuits as capacity-busy.
+                    for _attempt in 0..200 {
+                        let conn = Connection::open(&*dbp).unwrap();
+                        conn.busy_timeout(Duration::from_secs(10)).unwrap();
+                        let status: String = conn
+                            .query_row(
+                                "SELECT status FROM tasks WHERE display_id=?1",
+                                rusqlite::params![tid],
+                                |r| r.get(0),
+                            )
+                            .unwrap();
+                        if status == "integrated" || status == "integration_blocked" {
+                            return;
+                        }
+                        // Sample concurrent-integrator count BEFORE entering
+                        // run() so we observe the actual claim window.
+                        let count: i64 = conn
+                            .query_row(
+                                "SELECT COUNT(*) FROM tasks WHERE status='integrating'",
+                                [],
+                                |r| r.get(0),
+                            )
+                            .unwrap();
+                        let prev = mc.load(Ordering::Relaxed);
+                        if count > prev {
+                            mc.store(count, Ordering::Relaxed);
+                        }
+                        let row = task_row_json(&conn, &tid);
+                        let agents = integrate_agents_yaml(cmd);
+                        let cfg = cfg_path();
+                        let ctx = DispatchCtx {
+                            conn: &conn,
+                            agents: &agents,
+                            config_path: &cfg,
+                            policies_hash: "",
+                        };
+                        let _ = run(&row, &ctx);
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(
+            max_concurrent.load(Ordering::Relaxed) <= 1,
+            "max concurrent integrating rows must be ≤ 1; saw {}",
+            max_concurrent.load(Ordering::Relaxed)
+        );
+
+        let conn = Connection::open(&db_path).unwrap();
+        // All three integrated.
+        for i in 0..branches.len() {
+            let tid = format!("T9{:02}", i);
+            let status: String = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM tasks WHERE status='integrating'",
-                    [],
+                    "SELECT status FROM tasks WHERE display_id=?1",
+                    rusqlite::params![tid],
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert!(count <= 1, "at most one row may be integrating at a time");
-            let row = task_row_json(&conn, tid);
-            let ctx = DispatchCtx {
-                conn: &conn,
-                agents: &agents,
-                config_path: &cfg,
-                policies_hash: "",
-            };
-            run(&row, &ctx).unwrap();
-            let base = json_extract_str(&conn, tid, "$[#-1].base_main_sha").unwrap_or_default();
-            let landed =
-                json_extract_str(&conn, tid, "$[#-1].landed_main_sha").unwrap_or_default();
-            if let Some(prev) = last_landed {
-                assert_eq!(
-                    base, prev,
-                    "{} base_main_sha must equal predecessor landed_main_sha",
-                    tid
-                );
-            }
-            last_landed = Some(landed);
+            assert_eq!(status, "integrated", "{} not integrated", tid);
         }
+
+        // SHA chain: collect (base, landed) for each row and verify they
+        // form a single chain where each successor's base equals the
+        // predecessor's landed. `now_iso8601` is only second-precision, so
+        // sorting by `started_at` would be unreliable under concurrency;
+        // we determine integration order from the SHA graph instead.
+        let mut entries: Vec<(String, String, String)> = Vec::new();
+        for i in 0..branches.len() {
+            let tid = format!("T9{:02}", i);
+            let base =
+                json_extract_str(&conn, &tid, "$[#-1].base_main_sha").unwrap_or_default();
+            let landed =
+                json_extract_str(&conn, &tid, "$[#-1].landed_main_sha").unwrap_or_default();
+            assert!(!base.is_empty() && !landed.is_empty(), "{} SHAs empty", tid);
+            entries.push((tid, base, landed));
+        }
+        // Find the head of the chain: the entry whose base is NOT any
+        // other entry's landed.
+        let landed_set: std::collections::HashSet<String> =
+            entries.iter().map(|e| e.2.clone()).collect();
+        let mut current = entries
+            .iter()
+            .find(|e| !landed_set.contains(&e.1))
+            .expect("at least one entry must have a base outside the landed set")
+            .clone();
+        let mut visited = vec![current.clone()];
+        // base→entry index for follow-up.
+        let mut by_base: std::collections::HashMap<String, (String, String, String)> =
+            std::collections::HashMap::new();
+        for e in &entries {
+            by_base.insert(e.1.clone(), e.clone());
+        }
+        // Walk forward: successor.base must equal current.landed.
+        while visited.len() < entries.len() {
+            let next = by_base
+                .get(&current.2)
+                .cloned()
+                .unwrap_or_else(|| panic!(
+                    "no successor whose base equals predecessor landed {}",
+                    current.2
+                ));
+            assert_eq!(
+                next.1, current.2,
+                "{} base_main_sha must equal predecessor {} landed_main_sha",
+                next.0, current.0
+            );
+            visited.push(next.clone());
+            current = next;
+        }
+        assert_eq!(visited.len(), entries.len(), "chain must cover all entries");
+    }
+
+    /// (i) Refresh and pre_land_check must run with HEAD on the candidate
+    /// branch. Set up workspace_path on `main` (the failure surface from
+    /// review 2), then have pre_land_check write `git rev-parse
+    /// --abbrev-ref HEAD` to a probe file. Assert the probe says the
+    /// candidate branch, not `main`.
+    #[test]
+    fn i_pre_land_runs_on_candidate_branch_checkout() {
+        let conn = fresh_db();
+        let (_tmp, repo) = init_repo();
+        add_branch_with_change(&repo, "feat/i", "feat.txt", "feat\n");
+        // Sanity: add_branch_with_change leaves the worktree on main.
+        let starting = String::from_utf8_lossy(
+            &git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(starting, "main");
+
+        insert_queued_task(&conn, "T1000", "feat/i", repo.to_str().unwrap());
+
+        let probe = repo.join("probe.head");
+        // Use absolute path so cwd-changes don't affect it.
+        let cmd = format!(
+            "git rev-parse --abbrev-ref HEAD > {}",
+            probe.to_str().unwrap()
+        );
+        let agents = integrate_agents_yaml(&cmd);
+        let cfg = cfg_path();
+        let row = task_row_json(&conn, "T1000");
+        let ctx = DispatchCtx {
+            conn: &conn,
+            agents: &agents,
+            config_path: &cfg,
+            policies_hash: "",
+        };
+        run(&row, &ctx).unwrap();
+
+        let observed = std::fs::read_to_string(&probe).unwrap_or_default();
+        assert_eq!(
+            observed.trim(),
+            "feat/i",
+            "pre_land_check must run with HEAD on the candidate branch, saw {:?}",
+            observed
+        );
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='T1000'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "integrated");
     }
 
     /// (h) Stale_base BLOCKING path: ER row's base_sha is orphaned (not
