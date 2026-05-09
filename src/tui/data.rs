@@ -17,6 +17,9 @@ pub enum Section {
     TasksActionableCurrentWork,
     ObsRatifiable,
     TasksAcceptU3,
+    TasksIntegration,
+    TasksIntegratedAwaitingPostLand,
+    TasksIntegrationBlocked,
     TasksBlockedNeedsAction,
     TasksDeployRecovery,
     TasksNeedsTriage,
@@ -37,6 +40,9 @@ impl Section {
             Section::TasksActionableCurrentWork => "ACTIVE WORK",
             Section::ObsRatifiable => "RATIFY-U1",
             Section::TasksAcceptU3 => "ACCEPT-U3",
+            Section::TasksIntegration => "INTEGRATION",
+            Section::TasksIntegratedAwaitingPostLand => "INTEGRATED",
+            Section::TasksIntegrationBlocked => "HELD-INTEGRATION",
             Section::TasksBlockedNeedsAction => "HELD-BLOCKED",
             Section::TasksDeployRecovery => "HELD-DEPLOY",
             Section::TasksNeedsTriage => "HELD-TRIAGE",
@@ -52,10 +58,13 @@ impl Section {
         }
     }
 
-    pub const ALL: [Section; 15] = [
+    pub const ALL: [Section; 18] = [
         Section::TasksActionableCurrentWork,
         Section::ObsRatifiable,
         Section::TasksAcceptU3,
+        Section::TasksIntegration,
+        Section::TasksIntegratedAwaitingPostLand,
+        Section::TasksIntegrationBlocked,
         Section::TasksBlockedNeedsAction,
         Section::TasksDeployRecovery,
         Section::TasksNeedsTriage,
@@ -278,7 +287,10 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
                 ) {
                     model.accept += 1;
                 }
-                if matches!(t.status.as_str(), "blocked" | "deploy_blocked") {
+                if matches!(
+                    t.status.as_str(),
+                    "blocked" | "deploy_blocked" | "integration_blocked"
+                ) {
                     model.held += 1;
                 }
                 if is_in_flight_task_status(&t.status) {
@@ -473,7 +485,15 @@ fn extract_task_id(s: &str) -> Option<String> {
 pub fn is_in_flight_task_status(s: &str) -> bool {
     matches!(
         s,
-        "executing" | "plan_review" | "code_review" | "in_review" | "planning" | "ready"
+        "executing"
+            | "plan_review"
+            | "code_review"
+            | "in_review"
+            | "planning"
+            | "ready"
+            | "integration_queued"
+            | "integrating"
+            | "integrated"
     )
 }
 
@@ -1158,6 +1178,9 @@ fn section_for(row: &Row) -> Option<Section> {
                         Some(Section::TasksDeployRecovery)
                     }
                 }
+                "integration_queued" | "integrating" => Some(Section::TasksIntegration),
+                "integrated" => Some(Section::TasksIntegratedAwaitingPostLand),
+                "integration_blocked" => Some(Section::TasksIntegrationBlocked),
                 "plan_review" | "code_review" => Some(Section::TasksHeldAiReview),
                 "in_review" => Some(Section::TasksAcceptU3),
                 "closed_out_of_band" | "accepted" | "complete" | "cargo_installed"
@@ -1451,6 +1474,9 @@ mod tests {
             "ACTIVE WORK",
             "RATIFY-U1",
             "ACCEPT-U3",
+            "INTEGRATION",
+            "INTEGRATED",
+            "HELD-INTEGRATION",
             "HELD-BLOCKED",
             "HELD-DEPLOY",
             "HELD-TRIAGE",
@@ -1531,6 +1557,18 @@ mod tests {
             ("cargo_installed", None, Section::TasksRecentlyTerminal),
             ("schema_migrated", None, Section::TasksRecentlyTerminal),
             ("abandoned", None, Section::TasksRecentlyTerminal),
+            ("integration_queued", None, Section::TasksIntegration),
+            ("integrating", None, Section::TasksIntegration),
+            (
+                "integrated",
+                None,
+                Section::TasksIntegratedAwaitingPostLand,
+            ),
+            (
+                "integration_blocked",
+                None,
+                Section::TasksIntegrationBlocked,
+            ),
         ];
         for (status, reason, expected) in mappings {
             let r = task_at(status, NOW.to_string(), *reason);
@@ -1540,6 +1578,52 @@ mod tests {
                 "task status {status} reason {reason:?}"
             );
         }
+    }
+
+    #[test]
+    fn integration_queued_and_integrating_classify_to_tasks_integration() {
+        // AC4.4: integration_queued / integrating live in TasksIntegration —
+        // they MUST NOT appear in the ordinary ACTIVE WORK bucket.
+        let rows = vec![task("integration_queued"), task("integrating")];
+        let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
+        assert_eq!(bucket(&buckets, Section::TasksIntegration), vec![0usize, 1]);
+        assert!(bucket(&buckets, Section::TasksActionableCurrentWork).is_empty());
+        for (status, idx) in [("integration_queued", 0usize), ("integrating", 1)] {
+            let r = task(status);
+            assert_eq!(
+                section_for(&r),
+                Some(Section::TasksIntegration),
+                "{status} (idx {idx}) must classify to TasksIntegration"
+            );
+        }
+    }
+
+    #[test]
+    fn integrated_classifies_to_tasks_integrated_awaiting_post_land() {
+        let rows = vec![task("integrated")];
+        let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
+        assert_eq!(
+            bucket(&buckets, Section::TasksIntegratedAwaitingPostLand),
+            vec![0usize]
+        );
+        assert!(bucket(&buckets, Section::TasksRecentlyTerminal).is_empty());
+        assert!(bucket(&buckets, Section::TasksActionableCurrentWork).is_empty());
+    }
+
+    #[test]
+    fn integration_blocked_classifies_to_tasks_integration_blocked() {
+        // Mirrors HELD-DEPLOY / HELD-BLOCKED: the row is awaiting a
+        // human-authorized retry-integration. Must NOT collapse into the
+        // generic ACTIVE WORK or HELD-BLOCKED buckets.
+        let rows = vec![task("integration_blocked")];
+        let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
+        assert_eq!(
+            bucket(&buckets, Section::TasksIntegrationBlocked),
+            vec![0usize]
+        );
+        assert!(bucket(&buckets, Section::TasksBlockedNeedsAction).is_empty());
+        assert!(bucket(&buckets, Section::TasksDeployRecovery).is_empty());
+        assert!(bucket(&buckets, Section::TasksActionableCurrentWork).is_empty());
     }
 
     #[test]

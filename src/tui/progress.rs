@@ -140,6 +140,10 @@ fn terminal_stage(status: &str) -> Option<String> {
     match status {
         "accepted" => Some("✓ accepted".to_string()),
         "deploy" | "cargo_installed" | "schema_migrated" => Some("✓ deploy".to_string()),
+        "integration_queued" => Some("⏳ integration queued".to_string()),
+        "integrating" => Some("⏵ integrating".to_string()),
+        "integrated" => Some("✓ integrated".to_string()),
+        "integration_blocked" => Some("⚠ integration blocked".to_string()),
         _ => None,
     }
 }

@@ -232,6 +232,9 @@ fn mission_compact_window(app: &App, flat: &[FlatRow]) -> Vec<FlatRow> {
         Section::TasksActionableCurrentWork,
         Section::ObsRatifiable,
         Section::TasksAcceptU3,
+        Section::TasksIntegration,
+        Section::TasksIntegratedAwaitingPostLand,
+        Section::TasksIntegrationBlocked,
         Section::TasksBlockedNeedsAction,
         Section::TasksDeployRecovery,
         Section::TasksNeedsTriage,
@@ -464,6 +467,16 @@ fn task_status_label(t: &super::data::TaskRow) -> String {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("unknown")
         ),
+        "integration_blocked" => format!(
+            "integration:{}",
+            t.blocked_reason
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("unknown")
+        ),
+        "integration_queued" => "integration:queued".to_string(),
+        "integrating" => "integration:running".to_string(),
+        "integrated" => "integration:landed".to_string(),
         other => other.to_string(),
     }
 }
@@ -496,7 +509,10 @@ fn task_snippet(t: &super::data::TaskRow) -> String {
             parts.push("workspace:none".to_string());
         }
     }
-    if matches!(t.status.as_str(), "blocked" | "deploy_blocked") {
+    if matches!(
+        t.status.as_str(),
+        "blocked" | "deploy_blocked" | "integration_blocked"
+    ) {
         if let Some(reason) = t.blocked_reason.as_deref().filter(|s| !s.is_empty()) {
             parts.push(format!("reason:{reason}"));
         }
@@ -903,6 +919,9 @@ mod tests {
             Section::TasksActionableCurrentWork,
             Section::ObsRatifiable,
             Section::TasksAcceptU3,
+            Section::TasksIntegration,
+            Section::TasksIntegratedAwaitingPostLand,
+            Section::TasksIntegrationBlocked,
             Section::TasksBlockedNeedsAction,
             Section::TasksDeployRecovery,
             Section::TasksNeedsTriage,
@@ -932,6 +951,95 @@ mod tests {
             !present.contains(&Section::TasksRecentlyTerminal),
             "compact window must not surface TERMINAL historical noise"
         );
+    }
+
+    #[test]
+    fn render_frame_emits_dedicated_headers_for_integration_lane_states() {
+        // AC4.3: With one row in each new state, draw the cockpit and assert
+        // each row appears under its dedicated section header — never folded
+        // into ACTIVE WORK.
+        use crate::tui::data::{classify, Row, Section, TaskRow};
+
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![
+            Row::Task(TaskRow {
+                display_id: "T800".to_string(),
+                status: "integration_queued".to_string(),
+                title: "queued candidate".to_string(),
+                tier_hint: Some("T2".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T801".to_string(),
+                status: "integrating".to_string(),
+                title: "currently integrating".to_string(),
+                tier_hint: Some("T2".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T802".to_string(),
+                status: "integrated".to_string(),
+                title: "awaiting post-land".to_string(),
+                tier_hint: Some("T2".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T803".to_string(),
+                status: "integration_blocked".to_string(),
+                title: "stale base".to_string(),
+                tier_hint: Some("T2".to_string()),
+                blocked_reason: Some("stale_base".to_string()),
+                blocked_reason_class: Some("stale".to_string()),
+                ..Default::default()
+            }),
+        ];
+        app.sections = classify(&app.rows);
+        app.apply_sort();
+
+        // Sanity: classifier put each row in the right section.
+        let sec_idx = |sec: Section| -> usize {
+            app.sections.iter().position(|(s, _)| *s == sec).unwrap()
+        };
+        assert_eq!(app.sections[sec_idx(Section::TasksIntegration)].1.len(), 2);
+        assert_eq!(
+            app.sections[sec_idx(Section::TasksIntegratedAwaitingPostLand)]
+                .1
+                .len(),
+            1
+        );
+        assert_eq!(
+            app.sections[sec_idx(Section::TasksIntegrationBlocked)]
+                .1
+                .len(),
+            1
+        );
+        assert!(
+            app.sections[sec_idx(Section::TasksActionableCurrentWork)]
+                .1
+                .is_empty(),
+            "integration states must not appear in ACTIVE WORK"
+        );
+
+        let painted = painted_buffer(&mut app);
+
+        for label in ["INTEGRATION (2)", "INTEGRATED (1)", "HELD-INTEGRATION (1)"] {
+            assert!(
+                painted.contains(label),
+                "expected section header '{label}' in painted frame:\n{painted}"
+            );
+        }
+        for id in ["T800", "T801", "T802", "T803"] {
+            assert!(
+                painted.contains(id),
+                "expected row id {id} painted:\n{painted}"
+            );
+        }
+        // Sections must appear in canonical order: INTEGRATION before
+        // INTEGRATED before HELD-INTEGRATION.
+        let pos_int = painted.find("INTEGRATION (2)").unwrap();
+        let pos_integrated = painted.find("INTEGRATED (1)").unwrap();
+        let pos_held = painted.find("HELD-INTEGRATION (1)").unwrap();
+        assert!(pos_int < pos_integrated && pos_integrated < pos_held);
     }
 
     #[test]

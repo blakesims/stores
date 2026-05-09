@@ -127,6 +127,9 @@ fn render_frame(
         .flat_map(|(sec, idxs)| match sec {
             crate::tui::data::Section::TasksActionableCurrentWork
             | crate::tui::data::Section::TasksAcceptU3
+            | crate::tui::data::Section::TasksIntegration
+            | crate::tui::data::Section::TasksIntegratedAwaitingPostLand
+            | crate::tui::data::Section::TasksIntegrationBlocked
             | crate::tui::data::Section::TasksBlockedNeedsAction
             | crate::tui::data::Section::TasksDeployRecovery
             | crate::tui::data::Section::TasksNeedsTriage
@@ -578,6 +581,9 @@ fn task_status_rank(s: &str) -> u8 {
         "ready" => 1,
         "planning" | "plan_review" => 2,
         "in_review" => 3,
+        "integration_queued" | "integrating" => 3,
+        "integrated" => 3,
+        "integration_blocked" => 4,
         "blocked" => 4,
         "rejected" => 5,
         "complete" => 9,
@@ -588,9 +594,11 @@ fn task_status_rank(s: &str) -> u8 {
 fn task_status_color(s: &str) -> &'static str {
     match s {
         "executing" | "code_review" => ANSI_GREEN,
+        "integration_queued" | "integrating" => ANSI_GREEN,
+        "integrated" => ANSI_CYAN,
         "ready" => ANSI_CYAN,
         "planning" | "plan_review" | "in_review" => ANSI_YELLOW,
-        "blocked" | "rejected" => ANSI_RED,
+        "blocked" | "rejected" | "integration_blocked" => ANSI_RED,
         "complete" => ANSI_DIM,
         _ => ANSI_RESET,
     }

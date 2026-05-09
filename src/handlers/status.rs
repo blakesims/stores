@@ -123,6 +123,9 @@ fn next_from_status(status: &str) -> &'static str {
         "code_review" => "code-reviewer",
         "complete" => "wrap",
         "in_review" => "wrap",
+        "integration_queued" | "integrating" => "integrate",
+        "integrated" => "post-integrated",
+        "integration_blocked" => "-",
         "accepted" => "-",
         "rejected" => "-",
         "blocked" => "-",
@@ -144,11 +147,49 @@ fn is_terminal(status: &str) -> bool {
     matches!(status, "accepted" | "rejected" | "abandoned" | "closed_out_of_band" | "schema_migrated")
 }
 
+/// Active integration-lane states (queued/in-progress). These are still in
+/// flight from a monitoring standpoint and should NOT cause `status follow`
+/// to exit.
+pub fn is_integration_active(status: &str) -> bool {
+    matches!(status, "integration_queued" | "integrating")
+}
+
 /// Is this status one where drive (or `status follow`) should pause for human input?
 /// Superset of `is_terminal`; includes states that are awaiting a human action but
 /// could theoretically continue automatically (e.g. after `stores tasks accept`).
+///
+/// `integration_blocked` mirrors `blocked` / `deploy_blocked` — it requires a
+/// human-authorized retry (`tasks retry-integration`) so the follow loop pauses.
 fn is_awaiting_human(status: &str) -> bool {
-    status == "blocked" || status == "in_review" || is_terminal(status)
+    status == "blocked"
+        || status == "in_review"
+        || status == "integration_blocked"
+        || is_terminal(status)
+}
+
+/// Returns true when `integrated` should be treated as terminal for the
+/// bounded-follow loop — i.e. when no agents.yaml subscriber is wired off
+/// `from: integrated`. Used by `run_follow_loop` to decide whether to exit
+/// when a single-task follow lands on `integrated`.
+///
+/// Looks for `agents.yaml` next to the supplied DB path (stores_dir layout).
+fn integrated_is_terminal_no_post_subscriber(db: &Path) -> bool {
+    let dir = match db.parent() {
+        Some(d) => d,
+        None => return true,
+    };
+    let path = dir.join("agents.yaml");
+    if !path.exists() {
+        return true;
+    }
+    match crate::flow::agents_yaml::load_from_path(&path) {
+        Ok(cfg) => !cfg
+            .agents
+            .iter()
+            .flat_map(|a| a.subscribes_to.iter())
+            .any(|s| s.store == "tasks" && s.transition.from == "integrated"),
+        Err(_) => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +409,14 @@ fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
                     prev_keys.insert(id.clone(), key.clone());
                 }
                 if is_awaiting_human(&task.status) {
+                    return Ok(());
+                }
+                // `integrated` is the framework-terminal lane state; only exit
+                // here when no post-integrated subscriber is wired (otherwise
+                // the row will advance via mark_cargo_installed soon).
+                if task.status == "integrated"
+                    && integrated_is_terminal_no_post_subscriber(db)
+                {
                     return Ok(());
                 }
             }
@@ -854,6 +903,102 @@ mod tests {
             result.is_ok(),
             "follow loop should exit 0 on in_review task: {result:?}"
         );
+    }
+
+    #[test]
+    fn bounded_follow_loop_exits_on_integration_blocked() {
+        // `integration_blocked` mirrors `blocked` / `deploy_blocked` — awaiting
+        // a human-authorized retry-integration. is_awaiting_human returns true
+        // and the single-task follow loop exits 0.
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T100", "integration_blocked", None, None, None, None);
+        let db_path_val = _dir.path().join("test.db");
+
+        let args = StatusArgs {
+            display_id: Some("T100".to_string()),
+            follow: true,
+            interval_ms: 0,
+            max_iters: 100,
+        };
+        let result = run_follow_loop(&db_path_val, args);
+        assert!(
+            result.is_ok(),
+            "follow loop should exit 0 on integration_blocked: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_follow_loop_exits_on_integrated_when_no_post_subscriber() {
+        // No agents.yaml in the tempdir → no post-integrated subscriber wired
+        // → `integrated` is framework-terminal and the follow loop exits 0.
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T101", "integrated", None, None, None, None);
+        let db_path_val = _dir.path().join("test.db");
+
+        let args = StatusArgs {
+            display_id: Some("T101".to_string()),
+            follow: true,
+            interval_ms: 0,
+            max_iters: 100,
+        };
+        let result = run_follow_loop(&db_path_val, args);
+        assert!(
+            result.is_ok(),
+            "follow loop should exit 0 on integrated with no post-subscriber: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_follow_loop_runs_max_iters_on_integrated_with_post_subscriber() {
+        // agents.yaml wires schema-migrate on (integrated → cargo_installed)
+        // → `integrated` is awaiting post-land, NOT terminal. The single-task
+        // follow loop must keep polling until max_iters.
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T102", "integrated", None, None, None, None);
+        let db_path_val = _dir.path().join("test.db");
+        // Drop an agents.yaml fixture next to the db.
+        let agents_yaml = r#"
+agents:
+  - name: schema-migrate
+    subscribes_to:
+      - store: tasks
+        transition: { from: integrated, to: cargo_installed }
+    command: "builtin:schema-migrate"
+"#;
+        std::fs::write(_dir.path().join("agents.yaml"), agents_yaml).unwrap();
+
+        let args = StatusArgs {
+            display_id: Some("T102".to_string()),
+            follow: true,
+            interval_ms: 0,
+            max_iters: 3,
+        };
+        let result = run_follow_loop(&db_path_val, args);
+        assert!(
+            result.is_ok(),
+            "follow loop should run max_iters when post-integrated subscriber wired: {result:?}"
+        );
+    }
+
+    #[test]
+    fn integration_active_states_keep_multi_task_loop_alive() {
+        // integration_queued and integrating are NOT terminal — multi-task
+        // follow must include them and not exit early.
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T200", "integration_queued", None, None, None, None);
+        insert_task(&conn, "T201", "integrating", None, None, None, None);
+        let tasks = fetch_all_tasks(&conn).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().any(|t| t.status == "integration_queued"));
+        assert!(tasks.iter().any(|t| t.status == "integrating"));
+    }
+
+    #[test]
+    fn next_from_status_covers_integration_lane_states() {
+        assert_eq!(next_from_status("integration_queued"), "integrate");
+        assert_eq!(next_from_status("integrating"), "integrate");
+        assert_eq!(next_from_status("integrated"), "post-integrated");
+        assert_eq!(next_from_status("integration_blocked"), "-");
     }
 
     #[test]
