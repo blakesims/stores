@@ -168,9 +168,11 @@ fn is_awaiting_human(status: &str) -> bool {
 }
 
 /// Returns true when `integrated` should be treated as terminal for the
-/// bounded-follow loop — i.e. when no agents.yaml subscriber is wired off
-/// `from: integrated`. Used by `run_follow_loop` to decide whether to exit
-/// when a single-task follow lands on `integrated`.
+/// bounded-follow loop — i.e. when no agents.yaml subscriber is wired for the
+/// `integrated` handoff. This includes subscribers on the edge into integrated
+/// (`integrating → integrated`, e.g. cargo-install) as well as subscribers wired
+/// off `from: integrated` (e.g. schema-migrate). Used by `run_follow_loop` to
+/// decide whether to exit when a single-task follow lands on `integrated`.
 ///
 /// Looks for `agents.yaml` next to the supplied DB path (stores_dir layout).
 fn integrated_is_terminal_no_post_subscriber(db: &Path) -> bool {
@@ -187,7 +189,10 @@ fn integrated_is_terminal_no_post_subscriber(db: &Path) -> bool {
             .agents
             .iter()
             .flat_map(|a| a.subscribes_to.iter())
-            .any(|s| s.store == "tasks" && s.transition.from == "integrated"),
+            .any(|s| {
+                s.store == "tasks"
+                    && (s.transition.from == "integrated" || s.transition.to == "integrated")
+            }),
         Err(_) => true,
     }
 }
@@ -986,6 +991,38 @@ agents:
         assert!(
             result.is_ok(),
             "follow loop should run max_iters when post-integrated subscriber wired: {result:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_follow_loop_runs_max_iters_on_integrated_with_to_integrated_subscriber() {
+        // cargo-install subscribes to the transition into integrated
+        // (integrating → integrated). An integrated row may still be awaiting
+        // that post-land handoff, so follow must not treat integrated as
+        // terminal merely because no subscriber has from: integrated.
+        let (_dir, conn) = open_test_conn();
+        insert_task(&conn, "T103", "integrated", None, None, None, None);
+        let db_path_val = _dir.path().join("test.db");
+        let agents_yaml = r#"
+agents:
+  - name: cargo-install
+    subscribes_to:
+      - store: tasks
+        transition: { from: integrating, to: integrated }
+    command: "builtin:cargo-install"
+"#;
+        std::fs::write(_dir.path().join("agents.yaml"), agents_yaml).unwrap();
+
+        let args = StatusArgs {
+            display_id: Some("T103".to_string()),
+            follow: true,
+            interval_ms: 0,
+            max_iters: 3,
+        };
+        let result = run_follow_loop(&db_path_val, args);
+        assert!(
+            result.is_ok(),
+            "follow loop should run max_iters when to-integrated subscriber wired: {result:?}"
         );
     }
 
