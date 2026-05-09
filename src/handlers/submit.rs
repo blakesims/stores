@@ -43,6 +43,8 @@ use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::Command;
 
 use crate::codegen::ddl::quote_ident;
 use crate::schema::{
@@ -617,8 +619,14 @@ pub fn fire_on_entry_follow_ons(
 ///   sets current_phase = 1, current_cycle = 1 ONLY if current_phase == 0
 ///   (distinguishes initial plan approval from resume, where current_phase is preserved).
 fn entry_has_executable_plan(entry: &EntryMap) -> bool {
-    let tier_hint = entry.get("tier_hint").and_then(|v| v.as_str()).unwrap_or("");
-    let plan_source = entry.get("plan_source").and_then(|v| v.as_str()).unwrap_or("");
+    let tier_hint = entry
+        .get("tier_hint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let plan_source = entry
+        .get("plan_source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let plan_is_empty = entry
         .get("plan")
         .map(|v| match v {
@@ -779,10 +787,7 @@ pub(crate) fn compute_submit_plan(
             );
         }
         Some(p) => {
-            bail!(
-                "submit-plan: plan.phases must be an array, got {}",
-                p
-            );
+            bail!("submit-plan: plan.phases must be an array, got {}", p);
         }
         None => {
             bail!("submit-plan: plan.phases is missing; expected a non-empty array");
@@ -1055,6 +1060,91 @@ pub fn run_submit_plan_review(
 // submit-execute: executing → code_review (AC5.1)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedExecutorCommit {
+    resolved_sha: String,
+    claimed_sha: Option<String>,
+    resolution_note: String,
+}
+
+fn resolve_executor_commit(
+    row: &EntryMap,
+    claimed_commit: Option<&str>,
+) -> Result<Option<ResolvedExecutorCommit>> {
+    let workspace_path = row
+        .get("workspace_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let workspace_head = if workspace_path.trim().is_empty() {
+        None
+    } else {
+        git_rev_parse_head(Path::new(workspace_path)).ok()
+    };
+
+    match (
+        claimed_commit.filter(|s| !s.trim().is_empty()),
+        workspace_head,
+    ) {
+        (Some(claimed), Some(head)) if claimed == head => Ok(Some(ResolvedExecutorCommit {
+            resolved_sha: head,
+            claimed_sha: None,
+            resolution_note: "claimed_commit_matches_workspace_head".to_string(),
+        })),
+        (Some(claimed), Some(head)) => {
+            let claimed_valid = git_object_exists(Path::new(workspace_path), claimed);
+            Ok(Some(ResolvedExecutorCommit {
+                resolved_sha: head,
+                claimed_sha: Some(claimed.to_string()),
+                resolution_note: if claimed_valid {
+                    "claimed_commit_valid_but_workspace_head_wins".to_string()
+                } else {
+                    "claimed_commit_invalid_workspace_head_captured".to_string()
+                },
+            }))
+        }
+        (None, Some(head)) => Ok(Some(ResolvedExecutorCommit {
+            resolved_sha: head,
+            claimed_sha: None,
+            resolution_note: "workspace_head_captured".to_string(),
+        })),
+        (Some(claimed), None) => Ok(Some(ResolvedExecutorCommit {
+            resolved_sha: claimed.to_string(),
+            claimed_sha: None,
+            resolution_note: "claimed_commit_unvalidated_no_workspace_head".to_string(),
+        })),
+        (None, None) => Ok(None),
+    }
+}
+
+fn git_rev_parse_head(repo: &Path) -> Result<String> {
+    let out = Command::new("git")
+        .args(["-C", repo.to_str().unwrap_or("."), "rev-parse", "HEAD"])
+        .output()
+        .with_context(|| format!("spawning git rev-parse HEAD in {}", repo.display()))?;
+    if !out.status.success() {
+        bail!(
+            "git rev-parse HEAD failed in {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn git_object_exists(repo: &Path, sha: &str) -> bool {
+    Command::new("git")
+        .args([
+            "-C",
+            repo.to_str().unwrap_or("."),
+            "cat-file",
+            "-e",
+            &format!("{}^{{commit}}", sha),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_submit_execute(
     schema: &Schema,
@@ -1103,6 +1193,8 @@ pub(crate) fn compute_submit_execute(
         .and_then(|v| v.as_i64())
         .unwrap_or(1);
 
+    let resolved_commit = resolve_executor_commit(&existing, commit_sha)?;
+
     // Build new cycles entry
     let mut executor_obj = serde_json::Map::new();
     executor_obj.insert("at".to_string(), Value::String(now_iso8601()));
@@ -1110,8 +1202,15 @@ pub(crate) fn compute_submit_execute(
         "summary".to_string(),
         Value::String(exec_summary.to_string()),
     );
-    if let Some(sha) = commit_sha {
-        executor_obj.insert("commit".to_string(), Value::String(sha.to_string()));
+    if let Some(commit) = resolved_commit {
+        executor_obj.insert("commit".to_string(), Value::String(commit.resolved_sha));
+        if let Some(claimed) = commit.claimed_sha {
+            executor_obj.insert("claimed_commit".to_string(), Value::String(claimed));
+            executor_obj.insert(
+                "commit_resolution".to_string(),
+                Value::String(commit.resolution_note),
+            );
+        }
     }
     if let Some(files) = files_changed {
         let files_vec: Vec<Value> = files
@@ -2167,6 +2266,8 @@ fields:
     type: text
   - name: tier_hint
     type: text
+  - name: workspace_path
+    type: text
   - name: current_phase
     type: integer
     actor: framework
@@ -2216,6 +2317,10 @@ fields:
           - name: commit
             type: text
           - name: files_changed
+            type: text
+          - name: claimed_commit
+            type: text
+          - name: commit_resolution
             type: text
       - name: review
         type: record
@@ -2382,6 +2487,15 @@ workflow:
         .unwrap_or(None)
     }
 
+    fn set_workspace_path(conn: &Connection, workspace_path: &str) {
+        let _ = conn.execute("ALTER TABLE wf_tasks ADD COLUMN workspace_path TEXT", []);
+        conn.execute(
+            "UPDATE wf_tasks SET workspace_path = ?1 WHERE display_id = 'WF001'",
+            rusqlite::params![workspace_path],
+        )
+        .unwrap();
+    }
+
     fn read_cycles(conn: &Connection) -> Vec<Value> {
         let json_str: Option<String> = conn
             .query_row(
@@ -2487,6 +2601,70 @@ workflow:
             claimed_by.is_none() || claimed_by.as_deref() == Some(""),
             "lock should be released: {:?}",
             claimed_by
+        );
+    }
+
+    #[test]
+    fn submit_execute_captures_workspace_head_over_bad_claimed_commit() {
+        let (schema, conn) = setup();
+        insert_row_at(&conn, &schema, "executing", 1, 1, 1, vec![], vec![], None);
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success());
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        std::fs::write(tmp.path().join("file.txt"), "hello\n").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success());
+        let head = git_rev_parse_head(tmp.path()).unwrap();
+        set_workspace_path(&conn, tmp.path().to_str().unwrap());
+
+        compute_submit_execute(
+            &schema,
+            &conn,
+            "WF001",
+            "phase done",
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            None,
+            None,
+            Actor::AiAutonomous,
+            None,
+        )
+        .unwrap();
+
+        let cycles = read_cycles(&conn);
+        assert_eq!(
+            cycles[0]["executor"]["commit"].as_str(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            cycles[0]["executor"]["claimed_commit"].as_str(),
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        );
+        assert_eq!(
+            cycles[0]["executor"]["commit_resolution"].as_str(),
+            Some("claimed_commit_invalid_workspace_head_captured")
         );
     }
 
@@ -4348,7 +4526,9 @@ fields:
 
         let log = read_plan_review_log(&conn);
         assert_eq!(log.len(), 1, "one log entry expected");
-        let reviewed_plan = log[0].get("reviewed_plan").expect("reviewed_plan must be present");
+        let reviewed_plan = log[0]
+            .get("reviewed_plan")
+            .expect("reviewed_plan must be present");
         // The plan set by insert_row_at has a 'summary' key.
         assert!(
             reviewed_plan.is_object(),
@@ -4395,7 +4575,9 @@ fields:
         .unwrap();
 
         let log = read_plan_review_log(&conn);
-        let reviewed_plan = log[0].get("reviewed_plan").expect("reviewed_plan must be present");
+        let reviewed_plan = log[0]
+            .get("reviewed_plan")
+            .expect("reviewed_plan must be present");
         assert_eq!(
             reviewed_plan, &original_plan,
             "snapshot must be immune to subsequent plan mutations"
@@ -4459,7 +4641,9 @@ fields:
         );
 
         // (2) New entry has reviewed_plan populated.
-        let new_reviewed_plan = log[1].get("reviewed_plan").expect("new entry must have reviewed_plan");
+        let new_reviewed_plan = log[1]
+            .get("reviewed_plan")
+            .expect("new entry must have reviewed_plan");
         assert!(
             new_reviewed_plan.is_object(),
             "new entry reviewed_plan must be a JSON object: {new_reviewed_plan:?}"
@@ -5569,7 +5753,11 @@ workflow:
         drop(tx);
 
         let status: String = conn
-            .query_row("SELECT status FROM tasks WHERE display_id = 'T912'", [], |r| r.get(0))
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id = 'T912'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(status, "ready", "failed follow-on must not enter executing");
     }

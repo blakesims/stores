@@ -65,7 +65,9 @@ Review the executor's changes against the contract directly. There is no phase d
 
 {{#each cycles}}{{#if (eq this.phase ../current_phase)}}{{#if (eq this.cycle ../current_cycle)}}
 **Summary:** {{this.executor.summary}}
-{{#if this.executor.commit}}**Commit:** `{{this.executor.commit}}`{{/if}}
+{{#if this.executor.commit}}**System-captured Commit:** `{{this.executor.commit}}`{{/if}}
+{{#if this.executor.claimed_commit}}**Executor-claimed Commit (not authoritative):** `{{this.executor.claimed_commit}}`
+**Commit Resolution:** {{this.executor.commit_resolution}}{{/if}}
 {{#if this.executor.files_changed}}
 **Files Changed:**
 {{#each this.executor.files_changed}}
@@ -98,11 +100,12 @@ This is cycle {{current_cycle}} for the current phase after prior code-review ba
 {{/unless}}{{/if}}{{/if}}{{/each}}
 
 ## Critical Actions (Checklist)
-1. **CHECK** git state: `git diff --name-only HEAD~3`, `git status`, `git log --oneline -10`
-2. **VERIFY** each acceptance criterion is implemented
-3. **RUN** tests yourself: `cargo test` or equivalent
-4. **FIND** issues thoroughly (for non-trivial changes expect 3+; explain if fewer)
-5. **EMIT** the JSON envelope as your final structured output. Drive parses it and submits in-process; do not invoke any `submit-*` verb directly.
+1. **CHECK** git state and provenance: `git status`, `git log --oneline -10`, and if a System-captured Commit is listed, `git show <commit> --stat`.
+2. **REVIEW THE SYSTEM-CAPTURED COMMIT** when present. Do not fail solely because an executor-claimed commit differs; `claimed_commit` is non-authoritative metadata preserved for audit and `commit` is the substrate-captured review target.
+3. **VERIFY** each acceptance criterion is implemented
+4. **RUN** tests yourself: `cargo test` or equivalent
+5. **FIND** issues thoroughly (for non-trivial changes expect 3+; explain if fewer)
+6. **EMIT** the JSON envelope as your final structured output. Drive parses it and submits in-process; do not invoke any `submit-*` verb directly.
 
 ## Gate Decisions
 - **PASS** + more phases → executor takes next phase
@@ -113,9 +116,10 @@ This is cycle {{current_cycle}} for the current phase after prior code-review ba
 ## Git Reality Check
 Always verify:
 ```bash
-git diff --name-only HEAD~{N}
 git status --porcelain
 git log --oneline -10
+# If System-captured Commit exists:
+git show <system-captured-commit> --stat
 ```
 
-Compare against executor's claimed files. Discrepancies = findings.
+Compare changed files against executor's claimed files, but treat the System-captured Commit as authoritative. Discrepancies in model-supplied commit prose are audit notes unless they prevent identifying the system-captured review target.
