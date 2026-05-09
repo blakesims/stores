@@ -3,6 +3,10 @@
 **Date:** 2026-05-09
 **Type:** note
 
+## Next Loop Plan
+
+Continue with the focused meta-substrate rescue loop in `docs/worklog/2026-05-09/02-meta-substrate-rescue-plan.md`. That plan is the handoff for the next context: clear/preserve T122 without another blind code-reviewer retry, add minimal failed-role observability, document a manual review escape hatch, and address generated projection hygiene enough to unblock rebases.
+
 ## Sketch TODO
 
 1. **Stabilize the scene** — keep daemon/auto-spawn paused; do not resume blocked rows blindly; let useful child drives continue only when lifecycle-clean. ✅ initial audit done; stale-binary watchdog now catches old drive binaries.
