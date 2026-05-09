@@ -3606,6 +3606,16 @@ fields:
             Some("4th revise rejected by guard current_cycle <= 4 on phase 1 cycle 4: test"),
         );
 
+        // Seed latest READY plan review so this legacy recovery test remains
+        // the positive "blocked execution may resume" case after the I033
+        // guard. Rows whose latest plan review is NEEDS_WORK now resume to
+        // planning instead (covered by the T118 regression test below).
+        conn.execute(
+            "UPDATE wf_tasks SET plan_review_log = ?1 WHERE display_id = 'WF001'",
+            [r#"[{"gate":"READY","summary":"approved before execution"}]"#],
+        )
+        .unwrap();
+
         // Seed stale auto-drive bookkeeping from a prior detached drive. Resume
         // must clear this or the watchdog will immediately re-block the row.
         conn.execute(
