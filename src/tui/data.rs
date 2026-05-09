@@ -445,7 +445,16 @@ pub fn obs_visibility_class(
 
 fn is_silent_zombie_reason(reason: &str) -> bool {
     let reason = reason.trim().to_ascii_lowercase();
-    reason.starts_with("silent_zombie") || reason.starts_with("drive_failed:silent_zombie")
+    // Exact canonical tokens and known drive_failed variants; the colon-namespace
+    // form "silent_zombie:<detail>" is also accepted as a namespaced extension,
+    // but plain suffix attachment (silent_zombieish) is not.
+    matches!(
+        reason.as_str(),
+        "silent_zombie"
+            | "drive_failed:silent_zombie"
+            | "drive_failed:silent_zombie_pid_dead"
+            | "drive_failed:pid_never_recorded"
+    ) || reason.starts_with("silent_zombie:")
 }
 
 fn is_recoverable_deploy_reason(reason: &str) -> bool {
@@ -1768,5 +1777,26 @@ mod tests {
             task.recent_events[0].verb.as_deref(),
             Some("submit-execute")
         );
+    }
+
+    #[test]
+    fn silent_zombie_reason_exact_token_matching() {
+        // canonical tokens must match
+        assert!(is_silent_zombie_reason("silent_zombie"));
+        assert!(is_silent_zombie_reason("drive_failed:silent_zombie"));
+        // known drive_failed variants (real substrate data)
+        assert!(is_silent_zombie_reason("drive_failed:silent_zombie_pid_dead"));
+        assert!(is_silent_zombie_reason("drive_failed:pid_never_recorded"));
+        // colon-namespace form ("silent_zombie: pid dead")
+        assert!(is_silent_zombie_reason("silent_zombie: pid dead"));
+        // case and whitespace tolerance (trimmed + lowercased)
+        assert!(is_silent_zombie_reason("  Silent_Zombie  "));
+        // plain suffix attachment must NOT match (the regression this test locks)
+        assert!(!is_silent_zombie_reason("silent_zombieish"));
+        // unrecognised drive_failed:silent_zombie variant must NOT match
+        assert!(!is_silent_zombie_reason("drive_failed:silent_zombie_unrecognized"));
+        // empty and unrelated reasons must not match
+        assert!(!is_silent_zombie_reason(""));
+        assert!(!is_silent_zombie_reason("drive_failed"));
     }
 }
