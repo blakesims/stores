@@ -14,7 +14,7 @@ system-alert: daemon DEAD; 8 dangling locks; oldest started 8h ago
 ▾ HELD-AI-REVIEW (2)
   T500  plan_review              plan ◐ tier:T2 · planner AI review
 ▾ HELD-ZOMBIE (2)
-  T600  blocked:unknown          tier:T2 · reason:silent_zombie:pid_dead · silen
+  T600  blocked:unknown          tier:T2 · reason:silent_zombie · silent zombie
 ▾ OBSERVATIONS (7)
   L001  open                     priority:normal ×76 deploy-blocked: task T300 m
   L077  open                     priority:normal ×47 deploy-blocked: task T301 m
