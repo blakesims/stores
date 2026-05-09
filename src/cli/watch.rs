@@ -24,7 +24,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::handlers::disposition::{
-    operator_disposition, BranchStateSource, PlanStartBucket,
+    operator_disposition, GitBranchStateSource, PlanStartBucket,
 };
 use crate::paths::db_path;
 
@@ -306,17 +306,6 @@ const GLYPH_NEEDS_OPERATOR: char = '?';
 const GLYPH_BLOCKED: char = '⏸';
 const GLYPH_HISTORICAL: char = ' ';
 
-/// Always-Err [`BranchStateSource`] — `operator_disposition` treats branch
-/// errors conservatively as "still in flight", which is the right
-/// fallback for a 1Hz watch render that should not spawn a `git` process
-/// per row per tick.
-struct NoBranchProbe;
-impl BranchStateSource for NoBranchProbe {
-    fn branch_unmerged(&self, branch: &str) -> Result<bool> {
-        anyhow::bail!("watch render skips git probes (branch={branch})")
-    }
-}
-
 fn watch_today() -> DateTime<Utc> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -344,7 +333,9 @@ fn task_disposition_glyph_and_label(t: &crate::tui::data::TaskRow) -> (char, &'s
     if let Some(at) = &t.accepted_at {
         row_json["accepted_at"] = json!(at);
     }
-    let disp = operator_disposition(&row_json, watch_today(), &NoBranchProbe);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let branch_state = GitBranchStateSource::new(cwd, "main");
+    let disp = operator_disposition(&row_json, watch_today(), &branch_state);
     let glyph = match disp.plan_start_bucket() {
         PlanStartBucket::WouldRun => GLYPH_WOULD_RUN,
         PlanStartBucket::Inactive => GLYPH_INACTIVE,
