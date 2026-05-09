@@ -81,3 +81,19 @@ Clear all stale/stuck active tasks so the substrate can safely resume normal ope
 - Operators can inspect failed drive/role dispatch evidence instead of guessing from silent_zombie state, or the remaining observability gap is precisely filed if implementation is too large for this loop.
 - The manual review/close-out path for blocked reviewer rows is documented enough for engine-op to use.
 - Worklog notes (`01` and this `02`) accurately reflect final state and next steps.
+
+## Final Rescue Status
+
+Completed in the manual rescue loop after source/CLI confirmation:
+
+- `T117` resumed from stale silent-zombie, rebased onto current `main`, manually reviewed PASS, wrapped, accepted, merged, cargo-installed, and schema-migrated. Main merge: `bdaf46a`; task commit: `1f92da1`.
+- `T122` rebased onto current `main`, stale external-review base recovered (`ER355`), targeted tests plus full lib/clippy checks passed, accepted, merged, and deploy retry cleared to `accepted`. Main merge: `07766bd`; task commit: `22ae62d`.
+- `T121` had no executor code and the latest plan review was still `NEEDS_WORK` after repeated loops; it was abandoned with a rescue rationale so the stuck row no longer blocks queue health. The underlying observation can be reminted if still desired.
+
+Validation highlights:
+
+- T122 worktree: `cargo clippy --all-targets -- -D warnings`, `cargo test --lib`, `cargo test --lib auto_promote`, `cargo test --lib auto_resolve`, and `cargo test --lib subscriber_edges` passed after rebase.
+- T117 worktree: `cargo clippy --all-targets -- -D warnings`, `cargo test --lib acceptance_from_file`, and `cargo test --lib structured` passed after rebase.
+- `cargo install --path . --features runner-claude-code,runner-pi --locked --force` succeeded on main after the merges.
+
+Caveat: a later `stores agents run --once` intentionally resumed broader queue automation and scaffolded/started newer rows (`T124+`). Those are outside the original T117/T121/T122 stale-row rescue set and should be handled by normal queue policy, not confused with this completed rescue loop.
