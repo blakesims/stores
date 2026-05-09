@@ -94,7 +94,23 @@ The task has no `tier_hint`. Default to T3-style multi-phase decomposition, but 
 {{#if plan_review_log}}
 ## Revision Context
 
-You are revising a rejected plan. Do **not** reconstruct the previous plan from review comments alone; revise the rejected plan shown below against the review feedback.
+You are revising an existing plan. Do **not** reconstruct the previous plan from review comments alone; revise the plan shown below against the review feedback and any blocked/code-review context.
+
+{{#if (gt current_phase 1)}}
+## Late-Phase Replan Context — Treat as Scoped Repair
+
+This task is in `planning` after work had already progressed to **Phase {{current_phase}} of {{plan_phases_count}}**. That means this is not a fresh task design; it is a late-phase repair.
+
+{{#if blocked_reason}}**Blocked reason:** {{blocked_reason}}
+{{else}}**Blocked reason:** not present on the row (likely cleared by `resume`); infer the repair target from the current phase/cycle and prior execution/review history.
+{{/if}}**Current phase at unblock:** {{current_phase}} of {{plan_phases_count}}
+**Current cycle at unblock:** {{current_cycle}}
+
+Default rule: **preserve all already-ratified plan structure and repair only Phase {{current_phase}}**. Earlier phases have already been executed/reviewed; later phases should not be rewritten unless the failure proves the phase boundary itself is invalid. If you believe any phase other than Phase {{current_phase}} must change, state that explicitly in the plan objective and explain why this is not a scoped Phase {{current_phase}} repair.
+
+When the failure came from code review, translate the reviewer finding into a tighter Phase {{current_phase}} objective/tasks/acceptance criteria instead of redesigning the whole task.
+{{/if}}
+
 
 ### Rejected Plan To Revise
 

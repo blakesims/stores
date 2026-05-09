@@ -1818,7 +1818,7 @@ mod tests {
         // If this test fails, a template was changed — update these constants to the new values
         // shown in the assertion failure message.
         const EXPECTED_EXECUTOR_HASH: u64 = 0x3059c33b637615d1;
-        const EXPECTED_PLANNER_HASH: u64 = 0x678a2fdf40bd8f36;
+        const EXPECTED_PLANNER_HASH: u64 = 0x69bcb3633f12fb2e;
 
         assert_eq!(
             actual_exec_hash, EXPECTED_EXECUTOR_HASH,

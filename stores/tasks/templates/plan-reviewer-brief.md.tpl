@@ -33,6 +33,19 @@ You are the gate. If the plan isn't ready, send it back.
 {{contract.assumptions}}
 {{/if}}
 
+{{#if (gt current_phase 1)}}
+## Late-Phase Replan Review Scope
+
+This plan review follows a late-phase recovery, not a fresh task design. The task had already progressed to **Phase {{current_phase}} of {{plan_phases_count}}** before returning to planning.
+
+{{#if blocked_reason}}**Blocked reason:** {{blocked_reason}}
+{{else}}**Blocked reason:** not present on the row (likely cleared by `resume`); infer the repair target from the current phase/cycle and prior execution/review history.
+{{/if}}**Current phase at unblock:** {{current_phase}} of {{plan_phases_count}}
+**Current cycle at unblock:** {{current_cycle}}
+
+Review rule: **focus on whether the new plan correctly repairs Phase {{current_phase}} for the blocked/code-review failure.** Do not reopen earlier phases that were already executed/reviewed. Do not reject because of theoretical improvements to later phases unless the Phase {{current_phase}} repair creates a concrete dependency break. If you return NEEDS_WORK for anything outside Phase {{current_phase}}, your summary must explicitly justify why the issue is necessary to resolve the blocked failure rather than retroactive plan churn.
+{{/if}}
+
 ## Current Plan
 
 **Objective:** {{plan.objective}}
