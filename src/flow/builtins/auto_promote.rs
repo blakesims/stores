@@ -19,10 +19,33 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::flow::builtins::{BuiltinResult, DispatchCtx};
+use crate::flow::NotifyEvent;
 use crate::handlers::row::now_iso8601;
 use crate::id_format;
 
-pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
+/// Single source of truth for the idempotency / post-commit verification check.
+/// Returns true when at least one non-abandoned tasks row lists `obs_id` in
+/// its `linked_observations`. The same SQL is used both at the top of run()
+/// as the idempotency guard and after promote_fn returns Ok() to verify the
+/// row actually landed (L087 silent-zombie fix).
+fn linked_obs_has_active_task(conn: &Connection, obs_id: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM tasks, json_each(tasks.linked_observations) je \
+         WHERE je.value = ?1 AND tasks.status != 'abandoned' LIMIT 1",
+        rusqlite::params![obs_id],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
+}
+
+/// Core implementation with an injectable `promote_fn` for testing.
+/// Production callers use `run()` which passes the real `promote` function.
+/// The injectable surface exists only for the L087 no-row-but-ok regression
+/// test; it is not exported outside the crate.
+pub(crate) fn run_with_promote_fn<F>(row: &Value, ctx: &DispatchCtx, promote_fn: F) -> BuiltinResult
+where
+    F: FnOnce(&Connection, &str, &str, &str, &str, &Value, &Value) -> Result<String>,
+{
     let obs_display_id = row
         .get("display_id")
         .and_then(|v| v.as_str())
@@ -32,20 +55,10 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         return Ok(1);
     }
 
-    // Idempotency guard: if any non-abandoned tasks row already lists this obs
-    // in linked_observations, treat as already promoted. Abandoned tasks are
-    // excluded so re-ratifying an obs whose only linking task was abandoned
-    // triggers a fresh promotion.
-    let already_promoted: bool = ctx
-        .conn
-        .query_row(
-            "SELECT 1 FROM tasks, json_each(tasks.linked_observations) je \
-             WHERE je.value = ?1 AND tasks.status != 'abandoned' LIMIT 1",
-            rusqlite::params![obs_display_id],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    if already_promoted {
+    // Idempotency guard: delegate to the shared helper so there is one source
+    // of truth for the SQL. Abandoned tasks are excluded so re-ratifying an
+    // obs whose only linking task was abandoned triggers a fresh promotion.
+    if linked_obs_has_active_task(ctx.conn, obs_display_id) {
         eprintln!(
             "[auto-promote] {}: already promoted (linked_observations match); skipping",
             obs_display_id
@@ -115,7 +128,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     });
     let linked = serde_json::json!([obs_display_id]);
 
-    match promote(
+    match promote_fn(
         ctx.conn,
         obs_display_id,
         &title,
@@ -125,11 +138,42 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         &linked,
     ) {
         Ok(new_task_id) => {
-            eprintln!(
-                "[auto-promote] {}: promoted to {} (planning)",
-                obs_display_id, new_task_id
-            );
-            Ok(0)
+            // L087 post-commit verification: promote_fn returned Ok but that
+            // is decoupled from whether the tasks row actually landed (slug
+            // collision, txn rollback, etc. can all produce the silent-zombie
+            // shape). Verify observable state before declaring success.
+            if !linked_obs_has_active_task(ctx.conn, obs_display_id) {
+                eprintln!(
+                    "[auto-promote] {}: promote() returned ok={} but no tasks row landed; \
+                     surfacing as failure (was the silent-zombie shape)",
+                    obs_display_id, new_task_id
+                );
+                let _ = crate::flow::notify_with_path(
+                    ctx.config_path,
+                    NotifyEvent {
+                        row_id: obs_display_id.to_string(),
+                        transition_attempted: "observations: confirmed→ready (auto-promote)"
+                            .into(),
+                        policy_id_or_actor_halt:
+                            "auto-promote: silent fail (no tasks row after promote ok)".into(),
+                        summary: format!(
+                            "promote returned ok={} but linked_observations check post-commit \
+                             shows no non-abandoned task; lock would have been marked ok \
+                             decoupled from outcome",
+                            new_task_id
+                        ),
+                    },
+                );
+                // Ok(2) → terminal_from_dispatch_result maps to
+                // terminal_reason='exit_nonzero', NOT 'ok'.
+                Ok(2)
+            } else {
+                eprintln!(
+                    "[auto-promote] {}: promoted to {} (planning)",
+                    obs_display_id, new_task_id
+                );
+                Ok(0)
+            }
         }
         Err(e) => {
             eprintln!(
@@ -139,6 +183,10 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             Ok(1)
         }
     }
+}
+
+pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
+    run_with_promote_fn(row, ctx, promote)
 }
 
 fn collect_text_list(v: Option<&Value>) -> Vec<String> {
@@ -357,7 +405,7 @@ mod tests {
     use super::*;
     use crate::cli::dynamic::BUNDLED_STORE_SCHEMAS;
     use crate::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
-    use crate::flow::AgentsYaml;
+    use crate::flow::{install_notifier, AgentsYaml, MockNotifier, NotifierBackend};
     use crate::schema::Schema;
     use rusqlite::Connection;
 
@@ -435,6 +483,21 @@ mod tests {
             config_path: cfg,
             policies_hash: "",
         }
+    }
+
+    struct Shim {
+        inner: &'static MockNotifier,
+    }
+    impl NotifierBackend for Shim {
+        fn send(&self, url: &str, event: &crate::flow::NotifyEvent) -> anyhow::Result<()> {
+            self.inner.send(url, event)
+        }
+    }
+
+    fn install_mock() -> &'static MockNotifier {
+        let mock: &'static MockNotifier = Box::leak(Box::new(MockNotifier::new()));
+        install_notifier(Box::new(Shim { inner: mock }));
+        mock
     }
 
     #[test]
@@ -933,4 +996,145 @@ mod tests {
         assert_eq!(status, "planning", "T-live must remain unchanged");
     }
 
+    // --- New tests: Task 1.4, 1.5, 1.6 ---
+
+    /// Verifies the shared helper correctly handles all three cases:
+    /// (a) no tasks → false; (b) one non-abandoned task → true;
+    /// (c) only abandoned task → false.
+    #[test]
+    fn linked_obs_has_active_task_helper_handles_abandoned_only() {
+        let conn = fresh_db();
+        insert_ready_obs(&conn, "L300");
+
+        // (a) no tasks at all → false
+        assert!(!linked_obs_has_active_task(&conn, "L300"), "(a) no tasks must return false");
+
+        // (b) insert a non-abandoned task linking L300 → true
+        let now = "2026-05-09T00:00:00Z";
+        conn.execute(
+            "INSERT INTO tasks \
+             (display_id, status, title, slug, contract, linked_observations, \
+              created_at, updated_at, created_by, updated_by) \
+             VALUES ('T-active', 'planning', 'active', 'active', '{}', '[\"L300\"]', \
+                     ?1, ?1, 'ai_autonomous', 'ai_autonomous')",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        assert!(linked_obs_has_active_task(&conn, "L300"), "(b) active task must return true");
+
+        // (c) flip status to abandoned → false
+        conn.execute(
+            "UPDATE tasks SET status = 'abandoned' WHERE display_id = 'T-active'",
+            [],
+        )
+        .unwrap();
+        assert!(!linked_obs_has_active_task(&conn, "L300"), "(c) only abandoned must return false");
+    }
+
+    /// Regression test for the L087 silent-zombie shape: when the promote_fn
+    /// returns Ok but writes no row (slug collision, txn rollback, etc.),
+    /// run_with_promote_fn must return a non-zero exit code so the
+    /// dispatch_lock is marked terminal_reason='exit_nonzero', not 'ok'.
+    ///
+    /// AC1.6 extension: after the fake-promote (Ok(2)), a second invocation
+    /// with the real promote must succeed (Ok(0)) and create exactly one row —
+    /// proving idempotency passes the gate because no task landed on the first
+    /// call.
+    #[test]
+    fn auto_promote_returns_nonzero_when_promote_lies_about_landing() {
+        let conn = fresh_db();
+        insert_ready_obs(&conn, "L300");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let row = obs_row_json(&conn, "L300");
+
+        // Fake promote: returns Ok without inserting any row.
+        let fake_promote = |_conn: &Connection,
+                            obs_id: &str,
+                            _title: &str,
+                            _slug: &str,
+                            _tier: &str,
+                            _contract: &Value,
+                            _linked: &Value|
+         -> anyhow::Result<String> { Ok(format!("T999-phantom-for-{obs_id}")) };
+
+        let code = run_with_promote_fn(&row, &ctx_for(&conn, &agents, &cfg), fake_promote)
+            .unwrap();
+
+        // (a) Must return a non-zero exit code (expect 2).
+        assert_ne!(code, 0, "silent-zombie fake must return non-zero exit code");
+        assert_eq!(code, 2, "silent-zombie fake must return exactly 2");
+
+        // (b) No tasks row created.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "fake promote must not leave any tasks row");
+
+        // (c) Verify helper still returns false post-call.
+        assert!(!linked_obs_has_active_task(&conn, "L300"), "verify helper must return false after silent fail");
+
+        // AC1.6: second call with the real promote must succeed and create exactly one row.
+        let row2 = obs_row_json(&conn, "L300");
+        let code2 = run_with_promote_fn(&row2, &ctx_for(&conn, &agents, &cfg), promote)
+            .unwrap();
+        assert_eq!(code2, 0, "real promote must succeed on the second call");
+
+        let n2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n2, 1, "exactly one tasks row must exist after real promote");
+    }
+
+    /// Verifies that the silent-zombie path emits an ntfy event with the
+    /// expected fields. Mirrors the orphan_warns_and_notifies_without_failing
+    /// pattern from auto_resolve_observation.rs.
+    #[test]
+    fn auto_promote_silent_fail_emits_ntfy_event() {
+        let _g = crate::paths::test_notifier_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_dir.path().join("config.yaml");
+        std::fs::write(&cfg, "ntfy:\n  url: https://test.local\n").unwrap();
+        let mock = install_mock();
+
+        let conn = fresh_db();
+        insert_ready_obs(&conn, "L300");
+        let agents = AgentsYaml::default_empty();
+        let row = obs_row_json(&conn, "L300");
+
+        let fake_promote = |_conn: &Connection,
+                            obs_id: &str,
+                            _title: &str,
+                            _slug: &str,
+                            _tier: &str,
+                            _contract: &Value,
+                            _linked: &Value|
+         -> anyhow::Result<String> { Ok(format!("T999-phantom-for-{obs_id}")) };
+
+        let code = run_with_promote_fn(&row, &ctx_for(&conn, &agents, &cfg), fake_promote)
+            .unwrap();
+        assert_ne!(code, 0, "silent-zombie fake must return non-zero exit code");
+
+        let events = mock.events();
+        assert_eq!(events.len(), 1, "exactly one ntfy event must be emitted");
+        let (_, ev) = &events[0];
+        assert_eq!(ev.row_id, "L300", "event row_id must match obs display_id");
+        assert!(
+            ev.policy_id_or_actor_halt.contains("auto-promote"),
+            "policy_id_or_actor_halt must contain 'auto-promote'; got: {}",
+            ev.policy_id_or_actor_halt
+        );
+        assert!(
+            ev.policy_id_or_actor_halt.contains("silent fail"),
+            "policy_id_or_actor_halt must contain 'silent fail'; got: {}",
+            ev.policy_id_or_actor_halt
+        );
+        assert!(
+            ev.summary.contains("T999-phantom-for-L300"),
+            "summary must contain the phantom T-id; got: {}",
+            ev.summary
+        );
+    }
 }
