@@ -980,11 +980,15 @@ pub(crate) fn compute_git_diff_summary(
         .unwrap_or_else(|| "main".to_string());
 
     // Step 1: try git merge-base HEAD <resolved_base>.
-    // If resolved_base is "main" but the repo uses "master", also try that.
+    // If resolved_base is "main" but the repo uses "master", also try that and
+    // carry the successful fallback into the base-ahead range/labels below.
+    let mut effective_base = resolved_base.clone();
     let since_ref = run_git(&["merge-base", "HEAD", &resolved_base])
         .or_else(|| {
             if resolved_base == "main" {
-                run_git(&["merge-base", "HEAD", "master"])
+                run_git(&["merge-base", "HEAD", "master"]).inspect(|_| {
+                    effective_base = "master".to_string();
+                })
             } else {
                 None
             }
@@ -1019,16 +1023,16 @@ pub(crate) fn compute_git_diff_summary(
 
     // Section 2: commits on base that are NOT on this branch — shown so the
     // wrap agent does not misattribute main-ahead work as belonging to this task.
-    let base_ahead_range = format!("HEAD..{resolved_base}");
+    let base_ahead_range = format!("HEAD..{effective_base}");
     let base_ahead_log = run_git(&["log", "--oneline", &base_ahead_range])
         .unwrap_or_else(|| "(none — base is not ahead of this branch)".to_string());
 
     format!(
         "```\n\
-        ### On this branch (not on base/{resolved_base}):\n\
+        ### On this branch (not on base/{effective_base}):\n\
         {branch_log}\n\n\
         {branch_stat}\n\n\
-        ### On base/{resolved_base} (not on this branch — do NOT attribute to this task):\n\
+        ### On base/{effective_base} (not on this branch — do NOT attribute to this task):\n\
         {base_ahead_log}\n\
         ```"
     )
