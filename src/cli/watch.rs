@@ -289,6 +289,13 @@ const GLYPH_DOT_AVAILABLE: char = '·';
 /// (10) with headroom for the longest non-cycling label, "reviewing plan" (14).
 const STATUS_COL_WIDTH: usize = 16;
 
+/// Visible-column budget for the operator-disposition label column. Sized
+/// to fit the longest commonly-rendered `Disposition::display_label()`
+/// ("Awaiting integration (inactive)" = 31 chars) without truncation; rarer
+/// longer labels (e.g. "Terminal success (missed ceremony)" = 34) are
+/// elided with the existing truncate helper.
+const DISPOSITION_COL_WIDTH: usize = 32;
+
 // T140 P5: ignition-readiness glyphs surfacing the operator_disposition
 // plan-start bucket per row. Additive to existing watch columns; the legacy
 // status text remains in place so dashboards / scripts that grep for it
@@ -321,10 +328,12 @@ fn watch_today() -> DateTime<Utc> {
     })
 }
 
-/// Compute the ignition-readiness glyph for a single watch row. Single
-/// source of truth — the `Disposition` enum lives in `handlers::disposition`
-/// and the bucket mapping is `Disposition::plan_start_bucket`.
-fn task_disposition_glyph(t: &crate::tui::data::TaskRow) -> char {
+/// Compute the ignition-readiness glyph + operator-disposition label for a
+/// single watch row. Single source of truth — the `Disposition` enum lives
+/// in `handlers::disposition`; the glyph comes from
+/// `Disposition::plan_start_bucket` and the label comes from
+/// `Disposition::display_label`.
+fn task_disposition_glyph_and_label(t: &crate::tui::data::TaskRow) -> (char, &'static str) {
     let mut row_json = json!({
         "display_id": t.display_id,
         "status": t.status,
@@ -336,13 +345,14 @@ fn task_disposition_glyph(t: &crate::tui::data::TaskRow) -> char {
         row_json["accepted_at"] = json!(at);
     }
     let disp = operator_disposition(&row_json, watch_today(), &NoBranchProbe);
-    match disp.plan_start_bucket() {
+    let glyph = match disp.plan_start_bucket() {
         PlanStartBucket::WouldRun => GLYPH_WOULD_RUN,
         PlanStartBucket::Inactive => GLYPH_INACTIVE,
         PlanStartBucket::NeedsOperator => GLYPH_NEEDS_OPERATOR,
         PlanStartBucket::Blocked => GLYPH_BLOCKED,
         PlanStartBucket::Historical => GLYPH_HISTORICAL,
-    }
+    };
+    (glyph, disp.display_label())
 }
 
 #[derive(Debug)]
@@ -415,11 +425,14 @@ fn render_tui_task_line(t: &crate::tui::data::TaskRow) -> String {
     let status_str = format!("{}{}{}", task_status_color(&t.status), t.status, ANSI_RESET);
     let pad = STATUS_COL_WIDTH.saturating_sub(visible_width(&status_str));
     let pad_str = " ".repeat(pad);
-    // T140 P5: ignition-readiness glyph derived from operator_disposition.
-    // Additive — the legacy status text and existing columns are unchanged.
-    let glyph = task_disposition_glyph(t);
+    // T140 P5: ignition-readiness glyph + operator-disposition label, both
+    // sourced from handlers::disposition::operator_disposition. Additive —
+    // the legacy status text and existing columns remain in place so
+    // dashboards / scripts that grep for status text don't regress.
+    let (glyph, label) = task_disposition_glyph_and_label(t);
+    let label_text = truncate(label, DISPOSITION_COL_WIDTH);
     format!(
-        "  {glyph} {ANSI_CYAN}{:<5}{ANSI_RESET} {status_str}{pad_str} {:<50}{claimed} {ANSI_DIM}{updated}{ANSI_RESET}\n",
+        "  {glyph} {ANSI_CYAN}{:<5}{ANSI_RESET} {status_str}{pad_str} {:<50} {ANSI_DIM}{label_text}{ANSI_RESET}{claimed} {ANSI_DIM}{updated}{ANSI_RESET}\n",
         t.display_id, title
     )
 }
@@ -1017,6 +1030,64 @@ mod tests {
             plain.contains("oldest started ?h ago"),
             "expected '?h' placeholder when claimed_at is NULL:\n{plain}"
         );
+    }
+
+    /// T140 P5 (revise cycle 2): the watch task line must surface the
+    /// operator-disposition label text — not just a glyph — so the operator
+    /// can read disposition without mentally re-deriving it from raw status.
+    /// Sourced single-source from `handlers::disposition::operator_disposition`.
+    #[test]
+    fn render_tui_task_line_surfaces_disposition_label() {
+        use crate::tui::data::TaskRow as DataTaskRow;
+
+        let cases: &[(&str, &str, &str, &str)] = &[
+            // (display_id, status, activation, expected_label_substring)
+            ("T901", "executing", "active", "Active engine work"),
+            (
+                "T902",
+                "planning",
+                "active",
+                "Engine actionable (active)",
+            ),
+            (
+                "T903",
+                "planning",
+                "inactive",
+                "Engine actionable (inactive)",
+            ),
+            ("T904", "blocked", "inactive", "Blocked (recoverable)"),
+            ("T905", "schema_migrated", "inactive", "Terminal success"),
+        ];
+        assert!(
+            cases.len() >= 3,
+            "phase brief mandates ≥3 representative rows"
+        );
+
+        for (display_id, status, activation, expected_label) in cases {
+            let row = DataTaskRow {
+                display_id: (*display_id).to_string(),
+                status: (*status).to_string(),
+                title: format!("watch fixture {display_id}"),
+                updated_at: "2026-05-09T00:00:00Z".to_string(),
+                activation: Some((*activation).to_string()),
+                ..Default::default()
+            };
+            let rendered = strip_ansi(&render_tui_task_line(&row));
+            assert!(
+                rendered.contains(expected_label),
+                "{display_id}: expected disposition label `{expected_label}` in watch row; got:\n{rendered}"
+            );
+            // Existing columns must remain present so dashboards / scripts
+            // that grep for status text don't regress.
+            assert!(
+                rendered.contains(*status),
+                "{display_id}: existing status text `{status}` must remain in watch row; got:\n{rendered}"
+            );
+            assert!(
+                rendered.contains(*display_id),
+                "{display_id}: display_id must remain in watch row; got:\n{rendered}"
+            );
+        }
     }
 
     #[test]
