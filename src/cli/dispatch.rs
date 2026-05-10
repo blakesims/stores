@@ -310,6 +310,52 @@ pub fn dispatch(
                         handlers::external_review_run::run_external_review_row(
                             schema, &conn, display_id,
                         )?;
+                    } else if verb == "create-pending" && store.name == "external_reviews" {
+                        let task_id = sub
+                            .get_one::<String>("task_id")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let base_sha = sub
+                            .get_one::<String>("base-sha")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let head_sha = sub
+                            .get_one::<String>("head-sha")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let tx = conn.unchecked_transaction()?;
+                        let next_id_num: i64 = tx.query_row(
+                            "SELECT COALESCE(MAX(id), 0) + 1 FROM external_reviews",
+                            [],
+                            |r| r.get(0),
+                        )?;
+                        let display_id = format!("ER{next_id_num:03}");
+                        let attempt: i64 = tx.query_row(
+                            "SELECT COALESCE(MAX(attempt), 0) + 1 FROM external_reviews WHERE task_id=?1",
+                            rusqlite::params![task_id],
+                            |r| r.get(0),
+                        )?;
+                        let now = crate::handlers::row::now_iso8601();
+                        tx.execute(
+                            "INSERT INTO external_reviews (display_id,status,created_at,updated_at,created_by,updated_by,task_id,attempt,adapter,base_sha,head_sha,contract_ref,plan_ref,wrap_log_ref,diff_ref,prior_review_ref) VALUES (?1,'pending',?2,?2,?3,?3,?4,?5,'external_review',?6,?7,?8,?9,?10,?11,?12)",
+                            rusqlite::params![display_id, now, "ai_autonomous", task_id, attempt, base_sha, head_sha, format!("tasks:{task_id}:contract"), format!("tasks:{task_id}:plan"), format!("tasks:{task_id}:wrap_log"), format!("tasks:{task_id}:diff"), format!("tasks:{task_id}:cycles")],
+                        )?;
+                        let row_id = tx.last_insert_rowid();
+                        crate::db::insert_transition_history(
+                            &tx,
+                            "external_reviews",
+                            row_id,
+                            &display_id,
+                            "",
+                            "pending",
+                            "create-external-review",
+                            "ai_autonomous",
+                            None,
+                            None,
+                            Some("manual create-pending recovery"),
+                        )?;
+                        tx.commit()?;
+                        println!("Created {display_id} for {task_id}");
                     } else if verb == "recover-stale-base" && store.name == "tasks" {
                         let display_id = sub
                             .get_one::<String>("display_id")

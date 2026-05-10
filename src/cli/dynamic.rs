@@ -612,7 +612,9 @@ fn build_store_command(schema: &Schema) -> Command {
     // external_reviews run is a narrow operator-control verb: dispatch exactly
     // one review row without daemon startup sweeps/watchdog/engine-runner.
     if schema.name == "external_reviews" {
-        store_cmd = store_cmd.subcommand(build_external_review_run_cmd());
+        store_cmd = store_cmd
+            .subcommand(build_external_review_run_cmd())
+            .subcommand(build_external_review_create_pending_cmd());
     }
 
     // `guide` is also registered on the `gate` store (full form), which has no workflow.
@@ -1037,6 +1039,15 @@ fn build_run_integration_cmd() -> Command {
                 .help("Display ID of the integration_queued task (T###)")
                 .required(true),
         )
+}
+
+/// Build the `external_reviews create-pending` command.
+fn build_external_review_create_pending_cmd() -> Command {
+    Command::new("create-pending")
+        .about("Create a fresh pending external review for a task head (operator recovery)")
+        .arg(Arg::new("task_id").help("Task display ID").required(true))
+        .arg(Arg::new("base-sha").long("base-sha").required(true))
+        .arg(Arg::new("head-sha").long("head-sha").required(true))
 }
 
 /// Build the `external_reviews run` command.
