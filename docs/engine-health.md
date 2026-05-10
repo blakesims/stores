@@ -2,26 +2,25 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-09 engine-control incident update. Watch/flowtop direction is now durable (`docs/ui-ux.md`, T139), T138's generic integration lane shipped, and T140 is in flight on the ignition-ready activation/cleanup path. Two new safety findings dominate the current risk picture: (1) manual `tasks drive` inherited main cwd when `workspace_path` was empty, letting T140 agents dirty main; direct fail-closed fix is implemented on branch `fix/drive-worktree-fail-closed` (`ec087fe`) and T140 has been moved to its own worktree; (2) L543/10.06 found daemon self-reexec can jump from PATH's fresh 0.6.0 binary to stale canonical `~/.local/share/stores/bin/stores` 0.5.0, leaving the daemon stopped / unable to dispatch `builtin:integrate`. Until the canonical binary is synced or self-reexec target selection is repaired, broad daemon automation is not trustworthy; prefer single-row/manual control and do not disturb the 10.06 quick-fix lane.
+**Last updated:** 2026-05-10 cockpit/ignition refresh. T138's generic integration lane and T140's ignition cleanup/activation gate are now landed and installed (`T140 status=schema_migrated`; merge `3b6ed47`). T139 is the only active engine row (`executing`, phase 4/4) and remains the current observability/cockpit lane. The previous daemon-binary/worktree incident class is less urgent after T140/manual recovery, but still informs the top risk: control-plane truth must be visible before broad automation. The live queue is clean at the intake layer; the remaining backlog problem is not volume, it is prioritization/ranking and stale historical accepted rows that should be derived away rather than bulk-mutated.
 
 ## The picture in one sentence
 
-**The engine can now be manually stabilized and can ship real work, but operator trust is still bounded by ceremony cost, lifecycle safety visibility, and weak observability.** The immediate queue is clean; the upstream problem is control-plane fidelity: typed safety invariants before agent work, right-sized ceremony, store-flow watch surfaces, and empirical runner/model selection.
+**The engine can ship real work and the immediate queue is no longer the blocker; operator trust is now bounded by whether the control plane tells the truth.** The live pain is prioritization and legibility: distinguish active work from historical exhaust, rank observations by scheduling/severity, run authoritative external review at integration time, and keep lifecycle/binary/worktree safety visible enough that autonomy is safe to re-enable.
 
 ## Read-this-first priority ladder
 
-1. **Unblock daemon binary identity (L543 / 10.06) without disturbing active task worktrees.** The daemon currently reexecs from fresh PATH 0.6.0 into stale canonical 0.5.0, so `builtin:integrate` is unavailable and accepted rows will not merge automatically. 10.06 is pursuing the quick fix: sync the canonical binary. Do not run competing `cargo install` / daemon restart experiments from this lane.
-2. **Land drive/worktree isolation fail-closed.** Manual `tasks drive` must reject empty `workspace_path`; runners must never inherit main cwd. Direct fix exists on `fix/drive-worktree-fail-closed` (`ec087fe`) with focused tests; merge after review, then backport/update any running operator scripts.
-3. **Let T140 continue only in its dedicated worktree.** T140 has moved to `/home/blake/repos/experiments/stores-T140-engine-ignition-cleanup-activation-gate`; main was cleaned. Do not rebase/clean that worktree while its drive is active.
-4. **Ship L540/T139 watch cockpit Phase 1 through the engine.** `stores watch` should become a store-flow cockpit, not a raw task/observation dump. `docs/ui-ux.md` is now the durable doctrine; T139 is the implementation row.
-5. **Resume/drive safety invariants before throughput.** `9f11fc5` made `resume` conservative (`blocked → planning`). Next quick main-lane improvement: make status/watch/next-action clearly expose why a row is safe/unsafe to resume, and distinguish stale lock debris from live work.
-6. **Right-sized ceremony / T1 fast path.** T116 was a tiny exact-token matcher but consumed multiple long cycles. The engine preserved correctness, but at the wrong cost. Design a lightweight path with focused tests/review for local cosmetic work.
-7. **Empirical runner/model selection.** We changed T138 planner/executor to Opus based on judgment, not data. Capture role×runner×model, prompt/config hash, duration, token/cost, and outcome so model choice stops being vibes.
-8. **Native intake triage / draft drain.** Intake drafts remain a backlog. The front door needs to route/dedupe/escalate without queue-curator hand curation.
-9. **Auto-resolve / auto-promote edge hardening.** Manual cleanup closed the current remint holes, but the subscriber model still needs accepted/closed_out_of_band auto-resolve coverage and safe abandoned-task re-ratify semantics.
-10. **Manual-control primitives.** `external_reviews run <ERID>` helped. Need equivalent narrow verbs/status surfaces for single-row promote/scaffold/drive/review without daemon startup sweeps.
-11. **Stale lock / zombie cleanup observability.** Stale `dispatch_locks` were restart-safe but opaque. Watch/status should distinguish harmless stale debris from live work.
-12. **Priority + file-overlap scheduler.** Only after the queue is clean and visible; otherwise concurrency manufactures stale-base/rebase debt.
+1. **Finish/land L540/T139 watch cockpit P1.** This is the current active work and the highest-leverage operator-trust lane: `stores watch` must become a store-flow cockpit, not a raw mixed dump. T139 should hide historical exhaust, surface live lanes, and make drill-down explicit.
+2. **Move authoritative external review to the integration point.** T138 gave the substrate a real integration lane, but the current review timing can still be invalidated by refresh/rebase/main movement. The durable shape should be: candidate refreshes against current main → authoritative ER on the to-be-merged head → merge/post-land.
+3. **Make prioritization real, not markdown-only.** `priority`, `priority_rank`, and `priority_rank_at` exist, and watch/list can read them, but current open observations have no `priority_rank` values. L084 names the severity-vs-scheduling conflation; the missing primitive is a focus/rank surface that turns the observation backlog into an ordered next-pick queue.
+4. **Keep control-plane safety visible.** T140 made ignition safer (`operator_disposition`, `plan-start`, cleanup/activation), and direct fixes/manual verbs repaired recent integration gaps. Keep status/watch/plan-start explaining stale binary, stale lock, workspace, zombie, and held-runner conditions in operator language.
+5. **Right-sized ceremony / T1 fast path.** Tiny safe repairs still pay too much ceremony. Preserve gates for risky work, but add a mechanically-audited fast path for small local fixes.
+6. **Empirical runner/model selection.** Per-agent telemetry exists, but model/runner choice is still not a first-class experiment loop. Capture role×runner×model, prompt/config hash, duration, token/cost, and outcome before tuning by vibe.
+7. **Auto-resolve / lifecycle residue hardening.** Recent cleanup routed the current intake residue, but L555 shows schema edges still strand obsolete observations (`investigating → resolved` lacks autonomous close-as-addressed). Prevent remint/residue recurrence instead of periodic sweeps.
+8. **Manual narrow-control verbs.** The session proved narrow recovery verbs help (`enqueue-integration`, `run-integration`, `external_reviews create-pending`). Keep adding audited single-row controls where daemon startup sweeps are too broad.
+9. **Priority + file-overlap scheduler.** Only after ranking/visibility is trustworthy; otherwise concurrency manufactures stale-base and rebase debt.
+
+**Not current priorities:** the inactive accepted rows `T002`, `T005`, `T015`, and `T018` are historical/awaiting-integration residue, not the next strategic queue. `T015` may be superseded by T139; `T002` is useful later after telemetry; `T005`/`T018` are low unless topology becomes the active operator bottleneck. Prefer derived visibility over bulk status mutation.
 
 ## Status legend
 
@@ -38,7 +37,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 ## Layer-by-layer state
 
 ### Layer 1 — Runtime / dispatch reliability
-*Drive-loop reliability is stronger, but two control-plane gaps are now top-of-stack. Watchdog catches silent zombies + ignores pre-deploy stale pids; retry-on-failure reschedules transient flakes. However, L543 shows stale daemon binary self-reexec can downgrade a fresh 0.6.0 launch into canonical 0.5.0, disabling new builtins; and the T140 incident showed manual drive could inherit main cwd when `workspace_path` was empty. Treat both as safety blockers before broad daemon automation.*
+*Drive-loop reliability is stronger and T140 reduced the ignition hazard, but runtime trust still depends on visible identity and liveness. Watchdog catches silent zombies; retry-on-failure reschedules transient flakes; the remaining question for the operator is whether a given daemon/binary/workspace/lock condition is live, stale, harmless, or blocking.*
 
 | obs | state | what hurts |
 |---|---|---|
@@ -58,8 +57,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L134 | ✅ T050 | typed dispatch_locks lifecycle umbrella: postcondition_id+args, daemon_epoch, terminal_reason, next_retry_at; shipped via close-out-of-band after codex PASS/rebase reconciliation |
 | L141 | ✅ T049/T050 | auto-drive `ok`-on-dispatch concern translated into L134 typed postcondition semantics; open-lock invariant superseded by `drive_pid_recorded_or_terminal` + watchdog on task pid |
 | L149 | ⚪ T2 | daemon/on-disk binary drift after cargo-install kills fresh auto-drive subprocesses; restart workaround; folds into L011 + L134 observability |
-| L543 | 🟢 direct/10.06 | daemon self-reexec chooses stale canonical `~/.local/share/stores/bin/stores` 0.5.0 after starting fresh PATH 0.6.0; `builtin:integrate` unavailable and daemon stops. 10.06 quick-fix lane is syncing canonical binary; avoid competing daemon/binary changes here. |
-| GAP-drive-worktree-required | 🟢 direct | manual `stores tasks drive` accepted empty `workspace_path` and runners inherited process cwd, dirtying main during T140. Direct fail-closed fix exists on `fix/drive-worktree-fail-closed` (`ec087fe`): reject empty/missing workspace before spawn; valid path still propagates. |
+| L543 | ⚪ high | daemon/binary/schema identity remains a high-priority class: stale or half-migrated binaries must fail loudly and be visible. The acute T140 integration recovery is fixed/installed, but the observation remains open and should be re-triaged against current code before promotion. |
+| GAP-drive-worktree-required | ✅ T140/direct | manual drive/worktree ignition hazard was contained during T140; T140 landed installed and `plan-start`/activation now expose safer operator state. Keep any remaining fail-closed workspace-path checks verified before broad daemon automation. |
 | L150 | ⚪ T2 | halt/deploy-blocked subscriber mislabels blocked drive failures as deploy_blocked merge-conflict observations; another symptom of untyped terminal state / event postconditions, folded into L134/L135 |
 | L068 | ✅ T080 | cross-project daemon SIGTERM scoped per-project (cross-listed in Layer 8) |
 | GAP-stop-foreground | — | `stores agents stop` requires `--detach`-mode pidfile; foreground daemons can't be stopped via the verb. Hit during 2026-05-08 cleanup. |
@@ -120,6 +119,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | GAP | — | acceptance-time precheck for "task touches files with uncommitted main-side changes → accept-merge will fail" |
 
 ### Layer 5 — Discovery / observability
+*This is the current strategic bottleneck. T139 is in flight to turn watch into a cockpit; T140 added derived activation/operator disposition; but prioritization is still mostly human-curated markdown. No open observations currently carry `priority_rank`, so the substrate can classify urgency but cannot yet rank next picks mechanically.*
 
 | obs | state | what hurts |
 |---|---|---|
@@ -132,6 +132,9 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L059 | ✅ T072 | runs SQL VIEW + atomic-backlink-with-dispatch_submit shipped. `stores runs list/show` queries typed view `(display_id, phase, cycle, role, transcript_path)`; transcript_path embedded in cycles JSON in same TX as submit (Pi-critical atomicity invariant). |
 | L012 | ⚪ T3 | no inspector for agent context (full graph view: aggregate, post-run, edit) |
 | L188/T083 | ✅ T083 | final external review is substrate-native: T2/T3 wrap creates typed `external_reviews`; configurable `review.runner` supports codex, pi, and claude-code; `review.max_parallel` caps the lane; `tooling_held` held reasons are visible in agents/watch; T2/T3 accept requires a current-head PASS while T1 remains lightweight. |
+| L529/L540/T139 | 🟢 T139 | watch/flowtop cockpit P1 is active: default surface should show store-flow, active lanes, recent terminal exhaust only by policy, and focused detail instead of raw task/observation/intake noise. |
+| L084 | ⚪ T2 | priority conflates scheduling and severity; `priority_rank` exists but is unused (`0` ranked open observations as of 2026-05-10). Need a focus/ranking primitive before backlog ordering is trustworthy. |
+| L554 | ⚪ T2 | cluster_key registry coverage gap: cleanup had to reject/drop legitimate friction because the curated key set was too narrow. This is a front-door fidelity issue, not just taxonomy polish. |
 
 ### Layer 6 — Auth / security
 
@@ -153,7 +156,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | I001 | ✅ T068 | `required_when` parser now supports `IN [...]` membership and `expr OR expr` composition (the FIX 5 surface from T053 codex-revise — first real-world use of the gatekeeper Router seam) |
 
 ### Layer 8 — Orchestration / triage discipline
-*Investigator pull-shape shipped (T038/L043) — orchestrator now has a substrate primitive for "spawn a fresh sandboxed dive on this question". Auto-resolve subscriber shipped (T037/L049). The auto-investigator-fires-on-unblock-of-open-obs primitive is still the #1 strategic weakness; ~30 open obs sit without ratified contracts and the engine can't draft them itself yet.*
+*The front door is structurally much better: intake exists, investigator pull-shape shipped, auto-investigator exists, and T140 drained the current intake residue. The live weakness is no longer raw draft volume; it is ranking, dedupe/cluster fidelity, and closure edges for obsolete rows.*
 
 | obs | state | what hurts |
 |---|---|---|
@@ -168,7 +171,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L135 | ✅ T063 | Check primitive P1 shipped: trait + compile-time registry + structured CheckResult; two adapters (L134 dispatch postconditions; T053 gatekeeper validator) prove the shape; broader site adoption is follow-up; pairs with L172 fast-track auto-execution |
 | L171 | ✅ T077 | dedicated `architecture_reviews` typed store (P3 of T045 design) shipped: A### namespace; interpret/amend split; seven typed verdict outcomes; amend `cascade_decisions` + human-token `ratify-amend`; flexible `supersedes`; gatekeeper `arch_review_candidate` writes A### plus `pending_architecture_review=true`; reframe/merge U1 gate clearing; idempotent backfill; architecture-reviews render projection |
 | L172 | ⚪ T3 | **deferred** post-T053: fast-track auto-execution + L135 Check primitive (P4 of T045 design); deterministic check record audit shape |
-| L173 | ⚪ T3 | **deferred** post-T053: curated cluster_key registry + watch/observability dashboards (P5 of T045 design) |
+| L173 | ✅ T107 | curated cluster_key registry + watch/observability dashboard work shipped enough to resolve L173, but L554 shows registry coverage is still too narrow in real cleanup. |
 | L072 | ⚪ — | code-reviewer REPLAN gate dead-ends as `blocked` instead of routing back to planning |
 | L023 | ✅ T092 | observations `next-id` verb + JSON envelope shape shipped |
 | L124 | ✅ T043 | `tasks abandon <id> --reason <text>` verb retires stale/superseded/duplicate/misadd rows to terminal `abandoned` without burning a drive cycle; tier-A token-mediated; idempotent; watch/TUI bucket: terminal-history (not in-flight). Allowed from 9 non-terminal states incl. complete; refused from 5 successful terminals (accepted/rejected/cargo_installed/schema_migrated/closed_out_of_band). |
@@ -190,40 +193,55 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L199 | ✅ T097 | external_review verdict parser tolerates codex prose (no longer requires leading PASS/REVISE/TOOLING_FAILURE token) |
 | L077 | ✅ T082 | substrate persistence for high-leverage derivation tokens: `intent_contract.hardened_*` shipped |
 | I002 | ⚪ — | **code-reviewer / codex grepping `.sqlite` raw bytes treats stale page data as live row state** — burns review cycles on false-positive transitions (T078 c1-c3 burn). Filed via intake `I002`; doctrine fix pending: SOP edit + reviewer validator forbidding raw-byte inspection of sqlite files; substitute `sqlite3 SELECT` or substrate CLI verbs. |
-| GAP-cascade-dedup | — | Subscriber should dedup `deploy-blocked: merge conflict` observations on `(task_id, conflict_signature)` to avoid the L465–L479 dupe storm seen during the 2026-05-08 T086 cascade (one obs per tick × 6 affected branches × hours = 15+ duplicate rows). Tier T1. |
+| L555 | ⚪ T2 | obsolete investigated/investigating observations can be structurally unreachable to autonomous cleanup because `close_as_addressed` lacks an `investigating → resolved` edge; add a safe close path or equivalent recovery verb. |
+| GAP-cascade-dedup | — | Mostly covered by L483/T099 for framework-filed merge-conflict signatures, but keep an eye on new duplicate surfaces (L544) where subscriber cadence still emits repeated observations. |
 
 ## Architect big-picture priorities
 
-This doc is operational, but it should carry the architect's current strategic map. As of 2026-05-08, the priorities are:
+As of 2026-05-10, the strategic map is:
 
-1. **Control-plane safety before autonomy:** lifecycle invariants must make unsafe transitions impossible independent of model quality. T123/I033 is the proof.
-2. **Right-sized ceremony:** tiny safe repairs need a fast path; high-risk work still needs full contract/review/accept gates.
-3. **Front-door fidelity:** make intake/observations/watch store-flow-shaped and legible rather than a flat mixed list. `docs/ui-ux.md` and L540/T139 now define the first concrete implementation path.
-4. **Architect systematization:** route architecture-gray work to `architecture_reviews` against project Heart/Philosophy/Primitives; keep local agents local and Architect global.
-5. **Empirical engine telemetry:** make runner/model/harness/prompt choices measurable. Capture tokens/cost, prompt/config hashes, role/harness/model, wall time, outcomes, and experiment grouping before trying statistical inference.
-6. **Safe throughput:** once the queue is trustworthy, add priority + file-overlap scheduling so concurrency does not manufacture rebase debt.
+1. **Truthful control surfaces before more autonomy:** the system can ship, but the operator must be able to see which rows are live, historical, blocked, stale, or merely noisy.
+2. **Front-door fidelity and ranking:** intake/observations/watch should produce an ordered next-pick queue. Today `priority_rank` exists but is empty, so engine-health markdown is still doing too much work.
+3. **Review/integration correctness:** external review must be current with the exact integration candidate after refresh/rebase, not merely current when wrap happened.
+4. **Right-sized ceremony:** keep full ceremony for risky work; create a checked fast path for tiny deterministic repairs.
+5. **Empirical engine telemetry:** use the shipped metrics/runs surfaces to measure runner/model/prompt outcomes before model-policy changes.
+6. **Safe throughput:** only add priority/file-overlap scheduling once ranking and visibility are trustworthy.
 
 ## Highest-leverage next picks
 
-Operator-trust + actionability layers are much stronger after the 2026-05-08 recovery batch. The bottleneck has shifted: **the engine can finish work better than it can understand, sort, and visualize incoming work.** The next throughput gains come from front-of-engine fidelity, right-sized ceremony, empirical telemetry, then scheduler throughput.
+1. **Finish T139.** It is the active row and directly repairs the operator cockpit. Do not distract it with legacy accepted rows.
+2. **Design/ship integration-point external review.** Make ER authoritative immediately before merge after branch refresh; this reduces stale-review churn and false confidence.
+3. **Add a real focus/ranking primitive.** Write `priority_rank`/`priority_rank_at`, separate severity from scheduling (L084), and render next-picks from live substrate rows instead of this markdown doc.
+4. **Close the watch/backlog loop:** after T139 lands, verify `stores watch`, `stores engine plan-start`, and open observations agree on what is actionable; hide historical accepted residue by derivation, not DB mutation.
+5. **Fix lifecycle residue edges:** especially L555 (`investigating → resolved` cleanup) and any remaining duplicate auto-file surfaces (L544/L554).
+6. **T1 fast path.** Reduce ceremony cost for tiny safe fixes with deterministic checks.
+7. **Telemetry/model policy.** Use observed role×runner×model outcomes before changing per-role model defaults.
+8. **File-overlap scheduler.** Defer until the queue is ranked and stale-base/review timing is fixed.
 
-1. **L538/T138 integration lane v2** — current clean high-leverage task; let it finish single-row/manual-controlled and review contract drift aggressively.
-2. **L540/T139 watch store-flow cockpit P1** — current clean observability task; implement the read-only store strip + focused table + selected detail shape from `docs/ui-ux.md`.
-3. **Quick main-lane engine improvement:** add a narrow status/inspection surface for stale dispatch locks vs live work. The daemon/locks warning keeps appearing, but the operator needs to know impact: harmless stale debris, live claimed work, or subscriber-blocking fault.
-4. **T1 ceremony fast path** — T116 shows the system is correct-ish but too expensive for small fixes.
-5. **Metrics instrumentation P1** — make runner/model/prompt choices empirical before further tuning Opus vs Sonnet vs Pi vs Codex.
-6. **Native intake triage / draft drain** — reduce dependency on ad hoc queue-curator sweeps.
-7. **Auto-resolve/auto-promote subscriber edges** — prevent ready-row residue and remint windows from recurring.
-8. **Manual narrow-control verbs** — more `external_reviews run <ERID>`-style single-row operations; fewer daemon startup sweeps.
-9. **Priority + file-overlap scheduler** — after visibility and safety are solid.
+Current picture: intake is clean, tasks have one active engine row, and observations are the main backlog. The backlog should be handled by cluster/rank, not oldest-first. Historical accepted tasks (`T002`, `T005`, `T015`, `T018`) are not strategic blockers; revisit only after T139 clarifies what UI/topology/model-config work remains.
 
-Current picture: the queue is clean and the engine can do real work, but the upstream bottleneck is trust: safe lifecycle transitions, right-sized ceremony, legible control surfaces, and measured runner choices. The best quick main-thread improvement is not to implement T139 directly, but to add a small inspection primitive/status surface that explains stale dispatch locks and daemon/manual-engine impact in operator language.
+## Doc size / archival policy
 
+This file is now large enough that it should stop accumulating full history. Keep it as the **current health dashboard**, not the permanent changelog.
+
+Keep here:
+- the one-sentence picture, priority ladder, architect priorities, and highest-leverage next picks;
+- open/high-risk rows and recently-shipped items from the last few days that still explain current decisions;
+- shipped rows only when they define a current invariant or prevent re-litigation.
+
+Archive or compress:
+- old ✅ rows whose invariant is now uncontroversial and covered by tests/docs;
+- long implementation detail for shipped tasks (move to `docs/worklog/` or a dated archive such as `docs/archive/2026-05/engine-health-history.md`);
+- stale “recently shipped” entries older than the current operational window.
+
+Do **not** delete history outright: it is useful for debugging doctrine drift. But the main `engine-health.md` should become a curated index with links to dated detail, otherwise the current priorities drown in solved incidents.
 
 ## Recently shipped
 
 | date | task | obs | what changed |
 |---|---|---|---|
+| 2026-05-10 | T140/direct | — | ignition cleanup/activation gate landed and installed. `stores engine plan-start` reports derived activation/operator disposition; manual integration recovery verbs and external-review pending creation were added during recovery; T140 is `schema_migrated`. |
+| 2026-05-10 | direct | L541/I036/I037 | cleanup pass closed stale L541 and routed intake residue into observations L554/L555; watch default now hides resolved/wont_fix observations, routed/dropped intake, and stale terminal exhaust by derived visibility. |
 | 2026-05-09 | direct | I033/L519 | Resume safety repaired after T123 unsafe resume reproduced the contamination class. `tasks resume` now always routes `blocked → planning`; schema no longer has a fallthrough `blocked → ready` resume edge. Tests updated around conservative resume. Commit `9f11fc5`. |
 | 2026-05-09 | T116 | L180 | T1 exact-token silent_zombie matcher shipped after manual-control drive. Final diff tightens `src/tui/data.rs`, updates watch classification tests and live-realistic fixture. Shows correctness benefit of review but excessive ceremony cost for tiny fixes. |
 | 2026-05-09 | T124 | L034 | Direction-aware wrap diff attribution shipped: branch/base sections, workspace-local git diff computation, master fallback fix. Codex caught two substantive issues before accept. Merge `94357a1`; schema repair for ready-observation disposition `575615b`. |
