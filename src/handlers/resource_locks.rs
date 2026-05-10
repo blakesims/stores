@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use uuid::Uuid;
 
 use crate::schema::actor::Actor;
@@ -73,7 +73,7 @@ pub fn acquire(conn: &rusqlite::Connection, p: &AcquireParams<'_>) -> Result<Fen
     if !matches!(p.owner_kind, "task" | "job") {
         bail!("owner_kind must be task or job");
     }
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let existing: Option<(String, String, Option<String>)> = tx.query_row(
         "SELECT owner_display_id, fencing_token, expires_at FROM resource_locks WHERE resource_id=?1",
         params![p.resource_id],
@@ -205,7 +205,7 @@ pub fn recover_stale(
     now: DateTime<Utc>,
     invoker: Actor,
 ) -> Result<Vec<RecoveredLock>> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let cutoff = fmt(now);
     let rows: Vec<RecoveredLock> = {
         let mut stmt = tx.prepare("SELECT resource_id, owner_display_id, fencing_token FROM resource_locks WHERE expires_at IS NOT NULL AND expires_at < ?1 ORDER BY resource_id")?;
