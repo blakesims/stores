@@ -6,6 +6,7 @@ Story summary
 Current state
   status: executing
   priority/tier: T1
+  claimed: — by —
 
 Why it matters
   done_when: T701 done when operators understand state
@@ -40,6 +41,7 @@ Story summary
 Current state
   status: executing
   priority/tier: T2
+  claimed: — by —
 
 Why it matters
   done_when: T702 done when operators understand state
@@ -74,6 +76,7 @@ Story summary
 Current state
   status: code_review
   priority/tier: T3
+  claimed: — by —
 
 Why it matters
   done_when: T703 done when operators understand state

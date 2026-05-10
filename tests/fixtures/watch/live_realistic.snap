@@ -4,9 +4,9 @@ external review: unavailable / not installed
 
 system-alert: daemon DEAD; 8 dangling locks; oldest started 8h ago
 ▾ HELD-INTAKE (1)
-  I001  needs_info               priority:normal held:missing owner · next:recon
+  I001  needs_info               priority:normal source:- age:NNN held:missin
 ▾ RATIFY-U1 (3)
-  L900  open                     priority:normal ratify ready contract 1
+  L900  open                     priority:normal contract:ready ratify ready con
 ▾ OBSERVATIONS (7)
   L001  open                     priority:normal ×76 deploy-blocked: task T300 m
   L077  open                     priority:normal ×47 deploy-blocked: task T301 m
@@ -18,8 +18,8 @@ system-alert: daemon DEAD; 8 dangling locks; oldest started 8h ago
 ▾ ACCEPT-U3 (4)
   T400  in_review                wrap → external review: unavailable / not insta
 ▾ HELD-DEPLOY (7)
-  T300  deploy:retry-deploy-recoverable tier:T2 · reason:retry-deploy-recoverabl
+  T300  deploy:retry-deploy-recoverable runner:none age:NNN tier:T2 · reason:
 ▾ HELD-AI-REVIEW (2)
-  T500  plan_review              plan ◐ tier:T2 · planner AI review
+  T500  plan_review              plan ◐ runner:none age:NNN tier:T2 · planner
 ▾ HELD-ZOMBIE (2)
-  T600  blocked:unknown          tier:T2 · reason:silent_zombie · silent zombie
+  T600  blocked:unknown          runner:none age:NNN tier:T2 · reason:silent_

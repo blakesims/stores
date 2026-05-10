@@ -264,7 +264,39 @@ fn render_snapshot_text(app: &mut App) -> String {
     while all_lines.last().is_some_and(|line| line.is_empty()) {
         all_lines.pop();
     }
-    format!("{}\n", all_lines.join("\n"))
+    let raw = format!("{}\n", all_lines.join("\n"));
+    normalize_age(&raw)
+}
+
+/// Replace `age:Xh` / `age:Xm` / `age:<1m` tokens with `age:NNN` so the
+/// time-relative T141 columns don't drift the byte-exact snapshot. Operates
+/// on chars to preserve multi-byte UTF-8 around the ASCII `age:` token.
+fn normalize_age(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == 'a' {
+            // Try to match "age:" exactly.
+            let cloned: String = chars.clone().take(3).collect();
+            if cloned == "ge:" {
+                // Consume "ge:".
+                chars.next();
+                chars.next();
+                chars.next();
+                out.push_str("age:NNN");
+                while let Some(&p) = chars.peek() {
+                    if p.is_ascii_digit() || p == '<' || p == 'h' || p == 'm' || p == '-' {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 #[test]

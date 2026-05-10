@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use super::daemon::Liveness;
 use super::data::{
-    classify_with_options, is_terminal_task_status, store_lane_for_row, ExternalReviewState, Row,
-    Section, StoreLane, SystemHealth, WatchClassifyOptions,
+    classify_with_options, is_terminal_task_status, store_lane_for_row, EngineDetail,
+    ExternalReviewState, Row, Section, StoreLane, SystemHealth, WatchClassifyOptions,
 };
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
@@ -133,6 +133,10 @@ pub struct App {
     pub external_review: ExternalReviewState,
     /// Dispatch-lock health read during refresh; draw never opens SQLite.
     pub system_health: SystemHealth,
+    /// Richer engine-health detail (recent daemon starts, unfinished
+    /// dispatch_locks with agent_name/claimed_by, agent_runs by role) for
+    /// the engine-health drilldown panel.
+    pub engine_detail: EngineDetail,
     /// Visible-rows-per-page used by PgUp/PgDn + virtualization. Updated on
     /// each render; defaults to a sentinel until the first draw.
     pub viewport_height: usize,
@@ -212,6 +216,7 @@ impl App {
         self.rows = super::data::load_rows(conn)?;
         self.external_review = super::data::load_external_review_state(conn)?;
         self.system_health = super::data::load_system_health(conn)?;
+        self.engine_detail = super::data::load_engine_detail(conn)?;
         self.sections = classify_with_options(&self.rows, self.watch_classify_options());
         let (rows, sections) =
             super::data::dedup_observation_summaries_by_section(&self.rows, &self.sections);
@@ -519,6 +524,76 @@ fn local_clock_string() -> String {
 mod tests {
     use super::super::data::{classify, store_lane_for_row, IntakeRow, ObsRow, ReviewRow, TaskRow};
     use super::*;
+    use rusqlite::Connection;
+
+    fn minimal_seed_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE tasks (
+                display_id TEXT, status TEXT, title TEXT, claimed_by TEXT, updated_at TEXT,
+                tier_hint TEXT, linked_observations TEXT, blocked_reason TEXT,
+                current_phase INTEGER, current_cycle INTEGER, plan TEXT, plan_source TEXT,
+                contract TEXT, plan_review_log TEXT, cycles TEXT, wrap_log TEXT,
+                branch TEXT, workspace_path TEXT
+            );
+            CREATE TABLE observations (
+                display_id TEXT, status TEXT, priority TEXT, summary TEXT, updated_at TEXT,
+                body TEXT, source TEXT, task_id TEXT, priority_rank INTEGER, intent_contract TEXT,
+                locked_by TEXT, locked_at TEXT, lock_reason TEXT, evidence TEXT, resolution TEXT,
+                investigation_failure_reason TEXT
+            );
+            "#,
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn refresh_populates_engine_detail_from_seeded_db() {
+        let conn = minimal_seed_conn();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE dispatch_locks (
+                id INTEGER PRIMARY KEY,
+                display_id TEXT, agent_name TEXT, claimed_by TEXT,
+                claimed_at TEXT, finished_at TEXT, attempts INTEGER
+            );
+            INSERT INTO dispatch_locks (display_id, agent_name, claimed_by, claimed_at, finished_at, attempts)
+            VALUES ('T100', 'planner', 'engine-1', '2026-05-08T01:00:00', NULL, 1);
+
+            CREATE TABLE daemon_starts (
+                id INTEGER PRIMARY KEY,
+                display_id TEXT, status TEXT, pid INTEGER NOT NULL,
+                started_at TEXT, binary_version TEXT, git_sha TEXT
+            );
+            INSERT INTO daemon_starts (display_id, status, pid, started_at, binary_version, git_sha)
+            VALUES ('D001', 'running', 4242, '2026-05-08T00:00:00', '0.7.0', 'deadbeef');
+            "#,
+        )
+        .unwrap();
+        let mut app = App::new(TuiOpts::default());
+        app.refresh(&conn).unwrap();
+        assert_eq!(app.engine_detail.unfinished_lock_rows.len(), 1);
+        assert_eq!(app.engine_detail.recent_daemon_starts.len(), 1);
+        let lock = &app.engine_detail.unfinished_lock_rows[0];
+        assert_eq!(lock.display_id, "T100");
+        assert_eq!(lock.agent_name.as_deref(), Some("planner"));
+        assert_eq!(lock.claimed_by.as_deref(), Some("engine-1"));
+        let start = &app.engine_detail.recent_daemon_starts[0];
+        assert_eq!(start.pid, 4242);
+        assert_eq!(start.binary_version.as_deref(), Some("0.7.0"));
+        assert_eq!(start.git_sha.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn refresh_engine_detail_tolerates_absent_tables() {
+        let conn = minimal_seed_conn();
+        let mut app = App::new(TuiOpts::default());
+        app.refresh(&conn).unwrap();
+        assert_eq!(app.engine_detail, EngineDetail::default());
+    }
+
 
     fn task(status: &str) -> Row {
         Row::Task(TaskRow {

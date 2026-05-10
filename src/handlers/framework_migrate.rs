@@ -191,8 +191,7 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
         // DDL DEFAULT applied by ALTER. Idempotent on a second boot because
         // the column will not be in `drift.additive` once present.
         if backfill_tasks_activation {
-            let placeholders = std::iter::repeat("?")
-                .take(IN_FLIGHT_STATES.len())
+            let placeholders = std::iter::repeat_n("?", IN_FLIGHT_STATES.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(

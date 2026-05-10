@@ -720,8 +720,7 @@ fn post_integrated_handoff_repo_specific_variant_a_cargo_install_subscribed() {
         serde_yaml::Value::String("true".into()),
     );
     let mut cargo_args = serde_yaml::Mapping::new();
-    let mut features = serde_yaml::Sequence::new();
-    features.push(serde_yaml::Value::String("runner-claude-code".into()));
+    let features = vec![serde_yaml::Value::String("runner-claude-code".into())];
     cargo_args.insert(
         serde_yaml::Value::String("features".into()),
         serde_yaml::Value::Sequence(features),

@@ -11,6 +11,13 @@ Priority / risk
 
 Status
   needs_info
+  captured: —
+  recon_round: —
+
+Decision metadata
+  rationale: —
+  confidence: —
+  tier_hint: —
 
 Contract / routing state
   decision: needs_recon
