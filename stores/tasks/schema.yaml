@@ -192,10 +192,11 @@ lifecycle:
     # FAIL: code-reviewer hard-fail goes to blocked
     - {from: code_review, to: blocked, verb: submit-review, actor: ai_autonomous, requires_gate: FAIL}
 
-    # blocked recovery: resume always returns to planning. This is deliberately
-    # conservative: a non-empty plan can be a rejected/stale plan (I033/T123),
-    # and schema guards cannot inspect latest plan-review verdict reliably.
-    # Planner re-entry is cheaper than executing a rejected plan.
+    # blocked recovery. Default/user-level blockers resume to planning, but
+    # drive_failed infrastructure blockers may resume to the status that was
+    # interrupted (recorded in transition_history.from_status for
+    # mark_drive_failed). Replanning is for invalid plans/contracts; stale
+    # runner processes must not discard phase/cycle progress.
     # deploy_blocked is release-ceremony recovery, not work-cycle resume:
     # use retry-deploy after fixing the deploy issue, or close-out-of-band
     # when manually recovered outside the substrate.

@@ -39,7 +39,7 @@
 //! semantics.
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -1884,14 +1884,83 @@ pub fn run_submit_wrap(
 }
 
 // ---------------------------------------------------------------------------
-// resume: blocked → ready (→ executing via on-entry follow-on) (AC5.14)
+// resume: blocked → interrupted status for drive failures, planning otherwise
 // ---------------------------------------------------------------------------
+
+fn interrupted_status_for_drive_failure<'a>(
+    tx: &Transaction,
+    store: &str,
+    row_id: i64,
+) -> Result<Option<&'a str>> {
+    let latest: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT id, from_status FROM transition_history \
+             WHERE store = ?1 AND row_id = ?2 AND verb = 'mark_drive_failed' \
+             ORDER BY id DESC LIMIT 1",
+            rusqlite::params![store, row_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .context("resume: load interrupted status from mark_drive_failed history")?;
+
+    let Some((latest_id, from_status)) = latest else {
+        return Ok(None);
+    };
+
+    // If an old coarse resume already rewound to planning and that fresh planner
+    // drive then died (the T141 shape), do not let the second-order planning
+    // failure erase the original interrupted status. Recover the pre-resume
+    // drive failure instead. A normal planner failure is not immediately
+    // preceded by blocked→planning resume, so it still resumes to planning.
+    let effective_from_status = if from_status == "planning" {
+        let previous: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT from_status, to_status, verb FROM transition_history \
+                 WHERE store = ?1 AND row_id = ?2 AND id < ?3 \
+                 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![store, row_id, latest_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .context("resume: inspect transition before planning drive failure")?;
+        if matches!(previous.as_ref().map(|(from, to, verb)| (from.as_str(), to.as_str(), verb.as_str())), Some(("blocked", "planning", "resume"))) {
+            tx.query_row(
+                "SELECT from_status FROM transition_history \
+                 WHERE store = ?1 AND row_id = ?2 AND verb = 'mark_drive_failed' \
+                   AND id < ?3 AND from_status <> 'planning' \
+                 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![store, row_id, latest_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("resume: load pre-rewind interrupted status")?
+            .unwrap_or(from_status)
+        } else {
+            from_status
+        }
+    } else {
+        from_status
+    };
+
+    let target = match effective_from_status.as_str() {
+        "planning" => Some("planning"),
+        "plan_review" => Some("plan_review"),
+        "ready" => Some("ready"),
+        "executing" => Some("executing"),
+        "code_review" => Some("code_review"),
+        _ => None,
+    };
+    Ok(target)
+}
 
 /// Resume a blocked task.  Follows the same 11-step pattern as the other submit verbs.
 ///
 /// Required actor: `ai_with_human` (declared on the `resume` transition in schema).
 /// Post-actions per 5.4 "resume" row:
-///   - `current_cycle = 1` (reset; audit trail in cycles[] preserved)
+///   - default/user-level blockers return to planning with `current_cycle = 1`
+///   - `drive_failed:*` infrastructure blockers return to the interrupted
+///     status recorded by the latest `mark_drive_failed` transition and preserve
+///     phase/cycle progress
 ///   - `current_phase` UNCHANGED
 ///   - `blocked_reason` cleared
 ///   - stale auto-drive bookkeeping cleared so the watchdog does not immediately
@@ -1949,19 +2018,30 @@ pub(crate) fn compute_resume(
 
     clear_auto_drive_bookkeeping_for_resume(&tx, &schema.name, row_id, display_id)?;
 
-    // Step 7: compute post-action fields
-    //   current_cycle reset to 1; current_phase UNCHANGED; blocked_reason cleared
+    // Step 7: compute post-action fields.
+    // Default/user-level blockers return to planning and reset current_cycle.
+    // Infrastructure drive failures are different: the plan/review context is
+    // still valid, only the runner died (or its binary inode went stale). For
+    // those rows, resume restores the status interrupted by mark_drive_failed
+    // and preserves current_cycle so a REVISE/executor cycle is not discarded.
+    let blocked_reason = existing
+        .get("blocked_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let resume_target = if blocked_reason.starts_with("drive_failed:")
+        || blocked_reason == "drive_failed"
+    {
+        interrupted_status_for_drive_failure(&tx, &schema.name, row_id)?.unwrap_or("planning")
+    } else {
+        "planning"
+    };
+
     let mut fw_fields: BTreeMap<String, i64> = BTreeMap::new();
-    fw_fields.insert("current_cycle".to_string(), 1);
+    if resume_target == "planning" {
+        fw_fields.insert("current_cycle".to_string(), 1);
+    }
     let mut txt_fields: BTreeMap<String, String> = BTreeMap::new();
     txt_fields.insert("blocked_reason".to_string(), String::new());
-
-    // I033/T123: resume must never jump directly back to ready/executing.
-    // A non-empty plan can be a rejected/stale plan; executing it contaminates
-    // the task. The schema now declares only blocked → planning for resume, and
-    // the handler mirrors that conservative policy. Planner re-entry is cheaper
-    // than executing an invalid plan.
-    let resume_target = "planning";
 
     // Step 8: write blocked → resume_target
     write_status_and_fields(
@@ -3852,6 +3932,67 @@ fields:
             "lock must be released after resume: {:?}",
             claimed_by
         );
+    }
+
+    #[test]
+    fn resume_drive_failed_restores_interrupted_status_and_preserves_cycle() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+
+        let now = "2026-05-10T00:00:00Z";
+        let contract = r#"{"done_when":"fixed","scope_in":"resume","scope_out":"none"}"#;
+        let plan = r#"{"phases":[{"name":"phase 1"},{"name":"phase 2"},{"name":"phase 3"},{"name":"phase 4"}]}"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, tier_hint, contract, plan, current_phase, current_cycle, \
+             blocked_reason, drive_pid, drive_started_at) \
+             VALUES ('T914', 'blocked', ?1, ?1, 'framework', 'framework', \
+             'resume drive failed', 'resume-drive-failed', 'feat/t914', '/tmp/no-such', 'T3', \
+             ?2, ?3, 4, 3, 'drive_failed:stale_binary_inode', 999999, ?1)",
+            rusqlite::params![now, contract, plan],
+        )
+        .unwrap();
+        let row_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO transition_history \
+             (store, row_id, display_id, from_status, to_status, verb, invoker, occurred_at, actor_note) \
+             VALUES ('tasks', ?1, 'T914', 'executing', 'blocked', 'mark_drive_failed', 'framework', ?2, 'stale_binary_inode')",
+            rusqlite::params![row_id, now],
+        )
+        .unwrap();
+
+        let out = compute_resume(&task_schema, &conn, "T914", Actor::AiWithHuman).unwrap();
+        assert_eq!(out.new_status, "executing");
+
+        let (status, cycle, reason, pid): (String, i64, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT status, current_cycle, blocked_reason, drive_pid FROM tasks WHERE display_id='T914'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "executing");
+        assert_eq!(cycle, 3, "drive-failed resume must preserve current_cycle");
+        assert!(reason.unwrap_or_default().is_empty());
+        assert!(pid.is_none(), "resume must clear stale drive_pid");
+
+        let (from_s, to_s, verb): (String, String, String) = conn
+            .query_row(
+                "SELECT from_status, to_status, verb FROM transition_history WHERE display_id='T914' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((from_s.as_str(), to_s.as_str(), verb.as_str()), ("blocked", "executing", "resume"));
     }
 
     #[test]
