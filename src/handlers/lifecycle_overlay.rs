@@ -88,18 +88,17 @@ fn derive_blocked_kind(
 ) -> Option<String> {
     let reason = blocked_reason.unwrap_or("");
     if reason.contains("rate_limit") {
-        Some("rate_limit".to_string())
-    } else if reason.contains("silent_zombie") {
-        Some("runner".to_string())
-    } else if verb == "mark_drive_failed" {
-        Some("runner".to_string())
-    } else if verb == "submit-review" && from_status == "code_review" {
-        Some("task_review".to_string())
-    } else if verb == "submit-plan-review" && from_status == "plan_review" {
-        Some("task_review".to_string())
-    } else {
-        Some("runner".to_string())
+        return Some("rate_limit".to_string());
     }
+    if reason.contains("silent_zombie") || verb == "mark_drive_failed" {
+        return Some("runner".to_string());
+    }
+    if (verb == "submit-review" && from_status == "code_review")
+        || (verb == "submit-plan-review" && from_status == "plan_review")
+    {
+        return Some("task_review".to_string());
+    }
+    Some("runner".to_string())
 }
 
 fn derive_integration_blocker_kind(integration_blocked_reason: Option<&str>) -> Option<String> {
@@ -111,8 +110,6 @@ fn derive_integration_blocker_kind(integration_blocked_reason: Option<&str>) -> 
         Some("stale_base".to_string())
     } else if reason.starts_with("pre_land_check_failed") {
         Some("test_failure".to_string())
-    } else if reason.starts_with("merge_failure") || reason.starts_with("push_failure") {
-        Some("main_red".to_string())
     } else {
         Some("main_red".to_string())
     }

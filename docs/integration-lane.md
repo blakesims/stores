@@ -230,7 +230,7 @@ reachable from current main 8bd21b6; fresh external review required`.
 
 ## main_branch ResourceLock
 
-`builtin:integrate` acquires the DB-backed `main_branch` ResourceLock immediately before checking out and mutating `main`, using `handlers::resource_locks` with `Actor::Framework`; see `docs/primitives.md` for the primitive contract and `src/handlers/resource_locks.rs` for the helper surface. The lock is released after merge/push and `mark_integrated` complete; every error or early-return path in the merge/push window is covered by a guard `Drop`, so failed merge/push attempts release the lock too.
+`builtin:integrate` acquires the DB-backed `main_branch` ResourceLock immediately before checking out and mutating `main`, using `handlers::resource_locks` with `Actor::Framework`; see `docs/primitives.md` for the primitive contract and `src/handlers/resource_locks.rs` for the helper surface. In v1, that lock window sits wholly inside `status='integrating'`, whose overlay is `lifecycle='integration'` and `integration_step='merging'` for the entire integrating span. The lock is released after merge/push and `mark_integrated` complete; every error or early-return path in the merge/push window is covered by a guard `Drop`, so failed merge/push attempts release the lock too.
 
 If acquisition finds an unexpired owner, the attempt records `outcome='merge_failure'` with `pre_land_check_summary='merge_failure: main_branch lock held by <owner>; will retry'`, then routes to `integration_blocked`. Phase 3's lifecycle-overlay table maps that `merge_failure:` prefix to `blocker_kind='main_red'`, leaving the row visible as `lifecycle='integration'`, `integration_step='none'`, and `blocked=true`.
 

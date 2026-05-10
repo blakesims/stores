@@ -65,16 +65,16 @@ fn make_run_output(stdout: &str, workspace: &tempfile::TempDir) -> RunnerOutput 
     }
 }
 
-fn insert_t3_task_at_planning(conn: &Connection, display_id: &str) {
+fn insert_t3_task_at_planning(conn: &Connection, display_id: &str, workspace_path: &str) {
     let now = "2026-05-04T00:00:00Z";
     let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
     conn.execute(
         "INSERT INTO tasks (display_id, status, title, slug, tier_hint, contract, \
-         current_phase, current_cycle, cycles, plan_review_log, wrap_log, \
+         current_phase, current_cycle, cycles, plan_review_log, wrap_log, workspace_path, \
          created_at, updated_at, created_by, updated_by) \
-         VALUES (?1, 'planning', 't3 task', 't3-task', 'T3', ?2, 0, 0, '[]', '[]', '[]', \
-         ?3, ?3, 'human', 'human')",
-        rusqlite::params![display_id, contract, now],
+         VALUES (?1, 'planning', 't3 task', 't3-task', 'T3', ?2, 0, 0, '[]', '[]', '[]', ?3, \
+         ?4, ?4, 'human', 'human')",
+        rusqlite::params![display_id, contract, workspace_path, now],
     )
     .unwrap();
 }
@@ -102,11 +102,10 @@ fn t3_full_five_stage_cycle_runs() {
     let schema = tasks_schema();
     let conn = fresh_db();
     let display_id = "T100";
-    insert_t3_task_at_planning(&conn, display_id);
-
     // Keep workspace alive for the entire drive loop so transcript files persist.
     // T072 r6: executor and code-reviewer must have session_id (MINOR 1 requirement).
     let workspace = make_workspace();
+    insert_t3_task_at_planning(&conn, display_id, workspace.path().to_str().unwrap());
 
     let mut executor_out = make_run_output(executor_fixture(), &workspace);
     executor_out.session_id = Some("t3-exec-session".to_string());

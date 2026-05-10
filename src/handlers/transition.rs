@@ -17,7 +17,6 @@ use super::row::{build_entry_map, deep_merge_entry_field, now_iso8601, read_row}
 /// daemon (Phase 5: agents_run.rs::run_dispatch). When unset (the manual CLI
 /// path), returns `(None, None)` so transition_history records NULL — the
 /// distinct sentinel for "manual transition" per AC5.4.
-
 pub(crate) fn inject_tasks_overlay_into_diff(
     schema: &Schema,
     verb: &str,

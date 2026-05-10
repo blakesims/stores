@@ -199,7 +199,7 @@ pub(crate) fn fire_framework_transition(
 /// schema (e.g. `observations` for the auto-resolve-observation subscriber,
 /// T037 P1). All gates — declared transition lookup, validators, actor —
 /// fire just as they do for tasks.
-pub(crate) fn fire_framework_transition_for(
+pub fn fire_framework_transition_for(
     conn: &Connection,
     schema: &Schema,
     display_id: &str,

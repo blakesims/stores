@@ -243,6 +243,14 @@ fn write_happy_drive_stub(dir: &Path, db_path: &Path) -> PathBuf {
     stub
 }
 
+fn activate_autopromoted_tasks(conn: &Connection) {
+    conn.execute(
+        "UPDATE tasks SET activation='active' WHERE status='planning' AND activation='inactive'",
+        [],
+    )
+    .unwrap();
+}
+
 /// Repeatedly call `poll_once` until `predicate` holds or `timeout` elapses.
 fn poll_until<F: Fn(&Connection) -> bool>(
     conn: &Connection,
@@ -255,6 +263,7 @@ fn poll_until<F: Fn(&Connection) -> bool>(
 ) {
     let start = Instant::now();
     while start.elapsed() < timeout {
+        activate_autopromoted_tasks(conn);
         let _ = poll_once(conn, agents, policies, cfg, claimer, "").unwrap();
         if predicate(conn) {
             return;
@@ -326,6 +335,7 @@ fn ratify_promote_scaffold_drive_happy_path() {
     let mut hit = false;
     let pl_start = Instant::now();
     while pl_start.elapsed() < Duration::from_secs(30) {
+        activate_autopromoted_tasks(&conn);
         let _ = poll_once(&conn, &agents, &policies, &cfg_path, "t022p7-claimer", "").unwrap();
         if predicate(&conn) {
             hit = true;

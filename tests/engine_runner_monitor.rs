@@ -6,7 +6,8 @@ use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use stores::flow::engine_runner::{
     reconcile_external_reviews_for_in_review_tasks, scan_record_and_redrive_tasks, ScannerSchemas,
 };
-use stores::flow::AgentsYaml;
+use stores::flow::agents_yaml::{Subscription, TransitionEdge};
+use stores::flow::{AgentEntry, AgentsYaml, RetryPolicy};
 use stores::schema::Schema;
 
 const TS: &str = "2026-05-07T00:00:00Z";
@@ -123,6 +124,27 @@ fn run_monitor(
     run_monitor_with_base(conn, tasks, intake, observations, max_parallel, 0)
 }
 
+fn agents_with_auto_drive() -> AgentsYaml {
+    AgentsYaml {
+        agents: vec![AgentEntry {
+            name: "auto-drive".to_string(),
+            subscribes_to: vec![Subscription {
+                store: "tasks".to_string(),
+                transition: TransitionEdge {
+                    from: String::new(),
+                    to: "planning".to_string(),
+                },
+                predicate: None,
+            }],
+            command: "builtin:auto-drive".to_string(),
+            claim_window_secs: 300,
+            retry_policy: RetryPolicy::default(),
+            command_args: None,
+        }],
+        deployment_specialist: None,
+    }
+}
+
 fn run_monitor_with_base(
     conn: &Connection,
     tasks: &Schema,
@@ -137,7 +159,7 @@ fn run_monitor_with_base(
         scanner(tasks, intake, observations),
         1,
         TS,
-        &AgentsYaml::default_empty(),
+        &agents_with_auto_drive(),
         &tmp.path().join("config.yaml"),
         "",
         base_dispatched,
@@ -363,7 +385,7 @@ fn atomic_cas_prevents_double_spawn_on_same_orphan() {
         scanner(&tasks, &intake, &observations),
         1,
         TS,
-        &AgentsYaml::default_empty(),
+        &agents_with_auto_drive(),
         &cfg_path,
         "",
         0,
@@ -389,7 +411,7 @@ fn atomic_cas_prevents_double_spawn_on_same_orphan() {
         scanner(&tasks, &intake, &observations),
         2,
         TS,
-        &AgentsYaml::default_empty(),
+        &agents_with_auto_drive(),
         &cfg_path,
         "",
         0,
@@ -518,7 +540,7 @@ fn cas_abort_branch_fires_when_owner_appears_in_gap() {
             },
             1,
             TS,
-            &AgentsYaml::default_empty(),
+            &agents_with_auto_drive(),
             &cfg_path_clone,
             "",
             0,
@@ -660,7 +682,7 @@ fn heartbeat_dispatched_includes_base_dispatched() {
         scanner(&tasks, &intake, &observations),
         1,
         TS,
-        &AgentsYaml::default_empty(),
+        &agents_with_auto_drive(),
         &cfg_path,
         "",
         3, // base_dispatched

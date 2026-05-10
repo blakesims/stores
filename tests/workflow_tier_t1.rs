@@ -70,18 +70,18 @@ fn make_run_output(stdout: &str, workspace: &tempfile::TempDir) -> RunnerOutput 
     }
 }
 
-fn insert_t1_task_at_planning(conn: &Connection, display_id: &str) {
+fn insert_t1_task_at_planning(conn: &Connection, display_id: &str, workspace_path: &str) {
     let now = "2026-05-04T00:00:00Z";
     let contract = r#"{"done_when":"contract is the plan","scope_in":"a","scope_out":"b"}"#;
     // T1 rows have plan=NULL: contract IS the plan, so submit-review PASS
     // resolves through the schema's explicit `tier_hint == 'T1'` guard only.
     conn.execute(
         "INSERT INTO tasks (display_id, status, title, slug, tier_hint, contract, plan, \
-         current_phase, current_cycle, cycles, plan_review_log, wrap_log, \
+         current_phase, current_cycle, cycles, plan_review_log, wrap_log, workspace_path, \
          created_at, updated_at, created_by, updated_by) \
-         VALUES (?1, 'planning', 't1 task', 't1-task', 'T1', ?2, NULL, 0, 0, '[]', '[]', '[]', \
-         ?3, ?3, 'human', 'human')",
-        rusqlite::params![display_id, contract, now],
+         VALUES (?1, 'planning', 't1 task', 't1-task', 'T1', ?2, NULL, 0, 0, '[]', '[]', '[]', ?3, \
+         ?4, ?4, 'human', 'human')",
+        rusqlite::params![display_id, contract, workspace_path, now],
     )
     .unwrap();
 }
@@ -91,7 +91,10 @@ fn t1_drive_skips_planner_and_plan_reviewer() {
     let schema = tasks_schema();
     let conn = fresh_db();
     let display_id = "T001";
-    insert_t1_task_at_planning(&conn, display_id);
+    // Keep workspace alive for the entire drive loop so transcript files persist.
+    // T072 r6: executor and code-reviewer must have session_id (MINOR 1 requirement).
+    let workspace = make_workspace();
+    insert_t1_task_at_planning(&conn, display_id, workspace.path().to_str().unwrap());
 
     // Fire the initial on-entry follow-ons (planning→ready via skip-plan,
     // then ready→executing via the `start` framework transition). This is
@@ -134,10 +137,6 @@ fn t1_drive_skips_planner_and_plan_reviewer() {
         skip_plan_count, 1,
         "transition_history must contain exactly one skip-plan row on planning→ready"
     );
-
-    // Keep workspace alive for the entire drive loop so transcript files persist.
-    // T072 r6: executor and code-reviewer must have session_id (MINOR 1 requirement).
-    let workspace = make_workspace();
 
     let mut executor_out = make_run_output(
         r#"{"role":"executor","summary":"did the thing","commit":"abc","files_changed":["src/x.rs"]}"#,
