@@ -102,7 +102,11 @@ agents:
       - store: tasks
         transition:
           from: integrated
-          to: cargo_installed
+          to: integrated
+        predicate:
+          op: "=="
+          left: "$post_integration_step"
+          right: "cargo_installed"
     command: "builtin:schema-migrate"
     claim_window_secs: 300
     retry_policy:

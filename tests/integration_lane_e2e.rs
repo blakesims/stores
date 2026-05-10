@@ -781,10 +781,17 @@ fn post_integrated_handoff_repo_specific_variant_a_cargo_install_subscribed() {
 
     // cargo-install resolves main_repo via workspace_path → must succeed.
     drive_daemon_until(&conn, &agents, 30, |_| {}, |c| {
-        task_status(c, "T801") == "cargo_installed"
+        let row: (String, String) = c
+            .query_row(
+                "SELECT status, post_integration_step FROM tasks WHERE display_id='T801'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        row == ("integrated".into(), "cargo_installed".into())
     });
 
-    assert_eq!(task_status(&conn, "T801"), "cargo_installed");
+    assert_eq!(task_status(&conn, "T801"), "integrated");
     let n_cargo: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM transition_history \

@@ -13,6 +13,10 @@ digraph stores_topology {
 
   subgraph cluster_z1_tasks {
     label="Z1: tasks state machine";
+    "z1_tasks__queued" [label="queued"];
+    "z1_tasks__active" [label="active"];
+    "z1_tasks__integration" [label="integration"];
+    "z1_tasks__done" [label="done"];
     "z1_tasks__planning" [label="planning", style=bold, peripheries=2];
     "z1_tasks__plan_review" [label="plan_review"];
     "z1_tasks__ready" [label="ready"];
@@ -23,13 +27,10 @@ digraph stores_topology {
     "z1_tasks__in_review" [label="in_review"];
     "z1_tasks__accepted" [label="accepted"];
     "z1_tasks__rejected" [label="rejected"];
-    "z1_tasks__deploy_blocked" [label="deploy_blocked"];
     "z1_tasks__integration_queued" [label="integration_queued"];
     "z1_tasks__integrating" [label="integrating"];
     "z1_tasks__integration_blocked" [label="integration_blocked"];
     "z1_tasks__integrated" [label="integrated"];
-    "z1_tasks__cargo_installed" [label="cargo_installed"];
-    "z1_tasks__schema_migrated" [label="schema_migrated"];
     "z1_tasks__closed_out_of_band" [label="closed_out_of_band"];
     "z1_tasks__abandoned" [label="abandoned"];
     "z1_tasks__planning" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
@@ -41,7 +42,6 @@ digraph stores_topology {
     "z1_tasks__complete" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__in_review" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__rejected" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
-    "z1_tasks__deploy_blocked" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__integration_queued" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__integrating" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__integration_blocked" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
@@ -78,11 +78,9 @@ digraph stores_topology {
     "z1_tasks__integrating" -> "z1_tasks__integrated" [label=" F\nmark_integrated", color=gray, fontcolor=gray];
     "z1_tasks__integrating" -> "z1_tasks__integration_blocked" [label=" F\nmark_integration_blocked", color=gray, fontcolor=gray];
     "z1_tasks__integration_blocked" -> "z1_tasks__integration_queued" [label=" H+\nretry-integration", color=gold, fontcolor=gold];
-    "z1_tasks__integrated" -> "z1_tasks__cargo_installed" [label=" F\nmark_cargo_installed", color=gray, fontcolor=gray];
-    "z1_tasks__integrated" -> "z1_tasks__deploy_blocked" [label=" F\nmark_deploy_blocked", color=gray, fontcolor=gray];
-    "z1_tasks__cargo_installed" -> "z1_tasks__schema_migrated" [label=" F\nmark_schema_migrated", color=gray, fontcolor=gray];
-    "z1_tasks__cargo_installed" -> "z1_tasks__deploy_blocked" [label=" F\nmark_deploy_blocked", color=gray, fontcolor=gray];
-    "z1_tasks__deploy_blocked" -> "z1_tasks__accepted" [label=" H+\nretry-deploy", color=gold, fontcolor=gold];
+    "z1_tasks__integrated" -> "z1_tasks__integrated" [label=" F\nmark_cargo_installed", color=gray, fontcolor=gray];
+    "z1_tasks__integrated" -> "z1_tasks__integrated" [label=" F\nmark_schema_migrated", color=gray, fontcolor=gray];
+    "z1_tasks__integrated" -> "z1_tasks__integrated" [label=" F\nmark_deploy_blocked", color=gray, fontcolor=gray];
     "z1_tasks__complete" -> "z1_tasks__in_review" [label=" F\nrequest_review", color=gray, fontcolor=gray];
     "z1_tasks__in_review" -> "z1_tasks__executing" [label=" F\nsubmit-external-review\n[REVISE]", color=gray, fontcolor=gray];
     "z1_tasks__in_review" -> "z1_tasks__accepted" [label=" H!\naccept", color=red, fontcolor=red];
@@ -98,7 +96,6 @@ digraph stores_topology {
     "z1_tasks__code_review" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
     "z1_tasks__blocked" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
     "z1_tasks__in_review" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
-    "z1_tasks__deploy_blocked" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
     "z1_tasks__complete" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
     "z1_tasks__integration_queued" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
     "z1_tasks__integrating" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];

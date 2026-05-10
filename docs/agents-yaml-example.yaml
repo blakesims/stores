@@ -183,7 +183,11 @@ agents:
   - name: schema-migrate
     subscribes_to:
       - store: tasks
-        transition: { from: integrated, to: cargo_installed }
+        transition: { from: integrated, to: integrated }
+        predicate:
+          op: "=="
+          left: "$post_integration_step"
+          right: "cargo_installed"
     command: "builtin:schema-migrate"
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }

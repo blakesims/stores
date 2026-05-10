@@ -646,7 +646,7 @@ mod tests {
             "schema-migrate",
             "exit=11",
             "feedface",
-            "cargo_installed",
+            "integrated",
         );
 
         let (status, reason): (String, Option<String>) = conn
@@ -657,9 +657,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            status, "deploy_blocked",
-            "non-zero subscriber exit must route cargo_installed → deploy_blocked"
+            status, "integrated",
+            "non-zero subscriber exit must keep generic status integrated"
         );
+        let post_integration_step: String = conn.query_row("SELECT post_integration_step FROM tasks WHERE display_id='T046'", [], |r| r.get(0)).unwrap();
+        assert_eq!(post_integration_step, "deploy_blocked");
         let reason = reason.unwrap_or_default();
         assert!(
             reason.contains("schema-migrate") && reason.contains("exit=11"),
@@ -838,14 +840,15 @@ mod tests {
         let res = cargo_install::run(&row, &ctx).unwrap();
         assert_eq!(res, 0);
 
-        let status: String = conn
+        let (status, post_integration_step): (String, String) = conn
             .query_row(
-                "SELECT status FROM tasks WHERE display_id='T400'",
+                "SELECT status, post_integration_step FROM tasks WHERE display_id='T400'",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(status, "cargo_installed");
+        assert_eq!(status, "integrated");
+        assert_eq!(post_integration_step, "cargo_installed");
 
         let (verb, invoker): (String, String) = conn
             .query_row(
@@ -919,9 +922,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            status, "deploy_blocked",
-            "row must route to deploy_blocked on cargo-install failure"
+            status, "integrated",
+            "row must keep generic status integrated on cargo-install failure"
         );
+        let post_integration_step: String = conn.query_row("SELECT post_integration_step FROM tasks WHERE display_id='T401'", [], |r| r.get(0)).unwrap();
+        assert_eq!(post_integration_step, "deploy_blocked");
 
         assert_eq!(
             std::fs::read(&private_bin).unwrap(),
@@ -996,9 +1001,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            status, "deploy_blocked",
-            "row must route to deploy_blocked when candidate validation fails"
+            status, "integrated",
+            "row must keep generic status integrated when candidate validation fails"
         );
+        let post_integration_step: String = conn.query_row("SELECT post_integration_step FROM tasks WHERE display_id='T402'", [], |r| r.get(0)).unwrap();
+        assert_eq!(post_integration_step, "deploy_blocked");
         assert_eq!(std::fs::read(&private_bin).unwrap(), existing_private);
 
         std::env::remove_var("CARGO_HOME");
@@ -1089,8 +1096,8 @@ mod tests {
         let now = "2026-05-03T00:00:00Z";
         let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
         conn.execute(
-            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, 'cargo_installed', 'test', 't', 'feat/x', ?2, ?3, ?4, ?4, 'framework', 'framework')",
+            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, lifecycle, active_step, integration_step, post_integration_step, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'integrated', 'test', 't', 'feat/x', ?2, ?3, 'done', 'none', 'none', 'cargo_installed', ?4, ?4, 'framework', 'framework')",
             rusqlite::params![display_id, workspace_path, contract, now],
         ).unwrap();
         conn.last_insert_rowid()
@@ -1181,7 +1188,9 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(status, "deploy_blocked");
+        assert_eq!(status, "integrated");
+        let post_integration_step: String = conn.query_row("SELECT post_integration_step FROM tasks WHERE display_id='T502'", [], |r| r.get(0)).unwrap();
+        assert_eq!(post_integration_step, "deploy_blocked");
         let reason = reason.unwrap_or_default();
         assert!(
             reason.contains("schema-migrate failed"),

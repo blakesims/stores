@@ -77,7 +77,7 @@ pub(crate) fn inject_tasks_overlay_into_diff_for_transition(
                 .and_then(|v| v.as_str()),
         )?
     };
-    let fields = [
+    let mut fields = vec![
         ("lifecycle", Value::String(overlay.lifecycle)),
         ("active_step", Value::String(overlay.active_step)),
         ("integration_step", Value::String(overlay.integration_step)),
@@ -90,6 +90,15 @@ pub(crate) fn inject_tasks_overlay_into_diff_for_transition(
                 .unwrap_or(Value::Null),
         ),
     ];
+    let post_integration_step = match verb {
+        "mark_cargo_installed" => Some("cargo_installed"),
+        "mark_schema_migrated" => Some("schema_migrated"),
+        "mark_deploy_blocked" => Some("deploy_blocked"),
+        _ => None,
+    };
+    if let Some(step) = post_integration_step {
+        fields.push(("post_integration_step", Value::String(step.to_string())));
+    }
     for (k, v) in fields {
         diff.insert(k.to_string(), v.clone());
         merged.insert(k.to_string(), v);

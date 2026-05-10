@@ -163,7 +163,12 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
         if table == "tasks"
             && matches!(
                 col.name,
-                "lifecycle" | "active_step" | "integration_step" | "blocked" | "blocker_kind"
+                "lifecycle"
+                    | "active_step"
+                    | "integration_step"
+                    | "blocked"
+                    | "blocker_kind"
+                    | "post_integration_step"
             )
         {
             backfill_tasks_lifecycle_overlay = true;
@@ -292,14 +297,39 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
                         format!("T144 P1: derive lifecycle overlay backfill for {display_id}")
                     })?
                 };
+                let repo_specific_post_integration =
+                    matches!(status.as_str(), "cargo_installed" | "schema_migrated" | "deploy_blocked");
+                let post_integration_step = match status.as_str() {
+                    "cargo_installed" => "cargo_installed",
+                    "schema_migrated" => "schema_migrated",
+                    "deploy_blocked" => "deploy_blocked",
+                    _ => "none",
+                };
+                let migrated_status = if repo_specific_post_integration {
+                    "integrated"
+                } else {
+                    status.as_str()
+                };
+                let lifecycle = if repo_specific_post_integration {
+                    "done".to_string()
+                } else {
+                    overlay.lifecycle
+                };
+                let integration_step = if repo_specific_post_integration {
+                    "none".to_string()
+                } else {
+                    overlay.integration_step
+                };
                 tx.execute(
-                    "UPDATE tasks SET lifecycle=?1, active_step=?2, integration_step=?3, blocked=?4, blocker_kind=?5 WHERE id=?6",
+                    "UPDATE tasks SET status=?1, lifecycle=?2, active_step=?3, integration_step=?4, blocked=?5, blocker_kind=?6, post_integration_step=?7 WHERE id=?8",
                     rusqlite::params![
-                        overlay.lifecycle,
+                        migrated_status,
+                        lifecycle,
                         overlay.active_step,
-                        overlay.integration_step,
+                        integration_step,
                         if overlay.blocked { 1 } else { 0 },
                         overlay.blocker_kind,
+                        post_integration_step,
                         id
                     ],
                 )

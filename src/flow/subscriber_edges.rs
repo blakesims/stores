@@ -230,24 +230,38 @@ impl SubscriberEdgeContract for CargoInstallContract {
     fn agent_name(&self) -> &'static str {
         "cargo-install"
     }
+    fn opt_outs(&self) -> &'static [(&'static str, &'static str, &'static str, &'static str)] {
+        &[
+            ("integrated", "integrated", "mark_cargo_installed", "stores-only post_integration_step self-transition; do not re-run cargo-install"),
+            ("integrated", "integrated", "mark_schema_migrated", "stores-only post_integration_step self-transition; do not re-run cargo-install"),
+            ("integrated", "integrated", "mark_deploy_blocked", "stores-only post_integration_step self-transition; do not re-run cargo-install"),
+        ]
+    }
 }
 
-// T138 P3: schema-migrate's required_to_status is unchanged
-// (`cargo_installed`), but the only transition reaching that status is now
-// `integrated → cargo_installed` (fired by cargo-install) — the prior direct
-// `accepted → cargo_installed` edge has been removed by Phase 1 of T138.
+// T146 P6: schema-migrate chains from cargo-install's `integrated → integrated`
+// self-transition and the stores-only post_integration_step value, not from a
+// repo-specific generic status state.
 impl SubscriberEdgeContract for SchemaMigrateContract {
     fn name(&self) -> &'static str {
-        "schema_migrate_must_fire_on_every_cargo_installed_to_status"
+        "schema_migrate_must_fire_on_cargo_post_integration_step"
     }
     fn store(&self) -> &'static str {
         "tasks"
     }
     fn required_to_status(&self) -> &'static str {
-        "cargo_installed"
+        "integrated"
     }
     fn agent_name(&self) -> &'static str {
         "schema-migrate"
+    }
+    fn opt_outs(&self) -> &'static [(&'static str, &'static str, &'static str, &'static str)] {
+        &[
+            ("integrating", "integrated", "mark_verify_done", "schema-migrate waits for cargo-install post_integration_step"),
+            ("integrating", "integrated", "mark_integrated", "schema-migrate waits for cargo-install post_integration_step"),
+            ("integrated", "integrated", "mark_schema_migrated", "schema-migrate terminal self-transition"),
+            ("integrated", "integrated", "mark_deploy_blocked", "deploy-blocked post_integration_step self-transition"),
+        ]
     }
 }
 
@@ -352,7 +366,7 @@ mod tests {
             vec![
                 "integrate_must_fire_on_every_integration_queued_to_status",
                 "cargo_install_must_fire_on_every_integrated_to_status",
-                "schema_migrate_must_fire_on_every_cargo_installed_to_status",
+                "schema_migrate_must_fire_on_cargo_post_integration_step",
                 "auto_promote_must_fire_on_every_observation_ready_state",
             ],
             "registry order must match declaration order"
@@ -366,7 +380,7 @@ mod tests {
             "lookup must find cargo_install contract"
         );
         assert!(
-            lookup("schema_migrate_must_fire_on_every_cargo_installed_to_status").is_some(),
+            lookup("schema_migrate_must_fire_on_cargo_post_integration_step").is_some(),
             "lookup must find schema_migrate contract"
         );
         assert!(
@@ -563,11 +577,9 @@ agents:
 
     #[test]
     fn schema_migrate_fails_when_subscription_dropped() {
-        // Drop (integrated → cargo_installed); agent has no subscriptions.
-        // T138 P1: the prior accepted→cargo_installed direct edge is gone;
-        // post-T138, the only transition reaching cargo_installed is
-        // integrated→cargo_installed, fired by builtin:cargo-install via
-        // mark_cargo_installed.
+        // Drop (integrated → integrated mark_cargo_installed); agent has no subscriptions.
+        // T146 P6: schema-migrate observes cargo-install through post_integration_step,
+        // not through a repo-specific generic status state.
         let yaml = r#"
 agents:
   - name: schema-migrate
@@ -580,15 +592,15 @@ agents:
         assert_eq!(
             result.outcome,
             CheckOutcome::Fail,
-            "contract must fail when (integrated, cargo_installed) subscription is absent"
+            "contract must fail when (integrated, integrated) cargo post-step subscription is absent"
         );
         let reason = result.reason.unwrap();
         let missing = reason["missing_edges"].as_array().expect("missing_edges must be an array");
         assert!(
             missing
                 .iter()
-                .any(|e| e["from"] == "integrated" && e["to"] == "cargo_installed"),
-            "expected (integrated, cargo_installed) in missing_edges; got: {:?}",
+                .any(|e| e["from"] == "integrated" && e["to"] == "integrated"),
+            "expected (integrated, integrated) in missing_edges; got: {:?}",
             missing
         );
     }
@@ -701,7 +713,7 @@ agents:
         let post_integrate_names = [
             "integrate_must_fire_on_every_integration_queued_to_status",
             "cargo_install_must_fire_on_every_integrated_to_status",
-            "schema_migrate_must_fire_on_every_cargo_installed_to_status",
+            "schema_migrate_must_fire_on_cargo_post_integration_step",
         ];
         for name in &post_integrate_names {
             let contract = lookup(name).unwrap_or_else(|| {
@@ -720,19 +732,19 @@ agents:
     }
 
     // -----------------------------------------------------------------------
-    // (k) Opt-outs are empty today
+    // (k) Opt-outs are documented
     // -----------------------------------------------------------------------
 
     #[test]
-    fn opt_outs_default_empty_for_all_contracts() {
+    fn opt_outs_have_rationales_for_all_contracts() {
         for contract in registry() {
-            assert!(
-                contract.opt_outs().is_empty(),
-                "contract '{}' has non-empty opt_outs; every reachable to_status edge \
-                 must be covered today — add a new opt_out entry with rationale or \
-                 extend the subscriber's subscriptions",
-                contract.name()
-            );
+            for (_, _, _, rationale) in contract.opt_outs() {
+                assert!(
+                    !rationale.trim().is_empty(),
+                    "contract '{}' has an opt_out without rationale",
+                    contract.name()
+                );
+            }
         }
     }
 
@@ -799,13 +811,13 @@ agents:
             "(integrating → integrated) must dispatch cargo-install and auto-resolve-observation"
         );
 
-        let mut cargo_installed_subscribers =
-            agents_matching_edge(&agents, "tasks", "integrated", "cargo_installed");
-        cargo_installed_subscribers.sort_unstable();
+        let mut cargo_post_step_subscribers =
+            agents_matching_edge(&agents, "tasks", "integrated", "integrated");
+        cargo_post_step_subscribers.sort_unstable();
         assert_eq!(
-            cargo_installed_subscribers,
+            cargo_post_step_subscribers,
             vec!["schema-migrate"],
-            "(integrated → cargo_installed) must dispatch exactly schema-migrate"
+            "(integrated → integrated with post_integration_step=cargo_installed) must dispatch exactly schema-migrate"
         );
     }
 }

@@ -122,7 +122,7 @@ fn pre_t144_tasks_rows_backfill_lifecycle_overlay_on_open() {
             ),
             (
                 "T008".into(),
-                "queued".into(),
+                "done".into(),
                 "none".into(),
                 "none".into(),
                 0,

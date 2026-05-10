@@ -25,7 +25,6 @@ stateDiagram-v2
   complete --> closed_out_of_band :  H! close-out-of-band
   in_review --> closed_out_of_band :  H! close-out-of-band
   rejected --> closed_out_of_band :  H! close-out-of-band
-  deploy_blocked --> closed_out_of_band :  H! close-out-of-band
   integration_queued --> closed_out_of_band :  H! close-out-of-band
   integrating --> closed_out_of_band :  H! close-out-of-band
   integration_blocked --> closed_out_of_band :  H! close-out-of-band
@@ -62,11 +61,9 @@ stateDiagram-v2
   integrating --> integrated :  F mark_integrated
   integrating --> integration_blocked :  F mark_integration_blocked
   integration_blocked --> integration_queued :  H+ retry-integration
-  integrated --> cargo_installed :  F mark_cargo_installed
-  integrated --> deploy_blocked :  F mark_deploy_blocked
-  cargo_installed --> schema_migrated :  F mark_schema_migrated
-  cargo_installed --> deploy_blocked :  F mark_deploy_blocked
-  deploy_blocked --> accepted :  H+ retry-deploy
+  integrated --> integrated :  F mark_cargo_installed
+  integrated --> integrated :  F mark_schema_migrated
+  integrated --> integrated :  F mark_deploy_blocked
   complete --> in_review :  F request_review
   in_review --> executing :  F submit-external-review [REVISE]
   in_review --> accepted :  H! accept
@@ -82,7 +79,6 @@ stateDiagram-v2
   code_review --> abandoned :  H! abandon
   blocked --> abandoned :  H! abandon
   in_review --> abandoned :  H! abandon
-  deploy_blocked --> abandoned :  H! abandon
   complete --> abandoned :  H! abandon
   integration_queued --> abandoned :  H! abandon
   integrating --> abandoned :  H! abandon

@@ -103,6 +103,14 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
                 additive: true,
             },
             FrameworkColumn {
+                name: "post_integration_step",
+                sql_type: "TEXT",
+                nullable: false,
+                default_sql: Some("'none'"),
+                full_def: "post_integration_step TEXT NOT NULL DEFAULT 'none' CHECK(post_integration_step IN ('none','cargo_installed','schema_migrated','deploy_blocked','deploy_verified'))",
+                additive: true,
+            },
+            FrameworkColumn {
                 name: "human_acceptance_policy",
                 sql_type: "TEXT",
                 nullable: false,

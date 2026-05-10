@@ -75,6 +75,13 @@ fields:
     required: false
     actor: framework
     default: 'none'
+  - name: post_integration_step
+    type: enum
+    enum_values: [none, cargo_installed, schema_migrated, deploy_blocked, deploy_verified]
+    required: false
+    actor: framework
+    default: 'none'
+    description: 'Stores-repo-specific post-integrated subscriber state; not part of the generic ADR 0001 lifecycle'
   - {name: blocked, type: bool, required: false, actor: framework, default: 0}
   - name: blocker_kind
     type: enum
@@ -182,13 +189,13 @@ fields:
       - {name: at, type: timestamp}
 
 lifecycle:
-  states: [planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected, deploy_blocked, integration_queued, integrating, integration_blocked, integrated, cargo_installed, schema_migrated, closed_out_of_band, abandoned]
+  states: [queued, active, integration, done, planning, plan_review, ready, executing, code_review, blocked, complete, in_review, accepted, rejected, integration_queued, integrating, integration_blocked, integrated, closed_out_of_band, abandoned]
   initial_state: planning
   transitions:
     # close-out-of-band: tier-A recovery terminal for tasks whose work merged
     # to main without going through the substrate's accept verb (typical for
     # tasks where review/wrap/accept were skipped). Refused from terminal-ish
-    # states (accepted, cargo_installed, schema_migrated, closed_out_of_band);
+    # states (accepted, closed_out_of_band); legacy cargo_installed/schema_migrated compatibility is handled by lifecycle_overlay;
     # allowed from every other state. The `--commit` SHA is the merge-target
     # provenance and is recorded in transition_history.actor_note.
     - {from: planning, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
@@ -200,7 +207,6 @@ lifecycle:
     - {from: complete, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
     - {from: in_review, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
     - {from: rejected, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
-    - {from: deploy_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
     - {from: integration_queued, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
     - {from: integrating, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
     - {from: integration_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
@@ -314,22 +320,12 @@ lifecycle:
     # same edge for first attempts and retries. T138 P1.
     - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human, lifecycle: integration, active_step: none, integration_step: queued, blocked: false, legacy_status: integration_queued}
 
-    # integrated → cargo_installed (framework, fired by builtin:cargo-install
-    # on success). The ONLY post-integrated success edge stores subscribes to.
-    # Other repos opt out by not wiring cargo-install. T138 P1.
-    - {from: integrated, to: cargo_installed, verb: mark_cargo_installed, actor: framework, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: cargo_installed}
-    # integrated → deploy_blocked (framework, fired by builtin:cargo-install on
-    # stores-specific post-land build/candidate failure). Integration already
-    # landed in main; this is deploy/release recovery, not retry-integration.
-    - {from: integrated, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: true, blocker_kind: deploy, legacy_status: deploy_blocked}
-
-    # cargo_installed → schema_migrated (framework, fired by builtin:schema-migrate on success)
-    - {from: cargo_installed, to: schema_migrated, verb: mark_schema_migrated, actor: framework, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: schema_migrated}
-    # cargo_installed → deploy_blocked (framework, fired by builtin:schema-migrate on failure)
-    - {from: cargo_installed, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: true, blocker_kind: deploy, legacy_status: deploy_blocked}
-    # deploy_blocked recovery: retry the release ceremony from the accepted edge
-    # after fixing the underlying deploy issue. Do not use resume here.
-    - {from: deploy_blocked, to: accepted, verb: retry-deploy, actor: ai_with_human, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: accepted}
+    # integrated self-transitions update the stores-only post_integration_step column.
+    # cargo_installed/schema_migrated/deploy_blocked are compatibility status values only,
+    # not generic ADR0001 lifecycle states.
+    - {from: integrated, to: integrated, verb: mark_cargo_installed, actor: framework, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: integrated}
+    - {from: integrated, to: integrated, verb: mark_schema_migrated, actor: framework, guard: "post_integration_step == 'cargo_installed'", lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: integrated}
+    - {from: integrated, to: integrated, verb: mark_deploy_blocked, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: true, blocker_kind: deploy, legacy_status: integrated}
 
     # complete → in_review (framework on-entry follow-on)
     - {from: complete, to: in_review, verb: request_review, actor: framework, lifecycle: integration, active_step: wrapping, integration_step: none, blocked: false, legacy_status: in_review}
@@ -355,7 +351,6 @@ lifecycle:
     - {from: code_review, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
     - {from: blocked, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
     - {from: in_review, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
-    - {from: deploy_blocked, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
     - {from: complete, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
     - {from: integration_queued, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
     - {from: integrating, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
@@ -402,7 +397,6 @@ workflow:
     code_review:
       - dispatch_agent: code_reviewer
     blocked: []
-    deploy_blocked: []
     complete:
       - transition_to: in_review
     in_review:

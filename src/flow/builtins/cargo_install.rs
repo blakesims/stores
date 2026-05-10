@@ -4,8 +4,8 @@
 //! T138 P3: this is now a stores-repo-specific subscriber on
 //! (integrating → integrated). The source state expectation is `integrated`
 //! (post-T138; previously `accepted`). On success it fires
-//! `mark_cargo_installed` (integrated → cargo_installed); the
-//! schema-migrate subscriber takes over from there.
+//! `mark_cargo_installed`, which keeps generic status at `integrated` and sets
+//! `post_integration_step='cargo_installed'`; schema-migrate takes over from there.
 //!
 //! Builds into an isolated cargo install root, validates the candidate `stores`
 //! binary, then atomically promotes it to the private daemon binary path.

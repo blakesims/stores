@@ -6253,12 +6253,12 @@ workflow:
     }
 
     #[test]
-    fn retry_deploy_from_deploy_blocked_to_accepted_records_history() {
+    fn retry_deploy_from_legacy_deploy_blocked_errors_after_post_integration_quarantine() {
         let (schema, conn) = setup_bundled_tasks_for_retry();
         insert_task_for_retry(&conn, "T921", "deploy_blocked");
 
-        let out = compute_retry_deploy(&schema, &conn, "T921", Actor::AiWithHuman).unwrap();
-        assert_eq!(out.new_status, "accepted");
+        let err = compute_retry_deploy(&schema, &conn, "T921", Actor::AiWithHuman).unwrap_err();
+        assert!(err.to_string().contains("retry-deploy"));
         let status: String = conn
             .query_row(
                 "SELECT status FROM tasks WHERE display_id = 'T921'",
@@ -6266,23 +6266,7 @@ workflow:
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(status, "accepted");
-        let row: (String, String, String) = conn
-            .query_row(
-                "SELECT from_status, to_status, verb FROM transition_history \
-                 WHERE store='tasks' AND display_id='T921'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            row,
-            (
-                "deploy_blocked".into(),
-                "accepted".into(),
-                "retry-deploy".into()
-            )
-        );
+        assert_eq!(status, "deploy_blocked");
     }
 
     #[test]

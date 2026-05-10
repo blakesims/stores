@@ -4,9 +4,10 @@
 //! planning/plan_review/ready/executing/code_review are the active-lane rows;
 //! blocked is reached from plan_review/code_review and drive-failure rows;
 //! complete/in_review/accepted/integration_queued/integrating/integration_blocked
-//! are the integration-lane rows; rejected/integrated/cargo_installed/
-//! schema_migrated/closed_out_of_band/abandoned are terminal/done rows;
-//! deploy_blocked is the deployment blocker row. Blocked-kind derivation rows
+//! are the integration-lane rows; rejected/integrated/closed_out_of_band/abandoned
+//! are terminal/done rows. Legacy cargo_installed/schema_migrated/deploy_blocked
+//! statuses are compatibility-only projections for pre-ADR0001 rows; new writes
+//! use post_integration_step instead. Blocked-kind derivation rows
 //! correspond to the schema comments around submit-review fallback/FAIL,
 //! submit-plan-review fallback/NOT_READY, and mark_drive_failed transitions.
 
@@ -93,6 +94,9 @@ pub fn derive(
         }
         ("mark_deploy_done", "integrating") => {
             overlay("integration", "none", "verifying", false, None)
+        }
+        ("mark_deploy_blocked", "integrated") => {
+            overlay("integration", "none", "none", true, Some("deploy".into()))
         }
         (_, "planning") => overlay("active", "planning", "none", false, None),
         (_, "plan_review") => overlay("active", "planning_review", "none", false, None),
