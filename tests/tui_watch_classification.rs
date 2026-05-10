@@ -12,6 +12,20 @@ fn task(id: &str, status: &str, reason: Option<&str>) -> Row {
         updated_at: "1700000000".to_string(),
         blocked_reason: reason.map(str::to_string),
         blocked_reason_class: Some(blocked_reason_class(reason).to_string()),
+        lifecycle: Some("active".to_string()),
+        active_step: Some(
+            match status {
+                "plan_review" => "planning_review",
+                "code_review" => "coding_review",
+                "executing" => "coding",
+                "planning" => "planning",
+                _ => "none",
+            }
+            .to_string(),
+        ),
+        integration_step: Some("none".to_string()),
+        blocked: Some(reason.is_some()),
+        blocker_kind: None,
         ..Default::default()
     })
 }
@@ -69,7 +83,7 @@ fn tui_watch_classification_section_labels_are_contract_taxonomy_and_unique() {
 }
 
 #[test]
-fn tui_watch_classification_u1_u3_and_ai_review_have_distinct_sections() {
+fn tui_watch_classification_adr_0001_review_steps_stay_in_active_work() {
     let mut ready = obs("L100", "ratify ready");
     if let Row::Obs(o) = &mut ready {
         o.contract_state = Some("ready".to_string());
@@ -83,8 +97,12 @@ fn tui_watch_classification_u1_u3_and_ai_review_have_distinct_sections() {
     ];
     let buckets = classify_with_options(&rows, WatchClassifyOptions::default());
     assert_eq!(
-        bucket(&buckets, Section::TasksHeldAiReview),
+        bucket(&buckets, Section::TasksActionableCurrentWork),
         vec![0usize, 1]
+    );
+    assert_eq!(
+        bucket(&buckets, Section::TasksHeldAiReview),
+        Vec::<usize>::new()
     );
     assert_eq!(bucket(&buckets, Section::TasksAcceptU3), vec![2usize]);
     assert_eq!(bucket(&buckets, Section::ObsRatifiable), vec![3usize]);
@@ -112,7 +130,10 @@ fn tui_watch_classification_silent_zombie_routes_to_default_visible_zombie_secti
         assert_eq!(class(row, &[]), VisibilityClass::ActionableRecovery);
     }
     let buckets = classify_with_options(&rows, WatchClassifyOptions::default());
-    assert_eq!(bucket(&buckets, Section::TasksHeldZombie), vec![0usize, 1, 2]);
+    assert_eq!(
+        bucket(&buckets, Section::TasksHeldZombie),
+        vec![0usize, 1, 2]
+    );
 }
 
 #[test]

@@ -23,6 +23,20 @@ fn task(
         current_phase: Some(phase),
         current_cycle: Some(cycle),
         total_phases: Some(total),
+        lifecycle: Some("active".to_string()),
+        active_step: Some(
+            match status {
+                "code_review" => "coding_review",
+                "plan_review" => "planning_review",
+                "executing" => "coding",
+                "planning" => "planning",
+                _ => "none",
+            }
+            .to_string(),
+        ),
+        integration_step: Some("none".to_string()),
+        blocked: Some(reason.is_some()),
+        blocker_kind: None,
         ..Default::default()
     })
 }
@@ -154,6 +168,7 @@ fn row_line(row: &Row) -> String {
     }
 }
 
+/// ADR 0001 §3: planning_review/coding_review remain active work, not held AI review.
 fn render_snapshot(show_all_history: bool) -> String {
     let rows = fixture_rows();
     let model = cockpit_model(&rows, ExternalReviewState::default());

@@ -533,6 +533,7 @@ mod tests {
             CREATE TABLE tasks (
                 display_id TEXT, status TEXT, title TEXT, claimed_by TEXT, updated_at TEXT,
                 tier_hint TEXT, linked_observations TEXT, blocked_reason TEXT,
+                lifecycle TEXT, active_step TEXT, integration_step TEXT, blocked INTEGER, blocker_kind TEXT,
                 current_phase INTEGER, current_cycle INTEGER, plan TEXT, plan_source TEXT,
                 contract TEXT, plan_review_log TEXT, cycles TEXT, wrap_log TEXT,
                 branch TEXT, workspace_path TEXT
@@ -593,7 +594,6 @@ mod tests {
         app.refresh(&conn).unwrap();
         assert_eq!(app.engine_detail, EngineDetail::default());
     }
-
 
     fn task(status: &str) -> Row {
         Row::Task(TaskRow {

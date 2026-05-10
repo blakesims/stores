@@ -151,6 +151,11 @@ pub struct TaskRow {
     pub linked_observations: Vec<String>,
     pub blocked_reason: Option<String>,
     pub blocked_reason_class: Option<String>,
+    pub lifecycle: Option<String>,
+    pub active_step: Option<String>,
+    pub integration_step: Option<String>,
+    pub blocked: Option<bool>,
+    pub blocker_kind: Option<String>,
     pub current_phase: Option<i64>,
     pub current_cycle: Option<i64>,
     pub total_phases: Option<i64>,
@@ -817,8 +822,13 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
 
     let task_cols = table_columns(conn, "tasks")?;
     let integration_attempts_expr = sql_col(&task_cols, "integration_attempts", "NULL");
+    // T144 P2: lifecycle overlay columns are migration-guaranteed by
+    // db::open/apply_framework_drift before watch/TUI handlers run. Read them
+    // directly (no COALESCE/fallback) so operator opt-outs fail loudly when the
+    // framework migration is disabled.
     let task_sql = format!(
         "SELECT display_id, status, {title}, {claimed_by}, {updated_at}, {tier_hint}, {linked_observations}, {blocked_reason}, \
+                lifecycle, active_step, integration_step, blocked, blocker_kind, \
                 {current_phase}, {current_cycle}, {total_phases}, {plan_source}, \
                 {contract_executive_intent}, {contract_done_when}, {contract_scope_in}, {contract_scope_out}, \
                 {plan_review_log}, {cycles}, {wrap_log}, {branch}, {workspace_path}, {drive_pid}, {drive_started_at}, \
@@ -876,14 +886,19 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
     let task_iter = stmt.query_map([], |r| {
         let linked_raw: String = r.get(6)?;
         let blocked_reason: Option<String> = r.get(7).ok().flatten();
-        let branch: Option<String> = r.get(19).ok().flatten();
-        let workspace_path: Option<String> = r.get(20).ok().flatten();
-        let drive_pid: Option<i64> = r.get(21).ok().flatten();
-        let drive_started_at: Option<String> = r.get(22).ok().flatten();
-        let activation: Option<String> = r.get(23).ok().flatten();
-        let claimed_at: Option<String> = r.get(24).ok().flatten();
-        let integration_attempts_raw: Option<String> = r.get(25).ok().flatten();
-        let row_id: i64 = r.get(26)?;
+        let lifecycle: Option<String> = r.get(8).ok().flatten();
+        let active_step: Option<String> = r.get(9).ok().flatten();
+        let integration_step: Option<String> = r.get(10).ok().flatten();
+        let blocked: Option<bool> = r.get(11).ok().flatten();
+        let blocker_kind: Option<String> = r.get(12).ok().flatten();
+        let branch: Option<String> = r.get(24).ok().flatten();
+        let workspace_path: Option<String> = r.get(25).ok().flatten();
+        let drive_pid: Option<i64> = r.get(26).ok().flatten();
+        let drive_started_at: Option<String> = r.get(27).ok().flatten();
+        let activation: Option<String> = r.get(28).ok().flatten();
+        let claimed_at: Option<String> = r.get(29).ok().flatten();
+        let integration_attempts_raw: Option<String> = r.get(30).ok().flatten();
+        let row_id: i64 = r.get(31)?;
         let display_id: String = r.get(0)?;
         let (integration_attempts_count, last_integration_outcome) =
             integration_attempts_summary(integration_attempts_raw.as_deref());
@@ -897,21 +912,26 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             linked_observations: serde_json::from_str(&linked_raw).unwrap_or_default(),
             blocked_reason: blocked_reason.clone(),
             blocked_reason_class: Some(blocked_reason_class(blocked_reason.as_deref()).to_string()),
-            current_phase: r.get(8).ok().flatten(),
-            current_cycle: r.get(9).ok().flatten(),
-            total_phases: r.get(10).ok().flatten(),
-            plan_source: r.get(11).ok().flatten(),
-            contract_executive_intent: r.get(12).ok().flatten(),
-            contract_done_when: r.get(13).ok().flatten(),
-            contract_scope_in: r.get(14).ok().flatten(),
-            contract_scope_out: r.get(15).ok().flatten(),
+            lifecycle,
+            active_step,
+            integration_step,
+            blocked,
+            blocker_kind,
+            current_phase: r.get(13).ok().flatten(),
+            current_cycle: r.get(14).ok().flatten(),
+            total_phases: r.get(15).ok().flatten(),
+            plan_source: r.get(16).ok().flatten(),
+            contract_executive_intent: r.get(17).ok().flatten(),
+            contract_done_when: r.get(18).ok().flatten(),
+            contract_scope_in: r.get(19).ok().flatten(),
+            contract_scope_out: r.get(20).ok().flatten(),
             plan_review_summaries: json_summary_list(
-                r.get::<_, String>(16).ok().as_deref(),
+                r.get::<_, String>(21).ok().as_deref(),
                 "summary",
             ),
-            cycle_summaries: cycle_summary_list(r.get::<_, String>(17).ok().as_deref()),
+            cycle_summaries: cycle_summary_list(r.get::<_, String>(22).ok().as_deref()),
             wrap_summaries: json_summary_list(
-                r.get::<_, String>(18).ok().as_deref(),
+                r.get::<_, String>(23).ok().as_deref(),
                 "executive_summary",
             ),
             branch,
@@ -1673,6 +1693,22 @@ fn push_bucket(buckets: &mut [(Section, Vec<usize>)], sec: Section, idx: usize) 
     bucket.1.push(idx);
 }
 
+fn active_overlay_step(t: &TaskRow) -> Option<&str> {
+    t.active_step
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "none")
+}
+
+pub(crate) fn visible_step(t: &TaskRow) -> Option<&str> {
+    active_overlay_step(t).or_else(|| {
+        t.integration_step
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "none")
+    })
+}
+
 fn section_for(row: &Row) -> Option<Section> {
     match row {
         Row::Task(t) => {
@@ -1686,6 +1722,12 @@ fn section_for(row: &Row) -> Option<Section> {
             }
             if is_silent_zombie_reason(&reason) {
                 return Some(Section::TasksHeldZombie);
+            }
+            if matches!(
+                active_overlay_step(t),
+                Some("planning" | "planning_review" | "coding" | "coding_review" | "wrapping")
+            ) {
+                return Some(Section::TasksActionableCurrentWork);
             }
             match t.status.as_str() {
                 "blocked" => {
@@ -1705,7 +1747,6 @@ fn section_for(row: &Row) -> Option<Section> {
                 "integration_queued" | "integrating" => Some(Section::TasksIntegration),
                 "integrated" => Some(Section::TasksIntegratedAwaitingPostLand),
                 "integration_blocked" => Some(Section::TasksIntegrationBlocked),
-                "plan_review" | "code_review" => Some(Section::TasksHeldAiReview),
                 "in_review" => Some(Section::TasksAcceptU3),
                 _ if is_priority_task(t) => Some(Section::ObsOpenNoContract),
                 _ => Some(Section::TasksActionableCurrentWork),
@@ -2070,7 +2111,7 @@ mod tests {
     fn section_classification() {
         // blocked/deploy_blocked with no blocked_reason → unknown class → NeedsTriage section.
         let rows = vec![
-            task("plan_review"),        // idx 0 → HELD-AI-REVIEW
+            task("plan_review"),        // idx 0 → ACTIVE WORK (ADR 0001 §3)
             task("blocked"),            // idx 1 → HELD-TRIAGE (no reason → unknown)
             task("deploy_blocked"),     // idx 2 → HELD-TRIAGE (no reason → unknown)
             task("accepted"),           // idx 3 → TERMINAL
@@ -2087,13 +2128,13 @@ mod tests {
         let b = |sec: Section| -> Vec<usize> {
             buckets.iter().find(|(s, _)| *s == sec).unwrap().1.clone()
         };
-        assert_eq!(b(Section::TasksActionableCurrentWork), Vec::<usize>::new());
+        assert_eq!(b(Section::TasksActionableCurrentWork), vec![0usize]);
         assert_eq!(b(Section::TasksBlockedNeedsAction), Vec::<usize>::new());
         assert_eq!(b(Section::TasksDeployRecovery), Vec::<usize>::new());
         assert_eq!(b(Section::TasksNeedsTriage), vec![1usize, 2]);
         assert_eq!(b(Section::TasksRecentlyTerminal), vec![3usize]);
         assert_eq!(b(Section::ObsRatifiable), vec![4usize]);
-        assert_eq!(b(Section::TasksHeldAiReview), vec![0usize]);
+        assert_eq!(b(Section::TasksHeldAiReview), Vec::<usize>::new());
         assert_eq!(b(Section::ObsOpenNoContract), Vec::<usize>::new());
         assert_eq!(b(Section::ObsOther), vec![5usize]);
     }
@@ -2104,10 +2145,10 @@ mod tests {
         // Use an explicit recoverable reason to get TasksBlockedNeedsAction / TasksDeployRecovery.
         let mappings: &[(&str, Option<&str>, Section)] = &[
             ("planning", None, Section::TasksActionableCurrentWork),
-            ("plan_review", None, Section::TasksHeldAiReview),
+            ("plan_review", None, Section::TasksActionableCurrentWork),
             ("ready", None, Section::TasksActionableCurrentWork),
             ("executing", None, Section::TasksActionableCurrentWork),
-            ("code_review", None, Section::TasksHeldAiReview),
+            ("code_review", None, Section::TasksActionableCurrentWork),
             (
                 "blocked",
                 Some("rate_limit 429"),
@@ -2276,6 +2317,7 @@ mod tests {
             CREATE TABLE tasks (
                 display_id TEXT, status TEXT, title TEXT, claimed_by TEXT, updated_at TEXT,
                 tier_hint TEXT, linked_observations TEXT, blocked_reason TEXT,
+                lifecycle TEXT, active_step TEXT, integration_step TEXT, blocked INTEGER, blocker_kind TEXT,
                 current_phase INTEGER, current_cycle INTEGER, plan_source TEXT, contract TEXT,
                 plan TEXT, plan_review_log TEXT, cycles TEXT, wrap_log TEXT, branch TEXT, workspace_path TEXT
             );
@@ -2681,6 +2723,7 @@ mod tests {
             CREATE TABLE tasks (
                 display_id TEXT, status TEXT, title TEXT, claimed_by TEXT, updated_at TEXT,
                 tier_hint TEXT, linked_observations TEXT, blocked_reason TEXT,
+                lifecycle TEXT, active_step TEXT, integration_step TEXT, blocked INTEGER, blocker_kind TEXT,
                 current_phase INTEGER, current_cycle INTEGER, plan TEXT, plan_source TEXT,
                 contract TEXT, plan_review_log TEXT, cycles TEXT, wrap_log TEXT,
                 branch TEXT, workspace_path TEXT

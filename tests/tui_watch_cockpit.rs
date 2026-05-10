@@ -14,7 +14,7 @@ use rusqlite::Connection;
 
 use stores::tui::app::{App, TuiOpts};
 use stores::tui::daemon::Liveness;
-use stores::tui::data::StoreLane;
+use stores::tui::data::{Row, Section, StoreLane};
 use stores::tui::render::{BOTTOM_CHROME_HEIGHT, TOP_STRIP_HEIGHT};
 use stores::tui::{on_key, render};
 
@@ -36,6 +36,7 @@ fn fixture_conn() -> Connection {
         CREATE TABLE tasks (
             display_id TEXT, status TEXT, title TEXT, claimed_by TEXT, updated_at TEXT,
             tier_hint TEXT, linked_observations TEXT, blocked_reason TEXT,
+                lifecycle TEXT, active_step TEXT, integration_step TEXT, blocked INTEGER, blocker_kind TEXT,
             current_phase INTEGER, current_cycle INTEGER, plan TEXT, plan_source TEXT,
             contract TEXT, plan_review_log TEXT, cycles TEXT, wrap_log TEXT,
             branch TEXT, workspace_path TEXT
@@ -167,12 +168,94 @@ fn default_tui_opts_routes_through_cockpit_render_path() {
         "default TuiOpts must produce the 5-card cockpit top strip; got {} cards",
         cards.len()
     );
-    for label in ["INTAKE", "OBSERVATIONS", "TASKS", "EXTERNAL REVIEWS", "ENGINE"] {
+    for label in [
+        "INTAKE",
+        "OBSERVATIONS",
+        "TASKS",
+        "EXTERNAL REVIEWS",
+        "ENGINE",
+    ] {
         assert!(
             painted.contains(label),
             "default TuiOpts run-once paint must include cockpit lane label {label:?}"
         );
     }
+}
+
+#[test]
+fn cockpit_adr_0001_review_steps_render_under_active_work() {
+    let conn = fixture_conn();
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, updated_at, linked_observations, lifecycle, active_step, integration_step, blocked, blocker_kind) \
+         VALUES ('T102', 'code_review', 'code review active', '2026-05-06', '[]', 'active', 'coding_review', 'none', 0, NULL)",
+        [],
+    )
+    .expect("seed code_review overlay");
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, updated_at, linked_observations, lifecycle, active_step, integration_step, blocked, blocker_kind) \
+         VALUES ('T103', 'plan_review', 'plan review active', '2026-05-06', '[]', 'active', 'planning_review', 'none', 0, NULL)",
+        [],
+    )
+    .expect("seed plan_review overlay");
+
+    let mut app = build_cockpit_app(&conn);
+    let active_idxs = app
+        .sections
+        .iter()
+        .find(|(s, _)| *s == Section::TasksActionableCurrentWork)
+        .map(|(_, idxs)| idxs.clone())
+        .unwrap_or_default();
+    let active_ids: Vec<&str> = active_idxs
+        .iter()
+        .filter_map(|i| match &app.rows[*i] {
+            Row::Task(t) => Some(t.display_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        active_ids.contains(&"T102"),
+        "code_review/coding_review must classify ACTIVE WORK: {active_ids:?}"
+    );
+    assert!(
+        active_ids.contains(&"T103"),
+        "plan_review/planning_review must classify ACTIVE WORK: {active_ids:?}"
+    );
+    let held_ids: Vec<&str> = app
+        .sections
+        .iter()
+        .find(|(s, _)| *s == Section::TasksHeldAiReview)
+        .map(|(_, idxs)| {
+            idxs.iter()
+                .filter_map(|i| match &app.rows[*i] {
+                    Row::Task(t) => Some(t.display_id.as_str()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !held_ids.contains(&"T102"),
+        "code_review/coding_review must not classify HELD-AI-REVIEW: {held_ids:?}"
+    );
+    assert!(
+        !held_ids.contains(&"T103"),
+        "plan_review/planning_review must not classify HELD-AI-REVIEW: {held_ids:?}"
+    );
+
+    let buf = paint(&mut app);
+    let painted = buffer_to_string(&buf);
+    assert!(
+        painted.contains("ACTIVE WORK"),
+        "render_frame must show ACTIVE WORK header:\n{painted}"
+    );
+    assert!(
+        painted.contains("T102"),
+        "render_frame must show code_review row T102:\n{painted}"
+    );
+    assert!(
+        !painted.contains("HELD-AI-REVIEW"),
+        "review-step rows must not render under HELD-AI-REVIEW:\n{painted}"
+    );
 }
 
 #[test]
@@ -185,7 +268,13 @@ fn cockpit_top_strip_paints_all_five_lane_labels_with_counts() {
     let top: String = painted.lines().take(4).collect::<Vec<_>>().join("\n");
 
     // (i) All five lane labels present.
-    for label in ["INTAKE", "OBSERVATIONS", "TASKS", "EXTERNAL REVIEWS", "ENGINE"] {
+    for label in [
+        "INTAKE",
+        "OBSERVATIONS",
+        "TASKS",
+        "EXTERNAL REVIEWS",
+        "ENGINE",
+    ] {
         assert!(
             top.contains(label),
             "top strip missing lane label {label:?}; got top region:\n{top}\n\nfull paint:\n{painted}"
@@ -194,14 +283,29 @@ fn cockpit_top_strip_paints_all_five_lane_labels_with_counts() {
 
     // (i) Per-lane primary counts derived from the seeded fixture.
     // Intake: 1 draft → "open: 1".
-    assert!(top.contains("open: 1"), "top region missing 'open: 1' (intake/obs primary):\n{top}");
+    assert!(
+        top.contains("open: 1"),
+        "top region missing 'open: 1' (intake/obs primary):\n{top}"
+    );
     // Tasks: 1 executing + 1 ready → "active: 2".
-    assert!(top.contains("active: 2"), "top region missing 'active: 2' (tasks primary):\n{top}");
+    assert!(
+        top.contains("active: 2"),
+        "top region missing 'active: 2' (tasks primary):\n{top}"
+    );
     // External reviews: 1 running → "running: 1".
-    assert!(top.contains("running: 1"), "top region missing 'running: 1' (external-reviews primary):\n{top}");
+    assert!(
+        top.contains("running: 1"),
+        "top region missing 'running: 1' (external-reviews primary):\n{top}"
+    );
     // Engine: dead daemon + dangling lock.
-    assert!(top.contains("daemon DEAD"), "top region missing 'daemon DEAD' (engine primary):\n{top}");
-    assert!(top.contains("locks 1"), "top region missing 'locks 1' (engine breakdown):\n{top}");
+    assert!(
+        top.contains("daemon DEAD"),
+        "top region missing 'daemon DEAD' (engine primary):\n{top}"
+    );
+    assert!(
+        top.contains("locks 1"),
+        "top region missing 'locks 1' (engine breakdown):\n{top}"
+    );
 }
 
 #[test]

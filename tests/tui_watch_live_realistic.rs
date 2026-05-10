@@ -30,6 +30,7 @@ fn seed_db() -> Connection {
             tier_hint TEXT,
             linked_observations TEXT,
             blocked_reason TEXT,
+            lifecycle TEXT, active_step TEXT, integration_step TEXT, blocked INTEGER, blocker_kind TEXT,
             current_phase INTEGER,
             current_cycle INTEGER,
             plan TEXT
