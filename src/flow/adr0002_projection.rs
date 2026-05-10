@@ -415,7 +415,9 @@ fn parse_contract_state(value: Option<&str>) -> ObsContractState {
     match value {
         None | Some("none") => ObsContractState::None,
         Some("draft") => ObsContractState::Draft,
-        Some("approved") => ObsContractState::Approved,
+        // Current observations schema uses `ready`; ADR 0002 names the same
+        // ratified contract bucket `approved`.
+        Some("approved" | "ready") => ObsContractState::Approved,
         Some(other) => panic!("unknown intent_contract.contract_state {other}"),
     }
 }
@@ -818,6 +820,14 @@ mod tests {
         assert_eq!(project_observation(&o, None).waiting, None);
     }
     #[test]
+    fn waiting_ready_contract_state_maps_to_approved_no_overlay() {
+        let mut o = obs("open");
+        o.contract_state = Some("ready");
+        let p = project_observation(&o, None);
+        assert_eq!(p.contract_state, ObsContractState::Approved);
+        assert_eq!(p.waiting, None);
+    }
+    #[test]
     fn waiting_d9_closed_resolved_suppresses_human_ratification() {
         let mut o = obs("resolved");
         o.contract_state = Some("draft");
@@ -1012,6 +1022,11 @@ mod tests {
             "wont_fix",
         ] {
             let _ = project_observation(&obs(s), None);
+        }
+        for c in ["draft", "ready"] {
+            let mut o = obs("open");
+            o.contract_state = Some(c);
+            let _ = project_observation(&o, None);
         }
         for s in [
             "pending",
