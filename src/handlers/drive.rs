@@ -62,7 +62,7 @@ use crate::schema::{actor::Actor, Schema};
 
 pub(crate) struct HeartbeatPump {
     heartbeat_file: tempfile::NamedTempFile,
-    prior_env: Option<std::ffi::OsString>,
+    heartbeat_override: Option<crate::runner::liveness::HeartbeatFileOverride>,
     stop_tx: Option<mpsc::Sender<()>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -71,8 +71,8 @@ impl HeartbeatPump {
     pub(crate) fn start(display_id: &str, db_path: PathBuf) -> anyhow::Result<Self> {
         let heartbeat_file = tempfile::NamedTempFile::new()?;
         let heartbeat_path = heartbeat_file.path().to_path_buf();
-        let prior_env = std::env::var_os("STORES_HEARTBEAT_FILE");
-        std::env::set_var("STORES_HEARTBEAT_FILE", &heartbeat_path);
+        let heartbeat_override =
+            crate::runner::liveness::HeartbeatFileOverride::install(heartbeat_path.clone());
         let (tx, rx) = mpsc::channel::<()>();
         let display_id = display_id.to_string();
         let handle = std::thread::Builder::new()
@@ -103,7 +103,7 @@ impl HeartbeatPump {
             })?;
         Ok(Self {
             heartbeat_file,
-            prior_env,
+            heartbeat_override: Some(heartbeat_override),
             stop_tx: Some(tx),
             handle: Some(handle),
         })
@@ -122,11 +122,7 @@ impl Drop for HeartbeatPump {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-        if let Some(v) = self.prior_env.take() {
-            std::env::set_var("STORES_HEARTBEAT_FILE", v);
-        } else {
-            std::env::remove_var("STORES_HEARTBEAT_FILE");
-        }
+        self.heartbeat_override.take();
     }
 }
 
@@ -2361,6 +2357,54 @@ mod tests {
         }
         assert!(std::env::var_os("STORES_HEARTBEAT_FILE").is_none());
         assert!(!heartbeat_path.exists());
+    }
+
+    #[test]
+    fn overlapping_heartbeat_pumps_keep_thread_local_progress_isolated() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        std::env::remove_var("STORES_HEARTBEAT_FILE");
+        let dir = tempdir().unwrap();
+        let db_file = dir.path().join("heartbeat-overlap.db");
+        let conn = Connection::open(&db_file).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE dispatch_locks (\
+             store TEXT, display_id TEXT, agent_name TEXT, claimed_at TEXT, finished_at TEXT, heartbeat_at TEXT\
+             );\
+             INSERT INTO dispatch_locks (store,display_id,agent_name,claimed_at,finished_at,heartbeat_at) VALUES \
+             ('tasks','T998','auto-drive','2026-05-09T10:00:00Z',NULL,NULL),\
+             ('tasks','T999','auto-drive','2026-05-09T10:00:00Z',NULL,NULL);",
+        )
+        .unwrap();
+
+        let pump1 = HeartbeatPump::start("T998", db_file.clone()).unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let db_for_thread = db_file.clone();
+        let handle = std::thread::spawn(move || {
+            let _pump2 = HeartbeatPump::start("T999", db_for_thread).unwrap();
+            ready_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            crate::runner::liveness::touch_heartbeat_file_from_env();
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        });
+
+        ready_rx.recv().unwrap();
+        drop(pump1);
+        assert!(std::env::var_os("STORES_HEARTBEAT_FILE").is_none());
+        go_tx.send(()).unwrap();
+        handle.join().unwrap();
+
+        let hb: Option<String> = conn
+            .query_row(
+                "SELECT heartbeat_at FROM dispatch_locks WHERE display_id='T999'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(hb.is_some(), "overlapping pump lost thread-local heartbeat");
+        assert!(std::env::var_os("STORES_HEARTBEAT_FILE").is_none());
     }
 
     /// Insert a minimal task row in `planning` state.

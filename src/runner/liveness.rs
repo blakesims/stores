@@ -1,6 +1,8 @@
 use anyhow::Context;
+use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -109,8 +111,35 @@ enum Stream {
     Eof,
 }
 
+thread_local! {
+    static HEARTBEAT_FILE_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct HeartbeatFileOverride {
+    prior: Option<PathBuf>,
+}
+
+impl HeartbeatFileOverride {
+    pub(crate) fn install(path: PathBuf) -> Self {
+        let prior = HEARTBEAT_FILE_OVERRIDE.with(|slot| slot.replace(Some(path)));
+        Self { prior }
+    }
+}
+
+impl Drop for HeartbeatFileOverride {
+    fn drop(&mut self) {
+        let prior = self.prior.take();
+        HEARTBEAT_FILE_OVERRIDE.with(|slot| {
+            slot.replace(prior);
+        });
+    }
+}
+
 pub fn touch_heartbeat_file_from_env() {
-    if let Some(path) = std::env::var_os("STORES_HEARTBEAT_FILE") {
+    let override_path = HEARTBEAT_FILE_OVERRIDE.with(|slot| slot.borrow().clone());
+    let path =
+        override_path.or_else(|| std::env::var_os("STORES_HEARTBEAT_FILE").map(PathBuf::from));
+    if let Some(path) = path {
         if let Ok(mut f) = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -365,7 +394,8 @@ mod tests {
         let heartbeat = tempfile::NamedTempFile::new().unwrap();
         std::env::set_var("STORES_HEARTBEAT_FILE", heartbeat.path());
         let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg("echo stdout-progress; echo stderr-progress >&2");
+        cmd.arg("-c")
+            .arg("echo stdout-progress; echo stderr-progress >&2");
         let out = run_streaming_with_liveness(
             &mut cmd,
             &LivenessThresholds {
