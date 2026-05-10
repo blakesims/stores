@@ -321,6 +321,41 @@ pub fn dispatch(
                         handlers::recover_stale_base::run_recover_stale_base(
                             &conn, er_schema, display_id, invoker,
                         )?;
+                    } else if verb == "enqueue-integration" && store.name == "tasks" {
+                        let display_id = sub
+                            .get_one::<String>("display_id")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        crate::flow::builtins::fire_framework_transition(
+                            &conn,
+                            display_id,
+                            "enqueue-integration",
+                            std::collections::BTreeMap::new(),
+                            "",
+                        )?;
+                        println!("Transitioned {display_id}: accepted → integration_queued");
+                    } else if verb == "run-integration" && store.name == "tasks" {
+                        let display_id = sub
+                            .get_one::<String>("display_id")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let (_row_id, entry) = handlers::row::read_row(schema, &conn, display_id)?;
+                        let row = serde_json::Value::Object(entry.into_iter().collect());
+                        let stores_dir = crate::paths::stores_dir()?;
+                        let agents_path = stores_dir.join("agents.yaml");
+                        let agents = crate::flow::agents_yaml::load_from_path(&agents_path)?;
+                        let config_path = stores_dir.join("config.yaml");
+                        let ctx = crate::flow::builtins::DispatchCtx {
+                            conn: &conn,
+                            agents: &agents,
+                            config_path: &config_path,
+                            policies_hash: "",
+                        };
+                        let code = crate::flow::builtins::integrate::run(&row, &ctx)?;
+                        if code != 0 {
+                            anyhow::bail!("run-integration for {display_id} failed with exit code {code}");
+                        }
+                        println!("Ran integration for {display_id}");
                     // reconcile-accepted is a tasks-only operator-grounded recovery verb
                     // for I027-class strandings (accepted row, work merged, chain never fired).
                     } else if verb == "reconcile-accepted" && store.name == "tasks" {

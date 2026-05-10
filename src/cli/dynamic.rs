@@ -601,6 +601,8 @@ fn build_store_command(schema: &Schema) -> Command {
     if schema.name == "tasks" {
         store_cmd = store_cmd.subcommand(build_recover_stale_base_cmd());
         store_cmd = store_cmd.subcommand(build_reconcile_accepted_cmd());
+        store_cmd = store_cmd.subcommand(build_enqueue_integration_cmd());
+        store_cmd = store_cmd.subcommand(build_run_integration_cmd());
         // T140 P1: activation primitive — `tasks activate` / `tasks deactivate`.
         store_cmd = store_cmd
             .subcommand(build_activate_cmd())
@@ -997,6 +999,42 @@ fn build_reconcile_accepted_cmd() -> Command {
         .arg(
             Arg::new("display_id")
                 .help("Display ID of the task (T###)")
+                .required(true),
+        )
+}
+
+/// Build the `enqueue-integration` command (tasks only).
+///
+/// Operator recovery for rows accepted while the daemon/on-entry engine was off:
+/// fire the framework-owned `accepted → integration_queued` transition without
+/// granting arbitrary framework authority at the CLI.
+fn build_enqueue_integration_cmd() -> Command {
+    Command::new("enqueue-integration")
+        .about(
+            "Recovery: enqueue an accepted active task into the integration lane \
+             (accepted → integration_queued) when the engine was off and the \
+             framework on-entry transition did not fire.",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the accepted task (T###)")
+                .required(true),
+        )
+}
+
+/// Build the `run-integration` command (tasks only).
+///
+/// Operator recovery for an `integration_queued` row when the daemon is off or
+/// historical seeding skipped the just-created integration edge.
+fn build_run_integration_cmd() -> Command {
+    Command::new("run-integration")
+        .about(
+            "Recovery: run builtin:integrate once for an integration_queued task \
+             without starting the full agents daemon.",
+        )
+        .arg(
+            Arg::new("display_id")
+                .help("Display ID of the integration_queued task (T###)")
                 .required(true),
         )
 }
