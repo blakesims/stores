@@ -297,17 +297,16 @@ Do not rewrite the task schema first. Prove the model through a deterministic re
 
 Suggested implementation chain:
 
-1. **Task lifecycle read model / watch projection**
-   - Map current raw statuses to `lifecycle`, `active_step`, `integration_step`, and blocker overlay.
-   - Update `stores watch` so current `code_review` stays inside active.
+1. **Task lifecycle read model / watch projection — shipped in T144**
+   - `tasks.lifecycle` / `active_step` / `integration_step` / blocker overlay are maintained from ADR 0001's model; `stores watch` reads the projection.
+   - v1 intentionally collapses integration sub-steps: `integration_step='merging'` is populated for the whole `status='integrating'` span, and `integration_step='none'` outside it. `refreshing`, `task_review`, `testing`, `deploying`, and `verifying` are intentionally not populated until later slices add their subscribers.
 
-2. **Integration resource locks**
-   - Add `main_branch` capacity-1 resource lock for merge/main mutation.
-   - Avoid globally serializing task review/testing.
+2. **Integration resource locks — shipped in T144**
+   - `main_branch` capacity-1 mutation is protected by the ResourceLock primitive in `src/handlers/resource_locks.rs`; see ADR 0001 and `docs/primitives.md`.
+   - The v1 lock window is the merge window inside `status='integrating'`: acquire immediately before checkout/merge, release after `mark_integrated` or via guard on merge/push failure.
 
-3. **Task reviewer + freshness policy**
-   - Reframe whole-task external review as `task_reviewer`.
-   - Persist review base/head and implement L1 freshness checks.
+3. **Task reviewer + freshness policy — shipped in T144**
+   - External-review base/head freshness is persisted and enforced by `builtin:integrate`; ADR 0001 remains the target model for broader `task_reviewer` naming.
 
 4. **Later slices**
    - First-class automation jobs.

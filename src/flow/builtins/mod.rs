@@ -25,7 +25,7 @@ use std::process::Command;
 
 use crate::flow::AgentsYaml;
 use crate::handlers::row::read_row;
-use crate::handlers::transition::execute_transition_write;
+use crate::handlers::transition::{execute_transition_write, inject_tasks_overlay_into_diff};
 use crate::schema::actor::Actor;
 use crate::schema::lifecycle::select_transition;
 use crate::schema::Schema;
@@ -199,7 +199,7 @@ pub(crate) fn fire_framework_transition(
 /// schema (e.g. `observations` for the auto-resolve-observation subscriber,
 /// T037 P1). All gates — declared transition lookup, validators, actor —
 /// fire just as they do for tasks.
-pub(crate) fn fire_framework_transition_for(
+pub fn fire_framework_transition_for(
     conn: &Connection,
     schema: &Schema,
     display_id: &str,
@@ -217,7 +217,7 @@ pub(crate) fn fire_framework_transition_for(
         .unwrap_or("")
         .to_string();
 
-    let diff = diff_extra;
+    let mut diff = diff_extra;
     let mut merged = existing.clone();
     for (k, v) in &diff {
         merged.insert(k.clone(), v.clone());
@@ -244,6 +244,15 @@ pub(crate) fn fire_framework_transition_for(
             validate::pretty_print(&errs)
         )
     })?;
+
+    inject_tasks_overlay_into_diff(
+        schema,
+        verb,
+        &current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
 
     let phash_opt = if policies_hash.is_empty() {
         None

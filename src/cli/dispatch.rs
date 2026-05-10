@@ -617,6 +617,63 @@ fn detect_invoker(matches: &ArgMatches) -> Result<InvokerCtx> {
     Ok(InvokerCtx { actor, token_valid })
 }
 
+
+fn require_resource_lock_mutation_authority(ctx: InvokerCtx) -> Result<Actor> {
+    match ctx.actor {
+        Actor::AiAutonomous => bail!("ai_autonomous rejected for resource-locks mutation; use human or ai_with_human with --approve-token"),
+        Actor::AiWithHuman if !ctx.token_valid => bail!("resource-locks mutation by ai_with_human requires --approve-token"),
+        Actor::AiWithHuman | Actor::Human => Ok(ctx.actor),
+        Actor::Framework => bail!("framework cannot be passed via CLI --invoker"),
+    }
+}
+
+pub fn dispatch_resource_locks(root: &ArgMatches, sub: &ArgMatches) -> Result<()> {
+    let ctx = detect_invoker(root)?;
+    let conn = db::open(&db_path()?)?;
+    match sub.subcommand() {
+        Some(("acquire", m)) => {
+            let actor = require_resource_lock_mutation_authority(ctx)?;
+            let p = handlers::resource_locks::AcquireParams {
+                resource_id: m.get_one::<String>("resource").unwrap(),
+                owner_display_id: m.get_one::<String>("owner").unwrap(),
+                owner_kind: m.get_one::<String>("owner-kind").unwrap(),
+                ttl_secs: m.get_one::<u64>("ttl-secs").copied(),
+                claim_source: m.get_one::<String>("claim-source").map(|s| s.as_str()),
+                invoker: actor,
+            };
+            match handlers::resource_locks::acquire(&conn, &p) {
+                Ok(tok) => { println!("{}", tok.0); Ok(()) }
+                Err(e) if e.to_string().contains("ResourceLockBusy") => bail!("BUSY: {e}"),
+                Err(e) => Err(e),
+            }
+        }
+        Some(("release", m)) => {
+            let actor = require_resource_lock_mutation_authority(ctx)?;
+            handlers::resource_locks::release(
+                &conn,
+                m.get_one::<String>("resource").unwrap(),
+                m.get_one::<String>("token").unwrap(),
+                actor,
+            )?;
+            println!("released");
+            Ok(())
+        }
+        Some(("list", _)) => {
+            for (resource_id, owner_kind, owner, token) in handlers::resource_locks::list(&conn)? {
+                println!("{resource_id}\t{owner_kind}\t{owner}\t{token}");
+            }
+            Ok(())
+        }
+        Some(("recover-stale", _)) => {
+            let actor = require_resource_lock_mutation_authority(ctx)?;
+            let recovered = handlers::resource_locks::recover_stale(&conn, std::time::SystemTime::now().into(), actor)?;
+            for r in recovered { println!("{}\t{}\t{}", r.resource_id, r.owner_display_id, r.fencing_token); }
+            Ok(())
+        }
+        _ => bail!("resource-locks requires a subcommand"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

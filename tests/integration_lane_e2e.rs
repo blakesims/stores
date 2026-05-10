@@ -109,8 +109,8 @@ fn seed_queued_task(conn: &Connection, display_id: &str, branch: &str, workspace
     let now = "2026-05-09T00:00:00Z";
     let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
     conn.execute(
-        "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
-         VALUES (?1, 'integration_queued', 'test', 't', ?2, ?3, ?4, ?5, ?5, 'framework', 'framework')",
+        "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, activation, blocked_reason, created_at, updated_at, created_by, updated_by) \
+         VALUES (?1, 'integration_queued', 'test', 't', ?2, ?3, ?4, 'active', '', ?5, ?5, 'framework', 'framework')",
         rusqlite::params![display_id, branch, workspace_path, contract, now],
     )
     .unwrap();

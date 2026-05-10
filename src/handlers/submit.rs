@@ -329,6 +329,48 @@ pub(crate) fn write_status_and_fields(
         idx += 1;
     }
 
+    if table == "tasks" {
+        if let Some(a) = audit.as_ref() {
+            let blocked_reason = text_fields.get("blocked_reason").map(String::as_str);
+            let integration_blocked_reason = text_fields
+                .get("integration_blocked_reason")
+                .map(String::as_str);
+            let overlay = crate::handlers::lifecycle_overlay::derive(
+                a.verb,
+                a.from_status,
+                new_status,
+                blocked_reason,
+                integration_blocked_reason,
+            )?;
+            for (col, val) in [
+                ("lifecycle", rusqlite::types::Value::Text(overlay.lifecycle)),
+                (
+                    "active_step",
+                    rusqlite::types::Value::Text(overlay.active_step),
+                ),
+                (
+                    "integration_step",
+                    rusqlite::types::Value::Text(overlay.integration_step),
+                ),
+                (
+                    "blocked",
+                    rusqlite::types::Value::Integer(if overlay.blocked { 1 } else { 0 }),
+                ),
+                (
+                    "blocker_kind",
+                    overlay
+                        .blocker_kind
+                        .map(rusqlite::types::Value::Text)
+                        .unwrap_or(rusqlite::types::Value::Null),
+                ),
+            ] {
+                set_parts.push(format!("{col} = ?{idx}"));
+                sql_values.push(val);
+                idx += 1;
+            }
+        }
+    }
+
     let where_idx = idx;
     sql_values.push(rusqlite::types::Value::Integer(row_id));
 
@@ -1923,7 +1965,12 @@ fn interrupted_status_for_drive_failure<'a>(
             )
             .optional()
             .context("resume: inspect transition before planning drive failure")?;
-        if matches!(previous.as_ref().map(|(from, to, verb)| (from.as_str(), to.as_str(), verb.as_str())), Some(("blocked", "planning", "resume"))) {
+        if matches!(
+            previous
+                .as_ref()
+                .map(|(from, to, verb)| (from.as_str(), to.as_str(), verb.as_str())),
+            Some(("blocked", "planning", "resume"))
+        ) {
             tx.query_row(
                 "SELECT from_status FROM transition_history \
                  WHERE store = ?1 AND row_id = ?2 AND verb = 'mark_drive_failed' \
@@ -2028,13 +2075,12 @@ pub(crate) fn compute_resume(
         .get("blocked_reason")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let resume_target = if blocked_reason.starts_with("drive_failed:")
-        || blocked_reason == "drive_failed"
-    {
-        interrupted_status_for_drive_failure(&tx, &schema.name, row_id)?.unwrap_or("planning")
-    } else {
-        "planning"
-    };
+    let resume_target =
+        if blocked_reason.starts_with("drive_failed:") || blocked_reason == "drive_failed" {
+            interrupted_status_for_drive_failure(&tx, &schema.name, row_id)?.unwrap_or("planning")
+        } else {
+            "planning"
+        };
 
     let mut fw_fields: BTreeMap<String, i64> = BTreeMap::new();
     if resume_target == "planning" {
@@ -3992,7 +4038,10 @@ fields:
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!((from_s.as_str(), to_s.as_str(), verb.as_str()), ("blocked", "executing", "resume"));
+        assert_eq!(
+            (from_s.as_str(), to_s.as_str(), verb.as_str()),
+            ("blocked", "executing", "resume")
+        );
     }
 
     #[test]

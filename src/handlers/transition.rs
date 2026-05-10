@@ -17,6 +17,46 @@ use super::row::{build_entry_map, deep_merge_entry_field, now_iso8601, read_row}
 /// daemon (Phase 5: agents_run.rs::run_dispatch). When unset (the manual CLI
 /// path), returns `(None, None)` so transition_history records NULL — the
 /// distinct sentinel for "manual transition" per AC5.4.
+pub(crate) fn inject_tasks_overlay_into_diff(
+    schema: &Schema,
+    verb: &str,
+    from: &str,
+    to: &str,
+    diff: &mut crate::validate::EntryMap,
+    merged: &mut crate::validate::EntryMap,
+) -> Result<()> {
+    if schema.name != "tasks" {
+        return Ok(());
+    }
+    let overlay = crate::handlers::lifecycle_overlay::derive(
+        verb,
+        from,
+        to,
+        merged.get("blocked_reason").and_then(|v| v.as_str()),
+        merged
+            .get("integration_blocked_reason")
+            .and_then(|v| v.as_str()),
+    )?;
+    let fields = [
+        ("lifecycle", Value::String(overlay.lifecycle)),
+        ("active_step", Value::String(overlay.active_step)),
+        ("integration_step", Value::String(overlay.integration_step)),
+        ("blocked", Value::Bool(overlay.blocked)),
+        (
+            "blocker_kind",
+            overlay
+                .blocker_kind
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        ),
+    ];
+    for (k, v) in fields {
+        diff.insert(k.to_string(), v.clone());
+        merged.insert(k.to_string(), v);
+    }
+    Ok(())
+}
+
 pub(crate) fn read_policy_env() -> (Option<String>, Option<String>) {
     let pref = std::env::var("STORES_POLICY_REF")
         .ok()
@@ -187,6 +227,15 @@ pub fn run_close_as_addressed(
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
+    inject_tasks_overlay_into_diff(
+        schema,
+        "close_as_addressed",
+        current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
+
     let (pref, phash) = read_policy_env();
     execute_transition_write(
         &tx,
@@ -257,7 +306,7 @@ pub fn run_close_out_of_band(
     }
 
     // 3. Resolve transition (errors if from-state is terminal/disallowed).
-    let merged = existing.clone();
+    let mut merged = existing.clone();
     let transition = select_transition(
         &schema.lifecycle.transitions,
         current_status,
@@ -266,7 +315,7 @@ pub fn run_close_out_of_band(
         &merged,
     )?;
 
-    let diff: crate::validate::EntryMap = std::collections::BTreeMap::new();
+    let mut diff: crate::validate::EntryMap = std::collections::BTreeMap::new();
 
     validate::validate(
         schema,
@@ -282,15 +331,83 @@ pub fn run_close_out_of_band(
     // real git validation; there is no production escape hatch.
     validate_sha_reachable_in_main(commit)?;
 
+    inject_tasks_overlay_into_diff(
+        schema,
+        "close-out-of-band",
+        current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
+
     // 5. Write transition + audit row with SHA in actor_note.
     let now = now_iso8601();
     let invoker_str = invoker.actor.to_string();
     let qtable = quote_ident(&schema.name);
-    tx.execute(
-        &format!("UPDATE {qtable} SET updated_at = ?1, updated_by = ?2, status = ?3 WHERE id = ?4"),
-        rusqlite::params![now, invoker_str, transition.to, row_id],
-    )
-    .context("close-out-of-band: update row")?;
+    let live_columns = {
+        let mut stmt = tx
+            .prepare(&format!("PRAGMA table_info({})", quote_ident(&schema.name)))
+            .context("close-out-of-band: inspect live columns")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut cols = Vec::new();
+        for row in rows {
+            cols.push(row?);
+        }
+        cols
+    };
+    let has_overlay_columns = [
+        "lifecycle",
+        "active_step",
+        "integration_step",
+        "blocked",
+        "blocker_kind",
+    ]
+    .iter()
+    .all(|name| live_columns.iter().any(|c| c == name));
+    if has_overlay_columns {
+        tx.execute(
+            &format!(
+                "UPDATE {qtable} SET updated_at = ?1, updated_by = ?2, status = ?3, lifecycle = ?4, active_step = ?5, integration_step = ?6, blocked = ?7, blocker_kind = ?8 WHERE id = ?9"
+            ),
+            rusqlite::params![
+                now,
+                invoker_str,
+                transition.to,
+                merged
+                    .get("lifecycle")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("active"),
+                merged
+                    .get("active_step")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none"),
+                merged
+                    .get("integration_step")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none"),
+                if merged
+                    .get("blocked")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    1
+                } else {
+                    0
+                },
+                merged.get("blocker_kind").and_then(|v| v.as_str()),
+                row_id
+            ],
+        )
+        .context("close-out-of-band: update row")?;
+    } else {
+        tx.execute(
+            &format!(
+                "UPDATE {qtable} SET updated_at = ?1, updated_by = ?2, status = ?3 WHERE id = ?4"
+            ),
+            rusqlite::params![now, invoker_str, transition.to, row_id],
+        )
+        .context("close-out-of-band: update row")?;
+    }
 
     let (pref, phash) = read_policy_env();
     crate::db::insert_transition_history_with_note(
@@ -693,6 +810,15 @@ pub(crate) fn run_in_tx(
         diff.insert("current_cycle".to_string(), Value::Number(0.into()));
     }
 
+    inject_tasks_overlay_into_diff(
+        schema,
+        verb,
+        current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
+
     // Write: UPDATE merged fields + status = transition.to + updated_*
     let (pref, phash) = read_policy_env();
     execute_transition_write(
@@ -813,6 +939,15 @@ pub(crate) fn maybe_auto_ratify_observation(
         )
     })?;
 
+    inject_tasks_overlay_into_diff(
+        schema,
+        "ratify",
+        from_status,
+        &transition.to,
+        &mut ratify_diff,
+        &mut ratify_merged,
+    )?;
+
     execute_transition_write(
         tx,
         schema,
@@ -912,13 +1047,11 @@ pub(crate) fn execute_transition_write(
                     };
                     sql_values.push(rusqlite::types::Value::Integer(i));
                 }
-                _ => {
-                    let s = match new_val {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
-                    sql_values.push(rusqlite::types::Value::Text(s));
-                }
+                _ => match new_val {
+                    Value::Null => sql_values.push(rusqlite::types::Value::Null),
+                    Value::String(s) => sql_values.push(rusqlite::types::Value::Text(s.clone())),
+                    other => sql_values.push(rusqlite::types::Value::Text(other.to_string())),
+                },
             }
         }
     }

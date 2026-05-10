@@ -62,6 +62,46 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
                 full_def: "activation TEXT NOT NULL DEFAULT 'inactive' CHECK(activation IN ('active','inactive'))",
                 additive: true,
             },
+            FrameworkColumn {
+                name: "lifecycle",
+                sql_type: "TEXT",
+                nullable: false,
+                default_sql: Some("'active'"),
+                full_def: "lifecycle TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle IN ('queued','active','integration','done'))",
+                additive: true,
+            },
+            FrameworkColumn {
+                name: "active_step",
+                sql_type: "TEXT",
+                nullable: false,
+                default_sql: Some("'none'"),
+                full_def: "active_step TEXT NOT NULL DEFAULT 'none' CHECK(active_step IN ('none','planning','planning_review','coding','coding_review','wrapping'))",
+                additive: true,
+            },
+            FrameworkColumn {
+                name: "integration_step",
+                sql_type: "TEXT",
+                nullable: false,
+                default_sql: Some("'none'"),
+                full_def: "integration_step TEXT NOT NULL DEFAULT 'none' CHECK(integration_step IN ('none','refreshing','task_review','testing','merging','deploying','verifying'))",
+                additive: true,
+            },
+            FrameworkColumn {
+                name: "blocked",
+                sql_type: "INTEGER",
+                nullable: false,
+                default_sql: Some("0"),
+                full_def: "blocked INTEGER NOT NULL DEFAULT 0 CHECK(blocked IN (0,1))",
+                additive: true,
+            },
+            FrameworkColumn {
+                name: "blocker_kind",
+                sql_type: "TEXT",
+                nullable: true,
+                default_sql: None,
+                full_def: "blocker_kind TEXT CHECK(blocker_kind IN ('capacity','dependency','runner','rate_limit','human_acceptance','task_review','stale_base','config','test_failure','main_red','deploy','migration'))",
+                additive: true,
+            },
         ],
     },
     FrameworkTable {
@@ -111,6 +151,20 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
             FrameworkColumn { name: "postcondition_args", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "postcondition_args TEXT", additive: true },
             FrameworkColumn { name: "terminal_reason", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown','rate_limit'))", additive: true },
             FrameworkColumn { name: "next_retry_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "next_retry_at TEXT", additive: true },
+        ],
+    },
+    FrameworkTable {
+        name: "resource_locks",
+        columns: &[
+            FrameworkColumn { name: "resource_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "resource_id TEXT PRIMARY KEY", additive: false },
+            FrameworkColumn { name: "owner_kind", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "owner_kind TEXT NOT NULL CHECK(owner_kind IN ('task','job'))", additive: false },
+            FrameworkColumn { name: "owner_display_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "owner_display_id TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "fencing_token", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "fencing_token TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "acquired_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "acquired_at TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "heartbeat_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "heartbeat_at TEXT", additive: false },
+            FrameworkColumn { name: "expires_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "expires_at TEXT", additive: false },
+            FrameworkColumn { name: "daemon_epoch", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "daemon_epoch TEXT", additive: false },
+            FrameworkColumn { name: "claim_source", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "claim_source TEXT", additive: false },
         ],
     },
     FrameworkTable {
@@ -341,6 +395,17 @@ CREATE TABLE IF NOT EXISTS dispatch_locks (
     terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown','rate_limit')),
     next_retry_at TEXT,
     UNIQUE(store, row_id, agent_name)
+);
+CREATE TABLE IF NOT EXISTS resource_locks (
+    resource_id TEXT PRIMARY KEY,
+    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('task','job')),
+    owner_display_id TEXT NOT NULL,
+    fencing_token TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    heartbeat_at TEXT,
+    expires_at TEXT,
+    daemon_epoch TEXT,
+    claim_source TEXT
 );
 CREATE TABLE IF NOT EXISTS daemon_starts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

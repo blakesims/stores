@@ -14,6 +14,35 @@ use crate::validate::{self, Op, SideEffectAuthority};
 use super::row::{build_entry_map, now_iso8601};
 use super::submit::fire_on_entry_follow_ons;
 
+fn inject_tasks_create_overlay(
+    schema: &Schema,
+    initial_status: &str,
+    entry: &mut crate::validate::EntryMap,
+) -> Result<()> {
+    if schema.name != "tasks" {
+        return Ok(());
+    }
+    let overlay = super::lifecycle_overlay::derive("create", "", initial_status, None, None)?;
+    entry.insert("lifecycle".to_string(), Value::String(overlay.lifecycle));
+    entry.insert(
+        "active_step".to_string(),
+        Value::String(overlay.active_step),
+    );
+    entry.insert(
+        "integration_step".to_string(),
+        Value::String(overlay.integration_step),
+    );
+    entry.insert("blocked".to_string(), Value::Bool(overlay.blocked));
+    entry.insert(
+        "blocker_kind".to_string(),
+        overlay
+            .blocker_kind
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    Ok(())
+}
+
 pub fn run(
     schema: &Schema,
     conn: &Connection,
@@ -267,6 +296,7 @@ pub fn run(
     } else {
         initial_status.clone()
     };
+    inject_tasks_create_overlay(schema, &effective_initial_status, &mut entry)?;
 
     // Collect columns + values for INSERT
     // Reserved: display_id (placeholder ""), status, created_at, updated_at,
@@ -527,6 +557,7 @@ pub(crate) fn add_row_in_tx(
 
     validate::validate(schema, &entry, Op::Add, invoker.into())
         .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
+    inject_tasks_create_overlay(schema, &initial_status, &mut entry)?;
 
     let mut col_names = vec!["display_id".to_string()];
     let mut placeholders = vec!["?1".to_string()];
@@ -579,13 +610,11 @@ pub(crate) fn add_row_in_tx(
             FieldType::Integer => {
                 values.push(rusqlite::types::Value::Integer(val.as_i64().unwrap_or(0)))
             }
-            _ => {
-                let s = match val {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                values.push(rusqlite::types::Value::Text(s));
-            }
+            _ => match val {
+                Value::Null => values.push(rusqlite::types::Value::Null),
+                Value::String(s) => values.push(rusqlite::types::Value::Text(s.clone())),
+                other => values.push(rusqlite::types::Value::Text(other.to_string())),
+            },
         }
     }
 
@@ -663,6 +692,7 @@ pub(crate) fn add_row_in_tx_with_authority(
 
     validate::validate_with_authority(schema, &entry, Op::Add, invoker.into(), Some(authority))
         .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
+    inject_tasks_create_overlay(schema, &initial_status, &mut entry)?;
 
     let mut col_names = vec!["display_id".to_string()];
     let mut placeholders = vec!["?1".to_string()];
@@ -715,13 +745,11 @@ pub(crate) fn add_row_in_tx_with_authority(
             FieldType::Integer => {
                 values.push(rusqlite::types::Value::Integer(val.as_i64().unwrap_or(0)))
             }
-            _ => {
-                let s = match val {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                values.push(rusqlite::types::Value::Text(s));
-            }
+            _ => match val {
+                Value::Null => values.push(rusqlite::types::Value::Null),
+                Value::String(s) => values.push(rusqlite::types::Value::Text(s.clone())),
+                other => values.push(rusqlite::types::Value::Text(other.to_string())),
+            },
         }
     }
 
@@ -881,6 +909,93 @@ fields:
             })
             .unwrap();
         assert_eq!(display_id, "T001");
+    }
+
+    fn tasks_schema_and_conn() -> (Schema, Connection) {
+        let schema = Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
+        (schema, conn)
+    }
+
+    fn assert_planning_overlay(conn: &Connection, id: &str) {
+        let got: (String, String, String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT lifecycle, active_step, integration_step, blocked, blocker_kind FROM tasks WHERE display_id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            got,
+            ("active".into(), "planning".into(), "none".into(), 0, None)
+        );
+    }
+
+    #[test]
+    fn tasks_add_run_derives_initial_planning_overlay() {
+        let (schema, conn) = tasks_schema_and_conn();
+        let cmd = build_test_add_cmd(&schema);
+        let matches = cmd.get_matches_from([
+            "add",
+            "--title",
+            "initial overlay",
+            "--slug",
+            "initial-overlay",
+            "--done-when",
+            "done",
+            "--scope-in",
+            "src",
+            "--scope-out",
+            "none",
+        ]);
+
+        run(&schema, &conn, &matches, Actor::AiWithHuman.into()).unwrap();
+
+        assert_planning_overlay(&conn, "T001");
+    }
+
+    #[test]
+    fn tasks_add_row_helpers_derive_initial_planning_overlay() {
+        let (schema, conn) = tasks_schema_and_conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut entry = crate::validate::EntryMap::new();
+        entry.insert("title".into(), serde_json::json!("helper overlay"));
+        entry.insert("slug".into(), serde_json::json!("helper-overlay"));
+        entry.insert(
+            "contract".into(),
+            serde_json::json!({"done_when":"done","scope_in":"src","scope_out":"none"}),
+        );
+
+        let id = add_row_in_tx(&tx, &schema, entry, Actor::AiWithHuman).unwrap();
+
+        let mut entry_with_authority = crate::validate::EntryMap::new();
+        entry_with_authority.insert(
+            "title".into(),
+            serde_json::json!("authority helper overlay"),
+        );
+        entry_with_authority.insert("slug".into(), serde_json::json!("authority-helper-overlay"));
+        entry_with_authority.insert(
+            "contract".into(),
+            serde_json::json!({"done_when":"done","scope_in":"src","scope_out":"none"}),
+        );
+        let authority_id = add_row_in_tx_with_authority(
+            &tx,
+            &schema,
+            entry_with_authority,
+            Actor::AiWithHuman,
+            SideEffectAuthority::GatekeeperRoute,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(id, "T001");
+        assert_eq!(authority_id, "T002");
+        assert_planning_overlay(&conn, "T001");
+        assert_planning_overlay(&conn, "T002");
     }
 
     // ---- T006 Phase 2: list_record CLI round-trip ----

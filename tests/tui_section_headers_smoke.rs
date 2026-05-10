@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use stores::tui::app::{App, StatusBar, TuiOpts};
 use stores::tui::daemon::Liveness;
-use stores::tui::data::{classify, ExternalReviewState, ObsRow, Row, Section, TaskRow};
+use stores::tui::data::{
+    classify, store_lane_for_row, ExternalReviewState, ObsRow, Row, Section, StoreLane, TaskRow,
+};
 use stores::tui::render;
 
 fn build_app() -> App {
@@ -66,6 +68,41 @@ fn build_app() -> App {
     app.apply_sort();
     app.viewport_height = 20;
     app
+}
+
+#[test]
+fn section_all_order_and_store_lane_dispatch_are_unchanged() {
+    assert_eq!(
+        Section::ALL,
+        [
+            Section::TasksActionableCurrentWork,
+            Section::ObsRatifiable,
+            Section::TasksAcceptU3,
+            Section::TasksIntegration,
+            Section::TasksIntegratedAwaitingPostLand,
+            Section::TasksIntegrationBlocked,
+            Section::TasksBlockedNeedsAction,
+            Section::TasksDeployRecovery,
+            Section::TasksNeedsTriage,
+            Section::IntakeHeld,
+            Section::TasksHeldAiReview,
+            Section::TasksHeldZombie,
+            Section::TasksRecentlyTerminal,
+            Section::ObsOpenNoContract,
+            Section::ObsOther,
+            Section::IntakeOpen,
+            Section::IntakeRouted,
+            Section::ExternalReviewLane,
+        ]
+    );
+    assert_eq!(
+        store_lane_for_row(&Row::Task(TaskRow::default())),
+        StoreLane::Tasks
+    );
+    assert_eq!(
+        store_lane_for_row(&Row::Obs(ObsRow::default())),
+        StoreLane::Observations
+    );
 }
 
 #[test]

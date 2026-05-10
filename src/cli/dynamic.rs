@@ -319,6 +319,29 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         ),
                 ),
         )
+
+        // ResourceLock primitive CLI
+        .subcommand(
+            Command::new("resource-locks")
+                .about("Acquire, release, list, and recover ResourceLock rows")
+                .subcommand(
+                    Command::new("acquire")
+                        .about("Acquire a ResourceLock")
+                        .arg(Arg::new("resource").long("resource").required(true))
+                        .arg(Arg::new("owner").long("owner").required(true))
+                        .arg(Arg::new("owner-kind").long("owner-kind").value_parser(["task", "job"]).required(true))
+                        .arg(Arg::new("ttl-secs").long("ttl-secs").value_parser(clap::value_parser!(u64)))
+                        .arg(Arg::new("claim-source").long("claim-source")),
+                )
+                .subcommand(
+                    Command::new("release")
+                        .about("Release a ResourceLock")
+                        .arg(Arg::new("resource").long("resource").required(true))
+                        .arg(Arg::new("token").long("token").required(true)),
+                )
+                .subcommand(Command::new("list").about("List ResourceLock rows"))
+                .subcommand(Command::new("recover-stale").about("Recover expired ResourceLock rows")),
+        )
         // Runs transcript index/query surface
         .subcommand(
             Command::new("runs")

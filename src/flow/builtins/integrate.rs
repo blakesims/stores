@@ -36,7 +36,9 @@ use crate::flow::builtins::{
     fire_framework_transition_for, load_store_schema, load_tasks_schema, resolve_main_repo,
     BuiltinResult, DispatchCtx,
 };
+use crate::handlers::resource_locks::{self, ResourceLockBusy};
 use crate::handlers::row::now_iso8601;
+use crate::schema::actor::Actor;
 
 /// Configuration read from the `integrate` agent's `command_args` (or
 /// defaulted when absent). The `pre_land_check` field is required when
@@ -431,6 +433,45 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
 
     // 8. Fast-merge candidate into main. The merge runs from the main-repo
     //    checkout (resolve_main_repo()), not from the candidate worktree.
+    let lock_result = resource_locks::acquire(
+        ctx.conn,
+        &resource_locks::AcquireParams {
+            resource_id: "main_branch",
+            owner_display_id: display_id,
+            owner_kind: "task",
+            ttl_secs: Some(600),
+            claim_source: Some("integrate"),
+            invoker: Actor::Framework,
+        },
+    );
+    let lock_token = match lock_result {
+        Ok(token) => token.0,
+        Err(e) => {
+            if let Some(busy) = e.downcast_ref::<ResourceLockBusy>() {
+                let summary = format!(
+                    "merge_failure: main_branch lock held by {}; will retry",
+                    busy.current_owner
+                );
+                update_last_attempt(
+                    ctx.conn,
+                    display_id,
+                    &[
+                        ("completed_at", Value::String(now_iso8601())),
+                        ("outcome", Value::String("merge_failure".to_string())),
+                        ("pre_land_check_summary", Value::String(summary.clone())),
+                    ],
+                )?;
+                fire_mark_integration_blocked(ctx, display_id, &summary)?;
+                return Ok(0);
+            }
+            return Err(e.context(format!(
+                "acquiring main_branch ResourceLock for {}",
+                display_id
+            )));
+        }
+    };
+    let mut lock_guard = LockGuard::new(ctx.conn, "main_branch", lock_token);
+
     let merge = Command::new("git")
         .args([
             "-C",
@@ -459,6 +500,26 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             return Ok(0);
         }
     }
+    if !resource_locks::check_ownership_token(
+        ctx.conn,
+        "main_branch",
+        display_id,
+        &lock_guard.token,
+    )? {
+        let summary = "main_branch lock no longer owned (token rotated)".to_string();
+        update_last_attempt(
+            ctx.conn,
+            display_id,
+            &[
+                ("completed_at", Value::String(now_iso8601())),
+                ("outcome", Value::String("merge_failure".to_string())),
+                ("pre_land_check_summary", Value::String(summary.clone())),
+            ],
+        )?;
+        fire_mark_integration_blocked(ctx, display_id, &format!("merge_failure: {}", summary))?;
+        return Ok(0);
+    }
+
     let merge_out = Command::new("git")
         .args([
             "-C",
@@ -564,10 +625,44 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         None,
     )
     .with_context(|| format!("firing mark_integrated for {}", display_id))?;
+    lock_guard.release()?;
     Ok(0)
 }
 
 // ───────────────────────── helpers ─────────────────────────
+
+struct LockGuard<'a> {
+    conn: &'a rusqlite::Connection,
+    resource_id: &'static str,
+    token: String,
+    released: bool,
+}
+
+impl<'a> LockGuard<'a> {
+    fn new(conn: &'a rusqlite::Connection, resource_id: &'static str, token: String) -> Self {
+        Self {
+            conn,
+            resource_id,
+            token,
+            released: false,
+        }
+    }
+
+    fn release(&mut self) -> Result<()> {
+        resource_locks::release(self.conn, self.resource_id, &self.token, Actor::Framework)?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for LockGuard<'_> {
+    fn drop(&mut self) {
+        if !self.released {
+            let _ =
+                resource_locks::release(self.conn, self.resource_id, &self.token, Actor::Framework);
+        }
+    }
+}
 
 fn is_unique_constraint_violation(e: &anyhow::Error) -> bool {
     e.chain().any(|err| {

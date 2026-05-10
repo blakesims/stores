@@ -30,6 +30,7 @@ fn seed_db() -> Connection {
             tier_hint TEXT,
             linked_observations TEXT,
             blocked_reason TEXT,
+            lifecycle TEXT, active_step TEXT, integration_step TEXT, blocked INTEGER, blocker_kind TEXT,
             current_phase INTEGER,
             current_cycle INTEGER,
             plan TEXT
@@ -349,7 +350,7 @@ fn tui_watch_live_realistic_snapshot_and_budget() {
     );
     assert!(!got.contains("L281 open priority:normal deploy-blocked"));
     for required in [
-        "HELD-AI-REVIEW",
+        "ACTIVE WORK",
         "RATIFY-U1",
         "ACCEPT-U3",
         "HELD-INTAKE",
@@ -358,7 +359,7 @@ fn tui_watch_live_realistic_snapshot_and_budget() {
         assert!(got.contains(required), "missing {required}:\n{got}");
     }
     for section in [
-        Section::TasksHeldAiReview,
+        Section::TasksActionableCurrentWork,
         Section::ObsRatifiable,
         Section::TasksAcceptU3,
         Section::IntakeHeld,

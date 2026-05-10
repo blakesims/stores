@@ -23,9 +23,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::handlers::disposition::{
-    operator_disposition, GitBranchStateSource, PlanStartBucket,
-};
+use crate::handlers::disposition::{operator_disposition, GitBranchStateSource, PlanStartBucket};
 use crate::paths::db_path;
 
 const ANSI_CLEAR_HOME: &str = "\x1b[2J\x1b[H";
@@ -419,7 +417,16 @@ fn render_tui_task_line(t: &crate::tui::data::TaskRow) -> String {
         .unwrap_or_default();
     let title = truncate(&t.title, 50);
     let updated = clock_suffix(&t.updated_at);
-    let status_str = format!("{}{}{}", task_status_color(&t.status), t.status, ANSI_RESET);
+    let step_suffix = crate::tui::data::visible_step(t)
+        .map(|step| format!(" {ANSI_DIM}· {step}{ANSI_RESET}"))
+        .unwrap_or_default();
+    let status_str = format!(
+        "{}{}{}{}",
+        task_status_color(&t.status),
+        t.status,
+        ANSI_RESET,
+        step_suffix
+    );
     let pad = STATUS_COL_WIDTH.saturating_sub(visible_width(&status_str));
     let pad_str = " ".repeat(pad);
     // T140 P5: ignition-readiness glyph + operator-disposition label, both
@@ -961,6 +968,7 @@ mod tests {
             CREATE TABLE tasks (
                 display_id TEXT, status TEXT, title TEXT, claimed_by TEXT, updated_at TEXT,
                 tier_hint TEXT, linked_observations TEXT, blocked_reason TEXT,
+                lifecycle TEXT, active_step TEXT, integration_step TEXT, blocked INTEGER, blocker_kind TEXT,
                 current_phase INTEGER, current_cycle INTEGER, plan TEXT, plan_source TEXT,
                 contract TEXT, plan_review_log TEXT, cycles TEXT, wrap_log TEXT,
                 branch TEXT, workspace_path TEXT
@@ -1040,12 +1048,7 @@ mod tests {
         let cases: &[(&str, &str, &str, &str)] = &[
             // (display_id, status, activation, expected_label_substring)
             ("T901", "executing", "active", "Active engine work"),
-            (
-                "T902",
-                "planning",
-                "active",
-                "Engine actionable (active)",
-            ),
+            ("T902", "planning", "active", "Engine actionable (active)"),
             (
                 "T903",
                 "planning",

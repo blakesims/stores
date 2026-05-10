@@ -2919,6 +2919,22 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn spawn_sleep_copy(path: &std::path::Path) -> std::process::Child {
+        let mut last_err = None;
+        for _ in 0..20 {
+            match std::process::Command::new(path).arg("30").spawn() {
+                Ok(child) => return child,
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => panic!("spawn sleep copy: {e}"),
+            }
+        }
+        panic!("spawn sleep copy: {}", last_err.unwrap());
+    }
+
     /// AC1.2 / AC1.5: alive drive PID whose exe inode is deleted → watchdog
     /// marks the task drive_failed:stale_binary_inode within one tick.
     #[cfg(target_os = "linux")]
@@ -2930,10 +2946,7 @@ mod tests {
         let sleep_copy = tmp.path().join("sleep_copy");
         std::fs::copy("/bin/sleep", &sleep_copy).expect("copy /bin/sleep");
 
-        let mut child = std::process::Command::new(&sleep_copy)
-            .arg("30")
-            .spawn()
-            .expect("spawn sleep copy");
+        let mut child = spawn_sleep_copy(&sleep_copy);
         let child_pid = child.id();
         let _guard = KillOnDrop(child_pid);
 
@@ -3026,10 +3039,7 @@ mod tests {
         let sleep_copy = tmp.path().join("sleep_fresh");
         std::fs::copy("/bin/sleep", &sleep_copy).expect("copy /bin/sleep");
 
-        let mut child = std::process::Command::new(&sleep_copy)
-            .arg("30")
-            .spawn()
-            .expect("spawn sleep copy");
+        let mut child = spawn_sleep_copy(&sleep_copy);
         let child_pid = child.id();
         let _guard = KillOnDrop(child_pid);
 

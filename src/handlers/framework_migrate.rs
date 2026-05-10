@@ -142,6 +142,7 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
 
     let mut applied: Vec<AppliedFrameworkMigration> = Vec::with_capacity(drift.additive.len());
     let mut backfill_tasks_activation = false;
+    let mut backfill_tasks_lifecycle_overlay = false;
     for (table, col) in &drift.additive {
         let ddl = format!(
             "ALTER TABLE {} ADD COLUMN {};",
@@ -150,6 +151,14 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
         );
         if table == "tasks" && col.name == "activation" {
             backfill_tasks_activation = true;
+        }
+        if table == "tasks"
+            && matches!(
+                col.name,
+                "lifecycle" | "active_step" | "integration_step" | "blocked" | "blocker_kind"
+            )
+        {
+            backfill_tasks_lifecycle_overlay = true;
         }
         applied.push(AppliedFrameworkMigration {
             table_name: table.clone(),
@@ -194,15 +203,85 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
             let placeholders = std::iter::repeat_n("?", IN_FLIGHT_STATES.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            let sql = format!(
-                "UPDATE tasks SET activation='active' WHERE status IN ({placeholders})"
-            );
+            let sql =
+                format!("UPDATE tasks SET activation='active' WHERE status IN ({placeholders})");
             let params: Vec<&dyn rusqlite::ToSql> = IN_FLIGHT_STATES
                 .iter()
                 .map(|s| s as &dyn rusqlite::ToSql)
                 .collect();
             tx.execute(&sql, params.as_slice())
                 .context("T140 P1: backfill tasks.activation for IN_FLIGHT_STATES")?;
+        }
+        if backfill_tasks_lifecycle_overlay {
+            let live_cols = {
+                let mut pragma = tx
+                    .prepare("PRAGMA table_info(tasks)")
+                    .context("T144 P1: inspect tasks columns for lifecycle overlay backfill")?;
+                let rows = pragma.query_map([], |row| row.get::<_, String>(1))?;
+                let mut cols = Vec::new();
+                for row in rows {
+                    cols.push(row?);
+                }
+                cols
+            };
+            let blocked_expr = if live_cols.iter().any(|c| c == "blocked_reason") {
+                "blocked_reason"
+            } else {
+                "NULL AS blocked_reason"
+            };
+            let integration_expr = if live_cols.iter().any(|c| c == "integration_blocked_reason") {
+                "integration_blocked_reason"
+            } else {
+                "NULL AS integration_blocked_reason"
+            };
+            let select_sql = format!(
+                "SELECT id, display_id, status, {blocked_expr}, {integration_expr} FROM tasks"
+            );
+            let mut stmt = tx
+                .prepare(&select_sql)
+                .context("T144 P1: select tasks for lifecycle overlay backfill")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .context("T144 P1: query tasks for lifecycle overlay backfill")?;
+            let mut backfills = Vec::new();
+            for row in rows {
+                backfills.push(row?);
+            }
+            drop(stmt);
+            for (id, display_id, status, blocked_reason, integration_blocked_reason) in backfills {
+                let overlay = crate::handlers::lifecycle_overlay::derive(
+                    "backfill",
+                    "",
+                    &status,
+                    blocked_reason.as_deref(),
+                    integration_blocked_reason.as_deref(),
+                )
+                .with_context(|| {
+                    format!("T144 P1: derive lifecycle overlay backfill for {display_id}")
+                })?;
+                tx.execute(
+                    "UPDATE tasks SET lifecycle=?1, active_step=?2, integration_step=?3, blocked=?4, blocker_kind=?5 WHERE id=?6",
+                    rusqlite::params![
+                        overlay.lifecycle,
+                        overlay.active_step,
+                        overlay.integration_step,
+                        if overlay.blocked { 1 } else { 0 },
+                        overlay.blocker_kind,
+                        id
+                    ],
+                )
+                .with_context(|| {
+                    format!("T144 P1: update lifecycle overlay backfill for {display_id}")
+                })?;
+            }
         }
     }
     tx.commit()
@@ -257,7 +336,12 @@ mod tests {
             got,
             vec![
                 ("summary_signature", "TEXT", "summary_signature TEXT", true),
-                ("dupe_count", "INTEGER", "dupe_count INTEGER DEFAULT 1", true),
+                (
+                    "dupe_count",
+                    "INTEGER",
+                    "dupe_count INTEGER DEFAULT 1",
+                    true
+                ),
                 ("last_seen", "TEXT", "last_seen TEXT", true),
             ]
         );
@@ -271,8 +355,7 @@ mod tests {
     /// `Connection::open_in_memory`.
     fn fresh_db_with_tasks() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        let schema =
-            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let schema = Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
         conn.execute_batch(&ddl_for(&schema)).unwrap();
         conn
     }
@@ -328,13 +411,20 @@ mod tests {
         ).unwrap();
 
         // First UPDATE to 'integrating' must succeed.
-        let r1 =
-            conn.execute("UPDATE tasks SET status='integrating' WHERE display_id='T801'", []);
-        assert!(r1.is_ok(), "first UPDATE to integrating must succeed: {r1:?}");
+        let r1 = conn.execute(
+            "UPDATE tasks SET status='integrating' WHERE display_id='T801'",
+            [],
+        );
+        assert!(
+            r1.is_ok(),
+            "first UPDATE to integrating must succeed: {r1:?}"
+        );
 
         // Second UPDATE to 'integrating' must fail with ConstraintViolation.
-        let r2 =
-            conn.execute("UPDATE tasks SET status='integrating' WHERE display_id='T802'", []);
+        let r2 = conn.execute(
+            "UPDATE tasks SET status='integrating' WHERE display_id='T802'",
+            [],
+        );
         let err = r2.expect_err("second UPDATE to integrating must fail");
         let msg = format!("{err}");
         assert!(
@@ -369,7 +459,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1, "exactly one index named idx_tasks_integration_singleton");
+        assert_eq!(
+            n, 1,
+            "exactly one index named idx_tasks_integration_singleton"
+        );
     }
 
     #[test]

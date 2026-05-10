@@ -55,6 +55,7 @@ stateDiagram-v2
   integrating --> integration_blocked :  F mark_integration_blocked
   integration_blocked --> integration_queued :  H+ retry-integration
   integrated --> cargo_installed :  F mark_cargo_installed
+  integrated --> deploy_blocked :  F mark_deploy_blocked
   cargo_installed --> schema_migrated :  F mark_schema_migrated
   cargo_installed --> deploy_blocked :  F mark_deploy_blocked
   deploy_blocked --> accepted :  H+ retry-deploy
