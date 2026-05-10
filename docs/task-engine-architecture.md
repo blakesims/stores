@@ -299,7 +299,7 @@ Suggested implementation chain:
 
 1. **Task lifecycle read model / watch projection — shipped in T144**
    - `tasks.lifecycle` / `active_step` / `integration_step` / blocker overlay are maintained from ADR 0001's model; `stores watch` reads the projection.
-   - v1 intentionally collapses integration sub-steps: `integration_step='merging'` is populated for the whole `status='integrating'` span, and `integration_step='none'` outside it. `refreshing`, `task_review`, `testing`, `deploying`, and `verifying` remain ADR target states for later slices once their subscribers exist.
+   - v1 intentionally collapses integration sub-steps: `integration_step='merging'` is populated for the whole `status='integrating'` span, and `integration_step='none'` outside it. `refreshing`, `task_review`, `testing`, `deploying`, and `verifying` are intentionally not populated until later slices add their subscribers.
 
 2. **Integration resource locks — shipped in T144**
    - `main_branch` capacity-1 mutation is protected by the ResourceLock primitive in `src/handlers/resource_locks.rs`; see ADR 0001 and `docs/primitives.md`.
