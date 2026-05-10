@@ -277,7 +277,11 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
         external_review,
         ..Default::default()
     };
+    let visibility_ctx = task_status_by_id(rows);
     for row in rows {
+        if row_visibility_class(row, &visibility_ctx) == VisibilityClass::HistoricalNoise {
+            continue;
+        }
         match row {
             Row::Task(t) => {
                 if matches!(t.status.as_str(), "executing") {
@@ -443,6 +447,9 @@ pub fn obs_visibility_class(
     o: &ObsRow,
     task_status_by_id: &HashMap<String, String>,
 ) -> VisibilityClass {
+    if matches!(o.status.as_str(), "resolved" | "wont_fix") {
+        return VisibilityClass::HistoricalNoise;
+    }
     if is_silent_zombie_reason(o.investigation_failure_reason.as_deref().unwrap_or("")) {
         return VisibilityClass::ActionableRecovery;
     }
@@ -609,24 +616,25 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
     // without N+1 queries. Map row_id → max(occurred_at) where to_status='accepted'.
     // Skip silently when transition_history is absent or lacks the row_id column
     // (legacy / cockpit-test schemas).
-    let accepted_at_map: std::collections::HashMap<i64, String> = if table_exists(conn, "transition_history")?
-        && column_exists(conn, "transition_history", "row_id")?
-    {
-        let mut stmt = conn.prepare(
-            "SELECT row_id, MAX(occurred_at) FROM transition_history \
+    let accepted_at_map: std::collections::HashMap<i64, String> =
+        if table_exists(conn, "transition_history")?
+            && column_exists(conn, "transition_history", "row_id")?
+        {
+            let mut stmt = conn.prepare(
+                "SELECT row_id, MAX(occurred_at) FROM transition_history \
              WHERE store='tasks' AND to_status='accepted' GROUP BY row_id",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            let row_id: i64 = r.get(0)?;
-            let at: Option<String> = r.get(1)?;
-            Ok((row_id, at))
-        })?;
-        rows.flatten()
-            .filter_map(|(rid, at)| at.map(|s| (rid, s)))
-            .collect()
-    } else {
-        std::collections::HashMap::new()
-    };
+            )?;
+            let rows = stmt.query_map([], |r| {
+                let row_id: i64 = r.get(0)?;
+                let at: Option<String> = r.get(1)?;
+                Ok((row_id, at))
+            })?;
+            rows.flatten()
+                .filter_map(|(rid, at)| at.map(|s| (rid, s)))
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
     let mut stmt = conn.prepare(&task_sql)?;
     let task_iter = stmt.query_map([], |r| {
         let linked_raw: String = r.get(6)?;
@@ -1091,7 +1099,10 @@ pub fn dedup_observation_summaries_by_section(
             }
             match rows.get(idx) {
                 Some(Row::Obs(o)) => {
-                    let group = by_summary.get(&o.summary).cloned().unwrap_or_else(|| vec![idx]);
+                    let group = by_summary
+                        .get(&o.summary)
+                        .cloned()
+                        .unwrap_or_else(|| vec![idx]);
                     if group.len() >= 2 {
                         for member in &group {
                             consumed.insert(*member);
@@ -1174,8 +1185,22 @@ fn classify_with_options_at(
             .then_with(|| rows[*a].display_id().cmp(rows[*b].display_id()))
     });
 
-    let _ = now;
-    for idx in terminal {
+    let cutoff =
+        now.saturating_sub((opts.recent_terminal_days as i64).saturating_mul(SECS_PER_DAY));
+    for idx in terminal
+        .into_iter()
+        .filter(|idx| {
+            opts.show_all_history
+                || task_updated_epoch(&rows[*idx])
+                    .map(|updated| updated >= cutoff)
+                    .unwrap_or(false)
+        })
+        .take(if opts.show_all_history {
+            usize::MAX
+        } else {
+            opts.recent_terminal_limit
+        })
+    {
         push_bucket(&mut buckets, Section::TasksRecentlyTerminal, idx);
     }
 
@@ -1198,6 +1223,9 @@ fn section_for(row: &Row) -> Option<Section> {
                 .as_deref()
                 .unwrap_or("")
                 .to_ascii_lowercase();
+            if is_terminal_task_status(&t.status) {
+                return Some(Section::TasksRecentlyTerminal);
+            }
             if is_silent_zombie_reason(&reason) {
                 return Some(Section::TasksHeldZombie);
             }
@@ -1221,10 +1249,6 @@ fn section_for(row: &Row) -> Option<Section> {
                 "integration_blocked" => Some(Section::TasksIntegrationBlocked),
                 "plan_review" | "code_review" => Some(Section::TasksHeldAiReview),
                 "in_review" => Some(Section::TasksAcceptU3),
-                "closed_out_of_band" | "accepted" | "complete" | "cargo_installed"
-                | "schema_migrated" | "rejected" | "abandoned" => {
-                    Some(Section::TasksRecentlyTerminal)
-                }
                 _ if is_priority_task(t) => Some(Section::ObsOpenNoContract),
                 _ => Some(Section::TasksActionableCurrentWork),
             }
@@ -1245,13 +1269,13 @@ fn section_for(row: &Row) -> Option<Section> {
         Row::CollapsedObs(c) => Some(c.section),
         Row::Review(_) => Some(Section::ExternalReviewLane),
         Row::Intake(i) => match i.status.as_str() {
+            "routed" | "dropped" => None,
             "needs_info" => Some(Section::IntakeHeld),
             _ if is_priority_text(i.priority.as_deref().unwrap_or(""))
                 || !i.risk_flags.is_empty() =>
             {
                 Some(Section::ObsOpenNoContract)
             }
-            "routed" | "dropped" => Some(Section::IntakeRouted),
             _ => Some(Section::IntakeOpen),
         },
     }
@@ -1489,7 +1513,12 @@ mod tests {
     fn dedup_collapses_76_row_cluster_to_primary_lexicographic_id() {
         let mut rows = Vec::new();
         for i in (0..76).rev() {
-            rows.push(obs_with_id(&format!("L{:03}", i), "dupe cluster", "normal", None));
+            rows.push(obs_with_id(
+                &format!("L{:03}", i),
+                "dupe cluster",
+                "normal",
+                None,
+            ));
         }
         let sections = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
         let (deduped, buckets) = dedup_observation_summaries_by_section(&rows, &sections);
@@ -1543,7 +1572,7 @@ mod tests {
             task("accepted"),           // idx 3 → TERMINAL
             obs("open", Some("ready")), // idx 4 → RATIFY-U1
             obs("open", None),          // idx 5 → OBSERVATIONS
-            obs("resolved", None),      // idx 6 → OBSERVATIONS
+            obs("resolved", None),      // idx 6 → hidden historical noise
         ];
         let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
         assert_eq!(buckets.len(), Section::ALL.len());
@@ -1562,7 +1591,7 @@ mod tests {
         assert_eq!(b(Section::ObsRatifiable), vec![4usize]);
         assert_eq!(b(Section::TasksHeldAiReview), vec![0usize]);
         assert_eq!(b(Section::ObsOpenNoContract), Vec::<usize>::new());
-        assert_eq!(b(Section::ObsOther), vec![5usize, 6]);
+        assert_eq!(b(Section::ObsOther), vec![5usize]);
     }
 
     #[test]
@@ -1597,11 +1626,7 @@ mod tests {
             ("abandoned", None, Section::TasksRecentlyTerminal),
             ("integration_queued", None, Section::TasksIntegration),
             ("integrating", None, Section::TasksIntegration),
-            (
-                "integrated",
-                None,
-                Section::TasksIntegratedAwaitingPostLand,
-            ),
+            ("integrated", None, Section::TasksIntegratedAwaitingPostLand),
             (
                 "integration_blocked",
                 None,
@@ -1675,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_rows_remain_visible_unless_historical_noise() {
+    fn stale_terminal_rows_are_hidden_by_default() {
         let old = NOW - 49 * 3600;
         let rows = vec![
             task_with_id("T-schema", "schema_migrated", old),
@@ -1693,27 +1718,19 @@ mod tests {
             Section::TasksNeedsTriage,
             Section::TasksRecentlyTerminal,
         ] {
-            assert_eq!(
-                bucket(&buckets, sec).len(),
-                if sec == Section::TasksRecentlyTerminal {
-                    6
-                } else {
-                    0
-                },
-                "{sec:?} visibility"
-            );
+            assert_eq!(bucket(&buckets, sec).len(), 0, "{sec:?} visibility");
         }
     }
 
     #[test]
-    fn terminal_rows_are_uncapped_by_default_and_all_history_matches() {
+    fn terminal_rows_are_capped_by_default_and_all_history_uncaps() {
         let rows: Vec<Row> = (0..7)
             .map(|i| task_with_id(&format!("T{i}"), "accepted", NOW - i * 60))
             .collect();
         let default_buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
         assert_eq!(
             bucket(&default_buckets, Section::TasksRecentlyTerminal),
-            vec![0, 1, 2, 3, 4, 5, 6]
+            vec![0, 1, 2, 3, 4]
         );
 
         let all_buckets = classify_with_options_at(
@@ -1912,7 +1929,9 @@ mod tests {
         assert!(is_silent_zombie_reason("silent_zombie"));
         assert!(is_silent_zombie_reason("drive_failed:silent_zombie"));
         // known drive_failed variants (real substrate data)
-        assert!(is_silent_zombie_reason("drive_failed:silent_zombie_pid_dead"));
+        assert!(is_silent_zombie_reason(
+            "drive_failed:silent_zombie_pid_dead"
+        ));
         assert!(is_silent_zombie_reason("drive_failed:pid_never_recorded"));
         // colon-namespace form must NOT match (not in canonical set)
         assert!(!is_silent_zombie_reason("silent_zombie: pid dead"));
@@ -1921,7 +1940,9 @@ mod tests {
         // plain suffix attachment must NOT match (the regression this test locks)
         assert!(!is_silent_zombie_reason("silent_zombieish"));
         // unrecognised drive_failed:silent_zombie variant must NOT match
-        assert!(!is_silent_zombie_reason("drive_failed:silent_zombie_unrecognized"));
+        assert!(!is_silent_zombie_reason(
+            "drive_failed:silent_zombie_unrecognized"
+        ));
         // empty and unrelated reasons must not match
         assert!(!is_silent_zombie_reason(""));
         assert!(!is_silent_zombie_reason("drive_failed"));

@@ -1,5 +1,5 @@
 daemon:DEAD
-lanes: execution=1 review=1 accept=3 held=8 active=7 priority=3
+lanes: execution=1 review=1 accept=1 held=8 active=6 priority=3
 external review: unavailable / not installed
 ACTIVE WORK (1)
 T010 executing ▮▱ ··· in-flight
