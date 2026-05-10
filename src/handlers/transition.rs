@@ -2623,6 +2623,19 @@ fields:
             .unwrap();
         assert_eq!(verb, "mark_cargo_installed");
         assert_eq!(invoker, "framework");
+
+        let (lifecycle_to, active_step_to, integration_step_to): (String, String, String) = conn
+            .query_row(
+                "SELECT lifecycle_to, active_step_to, integration_step_to FROM transition_history \
+                 WHERE store='tasks' AND display_id='T001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (lifecycle_to.as_str(), active_step_to.as_str(), integration_step_to.as_str()),
+            ("done", "none", "none")
+        );
     }
 
     // ---- T020 P1: post-confirm auto-ratify (observations) ----
