@@ -145,6 +145,12 @@ fields:
       - {name: outcome, type: enum, enum_values: [integrated, rebase_conflict, stale_base, stale_external_review, pre_land_check_failed, merge_failure, push_failure]}
       - {name: started_at, type: timestamp}
       - {name: completed_at, type: timestamp}
+  - {name: review_base_sha, type: text, required: false, actor: framework}
+  - {name: review_head_sha, type: text, required: false, actor: framework}
+  - {name: test_base_sha, type: text, required: false, actor: framework}
+  - {name: test_head_sha, type: text, required: false, actor: framework}
+  - {name: branch_head_sha, type: text, required: false, actor: framework}
+  - {name: affected_scope, type: json, required: false, actor: framework, description: "Machine-checkable JSON list of candidate paths affected between review/test base and branch head."}
   - {name: drive_pid, type: integer, required: false, actor: framework}
   - {name: drive_started_at, type: timestamp, required: false, actor: framework}
   - name: wrap_log

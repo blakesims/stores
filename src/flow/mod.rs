@@ -11,6 +11,7 @@ pub mod checks;
 pub mod subscriber_edges;
 pub mod config;
 pub mod engine_runner;
+pub mod freshness;
 pub mod ntfy;
 pub mod policies_yaml;
 pub mod postconditions;
