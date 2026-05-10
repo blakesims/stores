@@ -36,6 +36,7 @@ use crate::flow::builtins::{
     fire_framework_transition_for, load_store_schema, load_tasks_schema, resolve_main_repo,
     BuiltinResult, DispatchCtx,
 };
+use crate::flow::freshness::{check_freshness, git_changed_paths, FreshnessOutcome};
 use crate::handlers::resource_locks::{self, ResourceLockBusy};
 use crate::handlers::row::now_iso8601;
 use crate::schema::actor::Actor;
@@ -344,6 +345,8 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             Value::String(candidate_head_after.clone()),
         )],
     )?;
+    let affected_scope = git_changed_paths(&workspace_buf, &base_main_sha, &candidate_head_after)?;
+    write_refresh_freshness_inputs(ctx.conn, display_id, &candidate_head_after, &affected_scope)?;
     fire_integration_step(ctx, &tasks_schema, display_id, "mark_refresh_done")?;
 
     // 6. ER head-freshness re-check (T2/T3). Skip when no passed ER row.
@@ -378,6 +381,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         }
     }
 
+    write_review_freshness_inputs(ctx.conn, display_id, &base_main_sha, &candidate_head_after)?;
     fire_integration_step(ctx, &tasks_schema, display_id, "mark_task_review_done")?;
 
     // 7. Run pre_land_check.
@@ -434,6 +438,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         }
     };
 
+    write_testing_freshness_inputs(ctx.conn, display_id, &base_main_sha, &candidate_head_after)?;
     fire_testing_done_when_merge_free(ctx, &tasks_schema, display_id)?;
 
     // 8. Fast-merge candidate into main. The merge runs from the main-repo
@@ -476,6 +481,28 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         }
     };
     let mut lock_guard = LockGuard::new(ctx.conn, "main_branch", lock_token);
+
+    let current_main_sha = git_rev_parse(&main_repo, &cfg.main_branch)
+        .with_context(|| format!("git rev-parse {} before merge", cfg.main_branch))?;
+    let current_row = task_row_value(ctx.conn, display_id)?;
+    match check_freshness(&current_row, &current_main_sha)? {
+        FreshnessOutcome::Ready => {}
+        FreshnessOutcome::StaleRequiresRefresh(scope) => {
+            lock_guard.release()?;
+            reset_for_stale_freshness(ctx.conn, display_id, "refresh", "refreshing", &scope)?;
+            return Ok(0);
+        }
+        FreshnessOutcome::StaleRequiresRereview(scope) => {
+            lock_guard.release()?;
+            reset_for_stale_freshness(ctx.conn, display_id, "review", "task_review", &scope)?;
+            return Ok(0);
+        }
+        FreshnessOutcome::StaleRequiresRetest(scope) => {
+            lock_guard.release()?;
+            reset_for_stale_freshness(ctx.conn, display_id, "test", "testing", &scope)?;
+            return Ok(0);
+        }
+    }
 
     let merge = Command::new("git")
         .args([
@@ -639,6 +666,99 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
 }
 
 // ───────────────────────── helpers ─────────────────────────
+
+fn write_refresh_freshness_inputs(
+    conn: &rusqlite::Connection,
+    display_id: &str,
+    branch_head_sha: &str,
+    affected_scope: &[String],
+) -> Result<()> {
+    let scope_json = serde_json::to_string(affected_scope)?;
+    conn.execute(
+        "UPDATE tasks SET branch_head_sha=?1, affected_scope=json(?2) WHERE display_id=?3",
+        params![branch_head_sha, scope_json, display_id],
+    )?;
+    Ok(())
+}
+
+fn write_review_freshness_inputs(
+    conn: &rusqlite::Connection,
+    display_id: &str,
+    review_base_sha: &str,
+    review_head_sha: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE tasks SET review_base_sha=?1, review_head_sha=?2 WHERE display_id=?3",
+        params![review_base_sha, review_head_sha, display_id],
+    )?;
+    Ok(())
+}
+
+fn write_testing_freshness_inputs(
+    conn: &rusqlite::Connection,
+    display_id: &str,
+    test_base_sha: &str,
+    test_head_sha: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE tasks SET test_base_sha=?1, test_head_sha=?2 WHERE display_id=?3",
+        params![test_base_sha, test_head_sha, display_id],
+    )?;
+    Ok(())
+}
+
+fn task_row_value(conn: &rusqlite::Connection, display_id: &str) -> Result<Value> {
+    let mut stmt = conn.prepare("SELECT * FROM tasks WHERE display_id=?1")?;
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query(params![display_id])?;
+    let row = rows
+        .next()?
+        .with_context(|| format!("tasks row {display_id} not found"))?;
+    let mut obj = serde_json::Map::new();
+    for (i, name) in cols.iter().enumerate() {
+        let v: rusqlite::types::Value = row.get(i)?;
+        let jv = match v {
+            rusqlite::types::Value::Null => Value::Null,
+            rusqlite::types::Value::Integer(i) => Value::from(i),
+            rusqlite::types::Value::Real(f) => Value::from(
+                serde_json::Number::from_f64(f).unwrap_or_else(|| serde_json::Number::from(0)),
+            ),
+            rusqlite::types::Value::Text(s) => {
+                if name == "affected_scope" {
+                    serde_json::from_str(&s).unwrap_or(Value::String(s))
+                } else {
+                    Value::String(s)
+                }
+            }
+            rusqlite::types::Value::Blob(b) => {
+                Value::String(String::from_utf8_lossy(&b).to_string())
+            }
+        };
+        obj.insert(name.clone(), jv);
+    }
+    Ok(Value::Object(obj))
+}
+
+fn reset_for_stale_freshness(
+    conn: &rusqlite::Connection,
+    display_id: &str,
+    dim: &str,
+    integration_step: &str,
+    scope: &[String],
+) -> Result<()> {
+    let reason = format!("stale_{dim}");
+    let summary = if scope.is_empty() {
+        reason
+    } else {
+        format!("{}: {}", reason, scope.join(","))
+    };
+    conn.execute(
+        "UPDATE tasks SET integration_step=?1, blocked=1, blocker_kind='stale_base', \
+         integration_blocked_reason=?2 WHERE display_id=?3",
+        params![integration_step, summary, display_id],
+    )?;
+    Ok(())
+}
 
 fn fire_testing_done_when_merge_free(
     ctx: &DispatchCtx,
@@ -1805,19 +1925,19 @@ mod tests {
         );
 
         let conn = Connection::open(&db_path).unwrap();
-        // Under ADR0001 P3 workers may overlap before merge. This stress test
-        // is scoped to the merge singleton; end-to-end landing order remains
-        // covered by tests/integration_lane_e2e.rs.
-        let integrated_count: i64 = conn
+        // Under ADR0001 P3/P4 workers may overlap before merge. P4 freshness
+        // can reroute stale candidates back to refresh/task_review before any
+        // worker lands; this stress test is scoped to the merge singleton.
+        let processed_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM tasks WHERE status='integrated'",
+                "SELECT COUNT(*) FROM tasks WHERE status='integrated' OR (status='integrating' AND blocker_kind='stale_base')",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert!(
-            integrated_count >= 1,
-            "at least one worker should complete while stressing merge singleton"
+            processed_count >= 1,
+            "at least one worker should complete or be freshness-rerouted while stressing merge singleton"
         );
     }
 

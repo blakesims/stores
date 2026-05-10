@@ -311,7 +311,7 @@ fn busy_lock_blocks_without_mutating_main_then_retry_lands_and_releases() {
 }
 
 #[test]
-fn failed_integration_releases_main_branch_lock() {
+fn stale_freshness_reroute_releases_main_branch_lock() {
     let conn = fresh_db();
     let (_tmp, repo) = init_repo();
     git(&repo, &["checkout", "-b", "feat/conflict"]);
@@ -325,11 +325,20 @@ fn failed_integration_releases_main_branch_lock() {
     drive_until(
         &conn,
         &agents("accepted", "integration_queued", &script),
-        |c| status(c, "T_FAIL") == "integration_blocked",
+        |c| {
+            let step: String = c
+                .query_row(
+                    "SELECT integration_step FROM tasks WHERE display_id='T_FAIL'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            status(c, "T_FAIL") == "integrating" && step == "task_review"
+        },
     );
     assert!(
         lock_owner(&conn).is_none(),
-        "Drop guard must release after merge_failure"
+        "Drop guard must release after stale freshness reroute"
     );
 }
 

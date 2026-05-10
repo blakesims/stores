@@ -475,10 +475,10 @@ fn pre_land_check_fail_routes_to_integration_blocked() {
     assert_eq!(rev_parse(&repo, "feat/pl"), pre_branch);
 }
 
-// ─── Task 5.6 — merge failure (commit injected on main between steps) ────
+// ─── T146 P4 — merge-time freshness gate catches overlap before merge ────
 
 #[test]
-fn merge_failure_routes_to_integration_blocked() {
+fn merge_overlap_routes_back_to_task_review_before_merge() {
     let conn = fresh_db();
     let (_tmp, repo) = init_two_commit_repo();
     // Branch modifies an existing tracked file so a later main-side
@@ -508,13 +508,25 @@ fn merge_failure_routes_to_integration_blocked() {
 
     let agents = integrate_only_agents(&conflict_script, false, "origin");
     drive_daemon_until(&conn, &agents, 5, |_| {}, |c| {
-        task_status(c, "T500") == "integration_blocked"
+        let step: String = c
+            .query_row(
+                "SELECT integration_step FROM tasks WHERE display_id='T500'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        task_status(c, "T500") == "integrating" && step == "task_review"
     });
 
-    assert_eq!(
-        attempts_field(&conn, "T500", "last", "outcome").as_deref(),
-        Some("merge_failure")
-    );
+    let blocker_kind: Option<String> = conn
+        .query_row(
+            "SELECT blocker_kind FROM tasks WHERE display_id='T500'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(blocker_kind.as_deref(), Some("stale_base"));
+    assert!(task_blocked_reason(&conn, "T500").contains("stale_review"));
     // Main is allowed to have moved one commit ahead (the injected blocker)
     // but must NOT include the candidate's branch tip.
     let post_main = rev_parse(&repo, "main");
@@ -845,6 +857,25 @@ fn integration_attempts_provenance_happy_path_and_retry() {
             v
         );
     }
+    let durable: (String, String, String, String, String, String) = conn
+        .query_row(
+            "SELECT review_base_sha, review_head_sha, test_base_sha, test_head_sha, branch_head_sha, affected_scope FROM tasks WHERE display_id='T900'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .unwrap();
+    assert!(
+        [&durable.0, &durable.1, &durable.2, &durable.3, &durable.4]
+            .iter()
+            .all(|v| !v.is_empty() && v.len() >= 7),
+        "AC4.2: durable freshness SHA columns must be populated: {:?}",
+        durable
+    );
+    assert!(
+        durable.5.contains("prov_hp.txt"),
+        "AC4.2: affected_scope must include candidate path: {:?}",
+        durable.5
+    );
 
     // ── Part 2 (AC5.7 second half): retry semantics — failure-then-success
     // appends a fresh entry with attempt_no=2, preserving the prior failure.
