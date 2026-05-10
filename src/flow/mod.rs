@@ -3,6 +3,7 @@
 //! Phase 2 scaffolding: pure config-file parsing and predicate evaluation.
 //! No daemon yet.
 
+pub mod adr0002_projection;
 pub mod agents_yaml;
 pub mod builtins;
 pub mod checks;
@@ -15,6 +16,7 @@ pub mod policies_yaml;
 pub mod postconditions;
 pub mod predicate;
 
+pub use adr0002_projection::*;
 pub use agents_yaml::{AgentEntry, AgentsYaml, BackoffKind, RetryPolicy, Subscription};
 pub use config::{NtfyCfg, StoresConfig};
 pub use ntfy::{
