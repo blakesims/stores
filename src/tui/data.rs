@@ -82,10 +82,11 @@ impl Section {
 
 /// Top-level store cockpit lanes. Each `Row` maps to exactly one lane via
 /// [`store_lane_for_row`]; engine-health is a system-state lane with no rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum StoreLane {
     Intake,
     Observations,
+    #[default]
     Tasks,
     ExternalReviews,
     EngineHealth,
@@ -108,12 +109,6 @@ impl StoreLane {
             StoreLane::ExternalReviews => "EXTERNAL REVIEWS",
             StoreLane::EngineHealth => "ENGINE",
         }
-    }
-}
-
-impl Default for StoreLane {
-    fn default() -> Self {
-        StoreLane::Tasks
     }
 }
 
