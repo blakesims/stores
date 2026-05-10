@@ -345,23 +345,70 @@ pub fn run_close_out_of_band(
     let now = now_iso8601();
     let invoker_str = invoker.actor.to_string();
     let qtable = quote_ident(&schema.name);
-    tx.execute(
-        &format!(
-            "UPDATE {qtable} SET updated_at = ?1, updated_by = ?2, status = ?3, lifecycle = ?4, active_step = ?5, integration_step = ?6, blocked = ?7, blocker_kind = ?8 WHERE id = ?9"
-        ),
-        rusqlite::params![
-            now,
-            invoker_str,
-            transition.to,
-            merged.get("lifecycle").and_then(|v| v.as_str()).unwrap_or("active"),
-            merged.get("active_step").and_then(|v| v.as_str()).unwrap_or("none"),
-            merged.get("integration_step").and_then(|v| v.as_str()).unwrap_or("none"),
-            if merged.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 },
-            merged.get("blocker_kind").and_then(|v| v.as_str()),
-            row_id
-        ],
-    )
-    .context("close-out-of-band: update row")?;
+    let live_columns = {
+        let mut stmt = tx
+            .prepare(&format!("PRAGMA table_info({})", quote_ident(&schema.name)))
+            .context("close-out-of-band: inspect live columns")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut cols = Vec::new();
+        for row in rows {
+            cols.push(row?);
+        }
+        cols
+    };
+    let has_overlay_columns = [
+        "lifecycle",
+        "active_step",
+        "integration_step",
+        "blocked",
+        "blocker_kind",
+    ]
+    .iter()
+    .all(|name| live_columns.iter().any(|c| c == name));
+    if has_overlay_columns {
+        tx.execute(
+            &format!(
+                "UPDATE {qtable} SET updated_at = ?1, updated_by = ?2, status = ?3, lifecycle = ?4, active_step = ?5, integration_step = ?6, blocked = ?7, blocker_kind = ?8 WHERE id = ?9"
+            ),
+            rusqlite::params![
+                now,
+                invoker_str,
+                transition.to,
+                merged
+                    .get("lifecycle")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("active"),
+                merged
+                    .get("active_step")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none"),
+                merged
+                    .get("integration_step")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("none"),
+                if merged
+                    .get("blocked")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    1
+                } else {
+                    0
+                },
+                merged.get("blocker_kind").and_then(|v| v.as_str()),
+                row_id
+            ],
+        )
+        .context("close-out-of-band: update row")?;
+    } else {
+        tx.execute(
+            &format!(
+                "UPDATE {qtable} SET updated_at = ?1, updated_by = ?2, status = ?3 WHERE id = ?4"
+            ),
+            rusqlite::params![now, invoker_str, transition.to, row_id],
+        )
+        .context("close-out-of-band: update row")?;
+    }
 
     let (pref, phash) = read_policy_env();
     crate::db::insert_transition_history_with_note(

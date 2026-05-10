@@ -213,10 +213,32 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
                 .context("T140 P1: backfill tasks.activation for IN_FLIGHT_STATES")?;
         }
         if backfill_tasks_lifecycle_overlay {
+            let live_cols = {
+                let mut pragma = tx
+                    .prepare("PRAGMA table_info(tasks)")
+                    .context("T144 P1: inspect tasks columns for lifecycle overlay backfill")?;
+                let rows = pragma.query_map([], |row| row.get::<_, String>(1))?;
+                let mut cols = Vec::new();
+                for row in rows {
+                    cols.push(row?);
+                }
+                cols
+            };
+            let blocked_expr = if live_cols.iter().any(|c| c == "blocked_reason") {
+                "blocked_reason"
+            } else {
+                "NULL AS blocked_reason"
+            };
+            let integration_expr = if live_cols.iter().any(|c| c == "integration_blocked_reason") {
+                "integration_blocked_reason"
+            } else {
+                "NULL AS integration_blocked_reason"
+            };
+            let select_sql = format!(
+                "SELECT id, display_id, status, {blocked_expr}, {integration_expr} FROM tasks"
+            );
             let mut stmt = tx
-                .prepare(
-                    "SELECT id, display_id, status, blocked_reason, integration_blocked_reason FROM tasks",
-                )
+                .prepare(&select_sql)
                 .context("T144 P1: select tasks for lifecycle overlay backfill")?;
             let rows = stmt
                 .query_map([], |row| {
