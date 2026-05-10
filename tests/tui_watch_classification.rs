@@ -83,6 +83,28 @@ fn tui_watch_classification_section_labels_are_contract_taxonomy_and_unique() {
 }
 
 #[test]
+fn tui_watch_classification_migrated_wrapping_in_review_stays_accept_u3() {
+    let rows = vec![Row::Task(TaskRow {
+        display_id: "T099".to_string(),
+        status: "in_review".to_string(),
+        title: "T099".to_string(),
+        updated_at: "1700000000".to_string(),
+        lifecycle: Some("integration".to_string()),
+        active_step: Some("wrapping".to_string()),
+        integration_step: Some("review".to_string()),
+        blocked: Some(false),
+        blocker_kind: None,
+        ..Default::default()
+    })];
+    let buckets = classify_with_options(&rows, WatchClassifyOptions::default());
+    assert_eq!(
+        bucket(&buckets, Section::TasksActionableCurrentWork),
+        Vec::<usize>::new()
+    );
+    assert_eq!(bucket(&buckets, Section::TasksAcceptU3), vec![0usize]);
+}
+
+#[test]
 fn tui_watch_classification_adr_0001_review_steps_stay_in_active_work() {
     let mut ready = obs("L100", "ratify ready");
     if let Row::Obs(o) = &mut ready {

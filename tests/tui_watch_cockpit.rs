@@ -244,18 +244,49 @@ fn cockpit_adr_0001_review_steps_render_under_active_work() {
 
     let buf = paint(&mut app);
     let painted = buffer_to_string(&buf);
+    let lines: Vec<&str> = painted.lines().collect();
+    let active_line = lines
+        .iter()
+        .position(|line| line.contains("ACTIVE WORK"))
+        .expect("render_frame must show ACTIVE WORK header");
+    let next_section_line = lines
+        .iter()
+        .enumerate()
+        .skip(active_line + 1)
+        .find_map(|(idx, line)| {
+            Section::ALL
+                .iter()
+                .filter(|s| **s != Section::TasksActionableCurrentWork)
+                .any(|s| line.contains(s.label()))
+                .then_some(idx)
+        })
+        .unwrap_or(lines.len());
     assert!(
-        painted.contains("ACTIVE WORK"),
-        "render_frame must show ACTIVE WORK header:\n{painted}"
+        lines[active_line + 1..next_section_line]
+            .iter()
+            .any(|line| line.contains("T102") && line.contains("code_review")),
+        "render_frame must place T102 under ACTIVE WORK before next section:\n{painted}"
     );
-    assert!(
-        painted.contains("T102"),
-        "render_frame must show code_review row T102:\n{painted}"
-    );
-    assert!(
-        !painted.contains("HELD-AI-REVIEW"),
-        "review-step rows must not render under HELD-AI-REVIEW:\n{painted}"
-    );
+    if let Some(held_line) = lines.iter().position(|line| line.contains("HELD-AI-REVIEW")) {
+        let next_after_held = lines
+            .iter()
+            .enumerate()
+            .skip(held_line + 1)
+            .find_map(|(idx, line)| {
+                Section::ALL
+                    .iter()
+                    .filter(|s| **s != Section::TasksHeldAiReview)
+                    .any(|s| line.contains(s.label()))
+                    .then_some(idx)
+            })
+            .unwrap_or(lines.len());
+        assert!(
+            !lines[held_line + 1..next_after_held]
+                .iter()
+                .any(|line| line.contains("T102") && line.contains("code_review")),
+            "render_frame must not place T102 under HELD-AI-REVIEW:\n{painted}"
+        );
+    }
 }
 
 #[test]

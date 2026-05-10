@@ -1723,10 +1723,12 @@ fn section_for(row: &Row) -> Option<Section> {
             if is_silent_zombie_reason(&reason) {
                 return Some(Section::TasksHeldZombie);
             }
-            if matches!(
-                active_overlay_step(t),
-                Some("planning" | "planning_review" | "coding" | "coding_review" | "wrapping")
-            ) {
+            if t.lifecycle.as_deref().map(str::trim) == Some("active")
+                && matches!(
+                    active_overlay_step(t),
+                    Some("planning" | "planning_review" | "coding" | "coding_review")
+                )
+            {
                 return Some(Section::TasksActionableCurrentWork);
             }
             match t.status.as_str() {
