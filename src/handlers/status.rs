@@ -94,6 +94,9 @@ pub struct TaskState {
     pub total_phases: Option<i64>,
     pub current_cycle: Option<i64>,
     pub blocked_reason: Option<String>,
+    pub lifecycle: Option<String>,
+    pub active_step: Option<String>,
+    pub integration_step: Option<String>,
 }
 
 /// Dedup key: hash the fields that define "same state".
@@ -232,9 +235,12 @@ pub fn format_task_line(task: &TaskState) -> String {
     let next = next_from_status(&task.status);
     let blocked = crate::handlers::is_blocked(&task.status, task.blocked_reason.as_deref());
     format!(
-        "{id} status={status} phase={phase} cycle={cycle} next={next} blocked={blocked}",
+        "{id} status={status} lifecycle={lifecycle} active_step={active_step} integration_step={integration_step} phase={phase} cycle={cycle} next={next} blocked={blocked}",
         id = task.display_id,
         status = task.status,
+        lifecycle = task.lifecycle.as_deref().unwrap_or("-"),
+        active_step = task.active_step.as_deref().unwrap_or("-"),
+        integration_step = task.integration_step.as_deref().unwrap_or("-"),
         phase = phase_str,
         cycle = cycle_str,
         next = next,
@@ -264,11 +270,31 @@ pub fn compute_multi_frame(tasks: &[TaskState]) -> String {
 // DB fetchers
 // ---------------------------------------------------------------------------
 
+fn task_projection_exprs(conn: &Connection) -> Result<(String, String, String)> {
+    let cols: Vec<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(tasks)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let expr = |name: &str| {
+        if cols.iter().any(|c| c == name) {
+            name.to_string()
+        } else {
+            "NULL".to_string()
+        }
+    };
+    Ok((expr("lifecycle"), expr("active_step"), expr("integration_step")))
+}
+
 /// Fetch a single task row by display_id from an open connection.
 pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
+    let (lifecycle_expr, active_step_expr, integration_step_expr) = task_projection_exprs(conn)?;
+    let sql = format!(
+        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan, {lifecycle_expr}, {active_step_expr}, {integration_step_expr} \
+         FROM tasks WHERE display_id = ?1"
+    );
     let row = conn.query_row(
-        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan \
-         FROM tasks WHERE display_id = ?1",
+        &sql,
         rusqlite::params![display_id],
         |row| {
             Ok((
@@ -278,6 +304,9 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         },
     );
@@ -286,7 +315,17 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
             bail!("no task with display_id '{display_id}'")
         }
         Err(e) => bail!("db error: {e}"),
-        Ok((id, status, current_phase, current_cycle, blocked_reason, plan_json)) => {
+        Ok((
+            id,
+            status,
+            current_phase,
+            current_cycle,
+            blocked_reason,
+            plan_json,
+            lifecycle,
+            active_step,
+            integration_step,
+        )) => {
             let total_phases = plan_json
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
@@ -302,6 +341,9 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
                 total_phases,
                 current_cycle,
                 blocked_reason,
+                lifecycle,
+                active_step,
+                integration_step,
             })
         }
     }
@@ -314,12 +356,14 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
 /// `blocked` and `in_review` ARE included — they are awaiting human input but are
 /// still "active" from a monitoring standpoint.
 pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
-    let mut stmt = conn.prepare(
-        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan \
+    let (lifecycle_expr, active_step_expr, integration_step_expr) = task_projection_exprs(conn)?;
+    let sql = format!(
+        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan, {lifecycle_expr}, {active_step_expr}, {integration_step_expr} \
          FROM tasks \
          WHERE status NOT IN ('accepted', 'rejected', 'abandoned', 'closed_out_of_band', 'schema_migrated') \
-         ORDER BY created_at ASC",
-    )?;
+         ORDER BY created_at ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -328,11 +372,24 @@ pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
             row.get::<_, Option<i64>>(3)?,
             row.get::<_, Option<String>>(4)?,
             row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
     let mut result = Vec::new();
     for row in rows {
-        let (id, status, current_phase, current_cycle, blocked_reason, plan_json) = row?;
+        let (
+            id,
+            status,
+            current_phase,
+            current_cycle,
+            blocked_reason,
+            plan_json,
+            lifecycle,
+            active_step,
+            integration_step,
+        ) = row?;
         let total_phases = plan_json
             .as_deref()
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
@@ -348,6 +405,9 @@ pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
             total_phases,
             current_cycle,
             blocked_reason,
+            lifecycle,
+            active_step,
+            integration_step,
         });
     }
     Ok(result)

@@ -12,6 +12,12 @@ pub struct Transition {
     pub to: String,
     pub verb: String,
     pub actor: Option<Actor>,
+    pub lifecycle: Option<String>,
+    pub active_step: Option<String>,
+    pub integration_step: Option<String>,
+    pub blocked: Option<bool>,
+    pub blocker_kind: Option<String>,
+    pub legacy_status: Option<String>,
     /// Optional gate key that must match the submit verb's `--gate` argument for
     /// this transition to be selected.  When multiple transitions share the same
     /// `(from, verb)` pair, all but at most one must declare `requires_gate`.
@@ -33,6 +39,18 @@ impl<'de> Deserialize<'de> for Transition {
             verb: String,
             #[serde(default)]
             actor: Option<Actor>,
+            #[serde(default)]
+            lifecycle: Option<String>,
+            #[serde(default)]
+            active_step: Option<String>,
+            #[serde(default)]
+            integration_step: Option<String>,
+            #[serde(default)]
+            blocked: Option<bool>,
+            #[serde(default)]
+            blocker_kind: Option<String>,
+            #[serde(default)]
+            legacy_status: Option<String>,
             #[serde(default)]
             requires_gate: Option<String>,
             #[serde(default)]
@@ -56,6 +74,12 @@ impl<'de> Deserialize<'de> for Transition {
             to: r.to,
             verb: r.verb,
             actor: r.actor,
+            lifecycle: r.lifecycle,
+            active_step: r.active_step,
+            integration_step: r.integration_step,
+            blocked: r.blocked,
+            blocker_kind: r.blocker_kind,
+            legacy_status: r.legacy_status,
             requires_gate: r.requires_gate,
             guard,
         })

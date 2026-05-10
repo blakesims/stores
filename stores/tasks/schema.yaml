@@ -167,39 +167,39 @@ lifecycle:
     # states (accepted, cargo_installed, schema_migrated, closed_out_of_band);
     # allowed from every other state. The `--commit` SHA is the merge-target
     # provenance and is recorded in transition_history.actor_note.
-    - {from: planning, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: plan_review, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: ready, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: executing, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: code_review, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: complete, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: in_review, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: rejected, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: deploy_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: integration_queued, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: integrating, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: integration_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human}
-    - {from: integrated, to: closed_out_of_band, verb: close-out-of-band, actor: human}
+    - {from: planning, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: plan_review, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: ready, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: executing, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: code_review, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: complete, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: in_review, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: rejected, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: deploy_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: integration_queued, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: integrating, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: integration_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+    - {from: integrated, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
 
     # planning → plan_review (submit-plan)
-    - {from: planning, to: plan_review, verb: submit-plan, actor: ai_autonomous}
+    - {from: planning, to: plan_review, verb: submit-plan, actor: ai_autonomous, lifecycle: active, active_step: planning_review, integration_step: none, blocked: false, legacy_status: plan_review}
 
     # planning → ready (skip-plan: T1 tasks bypass planner+plan_review; contract IS the plan)
-    - {from: planning, to: ready, verb: skip-plan, actor: framework, guard: "tier_hint == 'T1'"}
+    - {from: planning, to: ready, verb: skip-plan, actor: framework, guard: "tier_hint == 'T1'", lifecycle: active, active_step: none, integration_step: none, blocked: false, legacy_status: ready}
 
     # plan_review → ready / planning / blocked (gate-keyed by submit-plan-review)
-    - {from: plan_review, to: ready, verb: submit-plan-review, actor: ai_autonomous, requires_gate: READY}
-    - {from: plan_review, to: planning, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NEEDS_WORK, guard: "plan_review_log.length < 5"}
+    - {from: plan_review, to: ready, verb: submit-plan-review, actor: ai_autonomous, requires_gate: READY, lifecycle: active, active_step: none, integration_step: none, blocked: false, legacy_status: ready}
+    - {from: plan_review, to: planning, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NEEDS_WORK, guard: "plan_review_log.length < 5", lifecycle: active, active_step: planning, integration_step: none, blocked: false, legacy_status: planning}
     # Falls through when above guard fails (6th NEEDS_WORK)
-    - {from: plan_review, to: blocked, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NEEDS_WORK}
-    - {from: plan_review, to: blocked, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NOT_READY}
+    - {from: plan_review, to: blocked, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NEEDS_WORK, lifecycle: active, active_step: none, integration_step: none, blocked: true, blocker_kind: task_review, legacy_status: blocked}
+    - {from: plan_review, to: blocked, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NOT_READY, lifecycle: active, active_step: none, integration_step: none, blocked: true, blocker_kind: task_review, legacy_status: blocked}
 
     # ready → executing (framework, fired on entry via on_state.ready)
-    - {from: ready, to: executing, verb: start, actor: framework}
+    - {from: ready, to: executing, verb: start, actor: framework, lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
 
     # executing → code_review (submit-execute)
-    - {from: executing, to: code_review, verb: submit-execute, actor: ai_autonomous}
+    - {from: executing, to: code_review, verb: submit-execute, actor: ai_autonomous, lifecycle: active, active_step: coding_review, integration_step: none, blocked: false, legacy_status: code_review}
 
     # code_review → executing / complete / blocked (gate-keyed; PASS branches by current_phase guard per M9)
     # T054: T1 rows now carry a synthesized one-phase plan written during the
@@ -209,15 +209,15 @@ lifecycle:
     # (with guard `tier_hint == 'T1'`) became redundant once plan IS NULL was
     # eliminated as a T1 representation; it has been removed.
     # PASS-non-last: bump current_phase, reset current_cycle, return to executing
-    - {from: code_review, to: executing, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "current_phase < plan.phases.length"}
+    - {from: code_review, to: executing, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "current_phase < plan.phases.length", lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
     # PASS-last: complete
-    - {from: code_review, to: complete, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "current_phase >= plan.phases.length"}
+    - {from: code_review, to: complete, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "current_phase >= plan.phases.length", lifecycle: integration, active_step: wrapping, integration_step: none, blocked: false, legacy_status: complete}
     # REVISE: bump current_cycle (post-increment guard <= 4 means cycles 2/3/4 OK)
-    - {from: code_review, to: executing, verb: submit-review, actor: ai_autonomous, requires_gate: REVISE, guard: "current_cycle <= 4"}
+    - {from: code_review, to: executing, verb: submit-review, actor: ai_autonomous, requires_gate: REVISE, guard: "current_cycle <= 4", lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
     # REVISE-fallback: 4th-revise routes to blocked (no guard; selected when REVISE→executing's guard fails)
-    - {from: code_review, to: blocked, verb: submit-review, actor: ai_autonomous, requires_gate: REVISE}
+    - {from: code_review, to: blocked, verb: submit-review, actor: ai_autonomous, requires_gate: REVISE, lifecycle: active, active_step: none, integration_step: none, blocked: true, blocker_kind: task_review, legacy_status: blocked}
     # FAIL: code-reviewer hard-fail goes to blocked
-    - {from: code_review, to: blocked, verb: submit-review, actor: ai_autonomous, requires_gate: FAIL}
+    - {from: code_review, to: blocked, verb: submit-review, actor: ai_autonomous, requires_gate: FAIL, lifecycle: active, active_step: none, integration_step: none, blocked: true, blocker_kind: task_review, legacy_status: blocked}
 
     # blocked recovery. Default/user-level blockers resume to planning, but
     # drive_failed infrastructure blockers may resume to the status that was
@@ -227,14 +227,14 @@ lifecycle:
     # deploy_blocked is release-ceremony recovery, not work-cycle resume:
     # use retry-deploy after fixing the deploy issue, or close-out-of-band
     # when manually recovered outside the substrate.
-    - {from: blocked, to: planning, verb: resume, actor: ai_with_human}
+    - {from: blocked, to: planning, verb: resume, actor: ai_with_human, lifecycle: active, active_step: planning, integration_step: none, blocked: false, legacy_status: planning}
 
     # {planning, plan_review, ready, executing, code_review} → blocked (framework, fired by auto-drive subscriber on drive failure)
-    - {from: planning, to: blocked, verb: mark_drive_failed, actor: framework}
-    - {from: plan_review, to: blocked, verb: mark_drive_failed, actor: framework}
-    - {from: ready, to: blocked, verb: mark_drive_failed, actor: framework}
-    - {from: executing, to: blocked, verb: mark_drive_failed, actor: framework}
-    - {from: code_review, to: blocked, verb: mark_drive_failed, actor: framework}
+    - {from: planning, to: blocked, verb: mark_drive_failed, actor: framework, lifecycle: active, active_step: none, integration_step: none, blocked: true, blocker_kind: runner, legacy_status: blocked}
+    - {from: plan_review, to: blocked, verb: mark_drive_failed, actor: framework, lifecycle: active, active_step: none, integration_step: none, blocked: true, blocker_kind: runner, legacy_status: blocked}
+    - {from: ready, to: blocked, verb: mark_drive_failed, actor: framework, lifecycle: active, active_step: none, integration_step: none, blocked: true, blocker_kind: runner, legacy_status: blocked}
+    - {from: executing, to: blocked, verb: mark_drive_failed, actor: framework, lifecycle: active, active_step: none, integration_step: none, blocked: true, blocker_kind: runner, legacy_status: blocked}
+    - {from: code_review, to: blocked, verb: mark_drive_failed, actor: framework, lifecycle: active, active_step: none, integration_step: none, blocked: true, blocker_kind: runner, legacy_status: blocked}
 
     # accepted → integration_queued (framework, fired on-entry to enqueue the
     # generic integration lane). Replaces the prior direct accepted →
@@ -242,7 +242,7 @@ lifecycle:
     # integration lane (queued → integrating → integrated), and post-integrated
     # repo-specific verbs (cargo-install, schema-migrate) hang off the
     # integrated state. T138 P1.
-    - {from: accepted, to: integration_queued, verb: enqueue-integration, actor: framework}
+    - {from: accepted, to: integration_queued, verb: enqueue-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: integration_queued}
 
     # integration_queued → integrating (framework, fired by builtin:integrate
     # when capacity is free). The capacity-1 partial UNIQUE index on
@@ -257,20 +257,20 @@ lifecycle:
     # bypassing the subscriber still cannot advance an inactive row through
     # the integration lane. The row stays at integration_queued without
     # error; plan-start surfaces it in the `inactive` bucket (P4).
-    - {from: integration_queued, to: integrating, verb: start-integration, actor: framework, guard: "activation == 'active'"}
+    - {from: integration_queued, to: integrating, verb: start-integration, actor: framework, guard: "activation == 'active'", lifecycle: integration, active_step: none, integration_step: merging, blocked: false, legacy_status: integrating}
 
     # integrating → integrated (framework, fired by builtin:integrate after a
     # successful refresh-against-main, pre-land check, and merge/push to main).
     # Subscribers (e.g. stores' cargo-install) hang off the integrated state.
     # T138 P1.
-    - {from: integrating, to: integrated, verb: mark_integrated, actor: framework}
+    - {from: integrating, to: integrated, verb: mark_integrated, actor: framework, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: integrated}
 
     # integrating → integration_blocked (framework, fired by builtin:integrate
     # when refresh-against-main, pre-land check, or merge/push fails). The
     # integration_blocked_reason field records the typed failure mode
     # (rebase_conflict, stale_base, stale_external_review, pre_land_check_failed,
     # merge_failure, push_failure). T138 P1.
-    - {from: integrating, to: integration_blocked, verb: mark_integration_blocked, actor: framework}
+    - {from: integrating, to: integration_blocked, verb: mark_integration_blocked, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: true, blocker_kind: main_red, legacy_status: integration_blocked}
 
     # integration_blocked → integration_queued (ai_with_human, retry the
     # integration after the human has resolved the underlying conflict /
@@ -278,52 +278,52 @@ lifecycle:
     # integration_blocked → integrated direct edge — retry must re-traverse
     # integration_queued → integrating → integrated so subscribers fire on the
     # same edge for first attempts and retries. T138 P1.
-    - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human}
+    - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: integration_queued}
 
     # integrated → cargo_installed (framework, fired by builtin:cargo-install
     # on success). The ONLY post-integrated success edge stores subscribes to.
     # Other repos opt out by not wiring cargo-install. T138 P1.
-    - {from: integrated, to: cargo_installed, verb: mark_cargo_installed, actor: framework}
+    - {from: integrated, to: cargo_installed, verb: mark_cargo_installed, actor: framework, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: cargo_installed}
     # integrated → deploy_blocked (framework, fired by builtin:cargo-install on
     # stores-specific post-land build/candidate failure). Integration already
     # landed in main; this is deploy/release recovery, not retry-integration.
-    - {from: integrated, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework}
+    - {from: integrated, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: true, blocker_kind: deploy, legacy_status: deploy_blocked}
 
     # cargo_installed → schema_migrated (framework, fired by builtin:schema-migrate on success)
-    - {from: cargo_installed, to: schema_migrated, verb: mark_schema_migrated, actor: framework}
+    - {from: cargo_installed, to: schema_migrated, verb: mark_schema_migrated, actor: framework, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: schema_migrated}
     # cargo_installed → deploy_blocked (framework, fired by builtin:schema-migrate on failure)
-    - {from: cargo_installed, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework}
+    - {from: cargo_installed, to: deploy_blocked, verb: mark_deploy_blocked, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: true, blocker_kind: deploy, legacy_status: deploy_blocked}
     # deploy_blocked recovery: retry the release ceremony from the accepted edge
     # after fixing the underlying deploy issue. Do not use resume here.
-    - {from: deploy_blocked, to: accepted, verb: retry-deploy, actor: ai_with_human}
+    - {from: deploy_blocked, to: accepted, verb: retry-deploy, actor: ai_with_human, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: accepted}
 
     # complete → in_review (framework on-entry follow-on)
-    - {from: complete, to: in_review, verb: request_review, actor: framework}
+    - {from: complete, to: in_review, verb: request_review, actor: framework, lifecycle: integration, active_step: wrapping, integration_step: none, blocked: false, legacy_status: in_review}
     # External review revision route for T2/T3 rows. T1 remains lightweight by
     # default: skip-plan T1 rows do not require an external_review PASS unless a
     # later phase explicitly opts them into that lane.
-    - {from: in_review, to: executing, verb: submit-external-review, actor: framework, requires_gate: REVISE}
+    - {from: in_review, to: executing, verb: submit-external-review, actor: framework, requires_gate: REVISE, lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
 
     # in_review → accepted / rejected (human gated)
-    - {from: in_review, to: accepted, verb: accept, actor: human}
-    - {from: in_review, to: rejected, verb: reject, actor: human}
+    - {from: in_review, to: accepted, verb: accept, actor: human, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: accepted}
+    - {from: in_review, to: rejected, verb: reject, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: rejected}
     # rejected → planning (amend: re-open contract authoring)
-    - {from: rejected, to: planning, verb: amend, actor: ai_with_human}
+    - {from: rejected, to: planning, verb: amend, actor: ai_with_human, lifecycle: active, active_step: planning, integration_step: none, blocked: false, legacy_status: planning}
 
     # <non_terminal> → abandoned (T043: walk a stale row to terminal abandoned without burning a drive cycle)
-    - {from: planning, to: abandoned, verb: abandon, actor: human}
-    - {from: plan_review, to: abandoned, verb: abandon, actor: human}
-    - {from: ready, to: abandoned, verb: abandon, actor: human}
-    - {from: executing, to: abandoned, verb: abandon, actor: human}
-    - {from: code_review, to: abandoned, verb: abandon, actor: human}
-    - {from: blocked, to: abandoned, verb: abandon, actor: human}
-    - {from: in_review, to: abandoned, verb: abandon, actor: human}
-    - {from: deploy_blocked, to: abandoned, verb: abandon, actor: human}
-    - {from: complete, to: abandoned, verb: abandon, actor: human}
-    - {from: integration_queued, to: abandoned, verb: abandon, actor: human}
-    - {from: integrating, to: abandoned, verb: abandon, actor: human}
-    - {from: integration_blocked, to: abandoned, verb: abandon, actor: human}
-    - {from: integrated, to: abandoned, verb: abandon, actor: human}
+    - {from: planning, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: plan_review, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: ready, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: executing, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: code_review, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: blocked, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: in_review, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: deploy_blocked, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: complete, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: integration_queued, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: integrating, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: integration_blocked, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
+    - {from: integrated, to: abandoned, verb: abandon, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: abandoned}
 
 workflow:
   max_revise_cycles: 5

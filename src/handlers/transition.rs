@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::codegen::ddl::quote_ident;
 use crate::schema::{
     actor::{Actor, InvokerCtx},
-    lifecycle::select_transition,
+    lifecycle::{select_transition, Transition},
     FieldType, Schema,
 };
 use crate::validate::{self, Op};
@@ -25,18 +25,58 @@ pub(crate) fn inject_tasks_overlay_into_diff(
     diff: &mut crate::validate::EntryMap,
     merged: &mut crate::validate::EntryMap,
 ) -> Result<()> {
+    inject_tasks_overlay_into_diff_for_transition(schema, None, verb, from, to, diff, merged)
+}
+
+pub(crate) fn inject_tasks_overlay_into_diff_for_transition(
+    schema: &Schema,
+    transition: Option<&Transition>,
+    verb: &str,
+    from: &str,
+    to: &str,
+    diff: &mut crate::validate::EntryMap,
+    merged: &mut crate::validate::EntryMap,
+) -> Result<()> {
     if schema.name != "tasks" {
         return Ok(());
     }
-    let overlay = crate::handlers::lifecycle_overlay::derive(
-        verb,
-        from,
-        to,
-        merged.get("blocked_reason").and_then(|v| v.as_str()),
-        merged
-            .get("integration_blocked_reason")
-            .and_then(|v| v.as_str()),
-    )?;
+    let overlay = if let Some(t) = transition {
+        if let (Some(lifecycle), Some(active_step), Some(integration_step), Some(blocked)) = (
+            t.lifecycle.as_ref(),
+            t.active_step.as_ref(),
+            t.integration_step.as_ref(),
+            t.blocked,
+        ) {
+            crate::handlers::lifecycle_overlay::LifecycleOverlay {
+                lifecycle: lifecycle.clone(),
+                active_step: active_step.clone(),
+                integration_step: integration_step.clone(),
+                blocked,
+                blocker_kind: t.blocker_kind.clone(),
+                legacy_status: t.legacy_status.clone(),
+            }
+        } else {
+            crate::handlers::lifecycle_overlay::derive(
+                verb,
+                from,
+                to,
+                merged.get("blocked_reason").and_then(|v| v.as_str()),
+                merged
+                    .get("integration_blocked_reason")
+                    .and_then(|v| v.as_str()),
+            )?
+        }
+    } else {
+        crate::handlers::lifecycle_overlay::derive(
+            verb,
+            from,
+            to,
+            merged.get("blocked_reason").and_then(|v| v.as_str()),
+            merged
+                .get("integration_blocked_reason")
+                .and_then(|v| v.as_str()),
+        )?
+    };
     let fields = [
         ("lifecycle", Value::String(overlay.lifecycle)),
         ("active_step", Value::String(overlay.active_step)),
@@ -810,8 +850,9 @@ pub(crate) fn run_in_tx(
         diff.insert("current_cycle".to_string(), Value::Number(0.into()));
     }
 
-    inject_tasks_overlay_into_diff(
+    inject_tasks_overlay_into_diff_for_transition(
         schema,
+        Some(transition),
         verb,
         current_status,
         &transition.to,
@@ -819,7 +860,7 @@ pub(crate) fn run_in_tx(
         &mut merged,
     )?;
 
-    // Write: UPDATE merged fields + status = transition.to + updated_*
+    // Write: UPDATE merged fields + legacy status projection + updated_*
     let (pref, phash) = read_policy_env();
     execute_transition_write(
         tx,
@@ -992,6 +1033,37 @@ pub(crate) fn execute_transition_write(
 ) -> Result<()> {
     let now = now_iso8601();
     let invoker_str = invoker.to_string();
+    let legacy_status = if schema.name == "tasks" {
+        let overlay = crate::handlers::lifecycle_overlay::LifecycleOverlay {
+            lifecycle: merged
+                .get("lifecycle")
+                .and_then(Value::as_str)
+                .unwrap_or("active")
+                .to_string(),
+            active_step: merged
+                .get("active_step")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string(),
+            integration_step: merged
+                .get("integration_step")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string(),
+            blocked: merged
+                .get("blocked")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            blocker_kind: merged
+                .get("blocker_kind")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            legacy_status: Some(new_status.to_string()),
+        };
+        crate::handlers::lifecycle_overlay::legacy(&overlay)?
+    } else {
+        new_status.to_string()
+    };
 
     let mut set_parts: Vec<String> = vec![
         "updated_at = ?1".to_string(),
@@ -1001,7 +1073,7 @@ pub(crate) fn execute_transition_write(
     let mut sql_values: Vec<rusqlite::types::Value> = vec![
         rusqlite::types::Value::Text(now),
         rusqlite::types::Value::Text(invoker_str.clone()),
-        rusqlite::types::Value::Text(new_status.to_string()),
+        rusqlite::types::Value::Text(legacy_status.clone()),
     ];
     let mut param_idx = 4usize;
 
@@ -1074,13 +1146,56 @@ pub(crate) fn execute_transition_write(
         row_id,
         display_id,
         from_status,
-        new_status,
+        &legacy_status,
         verb,
         &invoker_str,
         policy_ref,
         policies_hash,
         actor_note,
     )?;
+
+    if schema.name == "tasks" {
+        let history_cols = {
+            let mut stmt = tx.prepare("PRAGMA table_info(transition_history)")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            let mut cols = Vec::new();
+            for row in rows {
+                cols.push(row?);
+            }
+            cols
+        };
+        if [
+            "lifecycle_from",
+            "active_step_from",
+            "integration_step_from",
+            "lifecycle_to",
+            "active_step_to",
+            "integration_step_to",
+        ]
+        .iter()
+        .all(|c| history_cols.iter().any(|h| h == c))
+        {
+            let from_overlay = crate::handlers::lifecycle_overlay::derive(
+                "history",
+                "",
+                from_status,
+                None,
+                None,
+            )?;
+            tx.execute(
+                "UPDATE transition_history SET lifecycle_from=?1, active_step_from=?2, integration_step_from=?3, lifecycle_to=?4, active_step_to=?5, integration_step_to=?6 WHERE id=last_insert_rowid()",
+                rusqlite::params![
+                    from_overlay.lifecycle,
+                    from_overlay.active_step,
+                    from_overlay.integration_step,
+                    merged.get("lifecycle").and_then(Value::as_str),
+                    merged.get("active_step").and_then(Value::as_str),
+                    merged.get("integration_step").and_then(Value::as_str),
+                ],
+            )
+            .context("transition_history primary tuple update")?;
+        }
+    }
 
     Ok(())
 }
@@ -1279,6 +1394,74 @@ fields:
     required: false
     actor: ai_with_human
 "#;
+
+    fn overlay_tuple(
+        o: crate::handlers::lifecycle_overlay::LifecycleOverlay,
+    ) -> (String, String, String, bool, Option<String>) {
+        (
+            o.lifecycle,
+            o.active_step,
+            o.integration_step,
+            o.blocked,
+            o.blocker_kind,
+        )
+    }
+
+    #[test]
+    fn primary_tuple_round_trip() {
+        let schema = Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        for t in &schema.lifecycle.transitions {
+            let expected = crate::handlers::lifecycle_overlay::derive(
+                &t.verb,
+                &t.from,
+                &t.to,
+                None,
+                None,
+            )
+            .unwrap();
+            let got = crate::handlers::lifecycle_overlay::LifecycleOverlay {
+                lifecycle: t.lifecycle.clone().expect("transition lifecycle"),
+                active_step: t.active_step.clone().expect("transition active_step"),
+                integration_step: t
+                    .integration_step
+                    .clone()
+                    .expect("transition integration_step"),
+                blocked: t.blocked.expect("transition blocked"),
+                blocker_kind: t.blocker_kind.clone(),
+                legacy_status: t.legacy_status.clone(),
+            };
+            assert_eq!(overlay_tuple(got), overlay_tuple(expected), "{} {} -> {}", t.verb, t.from, t.to);
+        }
+    }
+
+    #[test]
+    fn legacy_projection_round_trip() {
+        let statuses = [
+            "planning",
+            "plan_review",
+            "ready",
+            "executing",
+            "code_review",
+            "blocked",
+            "complete",
+            "in_review",
+            "accepted",
+            "rejected",
+            "deploy_blocked",
+            "integration_queued",
+            "integrating",
+            "integration_blocked",
+            "integrated",
+            "cargo_installed",
+            "schema_migrated",
+            "closed_out_of_band",
+            "abandoned",
+        ];
+        for status in statuses {
+            let overlay = crate::handlers::lifecycle_overlay::derive("test", "", status, None, None).unwrap();
+            assert_eq!(crate::handlers::lifecycle_overlay::legacy(&overlay).unwrap(), status);
+        }
+    }
 
     fn build_cmd(schema: &Schema, verb: &'static str) -> clap::Command {
         let leaves = crate::schema::flatten::leaf_args(schema).unwrap();

@@ -19,6 +19,7 @@ pub struct LifecycleOverlay {
     pub integration_step: String,
     pub blocked: bool,
     pub blocker_kind: Option<String>,
+    pub legacy_status: Option<String>,
 }
 
 fn overlay(
@@ -34,6 +35,7 @@ fn overlay(
         integration_step: integration_step.to_string(),
         blocked,
         blocker_kind,
+        legacy_status: None,
     }
 }
 
@@ -44,7 +46,7 @@ pub fn derive(
     blocked_reason: Option<&str>,
     integration_blocked_reason: Option<&str>,
 ) -> Result<LifecycleOverlay> {
-    let out = match to_status {
+    let mut out = match to_status {
         "planning" => overlay("active", "planning", "none", false, None),
         "plan_review" => overlay("active", "planning_review", "none", false, None),
         "ready" => overlay("active", "none", "none", false, None),
@@ -78,7 +80,35 @@ pub fn derive(
         "abandoned" => overlay("done", "none", "none", false, None),
         other => bail!("unknown task to_status for lifecycle overlay: {other}"),
     };
+    out.legacy_status = Some(to_status.to_string());
     Ok(out)
+}
+
+pub fn legacy(overlay: &LifecycleOverlay) -> Result<String> {
+    if let Some(status) = overlay.legacy_status.as_ref() {
+        return Ok(status.clone());
+    }
+    match (
+        overlay.lifecycle.as_str(),
+        overlay.active_step.as_str(),
+        overlay.integration_step.as_str(),
+        overlay.blocked,
+        overlay.blocker_kind.as_deref(),
+    ) {
+        ("active", "planning", "none", false, None) => Ok("planning".into()),
+        ("active", "planning_review", "none", false, None) => Ok("plan_review".into()),
+        ("active", "none", "none", false, None) => Ok("ready".into()),
+        ("active", "coding", "none", false, None) => Ok("executing".into()),
+        ("active", "coding_review", "none", false, None) => Ok("code_review".into()),
+        ("active", "none", "none", true, _) => Ok("blocked".into()),
+        ("integration", "wrapping", "none", false, None) => Ok("complete".into()),
+        ("integration", "none", "none", false, None) => Ok("accepted".into()),
+        ("integration", "none", "none", true, Some("deploy")) => Ok("deploy_blocked".into()),
+        ("integration", "none", "merging", false, None) => Ok("integrating".into()),
+        ("integration", "none", "none", true, _) => Ok("integration_blocked".into()),
+        ("done", "none", "none", false, None) => Ok("integrated".into()),
+        _ => bail!("no legacy status projection for lifecycle overlay: {:?}", overlay),
+    }
 }
 
 fn derive_blocked_kind(

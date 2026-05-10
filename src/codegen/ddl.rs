@@ -121,6 +121,12 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
             // L144: actor_note added post-v0.1; older DBs lack it. Nullable so
             // ALTER TABLE ADD COLUMN against existing rows is well-defined.
             FrameworkColumn { name: "actor_note", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "actor_note TEXT", additive: true },
+            FrameworkColumn { name: "lifecycle_from", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "lifecycle_from TEXT", additive: true },
+            FrameworkColumn { name: "active_step_from", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "active_step_from TEXT", additive: true },
+            FrameworkColumn { name: "integration_step_from", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "integration_step_from TEXT", additive: true },
+            FrameworkColumn { name: "lifecycle_to", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "lifecycle_to TEXT", additive: true },
+            FrameworkColumn { name: "active_step_to", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "active_step_to TEXT", additive: true },
+            FrameworkColumn { name: "integration_step_to", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "integration_step_to TEXT", additive: true },
         ],
     },
     FrameworkTable {
@@ -371,7 +377,13 @@ CREATE TABLE IF NOT EXISTS transition_history (
     policy_ref TEXT,
     policies_hash TEXT,
     occurred_at TEXT NOT NULL,
-    actor_note TEXT
+    actor_note TEXT,
+    lifecycle_from TEXT,
+    active_step_from TEXT,
+    integration_step_from TEXT,
+    lifecycle_to TEXT,
+    active_step_to TEXT,
+    integration_step_to TEXT
 );
 CREATE TABLE IF NOT EXISTS dispatch_locks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
