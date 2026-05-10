@@ -309,10 +309,7 @@ fn review_lines(r: &ReviewRow) -> Vec<String> {
         String::new(),
         "Timing".to_string(),
         format!("  started_at: {}", present_opt(r.started_at.as_deref())),
-        format!(
-            "  completed_at: {}",
-            present_opt(r.completed_at.as_deref())
-        ),
+        format!("  completed_at: {}", present_opt(r.completed_at.as_deref())),
         format!("  duration_ms: {}", opt_i64(r.duration_ms)),
         String::new(),
         "Artifacts".to_string(),
@@ -343,13 +340,15 @@ pub(super) fn engine_lines(app: &App) -> Vec<String> {
         lines.push("  —".to_string());
     } else {
         for lock in &app.engine_detail.unfinished_lock_rows {
+            let agent = present_opt(lock.agent_name.as_deref());
             lines.push(format!(
-                "  {} agent={} claimed_by={} claimed_at={} attempts={}",
+                "  {} agent={} runner={} claimed={} last_progress={} {}",
                 present(&lock.display_id),
-                present_opt(lock.agent_name.as_deref()),
-                present_opt(lock.claimed_by.as_deref()),
+                agent,
+                agent,
                 present_opt(lock.claimed_at.as_deref()),
-                lock.attempts,
+                present_opt(lock.heartbeat_at.as_deref()),
+                present(&lock.liveness_label),
             ));
         }
     }
@@ -453,9 +452,7 @@ fn list_or_dash(items: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::tui::app::{App, TuiOpts};
-    use crate::tui::data::{
-        AgentRunsRoleAggregate, DaemonStartRow, DispatchLockRow, EngineDetail,
-    };
+    use crate::tui::data::{AgentRunsRoleAggregate, DaemonStartRow, DispatchLockRow, EngineDetail};
 
     #[test]
     fn task_detail_contains_required_headings() {
@@ -526,7 +523,10 @@ mod tests {
         }
         // SHA truncated to 12 characters.
         assert!(text.contains("abcdef012345"), "base_sha trunc: {text}");
-        assert!(!text.contains("abcdef0123456789"), "base_sha not full: {text}");
+        assert!(
+            !text.contains("abcdef0123456789"),
+            "base_sha not full: {text}"
+        );
     }
 
     #[test]
@@ -578,8 +578,7 @@ mod tests {
     #[test]
     fn engine_detail_contains_daemon_and_lock_lines() {
         let mut app = App::new(TuiOpts::default());
-        app.status_bar.daemon_liveness =
-            crate::tui::daemon::Liveness::Live { pid: 12345 };
+        app.status_bar.daemon_liveness = crate::tui::daemon::Liveness::Live { pid: 12345 };
         app.engine_detail = EngineDetail {
             recent_daemon_starts: vec![DaemonStartRow {
                 pid: 9876,
@@ -592,6 +591,8 @@ mod tests {
                 agent_name: Some("planner".to_string()),
                 claimed_by: Some("daemon-9876".to_string()),
                 claimed_at: Some("2026-05-10T11:00:00Z".to_string()),
+                heartbeat_at: None,
+                liveness_label: "state=unknown".to_string(),
                 attempts: 2,
             }],
             recent_agent_runs_by_role: vec![AgentRunsRoleAggregate {

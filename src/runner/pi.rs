@@ -12,6 +12,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::liveness::{self, LivenessClass, LivenessThresholds};
 use super::{AgentRunTelemetry, Runner, RunnerOutput};
 
 pub struct PiRunner {
@@ -203,11 +204,17 @@ impl Runner for PiRunner {
             cmd.arg("--schema").arg(p);
         }
         let started_at = crate::handlers::row::now_iso8601();
-        let output = cmd.output().context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
+        let output = liveness::run_streaming_with_liveness(
+            &mut cmd,
+            &LivenessThresholds::from_env(),
+            |_| {},
+            |_| {},
+        )
+        .context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
         let ended_at = crate::handlers::row::now_iso8601();
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = output.stdout;
+        let stderr = output.stderr;
+        let exit_code = output.exit_code;
         // write_transcript returns Err if the path cannot be written under
         // .stores/runs/ — no /tmp fallback. On Err, propagate so the drive
         // layer marks the row failed without calling insert_agent_run.
@@ -240,6 +247,23 @@ impl Runner for PiRunner {
             stderr_log_path: None,
         };
 
+        if matches!(
+            output.killed_for,
+            Some(LivenessClass::StalledNoOutput { .. } | LivenessClass::WallClockTimeout { .. })
+        ) {
+            return Ok(RunnerOutput {
+                stdout,
+                stderr,
+                exit_code: -1,
+                final_message: None,
+                structured_output: None,
+                session_id: Some(session_id),
+                structured_output_source: None,
+                telemetry,
+                payload_error: output.payload_error,
+            });
+        }
+
         // Payload-level failures are surfaced via `payload_error` so that
         // `exit_code` always reflects the REAL child process exit status.
         // Drive persists telemetry (with the real exit_code) first, then checks
@@ -255,9 +279,7 @@ impl Runner for PiRunner {
                 session_id: Some(session_id),
                 structured_output_source: None,
                 telemetry,
-                payload_error: Some(
-                    "pi helper exited 0 but did not emit final_output".to_string(),
-                ),
+                payload_error: Some("pi helper exited 0 but did not emit final_output".to_string()),
             });
         }
         if let (Some(s), Some(p)) = (schema, payload.as_ref()) {
@@ -359,7 +381,10 @@ mod tests {
             )
             .unwrap();
         // exit_code reflects the REAL child process exit status (0 here).
-        assert_eq!(out.exit_code, 0, "payload failure preserves real child exit_code");
+        assert_eq!(
+            out.exit_code, 0,
+            "payload failure preserves real child exit_code"
+        );
         // payload_error carries the validation message, separate from exit_code.
         let payload_err = out.payload_error.as_deref().unwrap_or("");
         assert!(
@@ -389,7 +414,10 @@ mod tests {
             )
             .unwrap();
         // exit_code reflects the REAL child process exit status (0 here).
-        assert_eq!(out.exit_code, 0, "missing final_output preserves real child exit_code");
+        assert_eq!(
+            out.exit_code, 0,
+            "missing final_output preserves real child exit_code"
+        );
         // payload_error carries the explanation, separate from exit_code.
         let payload_err = out.payload_error.as_deref().unwrap_or("");
         assert!(
@@ -416,6 +444,117 @@ mod tests {
         assert_eq!(out.exit_code, 7);
         assert!(out.structured_output.is_none());
         assert!(out.stderr.contains("nope"));
+    }
+
+    #[test]
+    fn pi_runner_kills_alive_no_output_subprocess_after_threshold() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        std::env::set_var("STORES_RUNNER_NO_OUTPUT_SECS", "2");
+        std::env::set_var("STORES_RUNNER_WALL_CLOCK_MAX_SECS", "30");
+        let runs = tempfile::tempdir().unwrap();
+        std::env::set_var("STORES_RUNS_DIR", runs.path());
+        let (_d, helper) = shim("#!/bin/sh\nexec sleep 5\n");
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
+        let started = std::time::Instant::now();
+        let out = runner
+            .spawn(
+                "executor",
+                "sys",
+                "brief",
+                None,
+                Some(env!("CARGO_MANIFEST_DIR")),
+            )
+            .unwrap();
+        assert!(
+            started.elapsed() <= std::time::Duration::from_secs(4),
+            "elapsed={:?}",
+            started.elapsed()
+        );
+        assert_eq!(out.exit_code, -1);
+        assert!(out.payload_error.unwrap_or_default().contains("no output"));
+        std::env::remove_var("STORES_RUNNER_NO_OUTPUT_SECS");
+        std::env::remove_var("STORES_RUNNER_WALL_CLOCK_MAX_SECS");
+        std::env::remove_var("STORES_RUNS_DIR");
+    }
+
+    #[test]
+    fn pi_runner_streams_lines_and_extends_heartbeat() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        std::env::set_var("STORES_RUNNER_NO_OUTPUT_SECS", "2");
+        std::env::set_var("STORES_RUNNER_WALL_CLOCK_MAX_SECS", "30");
+        let runs = tempfile::tempdir().unwrap();
+        std::env::set_var("STORES_RUNS_DIR", runs.path());
+        let heartbeat = tempfile::NamedTempFile::new().unwrap();
+        std::env::set_var("STORES_HEARTBEAT_FILE", heartbeat.path());
+        let (_d, helper) = shim(
+            "#!/bin/sh\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"one\"}}'\nsleep 0.3\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"two\"}}'\nsleep 0.3\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"three\"}}'\n",
+        );
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
+        let schema = r#"{"type":"object","required":["role","summary"],"properties":{"role":{"const":"executor"},"summary":{"type":"string"}}}"#;
+        let out = runner
+            .spawn(
+                "executor",
+                "sys",
+                "brief",
+                Some(schema),
+                Some(env!("CARGO_MANIFEST_DIR")),
+            )
+            .unwrap();
+        assert_eq!(out.payload_error, None);
+        assert_eq!(out.structured_output.unwrap()["summary"], "three");
+        assert_eq!(out.stdout.lines().count(), 3);
+        let mtime = std::fs::metadata(heartbeat.path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(mtime.elapsed().unwrap() <= std::time::Duration::from_secs(2));
+        std::env::remove_var("STORES_RUNNER_NO_OUTPUT_SECS");
+        std::env::remove_var("STORES_RUNNER_WALL_CLOCK_MAX_SECS");
+        std::env::remove_var("STORES_RUNS_DIR");
+        std::env::remove_var("STORES_HEARTBEAT_FILE");
+    }
+
+    #[test]
+    fn pi_runner_stderr_progress_extends_heartbeat() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        std::env::set_var("STORES_RUNNER_NO_OUTPUT_SECS", "2");
+        std::env::set_var("STORES_RUNNER_WALL_CLOCK_MAX_SECS", "30");
+        let runs = tempfile::tempdir().unwrap();
+        std::env::set_var("STORES_RUNS_DIR", runs.path());
+        let heartbeat = tempfile::NamedTempFile::new().unwrap();
+        std::env::set_var("STORES_HEARTBEAT_FILE", heartbeat.path());
+        let (_d, helper) = shim(
+            "#!/bin/sh\necho stderr-one >&2\nsleep 0.3\necho stderr-two >&2\nsleep 0.3\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"ok\"}}'\n",
+        );
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
+        let schema = r#"{"type":"object","required":["role","summary"],"properties":{"role":{"const":"executor"},"summary":{"type":"string"}}}"#;
+        let out = runner
+            .spawn(
+                "executor",
+                "sys",
+                "brief",
+                Some(schema),
+                Some(env!("CARGO_MANIFEST_DIR")),
+            )
+            .unwrap();
+        assert_eq!(out.payload_error, None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stderr.contains("stderr-two"));
+        let mtime = std::fs::metadata(heartbeat.path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(mtime.elapsed().unwrap() <= std::time::Duration::from_secs(2));
+        std::env::remove_var("STORES_RUNNER_NO_OUTPUT_SECS");
+        std::env::remove_var("STORES_RUNNER_WALL_CLOCK_MAX_SECS");
+        std::env::remove_var("STORES_RUNS_DIR");
+        std::env::remove_var("STORES_HEARTBEAT_FILE");
     }
 
     #[test]

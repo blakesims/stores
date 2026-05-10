@@ -37,6 +37,7 @@
 use anyhow::{bail, Result};
 
 pub mod codex;
+pub mod liveness;
 pub mod mock;
 pub mod sap;
 

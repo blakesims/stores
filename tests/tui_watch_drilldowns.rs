@@ -11,6 +11,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 use rusqlite::Connection;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use stores::tui::app::{App, Selection, TuiOpts};
 use stores::tui::daemon::Liveness;
@@ -58,7 +59,7 @@ fn seed_conn() -> Connection {
         CREATE TABLE dispatch_locks (
             id INTEGER PRIMARY KEY,
             display_id TEXT, agent_name TEXT, claimed_by TEXT,
-            claimed_at TEXT, finished_at TEXT, attempts INTEGER
+            claimed_at TEXT, heartbeat_at TEXT, finished_at TEXT, attempts INTEGER
         );
         CREATE TABLE daemon_starts (
             id INTEGER PRIMARY KEY,
@@ -91,12 +92,19 @@ fn seed_conn() -> Connection {
         -- Engine: one daemon_starts row + one unfinished dispatch_lock with agent_name.
         INSERT INTO daemon_starts (pid,started_at,binary_version,git_sha)
         VALUES (4242,'2026-05-09T07:00:00','0.7.0','deadbeefcafe');
-        INSERT INTO dispatch_locks (display_id,agent_name,claimed_by,claimed_at,finished_at,attempts)
-        VALUES ('T100','planner','engine-1','2026-05-09T09:00:00',NULL,2);
+        INSERT INTO dispatch_locks (display_id,agent_name,claimed_by,claimed_at,heartbeat_at,finished_at,attempts)
+        VALUES ('T100','planner','engine-1','2026-05-09T09:00:00',NULL,NULL,2);
         "#,
     )
     .expect("seed fixture");
     conn
+}
+
+fn now_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn paint(app: &mut App) -> Buffer {
@@ -107,13 +115,7 @@ fn paint(app: &mut App) -> Buffer {
 }
 
 /// Slice [col_start, col_end) × [row_start, row_end) of `buf` to a string.
-fn region_text(
-    buf: &Buffer,
-    col_start: u16,
-    col_end: u16,
-    row_start: u16,
-    row_end: u16,
-) -> String {
+fn region_text(buf: &Buffer, col_start: u16, col_end: u16, row_start: u16, row_end: u16) -> String {
     let mut s = String::new();
     for y in row_start..row_end {
         for x in col_start..col_end {
@@ -258,6 +260,61 @@ fn engine_lane_side_detail_includes_daemon_locks_and_agent_name() {
         detail.contains("planner"),
         "Engine lane side-detail must list seeded agent_name 'planner':\n{detail}"
     );
+}
+
+#[test]
+fn engine_lane_renders_active_runner_state() {
+    let conn = seed_conn();
+    let now = now_epoch();
+    conn.execute(
+        "INSERT INTO dispatch_locks (display_id,agent_name,claimed_by,claimed_at,heartbeat_at,finished_at,attempts) \
+         VALUES ('T101','auto-drive','engine-1',?1,?2,NULL,1)",
+        rusqlite::params![(now - 10).to_string(), (now - 5).to_string()],
+    )
+    .unwrap();
+    let mut app = build_app(&conn);
+    focus_lane(&mut app, StoreLane::EngineHealth);
+    let buf = paint(&mut app);
+    let panel = focused_table_text(&buf);
+    let detail = side_detail_text(&buf);
+    let text = format!("{panel}\n{detail}");
+    assert!(
+        text.contains("last_progress="),
+        "missing last_progress: {text}"
+    );
+    assert!(
+        text.contains("state=active"),
+        "missing active state: {text}"
+    );
+}
+
+#[test]
+fn engine_lane_renders_stalled_runner_state() {
+    let conn = seed_conn();
+    let now = now_epoch();
+    conn.execute(
+        "INSERT INTO dispatch_locks (display_id,agent_name,claimed_by,claimed_at,heartbeat_at,finished_at,attempts) \
+         VALUES ('T102','auto-drive','engine-1',?1,?2,NULL,1)",
+        rusqlite::params![(now - 600).to_string(), (now - 600).to_string()],
+    )
+    .unwrap();
+    let mut app = build_app(&conn);
+    focus_lane(&mut app, StoreLane::EngineHealth);
+    let buf = paint(&mut app);
+    let panel = focused_table_text(&buf);
+    let detail = side_detail_text(&buf);
+    let text = format!("{panel}\n{detail}");
+    assert!(
+        text.contains("state=stalled_no_output"),
+        "missing stalled state: {text}"
+    );
+    let idle = text
+        .split("idle=")
+        .nth(1)
+        .and_then(|s| s.split('s').next())
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    assert!(idle >= 180, "idle must be >=180, got {idle}: {text}");
 }
 
 #[test]
