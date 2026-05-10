@@ -9,8 +9,6 @@
 /// returns it as `RunnerOutput.structured_output` with source `pi-tool`.
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -209,18 +207,7 @@ impl Runner for PiRunner {
         let output = liveness::run_streaming_with_liveness(
             &mut cmd,
             &LivenessThresholds::from_env(),
-            |_: &str| {
-                if let Some(path) = std::env::var_os("STORES_HEARTBEAT_FILE") {
-                    if let Ok(mut f) = OpenOptions::new()
-                        .write(true)
-                        .truncate(true)
-                        .create(true)
-                        .open(path)
-                    {
-                        let _ = writeln!(f, "{}", crate::handlers::row::now_iso8601());
-                    }
-                }
-            },
+            |_| {},
             |_| {},
         )
         .context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
@@ -520,6 +507,45 @@ mod tests {
         assert_eq!(out.payload_error, None);
         assert_eq!(out.structured_output.unwrap()["summary"], "three");
         assert_eq!(out.stdout.lines().count(), 3);
+        let mtime = std::fs::metadata(heartbeat.path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(mtime.elapsed().unwrap() <= std::time::Duration::from_secs(2));
+        std::env::remove_var("STORES_RUNNER_NO_OUTPUT_SECS");
+        std::env::remove_var("STORES_RUNNER_WALL_CLOCK_MAX_SECS");
+        std::env::remove_var("STORES_RUNS_DIR");
+        std::env::remove_var("STORES_HEARTBEAT_FILE");
+    }
+
+    #[test]
+    fn pi_runner_stderr_progress_extends_heartbeat() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        std::env::set_var("STORES_RUNNER_NO_OUTPUT_SECS", "2");
+        std::env::set_var("STORES_RUNNER_WALL_CLOCK_MAX_SECS", "30");
+        let runs = tempfile::tempdir().unwrap();
+        std::env::set_var("STORES_RUNS_DIR", runs.path());
+        let heartbeat = tempfile::NamedTempFile::new().unwrap();
+        std::env::set_var("STORES_HEARTBEAT_FILE", heartbeat.path());
+        let (_d, helper) = shim(
+            "#!/bin/sh\necho stderr-one >&2\nsleep 0.3\necho stderr-two >&2\nsleep 0.3\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"ok\"}}'\n",
+        );
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
+        let schema = r#"{"type":"object","required":["role","summary"],"properties":{"role":{"const":"executor"},"summary":{"type":"string"}}}"#;
+        let out = runner
+            .spawn(
+                "executor",
+                "sys",
+                "brief",
+                Some(schema),
+                Some(env!("CARGO_MANIFEST_DIR")),
+            )
+            .unwrap();
+        assert_eq!(out.payload_error, None);
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stderr.contains("stderr-two"));
         let mtime = std::fs::metadata(heartbeat.path())
             .unwrap()
             .modified()

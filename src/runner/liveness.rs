@@ -1,5 +1,6 @@
 use anyhow::Context;
-use std::io::{BufRead, BufReader};
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -108,6 +109,19 @@ enum Stream {
     Eof,
 }
 
+pub fn touch_heartbeat_file_from_env() {
+    if let Some(path) = std::env::var_os("STORES_HEARTBEAT_FILE") {
+        if let Ok(mut f) = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{}", crate::handlers::row::now_iso8601());
+        }
+    }
+}
+
 fn killed_payload_error(c: &LivenessClass) -> Option<String> {
     match c {
         LivenessClass::StalledNoOutput {
@@ -195,12 +209,14 @@ pub fn run_streaming_with_liveness(
             Ok(Stream::Stdout(line)) => {
                 stdout.push_str(&line);
                 stdout.push('\n');
+                touch_heartbeat_file_from_env();
                 on_stdout_line(&line);
                 last_output_at = Instant::now();
             }
             Ok(Stream::Stderr(line)) => {
                 stderr.push_str(&line);
                 stderr.push('\n');
+                touch_heartbeat_file_from_env();
                 on_stderr_line(&line);
                 last_output_at = Instant::now();
             }
@@ -339,6 +355,36 @@ mod tests {
             "state=wall_clock_timeout runtime=5s max=4s"
         );
         assert_eq!(LivenessClass::Unknown.label(), "state=unknown");
+    }
+
+    #[test]
+    fn streaming_helper_touches_heartbeat_for_stdout_and_stderr() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let heartbeat = tempfile::NamedTempFile::new().unwrap();
+        std::env::set_var("STORES_HEARTBEAT_FILE", heartbeat.path());
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("echo stdout-progress; echo stderr-progress >&2");
+        let out = run_streaming_with_liveness(
+            &mut cmd,
+            &LivenessThresholds {
+                no_output_secs: 5,
+                wall_clock_max_secs: 30,
+            },
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("stdout-progress"));
+        assert!(out.stderr.contains("stderr-progress"));
+        let mtime = std::fs::metadata(heartbeat.path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(mtime.elapsed().unwrap() <= Duration::from_secs(2));
+        std::env::remove_var("STORES_HEARTBEAT_FILE");
     }
 
     #[test]
