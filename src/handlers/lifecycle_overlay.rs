@@ -46,10 +46,36 @@ pub fn derive(
     blocked_reason: Option<&str>,
     integration_blocked_reason: Option<&str>,
 ) -> Result<LifecycleOverlay> {
+    if verb == "backfill_queued" {
+        let mut out = match to_status {
+            "blocked" => overlay(
+                "queued",
+                "none",
+                "none",
+                true,
+                derive_blocked_kind(verb, from_status, blocked_reason),
+            ),
+            "deploy_blocked" => overlay("queued", "none", "none", true, Some("deploy".into())),
+            "integration_blocked" => overlay(
+                "queued",
+                "none",
+                "none",
+                true,
+                derive_integration_blocker_kind(integration_blocked_reason),
+            ),
+            "planning" | "plan_review" | "ready" | "complete" | "in_review" | "accepted"
+            | "rejected" | "integration_queued" | "integrated" | "cargo_installed"
+            | "schema_migrated" | "closed_out_of_band" | "abandoned" => {
+                overlay("queued", "none", "none", false, None)
+            }
+            other => bail!("unknown task to_status for queued lifecycle backfill: {other}"),
+        };
+        out.legacy_status = Some(to_status.to_string());
+        return Ok(out);
+    }
+
     let mut out = match to_status {
-        "planning" if verb == "create" || verb == "backfill_queued" => {
-            overlay("queued", "none", "none", false, None)
-        }
+        "planning" if verb == "create" => overlay("queued", "none", "none", false, None),
         "planning" => overlay("active", "planning", "none", false, None),
         "plan_review" => overlay("active", "planning_review", "none", false, None),
         "ready" => overlay("active", "none", "none", false, None),

@@ -257,21 +257,33 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
             }
             drop(stmt);
             for (id, display_id, status, blocked_reason, integration_blocked_reason) in backfills {
-                let backfill_verb = if IN_FLIGHT_STATES.contains(&status.as_str()) {
-                    "backfill"
+                let overlay = if IN_FLIGHT_STATES.contains(&status.as_str()) {
+                    let active_step = match status.as_str() {
+                        "executing" => "coding",
+                        "code_review" => "coding_review",
+                        "integrating" => "none",
+                        _ => "none",
+                    };
+                    crate::handlers::lifecycle_overlay::LifecycleOverlay {
+                        lifecycle: "active".to_string(),
+                        active_step: active_step.to_string(),
+                        integration_step: "none".to_string(),
+                        blocked: false,
+                        blocker_kind: None,
+                        legacy_status: Some(status.clone()),
+                    }
                 } else {
-                    "backfill_queued"
+                    crate::handlers::lifecycle_overlay::derive(
+                        "backfill_queued",
+                        "",
+                        &status,
+                        blocked_reason.as_deref(),
+                        integration_blocked_reason.as_deref(),
+                    )
+                    .with_context(|| {
+                        format!("T144 P1: derive lifecycle overlay backfill for {display_id}")
+                    })?
                 };
-                let overlay = crate::handlers::lifecycle_overlay::derive(
-                    backfill_verb,
-                    "",
-                    &status,
-                    blocked_reason.as_deref(),
-                    integration_blocked_reason.as_deref(),
-                )
-                .with_context(|| {
-                    format!("T144 P1: derive lifecycle overlay backfill for {display_id}")
-                })?;
                 tx.execute(
                     "UPDATE tasks SET lifecycle=?1, active_step=?2, integration_step=?3, blocked=?4, blocker_kind=?5 WHERE id=?6",
                     rusqlite::params![
@@ -483,31 +495,38 @@ mod tests {
             conn.execute_batch(&format!("ALTER TABLE tasks DROP COLUMN {col};"))
                 .unwrap();
         }
-        conn.execute(
-            "INSERT INTO tasks (display_id,status,title,slug,created_at,updated_at,created_by,updated_by) VALUES ('T901','planning','p','p','n','n','framework','framework')",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO tasks (display_id,status,title,slug,created_at,updated_at,created_by,updated_by) VALUES ('T902','executing','e','e','n','n','framework','framework')",
-            [],
-        ).unwrap();
+        let cases = [
+            ("T901", "planning", "queued"),
+            ("T902", "ready", "queued"),
+            ("T903", "blocked", "queued"),
+            ("T904", "complete", "queued"),
+            ("T905", "in_review", "queued"),
+            ("T906", "integrated", "queued"),
+            ("T907", "executing", "active"),
+            ("T908", "code_review", "active"),
+            ("T909", "integrating", "active"),
+        ];
+        for (display_id, status, _) in cases {
+            conn.execute(
+                "INSERT INTO tasks (display_id,status,title,slug,created_at,updated_at,created_by,updated_by) VALUES (?1,?2,?3,?3,'n','n','framework','framework')",
+                rusqlite::params![display_id, status, status],
+            ).unwrap();
+        }
         apply_framework_drift(&conn).unwrap();
-        let queued: String = conn
-            .query_row(
-                "SELECT lifecycle FROM tasks WHERE display_id='T901'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let active: String = conn
-            .query_row(
-                "SELECT lifecycle FROM tasks WHERE display_id='T902'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(queued, "queued");
-        assert_eq!(active, "active");
+        for (display_id, status, expected_lifecycle) in cases {
+            let got: (String, String, String) = conn
+                .query_row(
+                    "SELECT lifecycle, active_step, integration_step FROM tasks WHERE display_id=?1",
+                    [display_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(got.0, expected_lifecycle, "{status}");
+            if expected_lifecycle == "queued" {
+                assert_eq!(got.1, "none", "active_step for {status}");
+                assert_eq!(got.2, "none", "integration_step for {status}");
+            }
+        }
     }
 
     #[test]
