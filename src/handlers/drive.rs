@@ -33,7 +33,7 @@
 /// # Safety rails
 ///
 /// - `--max-iters N` (default 50): loop is bounded; on hit exits non-zero.
-/// - Runner non-zero exit: task state is NOT modified (parse/submit are skipped).
+/// - Runner non-zero exit: if a valid agent envelope was captured, submit it; otherwise block.
 /// - `blocked` terminal state: exits 0 with a human-readable hint.
 use anyhow::{bail, Context as _, Result};
 use rusqlite::Connection;
@@ -1559,54 +1559,6 @@ fn drive_loop_with_role_runner(
             let _ = std::io::stderr().flush();
         }
 
-        // AC3.6: non-zero exit → surface stdout + stderr, no submit.
-        // (Some CLIs route auth / login errors to stdout, so always include both.)
-        if run_out.exit_code != 0 {
-            eprintln!(
-                "[{display_id}] runner exited with code {}; aborting without submitting",
-                run_out.exit_code
-            );
-            let _ = std::io::stderr().flush();
-            if !run_out.stdout.is_empty() {
-                eprintln!("runner stdout:\n{}", run_out.stdout);
-                let _ = std::io::stderr().flush();
-            }
-            if !run_out.stderr.is_empty() {
-                eprintln!("runner stderr:\n{}", run_out.stderr);
-                let _ = std::io::stderr().flush();
-            }
-
-            // T029: write a substrate transition before exit so the row leaves
-            // its current state (typically `executing`) cleanly with a
-            // structured exit reason captured in `blocked_reason`. Without
-            // this, the row would stay stuck at `executing` until the
-            // out-of-process watchdog (L062 territory) noticed PID death.
-            let blocked_reason = classify_runner_exit(&run_out);
-            match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
-                Ok(()) => {
-                    eprintln!(
-                        "[{display_id}] mark_drive_failed fired (blocked_reason={blocked_reason})"
-                    );
-                    let _ = std::io::stderr().flush();
-                    bail!(
-                        "runner non-zero exit (code {}); transitioned to blocked",
-                        run_out.exit_code
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[{display_id}] mark_drive_failed FAILED ({e:#}); row may stay at status='{}'",
-                        na.status
-                    );
-                    let _ = std::io::stderr().flush();
-                    bail!(
-                        "runner non-zero exit (code {}); mark_drive_failed transition FAILED: {e:#}",
-                        run_out.exit_code
-                    );
-                }
-            }
-        }
-
         // Payload validation error (MAJOR 2): surfaced after telemetry is
         // persisted (above) so the real exit_code is preserved in agent_runs.
         // Treated like a runner failure — transition to blocked.
@@ -1634,8 +1586,70 @@ fn drive_loop_with_role_runner(
         }
 
         // ── Step 2e: parse envelope + dispatch submit ─────────────────────
-        let (envelope, source_tag) =
-            parse_envelope(&run_out, &agent_name_normalized).map_err(|e| {
+        // Parse before treating non-zero exits as fatal. Claude Code can return a
+        // signal-ish/non-zero exit after the model already emitted a valid final
+        // result event (T139 observed exit=143 with a complete executor JSON
+        // envelope committed in the transcript). In that case the substrate must
+        // ingest the durable agent result instead of throwing it away and marking
+        // the row blocked.
+        let parsed_envelope = parse_envelope(&run_out, &agent_name_normalized);
+        let (envelope, source_tag) = if run_out.exit_code != 0 {
+            match parsed_envelope {
+                Ok((envelope, source_tag)) => {
+                    eprintln!(
+                        "[{display_id}] runner exited with code {} but produced a valid {source_tag} envelope; submitting result",
+                        run_out.exit_code
+                    );
+                    let _ = std::io::stderr().flush();
+                    (envelope, source_tag)
+                }
+                Err(parse_err) => {
+                    eprintln!(
+                        "[{display_id}] runner exited with code {}; aborting without submitting",
+                        run_out.exit_code
+                    );
+                    let _ = std::io::stderr().flush();
+                    eprintln!("[{display_id}] envelope parse failed: {parse_err}");
+                    let _ = std::io::stderr().flush();
+                    if !run_out.stdout.is_empty() {
+                        eprintln!("runner stdout:\n{}", run_out.stdout);
+                        let _ = std::io::stderr().flush();
+                    }
+                    if !run_out.stderr.is_empty() {
+                        eprintln!("runner stderr:\n{}", run_out.stderr);
+                        let _ = std::io::stderr().flush();
+                    }
+
+                    // T029: write a substrate transition before exit so the row
+                    // leaves its current state cleanly with a structured reason.
+                    let blocked_reason = classify_runner_exit(&run_out);
+                    match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
+                        Ok(()) => {
+                            eprintln!(
+                                "[{display_id}] mark_drive_failed fired (blocked_reason={blocked_reason})"
+                            );
+                            let _ = std::io::stderr().flush();
+                            bail!(
+                                "runner non-zero exit (code {}); transitioned to blocked",
+                                run_out.exit_code
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[{display_id}] mark_drive_failed FAILED ({e:#}); row may stay at status='{}'",
+                                na.status
+                            );
+                            let _ = std::io::stderr().flush();
+                            bail!(
+                                "runner non-zero exit (code {}); mark_drive_failed transition FAILED: {e:#}",
+                                run_out.exit_code
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            parsed_envelope.map_err(|e| {
                 eprintln!("[{display_id}] envelope parse failed: {e}");
                 let _ = std::io::stderr().flush();
                 if !run_out.stdout.is_empty() {
@@ -1646,9 +1660,9 @@ fn drive_loop_with_role_runner(
                     eprintln!("runner stderr:\n{}", run_out.stderr);
                     let _ = std::io::stderr().flush();
                 }
-                // Return the error so the caller sees it (no submit was called).
                 anyhow::anyhow!("envelope parse error: {e}")
-            })?;
+            })?
+        };
 
         // T072 r6: compute transcript_path BEFORE dispatch_submit so it can be
         // embedded atomically inside the submit transaction.
@@ -3441,6 +3455,64 @@ mod tests {
         assert_eq!(from_status, "executing");
         assert_eq!(to_status, "blocked");
         assert_eq!(verb, "mark_drive_failed");
+    }
+
+    #[test]
+    fn nonzero_exit_with_valid_executor_envelope_is_submitted() {
+        // T139 regression: Claude Code returned exit=143 after the executor had
+        // already emitted a valid final JSON envelope and committed the work.
+        // Drive must ingest that durable result instead of marking the row
+        // blocked solely because the process status was non-zero.
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+
+        insert_task(
+            &conn,
+            &schema,
+            "T143",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+
+        let executor_json = r#"{"role":"executor","summary":"implemented despite signal exit","commit":"0123456789abcdef0123456789abcdef01234567","files_changed":["src/tui/render.rs"]}"#;
+        let out = make_run_output_with_session(executor_json, 143, "t143-session");
+        let runner = MockRunner::new(vec![out]);
+
+        let err = drive_loop(&schema, &conn, "T143", &runner, 1)
+            .expect_err("max-iters should stop after the successful submit");
+        assert!(
+            err.to_string().contains("max iterations exceeded"),
+            "unexpected error: {err}"
+        );
+
+        let persisted_exit: i64 = conn
+            .query_row(
+                "SELECT exit_code FROM agent_runs WHERE display_id='T143' AND role='executor'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("agent_runs preserves real child exit");
+        assert_eq!(persisted_exit, 143);
+
+        let (_, after) = crate::handlers::row::read_row(&schema, &conn, "T143").unwrap();
+        assert_eq!(after.get("status").and_then(|v| v.as_str()), Some("code_review"));
+        assert!(
+            after.get("blocked_reason").and_then(|v| v.as_str()).is_none(),
+            "valid-envelope nonzero exit must not set blocked_reason"
+        );
+        let cycles = after.get("cycles").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(
+            cycles[0]
+                .get("executor")
+                .and_then(|v| v.get("summary"))
+                .and_then(|v| v.as_str()),
+            Some("implemented despite signal exit")
+        );
     }
 
     #[test]
