@@ -16,7 +16,7 @@ pub struct LivenessThresholds {
 impl Default for LivenessThresholds {
     fn default() -> Self {
         Self {
-            no_output_secs: 180,
+            no_output_secs: 600,
             wall_clock_max_secs: 1800,
         }
     }
