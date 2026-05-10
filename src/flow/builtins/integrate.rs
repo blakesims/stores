@@ -500,7 +500,12 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             return Ok(0);
         }
     }
-    if !resource_locks::check_ownership(ctx.conn, "main_branch", display_id)? {
+    if !resource_locks::check_ownership_token(
+        ctx.conn,
+        "main_branch",
+        display_id,
+        &lock_guard.token,
+    )? {
         let summary = "main_branch lock no longer owned (token rotated)".to_string();
         update_last_attempt(
             ctx.conn,

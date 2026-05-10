@@ -53,8 +53,7 @@ fn add_branch(repo: &Path, branch: &str, file: &str) {
     git(repo, &["checkout", "main"]);
 }
 
-fn fresh_db() -> Connection {
-    let conn = Connection::open_in_memory().unwrap();
+fn prepare_db(conn: &Connection) {
     conn.execute_batch(SUBSTRATE_DDL).unwrap();
     for name in ["tasks", "external_reviews", "observations"] {
         let yaml = BUNDLED_STORE_SCHEMAS
@@ -65,7 +64,18 @@ fn fresh_db() -> Connection {
         conn.execute_batch(&ddl_for(&Schema::from_yaml(yaml).unwrap()))
             .unwrap();
     }
-    ensure_integration_singleton_index(&conn).unwrap();
+    ensure_integration_singleton_index(conn).unwrap();
+}
+
+fn fresh_db() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    prepare_db(&conn);
+    conn
+}
+
+fn fresh_file_db(path: &Path) -> Connection {
+    let conn = Connection::open(path).unwrap();
+    prepare_db(&conn);
     conn
 }
 
@@ -123,7 +133,14 @@ fn policies() -> PoliciesYaml {
     }
 }
 fn cfg_path() -> PathBuf {
-    PathBuf::from("/tmp/stores-test-main-branch-lock-e2e.yaml")
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "stores-test-main-branch-lock-e2e-{}-{nanos}.yaml",
+        std::process::id()
+    ))
 }
 
 fn drive_until<F: Fn(&Connection) -> bool>(conn: &Connection, agents: &AgentsYaml, pred: F) {
@@ -192,6 +209,51 @@ fn lock_owner(conn: &Connection) -> Option<String> {
         |r| r.get(0),
     )
     .ok()
+}
+
+#[test]
+fn same_owner_token_rotation_blocks_before_merge_without_mutating_main() {
+    let db_tmp = tempfile::tempdir().unwrap();
+    let db_path = db_tmp.path().join("stores.db");
+    let conn = fresh_file_db(&db_path);
+    let (_repo_tmp, repo) = init_repo();
+    add_branch(&repo, "feat/rotate", "rotate.txt");
+    let hook = repo.join(".git/hooks/post-checkout");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nsqlite3 '{}' \"UPDATE resource_locks SET fencing_token='rotated-token' WHERE resource_id='main_branch' AND owner_display_id='T_ROTATE'\"\n",
+            db_path.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook, perms).unwrap();
+    }
+    git(&repo, &["checkout", "feat/rotate"]);
+    let pre_main = rev_parse(&repo, "main");
+    seed_queued_task(&conn, "T_ROTATE", "feat/rotate", repo.to_str().unwrap());
+
+    drive_until(
+        &conn,
+        &agents("accepted", "integration_queued", "true"),
+        |c| status(c, "T_ROTATE") == "integration_blocked",
+    );
+    assert_eq!(rev_parse(&repo, "main"), pre_main);
+    assert_eq!(
+        overlay(&conn, "T_ROTATE"),
+        (
+            "integration".into(),
+            "none".into(),
+            1,
+            Some("main_red".into())
+        )
+    );
+    assert_eq!(lock_owner(&conn).as_deref(), Some("T_ROTATE"));
 }
 
 #[test]
