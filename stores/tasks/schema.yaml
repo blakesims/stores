@@ -44,7 +44,7 @@ fields:
     enum_values: [queued, active, integration, done]
     required: false
     actor: framework
-    default: 'active'
+    default: 'queued'
   - name: active_step
     type: enum
     enum_values: [none, planning, planning_review, coding, coding_review, wrapping]
@@ -181,6 +181,10 @@ lifecycle:
     - {from: integrating, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
     - {from: integration_blocked, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
     - {from: integrated, to: closed_out_of_band, verb: close-out-of-band, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: closed_out_of_band}
+
+    # queued → active release. Historical status remains planning; ADR0001 lifecycle flips from queued to active.
+    - {from: planning, to: planning, verb: activate-task, actor: framework, guard: "activation == 'active'", lifecycle: active, active_step: planning, integration_step: none, blocked: false, legacy_status: planning}
+    - {from: planning, to: planning, verb: release-from-queued, actor: framework, guard: "activation == 'active'", lifecycle: active, active_step: planning, integration_step: none, blocked: false, legacy_status: planning}
 
     # planning → plan_review (submit-plan)
     - {from: planning, to: plan_review, verb: submit-plan, actor: ai_autonomous, lifecycle: active, active_step: planning_review, integration_step: none, blocked: false, legacy_status: plan_review}

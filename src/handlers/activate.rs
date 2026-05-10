@@ -16,15 +16,19 @@
 
 use anyhow::{Context, Result};
 use clap::ArgMatches;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 use serde_json::Value;
 
 use crate::codegen::ddl::quote_ident;
-use crate::schema::{actor::InvokerCtx, Schema};
+use crate::schema::{
+    actor::{Actor, InvokerCtx},
+    lifecycle::select_transition,
+    Schema,
+};
 use crate::validate::{self, Op};
 
 use super::row::{now_iso8601, read_row};
-use super::transition::read_policy_env;
+use super::transition::{execute_transition_write, read_policy_env};
 
 /// Run the `tasks activate <id> --reason <text>` verb.
 pub fn run_activate(
@@ -124,11 +128,145 @@ fn run_set_activation(
         Some(reason),
     )?;
 
+    if schema.name == "tasks" && verb == "activate" {
+        try_release_queued_in_tx(
+            &tx,
+            schema,
+            row_id,
+            display_id,
+            &merged,
+            "activate-task",
+            Some(reason),
+        )?;
+    }
+
     tx.commit().with_context(|| format!("{verb}: commit tx"))?;
-    println!(
-        "{verb} {display_id}: activation={new_value} (status={current_status} unchanged)"
-    );
+    println!("{verb} {display_id}: activation={new_value} (status={current_status} unchanged)");
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueueBlocker {
+    Dependency,
+    Capacity,
+}
+
+pub(crate) fn queued_activation_blocker(
+    tx: &Transaction,
+    display_id: &str,
+) -> Result<Option<QueueBlocker>> {
+    if !dependencies_satisfied(tx, display_id)? {
+        return Ok(Some(QueueBlocker::Dependency));
+    }
+    if !capacity_available(tx, display_id)? {
+        return Ok(Some(QueueBlocker::Capacity));
+    }
+    Ok(None)
+}
+
+pub(crate) fn try_release_queued_in_tx(
+    tx: &Transaction,
+    schema: &Schema,
+    row_id: i64,
+    display_id: &str,
+    existing: &crate::validate::EntryMap,
+    transition_verb: &str,
+    actor_note: Option<&str>,
+) -> Result<bool> {
+    if existing.get("lifecycle").and_then(|v| v.as_str()) != Some("queued") {
+        return Ok(false);
+    }
+    if existing.get("activation").and_then(|v| v.as_str()) != Some("active") {
+        return Ok(false);
+    }
+    if let Some(blocker) = queued_activation_blocker(tx, display_id)? {
+        let (blocked, kind) = match blocker {
+            QueueBlocker::Dependency => (1, "dependency"),
+            QueueBlocker::Capacity => (1, "capacity"),
+        };
+        tx.execute(
+            "UPDATE tasks SET blocked=?1, blocker_kind=?2, updated_at=?3 WHERE id=?4",
+            rusqlite::params![blocked, kind, now_iso8601(), row_id],
+        )?;
+        return Ok(false);
+    }
+
+    let status = existing
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("planning");
+    let transition = select_transition(
+        &schema.lifecycle.transitions,
+        status,
+        transition_verb,
+        None,
+        existing,
+    )?;
+    let mut diff: crate::validate::EntryMap = std::collections::BTreeMap::new();
+    diff.insert("lifecycle".to_string(), Value::String("active".to_string()));
+    diff.insert(
+        "active_step".to_string(),
+        Value::String("planning".to_string()),
+    );
+    diff.insert(
+        "integration_step".to_string(),
+        Value::String("none".to_string()),
+    );
+    diff.insert("blocked".to_string(), Value::Bool(false));
+    diff.insert("blocker_kind".to_string(), Value::Null);
+    let mut merged = existing.clone();
+    for (k, v) in &diff {
+        merged.insert(k.clone(), v.clone());
+    }
+    execute_transition_write(
+        tx,
+        schema,
+        row_id,
+        display_id,
+        status,
+        &transition.to,
+        transition_verb,
+        &diff,
+        &merged,
+        Actor::Framework,
+        None,
+        None,
+        actor_note,
+    )?;
+    Ok(true)
+}
+
+fn dependencies_satisfied(tx: &Transaction, display_id: &str) -> Result<bool> {
+    let raw: Option<String> = tx
+        .query_row(
+            "SELECT depends_on FROM tasks WHERE display_id=?1",
+            rusqlite::params![display_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(None);
+    let deps: Vec<String> = raw
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default();
+    for dep in deps {
+        let done: bool = tx.query_row(
+            "SELECT lifecycle='done' OR status IN ('accepted','rejected','integrated','cargo_installed','schema_migrated','closed_out_of_band','abandoned') FROM tasks WHERE display_id=?1",
+            rusqlite::params![dep],
+            |r| r.get::<_, i64>(0).map(|v| v != 0),
+        ).unwrap_or(false);
+        if !done {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn capacity_available(tx: &Transaction, display_id: &str) -> Result<bool> {
+    let active_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE display_id != ?1 AND lifecycle='active' AND COALESCE(blocked,0)=0 AND status NOT IN ('accepted','rejected','integrated','cargo_installed','schema_migrated','closed_out_of_band','abandoned')",
+        rusqlite::params![display_id],
+        |r| r.get(0),
+    )?;
+    Ok(active_count == 0)
 }
 
 #[cfg(test)]
@@ -211,10 +349,7 @@ mod tests {
         .unwrap()
     }
 
-    fn audit_rows(
-        conn: &Connection,
-        display_id: &str,
-    ) -> Vec<(String, Option<String>, String)> {
+    fn audit_rows(conn: &Connection, display_id: &str) -> Vec<(String, Option<String>, String)> {
         let mut s = conn
             .prepare(
                 "SELECT verb, actor_note, invoker FROM transition_history \
@@ -246,8 +381,7 @@ mod tests {
     fn activation_ac1_3_fresh_db_default_is_inactive() {
         let (_schema, conn) = fresh_db_with_tasks();
         insert_minimal_task(&conn, "T100", "planning");
-        let got = select_activation(&conn, "T100")
-            .expect("activation column present and non-NULL");
+        let got = select_activation(&conn, "T100").expect("activation column present and non-NULL");
         assert_eq!(got, "inactive", "fresh-DB row must default to inactive");
     }
 
@@ -363,7 +497,11 @@ mod tests {
         assert_eq!(status, "planning", "lifecycle status must NOT change");
 
         let rows = audit_rows(&conn, "T999");
-        assert_eq!(rows.len(), 1, "exactly one audit row; got: {rows:?}");
+        assert_eq!(
+            rows.len(),
+            2,
+            "activate plus queued→active audit rows; got: {rows:?}"
+        );
         assert_eq!(rows[0].0, "activate");
         assert_eq!(
             rows[0].1.as_deref(),
@@ -381,19 +519,12 @@ mod tests {
         conn.execute_batch(SUBSTRATE_DDL).ok();
         insert_minimal_task(&conn, "T999", "planning");
 
-        let m = build_activate_matches(&[
-            "activate",
-            "T999",
-            "--reason",
-            "should be rejected",
-        ]);
+        let m = build_activate_matches(&["activate", "T999", "--reason", "should be rejected"]);
         let err = run_activate(&schema, &conn, &m, Actor::AiAutonomous.into())
             .expect_err("ai_autonomous activate MUST be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("ai_with_human")
-                || msg.contains("ai_autonomous")
-                || msg.contains("actor"),
+            msg.contains("ai_with_human") || msg.contains("ai_autonomous") || msg.contains("actor"),
             "error must surface actor-rejection wording; got: {msg}"
         );
 
@@ -442,12 +573,8 @@ mod tests {
         assert_eq!(select_activation(&conn, "T700").unwrap(), "active");
 
         // ai_autonomous deactivate → rejected, activation stays 'active'.
-        let m_bad = build_activate_matches(&[
-            "deactivate",
-            "T700",
-            "--reason",
-            "should be rejected",
-        ]);
+        let m_bad =
+            build_activate_matches(&["deactivate", "T700", "--reason", "should be rejected"]);
         let err = run_deactivate(&schema, &conn, &m_bad, Actor::AiAutonomous.into())
             .expect_err("ai_autonomous deactivate MUST be rejected");
         assert!(
@@ -463,21 +590,21 @@ mod tests {
         );
 
         // ai_with_human deactivate → flips and writes audit row.
-        let m_ok = build_activate_matches(&[
-            "deactivate",
-            "T700",
-            "--reason",
-            "stand down for review",
-        ]);
+        let m_ok =
+            build_activate_matches(&["deactivate", "T700", "--reason", "stand down for review"]);
         run_deactivate(&schema, &conn, &m_ok, Actor::AiWithHuman.into())
             .expect("ai_with_human deactivate must succeed");
         assert_eq!(select_activation(&conn, "T700").unwrap(), "inactive");
 
         let rows = audit_rows(&conn, "T700");
-        assert_eq!(rows.len(), 2, "two audit rows expected: arm + stand-down");
-        assert_eq!(rows[1].0, "deactivate");
-        assert_eq!(rows[1].1.as_deref(), Some("stand down for review"));
-        assert_eq!(rows[1].2, "ai_with_human");
+        assert_eq!(
+            rows.len(),
+            3,
+            "three audit rows expected: arm + queued release + stand-down"
+        );
+        assert_eq!(rows[2].0, "deactivate");
+        assert_eq!(rows[2].1.as_deref(), Some("stand down for review"));
+        assert_eq!(rows[2].2, "ai_with_human");
     }
 
     /// Idempotency: running framework-migrate twice is a no-op the second

@@ -257,8 +257,13 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
             }
             drop(stmt);
             for (id, display_id, status, blocked_reason, integration_blocked_reason) in backfills {
+                let backfill_verb = if IN_FLIGHT_STATES.contains(&status.as_str()) {
+                    "backfill"
+                } else {
+                    "backfill_queued"
+                };
                 let overlay = crate::handlers::lifecycle_overlay::derive(
-                    "backfill",
+                    backfill_verb,
                     "",
                     &status,
                     blocked_reason.as_deref(),
@@ -463,6 +468,46 @@ mod tests {
             n, 1,
             "exactly one index named idx_tasks_integration_singleton"
         );
+    }
+
+    #[test]
+    fn queued_lifecycle_backfill() {
+        let conn = fresh_db_with_tasks();
+        for col in [
+            "lifecycle",
+            "active_step",
+            "integration_step",
+            "blocked",
+            "blocker_kind",
+        ] {
+            conn.execute_batch(&format!("ALTER TABLE tasks DROP COLUMN {col};"))
+                .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,slug,created_at,updated_at,created_by,updated_by) VALUES ('T901','planning','p','p','n','n','framework','framework')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,slug,created_at,updated_at,created_by,updated_by) VALUES ('T902','executing','e','e','n','n','framework','framework')",
+            [],
+        ).unwrap();
+        apply_framework_drift(&conn).unwrap();
+        let queued: String = conn
+            .query_row(
+                "SELECT lifecycle FROM tasks WHERE display_id='T901'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let active: String = conn
+            .query_row(
+                "SELECT lifecycle FROM tasks WHERE display_id='T902'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, "queued");
+        assert_eq!(active, "active");
     }
 
     #[test]

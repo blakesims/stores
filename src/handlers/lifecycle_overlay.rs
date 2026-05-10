@@ -47,6 +47,9 @@ pub fn derive(
     integration_blocked_reason: Option<&str>,
 ) -> Result<LifecycleOverlay> {
     let mut out = match to_status {
+        "planning" if verb == "create" || verb == "backfill_queued" => {
+            overlay("queued", "none", "none", false, None)
+        }
         "planning" => overlay("active", "planning", "none", false, None),
         "plan_review" => overlay("active", "planning_review", "none", false, None),
         "ready" => overlay("active", "none", "none", false, None),
@@ -95,6 +98,7 @@ pub fn legacy(overlay: &LifecycleOverlay) -> Result<String> {
         overlay.blocked,
         overlay.blocker_kind.as_deref(),
     ) {
+        ("queued", "none", "none", false, None) => Ok("planning".into()),
         ("active", "planning", "none", false, None) => Ok("planning".into()),
         ("active", "planning_review", "none", false, None) => Ok("plan_review".into()),
         ("active", "none", "none", false, None) => Ok("ready".into()),
@@ -107,7 +111,10 @@ pub fn legacy(overlay: &LifecycleOverlay) -> Result<String> {
         ("integration", "none", "merging", false, None) => Ok("integrating".into()),
         ("integration", "none", "none", true, _) => Ok("integration_blocked".into()),
         ("done", "none", "none", false, None) => Ok("integrated".into()),
-        _ => bail!("no legacy status projection for lifecycle overlay: {:?}", overlay),
+        _ => bail!(
+            "no legacy status projection for lifecycle overlay: {:?}",
+            overlay
+        ),
     }
 }
 

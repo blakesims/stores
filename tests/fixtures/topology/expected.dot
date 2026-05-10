@@ -46,6 +46,8 @@ digraph stores_topology {
     "z1_tasks__integrating" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__integration_blocked" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
     "z1_tasks__integrated" -> "z1_tasks__closed_out_of_band" [label=" H!\nclose-out-of-band", color=red, fontcolor=red];
+    "z1_tasks__planning" -> "z1_tasks__planning" [label=" F\nactivate-task", color=gray, fontcolor=gray];
+    "z1_tasks__planning" -> "z1_tasks__planning" [label=" F\nrelease-from-queued", color=gray, fontcolor=gray];
     "z1_tasks__planning" -> "z1_tasks__plan_review" [label=" A\nsubmit-plan", color=green, fontcolor=green];
     "z1_tasks__planning" -> "z1_tasks__ready" [label=" F\nskip-plan", color=gray, fontcolor=gray];
     "z1_tasks__plan_review" -> "z1_tasks__ready" [label=" A\nsubmit-plan-review\n[READY]", color=green, fontcolor=green];

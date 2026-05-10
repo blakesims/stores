@@ -32,6 +32,7 @@ use crate::schema::Schema;
 use crate::validate::{self, EntryMap, Op};
 
 pub mod accept_merge;
+pub mod activate_queued;
 pub mod auto_drive;
 pub mod auto_promote;
 pub mod auto_resolve_observation;
@@ -71,6 +72,7 @@ pub type BuiltinResult = Result<i32>;
 /// non-subscriber callers (see `accept_merge.rs`'s deprecation note).
 pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option<BuiltinResult> {
     match keyword {
+        "activate-queued" => Some(activate_queued::run(row, ctx)),
         "auto-drive" => Some(auto_drive::run(row, ctx)),
         "auto-promote" => Some(auto_promote::run(row, ctx)),
         "auto-resolve-observation" => Some(auto_resolve_observation::run(row, ctx)),
@@ -96,6 +98,7 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
 /// predicate to call (T050 P2). Unknown keywords return `None`.
 pub fn postcondition_for_builtin(keyword: &str) -> Option<&'static str> {
     match keyword {
+        "activate-queued" => Some("queued_task_released_or_blocked"),
         "auto-promote" => Some("task_exists_for_linked_observation"),
         "auto-scaffold" => Some("task_workspace_exists"),
         "auto-drive" => Some("drive_pid_recorded_or_terminal"),

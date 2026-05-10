@@ -30,6 +30,8 @@ stateDiagram-v2
   integrating --> closed_out_of_band :  H! close-out-of-band
   integration_blocked --> closed_out_of_band :  H! close-out-of-band
   integrated --> closed_out_of_band :  H! close-out-of-band
+  planning --> planning :  F activate-task
+  planning --> planning :  F release-from-queued
   planning --> plan_review :  A submit-plan
   planning --> ready :  F skip-plan
   plan_review --> ready :  A submit-plan-review [READY]

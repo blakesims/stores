@@ -66,8 +66,8 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
                 name: "lifecycle",
                 sql_type: "TEXT",
                 nullable: false,
-                default_sql: Some("'active'"),
-                full_def: "lifecycle TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle IN ('queued','active','integration','done'))",
+                default_sql: Some("'queued'"),
+                full_def: "lifecycle TEXT NOT NULL DEFAULT 'queued' CHECK(lifecycle IN ('queued','active','integration','done'))",
                 additive: true,
             },
             FrameworkColumn {
