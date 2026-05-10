@@ -682,6 +682,7 @@ pub fn scan_record_and_redrive_tasks(
     }
     let cap = crate::flow::config::resolve_drive_max_parallel(config_path) as usize;
     let mut dispatched = l2_dispatched;
+    let auto_drive_enabled = agents.auto_drive_subscriber_enabled();
 
     let mut processed_task_rows = std::collections::BTreeSet::new();
     for row in rows.iter_mut().filter(|r| {
@@ -708,6 +709,32 @@ pub fn scan_record_and_redrive_tasks(
                 },
                 started_at,
             )?;
+            continue;
+        }
+
+        // `auto_drive_subscriber_disabled` is the operator-visible held_reason
+        // emitted when agents.yaml has no `builtin:auto-drive` subscriber for
+        // the canonical `tasks: "" -> planning` edge.
+        if !auto_drive_enabled {
+            row.classification = "held".to_string();
+            row.held_reason = Some("auto_drive_subscriber_disabled".to_string());
+            upsert_actionability_throttled_log(
+                conn,
+                ActionabilityRecord {
+                    store: &row.store,
+                    row_id: row.row_id,
+                    classification: &row.classification,
+                    action: None,
+                    held_reason: row.held_reason.as_deref(),
+                    dispatched: false,
+                    last_logged_at: Some(started_at),
+                },
+                started_at,
+            )?;
+            eprintln!(
+                "[engine-runner] row_id={}: holding orphan redispatch — builtin:auto-drive subscriber disabled in agents.yaml",
+                row.row_id
+            );
             continue;
         }
 
@@ -1220,13 +1247,40 @@ fn parse_json_text(v: Option<String>) -> Value {
 mod tests {
     use super::*;
     use crate::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
-    use crate::flow::AgentsYaml;
+    use crate::flow::agents_yaml::TransitionEdge;
+    use crate::flow::{AgentEntry, AgentsYaml, RetryPolicy, Subscription};
     use crate::schema::Schema;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
         static L: OnceLock<Mutex<()>> = OnceLock::new();
         L.get_or_init(|| Mutex::new(()))
+    }
+
+    /// AgentsYaml fixture carrying the canonical `builtin:auto-drive`
+    /// subscriber for `tasks: "" -> planning`. Used by tests that exercise
+    /// the orphan-redispatch path: the gate added in T142 holds redispatch
+    /// when this subscriber is absent, so positive-path tests must pass an
+    /// AgentsYaml that includes it.
+    fn fixture_with_auto_drive() -> AgentsYaml {
+        AgentsYaml {
+            agents: vec![AgentEntry {
+                name: "auto-drive".to_string(),
+                subscribes_to: vec![Subscription {
+                    store: "tasks".to_string(),
+                    transition: TransitionEdge {
+                        from: String::new(),
+                        to: "planning".to_string(),
+                    },
+                    predicate: None,
+                }],
+                command: "builtin:auto-drive".to_string(),
+                claim_window_secs: 300,
+                retry_policy: RetryPolicy::default(),
+                command_args: None,
+            }],
+            deployment_specialist: None,
+        }
     }
 
     #[test]
@@ -1609,7 +1663,7 @@ mod tests {
             },
             8,
             "2026-05-07T00:07:00Z",
-            &AgentsYaml::default_empty(),
+            &fixture_with_auto_drive(),
             &cfg,
             "",
             0,
@@ -1635,6 +1689,65 @@ mod tests {
             libc::kill(pid as i32, libc::SIGTERM);
         }
         std::env::remove_var("STORES_DRIVE_CMD");
+    }
+
+    #[test]
+    fn redispatch_held_when_auto_drive_subscriber_absent() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let task_id = insert_task(&conn, "T1142", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1, workspace_path=?2 WHERE id=?3",
+            rusqlite::params![999_999_999_i64, tmp.path().to_str().unwrap(), task_id],
+        )
+        .unwrap();
+        let cfg = tmp.path().join("config.yaml");
+        std::fs::write(&cfg, "drive:\n  max_parallel: 5\n").unwrap();
+
+        scan_record_and_redrive_tasks(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            8,
+            "2026-05-07T00:07:30Z",
+            &AgentsYaml::default_empty(),
+            &cfg,
+            "",
+            0,
+        )
+        .unwrap();
+
+        let (classification, held_reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT classification, held_reason FROM engine_runner_actions \
+                 WHERE store='tasks' AND row_id=?1",
+                rusqlite::params![task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(classification, "held");
+        assert_eq!(held_reason.as_deref(), Some("auto_drive_subscriber_disabled"));
+
+        let locks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE row_id=?1 AND agent_name='auto-drive'",
+                rusqlite::params![task_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(locks, 0);
+
+        let drive_pid: i64 = conn
+            .query_row(
+                "SELECT drive_pid FROM tasks WHERE id=?1",
+                rusqlite::params![task_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(drive_pid, 999_999_999_i64);
     }
 
     #[test]

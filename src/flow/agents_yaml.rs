@@ -160,6 +160,40 @@ impl AgentsYaml {
         }
         Ok(())
     }
+
+    /// Returns true iff a `builtin:auto-drive` subscriber for the canonical
+    /// `tasks: "" -> planning` edge is declared in this config.
+    ///
+    /// Why this gate exists: operators disable auto-drive for a project by
+    /// removing or commenting out the `agents.yaml` `builtin:auto-drive`
+    /// entry. The engine-runner orphan-redispatch loop consults this method
+    /// before spawning `stores tasks drive` for an orphan; when it returns
+    /// false the orphan row is held with reason
+    /// `auto_drive_subscriber_disabled` instead.
+    ///
+    /// Scope: this gate is consulted by engine_runner::scan_record_and_redrive_tasks
+    /// ONLY. The policies.yaml-driven row-creation dispatch path runs through
+    /// a separate predicate-gated subscriber match (see handlers/agents_run.rs)
+    /// that this method does not duplicate.
+    ///
+    /// Matching rules: the matching key is the BUILTIN COMMAND, not the agent
+    /// name — a renamed entry with `command: "builtin:auto-drive"` still
+    /// passes. The canonical edge `tasks: "" -> planning` mirrors
+    /// src/flow/builtins/auto_drive.rs's subscription contract; a half-
+    /// configured `from: accepted, to: planning` entry does NOT enable. The
+    /// subscription's `predicate` field is neither required nor evaluated by
+    /// this gate (predicate evaluation is the daemon's job at row-creation
+    /// time; this gate only verifies the subscription is declared).
+    pub fn auto_drive_subscriber_enabled(&self) -> bool {
+        self.agents.iter().any(|agent| {
+            agent.command == "builtin:auto-drive"
+                && agent.subscribes_to.iter().any(|sub| {
+                    sub.store == "tasks"
+                        && sub.transition.from.is_empty()
+                        && sub.transition.to == "planning"
+                })
+        })
+    }
 }
 
 fn format_yaml_error(e: &serde_yaml::Error) -> String {
@@ -483,6 +517,156 @@ agents:
 "#;
         let p = AgentsYaml::from_yaml(yaml).unwrap();
         assert!(p.agents[0].subscribes_to[0].predicate.is_none());
+    }
+
+    fn canonical_auto_drive_sub() -> Subscription {
+        Subscription {
+            store: "tasks".to_string(),
+            transition: TransitionEdge {
+                from: String::new(),
+                to: "planning".to_string(),
+            },
+            predicate: None,
+        }
+    }
+
+    fn agent_with(name: &str, command: &str, sub: Subscription) -> AgentEntry {
+        AgentEntry {
+            name: name.to_string(),
+            subscribes_to: vec![sub],
+            command: command.to_string(),
+            claim_window_secs: 300,
+            retry_policy: RetryPolicy::default(),
+            command_args: None,
+        }
+    }
+
+    #[test]
+    fn auto_drive_subscriber_enabled_default_empty_returns_false() {
+        assert!(!AgentsYaml::default_empty().auto_drive_subscriber_enabled());
+    }
+
+    #[test]
+    fn auto_drive_subscriber_enabled_name_only_match_returns_false() {
+        let cfg = AgentsYaml {
+            agents: vec![agent_with(
+                "auto-drive",
+                "/bin/true",
+                canonical_auto_drive_sub(),
+            )],
+            deployment_specialist: None,
+        };
+        assert!(!cfg.auto_drive_subscriber_enabled());
+    }
+
+    #[test]
+    fn auto_drive_subscriber_enabled_wrong_edge_returns_false() {
+        let cfg = AgentsYaml {
+            agents: vec![agent_with(
+                "auto-drive",
+                "builtin:auto-drive",
+                Subscription {
+                    store: "tasks".to_string(),
+                    transition: TransitionEdge {
+                        from: "accepted".to_string(),
+                        to: "planning".to_string(),
+                    },
+                    predicate: None,
+                },
+            )],
+            deployment_specialist: None,
+        };
+        assert!(!cfg.auto_drive_subscriber_enabled());
+    }
+
+    #[test]
+    fn auto_drive_subscriber_enabled_wrong_to_returns_false() {
+        let cfg = AgentsYaml {
+            agents: vec![agent_with(
+                "auto-drive",
+                "builtin:auto-drive",
+                Subscription {
+                    store: "tasks".to_string(),
+                    transition: TransitionEdge {
+                        from: String::new(),
+                        to: "accepted".to_string(),
+                    },
+                    predicate: None,
+                },
+            )],
+            deployment_specialist: None,
+        };
+        assert!(!cfg.auto_drive_subscriber_enabled());
+    }
+
+    #[test]
+    fn auto_drive_subscriber_enabled_wrong_store_returns_false() {
+        let cfg = AgentsYaml {
+            agents: vec![agent_with(
+                "auto-drive",
+                "builtin:auto-drive",
+                Subscription {
+                    store: "observations".to_string(),
+                    transition: TransitionEdge {
+                        from: String::new(),
+                        to: "planning".to_string(),
+                    },
+                    predicate: None,
+                },
+            )],
+            deployment_specialist: None,
+        };
+        assert!(!cfg.auto_drive_subscriber_enabled());
+    }
+
+    #[test]
+    fn auto_drive_subscriber_enabled_canonical_returns_true() {
+        let cfg = AgentsYaml {
+            agents: vec![agent_with(
+                "auto-drive",
+                "builtin:auto-drive",
+                canonical_auto_drive_sub(),
+            )],
+            deployment_specialist: None,
+        };
+        assert!(cfg.auto_drive_subscriber_enabled());
+    }
+
+    #[test]
+    fn auto_drive_subscriber_enabled_canonical_with_predicate_returns_true() {
+        let mut sub = canonical_auto_drive_sub();
+        sub.predicate = Some(crate::flow::predicate::PredicateExpr::Neq {
+            left: serde_json::Value::String("$workspace_path".to_string()),
+            right: serde_json::Value::String(String::new()),
+        });
+        let cfg = AgentsYaml {
+            agents: vec![agent_with("auto-drive", "builtin:auto-drive", sub)],
+            deployment_specialist: None,
+        };
+        assert!(cfg.auto_drive_subscriber_enabled());
+    }
+
+    #[test]
+    fn auto_drive_subscriber_enabled_renamed_entry_returns_true() {
+        let cfg = AgentsYaml {
+            agents: vec![agent_with(
+                "auto-drive-custom",
+                "builtin:auto-drive",
+                canonical_auto_drive_sub(),
+            )],
+            deployment_specialist: None,
+        };
+        assert!(cfg.auto_drive_subscriber_enabled());
+    }
+
+    /// AC1.8: the bundled tests/fixtures/agents.yaml must continue to enable
+    /// the gate — proves the production fixture remains gate-passing.
+    #[test]
+    fn auto_drive_subscriber_enabled_bundled_fixture_returns_true() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
+        let p = load_from_path(&path).expect("fixture must parse");
+        assert!(p.auto_drive_subscriber_enabled());
     }
 
     #[test]
