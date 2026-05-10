@@ -448,6 +448,13 @@ fn draw_engine_panel(f: &mut Frame, app: &App, area: Rect) {
         Vec::new()
     };
     let mut lines = vec![daemon_line, locks_line, oldest_line, runs_line];
+    if let Some(start) = app.engine_detail.recent_daemon_starts.first() {
+        let started = start.started_at.as_deref().unwrap_or("-");
+        lines.push(Line::from(Span::raw(format!(
+            "recent_restart: pid={} at {}",
+            start.pid, started
+        ))));
+    }
     if !alert_lines.is_empty() {
         lines.push(Line::from(""));
         lines.extend(alert_lines);
@@ -635,71 +642,11 @@ fn format_row_line(
     external_review: &ExternalReviewState,
 ) -> Line<'static> {
     let base = match row {
-        Row::Task(t) => vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("{:<6}", t.display_id),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled(
-                format!("{:<24}", task_status_label(t)),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(" "),
-            Span::raw(task_progress_text(t, external_review)),
-            Span::raw(truncate(&task_snippet(t), 60)),
-        ],
-        Row::Obs(o) => obs_spans(o, None),
-        Row::CollapsedObs(c) => obs_spans(&c.representative, Some(c)),
-        Row::Review(r) => vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("{:<6}", r.display_id),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled(
-                format!("{:<24}", format!("review:{}", r.status)),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(" "),
-            Span::raw(truncate(
-                &format!(
-                    "task={} runner={} held_reason={} attempts={} next_retry_at={} liveness={}",
-                    r.task_id,
-                    if r.runner.is_empty() {
-                        "unknown"
-                    } else {
-                        &r.runner
-                    },
-                    r.held_reason.as_deref().unwrap_or("none"),
-                    r.attempts,
-                    r.next_retry_at.as_deref().unwrap_or("none"),
-                    match r.status.as_str() {
-                        "running" => "live",
-                        "tooling_held" => "held",
-                        _ => "pending",
-                    }
-                ),
-                80,
-            )),
-        ],
-        Row::Intake(i) => vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("{:<6}", i.display_id),
-                Style::default().fg(Color::Green),
-            ),
-            Span::styled(
-                format!("{:<24}", i.status),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(" "),
-            Span::raw(format!(
-                "priority:{} ",
-                i.priority.as_deref().unwrap_or("normal")
-            )),
-            Span::raw(truncate(&intake_snippet(i), 60)),
-        ],
+        Row::Task(t) => format_task_line(t, external_review),
+        Row::Obs(o) => format_obs_line(o, None),
+        Row::CollapsedObs(c) => format_obs_line(&c.representative, Some(c)),
+        Row::Review(r) => format_review_line(r),
+        Row::Intake(i) => format_intake_line(i),
     };
     if selected {
         let mut spans = base;
@@ -712,7 +659,51 @@ fn format_row_line(
     }
 }
 
-fn obs_spans(
+fn age_label(epoch: Option<i64>) -> String {
+    match epoch {
+        Some(e) => {
+            let diff = now_epoch().saturating_sub(e);
+            if diff >= 3600 {
+                format!("age:{}h", diff / 3600)
+            } else if diff >= 60 {
+                format!("age:{}m", diff / 60)
+            } else {
+                "age:<1m".to_string()
+            }
+        }
+        None => "age:-".to_string(),
+    }
+}
+
+fn format_task_line(
+    t: &super::data::TaskRow,
+    external_review: &ExternalReviewState,
+) -> Vec<Span<'static>> {
+    let runner = t
+        .claimed_by
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("none");
+    let age = age_label(super::data::parse_epoch(&t.updated_at));
+    vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<6}", t.display_id),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            format!("{:<24}", task_status_label(t)),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(" "),
+        Span::raw(task_progress_text(t, external_review)),
+        Span::raw(format!("runner:{runner} ")),
+        Span::raw(format!("{age} ")),
+        Span::raw(truncate(&task_snippet(t), 60)),
+    ]
+}
+
+fn format_obs_line(
     o: &super::data::ObsRow,
     collapsed: Option<&super::data::CollapsedObsRow>,
 ) -> Vec<Span<'static>> {
@@ -735,7 +726,13 @@ fn obs_spans(
             )
         })
         .unwrap_or((o.display_id.as_str(), String::new(), String::new()));
-    vec![
+    let tier = o.tier_hint.as_deref().filter(|s| !s.is_empty());
+    let contract = o.contract_state.as_deref().filter(|s| !s.is_empty());
+    let linked = collapsed
+        .is_none()
+        .then(|| o.task_id.as_deref().filter(|s| !s.is_empty()))
+        .flatten();
+    let mut spans = vec![
         Span::raw("  "),
         Span::styled(
             format!("{:<6}", display_id),
@@ -747,11 +744,121 @@ fn obs_spans(
         ),
         Span::raw(" "),
         Span::raw(format!("priority:{}{} ", o.priority, badge)),
-        Span::raw(truncate(
-            &format!("{}{}", summary_prefix, obs_snippet(o)),
-            60,
+    ];
+    if let Some(t) = tier {
+        spans.push(Span::raw(format!("tier:{t} ")));
+    }
+    if let Some(c) = contract {
+        spans.push(Span::raw(format!("contract:{c} ")));
+    }
+    if let Some(l) = linked {
+        spans.push(Span::raw(format!("linked:{l} ")));
+    }
+    spans.push(Span::raw(truncate(
+        &format!("{}{}", summary_prefix, obs_snippet(o)),
+        60,
+    )));
+    spans
+}
+
+fn format_intake_line(i: &super::data::IntakeRow) -> Vec<Span<'static>> {
+    let source = i
+        .source_agent
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("-");
+    let cluster = i
+        .cluster_key
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|c| format!("cluster:{c} "));
+    let age_source = i
+        .captured_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&i.updated_at);
+    let age = age_label(super::data::parse_epoch(age_source));
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<6}", i.display_id),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled(
+            format!("{:<24}", i.status),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(" "),
+        Span::raw(format!(
+            "priority:{} ",
+            i.priority.as_deref().unwrap_or("normal")
         )),
-    ]
+        Span::raw(format!("source:{source} ")),
+    ];
+    if let Some(c) = cluster {
+        spans.push(Span::raw(c));
+    }
+    spans.push(Span::raw(format!("{age} ")));
+    spans.push(Span::raw(truncate(&intake_snippet(i), 60)));
+    spans
+}
+
+fn format_review_line(r: &super::data::ReviewRow) -> Vec<Span<'static>> {
+    let verdict = format!(
+        "verdict:{}",
+        r.verdict
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("-")
+    );
+    let attempts = format!("attempts:{}", r.attempts);
+    let held = r
+        .held_reason
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|h| format!("held:{h} "));
+    let age = age_label(
+        r.started_at
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(super::data::parse_epoch),
+    );
+    let sha = r
+        .base_sha
+        .as_deref()
+        .filter(|s| s.len() >= 7)
+        .map(|s| format!("sha:{} ", &s[..7]));
+    let runner = if r.runner.is_empty() {
+        "unknown"
+    } else {
+        r.runner.as_str()
+    };
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<6}", r.display_id),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            format!("{:<24}", format!("review:{}", r.status)),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw(" "),
+        Span::raw(format!("{verdict} ")),
+        Span::raw(format!("{attempts} ")),
+    ];
+    if let Some(h) = held {
+        spans.push(Span::raw(h));
+    }
+    spans.push(Span::raw(format!("{age} ")));
+    if let Some(s) = sha {
+        spans.push(Span::raw(s));
+    }
+    spans.push(Span::raw(truncate(
+        &format!("task={} runner={}", r.task_id, runner),
+        60,
+    )));
+    spans
 }
 
 fn task_status_label(t: &super::data::TaskRow) -> String {
@@ -829,9 +936,6 @@ fn task_snippet(t: &super::data::TaskRow) -> String {
 
 fn obs_snippet(o: &super::data::ObsRow) -> String {
     let mut parts = Vec::new();
-    if let Some(tier) = o.tier_hint.as_deref().filter(|s| !s.is_empty()) {
-        parts.push(format!("tier:{tier}"));
-    }
     if let Some(reason) = o.lock_reason.as_deref().filter(|s| !s.is_empty()) {
         parts.push(format!("held:{reason}"));
     }
@@ -1628,6 +1732,124 @@ mod tests {
             buf2[(cols2[2], 0)].fg,
             Color::Cyan,
             "old focus at col 2 must lose cyan border"
+        );
+    }
+
+    /// Phase 3 (T141): per-row column renderers surface store-specific cues.
+    #[test]
+    fn format_obs_line_surfaces_tier_and_contract() {
+        let row = Row::Obs(ObsRow {
+            display_id: "L200".to_string(),
+            status: "open".to_string(),
+            priority: "normal".to_string(),
+            summary: "obs with contract".to_string(),
+            tier_hint: Some("T2".to_string()),
+            contract_state: Some("ready".to_string()),
+            task_id: Some("T555".to_string()),
+            ..Default::default()
+        });
+        let text = line_text(format_row_line(
+            &row,
+            false,
+            &ExternalReviewState::default(),
+        ));
+        assert!(text.contains("tier:T2"), "{text}");
+        assert!(text.contains("contract:ready"), "{text}");
+        assert!(text.contains("linked:T555"), "{text}");
+
+        // None/empty tier/contract/task_id are simply omitted — keeps the
+        // 80-col cockpit budget within reach for the narrow live-realistic
+        // snapshot.
+        let bare = Row::Obs(ObsRow {
+            display_id: "L201".to_string(),
+            status: "open".to_string(),
+            priority: "normal".to_string(),
+            summary: "bare obs".to_string(),
+            ..Default::default()
+        });
+        let bare_text = line_text(format_row_line(
+            &bare,
+            false,
+            &ExternalReviewState::default(),
+        ));
+        assert!(!bare_text.contains("tier:"), "{bare_text}");
+        assert!(!bare_text.contains("contract:"), "{bare_text}");
+        assert!(!bare_text.contains("linked:"), "{bare_text}");
+    }
+
+    #[test]
+    fn format_intake_line_surfaces_source_and_cluster() {
+        let row = Row::Intake(IntakeRow {
+            display_id: "I200".to_string(),
+            status: "draft".to_string(),
+            summary: "intake row".to_string(),
+            source_agent: Some("executor".to_string()),
+            cluster_key: Some("watch-ux".to_string()),
+            captured_at: Some("2026-05-09T00:00:00Z".to_string()),
+            ..Default::default()
+        });
+        let text = line_text(format_row_line(
+            &row,
+            false,
+            &ExternalReviewState::default(),
+        ));
+        assert!(text.contains("source:executor"), "{text}");
+        assert!(text.contains("cluster:watch-ux"), "{text}");
+        assert!(text.contains("age:"), "{text}");
+    }
+
+    #[test]
+    fn format_review_line_surfaces_verdict_and_attempts() {
+        let row = Row::Review(ReviewRow {
+            display_id: "E200".to_string(),
+            task_id: "T100".to_string(),
+            status: "running".to_string(),
+            runner: "codex".to_string(),
+            verdict: Some("PASS".to_string()),
+            attempts: 2,
+            base_sha: Some("abcdef0123456789".to_string()),
+            started_at: Some("2026-05-09T00:00:00Z".to_string()),
+            ..Default::default()
+        });
+        let text = line_text(format_row_line(
+            &row,
+            false,
+            &ExternalReviewState::default(),
+        ));
+        assert!(text.contains("verdict:PASS"), "{text}");
+        assert!(text.contains("attempts:2"), "{text}");
+        assert!(text.contains("sha:abcdef0"), "{text}");
+    }
+
+    #[test]
+    fn engine_panel_renders_recent_daemon_restart_when_present() {
+        use crate::tui::data::DaemonStartRow;
+        let mut app = cockpit_fixture_app();
+        app.focused_store = StoreLane::EngineHealth;
+        app.engine_detail.recent_daemon_starts = vec![DaemonStartRow {
+            pid: 4242,
+            started_at: Some("2026-05-09T12:34:56Z".to_string()),
+            ..Default::default()
+        }];
+        let buf = paint(&mut app, 120, 30);
+        let painted = buffer_to_string(&buf);
+        assert!(
+            painted.contains("recent_restart:"),
+            "engine panel must include recent_restart line:\n{painted}"
+        );
+        assert!(
+            painted.contains("pid="),
+            "engine panel restart line must include pid=:\n{painted}"
+        );
+
+        // Empty recent_daemon_starts → no restart line, no panic.
+        let mut empty_app = cockpit_fixture_app();
+        empty_app.focused_store = StoreLane::EngineHealth;
+        let buf2 = paint(&mut empty_app, 120, 30);
+        let painted2 = buffer_to_string(&buf2);
+        assert!(
+            !painted2.contains("recent_restart:"),
+            "engine panel must NOT include recent_restart line when empty:\n{painted2}"
         );
     }
 
