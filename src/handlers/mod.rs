@@ -15,6 +15,7 @@ pub mod external_reviews;
 pub mod framework_migrate;
 pub mod guide;
 pub mod intake_route;
+pub mod lifecycle_overlay;
 pub mod list;
 pub mod migrate;
 pub mod next_action;

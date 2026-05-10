@@ -36,6 +36,33 @@ fields:
     actor: ai_with_human
     default: 'inactive'
     description: "Per-row activation gate (active|inactive, default inactive). Combustion-class subscribers gate on this in P2; P1 ships the column and the activate/deactivate verbs only."
+  # T144 P1: lifecycle overlay maintained by the framework engine. These
+  # columns denormalize task-engine lanes for watch/status consumers while
+  # preserving the historical status field as the transition source of truth.
+  - name: lifecycle
+    type: enum
+    enum_values: [queued, active, integration, done]
+    required: false
+    actor: framework
+    default: 'active'
+  - name: active_step
+    type: enum
+    enum_values: [none, planning, planning_review, coding, coding_review, wrapping]
+    required: false
+    actor: framework
+    default: 'none'
+  - name: integration_step
+    type: enum
+    enum_values: [none, refreshing, task_review, testing, merging, deploying, verifying]
+    required: false
+    actor: framework
+    default: 'none'
+  - {name: blocked, type: bool, required: false, actor: framework, default: 0}
+  - name: blocker_kind
+    type: enum
+    enum_values: [capacity, dependency, runner, rate_limit, human_acceptance, task_review, stale_base, config, test_failure, main_red, deploy, migration]
+    required: false
+    actor: framework
   - name: contract
     type: record
     fields:
