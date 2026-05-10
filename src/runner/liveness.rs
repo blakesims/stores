@@ -260,20 +260,23 @@ pub fn run_streaming_with_liveness(
         }
     }
 
-    while let Ok(msg) = rx.try_recv() {
-        match msg {
-            Stream::Stdout(line) => {
+    let status = child.wait().context("failed to wait on streaming child")?;
+    while eof_count < 2 {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(Stream::Stdout(line)) => {
                 stdout.push_str(&line);
                 stdout.push('\n');
             }
-            Stream::Stderr(line) => {
+            Ok(Stream::Stderr(line)) => {
                 stderr.push_str(&line);
                 stderr.push('\n');
             }
-            Stream::Eof => {}
+            Ok(Stream::Eof) => {
+                eof_count += 1;
+            }
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
         }
     }
-    let status = child.wait().context("failed to wait on streaming child")?;
     let _ = out_handle.join();
     let _ = err_handle.join();
     let exit_code = if killed_for.is_some() {
@@ -441,6 +444,34 @@ mod tests {
         assert!(matches!(
             out.killed_for,
             Some(LivenessClass::StalledNoOutput { .. })
+        ));
+    }
+
+    #[test]
+    fn wall_clock_timeout_drains_noisy_child_before_join() {
+        let started = Instant::now();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("while :; do i=0; while [ $i -lt 200 ]; do echo noisy; i=$((i+1)); done; sleep 0.01; done");
+        let out = run_streaming_with_liveness(
+            &mut cmd,
+            &LivenessThresholds {
+                no_output_secs: 30,
+                wall_clock_max_secs: 1,
+            },
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() <= Duration::from_secs(4),
+            "elapsed={:?}",
+            started.elapsed()
+        );
+        assert_eq!(out.exit_code, -1);
+        assert!(matches!(
+            out.killed_for,
+            Some(LivenessClass::WallClockTimeout { .. })
         ));
     }
 }
