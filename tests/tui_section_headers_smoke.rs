@@ -126,20 +126,39 @@ fn top_level_cockpit_paints_heartbeat_lanes_and_external_placeholder() {
         painted.push('\n');
     }
 
+    // Top store-flow strip paints all five lane labels.
     for needle in [
-        "daemon:LIVE",
-        "execution=1",
-        "review=1",
-        "accept=0",
-        "ACTIVE WORK",
-        "HELD-BLOCKED",
-        "RATIFY-U1",
-        "PRIORITY",
-        "external review: unavailable / not installed",
+        "INTAKE",
+        "OBSERVATIONS",
+        "TASKS",
+        "EXTERNAL REVIEWS",
+        "ENGINE",
     ] {
         assert!(
             painted.contains(needle),
-            "missing {needle:?} in:\n{painted}"
+            "missing top-strip lane label {needle:?} in:\n{painted}"
+        );
+    }
+    // Engine card surfaces daemon liveness.
+    assert!(
+        painted.contains("daemon LIVE"),
+        "missing 'daemon LIVE' in engine card:\n{painted}"
+    );
+    // Tasks card surfaces per-status counts (1 executing → active: 1, 1
+    // blocked → held 1, 1 plan_review → review 1).
+    assert!(
+        painted.contains("active: 1"),
+        "missing 'active: 1' on tasks card:\n{painted}"
+    );
+    assert!(
+        painted.contains("held 1 · review 1"),
+        "missing tasks breakdown 'held 1 · review 1':\n{painted}"
+    );
+    // Default focus is the Tasks lane → focused table renders task sections.
+    for needle in ["ACTIVE WORK", "HELD-BLOCKED"] {
+        assert!(
+            painted.contains(needle),
+            "missing focused-table section {needle:?} in:\n{painted}"
         );
     }
 }

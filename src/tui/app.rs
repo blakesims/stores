@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use super::daemon::Liveness;
 use super::data::{
-    classify_with_options, is_terminal_task_status, ExternalReviewState, Row, Section,
-    SystemHealth, WatchClassifyOptions,
+    classify_with_options, is_terminal_task_status, store_lane_for_row, ExternalReviewState, Row,
+    Section, StoreLane, SystemHealth, WatchClassifyOptions,
 };
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
@@ -86,6 +86,7 @@ pub struct PreservedView {
     pub filter: FilterPredicate,
     pub collapsed: HashSet<Section>,
     pub scroll_offset: usize,
+    pub focused_store: StoreLane,
 }
 
 /// Status-bar payload (daemon liveness, db path, clock, cap, message).
@@ -155,6 +156,9 @@ pub struct App {
     /// Trace of the last obs-draft confirm action ("file" or "discard").
     /// Tests assert against it; production ignores.
     pub last_obs_draft_action: Option<String>,
+    /// Cockpit lane currently focused for navigation. Defaults to
+    /// `StoreLane::Tasks`; left/right (h/l) cycle through `StoreLane::ALL`.
+    pub focused_store: StoreLane,
 }
 
 impl App {
@@ -186,6 +190,7 @@ impl App {
             filter: self.filter.clone(),
             collapsed: self.collapsed.clone(),
             scroll_offset: self.scroll_offset,
+            focused_store: self.focused_store,
         }
     }
 
@@ -197,6 +202,7 @@ impl App {
         self.filter = snap.filter;
         self.collapsed = snap.collapsed;
         self.scroll_offset = snap.scroll_offset;
+        self.focused_store = snap.focused_store;
         self.apply_sort();
         self.clamp_selection();
     }
@@ -265,6 +271,31 @@ impl App {
         self.apply_sort();
     }
 
+    /// Cycle the focused store lane by `direction` (+1 right, -1 left) with
+    /// wrap-around across `StoreLane::ALL`. After moving, snap the selection
+    /// to the first navigable row in the new lane (or `Selection::default()`
+    /// if the lane is empty).
+    pub fn cycle_focus(&mut self, direction: isize) {
+        let n = StoreLane::ALL.len() as isize;
+        let cur_idx = StoreLane::ALL
+            .iter()
+            .position(|&l| l == self.focused_store)
+            .map(|p| p as isize)
+            .unwrap_or(0);
+        let new_idx = (cur_idx + direction).rem_euclid(n) as usize;
+        self.focused_store = StoreLane::ALL[new_idx];
+        self.scroll_offset = 0;
+        let flat = self.flat_rows();
+        if let Some(first) = flat.first() {
+            self.selection = Selection {
+                section: first.section,
+                row: first.row,
+            };
+        } else {
+            self.selection = Selection::default();
+        }
+    }
+
     /// Toggle collapse state of the section currently under the cursor.
     pub fn toggle_collapse_current(&mut self) {
         if let Some((sec, _)) = self.sections.get(self.selection.section) {
@@ -277,8 +308,10 @@ impl App {
         }
     }
 
-    /// Compute the navigable flat-row list — rows that pass the filter and
-    /// live in non-collapsed sections, walked in canonical section order.
+    /// Compute the navigable flat-row list — rows that pass the filter, live
+    /// in non-collapsed sections, and belong to the currently focused store
+    /// lane. Walked in canonical section order so per-lane sub-taxonomy is
+    /// preserved.
     pub fn flat_rows(&self) -> Vec<FlatRow> {
         let mut out = Vec::new();
         for (sec_idx, (sec, indices)) in self.sections.iter().enumerate() {
@@ -286,7 +319,14 @@ impl App {
                 continue;
             }
             for (within, &abs) in indices.iter().enumerate() {
-                if self.filter.is_empty() || self.filter.matches(&self.rows[abs], *sec) {
+                let row = &self.rows[abs];
+                if store_lane_for_row(row) != self.focused_store {
+                    continue;
+                }
+                if *sec == Section::TasksRecentlyTerminal {
+                    continue;
+                }
+                if self.filter.is_empty() || self.filter.matches(row, *sec) {
                     out.push(FlatRow {
                         section: sec_idx,
                         row: within,
@@ -473,7 +513,7 @@ fn local_clock_string() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::data::TaskRow;
+    use super::super::data::{classify, store_lane_for_row, IntakeRow, ObsRow, ReviewRow, TaskRow};
     use super::*;
 
     fn task(status: &str) -> Row {
@@ -489,6 +529,54 @@ mod tests {
             blocked_reason_class: None,
             ..Default::default()
         })
+    }
+
+    fn obs(id: &str, summary: &str) -> Row {
+        Row::Obs(ObsRow {
+            display_id: id.to_string(),
+            status: "open".to_string(),
+            priority: "normal".to_string(),
+            summary: summary.to_string(),
+            updated_at: "2026-05-05".to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn intake(id: &str) -> Row {
+        Row::Intake(IntakeRow {
+            display_id: id.to_string(),
+            status: "draft".to_string(),
+            summary: id.to_string(),
+            updated_at: "2026-05-05".to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn review(id: &str) -> Row {
+        Row::Review(ReviewRow {
+            display_id: id.to_string(),
+            task_id: "T001".to_string(),
+            status: "running".to_string(),
+            runner: "codex".to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn five_lane_app() -> App {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![
+            intake("I001"),
+            obs("L001", "obs-a"),
+            obs("L002", "obs-b"),
+            task("executing"),
+            task("ready"),
+            task("planning"),
+            review("E001"),
+        ];
+        app.sections = classify(&app.rows);
+        app.apply_sort();
+        app.viewport_height = 10;
+        app
     }
 
     #[test]
@@ -507,5 +595,155 @@ mod tests {
         assert!(is_terminal_task_status("closed_out_of_band"));
         assert!(is_terminal_task_status("rejected"));
         assert!(!is_terminal_task_status("executing"));
+    }
+
+    #[test]
+    fn focused_store_defaults_to_tasks() {
+        let app = App::new(TuiOpts::default());
+        assert_eq!(app.focused_store, StoreLane::Tasks);
+    }
+
+    #[test]
+    fn cycle_focus_wraps_in_both_directions() {
+        let mut app = App::new(TuiOpts::default());
+        // Default lane is Tasks (idx 2). Walk +1 across all five and wrap.
+        assert_eq!(app.focused_store, StoreLane::Tasks);
+        app.cycle_focus(1);
+        assert_eq!(app.focused_store, StoreLane::ExternalReviews);
+        app.cycle_focus(1);
+        assert_eq!(app.focused_store, StoreLane::EngineHealth);
+        app.cycle_focus(1);
+        assert_eq!(app.focused_store, StoreLane::Intake);
+        app.cycle_focus(1);
+        assert_eq!(app.focused_store, StoreLane::Observations);
+        app.cycle_focus(1);
+        assert_eq!(app.focused_store, StoreLane::Tasks);
+
+        // Reverse: -1 from Tasks wraps to EngineHealth via the front edge,
+        // and from Intake wraps back to EngineHealth.
+        app.cycle_focus(-1);
+        assert_eq!(app.focused_store, StoreLane::Observations);
+        app.cycle_focus(-1);
+        assert_eq!(app.focused_store, StoreLane::Intake);
+        app.cycle_focus(-1);
+        assert_eq!(app.focused_store, StoreLane::EngineHealth);
+        app.cycle_focus(-1);
+        assert_eq!(app.focused_store, StoreLane::ExternalReviews);
+        app.cycle_focus(-1);
+        assert_eq!(app.focused_store, StoreLane::Tasks);
+    }
+
+    #[test]
+    fn flat_rows_length_matches_focused_lane_for_each_lane() {
+        let mut app = five_lane_app();
+
+        let expected: Vec<(StoreLane, usize)> = vec![
+            (StoreLane::Intake, 1),
+            (StoreLane::Observations, 2),
+            (StoreLane::Tasks, 3),
+            (StoreLane::ExternalReviews, 1),
+            (StoreLane::EngineHealth, 0),
+        ];
+
+        for (lane, expected_count) in expected {
+            app.focused_store = lane;
+            let flat = app.flat_rows();
+            assert_eq!(
+                flat.len(),
+                expected_count,
+                "lane {:?} should expose {} rows",
+                lane,
+                expected_count
+            );
+            for fr in &flat {
+                let row = &app.rows[fr.abs];
+                assert_eq!(
+                    store_lane_for_row(row),
+                    lane,
+                    "flat_rows must only emit rows whose lane matches focused_store"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cycle_focus_snaps_selection_to_first_row_in_new_lane() {
+        let mut app = five_lane_app();
+        // Land focus on a lane with rows; selection should land on the first
+        // navigable row in that lane.
+        app.focused_store = StoreLane::Intake;
+        app.cycle_focus(1); // → Observations
+        assert_eq!(app.focused_store, StoreLane::Observations);
+        let flat = app.flat_rows();
+        assert!(!flat.is_empty());
+        let first = flat[0];
+        assert_eq!(app.selection.section, first.section);
+        assert_eq!(app.selection.row, first.row);
+    }
+
+    #[test]
+    fn cycle_focus_to_empty_lane_resets_selection() {
+        let mut app = five_lane_app();
+        app.cycle_focus(1); // Tasks → ExternalReviews
+        app.cycle_focus(1); // → EngineHealth (empty in flat_rows)
+        assert_eq!(app.focused_store, StoreLane::EngineHealth);
+        assert!(app.flat_rows().is_empty());
+        assert_eq!(app.selection, Selection::default());
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn flat_rows_lane_invariant_holds_after_cycle_focus_across_all_lanes() {
+        // AC2.3: After cycle_focus, app.flat_rows() must contain only rows
+        // whose store_lane_for_row matches app.focused_store. Verified across
+        // all five lanes by exercising cycle_focus as the state transition.
+        let mut app = five_lane_app();
+        assert_eq!(app.focused_store, StoreLane::Tasks);
+
+        // Walk forward through all five lanes via cycle_focus(1) and assert
+        // the invariant after each transition.
+        let mut visited_forward: Vec<StoreLane> = Vec::new();
+        for _ in 0..StoreLane::ALL.len() {
+            let lane = app.focused_store;
+            let flat = app.flat_rows();
+            for fr in &flat {
+                let row = &app.rows[fr.abs];
+                assert_eq!(
+                    store_lane_for_row(row),
+                    lane,
+                    "flat_rows must only emit rows whose store_lane_for_row matches focused_store ({:?})",
+                    lane
+                );
+            }
+            visited_forward.push(lane);
+            app.cycle_focus(1);
+        }
+        // All five distinct lanes were visited and invariant held for each.
+        let mut sorted_forward = visited_forward.clone();
+        sorted_forward.sort_by_key(|l| StoreLane::ALL.iter().position(|x| x == l).unwrap());
+        let mut all_lanes: Vec<StoreLane> = StoreLane::ALL.to_vec();
+        all_lanes.sort_by_key(|l| StoreLane::ALL.iter().position(|x| x == l).unwrap());
+        assert_eq!(sorted_forward, all_lanes);
+
+        // And reverse: cycle_focus(-1) preserves the invariant too.
+        let mut visited_backward: Vec<StoreLane> = Vec::new();
+        for _ in 0..StoreLane::ALL.len() {
+            let lane = app.focused_store;
+            let flat = app.flat_rows();
+            for fr in &flat {
+                let row = &app.rows[fr.abs];
+                assert_eq!(
+                    store_lane_for_row(row),
+                    lane,
+                    "flat_rows lane invariant must hold after cycle_focus(-1) on lane {:?}",
+                    lane
+                );
+            }
+            visited_backward.push(lane);
+            app.cycle_focus(-1);
+        }
+        let mut sorted_backward = visited_backward.clone();
+        sorted_backward.sort_by_key(|l| StoreLane::ALL.iter().position(|x| x == l).unwrap());
+        assert_eq!(sorted_backward, all_lanes);
     }
 }

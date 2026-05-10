@@ -49,7 +49,7 @@ pub fn render_popup(f: &mut Frame, _app: &App) {
 pub fn hint_for(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => {
-            "j/k nav  , sort  f filter  / search  D daemon  s/S/g/o sidecar  ? help  q quit"
+            "←/→ lane  ↑/↓ row  Enter drill  / search  f filter  , sort  D daemon  s/S/g/o sidecar  ? help  q quit"
         }
         Mode::Filter => "type k=v (state= priority= tier= since=)  Enter apply  Esc cancel",
         Mode::Search => "type to search  Enter accept  Esc cancel  n/N next/prev",
@@ -79,7 +79,11 @@ mod tests {
         let n = hint_for(Mode::Normal);
         let f = hint_for(Mode::Filter);
         let s = hint_for(Mode::Search);
-        assert!(n.contains("nav"));
+        // Normal-mode hint must surface both the lane affordance (Left/Right)
+        // and the row affordance (Up/Down) so the operator sees the cockpit
+        // navigation model at a glance.
+        assert!(n.contains("lane"), "Normal hint must mention 'lane': {n}");
+        assert!(n.contains("row"), "Normal hint must mention 'row': {n}");
         assert!(f.contains("Enter apply"));
         assert!(s.contains("next/prev"));
         assert_ne!(n, f);

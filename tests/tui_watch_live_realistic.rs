@@ -4,7 +4,7 @@ use rusqlite::{params, Connection};
 use std::time::{SystemTime, UNIX_EPOCH};
 use stores::tui::app::StatusBar;
 use stores::tui::daemon::Liveness;
-use stores::tui::data::Section;
+use stores::tui::data::{Section, StoreLane};
 use stores::tui::sort::Sort;
 use stores::tui::{render, App, TuiOpts};
 
@@ -195,30 +195,76 @@ fn live_app() -> App {
     app
 }
 
+/// Paint the cockpit once per lane (Intake / Observations / Tasks /
+/// ExternalReviews / EngineHealth) and concatenate the body lines so the
+/// regression snapshot can still assert cross-lane coverage even though the
+/// cockpit only paints the focused lane in any single frame.
+///
+/// Phase-3 cockpit semantics: `render::draw` renders only `app.focused_store`
+/// into the focused-table region. The pre-cockpit live-realistic snapshot was
+/// produced by a single full-buffer paint that emitted every populated section
+/// regardless of focus. To preserve cross-lane regression coverage without
+/// abandoning byte-exact comparison, we drive the painter through every lane
+/// and collect each lane's section block into one composite.
 fn render_snapshot_text(app: &mut App) -> String {
-    let backend = TestBackend::new(80, 26);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|f| render::draw(f, app)).unwrap();
-    let buf = terminal.backend().buffer().clone();
-    let mut lines = Vec::new();
-    for y in 0..buf.area.height {
-        let mut line = String::new();
-        for x in 0..buf.area.width {
-            line.push_str(buf[(x, y)].symbol());
+    let mut all_lines: Vec<String> = Vec::new();
+    let mut header_emitted = false;
+    for lane in StoreLane::ALL {
+        app.focused_store = lane;
+        let backend = TestBackend::new(80, 26);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render::draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut lane_lines: Vec<String> = Vec::new();
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            let line = line.trim_end().to_string();
+            if line == "stores watch · cockpit"
+                || line.starts_with("j/k move")
+                || line.starts_with("sort:")
+            {
+                continue;
+            }
+            lane_lines.push(line);
         }
-        let line = line.trim_end().to_string();
-        if line == "stores watch · cockpit"
-            || line.starts_with("j/k move")
-            || line.starts_with("sort:")
-        {
-            continue;
+        if !header_emitted {
+            // First lane: emit header (daemon / lanes / external review / blank
+            // / system-alert), then strip the focused-table padding (blank
+            // lines emitted by the ratatui List widget below the section
+            // block), keeping only header + section content.
+            let mut emitted_section = false;
+            for line in lane_lines.into_iter() {
+                let is_section_or_row = line.starts_with("▾ ") || line.starts_with("  ");
+                if is_section_or_row {
+                    emitted_section = true;
+                }
+                if emitted_section && line.is_empty() {
+                    continue;
+                }
+                all_lines.push(line);
+            }
+            header_emitted = true;
+        } else {
+            // Subsequent lanes: skip the header echo, emit only the lane's
+            // section block (lines from the first `▾ <SECTION>` onward).
+            let body_start = lane_lines
+                .iter()
+                .position(|l| l.starts_with("▾ "))
+                .unwrap_or(lane_lines.len());
+            for line in lane_lines.into_iter().skip(body_start) {
+                if !line.is_empty() {
+                    all_lines.push(line);
+                }
+            }
         }
-        lines.push(line);
     }
-    while lines.last().is_some_and(|line| line.is_empty()) {
-        lines.pop();
+    while all_lines.last().is_some_and(|line| line.is_empty()) {
+        all_lines.pop();
     }
-    format!("{}\n", lines.join("\n"))
+    format!("{}\n", all_lines.join("\n"))
 }
 
 #[test]

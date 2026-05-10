@@ -51,6 +51,14 @@ fn normal(app: &mut App, ev: KeyEvent) -> KeyOutcome {
             app.move_page(-1);
             KeyOutcome::Continue
         }
+        (KeyCode::Char('l'), _) | (KeyCode::Right, _) => {
+            app.cycle_focus(1);
+            KeyOutcome::Continue
+        }
+        (KeyCode::Char('h'), _) | (KeyCode::Left, _) => {
+            app.cycle_focus(-1);
+            KeyOutcome::Continue
+        }
         (KeyCode::Tab, _) => {
             app.toggle_collapse_current();
             KeyOutcome::Continue
@@ -320,11 +328,13 @@ mod tests {
 
     #[test]
     fn nav() {
-        // AC2.1: j/k/arrows/PgUp/PgDn move selection across sections.
+        // AC2.1: j/k/arrows/PgUp/PgDn move selection across sections within
+        // the focused lane (default StoreLane::Tasks).
         let mut app = fresh_app();
         let flat = app.flat_rows();
-        // 4 selectable rows across 4 non-empty sections.
-        assert_eq!(flat.len(), 4);
+        // 3 task rows across 3 non-empty Tasks-lane sections (the obs row
+        // belongs to the Observations lane and is filtered out).
+        assert_eq!(flat.len(), 3);
 
         // Start: first row.
         assert_eq!(app.current_flat(), Some(0));
@@ -343,7 +353,7 @@ mod tests {
 
         // PgDn (viewport=10) → clamps to last row.
         on_key(&mut app, key(KeyCode::PageDown));
-        assert_eq!(app.current_flat(), Some(3));
+        assert_eq!(app.current_flat(), Some(2));
 
         // PgUp → clamps to first row.
         on_key(&mut app, key(KeyCode::PageUp));
@@ -424,5 +434,71 @@ mod tests {
         let mut app = fresh_app();
         on_key(&mut app, key(KeyCode::Char('g')));
         assert_eq!(app.pending_spawn, Some(SidecarScope::General));
+    }
+
+    #[test]
+    fn left_right_cycle_focused_store() {
+        // AC2.2: Left/Right (and h/l) cycle focused_store across all five
+        // lanes with wrap-around in both directions. Default is Tasks.
+        use crate::tui::data::StoreLane;
+        let mut app = fresh_app();
+        assert_eq!(app.focused_store, StoreLane::Tasks);
+
+        // Right (l) walks Tasks → ExternalReviews → EngineHealth → Intake →
+        // Observations → Tasks.
+        on_key(&mut app, key(KeyCode::Right));
+        assert_eq!(app.focused_store, StoreLane::ExternalReviews);
+        on_key(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.focused_store, StoreLane::EngineHealth);
+        on_key(&mut app, key(KeyCode::Right));
+        assert_eq!(app.focused_store, StoreLane::Intake);
+        on_key(&mut app, key(KeyCode::Char('l')));
+        assert_eq!(app.focused_store, StoreLane::Observations);
+        on_key(&mut app, key(KeyCode::Right));
+        assert_eq!(app.focused_store, StoreLane::Tasks);
+
+        // Left (h) wraps the other way.
+        on_key(&mut app, key(KeyCode::Left));
+        assert_eq!(app.focused_store, StoreLane::Observations);
+        on_key(&mut app, key(KeyCode::Char('h')));
+        assert_eq!(app.focused_store, StoreLane::Intake);
+        on_key(&mut app, key(KeyCode::Left));
+        assert_eq!(app.focused_store, StoreLane::EngineHealth);
+        on_key(&mut app, key(KeyCode::Char('h')));
+        assert_eq!(app.focused_store, StoreLane::ExternalReviews);
+        on_key(&mut app, key(KeyCode::Left));
+        assert_eq!(app.focused_store, StoreLane::Tasks);
+    }
+
+    #[test]
+    fn cockpit_nav_keys_are_read_only() {
+        // AC2.4: Left, Right, h, l, Up, Down, PgUp, PgDn, Tab, Enter must
+        // never set pending_spawn or obs_draft_filing_request.
+        let nav_keys = [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Char('h'),
+            KeyCode::Char('l'),
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Tab,
+            KeyCode::Enter,
+        ];
+        for kc in nav_keys {
+            let mut app = fresh_app();
+            on_key(&mut app, key(kc));
+            assert!(
+                app.pending_spawn.is_none(),
+                "key {:?} must not enqueue a sidecar spawn",
+                kc
+            );
+            assert!(
+                app.obs_draft_filing_request.is_none(),
+                "key {:?} must not enqueue an obs-draft filing request",
+                kc
+            );
+        }
     }
 }

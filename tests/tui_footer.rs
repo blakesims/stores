@@ -1,11 +1,17 @@
 //! Integration: selected-row footer renders the canonical fields.
 
 use stores::tui::app::{App, Selection, TuiOpts};
-use stores::tui::data::{classify, ObsRow, Row, TaskRow};
+use stores::tui::data::{classify, store_lane_for_row, ObsRow, Row, TaskRow};
 use stores::tui::footer::{iso8601_to_epoch_secs, render_text};
 
 fn fresh_app(rows: Vec<Row>) -> App {
     let mut app = App::new(TuiOpts::default());
+    // P2 lane-scoping: flat_rows() filters by app.focused_store. Pick the
+    // lane of the first row so a single-lane fixture remains navigable
+    // regardless of TuiOpts::default()'s starting lane.
+    if let Some(first_row) = rows.first() {
+        app.focused_store = store_lane_for_row(first_row);
+    }
     app.rows = rows;
     app.sections = classify(&app.rows);
     app.apply_sort();

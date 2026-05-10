@@ -80,6 +80,43 @@ impl Section {
     ];
 }
 
+/// Top-level store cockpit lanes. Each `Row` maps to exactly one lane via
+/// [`store_lane_for_row`]; engine-health is a system-state lane with no rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StoreLane {
+    Intake,
+    Observations,
+    Tasks,
+    ExternalReviews,
+    EngineHealth,
+}
+
+impl StoreLane {
+    pub const ALL: [StoreLane; 5] = [
+        StoreLane::Intake,
+        StoreLane::Observations,
+        StoreLane::Tasks,
+        StoreLane::ExternalReviews,
+        StoreLane::EngineHealth,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StoreLane::Intake => "INTAKE",
+            StoreLane::Observations => "OBSERVATIONS",
+            StoreLane::Tasks => "TASKS",
+            StoreLane::ExternalReviews => "EXTERNAL REVIEWS",
+            StoreLane::EngineHealth => "ENGINE",
+        }
+    }
+}
+
+impl Default for StoreLane {
+    fn default() -> Self {
+        StoreLane::Tasks
+    }
+}
+
 /// Watch task classification knobs. Default hides stale terminal exhaust
 /// older than 48 hours and caps recent terminal rows to the 5 newest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +397,156 @@ fn is_priority_task(t: &TaskRow) -> bool {
         .as_deref()
         .map(is_priority_text)
         .unwrap_or(false)
+}
+
+/// Per-status counts the cockpit renders for the intake lane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IntakeFlow {
+    pub draft: usize,
+    pub triaging: usize,
+    pub needs_info: usize,
+    pub routed: usize,
+    pub dropped: usize,
+}
+
+/// Per-status counts the cockpit renders for the observations lane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObsFlow {
+    pub open: usize,
+    pub investigating: usize,
+    pub ready: usize,
+    pub resolved: usize,
+    pub wont_fix: usize,
+    pub investigation_failed: usize,
+}
+
+/// Per-status counts the cockpit renders for the tasks lane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TasksFlow {
+    pub active: usize,
+    pub held: usize,
+    pub plan_review: usize,
+    pub code_review: usize,
+    pub in_review: usize,
+    pub recently_terminal: usize,
+}
+
+/// Per-status counts the cockpit renders for the external-reviews lane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewsFlow {
+    pub pending: usize,
+    pub running: usize,
+    pub passed: usize,
+    pub revise: usize,
+    pub tooling_held: usize,
+}
+
+/// System-state counts the cockpit renders for the engine-health lane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineFlow {
+    pub daemon_live: bool,
+    pub unfinished_locks: usize,
+    pub oldest_lock_age_secs: Option<i64>,
+    pub agent_runs_recent: usize,
+}
+
+/// Per-lane store-flow model rendered at the top of the cockpit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreFlowModel {
+    pub intake: IntakeFlow,
+    pub observations: ObsFlow,
+    pub tasks: TasksFlow,
+    pub external_reviews: ReviewsFlow,
+    pub engine: EngineFlow,
+}
+
+/// Build a [`StoreFlowModel`] by walking `rows` once and folding per-lane
+/// status counts; engine flow is filled from `system_health` + `daemon`.
+/// `external_review` is accepted to keep the call-site shape aligned with
+/// the cockpit data path even though external-review counts come from `rows`.
+pub fn store_flow_model(
+    rows: &[Row],
+    system_health: &SystemHealth,
+    daemon: &super::daemon::Liveness,
+    external_review: &ExternalReviewState,
+) -> StoreFlowModel {
+    store_flow_model_at(rows, system_health, daemon, external_review, now_epoch())
+}
+
+fn store_flow_model_at(
+    rows: &[Row],
+    system_health: &SystemHealth,
+    daemon: &super::daemon::Liveness,
+    _external_review: &ExternalReviewState,
+    now: i64,
+) -> StoreFlowModel {
+    let mut model = StoreFlowModel::default();
+    for row in rows {
+        match row {
+            Row::Intake(i) => apply_intake_to_flow(&i.status, 1, &mut model.intake),
+            Row::Obs(o) => apply_obs_to_flow(&o.status, 1, &mut model.observations),
+            Row::CollapsedObs(c) => {
+                apply_obs_to_flow(&c.representative.status, c.count, &mut model.observations)
+            }
+            Row::Task(t) => apply_task_to_flow(&t.status, &mut model.tasks),
+            Row::Review(r) => apply_review_to_flow(&r.status, &mut model.external_reviews),
+        }
+    }
+    model.engine = EngineFlow {
+        daemon_live: matches!(daemon, super::daemon::Liveness::Live { .. }),
+        unfinished_locks: system_health.unfinished_dispatch_locks,
+        oldest_lock_age_secs: system_health
+            .oldest_claimed_at_epoch
+            .map(|epoch| (now - epoch).max(0)),
+        agent_runs_recent: 0,
+    };
+    model
+}
+
+fn apply_intake_to_flow(status: &str, count: usize, flow: &mut IntakeFlow) {
+    match status {
+        "draft" => flow.draft += count,
+        "triaging" => flow.triaging += count,
+        "needs_info" => flow.needs_info += count,
+        "routed" => flow.routed += count,
+        "dropped" => flow.dropped += count,
+        _ => {}
+    }
+}
+
+fn apply_obs_to_flow(status: &str, count: usize, flow: &mut ObsFlow) {
+    match status {
+        "open" => flow.open += count,
+        "investigating" => flow.investigating += count,
+        "ready" => flow.ready += count,
+        "resolved" => flow.resolved += count,
+        "wont_fix" => flow.wont_fix += count,
+        "investigation_failed" => flow.investigation_failed += count,
+        _ => {}
+    }
+}
+
+fn apply_task_to_flow(status: &str, flow: &mut TasksFlow) {
+    match status {
+        "planning" | "ready" | "executing" => flow.active += 1,
+        "blocked" | "deploy_blocked" => flow.held += 1,
+        "plan_review" => flow.plan_review += 1,
+        "code_review" => flow.code_review += 1,
+        "in_review" => flow.in_review += 1,
+        s if is_terminal_task_status(s) => flow.recently_terminal += 1,
+        _ => {}
+    }
+}
+
+fn apply_review_to_flow(status: &str, flow: &mut ReviewsFlow) {
+    match status {
+        "pending" => flow.pending += 1,
+        "running" => flow.running += 1,
+        "passed" => flow.passed += 1,
+        "revise" => flow.revise += 1,
+        "tooling_held" => flow.tooling_held += 1,
+        _ => {}
+    }
 }
 
 fn is_priority_text(s: &str) -> bool {
@@ -1281,6 +1468,52 @@ fn section_for(row: &Row) -> Option<Section> {
     }
 }
 
+/// Map a `Row` to the cockpit's top-level [`StoreLane`].
+pub fn store_lane_for_row(row: &Row) -> StoreLane {
+    match row {
+        Row::Intake(_) => StoreLane::Intake,
+        Row::Obs(_) | Row::CollapsedObs(_) => StoreLane::Observations,
+        Row::Task(_) => StoreLane::Tasks,
+        Row::Review(_) => StoreLane::ExternalReviews,
+    }
+}
+
+/// Return up to `limit` newest terminal task rows, sorted by `updated_at`
+/// descending (display_id as tiebreaker). Used to render the "recent
+/// exhaust" strip — main task rows hide terminal history. This mirrors the
+/// default watch classification policy: terminal rows older than the recent
+/// terminal window stay hidden unless the operator explicitly asks for history.
+pub fn recent_exhaust(rows: &[Row], limit: usize) -> Vec<&Row> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let opts = WatchClassifyOptions::default();
+    let cutoff =
+        now_epoch().saturating_sub((opts.recent_terminal_days as i64).saturating_mul(SECS_PER_DAY));
+    let mut indices: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| match r {
+            Row::Task(t)
+                if is_terminal_task_status(&t.status)
+                    && task_updated_epoch(r)
+                        .map(|updated| updated >= cutoff)
+                        .unwrap_or(false) =>
+            {
+                Some(i)
+            }
+            _ => None,
+        })
+        .collect();
+    indices.sort_by(|a, b| {
+        let ea = task_updated_epoch(&rows[*a]).unwrap_or(i64::MIN);
+        let eb = task_updated_epoch(&rows[*b]).unwrap_or(i64::MIN);
+        eb.cmp(&ea)
+            .then_with(|| rows[*a].display_id().cmp(rows[*b].display_id()))
+    });
+    indices.into_iter().take(limit).map(|i| &rows[i]).collect()
+}
+
 pub fn is_terminal_task_status(s: &str) -> bool {
     matches!(
         s,
@@ -1921,6 +2154,245 @@ mod tests {
             task.recent_events[0].verb.as_deref(),
             Some("submit-execute")
         );
+    }
+
+    fn intake_row(status: &str) -> Row {
+        Row::Intake(IntakeRow {
+            display_id: format!("I-{status}"),
+            status: status.to_string(),
+            summary: "s".to_string(),
+            updated_at: NOW.to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn obs_row(status: &str) -> Row {
+        Row::Obs(ObsRow {
+            display_id: format!("L-{status}"),
+            status: status.to_string(),
+            priority: "normal".to_string(),
+            summary: "s".to_string(),
+            updated_at: NOW.to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn review_row(status: &str) -> Row {
+        Row::Review(ReviewRow {
+            display_id: format!("E-{status}"),
+            task_id: "T001".to_string(),
+            status: status.to_string(),
+            runner: "codex".to_string(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn store_lane_all_has_five_lanes_in_canonical_order() {
+        assert_eq!(StoreLane::ALL.len(), 5);
+        assert_eq!(
+            StoreLane::ALL,
+            [
+                StoreLane::Intake,
+                StoreLane::Observations,
+                StoreLane::Tasks,
+                StoreLane::ExternalReviews,
+                StoreLane::EngineHealth,
+            ]
+        );
+    }
+
+    #[test]
+    fn store_lane_for_row_covers_each_row_variant() {
+        assert_eq!(store_lane_for_row(&intake_row("draft")), StoreLane::Intake);
+        assert_eq!(
+            store_lane_for_row(&obs_row("open")),
+            StoreLane::Observations
+        );
+        let collapsed = Row::CollapsedObs(CollapsedObsRow {
+            section: Section::ObsOther,
+            summary: "dupe".to_string(),
+            count: 3,
+            primary_display_id: "L001".to_string(),
+            display_ids: vec!["L001".to_string(), "L002".to_string(), "L003".to_string()],
+            representative: ObsRow {
+                display_id: "L001".to_string(),
+                status: "open".to_string(),
+                ..Default::default()
+            },
+        });
+        assert_eq!(store_lane_for_row(&collapsed), StoreLane::Observations);
+        assert_eq!(store_lane_for_row(&task("executing")), StoreLane::Tasks);
+        assert_eq!(
+            store_lane_for_row(&review_row("running")),
+            StoreLane::ExternalReviews,
+        );
+    }
+
+    #[test]
+    fn store_flow_model_counts_mixed_rows_per_lane() {
+        let rows = vec![
+            intake_row("draft"),
+            intake_row("draft"),
+            intake_row("triaging"),
+            intake_row("needs_info"),
+            intake_row("routed"),
+            intake_row("dropped"),
+            obs_row("open"),
+            obs_row("investigating"),
+            obs_row("ready"),
+            obs_row("resolved"),
+            obs_row("wont_fix"),
+            obs_row("investigation_failed"),
+            task("planning"),
+            task("ready"),
+            task("executing"),
+            task("blocked"),
+            task("deploy_blocked"),
+            task("plan_review"),
+            task("code_review"),
+            task("in_review"),
+            task("accepted"),
+            task("complete"),
+            task("rejected"),
+            review_row("pending"),
+            review_row("running"),
+            review_row("passed"),
+            review_row("revise"),
+            review_row("tooling_held"),
+        ];
+        let health = SystemHealth::default();
+        let daemon = super::super::daemon::Liveness::Live { pid: 4242 };
+        let model = store_flow_model(&rows, &health, &daemon, &ExternalReviewState::default());
+
+        assert_eq!(model.intake.draft, 2);
+        assert_eq!(model.intake.triaging, 1);
+        assert_eq!(model.intake.needs_info, 1);
+        assert_eq!(model.intake.routed, 1);
+        assert_eq!(model.intake.dropped, 1);
+
+        assert_eq!(model.observations.open, 1);
+        assert_eq!(model.observations.investigating, 1);
+        assert_eq!(model.observations.ready, 1);
+        assert_eq!(model.observations.resolved, 1);
+        assert_eq!(model.observations.wont_fix, 1);
+        assert_eq!(model.observations.investigation_failed, 1);
+
+        assert_eq!(model.tasks.active, 3);
+        assert_eq!(model.tasks.held, 2);
+        assert_eq!(model.tasks.plan_review, 1);
+        assert_eq!(model.tasks.code_review, 1);
+        assert_eq!(model.tasks.in_review, 1);
+        assert_eq!(model.tasks.recently_terminal, 3);
+
+        assert_eq!(model.external_reviews.pending, 1);
+        assert_eq!(model.external_reviews.running, 1);
+        assert_eq!(model.external_reviews.passed, 1);
+        assert_eq!(model.external_reviews.revise, 1);
+        assert_eq!(model.external_reviews.tooling_held, 1);
+
+        assert!(model.engine.daemon_live);
+        assert_eq!(model.engine.unfinished_locks, 0);
+        assert_eq!(model.engine.oldest_lock_age_secs, None);
+        assert_eq!(model.engine.agent_runs_recent, 0);
+    }
+
+    #[test]
+    fn store_flow_model_collapsed_obs_uses_cluster_count() {
+        let rep = ObsRow {
+            display_id: "L001".to_string(),
+            status: "open".to_string(),
+            ..Default::default()
+        };
+        let rows = vec![Row::CollapsedObs(CollapsedObsRow {
+            section: Section::ObsOther,
+            summary: "dupe".to_string(),
+            count: 7,
+            primary_display_id: "L001".to_string(),
+            display_ids: (0..7).map(|i| format!("L00{i}")).collect(),
+            representative: rep,
+        })];
+        let model = store_flow_model(
+            &rows,
+            &SystemHealth::default(),
+            &super::super::daemon::Liveness::Dead,
+            &ExternalReviewState::default(),
+        );
+        assert_eq!(model.observations.open, 7);
+    }
+
+    #[test]
+    fn store_flow_model_empty_rows_zero_counts_but_engine_reflects_inputs() {
+        let health = SystemHealth {
+            unfinished_dispatch_locks: 4,
+            oldest_claimed_at_epoch: Some(NOW - 90),
+        };
+        let daemon = super::super::daemon::Liveness::Dead;
+        let model =
+            store_flow_model_at(&[], &health, &daemon, &ExternalReviewState::default(), NOW);
+        assert_eq!(model.intake, IntakeFlow::default());
+        assert_eq!(model.observations, ObsFlow::default());
+        assert_eq!(model.tasks, TasksFlow::default());
+        assert_eq!(model.external_reviews, ReviewsFlow::default());
+        assert!(!model.engine.daemon_live);
+        assert_eq!(model.engine.unfinished_locks, 4);
+        assert_eq!(model.engine.oldest_lock_age_secs, Some(90));
+        assert_eq!(model.engine.agent_runs_recent, 0);
+    }
+
+    #[test]
+    fn engine_flow_dead_daemon_with_unfinished_locks_reflected() {
+        let health = SystemHealth {
+            unfinished_dispatch_locks: 3,
+            oldest_claimed_at_epoch: Some(NOW - 600),
+        };
+        let model = store_flow_model_at(
+            &[],
+            &health,
+            &super::super::daemon::Liveness::Dead,
+            &ExternalReviewState::default(),
+            NOW,
+        );
+        assert!(!model.engine.daemon_live);
+        assert_eq!(model.engine.unfinished_locks, 3);
+        assert_eq!(model.engine.oldest_lock_age_secs, Some(600));
+    }
+
+    #[test]
+    fn recent_exhaust_caps_at_limit_and_orders_newest_first() {
+        let now = now_epoch();
+        let rows: Vec<Row> = vec![
+            task_with_id("T1", "accepted", now - 300),
+            task_with_id("T2", "complete", now - 100),
+            task_with_id("T3", "rejected", now - 200),
+            task_with_id("T4", "executing", now - 50),
+            task_with_id("T5", "abandoned", now - 400),
+            task_with_id("T6", "schema_migrated", now - 10),
+        ];
+        let exhaust = recent_exhaust(&rows, 3);
+        assert_eq!(exhaust.len(), 3);
+        let ids: Vec<&str> = exhaust.iter().map(|r| r.display_id()).collect();
+        assert_eq!(ids, vec!["T6", "T2", "T3"]);
+
+        // Non-task rows are excluded; in-flight tasks are excluded.
+        let mut mixed = rows.clone();
+        mixed.push(obs_row("open"));
+        mixed.push(intake_row("draft"));
+        mixed.push(review_row("pending"));
+        let only_terminal = recent_exhaust(&mixed, 10);
+        assert_eq!(only_terminal.len(), 5);
+        for r in &only_terminal {
+            match r {
+                Row::Task(t) => assert!(is_terminal_task_status(&t.status)),
+                other => panic!("non-task in recent_exhaust: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn recent_exhaust_zero_limit_returns_empty() {
+        let rows = vec![task_with_id("T1", "accepted", NOW)];
+        assert!(recent_exhaust(&rows, 0).is_empty());
     }
 
     #[test]

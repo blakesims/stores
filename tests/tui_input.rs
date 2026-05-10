@@ -10,7 +10,7 @@ use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
 use stores::tui::app::{App, DetailKind, Mode, Selection, TuiOpts};
-use stores::tui::data::{classify, IntakeRow, ObsRow, Row, Section, TaskRow};
+use stores::tui::data::{classify, IntakeRow, ObsRow, Row, Section, StoreLane, TaskRow};
 use stores::tui::filter::FilterPredicate;
 use stores::tui::sort::Sort;
 use stores::tui::{on_key, render, KeyOutcome};
@@ -244,6 +244,11 @@ fn q_returns_from_detail_but_quits_from_normal() {
 #[test]
 fn enter_opens_observation_and_intake_detail_by_selected_row() {
     let mut app = build_app(fixtures());
+
+    // P2 lane-scoping: flat_rows() only emits rows whose lane matches
+    // app.focused_store (default Tasks). To navigate to the Obs/Intake
+    // rows we must first focus their respective lanes.
+    app.focused_store = StoreLane::Observations;
     let flat = app.flat_rows();
     let obs_idx = flat
         .iter()
@@ -254,6 +259,7 @@ fn enter_opens_observation_and_intake_detail_by_selected_row() {
     assert_eq!(app.detail.as_ref().unwrap().kind, DetailKind::Observation);
     on_key(&mut app, key(KeyCode::Esc));
 
+    app.focused_store = StoreLane::Intake;
     let flat = app.flat_rows();
     let intake_idx = flat
         .iter()

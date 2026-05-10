@@ -29,7 +29,7 @@ pub fn render_text_for_row(row: &Row, app: &App) -> String {
     lines_for_row(row, app).join("\n")
 }
 
-fn lines_for_row(row: &Row, app: &App) -> Vec<String> {
+pub(super) fn lines_for_row(row: &Row, app: &App) -> Vec<String> {
     match row {
         Row::Task(t) => task_lines(t, app),
         Row::Obs(o) => observation_lines(o),
