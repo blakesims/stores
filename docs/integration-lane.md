@@ -228,6 +228,16 @@ column.
 short summary, e.g. `stale_base: reviewed base 9def951 no longer
 reachable from current main 8bd21b6; fresh external review required`.
 
+## main_branch ResourceLock
+
+`builtin:integrate` acquires the DB-backed `main_branch` ResourceLock immediately before checking out and mutating `main`, using `handlers::resource_locks` with `Actor::Framework`; see `docs/primitives.md` for the primitive contract and `src/handlers/resource_locks.rs` for the helper surface. The lock is released after merge/push and `mark_integrated` complete; every error or early-return path in the merge/push window is covered by a guard `Drop`, so failed merge/push attempts release the lock too.
+
+If acquisition finds an unexpired owner, the attempt records `outcome='merge_failure'` with `pre_land_check_summary='merge_failure: main_branch lock held by <owner>; will retry'`, then routes to `integration_blocked`. Phase 3's lifecycle-overlay table maps that `merge_failure:` prefix to `blocker_kind='main_red'`, leaving the row visible as `lifecycle='integration'`, `integration_step='none'`, and `blocked=true`.
+
+Immediately before `git merge --no-ff`, the lane re-checks ownership of `main_branch` for the task display id. If the lock was fenced/stolen/rotated during merge prep, the lane blocks with `merge_failure: main_branch lock no longer owned (token rotated)` and the guard releases the stale token if still valid.
+
+Stale ResourceLock rows are recovered by `resource_locks::acquire`: expired rows are deleted, a `transition_history` audit row is written with `verb='recover_stale'` and `invoker='framework'`, and the current integration attempt acquires a fresh fencing token before mutating main.
+
 ## Post-integrated subscribers
 
 The integration lane fires `mark_integrated` and stops. It does **not**

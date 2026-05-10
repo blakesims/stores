@@ -1,7 +1,7 @@
 use clap::{Arg, Command};
 use rusqlite::Connection;
 use stores::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
-use stores::handlers::{submit, transition};
+use stores::handlers::{lifecycle_overlay, submit, transition};
 use stores::schema::actor::Actor;
 use stores::schema::Schema;
 
@@ -121,6 +121,22 @@ fn t1_walk_updates_overlay_on_every_edge() {
             None
         )
     );
+}
+
+#[test]
+fn lock_busy_merge_failure_reason_maps_to_main_red() {
+    let overlay = lifecycle_overlay::derive(
+        "mark_integration_blocked",
+        "integrating",
+        "integration_blocked",
+        None,
+        Some("merge_failure: main_branch lock held by T_OTHER; will retry"),
+    )
+    .unwrap();
+    assert_eq!(overlay.lifecycle, "integration");
+    assert_eq!(overlay.integration_step, "none");
+    assert!(overlay.blocked);
+    assert_eq!(overlay.blocker_kind, Some("main_red".into()));
 }
 
 #[test]
