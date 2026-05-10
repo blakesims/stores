@@ -181,6 +181,9 @@ pub struct TaskRow {
     /// used by the disposition function to distinguish historical-legacy
     /// from deploy-ceremony-pending accepted rows.
     pub accepted_at: Option<String>,
+    pub claimed_at: Option<String>,
+    pub integration_attempts_count: usize,
+    pub last_integration_outcome: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -231,6 +234,18 @@ pub struct ReviewRow {
     pub held_reason: Option<String>,
     pub next_retry_at: Option<String>,
     pub attempts: i64,
+    pub verdict: Option<String>,
+    pub base_sha: Option<String>,
+    pub head_sha: Option<String>,
+    pub log_path: Option<String>,
+    pub transcript_path: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub critical_count: Option<i64>,
+    pub major_count: Option<i64>,
+    pub minor_count: Option<i64>,
+    pub findings_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -270,6 +285,11 @@ pub struct IntakeRow {
     pub duplicate_of: Option<String>,
     pub evidence_pointer: Option<String>,
     pub recent_events: Vec<RecentEvent>,
+    pub captured_at: Option<String>,
+    pub recon_round: Option<i64>,
+    pub decision_rationale: Option<String>,
+    pub decision_confidence: Option<String>,
+    pub decision_tier_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +316,37 @@ impl Default for ExternalReviewState {
 pub struct SystemHealth {
     pub unfinished_dispatch_locks: usize,
     pub oldest_claimed_at_epoch: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonStartRow {
+    pub pid: i64,
+    pub started_at: Option<String>,
+    pub binary_version: Option<String>,
+    pub git_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DispatchLockRow {
+    pub display_id: String,
+    pub agent_name: Option<String>,
+    pub claimed_by: Option<String>,
+    pub claimed_at: Option<String>,
+    pub attempts: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentRunsRoleAggregate {
+    pub role: String,
+    pub count: i64,
+    pub total_tokens: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EngineDetail {
+    pub recent_daemon_starts: Vec<DaemonStartRow>,
+    pub unfinished_lock_rows: Vec<DispatchLockRow>,
+    pub recent_agent_runs_by_role: Vec<AgentRunsRoleAggregate>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -768,12 +819,13 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
     let mut rows = Vec::new();
 
     let task_cols = table_columns(conn, "tasks")?;
+    let integration_attempts_expr = sql_col(&task_cols, "integration_attempts", "NULL");
     let task_sql = format!(
         "SELECT display_id, status, {title}, {claimed_by}, {updated_at}, {tier_hint}, {linked_observations}, {blocked_reason}, \
                 {current_phase}, {current_cycle}, {total_phases}, {plan_source}, \
                 {contract_executive_intent}, {contract_done_when}, {contract_scope_in}, {contract_scope_out}, \
                 {plan_review_log}, {cycles}, {wrap_log}, {branch}, {workspace_path}, {drive_pid}, {drive_started_at}, \
-                {activation}, rowid FROM tasks",
+                {activation}, {claimed_at}, {integration_attempts_expr}, rowid FROM tasks",
         title = sql_col(&task_cols, "title", "''"),
         claimed_by = sql_col(&task_cols, "claimed_by", "NULL"),
         updated_at = sql_col(&task_cols, "updated_at", "''"),
@@ -796,6 +848,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         drive_pid = sql_col(&task_cols, "drive_pid", "NULL"),
         drive_started_at = sql_col(&task_cols, "drive_started_at", "NULL"),
         activation = sql_col(&task_cols, "activation", "NULL"),
+        claimed_at = sql_col(&task_cols, "claimed_at", "NULL"),
     );
 
     // T140 P5: pre-load accepted_at for every task in one shot from
@@ -831,8 +884,12 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         let drive_pid: Option<i64> = r.get(21).ok().flatten();
         let drive_started_at: Option<String> = r.get(22).ok().flatten();
         let activation: Option<String> = r.get(23).ok().flatten();
-        let row_id: i64 = r.get(24)?;
+        let claimed_at: Option<String> = r.get(24).ok().flatten();
+        let integration_attempts_raw: Option<String> = r.get(25).ok().flatten();
+        let row_id: i64 = r.get(26)?;
         let display_id: String = r.get(0)?;
+        let (integration_attempts_count, last_integration_outcome) =
+            integration_attempts_summary(integration_attempts_raw.as_deref());
         Ok(TaskRow {
             display_id: display_id.clone(),
             status: r.get(1)?,
@@ -868,6 +925,9 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             recent_events: Vec::new(),
             activation,
             accepted_at: accepted_at_map.get(&row_id).cloned(),
+            claimed_at,
+            integration_attempts_count,
+            last_integration_outcome,
         })
     })?;
     for r in task_iter.flatten() {
@@ -943,8 +1003,27 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         } else {
             "0"
         };
+        let findings_count_expr = if cols.iter().any(|c| c == "findings") {
+            "json_array_length(findings)".to_string()
+        } else {
+            "NULL".to_string()
+        };
         let sql = format!(
-            "SELECT display_id, task_id, status, {runner_expr}, {held_expr}, {retry_expr}, {attempts_expr} FROM external_reviews WHERE status IN ('pending','running','tooling_held')"
+            "SELECT display_id, task_id, status, {runner_expr}, {held_expr}, {retry_expr}, {attempts_expr}, \
+             {verdict}, {base_sha}, {head_sha}, {log_path}, {transcript_path}, {started_at}, {completed_at}, {duration_ms}, \
+             {critical_count}, {major_count}, {minor_count}, {findings_count_expr} \
+             FROM external_reviews WHERE status IN ('pending','running','tooling_held')",
+            verdict = sql_col(&cols, "verdict", "NULL"),
+            base_sha = sql_col(&cols, "base_sha", "NULL"),
+            head_sha = sql_col(&cols, "head_sha", "NULL"),
+            log_path = sql_col(&cols, "log_path", "NULL"),
+            transcript_path = sql_col(&cols, "transcript_path", "NULL"),
+            started_at = sql_col(&cols, "started_at", "NULL"),
+            completed_at = sql_col(&cols, "completed_at", "NULL"),
+            duration_ms = sql_col(&cols, "duration_ms", "NULL"),
+            critical_count = sql_col(&cols, "critical_count", "NULL"),
+            major_count = sql_col(&cols, "major_count", "NULL"),
+            minor_count = sql_col(&cols, "minor_count", "NULL"),
         );
         let mut stmt = conn.prepare(&sql)?;
         let review_iter = stmt.query_map([], |r| {
@@ -953,9 +1032,21 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
                 task_id: r.get(1)?,
                 status: r.get(2)?,
                 runner: r.get(3)?,
-                held_reason: r.get(4).ok(),
-                next_retry_at: r.get(5).ok(),
+                held_reason: r.get(4).ok().flatten(),
+                next_retry_at: r.get(5).ok().flatten(),
                 attempts: r.get(6)?,
+                verdict: r.get(7).ok().flatten(),
+                base_sha: r.get(8).ok().flatten(),
+                head_sha: r.get(9).ok().flatten(),
+                log_path: r.get(10).ok().flatten(),
+                transcript_path: r.get(11).ok().flatten(),
+                started_at: r.get(12).ok().flatten(),
+                completed_at: r.get(13).ok().flatten(),
+                duration_ms: r.get(14).ok().flatten(),
+                critical_count: r.get(15).ok().flatten(),
+                major_count: r.get(16).ok().flatten(),
+                minor_count: r.get(17).ok().flatten(),
+                findings_count: r.get(18).ok().flatten(),
             })
         })?;
         for r in review_iter.flatten() {
@@ -1054,6 +1145,40 @@ fn cycle_summary_list(raw: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+fn decision_metadata_summary(
+    raw: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(raw) = raw else {
+        return (None, None, None);
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return (None, None, None);
+    };
+    let pluck = |key: &str| -> Option<String> {
+        v.get(key).and_then(|x| x.as_str()).map(str::to_string)
+    };
+    (pluck("rationale"), pluck("confidence"), pluck("tier_hint"))
+}
+
+fn integration_attempts_summary(raw: Option<&str>) -> (usize, Option<String>) {
+    let Some(raw) = raw else {
+        return (0, None);
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return (0, None);
+    };
+    let Some(arr) = v.as_array() else {
+        return (0, None);
+    };
+    let count = arr.len();
+    let last_outcome = arr
+        .last()
+        .and_then(|item| item.get("outcome"))
+        .and_then(|s| s.as_str())
+        .map(str::to_string);
+    (count, last_outcome)
+}
+
 fn evidence_pointers(raw: Option<&str>) -> Vec<ArtifactPointer> {
     let Some(raw) = raw else {
         return Vec::new();
@@ -1083,11 +1208,14 @@ fn evidence_pointers(raw: Option<&str>) -> Vec<ArtifactPointer> {
 fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
     let cols = table_columns(conn, "intake")?;
     let sql = format!(
-        "SELECT display_id, status, {summary}, {body}, {updated_at}, {source_task}, {source_agent}, {risk_flags}, {cluster_key}, {decision}, {missing_info_question}, {routed_to_observation}, {routed_to_arch_review}, {duplicate_of}, {evidence} FROM intake",
+        "SELECT display_id, status, {summary}, {body}, {updated_at}, {source_task}, {source_agent}, {risk_flags}, {cluster_key}, {decision}, {missing_info_question}, {routed_to_observation}, {routed_to_arch_review}, {duplicate_of}, {evidence}, {captured_at}, {recon_round}, {decision_metadata} FROM intake",
         summary = sql_col(&cols, "summary", "''"), body = sql_col(&cols, "body", "NULL"),
         updated_at = if cols.iter().any(|c| c == "updated_at") { quote_ident("updated_at") } else { sql_col(&cols, "captured_at", "''") },
         source_task = sql_col(&cols, "source_task", "NULL"), source_agent = sql_col(&cols, "source_agent", "NULL"), risk_flags = sql_col(&cols, "risk_flags", "NULL"), cluster_key = sql_col(&cols, "cluster_key", "NULL"),
         decision = sql_col(&cols, "decision", "NULL"), missing_info_question = sql_col(&cols, "missing_info_question", "NULL"), routed_to_observation = sql_col(&cols, "routed_to_observation", "NULL"), routed_to_arch_review = sql_col(&cols, "routed_to_arch_review", "NULL"), duplicate_of = sql_col(&cols, "duplicate_of", "NULL"), evidence = sql_col(&cols, "evidence", "NULL"),
+        captured_at = sql_col(&cols, "captured_at", "NULL"),
+        recon_round = sql_col(&cols, "recon_round", "NULL"),
+        decision_metadata = sql_col(&cols, "decision_metadata", "NULL"),
     );
     let mut stmt = conn.prepare(&sql)?;
     let iter = stmt.query_map([], |r| {
@@ -1099,6 +1227,9 @@ fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
         } else {
             None
         };
+        let decision_metadata_raw: Option<String> = r.get(17).ok().flatten();
+        let (decision_rationale, decision_confidence, decision_tier_hint) =
+            decision_metadata_summary(decision_metadata_raw.as_deref());
         Ok(IntakeRow {
             display_id: r.get(0)?,
             status: status.clone(),
@@ -1119,6 +1250,11 @@ fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
             duplicate_of: r.get(13).ok().flatten(),
             evidence_pointer: r.get(14).ok().flatten(),
             recent_events: Vec::new(),
+            captured_at: r.get(15).ok().flatten(),
+            recon_round: r.get(16).ok().flatten(),
+            decision_rationale,
+            decision_confidence,
+            decision_tier_hint,
         })
     })?;
     for r in iter.flatten() {
@@ -1207,6 +1343,128 @@ fn value_to_epoch(value: rusqlite::types::Value) -> Option<i64> {
         rusqlite::types::Value::Text(s) => parse_epoch(&s),
         rusqlite::types::Value::Null | rusqlite::types::Value::Blob(_) => None,
     }
+}
+
+/// Aggregate richer engine-health detail (recent daemon starts, unfinished
+/// dispatch_locks with agent_name/claimed_by/attempts, recent agent_runs by
+/// role). Each sub-load is column-presence-guarded; absent tables/columns
+/// return an empty vec rather than erroring.
+pub fn load_engine_detail(conn: &Connection) -> Result<EngineDetail> {
+    let recent_daemon_starts = load_daemon_starts(conn).unwrap_or_default();
+    let unfinished_lock_rows = load_unfinished_dispatch_locks(conn).unwrap_or_default();
+    let recent_agent_runs_by_role = load_agent_runs_by_role(conn).unwrap_or_default();
+    Ok(EngineDetail {
+        recent_daemon_starts,
+        unfinished_lock_rows,
+        recent_agent_runs_by_role,
+    })
+}
+
+fn load_daemon_starts(conn: &Connection) -> Result<Vec<DaemonStartRow>> {
+    if !table_exists(conn, "daemon_starts")? {
+        return Ok(Vec::new());
+    }
+    let cols = table_columns(conn, "daemon_starts")?;
+    if !cols.iter().any(|c| c == "pid") {
+        return Ok(Vec::new());
+    }
+    let order_col = if cols.iter().any(|c| c == "started_at") {
+        "started_at"
+    } else if cols.iter().any(|c| c == "id") {
+        "id"
+    } else {
+        "rowid"
+    };
+    let sql = format!(
+        "SELECT pid, {started_at}, {binary_version}, {git_sha} FROM daemon_starts \
+         ORDER BY {order_col} DESC LIMIT 5",
+        started_at = sql_col(&cols, "started_at", "NULL"),
+        binary_version = sql_col(&cols, "binary_version", "NULL"),
+        git_sha = sql_col(&cols, "git_sha", "NULL"),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let iter = stmt.query_map([], |r| {
+        Ok(DaemonStartRow {
+            pid: r.get(0)?,
+            started_at: r.get(1).ok().flatten(),
+            binary_version: r.get(2).ok().flatten(),
+            git_sha: r.get(3).ok().flatten(),
+        })
+    })?;
+    Ok(iter.flatten().collect())
+}
+
+fn load_unfinished_dispatch_locks(conn: &Connection) -> Result<Vec<DispatchLockRow>> {
+    if !table_exists(conn, "dispatch_locks")? {
+        return Ok(Vec::new());
+    }
+    let cols = table_columns(conn, "dispatch_locks")?;
+    if !cols.iter().any(|c| c == "display_id") || !cols.iter().any(|c| c == "finished_at") {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT display_id, {agent_name}, {claimed_by}, {claimed_at}, {attempts} \
+         FROM dispatch_locks WHERE finished_at IS NULL",
+        agent_name = sql_col(&cols, "agent_name", "NULL"),
+        claimed_by = sql_col(&cols, "claimed_by", "NULL"),
+        claimed_at = sql_col(&cols, "claimed_at", "NULL"),
+        attempts = if cols.iter().any(|c| c == "attempts") {
+            "COALESCE(attempts,0)"
+        } else {
+            "0"
+        },
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let iter = stmt.query_map([], |r| {
+        Ok(DispatchLockRow {
+            display_id: r.get(0)?,
+            agent_name: r.get(1).ok().flatten(),
+            claimed_by: r.get(2).ok().flatten(),
+            claimed_at: r.get(3).ok().flatten(),
+            attempts: r.get(4)?,
+        })
+    })?;
+    Ok(iter.flatten().collect())
+}
+
+fn load_agent_runs_by_role(conn: &Connection) -> Result<Vec<AgentRunsRoleAggregate>> {
+    if !table_exists(conn, "agent_runs")? {
+        return Ok(Vec::new());
+    }
+    let cols = table_columns(conn, "agent_runs")?;
+    if !cols.iter().any(|c| c == "role") {
+        return Ok(Vec::new());
+    }
+    let total_tokens_expr = if cols.iter().any(|c| c == "total_tokens") {
+        "COALESCE(SUM(total_tokens),0)".to_string()
+    } else if cols.iter().any(|c| c == "tokens_in") || cols.iter().any(|c| c == "tokens_out") {
+        let ti = if cols.iter().any(|c| c == "tokens_in") {
+            "COALESCE(tokens_in,0)"
+        } else {
+            "0"
+        };
+        let to = if cols.iter().any(|c| c == "tokens_out") {
+            "COALESCE(tokens_out,0)"
+        } else {
+            "0"
+        };
+        format!("COALESCE(SUM({ti} + {to}),0)")
+    } else {
+        "0".to_string()
+    };
+    let sql = format!(
+        "SELECT role, COUNT(*) AS cnt, {total_tokens_expr} AS tokens \
+         FROM agent_runs GROUP BY role ORDER BY cnt DESC, role ASC LIMIT 20"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let iter = stmt.query_map([], |r| {
+        Ok(AgentRunsRoleAggregate {
+            role: r.get(0)?,
+            count: r.get(1)?,
+            total_tokens: r.get(2)?,
+        })
+    })?;
+    Ok(iter.flatten().collect())
 }
 
 pub fn load_external_review_state(conn: &Connection) -> Result<ExternalReviewState> {
@@ -1596,7 +1854,7 @@ fn now_epoch() -> i64 {
         .unwrap_or(0)
 }
 
-fn parse_epoch(s: &str) -> Option<i64> {
+pub(crate) fn parse_epoch(s: &str) -> Option<i64> {
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -2393,6 +2651,137 @@ mod tests {
     fn recent_exhaust_zero_limit_returns_empty() {
         let rows = vec![task_with_id("T1", "accepted", NOW)];
         assert!(recent_exhaust(&rows, 0).is_empty());
+    }
+
+    #[test]
+    fn parse_epoch_is_pub_crate_visible_from_super() {
+        // Lock pub(crate) visibility so render.rs (sibling module) can call it.
+        use super::parse_epoch;
+        assert_eq!(parse_epoch("1970-01-01T00:00:00Z"), Some(0));
+    }
+
+    #[test]
+    fn seeded_external_review_round_trips_extended_fields() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE tasks (
+                display_id TEXT, status TEXT, title TEXT, claimed_by TEXT, updated_at TEXT,
+                tier_hint TEXT, linked_observations TEXT, blocked_reason TEXT,
+                current_phase INTEGER, current_cycle INTEGER, plan TEXT, plan_source TEXT,
+                contract TEXT, plan_review_log TEXT, cycles TEXT, wrap_log TEXT,
+                branch TEXT, workspace_path TEXT
+            );
+            CREATE TABLE observations (
+                display_id TEXT, status TEXT, priority TEXT, summary TEXT, updated_at TEXT,
+                body TEXT, source TEXT, task_id TEXT, priority_rank INTEGER, intent_contract TEXT,
+                locked_by TEXT, locked_at TEXT, lock_reason TEXT, evidence TEXT, resolution TEXT,
+                investigation_failure_reason TEXT
+            );
+            CREATE TABLE external_reviews (
+                id INTEGER PRIMARY KEY,
+                display_id TEXT, task_id TEXT, status TEXT, runner TEXT,
+                held_reason TEXT, next_retry_at TEXT, attempts INTEGER,
+                verdict TEXT, base_sha TEXT, head_sha TEXT, log_path TEXT,
+                transcript_path TEXT, started_at TEXT, completed_at TEXT, duration_ms INTEGER,
+                critical_count INTEGER, major_count INTEGER, minor_count INTEGER, findings TEXT
+            );
+            INSERT INTO external_reviews (
+                display_id, task_id, status, runner, attempts,
+                verdict, base_sha, head_sha, log_path, transcript_path,
+                started_at, completed_at, duration_ms,
+                critical_count, major_count, minor_count, findings
+            ) VALUES (
+                'ER001', 'T100', 'running', 'codex', 2,
+                'REVISE', 'abc123', 'def456', '/tmp/log', '/tmp/transcript',
+                '2026-05-09T01:00:00', '2026-05-09T01:05:00', 300000,
+                1, 2, 3, '[{"severity":"critical"},{"severity":"major"},{"severity":"major"},{"severity":"minor"}]'
+            );
+            "#,
+        )
+        .unwrap();
+        let rows = load_rows(&conn).unwrap();
+        let review = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Review(r) => Some(r),
+                _ => None,
+            })
+            .expect("review row loaded");
+        assert_eq!(review.verdict.as_deref(), Some("REVISE"));
+        assert_eq!(review.base_sha.as_deref(), Some("abc123"));
+        assert_eq!(review.head_sha.as_deref(), Some("def456"));
+        assert_eq!(review.log_path.as_deref(), Some("/tmp/log"));
+        assert_eq!(review.transcript_path.as_deref(), Some("/tmp/transcript"));
+        assert_eq!(review.started_at.as_deref(), Some("2026-05-09T01:00:00"));
+        assert_eq!(review.completed_at.as_deref(), Some("2026-05-09T01:05:00"));
+        assert_eq!(review.duration_ms, Some(300000));
+        assert_eq!(review.critical_count, Some(1));
+        assert_eq!(review.major_count, Some(2));
+        assert_eq!(review.minor_count, Some(3));
+        assert_eq!(review.findings_count, Some(4));
+    }
+
+    #[test]
+    fn task_row_extended_fields_round_trip() {
+        let conn = cockpit_conn();
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN claimed_at TEXT;
+             ALTER TABLE tasks ADD COLUMN integration_attempts TEXT;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,updated_at,linked_observations,claimed_at,integration_attempts) VALUES ('T200','executing','t','2026-05-01','[]','2026-05-01T12:00:00',?1)",
+            rusqlite::params![
+                r#"[{"attempt_no":1,"outcome":"rebase_conflict"},{"attempt_no":2,"outcome":"integrated"}]"#
+            ],
+        ).unwrap();
+
+        let rows = load_rows(&conn).unwrap();
+        let task = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Task(t) => Some(t),
+                _ => None,
+            })
+            .expect("task row loaded");
+        assert_eq!(task.claimed_at.as_deref(), Some("2026-05-01T12:00:00"));
+        assert_eq!(task.integration_attempts_count, 2);
+        assert_eq!(task.last_integration_outcome.as_deref(), Some("integrated"));
+    }
+
+    #[test]
+    fn intake_row_extended_fields_round_trip() {
+        let conn = cockpit_conn();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE intake (
+                display_id TEXT, status TEXT, summary TEXT, body TEXT, captured_at TEXT,
+                source_task TEXT, source_agent TEXT, risk_flags TEXT, cluster_key TEXT, decision TEXT,
+                missing_info_question TEXT, routed_to_observation TEXT, routed_to_arch_review TEXT, duplicate_of TEXT, evidence TEXT,
+                recon_round INTEGER, decision_metadata TEXT
+            );
+            INSERT INTO intake (display_id,status,summary,captured_at,recon_round,decision_metadata)
+            VALUES ('I042','triaging','captured','2026-05-08T09:00:00',2,'{"rationale":"matches dispatch cluster","confidence":"high","tier_hint":"T2"}');
+            "#,
+        )
+        .unwrap();
+        let rows = load_rows(&conn).unwrap();
+        let intake = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Intake(i) => Some(i),
+                _ => None,
+            })
+            .expect("intake row loaded");
+        assert_eq!(intake.captured_at.as_deref(), Some("2026-05-08T09:00:00"));
+        assert_eq!(intake.recon_round, Some(2));
+        assert_eq!(
+            intake.decision_rationale.as_deref(),
+            Some("matches dispatch cluster")
+        );
+        assert_eq!(intake.decision_confidence.as_deref(), Some("high"));
+        assert_eq!(intake.decision_tier_hint.as_deref(), Some("T2"));
     }
 
     #[test]
