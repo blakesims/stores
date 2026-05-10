@@ -2143,23 +2143,11 @@ pub(crate) fn route_failure_to_deploy_blocked(
     policies_hash: &str,
     subscription_to: &str,
 ) {
-    // Only the `tasks` store declares `mark_deploy_blocked` today. Avoid the
-    // schema-load cost (and a spurious bundled-schema-not-found error) for
-    // other stores until generalization is in scope (out-of-scope per T046).
+    // Only the `tasks` store has stores-repo deployment-blocked routing today.
     if store != "tasks" {
         return;
     }
-    let schema = match crate::flow::builtins::load_tasks_schema() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "[daemon] route_failure_to_deploy_blocked: load schema: {}",
-                e
-            );
-            return;
-        }
-    };
-    let qtable = quote_ident(&schema.name);
+    let qtable = quote_ident(store);
     let current_status: Option<String> = conn
         .query_row(
             &format!("SELECT status FROM {} WHERE display_id = ?1", qtable),
@@ -2181,12 +2169,7 @@ pub(crate) fn route_failure_to_deploy_blocked(
     if subscription_to != current_status {
         return;
     }
-    let has_edge = schema.lifecycle.transitions.iter().any(|t| {
-        t.from == current_status
-            && t.verb == "mark_deploy_blocked"
-            && t.actor == Some(crate::schema::actor::Actor::Framework)
-    });
-    if !has_edge {
+    if current_status != "integrated" {
         return;
     }
     let blocked_reason = format!("subscriber '{}' failed: {}", agent_name, last_status);

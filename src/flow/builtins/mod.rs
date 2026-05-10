@@ -243,6 +243,65 @@ pub fn fire_framework_transition_for(
         }
     }
 
+    if schema.name == "tasks"
+        && matches!(
+            verb,
+            "mark_cargo_installed" | "mark_schema_migrated" | "mark_deploy_blocked"
+        )
+    {
+        if current_status != "integrated" {
+            anyhow::bail!("{verb} requires generic status integrated; got {current_status}");
+        }
+        if verb == "mark_schema_migrated"
+            && merged.get("post_integration_step").and_then(Value::as_str) != Some("cargo_installed")
+        {
+            anyhow::bail!("mark_schema_migrated requires post_integration_step=cargo_installed");
+        }
+        validate::validate(
+            schema,
+            &merged,
+            Op::Transition(verb.to_string(), diff.clone()),
+            Actor::Framework.into(),
+        )
+        .map_err(|errs| {
+            anyhow!(
+                "{} validation failed:\n{}",
+                verb,
+                validate::pretty_print(&errs)
+            )
+        })?;
+        inject_tasks_overlay_into_diff(
+            schema,
+            verb,
+            &current_status,
+            "integrated",
+            &mut diff,
+            &mut merged,
+        )?;
+        let phash_opt = if policies_hash.is_empty() {
+            None
+        } else {
+            Some(policies_hash)
+        };
+        execute_transition_write(
+            &tx,
+            schema,
+            row_id,
+            display_id,
+            &current_status,
+            "integrated",
+            verb,
+            &diff,
+            &merged,
+            Actor::Framework,
+            None,
+            phash_opt,
+            actor_note,
+        )?;
+        tx.commit()?;
+        return Ok(());
+    }
+
     let transition = select_transition(
         &schema.lifecycle.transitions,
         &current_status,

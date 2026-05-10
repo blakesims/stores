@@ -5,13 +5,16 @@ use stores::flow::builtins::fire_framework_transition_for;
 use stores::handlers::framework_migrate::apply_framework_drift;
 use stores::schema::Schema;
 
-fn tasks_schema() -> Schema {
-    let yaml = BUNDLED_STORE_SCHEMAS
+fn tasks_schema_yaml() -> &'static str {
+    BUNDLED_STORE_SCHEMAS
         .iter()
         .find(|(n, _)| *n == "tasks")
         .map(|(_, y)| *y)
-        .unwrap();
-    Schema::from_yaml(yaml).unwrap()
+        .unwrap()
+}
+
+fn tasks_schema() -> Schema {
+    Schema::from_yaml(tasks_schema_yaml()).unwrap()
 }
 
 fn conn() -> Connection {
@@ -49,6 +52,25 @@ fn generic_lifecycle_excludes_repo_specific() {
         assert!(
             !schema.lifecycle.states.iter().any(|s| s == state),
             "repo-specific state leaked into lifecycle.states: {state}"
+        );
+    }
+}
+
+#[test]
+fn repo_specific_terms_are_quarantined_to_field_enum_or_compat_comments() {
+    for (idx, line) in tasks_schema_yaml().lines().enumerate() {
+        let mentions_repo_specific = ["cargo_installed", "schema_migrated", "deploy_blocked"]
+            .iter()
+            .any(|term| line.contains(term));
+        if !mentions_repo_specific {
+            continue;
+        }
+        let allowed = line.contains("enum_values") || line.contains("compatibility");
+        assert!(
+            allowed,
+            "repo-specific post-integration term leaked into generic schema surface at line {}: {}",
+            idx + 1,
+            line
         );
     }
 }

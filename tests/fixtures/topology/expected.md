@@ -61,9 +61,6 @@ stateDiagram-v2
   integrating --> integrated :  F mark_integrated
   integrating --> integration_blocked :  F mark_integration_blocked
   integration_blocked --> integration_queued :  H+ retry-integration
-  integrated --> integrated :  F mark_cargo_installed
-  integrated --> integrated :  F mark_schema_migrated
-  integrated --> integrated :  F mark_deploy_blocked
   complete --> in_review :  F request_review
   in_review --> executing :  F submit-external-review [REVISE]
   in_review --> accepted :  H! accept

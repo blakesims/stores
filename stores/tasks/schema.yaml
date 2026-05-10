@@ -258,8 +258,8 @@ lifecycle:
     # interrupted (recorded in transition_history.from_status for
     # mark_drive_failed). Replanning is for invalid plans/contracts; stale
     # runner processes must not discard phase/cycle progress.
-    # deploy_blocked is release-ceremony recovery, not work-cycle resume:
-    # use retry-deploy after fixing the deploy issue, or close-out-of-band
+    # Deployment blockage is release-ceremony recovery, not work-cycle resume:
+    # use retry-deploy after fixing the deployment issue, or close-out-of-band
     # when manually recovered outside the substrate.
     - {from: blocked, to: planning, verb: resume, actor: ai_with_human, lifecycle: active, active_step: planning, integration_step: none, blocked: false, legacy_status: planning}
 
@@ -272,10 +272,9 @@ lifecycle:
 
     # accepted → integration_queued (framework, fired on-entry to enqueue the
     # generic integration lane). Replaces the prior direct accepted →
-    # cargo_installed edge: post-accept work is now serialized through the
+    # cargo install edge: post-accept work is now serialized through the
     # integration lane (queued → integrating → integrated), and post-integrated
-    # repo-specific verbs (cargo-install, schema-migrate) hang off the
-    # integrated state. T138 P1.
+    # repo-specific subscribers hang off the integrated state. T138 P1.
     - {from: accepted, to: integration_queued, verb: enqueue-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: queued, blocked: false, legacy_status: integration_queued}
 
     # integration_queued → integrating (framework, fired by builtin:integrate).
@@ -319,13 +318,6 @@ lifecycle:
     # integration_queued → integrating → integrated so subscribers fire on the
     # same edge for first attempts and retries. T138 P1.
     - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human, lifecycle: integration, active_step: none, integration_step: queued, blocked: false, legacy_status: integration_queued}
-
-    # integrated self-transitions update the stores-only post_integration_step column.
-    # cargo_installed/schema_migrated/deploy_blocked are compatibility status values only,
-    # not generic ADR0001 lifecycle states.
-    - {from: integrated, to: integrated, verb: mark_cargo_installed, actor: framework, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: integrated}
-    - {from: integrated, to: integrated, verb: mark_schema_migrated, actor: framework, guard: "post_integration_step == 'cargo_installed'", lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: integrated}
-    - {from: integrated, to: integrated, verb: mark_deploy_blocked, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: true, blocker_kind: deploy, legacy_status: integrated}
 
     # complete → in_review (framework on-entry follow-on)
     - {from: complete, to: in_review, verb: request_review, actor: framework, lifecycle: integration, active_step: wrapping, integration_step: none, blocked: false, legacy_status: in_review}

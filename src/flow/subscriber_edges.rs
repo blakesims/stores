@@ -259,9 +259,39 @@ impl SubscriberEdgeContract for SchemaMigrateContract {
         &[
             ("integrating", "integrated", "mark_verify_done", "schema-migrate waits for cargo-install post_integration_step"),
             ("integrating", "integrated", "mark_integrated", "schema-migrate waits for cargo-install post_integration_step"),
-            ("integrated", "integrated", "mark_schema_migrated", "schema-migrate terminal self-transition"),
-            ("integrated", "integrated", "mark_deploy_blocked", "deploy-blocked post_integration_step self-transition"),
         ]
+    }
+
+    fn evaluate(&self, agents: &AgentsYaml, _transitions: &[Transition]) -> CheckResult {
+        let args = json!({
+            "store": self.store(),
+            "agent": self.agent_name(),
+            "required_edge": {"from": "integrated", "to": "integrated"}
+        });
+        let covered = agents
+            .agents
+            .iter()
+            .find(|a| a.name == self.agent_name())
+            .map(|a| {
+                a.subscribes_to.iter().any(|sub| {
+                    sub.store == self.store()
+                        && sub.transition.from == "integrated"
+                        && sub.transition.to == "integrated"
+                })
+            })
+            .unwrap_or(false);
+        if covered {
+            CheckResult::pass(self.name(), &args)
+        } else {
+            CheckResult::fail(
+                self.name(),
+                &args,
+                json!({
+                    "missing_edges": [{"from": "integrated", "to": "integrated", "verb": "post_integration_step"}],
+                    "message": "agent 'schema-migrate' is missing subscription for cargo post-integration step"
+                }),
+            )
+        }
     }
 }
 
