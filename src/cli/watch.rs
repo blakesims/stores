@@ -353,9 +353,14 @@ fn task_disposition_glyph_and_label(t: &crate::tui::data::TaskRow) -> (char, &'s
         "display_id": t.display_id,
         "status": t.status,
         "activation": t.activation.clone().unwrap_or_else(|| "inactive".to_string()),
+        "human_acceptance_policy": t.human_acceptance_policy.clone().unwrap_or_else(|| "optional".to_string()),
+        "task_review_policy": t.task_review_policy.clone().unwrap_or_else(|| "none".to_string()),
         "branch": t.branch.clone().unwrap_or_default(),
         "linked_observations": t.linked_observations,
     });
+    if let Some(by) = &t.acceptance_decided_by {
+        row_json["acceptance_decided_by"] = json!(by);
+    }
     if let Some(at) = &t.accepted_at {
         row_json["accepted_at"] = json!(at);
     }

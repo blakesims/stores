@@ -44,6 +44,7 @@ pub mod gatekeeper_router_drain;
 pub mod gatekeeper_stub;
 pub mod integrate;
 pub mod investigator;
+pub mod release_to_integration;
 pub mod schema_migrate;
 pub mod user_escalation;
 
@@ -86,6 +87,7 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
         "gatekeeper-stub" => Some(gatekeeper_stub::run(row, ctx)),
         "integrate" => Some(integrate::run(row, ctx)),
         "investigator" => Some(investigator::run(row, ctx)),
+        "release-to-integration" => Some(release_to_integration::run(row, ctx)),
         "schema-migrate" => Some(schema_migrate::run(row, ctx)),
         "user-escalation" => Some(user_escalation::run(row, ctx)),
         _ => None,
@@ -104,6 +106,7 @@ pub fn postcondition_for_builtin(keyword: &str) -> Option<&'static str> {
         "auto-drive" => Some("drive_pid_recorded_or_terminal"),
         "cargo-install" => Some("cargo_installed_state"),
         "integrate" => Some("integrated_state"),
+        "release-to-integration" => Some("release_to_integration_state"),
         "schema-migrate" => Some("schema_migrated_state"),
         _ => None,
     }
@@ -224,6 +227,20 @@ pub fn fire_framework_transition_for(
     let mut merged = existing.clone();
     for (k, v) in &diff {
         merged.insert(k.clone(), v.clone());
+    }
+
+    if schema.name == "tasks" && verb == "release-to-integration" {
+        let policy = merged
+            .get("human_acceptance_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("optional");
+        let decided = merged.get("acceptance_decided_by").and_then(Value::as_str);
+        if policy == "required" && decided != Some("human") {
+            anyhow::bail!("human acceptance required but not recorded");
+        }
+        if policy == "delegated_by_policy" && !matches!(decided, Some("human" | "policy_delegate")) {
+            anyhow::bail!("delegated acceptance requires acceptance_decided_by");
+        }
     }
 
     let transition = select_transition(

@@ -352,7 +352,7 @@ fn tui_watch_live_realistic_snapshot_and_budget() {
     for required in [
         "ACTIVE WORK",
         "RATIFY-U1",
-        "ACCEPT-U3",
+        "AWAITING HUMAN ACCEPTANCE",
         "HELD-INTAKE",
         "HELD-ZOMBIE",
     ] {

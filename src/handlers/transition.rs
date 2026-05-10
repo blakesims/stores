@@ -776,6 +776,14 @@ pub(crate) fn run_in_tx(
     if schema.name == "observations" && verb == "wont_fix" {
         diff.insert("wont_fix_at".to_string(), Value::String(now_iso8601()));
     }
+    if schema.name == "tasks" && verb == "accept" {
+        let now = now_iso8601();
+        diff.insert(
+            "acceptance_decided_by".to_string(),
+            Value::String("human".to_string()),
+        );
+        diff.insert("acceptance_decided_at".to_string(), Value::String(now));
+    }
 
     // Deep-merge diff into existing; Record-typed fields get recursive
     // sub-field-level merge.
@@ -833,10 +841,18 @@ pub(crate) fn run_in_tx(
     }
 
     // Run validator against merged entry; actor checks scoped to diff only.
+    let validation_diff = if schema.name == "tasks" && verb == "accept" {
+        let mut d = diff.clone();
+        d.remove("acceptance_decided_by");
+        d.remove("acceptance_decided_at");
+        d
+    } else {
+        diff.clone()
+    };
     validate::validate(
         schema,
         &merged,
-        Op::Transition(verb.to_string(), diff.clone()),
+        Op::Transition(verb.to_string(), validation_diff),
         invoker,
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;

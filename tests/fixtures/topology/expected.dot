@@ -86,6 +86,9 @@ digraph stores_topology {
     "z1_tasks__complete" -> "z1_tasks__in_review" [label=" F\nrequest_review", color=gray, fontcolor=gray];
     "z1_tasks__in_review" -> "z1_tasks__executing" [label=" F\nsubmit-external-review\n[REVISE]", color=gray, fontcolor=gray];
     "z1_tasks__in_review" -> "z1_tasks__accepted" [label=" H!\naccept", color=red, fontcolor=red];
+    "z1_tasks__complete" -> "z1_tasks__integration_queued" [label=" F\nrelease-to-integration", color=gray, fontcolor=gray];
+    "z1_tasks__in_review" -> "z1_tasks__integration_queued" [label=" F\nrelease-to-integration", color=gray, fontcolor=gray];
+    "z1_tasks__accepted" -> "z1_tasks__integration_queued" [label=" F\nrelease-to-integration", color=gray, fontcolor=gray];
     "z1_tasks__in_review" -> "z1_tasks__rejected" [label=" H!\nreject", color=red, fontcolor=red];
     "z1_tasks__rejected" -> "z1_tasks__planning" [label=" H+\namend", color=gold, fontcolor=gold];
     "z1_tasks__planning" -> "z1_tasks__abandoned" [label=" H!\nabandon", color=red, fontcolor=red];
@@ -180,9 +183,6 @@ digraph stores_topology {
     "z2_tasks__in_review" [label="in_review"];
     "z2_tasks__in_review__role_0_wrap" [shape=ellipse, label="wrap"];
     "z2_tasks__in_review" -> "z2_tasks__in_review__role_0_wrap" [label="→ wrap", color=green, fontcolor=green];
-    "z2_tasks__accepted" [label="accepted"];
-    "z2_tasks__integration_queued" [label="integration_queued"];
-    "z2_tasks__accepted" -> "z2_tasks__integration_queued" [label="⇒ auto", color=gray, fontcolor=gray];
   }
 
 }

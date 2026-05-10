@@ -70,6 +70,9 @@ stateDiagram-v2
   complete --> in_review :  F request_review
   in_review --> executing :  F submit-external-review [REVISE]
   in_review --> accepted :  H! accept
+  complete --> integration_queued :  F release-to-integration
+  in_review --> integration_queued :  F release-to-integration
+  accepted --> integration_queued :  F release-to-integration
   in_review --> rejected :  H! reject
   rejected --> planning :  H+ amend
   planning --> abandoned :  H! abandon
@@ -153,6 +156,5 @@ stateDiagram-v2
   complete --> in_review :  F ⇒ auto
   state "wrap" as in_review_role_0_wrap
   in_review --> in_review_role_0_wrap :  A → wrap
-  accepted --> integration_queued :  F ⇒ auto
 ```
 

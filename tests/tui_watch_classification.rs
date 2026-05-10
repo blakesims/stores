@@ -60,7 +60,7 @@ fn tui_watch_classification_section_labels_are_contract_taxonomy_and_unique() {
     let expected = vec![
         "ACTIVE WORK",
         "RATIFY-U1",
-        "ACCEPT-U3",
+        "AWAITING HUMAN ACCEPTANCE",
         "INTEGRATION",
         "INTEGRATED",
         "HELD-INTEGRATION",

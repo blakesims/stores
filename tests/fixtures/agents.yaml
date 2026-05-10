@@ -13,6 +13,22 @@ agents:
         transition:
           from: accepted
           to: integration_queued
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition:
+          from: complete
+          to: integration_queued
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition:
+          from: in_review
+          to: integration_queued
         # T140 P2: gate on per-row activation. Only `active` rows enter the
         # integration lane; inactive rows queue but never combust.
         predicate:

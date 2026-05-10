@@ -65,6 +65,18 @@ agents:
     subscribes_to:
       - store: tasks
         transition: { from: accepted, to: integration_queued }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition: { from: complete, to: integration_queued }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition: { from: in_review, to: integration_queued }
         # T140 P2: per-row activation gate on the work-starting class.
         # Inactive rows enqueue (so plan-start surfaces them) but never
         # enter the integration lane until an operator activates them.

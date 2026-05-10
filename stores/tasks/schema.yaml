@@ -6,6 +6,24 @@ fields:
   - {name: title, type: text, required: true, actor: ai_with_human}
   - {name: slug, type: text, required: true, pattern: "^[a-z0-9-]+$", actor: ai_with_human}
   - {name: branch, type: text, required: false}
+  - name: human_acceptance_policy
+    type: enum
+    enum_values: [required, optional, delegated_by_policy]
+    required: false
+    actor: ai_with_human
+    default: optional
+  - name: task_review_policy
+    type: enum
+    enum_values: [none, advisory, authoritative, both]
+    required: false
+    actor: ai_with_human
+    default: none
+  - name: acceptance_decided_by
+    type: enum
+    enum_values: [human, policy_delegate]
+    required: false
+    actor: framework
+  - {name: acceptance_decided_at, type: timestamp, required: false, actor: framework}
   - {name: workspace_path, type: text, required: false}
   - {name: capability, type: text}
   - {name: sub_item, type: text}
@@ -53,7 +71,7 @@ fields:
     default: 'none'
   - name: integration_step
     type: enum
-    enum_values: [none, refreshing, task_review, testing, merging, deploying, verifying]
+    enum_values: [none, queued, refreshing, task_review, testing, merging, deploying, verifying]
     required: false
     actor: framework
     default: 'none'
@@ -252,7 +270,7 @@ lifecycle:
     # integration lane (queued → integrating → integrated), and post-integrated
     # repo-specific verbs (cargo-install, schema-migrate) hang off the
     # integrated state. T138 P1.
-    - {from: accepted, to: integration_queued, verb: enqueue-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: integration_queued}
+    - {from: accepted, to: integration_queued, verb: enqueue-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: queued, blocked: false, legacy_status: integration_queued}
 
     # integration_queued → integrating (framework, fired by builtin:integrate).
     # ADR0001 P3 decomposes the historical singleton "integrating" status into
@@ -294,7 +312,7 @@ lifecycle:
     # integration_blocked → integrated direct edge — retry must re-traverse
     # integration_queued → integrating → integrated so subscribers fire on the
     # same edge for first attempts and retries. T138 P1.
-    - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: integration_queued}
+    - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human, lifecycle: integration, active_step: none, integration_step: queued, blocked: false, legacy_status: integration_queued}
 
     # integrated → cargo_installed (framework, fired by builtin:cargo-install
     # on success). The ONLY post-integrated success edge stores subscribes to.
@@ -320,8 +338,11 @@ lifecycle:
     # later phase explicitly opts them into that lane.
     - {from: in_review, to: executing, verb: submit-external-review, actor: framework, requires_gate: REVISE, lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
 
-    # in_review → accepted / rejected (human gated)
-    - {from: in_review, to: accepted, verb: accept, actor: human, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: accepted}
+    # in_review acceptance records a durable policy decision; framework release-to-integration performs lane entry.
+    - {from: in_review, to: accepted, verb: accept, actor: human, lifecycle: active, active_step: wrapping, integration_step: none, blocked: false, legacy_status: accepted}
+    - {from: complete, to: integration_queued, verb: release-to-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: queued, blocked: false, legacy_status: integration_queued}
+    - {from: in_review, to: integration_queued, verb: release-to-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: queued, blocked: false, legacy_status: integration_queued}
+    - {from: accepted, to: integration_queued, verb: release-to-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: queued, blocked: false, legacy_status: integration_queued}
     - {from: in_review, to: rejected, verb: reject, actor: human, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: rejected}
     # rejected → planning (amend: re-open contract authoring)
     - {from: rejected, to: planning, verb: amend, actor: ai_with_human, lifecycle: active, active_step: planning, integration_step: none, blocked: false, legacy_status: planning}
@@ -386,8 +407,7 @@ workflow:
       - transition_to: in_review
     in_review:
       - dispatch_agent: wrap
-    accepted:
-      - transition_to: integration_queued
+    accepted: []
     integration_queued: []
     integrating: []
     integration_blocked: []

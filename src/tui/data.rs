@@ -39,7 +39,7 @@ impl Section {
         match self {
             Section::TasksActionableCurrentWork => "ACTIVE WORK",
             Section::ObsRatifiable => "RATIFY-U1",
-            Section::TasksAcceptU3 => "ACCEPT-U3",
+            Section::TasksAcceptU3 => "AWAITING HUMAN ACCEPTANCE",
             Section::TasksIntegration => "INTEGRATION",
             Section::TasksIntegratedAwaitingPostLand => "INTEGRATED",
             Section::TasksIntegrationBlocked => "HELD-INTEGRATION",
@@ -177,6 +177,9 @@ pub struct TaskRow {
     /// the operator-disposition glyph. `None` means the substrate did not
     /// expose the column (legacy schema); render falls back to "inactive".
     pub activation: Option<String>,
+    pub human_acceptance_policy: Option<String>,
+    pub task_review_policy: Option<String>,
+    pub acceptance_decided_by: Option<String>,
     /// T140 P5: latest `accepted_at` recovered from `transition_history`,
     /// used by the disposition function to distinguish historical-legacy
     /// from deploy-ceremony-pending accepted rows.
@@ -832,7 +835,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
                 {current_phase}, {current_cycle}, {total_phases}, {plan_source}, \
                 {contract_executive_intent}, {contract_done_when}, {contract_scope_in}, {contract_scope_out}, \
                 {plan_review_log}, {cycles}, {wrap_log}, {branch}, {workspace_path}, {drive_pid}, {drive_started_at}, \
-                {activation}, {claimed_at}, {integration_attempts_expr}, rowid FROM tasks",
+                {activation}, {human_acceptance_policy}, {task_review_policy}, {acceptance_decided_by}, {claimed_at}, {integration_attempts_expr}, rowid FROM tasks",
         title = sql_col(&task_cols, "title", "''"),
         claimed_by = sql_col(&task_cols, "claimed_by", "NULL"),
         updated_at = sql_col(&task_cols, "updated_at", "''"),
@@ -855,6 +858,9 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         drive_pid = sql_col(&task_cols, "drive_pid", "NULL"),
         drive_started_at = sql_col(&task_cols, "drive_started_at", "NULL"),
         activation = sql_col(&task_cols, "activation", "NULL"),
+        human_acceptance_policy = sql_col(&task_cols, "human_acceptance_policy", "NULL"),
+        task_review_policy = sql_col(&task_cols, "task_review_policy", "NULL"),
+        acceptance_decided_by = sql_col(&task_cols, "acceptance_decided_by", "NULL"),
         claimed_at = sql_col(&task_cols, "claimed_at", "NULL"),
     );
 
@@ -896,9 +902,12 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         let drive_pid: Option<i64> = r.get(26).ok().flatten();
         let drive_started_at: Option<String> = r.get(27).ok().flatten();
         let activation: Option<String> = r.get(28).ok().flatten();
-        let claimed_at: Option<String> = r.get(29).ok().flatten();
-        let integration_attempts_raw: Option<String> = r.get(30).ok().flatten();
-        let row_id: i64 = r.get(31)?;
+        let human_acceptance_policy: Option<String> = r.get(29).ok().flatten();
+        let task_review_policy: Option<String> = r.get(30).ok().flatten();
+        let acceptance_decided_by: Option<String> = r.get(31).ok().flatten();
+        let claimed_at: Option<String> = r.get(32).ok().flatten();
+        let integration_attempts_raw: Option<String> = r.get(33).ok().flatten();
+        let row_id: i64 = r.get(34)?;
         let display_id: String = r.get(0)?;
         let (integration_attempts_count, last_integration_outcome) =
             integration_attempts_summary(integration_attempts_raw.as_deref());
@@ -941,6 +950,9 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             artifact_pointers: Vec::new(),
             recent_events: Vec::new(),
             activation,
+            human_acceptance_policy,
+            task_review_policy,
+            acceptance_decided_by,
             accepted_at: accepted_at_map.get(&row_id).cloned(),
             claimed_at,
             integration_attempts_count,
@@ -2087,7 +2099,7 @@ mod tests {
         let expected = vec![
             "ACTIVE WORK",
             "RATIFY-U1",
-            "ACCEPT-U3",
+            "AWAITING HUMAN ACCEPTANCE",
             "INTEGRATION",
             "INTEGRATED",
             "HELD-INTEGRATION",

@@ -454,6 +454,10 @@ agents:
       - store: tasks
         transition: { from: accepted, to: integration_queued }
       - store: tasks
+        transition: { from: complete, to: integration_queued }
+      - store: tasks
+        transition: { from: in_review, to: integration_queued }
+      - store: tasks
         transition: { from: integration_blocked, to: integration_queued }
     command: "builtin:integrate"
 "#;
@@ -474,6 +478,10 @@ agents:
     subscribes_to:
       - store: tasks
         transition: { from: accepted, to: integration_queued }
+      - store: tasks
+        transition: { from: complete, to: integration_queued }
+      - store: tasks
+        transition: { from: in_review, to: integration_queued }
     command: "builtin:integrate"
 "#;
         let agents = parse_inline_agents(yaml_drop_retry);
@@ -498,6 +506,10 @@ agents:
 agents:
   - name: integrate
     subscribes_to:
+      - store: tasks
+        transition: { from: complete, to: integration_queued }
+      - store: tasks
+        transition: { from: in_review, to: integration_queued }
       - store: tasks
         transition: { from: integration_blocked, to: integration_queued }
     command: "builtin:integrate"

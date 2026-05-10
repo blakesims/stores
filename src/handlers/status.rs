@@ -97,6 +97,8 @@ pub struct TaskState {
     pub lifecycle: Option<String>,
     pub active_step: Option<String>,
     pub integration_step: Option<String>,
+    pub human_acceptance_policy: Option<String>,
+    pub task_review_policy: Option<String>,
 }
 
 /// Dedup key: hash the fields that define "same state".
@@ -235,12 +237,14 @@ pub fn format_task_line(task: &TaskState) -> String {
     let next = next_from_status(&task.status);
     let blocked = crate::handlers::is_blocked(&task.status, task.blocked_reason.as_deref());
     format!(
-        "{id} status={status} lifecycle={lifecycle} active_step={active_step} integration_step={integration_step} phase={phase} cycle={cycle} next={next} blocked={blocked}",
+        "{id} status={status} lifecycle={lifecycle} active_step={active_step} integration_step={integration_step} human_acceptance_policy={human_acceptance_policy} task_review_policy={task_review_policy} phase={phase} cycle={cycle} next={next} blocked={blocked}",
         id = task.display_id,
         status = task.status,
         lifecycle = task.lifecycle.as_deref().unwrap_or("-"),
         active_step = task.active_step.as_deref().unwrap_or("-"),
         integration_step = task.integration_step.as_deref().unwrap_or("-"),
+        human_acceptance_policy = task.human_acceptance_policy.as_deref().unwrap_or("-"),
+        task_review_policy = task.task_review_policy.as_deref().unwrap_or("-"),
         phase = phase_str,
         cycle = cycle_str,
         next = next,
@@ -270,7 +274,7 @@ pub fn compute_multi_frame(tasks: &[TaskState]) -> String {
 // DB fetchers
 // ---------------------------------------------------------------------------
 
-fn task_projection_exprs(conn: &Connection) -> Result<(String, String, String)> {
+fn task_projection_exprs(conn: &Connection) -> Result<(String, String, String, String, String)> {
     let cols: Vec<String> = {
         let mut stmt = conn.prepare("PRAGMA table_info(tasks)")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
@@ -283,14 +287,20 @@ fn task_projection_exprs(conn: &Connection) -> Result<(String, String, String)> 
             "NULL".to_string()
         }
     };
-    Ok((expr("lifecycle"), expr("active_step"), expr("integration_step")))
+    Ok((
+        expr("lifecycle"),
+        expr("active_step"),
+        expr("integration_step"),
+        expr("human_acceptance_policy"),
+        expr("task_review_policy"),
+    ))
 }
 
 /// Fetch a single task row by display_id from an open connection.
 pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
-    let (lifecycle_expr, active_step_expr, integration_step_expr) = task_projection_exprs(conn)?;
+    let (lifecycle_expr, active_step_expr, integration_step_expr, human_acceptance_policy_expr, task_review_policy_expr) = task_projection_exprs(conn)?;
     let sql = format!(
-        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan, {lifecycle_expr}, {active_step_expr}, {integration_step_expr} \
+        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan, {lifecycle_expr}, {active_step_expr}, {integration_step_expr}, {human_acceptance_policy_expr}, {task_review_policy_expr} \
          FROM tasks WHERE display_id = ?1"
     );
     let row = conn.query_row(
@@ -307,6 +317,8 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         },
     );
@@ -325,6 +337,8 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
             lifecycle,
             active_step,
             integration_step,
+            human_acceptance_policy,
+            task_review_policy,
         )) => {
             let total_phases = plan_json
                 .as_deref()
@@ -344,6 +358,8 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
                 lifecycle,
                 active_step,
                 integration_step,
+                human_acceptance_policy,
+                task_review_policy,
             })
         }
     }
@@ -356,9 +372,9 @@ pub fn fetch_task(conn: &Connection, display_id: &str) -> Result<TaskState> {
 /// `blocked` and `in_review` ARE included — they are awaiting human input but are
 /// still "active" from a monitoring standpoint.
 pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
-    let (lifecycle_expr, active_step_expr, integration_step_expr) = task_projection_exprs(conn)?;
+    let (lifecycle_expr, active_step_expr, integration_step_expr, human_acceptance_policy_expr, task_review_policy_expr) = task_projection_exprs(conn)?;
     let sql = format!(
-        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan, {lifecycle_expr}, {active_step_expr}, {integration_step_expr} \
+        "SELECT display_id, status, current_phase, current_cycle, blocked_reason, plan, {lifecycle_expr}, {active_step_expr}, {integration_step_expr}, {human_acceptance_policy_expr}, {task_review_policy_expr} \
          FROM tasks \
          WHERE status NOT IN ('accepted', 'rejected', 'abandoned', 'closed_out_of_band', 'schema_migrated') \
          ORDER BY created_at ASC"
@@ -375,6 +391,8 @@ pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
             row.get::<_, Option<String>>(6)?,
             row.get::<_, Option<String>>(7)?,
             row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<String>>(9)?,
+            row.get::<_, Option<String>>(10)?,
         ))
     })?;
     let mut result = Vec::new();
@@ -389,6 +407,8 @@ pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
             lifecycle,
             active_step,
             integration_step,
+            human_acceptance_policy,
+            task_review_policy,
         ) = row?;
         let total_phases = plan_json
             .as_deref()
@@ -408,6 +428,8 @@ pub fn fetch_all_tasks(conn: &Connection) -> Result<Vec<TaskState>> {
             lifecycle,
             active_step,
             integration_step,
+            human_acceptance_policy,
+            task_review_policy,
         });
     }
     Ok(result)

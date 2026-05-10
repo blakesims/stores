@@ -121,6 +121,8 @@ pub enum Disposition {
     /// Mid-cycle row: status in `executing | code_review | integrating`.
     /// Drive is presumed underway.
     ActiveEngineWork,
+    /// Finished work parked at the human acceptance gate, before integration release.
+    AwaitingHumanAcceptance,
     /// Row in the integration lane (`integration_queued | integration_blocked`).
     /// Combustion gated by activation.
     AwaitingIntegration { activation_active: bool },
@@ -172,6 +174,7 @@ impl Disposition {
     pub fn plan_start_bucket(&self) -> PlanStartBucket {
         match self {
             Disposition::ActiveEngineWork => PlanStartBucket::WouldRun,
+            Disposition::AwaitingHumanAcceptance => PlanStartBucket::NeedsOperator,
             Disposition::AwaitingIntegration { activation_active } => {
                 if *activation_active {
                     PlanStartBucket::WouldRun
@@ -203,6 +206,7 @@ impl Disposition {
     pub fn display_label(&self) -> &'static str {
         match self {
             Disposition::ActiveEngineWork => "Active engine work",
+            Disposition::AwaitingHumanAcceptance => "Awaiting human acceptance",
             Disposition::AwaitingIntegration {
                 activation_active: true,
             } => "Awaiting integration (active)",
@@ -282,6 +286,11 @@ pub fn operator_disposition(
             Disposition::EngineActionable { activation_active }
         }
         "in_review" => {
+            let acceptance_policy = row_str(row, "human_acceptance_policy").unwrap_or("optional");
+            let accepted = row_str(row, "acceptance_decided_by").is_some();
+            if acceptance_policy == "required" && !accepted {
+                return Disposition::AwaitingHumanAcceptance;
+            }
             // Sanity refinement: if the branch already shipped (merged into
             // target) but the row is still parked in_review, the operator
             // needs to disposition it. Errors and missing-branch fall back

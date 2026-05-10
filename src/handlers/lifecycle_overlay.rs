@@ -108,12 +108,13 @@ pub fn derive(
         ),
         (_, "complete") => overlay("integration", "wrapping", "none", false, None),
         (_, "in_review") => overlay("integration", "wrapping", "none", false, None),
+        ("accept", "accepted") => overlay("active", "wrapping", "none", false, None),
         (_, "accepted") => overlay("integration", "none", "none", false, None),
         (_, "rejected") => overlay("done", "none", "none", false, None),
         (_, "deploy_blocked") => {
             overlay("integration", "none", "none", true, Some("deploy".into()))
         }
-        (_, "integration_queued") => overlay("integration", "none", "none", false, None),
+        (_, "integration_queued") => overlay("integration", "none", "queued", false, None),
         (_, "integrating") => overlay("integration", "none", "merging", false, None),
         (_, "integration_blocked") => overlay(
             "integration",
@@ -152,6 +153,7 @@ pub fn legacy(overlay: &LifecycleOverlay) -> Result<String> {
         ("active", "coding_review", "none", false, None) => Ok("code_review".into()),
         ("active", "none", "none", true, _) => Ok("blocked".into()),
         ("integration", "wrapping", "none", false, None) => Ok("complete".into()),
+        ("integration", "none", "queued", false, None) => Ok("integration_queued".into()),
         ("integration", "none", "none", false, None) => Ok("accepted".into()),
         ("integration", "none", "none", true, Some("deploy")) => Ok("deploy_blocked".into()),
         ("integration", "none", "refreshing", false, None)
@@ -245,7 +247,7 @@ mod tests {
             ),
             (
                 "integration_queued",
-                ("integration", "none", "none", false, None),
+                ("integration", "none", "queued", false, None),
             ),
             (
                 "integrating",
