@@ -122,10 +122,26 @@ pub fn acquire(conn: &rusqlite::Connection, p: &AcquireParams<'_>) -> Result<Fen
     let token = Uuid::new_v4().to_string();
     let acquired_at = fmt(now());
     let expires_at = p.ttl_secs.map(|s| fmt(now() + Duration::seconds(s as i64)));
-    tx.execute(
+    if let Err(e) = tx.execute(
         "INSERT INTO resource_locks (resource_id, owner_kind, owner_display_id, fencing_token, acquired_at, heartbeat_at, expires_at, daemon_epoch, claim_source) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL, ?7)",
         params![p.resource_id, p.owner_kind, p.owner_display_id, token, acquired_at, expires_at, p.claim_source],
-    )?;
+    ) {
+        let current_owner: Option<String> = tx
+            .query_row(
+                "SELECT owner_display_id FROM resource_locks WHERE resource_id=?1",
+                params![p.resource_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(current_owner) = current_owner {
+            return Err(ResourceLockBusy {
+                resource_id: p.resource_id.to_string(),
+                current_owner,
+            }
+            .into());
+        }
+        return Err(e.into());
+    }
     audit(
         &tx,
         p.resource_id,
