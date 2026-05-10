@@ -100,3 +100,24 @@ fn missing_branch_head_sha_forces_refresh() {
         FreshnessOutcome::StaleRequiresRefresh(_)
     ));
 }
+
+#[test]
+fn missing_affected_scope_forces_refresh_even_when_bases_match_main() {
+    let (_tmp, repo, _base, head) = repo();
+    let mut row = row(&repo, &head, json!(["src/lib.rs"]));
+    row.as_object_mut().unwrap().remove("affected_scope");
+    assert_eq!(
+        check_freshness(&row, &head).unwrap(),
+        FreshnessOutcome::StaleRequiresRefresh(Vec::new())
+    );
+}
+
+#[test]
+fn malformed_affected_scope_forces_refresh_even_when_bases_match_main() {
+    let (_tmp, repo, _base, head) = repo();
+    let row = row(&repo, &head, json!("not-json-list"));
+    assert_eq!(
+        check_freshness(&row, &head).unwrap(),
+        FreshnessOutcome::StaleRequiresRefresh(Vec::new())
+    );
+}

@@ -20,6 +20,11 @@ pub fn check_freshness(row: &Value, current_main_sha: &str) -> Result<FreshnessO
         return Ok(FreshnessOutcome::StaleRequiresRefresh(affected_scope(row)));
     }
 
+    let scope = affected_scope(row);
+    if scope.is_empty() {
+        return Ok(FreshnessOutcome::StaleRequiresRefresh(scope));
+    }
+
     let review_base = match field(row, "review_base_sha") {
         Some(v) => v,
         None => return Ok(FreshnessOutcome::StaleRequiresRereview(affected_scope(row))),
@@ -39,10 +44,6 @@ pub fn check_freshness(row: &Value, current_main_sha: &str) -> Result<FreshnessO
         return Ok(FreshnessOutcome::Ready);
     }
 
-    let scope = affected_scope(row);
-    if scope.is_empty() {
-        return Ok(FreshnessOutcome::StaleRequiresRefresh(scope));
-    }
     let changed = main_changed_paths(row, &review_base, current_main_sha)?;
     if intersects(&scope, &changed) {
         return Ok(FreshnessOutcome::StaleRequiresRereview(overlap(&scope, &changed)));
