@@ -1,5 +1,5 @@
-# Sample .stores/agents.yaml fixture — generic integration lane plus the
-# stores-specific post-`integrated` chain.
+# Sample .stores/agents.yaml fixture — durable release-to-integration subscriber,
+# generic integration lane, plus the stores-specific post-`integrated` chain.
 #
 # Kept in sync with docs/agents-yaml-example.yaml for the post-integrate
 # agents (integrate, cargo-install, schema-migrate, auto-resolve-observation)
@@ -7,6 +7,38 @@
 # not yet carry. The subscriber-edge contracts in
 # src/flow/subscriber_edges.rs evaluate against this file.
 agents:
+  - name: release-to-integration
+    subscribes_to:
+      - store: tasks
+        transition:
+          from: code_review
+          to: complete
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition:
+          from: complete
+          to: in_review
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition:
+          from: in_review
+          to: accepted
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+    command: "builtin:release-to-integration"
+    claim_window_secs: 300
+    retry_policy:
+      max_attempts: 1
+      backoff: linear
+
   - name: integrate
     subscribes_to:
       - store: tasks

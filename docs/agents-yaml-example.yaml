@@ -1,12 +1,13 @@
 # Reference `.stores/agents.yaml` — the generic integration lane plus the
 # stores-specific post-`integrated` chain (T138).
 #
-# Post-T138 ceremony for an `accepted` row:
+# Post-T146 ceremony for a row whose acceptance policy permits release:
 #
-#   1. accepted → integration_queued (framework on_entry; enqueues the row).
+#   1. builtin:release-to-integration fires from the framework subscriber and
+#      moves complete/in_review/accepted → integration_queued.
 #   2. builtin:integrate (this file) — the generic, repo-agnostic
-#      integration lane. Subscribes to (accepted→integration_queued) and
-#      (integration_blocked→integration_queued). Advances ADR0001
+#      integration lane. Subscribes to (complete|in_review|accepted→integration_queued)
+#      and (integration_blocked→integration_queued). Advances ADR0001
 #      integration_step through refreshing → task_review → testing →
 #      merging → deploying → verifying, refreshes the candidate against
 #      current main via the configured `refresh_strategy`, re-checks the
@@ -61,6 +62,30 @@
 # integration lane.
 
 agents:
+  - name: release-to-integration
+    subscribes_to:
+      - store: tasks
+        transition: { from: code_review, to: complete }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition: { from: complete, to: in_review }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+    command: "builtin:release-to-integration"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
   - name: integrate
     subscribes_to:
       - store: tasks
