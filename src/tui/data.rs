@@ -1480,16 +1480,28 @@ pub fn store_lane_for_row(row: &Row) -> StoreLane {
 
 /// Return up to `limit` newest terminal task rows, sorted by `updated_at`
 /// descending (display_id as tiebreaker). Used to render the "recent
-/// exhaust" strip — main task rows hide terminal history.
+/// exhaust" strip — main task rows hide terminal history. This mirrors the
+/// default watch classification policy: terminal rows older than the recent
+/// terminal window stay hidden unless the operator explicitly asks for history.
 pub fn recent_exhaust(rows: &[Row], limit: usize) -> Vec<&Row> {
     if limit == 0 {
         return Vec::new();
     }
+    let opts = WatchClassifyOptions::default();
+    let cutoff =
+        now_epoch().saturating_sub((opts.recent_terminal_days as i64).saturating_mul(SECS_PER_DAY));
     let mut indices: Vec<usize> = rows
         .iter()
         .enumerate()
         .filter_map(|(i, r)| match r {
-            Row::Task(t) if is_terminal_task_status(&t.status) => Some(i),
+            Row::Task(t)
+                if is_terminal_task_status(&t.status)
+                    && task_updated_epoch(r)
+                        .map(|updated| updated >= cutoff)
+                        .unwrap_or(false) =>
+            {
+                Some(i)
+            }
             _ => None,
         })
         .collect();
@@ -2193,7 +2205,10 @@ mod tests {
     #[test]
     fn store_lane_for_row_covers_each_row_variant() {
         assert_eq!(store_lane_for_row(&intake_row("draft")), StoreLane::Intake);
-        assert_eq!(store_lane_for_row(&obs_row("open")), StoreLane::Observations);
+        assert_eq!(
+            store_lane_for_row(&obs_row("open")),
+            StoreLane::Observations
+        );
         let collapsed = Row::CollapsedObs(CollapsedObsRow {
             section: Section::ObsOther,
             summary: "dupe".to_string(),
@@ -2313,13 +2328,8 @@ mod tests {
             oldest_claimed_at_epoch: Some(NOW - 90),
         };
         let daemon = super::super::daemon::Liveness::Dead;
-        let model = store_flow_model_at(
-            &[],
-            &health,
-            &daemon,
-            &ExternalReviewState::default(),
-            NOW,
-        );
+        let model =
+            store_flow_model_at(&[], &health, &daemon, &ExternalReviewState::default(), NOW);
         assert_eq!(model.intake, IntakeFlow::default());
         assert_eq!(model.observations, ObsFlow::default());
         assert_eq!(model.tasks, TasksFlow::default());
@@ -2350,13 +2360,14 @@ mod tests {
 
     #[test]
     fn recent_exhaust_caps_at_limit_and_orders_newest_first() {
+        let now = now_epoch();
         let rows: Vec<Row> = vec![
-            task_with_id("T1", "accepted", NOW - 300),
-            task_with_id("T2", "complete", NOW - 100),
-            task_with_id("T3", "rejected", NOW - 200),
-            task_with_id("T4", "executing", NOW - 50),
-            task_with_id("T5", "abandoned", NOW - 400),
-            task_with_id("T6", "schema_migrated", NOW - 10),
+            task_with_id("T1", "accepted", now - 300),
+            task_with_id("T2", "complete", now - 100),
+            task_with_id("T3", "rejected", now - 200),
+            task_with_id("T4", "executing", now - 50),
+            task_with_id("T5", "abandoned", now - 400),
+            task_with_id("T6", "schema_migrated", now - 10),
         ];
         let exhaust = recent_exhaust(&rows, 3);
         assert_eq!(exhaust.len(), 3);

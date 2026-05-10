@@ -323,6 +323,9 @@ impl App {
                 if store_lane_for_row(row) != self.focused_store {
                     continue;
                 }
+                if *sec == Section::TasksRecentlyTerminal {
+                    continue;
+                }
                 if self.filter.is_empty() || self.filter.matches(row, *sec) {
                     out.push(FlatRow {
                         section: sec_idx,
@@ -510,9 +513,7 @@ fn local_clock_string() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::data::{
-        classify, store_lane_for_row, IntakeRow, ObsRow, ReviewRow, TaskRow,
-    };
+    use super::super::data::{classify, store_lane_for_row, IntakeRow, ObsRow, ReviewRow, TaskRow};
     use super::*;
 
     fn task(status: &str) -> Row {
