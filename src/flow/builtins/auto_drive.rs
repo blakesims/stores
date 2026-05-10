@@ -2740,6 +2740,7 @@ mod tests {
                     from: "".to_string(),
                     to: "planning".to_string(),
                 },
+                integration_step: None,
                 predicate: None,
             }],
             command: "builtin:auto-drive".to_string(),

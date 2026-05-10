@@ -1339,6 +1339,7 @@ mod tests {
                         from: "deploy_blocked".to_string(),
                         to: "accepted".to_string(),
                     },
+                    integration_step: None,
                     predicate: None,
                 }],
                 command: "builtin:cargo-install".to_string(),

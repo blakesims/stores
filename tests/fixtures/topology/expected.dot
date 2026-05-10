@@ -69,6 +69,12 @@ digraph stores_topology {
     "z1_tasks__code_review" -> "z1_tasks__blocked" [label=" F\nmark_drive_failed", color=gray, fontcolor=gray];
     "z1_tasks__accepted" -> "z1_tasks__integration_queued" [label=" F\nenqueue-integration", color=gray, fontcolor=gray];
     "z1_tasks__integration_queued" -> "z1_tasks__integrating" [label=" F\nstart-integration", color=gray, fontcolor=gray];
+    "z1_tasks__integrating" -> "z1_tasks__integrating" [label=" F\nmark_refresh_done", color=gray, fontcolor=gray];
+    "z1_tasks__integrating" -> "z1_tasks__integrating" [label=" F\nmark_task_review_done", color=gray, fontcolor=gray];
+    "z1_tasks__integrating" -> "z1_tasks__integrating" [label=" F\nmark_testing_done", color=gray, fontcolor=gray];
+    "z1_tasks__integrating" -> "z1_tasks__integrating" [label=" F\nmark_merge_done", color=gray, fontcolor=gray];
+    "z1_tasks__integrating" -> "z1_tasks__integrating" [label=" F\nmark_deploy_done", color=gray, fontcolor=gray];
+    "z1_tasks__integrating" -> "z1_tasks__integrated" [label=" F\nmark_verify_done", color=gray, fontcolor=gray];
     "z1_tasks__integrating" -> "z1_tasks__integrated" [label=" F\nmark_integrated", color=gray, fontcolor=gray];
     "z1_tasks__integrating" -> "z1_tasks__integration_blocked" [label=" F\nmark_integration_blocked", color=gray, fontcolor=gray];
     "z1_tasks__integration_blocked" -> "z1_tasks__integration_queued" [label=" H+\nretry-integration", color=gold, fontcolor=gold];

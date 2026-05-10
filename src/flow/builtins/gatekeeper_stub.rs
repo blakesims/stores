@@ -161,6 +161,7 @@ mod tests {
                         from: "draft".to_string(),
                         to: "triaging".to_string(),
                     },
+                    integration_step: None,
                     predicate: None,
                 }],
                 command: "builtin:gatekeeper-stub".to_string(),

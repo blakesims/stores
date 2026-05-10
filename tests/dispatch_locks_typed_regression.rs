@@ -75,6 +75,7 @@ fn agent(name: &str, store: &str, from: &str, to: &str, command: &str) -> AgentE
                 from: from.to_string(),
                 to: to.to_string(),
             },
+            integration_step: None,
             predicate: None,
         }],
         command: command.to_string(),

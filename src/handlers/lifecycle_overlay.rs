@@ -74,40 +74,60 @@ pub fn derive(
         return Ok(out);
     }
 
-    let mut out = match to_status {
-        "planning" if verb == "create" => overlay("queued", "none", "none", false, None),
-        "planning" => overlay("active", "planning", "none", false, None),
-        "plan_review" => overlay("active", "planning_review", "none", false, None),
-        "ready" => overlay("active", "none", "none", false, None),
-        "executing" => overlay("active", "coding", "none", false, None),
-        "code_review" => overlay("active", "coding_review", "none", false, None),
-        "blocked" => overlay(
+    let mut out = match (verb, to_status) {
+        ("create", "planning") => overlay("queued", "none", "none", false, None),
+        ("start-integration", "integrating") => {
+            overlay("integration", "none", "refreshing", false, None)
+        }
+        ("mark_refresh_done", "integrating") => {
+            overlay("integration", "none", "task_review", false, None)
+        }
+        ("mark_task_review_done", "integrating") => {
+            overlay("integration", "none", "testing", false, None)
+        }
+        ("mark_testing_done", "integrating") => {
+            overlay("integration", "none", "merging", false, None)
+        }
+        ("mark_merge_done", "integrating") => {
+            overlay("integration", "none", "deploying", false, None)
+        }
+        ("mark_deploy_done", "integrating") => {
+            overlay("integration", "none", "verifying", false, None)
+        }
+        (_, "planning") => overlay("active", "planning", "none", false, None),
+        (_, "plan_review") => overlay("active", "planning_review", "none", false, None),
+        (_, "ready") => overlay("active", "none", "none", false, None),
+        (_, "executing") => overlay("active", "coding", "none", false, None),
+        (_, "code_review") => overlay("active", "coding_review", "none", false, None),
+        (_, "blocked") => overlay(
             "active",
             "none",
             "none",
             true,
             derive_blocked_kind(verb, from_status, blocked_reason),
         ),
-        "complete" => overlay("integration", "wrapping", "none", false, None),
-        "in_review" => overlay("integration", "wrapping", "none", false, None),
-        "accepted" => overlay("integration", "none", "none", false, None),
-        "rejected" => overlay("done", "none", "none", false, None),
-        "deploy_blocked" => overlay("integration", "none", "none", true, Some("deploy".into())),
-        "integration_queued" => overlay("integration", "none", "none", false, None),
-        "integrating" => overlay("integration", "none", "merging", false, None),
-        "integration_blocked" => overlay(
+        (_, "complete") => overlay("integration", "wrapping", "none", false, None),
+        (_, "in_review") => overlay("integration", "wrapping", "none", false, None),
+        (_, "accepted") => overlay("integration", "none", "none", false, None),
+        (_, "rejected") => overlay("done", "none", "none", false, None),
+        (_, "deploy_blocked") => {
+            overlay("integration", "none", "none", true, Some("deploy".into()))
+        }
+        (_, "integration_queued") => overlay("integration", "none", "none", false, None),
+        (_, "integrating") => overlay("integration", "none", "merging", false, None),
+        (_, "integration_blocked") => overlay(
             "integration",
             "none",
             "none",
             true,
             derive_integration_blocker_kind(integration_blocked_reason),
         ),
-        "integrated" => overlay("done", "none", "none", false, None),
-        "cargo_installed" => overlay("done", "none", "none", false, None),
-        "schema_migrated" => overlay("done", "none", "none", false, None),
-        "closed_out_of_band" => overlay("done", "none", "none", false, None),
-        "abandoned" => overlay("done", "none", "none", false, None),
-        other => bail!("unknown task to_status for lifecycle overlay: {other}"),
+        (_, "integrated") => overlay("done", "none", "none", false, None),
+        (_, "cargo_installed") => overlay("done", "none", "none", false, None),
+        (_, "schema_migrated") => overlay("done", "none", "none", false, None),
+        (_, "closed_out_of_band") => overlay("done", "none", "none", false, None),
+        (_, "abandoned") => overlay("done", "none", "none", false, None),
+        (_, other) => bail!("unknown task to_status for lifecycle overlay: {other}"),
     };
     out.legacy_status = Some(to_status.to_string());
     Ok(out)
@@ -134,7 +154,12 @@ pub fn legacy(overlay: &LifecycleOverlay) -> Result<String> {
         ("integration", "wrapping", "none", false, None) => Ok("complete".into()),
         ("integration", "none", "none", false, None) => Ok("accepted".into()),
         ("integration", "none", "none", true, Some("deploy")) => Ok("deploy_blocked".into()),
-        ("integration", "none", "merging", false, None) => Ok("integrating".into()),
+        ("integration", "none", "refreshing", false, None)
+        | ("integration", "none", "task_review", false, None)
+        | ("integration", "none", "testing", false, None)
+        | ("integration", "none", "merging", false, None)
+        | ("integration", "none", "deploying", false, None)
+        | ("integration", "none", "verifying", false, None) => Ok("integrating".into()),
         ("integration", "none", "none", true, _) => Ok("integration_blocked".into()),
         ("done", "none", "none", false, None) => Ok("integrated".into()),
         _ => bail!(

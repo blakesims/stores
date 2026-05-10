@@ -248,12 +248,11 @@ lifecycle:
     # integrated state. T138 P1.
     - {from: accepted, to: integration_queued, verb: enqueue-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: integration_queued}
 
-    # integration_queued → integrating (framework, fired by builtin:integrate
-    # when capacity is free). The capacity-1 partial UNIQUE index on
-    # tasks(status) WHERE status='integrating' guarantees at most one row
-    # holds the integrating slot substrate-wide. Concurrent attempts surface
-    # as SQLite ConstraintViolation, which the integrate builtin treats as
-    # capacity-busy and returns Ok(0). T138 P1.
+    # integration_queued → integrating (framework, fired by builtin:integrate).
+    # ADR0001 P3 decomposes the historical singleton "integrating" status into
+    # integration_step substeps. Only integration_step='merging' is serialized
+    # by the main_branch ResourceLock / partial index; refreshing, task_review,
+    # and testing may run in parallel.
     #
     # T140 P2: dual gating on activation. The integrate subscriber's
     # predicate (`activation == 'active'` in agents.yaml) is the primary
@@ -261,12 +260,19 @@ lifecycle:
     # bypassing the subscriber still cannot advance an inactive row through
     # the integration lane. The row stays at integration_queued without
     # error; plan-start surfaces it in the `inactive` bucket (P4).
-    - {from: integration_queued, to: integrating, verb: start-integration, actor: framework, guard: "activation == 'active'", lifecycle: integration, active_step: none, integration_step: merging, blocked: false, legacy_status: integrating}
+    - {from: integration_queued, to: integrating, verb: start-integration, actor: framework, guard: "activation == 'active'", lifecycle: integration, active_step: none, integration_step: refreshing, blocked: false, legacy_status: integrating}
+    - {from: integrating, to: integrating, verb: mark_refresh_done, actor: framework, lifecycle: integration, active_step: none, integration_step: task_review, blocked: false, legacy_status: integrating}
+    - {from: integrating, to: integrating, verb: mark_task_review_done, actor: framework, lifecycle: integration, active_step: none, integration_step: testing, blocked: false, legacy_status: integrating}
+    - {from: integrating, to: integrating, verb: mark_testing_done, actor: framework, lifecycle: integration, active_step: none, integration_step: merging, blocked: false, legacy_status: integrating}
+    - {from: integrating, to: integrating, verb: mark_merge_done, actor: framework, lifecycle: integration, active_step: none, integration_step: deploying, blocked: false, legacy_status: integrating}
+    - {from: integrating, to: integrating, verb: mark_deploy_done, actor: framework, lifecycle: integration, active_step: none, integration_step: verifying, blocked: false, legacy_status: integrating}
 
     # integrating → integrated (framework, fired by builtin:integrate after a
-    # successful refresh-against-main, pre-land check, and merge/push to main).
+    # successful refresh-against-main, task review freshness, testing,
+    # merge/push, deployment, and verification substeps).
     # Subscribers (e.g. stores' cargo-install) hang off the integrated state.
     # T138 P1.
+    - {from: integrating, to: integrated, verb: mark_verify_done, actor: framework, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: integrated}
     - {from: integrating, to: integrated, verb: mark_integrated, actor: framework, lifecycle: done, active_step: none, integration_step: none, blocked: false, legacy_status: integrated}
 
     # integrating → integration_blocked (framework, fired by builtin:integrate

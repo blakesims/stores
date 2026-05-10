@@ -115,6 +115,7 @@ fn agents(from: &str, to: &str, pre_land_check: &str) -> AgentsYaml {
                     from: from.into(),
                     to: to.into(),
                 },
+                integration_step: None,
                 predicate: None,
             }],
             command: "builtin:integrate".into(),

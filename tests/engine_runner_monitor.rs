@@ -134,6 +134,7 @@ fn agents_with_auto_drive() -> AgentsYaml {
                     from: String::new(),
                     to: "planning".to_string(),
                 },
+                integration_step: None,
                 predicate: None,
             }],
             command: "builtin:auto-drive".to_string(),

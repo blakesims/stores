@@ -82,15 +82,15 @@ fn pre_t144_tasks_rows_backfill_lifecycle_overlay_on_open() {
             ),
             (
                 "T003".into(),
-                "integration".into(),
-                "wrapping".into(),
+                "queued".into(),
+                "none".into(),
                 "none".into(),
                 0,
                 None
             ),
             (
                 "T004".into(),
-                "integration".into(),
+                "queued".into(),
                 "none".into(),
                 "none".into(),
                 0,
@@ -98,7 +98,7 @@ fn pre_t144_tasks_rows_backfill_lifecycle_overlay_on_open() {
             ),
             (
                 "T005".into(),
-                "integration".into(),
+                "queued".into(),
                 "none".into(),
                 "none".into(),
                 0,
@@ -106,15 +106,15 @@ fn pre_t144_tasks_rows_backfill_lifecycle_overlay_on_open() {
             ),
             (
                 "T006".into(),
-                "integration".into(),
+                "active".into(),
                 "none".into(),
-                "merging".into(),
+                "none".into(),
                 0,
                 None
             ),
             (
                 "T007".into(),
-                "integration".into(),
+                "queued".into(),
                 "none".into(),
                 "none".into(),
                 1,
@@ -122,7 +122,7 @@ fn pre_t144_tasks_rows_backfill_lifecycle_overlay_on_open() {
             ),
             (
                 "T008".into(),
-                "done".into(),
+                "queued".into(),
                 "none".into(),
                 "none".into(),
                 0,
@@ -130,7 +130,7 @@ fn pre_t144_tasks_rows_backfill_lifecycle_overlay_on_open() {
             ),
             (
                 "T009".into(),
-                "active".into(),
+                "queued".into(),
                 "none".into(),
                 "none".into(),
                 1,

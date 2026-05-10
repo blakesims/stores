@@ -1307,6 +1307,18 @@ pub fn poll_once_with_guard<P: BinaryIdentityProvider>(
                     }
                 };
 
+                // ADR0001 integration_step gate. Same-status integrating
+                // transitions are disambiguated by the row's durable substep.
+                if let Some(expected_step) = &sub.integration_step {
+                    let row_step = row_json
+                        .get("integration_step")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if row_step != expected_step {
+                        continue;
+                    }
+                }
+
                 // Per-subscription predicate gate (T022 P2). Runs AFTER the
                 // policy decide() halt-check so existing halt+ntfy semantics
                 // are preserved; runs BEFORE try_claim so a false predicate
@@ -3413,6 +3425,7 @@ mod tests {
                     from: from.to_string(),
                     to: to.to_string(),
                 },
+                integration_step: None,
                 predicate: None,
             }],
             command: "/bin/true".to_string(),
@@ -4628,6 +4641,7 @@ policies:
                     from: "ready".to_string(),
                     to: "in_review".to_string(),
                 },
+                integration_step: None,
                 predicate: None,
             }],
             command: command.to_string(),

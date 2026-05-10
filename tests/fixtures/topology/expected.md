@@ -53,6 +53,12 @@ stateDiagram-v2
   code_review --> blocked :  F mark_drive_failed
   accepted --> integration_queued :  F enqueue-integration
   integration_queued --> integrating :  F start-integration
+  integrating --> integrating :  F mark_refresh_done
+  integrating --> integrating :  F mark_task_review_done
+  integrating --> integrating :  F mark_testing_done
+  integrating --> integrating :  F mark_merge_done
+  integrating --> integrating :  F mark_deploy_done
+  integrating --> integrated :  F mark_verify_done
   integrating --> integrated :  F mark_integrated
   integrating --> integration_blocked :  F mark_integration_blocked
   integration_blocked --> integration_queued :  H+ retry-integration

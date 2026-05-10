@@ -6,13 +6,15 @@
 #   1. accepted → integration_queued (framework on_entry; enqueues the row).
 #   2. builtin:integrate (this file) — the generic, repo-agnostic
 #      integration lane. Subscribes to (accepted→integration_queued) and
-#      (integration_blocked→integration_queued). Atomically claims the
-#      capacity-1 `integrating` slot, refreshes the candidate against
+#      (integration_blocked→integration_queued). Advances ADR0001
+#      integration_step through refreshing → task_review → testing →
+#      merging → deploying → verifying, refreshes the candidate against
 #      current main via the configured `refresh_strategy`, re-checks the
 #      candidate's external_review HEAD freshness, runs the configured
-#      `pre_land_check` command, fast-merges into main, and on success
-#      fires `mark_integrated`. Failure surfaces as
-#      `mark_integration_blocked` with a typed `integration_blocked_reason`
+#      `pre_land_check` command, fast-merges into main while holding only
+#      the main_branch ResourceLock, and on success fires `mark_verify_done`.
+#      Failure surfaces as `mark_integration_blocked` with a typed
+#      `integration_blocked_reason`
 #      (rebase_conflict | stale_base | stale_external_review |
 #      pre_land_check_failed | merge_failure | push_failure). The
 #      integration lane records single-record provenance per attempt in
@@ -83,6 +85,52 @@ agents:
       pre_land_check: "cargo check --quiet"
       refresh_strategy: rebase
       allow_push: false
+
+  # Optional per-step registrations. A production repo may split builtin or
+  # shell agents per ADR0001 integration_step; the monolithic builtin above
+  # still emits the same durable substep transitions.
+  - name: integration-refresh
+    subscribes_to:
+      - store: tasks
+        transition: { from: integration_queued, to: integrating }
+        integration_step: refreshing
+    command: "builtin:integrate"
+    retry_policy: { max_attempts: 1, backoff: linear }
+  - name: integration-task-review
+    subscribes_to:
+      - store: tasks
+        transition: { from: integrating, to: integrating }
+        integration_step: task_review
+    command: "builtin:integrate"
+    retry_policy: { max_attempts: 1, backoff: linear }
+  - name: integration-test
+    subscribes_to:
+      - store: tasks
+        transition: { from: integrating, to: integrating }
+        integration_step: testing
+    command: "builtin:integrate"
+    retry_policy: { max_attempts: 1, backoff: linear }
+  - name: integration-merge
+    subscribes_to:
+      - store: tasks
+        transition: { from: integrating, to: integrating }
+        integration_step: merging
+    command: "builtin:integrate"
+    retry_policy: { max_attempts: 1, backoff: linear }
+  - name: integration-deploy
+    subscribes_to:
+      - store: tasks
+        transition: { from: integrating, to: integrating }
+        integration_step: deploying
+    command: "builtin:integrate"
+    retry_policy: { max_attempts: 1, backoff: linear }
+  - name: integration-verify
+    subscribes_to:
+      - store: tasks
+        transition: { from: integrating, to: integrating }
+        integration_step: verifying
+    command: "builtin:integrate"
+    retry_policy: { max_attempts: 1, backoff: linear }
 
   - name: cargo-install
     subscribes_to:

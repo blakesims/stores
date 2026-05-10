@@ -113,6 +113,7 @@ fn agents() -> AgentsYaml {
                     from: "".to_string(),
                     to: "pending".to_string(),
                 },
+                integration_step: None,
                 predicate: None,
             }],
             command: "builtin:external-review".to_string(),

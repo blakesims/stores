@@ -85,6 +85,7 @@ fn auto_drive_agent() -> AgentEntry {
                 from: "".to_string(),
                 to: "planning".to_string(),
             },
+            integration_step: None,
             predicate: Some(stores::flow::predicate::PredicateExpr::Neq {
                 left: serde_json::json!("$workspace_path"),
                 right: serde_json::json!(""),

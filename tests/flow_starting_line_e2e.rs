@@ -40,6 +40,7 @@ fn noop_agent(name: &str, store: &str, from: &str, to: &str) -> AgentEntry {
                 from: from.to_string(),
                 to: to.to_string(),
             },
+            integration_step: None,
             predicate: None,
         }],
         command: "/bin/true".to_string(),
