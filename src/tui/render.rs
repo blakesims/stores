@@ -469,10 +469,12 @@ fn draw_selected_detail(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" detail ");
     let lines: Vec<Line<'static>> = if app.focused_store == StoreLane::EngineHealth {
-        vec![Line::from(Span::styled(
-            "— no row selected —",
-            Style::default().fg(Color::DarkGray),
-        ))]
+        let pane_height = area.height.saturating_sub(2).max(1) as usize;
+        super::detail::engine_lines(app)
+            .into_iter()
+            .take(pane_height)
+            .map(Line::from)
+            .collect()
     } else if let Some(row) = app.current_row() {
         let pane_height = area.height.saturating_sub(2).max(1) as usize;
         super::detail::lines_for_row(row, app)
@@ -1591,10 +1593,11 @@ mod tests {
             middle.contains("unfinished_locks: 3"),
             "engine panel must show lock count; got middle:\n{middle}"
         );
-        // Side detail pane shows the no-row placeholder for engine focus.
+        // Side detail pane now renders engine detail (T141 P2): the
+        // EngineHealth focus branch calls super::detail::engine_lines.
         assert!(
-            middle.contains("— no row selected —"),
-            "engine focus must show no-row placeholder in detail pane; got:\n{middle}"
+            middle.contains("Engine detail"),
+            "engine focus must paint Engine detail header in side pane; got:\n{middle}"
         );
     }
 

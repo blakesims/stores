@@ -13,12 +13,17 @@ Status
 Contract state
   state: ready
   objective: ratify this
+  tier: —
+  auto-promote: contract ready · auto-promote eligible
 
 Next action / held reason
   ratify contract
 
 Recent events
   tasks ready -> executing via start at 2026-05-01
+
+Linked tasks
+  T700
 
 Artifact pointers
   linked task: T700
