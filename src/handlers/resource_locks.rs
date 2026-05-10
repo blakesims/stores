@@ -79,7 +79,7 @@ pub fn acquire(conn: &rusqlite::Connection, p: &AcquireParams<'_>) -> Result<Fen
         params![p.resource_id],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).optional()?;
-    if let Some((owner, _tok, exp)) = existing {
+    if let Some((owner, tok, exp)) = existing {
         let expired = exp
             .as_deref()
             .and_then(parse)
@@ -92,10 +92,24 @@ pub fn acquire(conn: &rusqlite::Connection, p: &AcquireParams<'_>) -> Result<Fen
             }
             .into());
         }
-        tx.execute(
-            "DELETE FROM resource_locks WHERE resource_id=?1",
-            params![p.resource_id],
+        let deleted = tx.execute(
+            "DELETE FROM resource_locks WHERE resource_id=?1 AND fencing_token=?2",
+            params![p.resource_id, tok],
         )?;
+        if deleted != 1 {
+            let current_owner: Option<String> = tx
+                .query_row(
+                    "SELECT owner_display_id FROM resource_locks WHERE resource_id=?1",
+                    params![p.resource_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            return Err(ResourceLockBusy {
+                resource_id: p.resource_id.to_string(),
+                current_owner: current_owner.unwrap_or(owner),
+            }
+            .into());
+        }
         audit(
             &tx,
             p.resource_id,
