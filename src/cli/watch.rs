@@ -89,7 +89,13 @@ fn render_frame(
     let system_health = crate::tui::data::load_system_health(conn).unwrap_or_default();
     let daemon_liveness = crate::tui::daemon::pidfile_path()
         .ok()
-        .map(|p| crate::tui::daemon::liveness(&p))
+        .map(|p| {
+            let project_root = p
+                .parent()
+                .and_then(|stores_dir| stores_dir.parent())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            crate::tui::daemon::project_liveness(&p, project_root)
+        })
         .unwrap_or(crate::tui::daemon::Liveness::Dead);
     let daemon_dead = matches!(daemon_liveness, crate::tui::daemon::Liveness::Dead);
 

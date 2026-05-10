@@ -242,7 +242,11 @@ impl App {
         self.status_bar.cap = (active, total);
         self.status_bar.clock = local_clock_string();
         if let Ok(p) = super::daemon::pidfile_path() {
-            let live = super::daemon::liveness(&p);
+            let project_root = p
+                .parent()
+                .and_then(|stores_dir| stores_dir.parent())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let live = super::daemon::project_liveness(&p, project_root);
             self.status_bar.daemon_liveness = live.clone();
             self.status_bar.daemon_pid = match live {
                 Liveness::Live { pid } => Some(pid),

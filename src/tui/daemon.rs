@@ -6,12 +6,15 @@
 //! operator would type, returning the new pid.
 
 use anyhow::{Context, Result};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Liveness {
-    Live { pid: u32 },
+    Live {
+        pid: u32,
+    },
     #[default]
     Dead,
 }
@@ -29,15 +32,69 @@ pub fn liveness(pidfile: &Path) -> Liveness {
     if pid == 0 {
         return Liveness::Dead;
     }
-    // kill(pid, 0) returns 0 when the pid exists and we have permission to
-    // signal it; ESRCH ⇒ no such pid; EPERM ⇒ pid exists but we can't signal.
+    pid_liveness(pid)
+}
+
+/// Probe the project daemon, accepting either the detached pidfile daemon or a
+/// foreground `stores agents run` whose cwd is this project root.
+pub fn project_liveness(pidfile: &Path, project_root: &Path) -> Liveness {
+    match liveness(pidfile) {
+        Liveness::Live { pid } => Liveness::Live { pid },
+        Liveness::Dead => foreground_liveness(project_root).unwrap_or(Liveness::Dead),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn foreground_liveness(project_root: &Path) -> Option<Liveness> {
+    let want = std::fs::canonicalize(project_root).ok()?;
+    for entry in std::fs::read_dir("/proc").ok()? {
+        let Ok(entry) = entry else { continue };
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == std::process::id() {
+            continue;
+        }
+        let proc_dir = entry.path();
+        let Ok(cwd) = std::fs::read_link(proc_dir.join("cwd")) else {
+            continue;
+        };
+        if cwd != want {
+            continue;
+        }
+        let Ok(cmdline) = std::fs::read(proc_dir.join("cmdline")) else {
+            continue;
+        };
+        if is_agents_run_cmdline(&cmdline) && matches!(pid_liveness(pid), Liveness::Live { .. }) {
+            return Some(Liveness::Live { pid });
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn foreground_liveness(_project_root: &Path) -> Option<Liveness> {
+    None
+}
+
+fn is_agents_run_cmdline(cmdline: &[u8]) -> bool {
+    let args: Vec<OsString> = cmdline
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| OsString::from(String::from_utf8_lossy(s).into_owned()))
+        .collect();
+    args.windows(3).any(|w| w[1] == "agents" && w[2] == "run")
+}
+
+fn pid_liveness(pid: u32) -> Liveness {
+    if pid == 0 {
+        return Liveness::Dead;
+    }
     let rc = unsafe { libc::kill(pid as i32, 0) };
     if rc == 0 {
         Liveness::Live { pid }
     } else {
-        let errno = std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(0);
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         if errno == libc::EPERM {
             Liveness::Live { pid }
         } else {
@@ -63,17 +120,11 @@ pub fn default_log_path() -> Result<PathBuf> {
 pub fn start_detached() -> Result<u32> {
     let log = default_log_path()?;
     if let Some(dir) = log.parent() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let exe = std::env::current_exe().context("locating current stores binary")?;
     let out = Command::new(exe)
-        .args([
-            "agents",
-            "run",
-            "--detach",
-            "--log-file",
-        ])
+        .args(["agents", "run", "--detach", "--log-file"])
         .arg(&log)
         .args(["--poll-interval", "2"])
         .output()
