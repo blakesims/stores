@@ -20,7 +20,7 @@ lifecycle:
       to: planning
       verb: submit-plan-review
       requires_gate: NEEDS_WORK
-      guard: "plan_review_log.length < 3"
+      guard: "plan_review_log.length < 5"
       actor: ai_autonomous
     # Plan review → blocked (NEEDS_WORK guard fail fallback)
     - from: plan_review
@@ -189,4 +189,4 @@ workflow:
     submit-execute: cycles
     submit-review: cycles
     submit-plan-review: plan_review_log
-  max_revise_cycles: 3
+  max_revise_cycles: 5

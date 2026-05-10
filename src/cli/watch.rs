@@ -270,7 +270,7 @@ struct TaskRow {
     total_phases: Option<i64>,
 }
 
-/// Schema-declared limit (`max_revise_cycles: 3` in stores/tasks/schema.yaml).
+/// Schema-declared limit (`max_revise_cycles: 5` in stores/tasks/schema.yaml).
 /// Hardcoded here for the POC; promote to a schema read when this graduates.
 #[cfg(test)]
 const MAX_CYCLES_DISPLAY: i64 = 3;

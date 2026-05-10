@@ -973,10 +973,10 @@ pub(crate) fn compute_submit_plan_review(
         .unwrap_or_default();
 
     // Guard evaluation (for NEEDS_WORK cycle-limit guard) uses the PRE-append entry.
-    // The guard `plan_review_log.length < 3` counts how many reviews have already been
-    // submitted, NOT including this one.  So on the 4th NEEDS_WORK (where pre-append length=3),
-    // 3 < 3 is false → blocked.  On the 3rd NEEDS_WORK (pre-append length=2), 2 < 3 is true → planning.
-    // (Post-append evaluation would cause the 3rd NEEDS_WORK to fail, which is wrong.)
+    // The guard `plan_review_log.length < 5` counts how many reviews have already been
+    // submitted, NOT including this one.  So on the 6th NEEDS_WORK (where pre-append length=5),
+    // 5 < 5 is false → blocked.  On the 5th NEEDS_WORK (pre-append length=4), 4 < 5 is true → planning.
+    // (Post-append evaluation would cause the 5th NEEDS_WORK to fail, which is wrong.)
     let guard_entry = existing.clone(); // guards evaluate against pre-append state
 
     log_list.push(log_entry);
@@ -2315,7 +2315,7 @@ lifecycle:
       to: planning
       verb: submit-plan-review
       requires_gate: NEEDS_WORK
-      guard: "plan_review_log.length < 3"
+      guard: "plan_review_log.length < 5"
       actor: ai_autonomous
     - from: plan_review
       to: blocked
@@ -2526,7 +2526,7 @@ workflow:
     submit-review: cycles
     submit-plan-review: plan_review_log
     submit-wrap: wrap_log
-  max_revise_cycles: 3
+  max_revise_cycles: 5
 "#;
 
     fn setup() -> (Schema, Connection) {
@@ -3567,7 +3567,7 @@ workflow:
         let (schema, conn) = setup();
         insert_row_at(&conn, &schema, "plan_review", 0, 0, 2, vec![], vec![], None);
 
-        // 1st NEEDS_WORK: log.length = 0 < 3 → planning
+        // 1st NEEDS_WORK: log.length = 0 < 5 → planning
         {
             let out = compute_submit_plan_review(
                 &schema,
@@ -3588,7 +3588,7 @@ workflow:
             .unwrap();
         }
 
-        // 2nd NEEDS_WORK: log.length = 1 < 3 → planning
+        // 2nd NEEDS_WORK: log.length = 1 < 5 → planning
         {
             let out = compute_submit_plan_review(
                 &schema,
@@ -3609,7 +3609,7 @@ workflow:
             .unwrap();
         }
 
-        // 3rd NEEDS_WORK: log.length = 2 < 3 → planning
+        // 3rd NEEDS_WORK: log.length = 2 < 5 → planning
         {
             let out = compute_submit_plan_review(
                 &schema,
@@ -3630,7 +3630,49 @@ workflow:
             .unwrap();
         }
 
-        // 4th NEEDS_WORK: log.length = 3 < 3 false → blocked (unguarded fallback)
+        // 4th NEEDS_WORK: log.length = 3 < 5 → planning
+        {
+            let out = compute_submit_plan_review(
+                &schema,
+                &conn,
+                "WF001",
+                "NEEDS_WORK",
+                "needs changes 4",
+                None,
+                Actor::AiAutonomous,
+            )
+            .unwrap();
+            assert_eq!(out.new_status, "planning");
+            assert_eq!(read_plan_review_log(&conn).len(), 4);
+            conn.execute(
+                "UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 5th NEEDS_WORK: log.length = 4 < 5 → planning
+        {
+            let out = compute_submit_plan_review(
+                &schema,
+                &conn,
+                "WF001",
+                "NEEDS_WORK",
+                "needs changes 5",
+                None,
+                Actor::AiAutonomous,
+            )
+            .unwrap();
+            assert_eq!(out.new_status, "planning");
+            assert_eq!(read_plan_review_log(&conn).len(), 5);
+            conn.execute(
+                "UPDATE wf_tasks SET status = 'plan_review' WHERE display_id = 'WF001'",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 6th NEEDS_WORK: log.length = 5 < 5 false → blocked (unguarded fallback)
         {
             let out = compute_submit_plan_review(
                 &schema,
@@ -3644,7 +3686,7 @@ workflow:
             .unwrap();
             assert_eq!(
                 out.new_status, "blocked",
-                "4th NEEDS_WORK must route to blocked (guard plan_review_log.length < 3 fails)"
+                "6th NEEDS_WORK must route to blocked (guard plan_review_log.length < 5 fails)"
             );
             assert_eq!(read_status(&conn), "blocked");
         }
@@ -5720,7 +5762,7 @@ workflow:
       - transition_to: ready
         when: "tier_hint == 'T1'"
   submit_targets: {}
-  max_revise_cycles: 3
+  max_revise_cycles: 5
 "#;
         let schema = Schema::from_yaml(yaml).unwrap();
         let conn = Connection::open_in_memory().unwrap();

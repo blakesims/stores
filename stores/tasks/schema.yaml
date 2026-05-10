@@ -190,8 +190,8 @@ lifecycle:
 
     # plan_review → ready / planning / blocked (gate-keyed by submit-plan-review)
     - {from: plan_review, to: ready, verb: submit-plan-review, actor: ai_autonomous, requires_gate: READY}
-    - {from: plan_review, to: planning, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NEEDS_WORK, guard: "plan_review_log.length < 3"}
-    # Falls through when above guard fails (4th NEEDS_WORK)
+    - {from: plan_review, to: planning, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NEEDS_WORK, guard: "plan_review_log.length < 5"}
+    # Falls through when above guard fails (6th NEEDS_WORK)
     - {from: plan_review, to: blocked, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NEEDS_WORK}
     - {from: plan_review, to: blocked, verb: submit-plan-review, actor: ai_autonomous, requires_gate: NOT_READY}
 
@@ -326,7 +326,7 @@ lifecycle:
     - {from: integrated, to: abandoned, verb: abandon, actor: human}
 
 workflow:
-  max_revise_cycles: 3
+  max_revise_cycles: 5
   agent_roles:
     planner:
       description: "Creates implementation plans"
