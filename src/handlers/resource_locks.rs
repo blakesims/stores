@@ -202,20 +202,25 @@ pub fn recover_stale(
         })?;
         iter.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let mut recovered = Vec::new();
     for row in &rows {
-        tx.execute(
-            "DELETE FROM resource_locks WHERE resource_id=?1",
-            params![row.resource_id],
+        let deleted = tx.execute(
+            "DELETE FROM resource_locks WHERE resource_id=?1 AND fencing_token=?2",
+            params![row.resource_id, row.fencing_token],
         )?;
-        audit(
-            &tx,
-            &row.resource_id,
-            "locked",
-            "unlocked",
-            "recover_stale",
-            invoker,
-        )?;
+        if deleted == 1 {
+            audit(
+                &tx,
+                &row.resource_id,
+                "locked",
+                "unlocked",
+                "recover_stale",
+                invoker,
+            )?;
+            recovered.push(row.clone());
+        }
     }
+    let rows = recovered;
     tx.commit()?;
     Ok(rows)
 }
