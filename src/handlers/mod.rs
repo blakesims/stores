@@ -8,6 +8,7 @@ pub mod architecture_reviews_backfill;
 pub mod brief;
 pub mod brief_contracts;
 pub mod cluster_keys;
+pub mod disposition;
 pub mod drive;
 pub mod external_review_run;
 pub mod external_reviews;
@@ -31,6 +32,11 @@ pub mod status;
 pub mod submit;
 pub mod transition;
 pub mod update;
+
+// T140 P3: re-export the derived operator_disposition surface for P4/P5/P6.
+pub use disposition::{
+    operator_disposition, BranchStateSource, Disposition, PlanStartBucket,
+};
 
 /// Canonical predicate for whether a task row is "blocked".
 ///

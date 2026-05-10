@@ -1564,6 +1564,177 @@ mod tests {
             "subscriber-class taxonomy drift:\n  - {}",
             errors.join("\n  - ")
         );
+
+        // ---- T140 P6 / Task 6.2 (a): every dispatch_builtin keyword is
+        // listed in the doc, classified as something other than
+        // `deprecated_internal`, and its rationale records the dispatch fact
+        // so the dispatched-vs-undispatched note matches the class.
+        //
+        // Keywords are extracted from the `dispatch_builtin` function body
+        // by parsing the source file: each match arm has the shape
+        //     "<keyword>" => Some(<module>::run( ... ))
+        // and the test asserts the doc row keyed by the corresponding
+        // module name (kebab-case → snake_case) carries:
+        //   - rationale containing "Registered in `dispatch_builtin`"
+        //   - class != "deprecated_internal"
+        //
+        // Accordingly, every `pub mod` whose doc row says "Not registered"
+        // must NOT appear in dispatch_builtin. Failure messages name the
+        // offending module(s) so future drift fails loud at exact identity.
+
+        let keywords = parse_dispatch_builtin_keywords(BUILTINS_MOD_RS);
+        assert!(
+            !keywords.is_empty(),
+            "expected `dispatch_builtin` to register at least one keyword"
+        );
+
+        // Re-parse the markdown table, this time keeping rationale text
+        // alongside class.
+        let mut doc_rows: HashMap<String, (String, String)> = HashMap::new();
+        for raw in SUBSCRIBER_CLASSES_MD.lines() {
+            let line = raw.trim();
+            if !line.starts_with('|') {
+                continue;
+            }
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("module") && lower.contains("class") {
+                continue;
+            }
+            if line
+                .chars()
+                .all(|c| c == '|' || c == '-' || c == ' ' || c == ':')
+            {
+                continue;
+            }
+            let cells: Vec<&str> = line
+                .trim_matches('|')
+                .split('|')
+                .map(|s| s.trim())
+                .collect();
+            if cells.len() < 3 {
+                continue;
+            }
+            let mod_name = cells[0].trim_matches('`').trim().to_string();
+            if mod_name.is_empty() {
+                continue;
+            }
+            doc_rows.insert(mod_name, (cells[1].to_string(), cells[2].to_string()));
+        }
+
+        let mut dispatch_errors: Vec<String> = Vec::new();
+        for kw in &keywords {
+            let module = kw.replace('-', "_");
+            match doc_rows.get(&module) {
+                None => dispatch_errors.push(format!(
+                    "dispatch_builtin keyword `{kw}` (module `{module}`) is missing from docs/subscriber-classes.md"
+                )),
+                Some((class_cell, rationale)) => {
+                    if class_cell.contains("deprecated_internal") {
+                        dispatch_errors.push(format!(
+                            "dispatch_builtin keyword `{kw}` is classified `deprecated_internal` — \
+                             dispatched modules must not carry the deprecated_internal class"
+                        ));
+                    }
+                    let rl = rationale.to_ascii_lowercase();
+                    if !rl.contains("registered in `dispatch_builtin`")
+                        || rl.contains("not registered in `dispatch_builtin`")
+                    {
+                        dispatch_errors.push(format!(
+                            "dispatch_builtin keyword `{kw}` rationale must say \"Registered in `dispatch_builtin`\"; \
+                             got: {rationale:?}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // ---- T140 P6 / Task 6.2 (b): accept-merge is the only entry
+        // classified as `deprecated_internal`.
+        let mut deprecated_modules: Vec<String> = Vec::new();
+        for (module, (class_cell, _)) in &doc_rows {
+            if class_cell.contains("deprecated_internal") {
+                deprecated_modules.push(module.clone());
+            }
+        }
+        deprecated_modules.sort();
+        if deprecated_modules != vec!["accept_merge".to_string()] {
+            dispatch_errors.push(format!(
+                "expected `accept_merge` to be the unique deprecated_internal entry; \
+                 got: {deprecated_modules:?}"
+            ));
+        }
+
+        // Also assert: every undispatched module's rationale says so. This
+        // is the dual of the dispatched-side check above.
+        for (module, (_class, rationale)) in &doc_rows {
+            let kw = module.replace('_', "-");
+            let rl = rationale.to_ascii_lowercase();
+            let rationale_says_registered = rl.contains("registered in `dispatch_builtin`")
+                && !rl.contains("not registered in `dispatch_builtin`");
+            let actually_dispatched = keywords.iter().any(|k| k == &kw);
+            if rationale_says_registered != actually_dispatched {
+                dispatch_errors.push(format!(
+                    "module `{module}`: rationale registered={rationale_says_registered} but dispatch_builtin actually_dispatched={actually_dispatched}; \
+                     rationale={rationale:?}"
+                ));
+            }
+        }
+
+        assert!(
+            dispatch_errors.is_empty(),
+            "T140 P6 / Task 6.2 dispatched-vs-undispatched drift:\n  - {}",
+            dispatch_errors.join("\n  - ")
+        );
+    }
+
+    /// Parse the `dispatch_builtin` function body for `"<keyword>" =>` arms.
+    /// Returns the keywords in source order.
+    fn parse_dispatch_builtin_keywords(source: &str) -> Vec<String> {
+        let start = source
+            .find("pub fn dispatch_builtin(")
+            .expect("dispatch_builtin source present");
+        let body = &source[start..];
+        let body_open = body.find('{').expect("dispatch_builtin body open brace");
+        let body = &body[body_open..];
+        // Walk the body to find a balanced closing brace.
+        let mut depth = 0i32;
+        let mut end = 0usize;
+        for (i, ch) in body.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &body[..end];
+
+        let mut keywords = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim();
+            // Skip the catch-all `_ => None,` arm.
+            if !trimmed.contains("=>") || trimmed.starts_with("_ ") || trimmed.starts_with("_=>") {
+                continue;
+            }
+            // Find the first quoted token before "=>".
+            if let Some(arrow) = trimmed.find("=>") {
+                let lhs = &trimmed[..arrow];
+                if let (Some(s), Some(e)) = (lhs.find('"'), lhs.rfind('"')) {
+                    if e > s {
+                        let kw = &lhs[s + 1..e];
+                        if !kw.is_empty() {
+                            keywords.push(kw.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        keywords
     }
 
     /// T138 P3 AC3.5: `dispatch_builtin("accept-merge", …)` must return
