@@ -154,6 +154,20 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
         ],
     },
     FrameworkTable {
+        name: "resource_locks",
+        columns: &[
+            FrameworkColumn { name: "resource_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "resource_id TEXT PRIMARY KEY", additive: false },
+            FrameworkColumn { name: "owner_kind", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "owner_kind TEXT NOT NULL CHECK(owner_kind IN ('task','job'))", additive: false },
+            FrameworkColumn { name: "owner_display_id", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "owner_display_id TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "fencing_token", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "fencing_token TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "acquired_at", sql_type: "TEXT", nullable: false, default_sql: None, full_def: "acquired_at TEXT NOT NULL", additive: false },
+            FrameworkColumn { name: "heartbeat_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "heartbeat_at TEXT", additive: false },
+            FrameworkColumn { name: "expires_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "expires_at TEXT", additive: false },
+            FrameworkColumn { name: "daemon_epoch", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "daemon_epoch TEXT", additive: false },
+            FrameworkColumn { name: "claim_source", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "claim_source TEXT", additive: false },
+        ],
+    },
+    FrameworkTable {
         name: "daemon_starts",
         columns: &[
             FrameworkColumn { name: "id", sql_type: "INTEGER", nullable: false, default_sql: None, full_def: "id INTEGER PRIMARY KEY AUTOINCREMENT", additive: false },
@@ -381,6 +395,17 @@ CREATE TABLE IF NOT EXISTS dispatch_locks (
     terminal_reason TEXT CHECK(terminal_reason IN ('ok','exit_nonzero','error','silent_zombie','timeout','halted','legacy_unknown','rate_limit')),
     next_retry_at TEXT,
     UNIQUE(store, row_id, agent_name)
+);
+CREATE TABLE IF NOT EXISTS resource_locks (
+    resource_id TEXT PRIMARY KEY,
+    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('task','job')),
+    owner_display_id TEXT NOT NULL,
+    fencing_token TEXT NOT NULL,
+    acquired_at TEXT NOT NULL,
+    heartbeat_at TEXT,
+    expires_at TEXT,
+    daemon_epoch TEXT,
+    claim_source TEXT
 );
 CREATE TABLE IF NOT EXISTS daemon_starts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

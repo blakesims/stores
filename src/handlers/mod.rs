@@ -25,6 +25,7 @@ pub(crate) mod observations_source;
 pub mod overrides;
 pub mod reconcile_accepted;
 pub mod recover_stale_base;
+pub mod resource_locks;
 pub mod render;
 pub mod row;
 pub mod schema_show;

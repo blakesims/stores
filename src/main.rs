@@ -174,6 +174,9 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Some(("resource-locks", sub)) => {
+            cli::dispatch::dispatch_resource_locks(&matches, sub)?;
+        }
         Some(("runs", sub)) => {
             use cli::runs::{run as runs_run, RunsCmd};
             let cmd = match sub.subcommand() {
