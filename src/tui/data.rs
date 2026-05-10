@@ -327,6 +327,8 @@ pub struct DispatchLockRow {
     pub agent_name: Option<String>,
     pub claimed_by: Option<String>,
     pub claimed_at: Option<String>,
+    pub heartbeat_at: Option<String>,
+    pub liveness_label: String,
     pub attempts: i64,
 }
 
@@ -1149,9 +1151,8 @@ fn decision_metadata_summary(
     let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
         return (None, None, None);
     };
-    let pluck = |key: &str| -> Option<String> {
-        v.get(key).and_then(|x| x.as_str()).map(str::to_string)
-    };
+    let pluck =
+        |key: &str| -> Option<String> { v.get(key).and_then(|x| x.as_str()).map(str::to_string) };
     (pluck("rationale"), pluck("confidence"), pluck("tier_hint"))
 }
 
@@ -1398,11 +1399,12 @@ fn load_unfinished_dispatch_locks(conn: &Connection) -> Result<Vec<DispatchLockR
         return Ok(Vec::new());
     }
     let sql = format!(
-        "SELECT display_id, {agent_name}, {claimed_by}, {claimed_at}, {attempts} \
+        "SELECT display_id, {agent_name}, {claimed_by}, {claimed_at}, {heartbeat_at}, {attempts} \
          FROM dispatch_locks WHERE finished_at IS NULL",
         agent_name = sql_col(&cols, "agent_name", "NULL"),
         claimed_by = sql_col(&cols, "claimed_by", "NULL"),
         claimed_at = sql_col(&cols, "claimed_at", "NULL"),
+        heartbeat_at = sql_col(&cols, "heartbeat_at", "NULL"),
         attempts = if cols.iter().any(|c| c == "attempts") {
             "COALESCE(attempts,0)"
         } else {
@@ -1416,7 +1418,23 @@ fn load_unfinished_dispatch_locks(conn: &Connection) -> Result<Vec<DispatchLockR
             agent_name: r.get(1).ok().flatten(),
             claimed_by: r.get(2).ok().flatten(),
             claimed_at: r.get(3).ok().flatten(),
-            attempts: r.get(4)?,
+            heartbeat_at: r.get(4).ok().flatten(),
+            liveness_label: crate::runner::liveness::classify(
+                r.get::<_, Option<String>>(3)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    .and_then(parse_epoch),
+                r.get::<_, Option<String>>(4)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    .and_then(parse_epoch),
+                now_epoch(),
+                &crate::runner::liveness::LivenessThresholds::from_env(),
+            )
+            .label(),
+            attempts: r.get(5)?,
         })
     })?;
     Ok(iter.flatten().collect())

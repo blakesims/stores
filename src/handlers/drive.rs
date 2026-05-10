@@ -41,6 +41,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::cli::agents::{BUNDLED_AGENTS, BUNDLED_AGENT_SCHEMAS};
 use crate::cli::dynamic::BUNDLED_STORE_TEMPLATES;
@@ -57,6 +59,76 @@ use crate::paths::db_path;
 use crate::render::{build_context, render_template_with_overlay};
 use crate::runner::{mock::MockRunner, Runner, RunnerOutput};
 use crate::schema::{actor::Actor, Schema};
+
+pub(crate) struct HeartbeatPump {
+    heartbeat_file: tempfile::NamedTempFile,
+    prior_env: Option<std::ffi::OsString>,
+    stop_tx: Option<mpsc::Sender<()>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HeartbeatPump {
+    pub(crate) fn start(display_id: &str, db_path: PathBuf) -> anyhow::Result<Self> {
+        let heartbeat_file = tempfile::NamedTempFile::new()?;
+        let heartbeat_path = heartbeat_file.path().to_path_buf();
+        let prior_env = std::env::var_os("STORES_HEARTBEAT_FILE");
+        std::env::set_var("STORES_HEARTBEAT_FILE", &heartbeat_path);
+        let (tx, rx) = mpsc::channel::<()>();
+        let display_id = display_id.to_string();
+        let handle = std::thread::Builder::new()
+            .name(format!("stores-heartbeat-pump-{display_id}"))
+            .spawn(move || {
+                let mut last_mtime = None;
+                loop {
+                    match rx.recv_timeout(Duration::from_millis(500)) {
+                        Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            let Ok(md) = std::fs::metadata(&heartbeat_path) else { continue; };
+                            let Ok(mtime) = md.modified() else { continue; };
+                            if last_mtime.is_some_and(|prev| mtime <= prev) {
+                                continue;
+                            }
+                            last_mtime = Some(mtime);
+                            if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                                let _ = conn.execute(
+                                    "UPDATE dispatch_locks SET heartbeat_at=?1 \
+                                     WHERE store='tasks' AND display_id=?2 AND agent_name='auto-drive' \
+                                       AND finished_at IS NULL",
+                                    rusqlite::params![crate::handlers::row::now_iso8601(), display_id],
+                                );
+                            }
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            heartbeat_file,
+            prior_env,
+            stop_tx: Some(tx),
+            handle: Some(handle),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn heartbeat_path(&self) -> &std::path::Path {
+        self.heartbeat_file.path()
+    }
+}
+
+impl Drop for HeartbeatPump {
+    fn drop(&mut self) {
+        let _ = self.heartbeat_file.path();
+        self.stop_tx.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(v) = self.prior_env.take() {
+            std::env::set_var("STORES_HEARTBEAT_FILE", v);
+        } else {
+            std::env::remove_var("STORES_HEARTBEAT_FILE");
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Lock-expiry constant (same window as submit.rs – 300 seconds)
@@ -1450,6 +1522,7 @@ fn drive_loop_with_role_runner(
             "[{display_id}] phase {phase_for_log} cycle {cycle_for_log}: spawning {agent_role} via {runner_name} runner... (may take 30-90s)"
         );
         let _ = std::io::stderr().flush();
+        let _hb = HeartbeatPump::start(display_id, db_path()?)?;
         let spawn_start = std::time::Instant::now();
         let run_out = match role_runner.spawn_for_role(
             &agent_name_normalized,
@@ -2244,6 +2317,50 @@ mod tests {
         let conn = db::open(&db_file).unwrap();
         conn.execute_batch(&ddl_for(schema)).unwrap();
         (dir, conn)
+    }
+
+    #[test]
+    fn heartbeat_pump_updates_dispatch_locks_heartbeat_at_durably() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        std::env::remove_var("STORES_HEARTBEAT_FILE");
+        let dir = tempdir().unwrap();
+        let db_file = dir.path().join("heartbeat.db");
+        let conn = Connection::open(&db_file).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE dispatch_locks (\
+             store TEXT, display_id TEXT, agent_name TEXT, claimed_at TEXT, finished_at TEXT, heartbeat_at TEXT\
+             );\
+             INSERT INTO dispatch_locks (store,display_id,agent_name,claimed_at,finished_at,heartbeat_at) \
+             VALUES ('tasks','T999','auto-drive','2026-05-09T10:00:00Z',NULL,NULL);",
+        )
+        .unwrap();
+        let heartbeat_path;
+        {
+            let pump = HeartbeatPump::start("T999", db_file.clone()).unwrap();
+            heartbeat_path = pump.heartbeat_path().to_path_buf();
+            std::fs::write(&heartbeat_path, crate::handlers::row::now_iso8601()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let hb: Option<String> = conn
+                .query_row(
+                    "SELECT heartbeat_at FROM dispatch_locks WHERE display_id='T999'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let hb = hb.expect("heartbeat_at updated");
+            let parsed = chrono::DateTime::parse_from_rfc3339(&hb)
+                .unwrap()
+                .timestamp();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            assert!(now - parsed <= 5, "heartbeat too old: {hb}");
+        }
+        assert!(std::env::var_os("STORES_HEARTBEAT_FILE").is_none());
+        assert!(!heartbeat_path.exists());
     }
 
     /// Insert a minimal task row in `planning` state.
@@ -3499,9 +3616,15 @@ mod tests {
         assert_eq!(persisted_exit, 143);
 
         let (_, after) = crate::handlers::row::read_row(&schema, &conn, "T143").unwrap();
-        assert_eq!(after.get("status").and_then(|v| v.as_str()), Some("code_review"));
+        assert_eq!(
+            after.get("status").and_then(|v| v.as_str()),
+            Some("code_review")
+        );
         assert!(
-            after.get("blocked_reason").and_then(|v| v.as_str()).is_none(),
+            after
+                .get("blocked_reason")
+                .and_then(|v| v.as_str())
+                .is_none(),
             "valid-envelope nonzero exit must not set blocked_reason"
         );
         let cycles = after.get("cycles").and_then(|v| v.as_array()).unwrap();

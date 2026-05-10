@@ -254,7 +254,9 @@ fn draw_store_card(
 ) {
     let (border_style, title_style) = if focused {
         (
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -271,7 +273,9 @@ fn draw_store_card(
         .title(Span::styled(format!(" {} ", lane.label()), title_style));
     let (primary, breakdown) = lane_card_lines(lane, model);
     let primary_style = if focused {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
@@ -433,7 +437,10 @@ fn draw_engine_panel(f: &mut Frame, app: &App, area: Rect) {
         None => "oldest_lock_age: —".to_string(),
     }));
     let runs_line = Line::from(Span::styled(
-        format!("agent_runs (recent): {} (not yet wired)", e.agent_runs_recent),
+        format!(
+            "agent_runs (recent): {} (not yet wired)",
+            e.agent_runs_recent
+        ),
         Style::default().fg(Color::DarkGray),
     ));
     let alert_lines: Vec<Line<'static>> = if !e.daemon_live && e.unfinished_locks > 0 {
@@ -453,6 +460,14 @@ fn draw_engine_panel(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::raw(format!(
             "recent_restart: pid={} at {}",
             start.pid, started
+        ))));
+    }
+    for lock in app.engine_detail.unfinished_lock_rows.iter().take(3) {
+        let agent = lock.agent_name.as_deref().unwrap_or("-");
+        let heartbeat = lock.heartbeat_at.as_deref().unwrap_or("-");
+        lines.push(Line::from(Span::raw(format!(
+            "lock: {} runner={} last_progress={} {}",
+            lock.display_id, agent, heartbeat, lock.liveness_label
         ))));
     }
     if !alert_lines.is_empty() {
@@ -1260,7 +1275,10 @@ mod tests {
             oldest_claimed_at_epoch: None,
         };
         let alert = system_alert_item(&app);
-        assert!(alert.is_some(), "alert must render even when claimed_at is NULL");
+        assert!(
+            alert.is_some(),
+            "alert must render even when claimed_at is NULL"
+        );
         let painted = painted_buffer(&mut app);
         assert!(
             painted.contains("system-alert: daemon DEAD; 3 dangling locks; oldest started ?h ago"),
@@ -1414,9 +1432,8 @@ mod tests {
         app.apply_sort();
 
         // Sanity: classifier put each row in the right section.
-        let sec_idx = |sec: Section| -> usize {
-            app.sections.iter().position(|(s, _)| *s == sec).unwrap()
-        };
+        let sec_idx =
+            |sec: Section| -> usize { app.sections.iter().position(|(s, _)| *s == sec).unwrap() };
         assert_eq!(app.sections[sec_idx(Section::TasksIntegration)].1.len(), 2);
         assert_eq!(
             app.sections[sec_idx(Section::TasksIntegratedAwaitingPostLand)]
@@ -1663,7 +1680,8 @@ mod tests {
     fn cockpit_recent_exhaust_strip_placeholder_when_no_terminal_rows() {
         let mut app = cockpit_fixture_app();
         // Drop the terminal task.
-        app.rows.retain(|r| !matches!(r, Row::Task(t) if t.status == "accepted"));
+        app.rows
+            .retain(|r| !matches!(r, Row::Task(t) if t.status == "accepted"));
         app.sections = classify(&app.rows);
         app.apply_sort();
         let buf = paint(&mut app, 120, 30);
@@ -1727,7 +1745,11 @@ mod tests {
 
         let buf2 = paint(&mut app, 120, 30);
         let cols2 = card_left_borders(&buf2);
-        assert_eq!(buf2[(cols2[3], 0)].fg, Color::Cyan, "focus should follow to col 3");
+        assert_eq!(
+            buf2[(cols2[3], 0)].fg,
+            Color::Cyan,
+            "focus should follow to col 3"
+        );
         assert_ne!(
             buf2[(cols2[2], 0)].fg,
             Color::Cyan,

@@ -15,6 +15,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::runner::liveness::{self, LivenessThresholds};
+
 use crate::flow::builtins::{
     dispatch_to_specialist, fire_framework_transition, fire_mark_deploy_blocked, resolve_main_repo,
     BuiltinResult, DispatchCtx,
@@ -55,22 +57,35 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         .tempdir()
         .context("creating isolated cargo install root")?;
 
-    let install = Command::new("cargo")
-        .args([
-            "install",
-            "--path",
-            main_repo.to_str().unwrap_or("."),
-            "--features",
-            &features,
-            "--root",
-            install_root.path().to_str().unwrap_or("."),
-            "--quiet",
-        ])
-        .output()
-        .with_context(|| format!("spawning cargo install for {}", display_id))?;
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "install",
+        "--path",
+        main_repo.to_str().unwrap_or("."),
+        "--features",
+        &features,
+        "--root",
+        install_root.path().to_str().unwrap_or("."),
+        "--quiet",
+    ]);
+    let install = liveness::run_streaming_with_liveness(
+        &mut cmd,
+        &LivenessThresholds::from_env(),
+        |_| {},
+        |_| {},
+    )
+    .with_context(|| format!("spawning cargo install for {}", display_id))?;
 
-    if !install.status.success() {
-        let stderr = String::from_utf8_lossy(&install.stderr).to_string();
+    if install.killed_for.is_some() || install.exit_code != 0 {
+        let stderr = if let Some(killed) = &install.killed_for {
+            if install.stderr.trim().is_empty() {
+                killed.label()
+            } else {
+                format!("{}\n{}", killed.label(), install.stderr)
+            }
+        } else {
+            install.stderr.clone()
+        };
         let blocked_reason = format_cargo_blocked_reason(&main_repo, &features, &stderr);
         block_deploy(row, ctx, display_id, blocked_reason)?;
         return Ok(0);

@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -47,6 +48,7 @@ use crate::handlers::agents_run::{
     spawn_detached_drive,
 };
 use crate::handlers::row::now_iso8601;
+use crate::runner::liveness::{classify, LivenessClass, LivenessThresholds};
 
 /// Grace window (seconds) before the silent-zombie scan flips a row whose
 /// drive_pid is NULL (post-spawn UPDATE not yet committed). Without this
@@ -171,7 +173,20 @@ fn parse_iso8601_to_epoch_local(s: &str) -> Option<i64> {
         days += if leap { 366 } else { 365 };
     }
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let dim = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let dim = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     for m in 1..mo {
         days += dim[(m - 1) as usize] as i64;
     }
@@ -771,6 +786,26 @@ fn annotate_drive_failed_history(conn: &Connection, display_id: &str, note: &str
 /// Build the structured log line emitted when the watchdog detects a live
 /// drive subprocess whose exe inode was replaced on disk. Isolated here so
 /// tests can assert its contents directly without stderr capture.
+fn now_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn parse_epoch(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(v) = s.parse::<i64>() {
+        return Some(v);
+    }
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
 pub(crate) fn stale_exe_log_line(display_id: &str, pid: i64) -> String {
     format!(
         "[auto-drive-watchdog] {display_id}: drive_pid={pid} stale_binary_inode \
@@ -808,18 +843,25 @@ pub fn sweep_drive_watchdog(
     let mut acted = 0usize;
     let now_iso = now_iso8601();
     let tasks_schema = load_tasks_schema()?;
-    let locks: Vec<(i64, String)> = {
+    let locks: Vec<(i64, String, Option<String>, Option<String>)> = {
         let mut stmt = conn.prepare(
-            "SELECT row_id, display_id FROM dispatch_locks \
+            "SELECT row_id, display_id, claimed_at, heartbeat_at FROM dispatch_locks \
              WHERE agent_name = 'auto-drive' AND finished_at IS NULL",
         )?;
-        let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let it = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2).ok().flatten(),
+                r.get::<_, Option<String>>(3).ok().flatten(),
+            ))
+        })?;
         it.filter_map(|r| r.ok()).collect()
     };
 
     let mut handled: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (row_id, display_id) in locks {
+    for (row_id, display_id, claimed_at, heartbeat_at) in locks {
         let row = match refresh_task_row(conn, &display_id) {
             Some(r) => r,
             None => continue,
@@ -853,7 +895,12 @@ pub fn sweep_drive_watchdog(
             ) {
                 Ok(()) => {
                     annotate_drive_failed_history(conn, &display_id, STALE_BINARY_REASON);
-                    dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog-stale-exe");
+                    dispatch_to_specialist(
+                        &row,
+                        &ctx,
+                        &display_id,
+                        "auto-drive-watchdog-stale-exe",
+                    );
                     let _ = mark_claim_silent_zombie(
                         conn,
                         "tasks",
@@ -875,6 +922,68 @@ pub fn sweep_drive_watchdog(
             continue;
         }
         if pid_is_alive(pid as i32) {
+            let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if !is_watchdog_actionable_status(status)
+                || task_has_active_external_review_lane(conn, &display_id, &now_iso)
+            {
+                continue;
+            }
+            let liveness = classify(
+                claimed_at.as_deref().and_then(parse_epoch),
+                heartbeat_at.as_deref().and_then(parse_epoch),
+                now_epoch(),
+                &LivenessThresholds::from_env(),
+            );
+            let detail = match liveness {
+                LivenessClass::StalledNoOutput {
+                    idle_secs,
+                    threshold_secs,
+                } => {
+                    format!("no_output_idle_{idle_secs}s_threshold_{threshold_secs}s")
+                }
+                LivenessClass::WallClockTimeout {
+                    runtime_secs,
+                    max_secs,
+                } => {
+                    format!("wall_clock_{runtime_secs}s_max_{max_secs}s")
+                }
+                LivenessClass::Active { .. } | LivenessClass::Unknown => continue,
+            };
+            match fire_mark_drive_failed(
+                conn,
+                &display_id,
+                "drive_failed",
+                policies_hash,
+                Some(&detail),
+            ) {
+                Ok(()) => {
+                    annotate_drive_failed_history(conn, &display_id, &detail);
+                    let ctx = DispatchCtx {
+                        conn,
+                        agents,
+                        config_path,
+                        policies_hash,
+                    };
+                    dispatch_to_specialist(&row, &ctx, &display_id, "auto-drive-watchdog-liveness");
+                    let agent = agents.agents.iter().find(|a| a.name == "auto-drive");
+                    let _ = mark_claim_silent_zombie(
+                        conn,
+                        "tasks",
+                        row_id,
+                        agent,
+                        "auto-drive",
+                        &detail,
+                    );
+                    acted += 1;
+                    handled.insert(display_id.clone());
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[auto-drive-watchdog] {}: mark_drive_failed liveness failed: {:#}",
+                        display_id, e
+                    );
+                }
+            }
             continue;
         }
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
@@ -1356,6 +1465,42 @@ mod tests {
         0x7fff_fffe
     }
 
+    #[test]
+    fn watchdog_classifies_alive_but_stalled_runner() {
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T143W", "planning", Some(std::process::id() as i64));
+        insert_lock(&conn, row_id, "T143W");
+        let stale = (super::now_epoch() - 600).to_string();
+        conn.execute(
+            "UPDATE dispatch_locks SET claimed_at=?1, heartbeat_at=?1 WHERE row_id=?2",
+            rusqlite::params![stale, row_id],
+        )
+        .unwrap();
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let _ = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+        let (terminal_reason, last_status): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT terminal_reason, last_status FROM dispatch_locks WHERE row_id=?1",
+                rusqlite::params![row_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(terminal_reason.as_deref(), Some("silent_zombie"));
+        assert!(last_status
+            .unwrap_or_default()
+            .starts_with("drive_failed:no_output_idle_"));
+        let note: String = conn
+            .query_row(
+                "SELECT COALESCE(actor_note,'') FROM transition_history \
+                 WHERE display_id='T143W' AND verb='mark_drive_failed' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(note.starts_with("no_output_idle_"), "actor_note={note}");
+    }
+
     /// AC5.1 (i): live PID + status='planning' → no flip, lock left open.
     #[test]
     fn watchdog_live_pid_no_flip() {
@@ -1364,6 +1509,11 @@ mod tests {
         let our_pid = std::process::id() as i64;
         let row_id = insert_task_full(&conn, "T720", "planning", Some(our_pid));
         insert_lock(&conn, row_id, "T720");
+        conn.execute(
+            "UPDATE dispatch_locks SET claimed_at=?1, heartbeat_at=?1 WHERE row_id=?2",
+            rusqlite::params![super::now_epoch().to_string(), row_id],
+        )
+        .unwrap();
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
@@ -1587,7 +1737,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(status, "executing", "watchdog must defer when ER is running");
+        assert_eq!(
+            status, "executing",
+            "watchdog must defer when ER is running"
+        );
         assert!(
             reason.as_deref().unwrap_or("").is_empty(),
             "no blocked_reason must be set: {:?}",
@@ -2568,7 +2721,13 @@ mod tests {
         // T067/L134 invariant: initial auto-drive spawn leaves a pending
         // next_agent (planner) and therefore the lock stays in-flight rather
         // than terminal_reason='ok'.
-        type LockRow = (Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>);
+        type LockRow = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        );
         let (finished_at, last_status, terminal_reason, postcondition_id, drive_pid): LockRow = conn
             .query_row(
                 "SELECT dl.finished_at, dl.last_status, dl.terminal_reason, dl.postcondition_id, t.drive_pid \
@@ -2781,8 +2940,7 @@ mod tests {
         std::fs::remove_file(&sleep_copy).expect("remove sleep copy");
 
         // Poll until the kernel marks /proc/<pid>/exe with " (deleted)".
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         loop {
             if crate::handlers::agents_run::drive_pid_exe_is_stale(child_pid as i32) {
                 break;
@@ -2826,7 +2984,10 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert!(finished_at.is_some(), "lock must be closed (finished_at IS NOT NULL)");
+        assert!(
+            finished_at.is_some(),
+            "lock must be closed (finished_at IS NOT NULL)"
+        );
         assert_eq!(
             terminal_reason.as_deref(),
             Some("silent_zombie"),
@@ -2877,6 +3038,11 @@ mod tests {
         let conn = fresh_db_with_obs();
         let row_id = insert_task_full(&conn, "T796", "executing", Some(child_pid as i64));
         insert_lock(&conn, row_id, "T796");
+        conn.execute(
+            "UPDATE dispatch_locks SET claimed_at=?1, heartbeat_at=?1 WHERE row_id=?2",
+            rusqlite::params![super::now_epoch().to_string(), row_id],
+        )
+        .unwrap();
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
