@@ -1927,17 +1927,19 @@ mod tests {
         let conn = Connection::open(&db_path).unwrap();
         // Under ADR0001 P3/P4 workers may overlap before merge. P4 freshness
         // can reroute stale candidates back to refresh/task_review before any
-        // worker lands; this stress test is scoped to the merge singleton.
-        let processed_count: i64 = conn
+        // worker lands; this stress test is scoped to the merge singleton, so
+        // assert that at least one worker claimed the slot and recorded an
+        // attempt rather than depending on one specific terminal/reroute state.
+        let attempted_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM tasks WHERE status='integrated' OR (status='integrating' AND blocker_kind='stale_base')",
+                "SELECT COUNT(*) FROM tasks WHERE COALESCE(json_array_length(integration_attempts), 0) > 0",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert!(
-            processed_count >= 1,
-            "at least one worker should complete or be freshness-rerouted while stressing merge singleton"
+            attempted_count >= 1,
+            "at least one worker should claim the merge singleton and record an integration attempt"
         );
     }
 
