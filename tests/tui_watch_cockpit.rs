@@ -15,6 +15,7 @@ use rusqlite::Connection;
 use stores::tui::app::{App, TuiOpts};
 use stores::tui::daemon::Liveness;
 use stores::tui::data::StoreLane;
+use stores::tui::render::{BOTTOM_CHROME_HEIGHT, TOP_STRIP_HEIGHT};
 use stores::tui::{on_key, render};
 
 const W: u16 = 140;
@@ -306,13 +307,17 @@ fn cockpit_recent_exhaust_shows_terminal_id_absent_from_main_rows() {
     let painted = buffer_to_string(&buf);
     let lines: Vec<&str> = painted.lines().collect();
 
-    // Layout (top → bottom): top-strip (4) · middle · exhaust (1) · hint (1) · status (1).
-    // No Search bar here, so the exhaust line is at H-3.
-    let exhaust_line = line_at(&buf, H - 3);
+    // Layout (top → bottom): top-strip (TOP_STRIP_HEIGHT) · middle ·
+    // exhaust (1) · hint (1) · status (1). With no Search bar the exhaust
+    // strip sits at the top of the bottom-chrome band, i.e. row
+    // H - BOTTOM_CHROME_HEIGHT. Deriving from named constants makes the
+    // test fail loudly if either height shifts in render.rs instead of
+    // silently re-slicing the wrong region.
+    let exhaust_y = H - BOTTOM_CHROME_HEIGHT;
+    let exhaust_line = line_at(&buf, exhaust_y);
     assert!(
         exhaust_line.contains("recent exhaust"),
-        "expected 'recent exhaust' label on exhaust strip line {}: {exhaust_line}",
-        H - 3
+        "expected 'recent exhaust' label on exhaust strip line {exhaust_y}: {exhaust_line}"
     );
     assert!(
         exhaust_line.contains("T200"),
@@ -322,7 +327,9 @@ fn cockpit_recent_exhaust_shows_terminal_id_absent_from_main_rows() {
     // (v) The middle region (focused-table + side detail) must NOT contain
     // the terminal task id T200 — terminal tasks are filtered out of the
     // focused Tasks-lane table by classify().
-    let middle: String = lines[4..(H as usize - 3)].join("\n");
+    let middle_start = TOP_STRIP_HEIGHT as usize;
+    let middle_end = (H - BOTTOM_CHROME_HEIGHT) as usize;
+    let middle: String = lines[middle_start..middle_end].join("\n");
     assert!(
         !middle.contains("T200"),
         "terminal task id T200 must NOT appear in the focused-table region:\n{middle}"

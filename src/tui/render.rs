@@ -14,6 +14,17 @@ use super::data::{
     Row, Section, StoreFlowModel, StoreLane,
 };
 
+/// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
+/// inside a bordered block ⇒ 4 lines: top border + 2 body rows + bottom
+/// border). Exposed so integration tests can derive the focused-table
+/// region's vertical span without re-encoding the literal.
+pub const TOP_STRIP_HEIGHT: u16 = 4;
+
+/// Height (in rows) of the bottom chrome painted below the focused-table
+/// region: recent-exhaust strip (1) + hint line (1) + status bar (1) = 3.
+/// Excludes the optional search bar (only present in `Mode::Search`).
+pub const BOTTOM_CHROME_HEIGHT: u16 = 3;
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     if app.mode == Mode::Detail {
         draw_detail(f, app);
@@ -32,12 +43,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),          // store-flow top strip (5 cards)
-                Constraint::Min(1),             // focused table | side detail
-                Constraint::Length(1),          // recent-exhaust strip
-                Constraint::Length(search_bar), // search input
-                Constraint::Length(1),          // hint line
-                Constraint::Length(1),          // status bar
+                Constraint::Length(TOP_STRIP_HEIGHT), // store-flow top strip (5 cards)
+                Constraint::Min(1),                   // focused table | side detail
+                Constraint::Length(1),                // recent-exhaust strip
+                Constraint::Length(search_bar),       // search input
+                Constraint::Length(1),                // hint line
+                Constraint::Length(1),                // status bar
             ])
             .split(f.area());
 
