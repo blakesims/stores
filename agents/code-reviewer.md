@@ -118,16 +118,18 @@ For each AC:
 2. Record: PASS / FAIL / PARTIAL with evidence.
 3. If FAIL: classify as critical, major, or minor (see below).
 
+For Rust tests in this repository, prefer `-- --test-threads=10` on the beefy host unless the target is known to require serialization. If a test flakes, retry with `--test-threads=4` before falling back to `--test-threads=1`. Avoid piping long-running test commands through `tail`; it hides live progress from the runner UI. Use `tee /tmp/<log>.log` when you need both live output and a saved/tailable log.
+
 Examples:
 ```bash
 # AC: cargo build succeeds
-cargo build 2>&1 | tail -5
+cargo build
 
 # AC: stores agents list prints 5 entries
 stores agents list 2>&1
 
 # AC: cargo test cli::agents passes
-cargo test cli::agents -- --nocapture 2>&1 | tail -30
+cargo test cli::agents -- --test-threads=10 --nocapture
 
 # AC: file exists
 ls -la src/cli/agents.rs

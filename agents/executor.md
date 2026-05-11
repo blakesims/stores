@@ -102,10 +102,26 @@ For each task:
 
 ### Step 3: Run tests after each task group
 
-After each task or group of related tasks:
+After each task or group of related tasks, prefer targeted tests first. On this repository's current hardware, use parallel Rust test threads unless a test is known to require serialization:
+
 ```bash
-cargo test <module_path> -- --nocapture 2>&1 | tail -30
+cargo test <module_path> -- --test-threads=10 --nocapture
 ```
+
+If a test is flaky under parallelism, retry the smallest relevant target with a lower thread count before falling all the way back to serialization:
+
+```bash
+cargo test <module_path> -- --test-threads=4 --nocapture
+cargo test <module_path> -- --test-threads=1 --nocapture   # only for known shared-state/flaky cases
+```
+
+Do **not** hide long-running test progress behind `| tail` while the command is running. Use `tee` if you need a saved log plus live output:
+
+```bash
+cargo test <module_path> -- --test-threads=10 --nocapture 2>&1 | tee /tmp/stores-test.log
+```
+
+Why: live runner visibility depends on seeing tool output as it happens. `cargo test ... | tail -40` can make a healthy long-running test look stuck until the command exits.
 
 If tests fail, fix before proceeding to the next task. Do not proceed past
 a failing test.
@@ -134,8 +150,15 @@ Never `git add -A` or `git add .` — name files explicitly.
 
 After all tasks:
 ```bash
-cargo build 2>&1 | tail -5
-cargo test 2>&1 | tail -20
+cargo build
+cargo test -- --test-threads=10
+```
+
+If full-suite parallelism shows shared-state flakes, retry once with moderate parallelism before serializing:
+
+```bash
+cargo test -- --test-threads=4
+cargo test -- --test-threads=1   # last resort; slow and can obscure live progress
 ```
 
 If `cargo build` fails, fix before submitting. If tests fail, fix before
@@ -367,8 +390,9 @@ cargo build 2>&1 | tail -3
 
 ### `cargo test <module> passes`
 ```bash
-cargo test cli::agents -- --nocapture 2>&1 | grep -E 'test .* (ok|FAILED)'
-# All lines must be 'ok', none 'FAILED'
+cargo test cli::agents -- --test-threads=10 --nocapture
+# Test result must pass; if parallelism flakes, retry with --test-threads=4 before --test-threads=1.
+# Avoid `| tail` on long-running tests because it hides live progress from the runner UI.
 ```
 
 ### `stores <verb> prints N entries`
