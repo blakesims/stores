@@ -433,25 +433,104 @@ mod tests {
     #[test]
     fn merge_verdict_resolves_source_and_blocks_later_u1_by_status() {
         let conn = setup();
-        let tx = conn.unchecked_transaction().unwrap();
-        let mut ruling = EntryMap::new();
-        ruling.insert("verdict".into(), Value::String("merge_with_cluster".into()));
-        ruling.insert("source_observation".into(), Value::String("L001".into()));
-        ruling.insert("merge_target_id".into(), Value::String("L999".into()));
-        apply_merge_with_cluster_verdict(&tx, "A004", &ruling, Actor::AiWithHuman).unwrap();
-        let row: (String, i64, String, String) = tx.query_row(
-            "SELECT status,pending_architecture_review,resolved_by,resolution_kind FROM observations WHERE display_id='L001'",
+        conn.execute(
+            "INSERT INTO architecture_reviews (display_id,status,created_at,updated_at,created_by,updated_by,kind,summary,source_observation,linked_observation_ids) VALUES ('A004','in_review','now','now','ai_with_human','ai_with_human','interpret','s','L001',?1)",
+            [json!(["L001"]).to_string()],
+        ).unwrap();
+        let arch = crate::schema::Schema::from_yaml(include_str!(
+            "../../stores/architecture_reviews/schema.yaml"
+        ))
+        .unwrap();
+        let mut cmd = clap::Command::new("issue-verdict")
+            .arg(clap::Arg::new("display_id").required(true).index(1));
+        for leaf in crate::schema::flatten::leaf_args(&arch).unwrap() {
+            cmd = cmd.arg(clap::Arg::new(leaf.cli_name.clone()).long(leaf.cli_name).required(false));
+        }
+        let matches = cmd.get_matches_from([
+            "issue-verdict",
+            "A004",
+            "--kind",
+            "interpret",
+            "--verdict",
+            "merge_with_cluster",
+            "--rationale",
+            "same cluster",
+            "--source-observation",
+            "L001",
+            "--merge-target-id",
+            "L999",
+        ]);
+        crate::handlers::architecture_reviews::run_issue_verdict(
+            &arch,
+            &conn,
+            &matches,
+            Actor::AiWithHuman.into(),
+        )
+        .unwrap();
+
+        let obs_row: (String, i64, String, String, String) = conn.query_row(
+            "SELECT status,pending_architecture_review,resolved_by,resolution_kind,outcome FROM observations WHERE display_id='L001'",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         ).unwrap();
         assert_eq!(
-            row,
+            obs_row,
             (
                 "resolved".into(),
                 0,
                 "A004".into(),
+                "merged_with_cluster".into(),
                 "merged_with_cluster".into()
             )
+        );
+        let arch_row: (String, String, String, String) = conn.query_row(
+            "SELECT status,verdict,outcome,merge_target_id FROM architecture_reviews WHERE display_id='A004'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).unwrap();
+        assert_eq!(arch_row.0, "verdict_issued");
+        assert_eq!(arch_row.2, "merged_with_cluster");
+
+        let obs_projection = crate::flow::adr0002_projection::project_observation(
+            &crate::flow::adr0002_projection::ObsRowInput {
+                display_id: "L001",
+                status: &obs_row.0,
+                contract_state: Some("approved"),
+                pending_architecture_review: Some(false),
+                clearable_by_ruling: None,
+                open_architecture_review_id: None,
+                resolution_kind: Some(&obs_row.3),
+                resolution: None,
+                merge_target_id: Some(&arch_row.3),
+                resolved_by: Some(&obs_row.2),
+                task_id: None,
+                addressed_by_commit_sha: None,
+                superseded_by_id: None,
+            },
+            None,
+        );
+        let arch_projection = crate::flow::adr0002_projection::project_arch_review(
+            &crate::flow::adr0002_projection::ArchReviewRowInput {
+                display_id: "A004",
+                status: &arch_row.0,
+                verdict: Some(&arch_row.1),
+                source_observation: Some("L001"),
+                source_intake: None,
+                linked_observation_ids: vec!["L001"],
+                supersedes: None,
+                merge_target_id: Some(&arch_row.3),
+                produced_task_id: None,
+                superseded_by_id: None,
+                updated_at: None,
+            },
+        );
+        assert_eq!(
+            obs_projection.outcome,
+            Some(crate::flow::adr0002_projection::ObsOutcome::MergedWithCluster)
+        );
+        assert_eq!(
+            arch_projection.outcome,
+            Some(crate::flow::adr0002_projection::ArchReviewOutcome::MergedWithCluster)
         );
     }
 }

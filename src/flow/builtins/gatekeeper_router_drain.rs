@@ -183,10 +183,23 @@ fn process_one_row(
         &merged,
     )?;
 
+    crate::handlers::transition::inject_upstream_primary_tuple(
+        schema,
+        route_transition,
+        "route",
+        &triaging_status,
+        &route_transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
+
     validate::validate(
         schema,
         &merged,
-        Op::Transition("route".to_string(), diff.clone()),
+        Op::Transition(
+            "route".to_string(),
+            crate::handlers::transition::strip_framework_overlay_from_validation_diff(schema, &diff),
+        ),
         Actor::AiAutonomous.into(),
     )
     .map_err(|errs| {

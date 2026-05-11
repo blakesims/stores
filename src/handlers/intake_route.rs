@@ -36,6 +36,11 @@ fn is_absent(merged: &EntryMap, key: &str) -> bool {
     matches!(merged.get(key), None | Some(Value::Null))
 }
 
+fn mirror_string(diff: &mut EntryMap, merged: &mut EntryMap, key: &str, value: &str) {
+    diff.insert(key.to_string(), Value::String(value.to_string()));
+    merged.insert(key.to_string(), Value::String(value.to_string()));
+}
+
 // ---------------------------------------------------------------------------
 // Public hook 1: pre-validation field injection
 // ---------------------------------------------------------------------------
@@ -138,11 +143,10 @@ pub(crate) fn inject_pre_validation_fields(
                     },
                 )?;
 
-                diff.insert(
-                    "routed_to_observation".to_string(),
-                    Value::String(obs_id.clone()),
-                );
-                merged.insert("routed_to_observation".to_string(), Value::String(obs_id));
+                mirror_string(diff, merged, "routed_to_observation", &obs_id);
+                mirror_string(diff, merged, "produced_observation_id", &obs_id);
+                mirror_string(diff, merged, "produced_artifact_kind", "observation");
+                mirror_string(diff, merged, "produced_artifact_id", &obs_id);
             }
         }
 
@@ -197,11 +201,8 @@ pub(crate) fn inject_pre_validation_fields(
                     },
                 )?;
 
-                diff.insert(
-                    "routed_to_observation".to_string(),
-                    Value::String(obs_id.clone()),
-                );
-                merged.insert("routed_to_observation".to_string(), Value::String(obs_id));
+                mirror_string(diff, merged, "routed_to_observation", &obs_id);
+                mirror_string(diff, merged, "produced_observation_id", &obs_id);
             }
         }
 
@@ -252,14 +253,8 @@ pub(crate) fn inject_pre_validation_fields(
                     pending_architecture_review: true,
                 },
             )?;
-            diff.insert(
-                "routed_to_observation".to_string(),
-                Value::String(obs_id.clone()),
-            );
-            merged.insert(
-                "routed_to_observation".to_string(),
-                Value::String(obs_id.clone()),
-            );
+            mirror_string(diff, merged, "routed_to_observation", &obs_id);
+            mirror_string(diff, merged, "produced_observation_id", &obs_id);
 
             let intake_id = merged
                 .get("display_id")
@@ -274,11 +269,8 @@ pub(crate) fn inject_pre_validation_fields(
                     cluster_key,
                 },
             )?;
-            diff.insert(
-                "routed_to_arch_review".to_string(),
-                Value::String(arch_id.clone()),
-            );
-            merged.insert("routed_to_arch_review".to_string(), Value::String(arch_id));
+            mirror_string(diff, merged, "routed_to_arch_review", &arch_id);
+            mirror_string(diff, merged, "produced_architecture_review_id", &arch_id);
         }
 
         // reject_noise → terminal (no pre-validation side effects)

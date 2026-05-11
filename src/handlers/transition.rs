@@ -21,6 +21,10 @@ fn value_as_string(entry: &crate::validate::EntryMap, key: &str) -> Option<Strin
         .map(str::to_string)
 }
 
+fn first_string(entry: &crate::validate::EntryMap, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| value_as_string(entry, key))
+}
+
 fn bool_value(entry: &crate::validate::EntryMap, key: &str) -> Option<bool> {
     entry.get(key).and_then(|v| match v {
         Value::Bool(b) => Some(*b),
@@ -89,12 +93,12 @@ pub(crate) fn inject_upstream_primary_tuple(
         }
     }
     let refs = super::upstream_overlay::ReferencesIn {
-        routed_to_observation: value_as_string(merged, "routed_to_observation"),
-        routed_to_arch_review: value_as_string(merged, "routed_to_arch_review"),
+        routed_to_observation: first_string(merged, &["produced_observation_id", "routed_to_observation"]),
+        routed_to_arch_review: first_string(merged, &["produced_architecture_review_id", "routed_to_arch_review"]),
         produced_task_id: value_as_string(merged, "produced_task_id"),
         produced_artifact_kind: value_as_string(merged, "produced_artifact_kind"),
         produced_artifact_id: value_as_string(merged, "produced_artifact_id"),
-        duplicate_of: value_as_string(merged, "duplicate_of"),
+        duplicate_of: first_string(merged, &["duplicate_of_id", "duplicate_of"]),
         contract_state: intent_contract_state(merged),
         pending_architecture_review: bool_value(merged, "pending_architecture_review"),
         clearable_by_ruling: value_as_string(merged, "clearable_by_ruling"),
@@ -132,6 +136,9 @@ pub(crate) fn inject_upstream_primary_tuple(
             insert_string(diff, merged, "lifecycle", p.lifecycle.as_str());
             insert_opt_string(diff, merged, "waiting_kind", p.waiting.map(|w| w.as_str()));
             insert_opt_string(diff, merged, "outcome", p.outcome.map(|o| o.as_str()));
+            insert_opt_owned(diff, merged, "produced_observation_id", p.references.produced_observation_id);
+            insert_opt_owned(diff, merged, "produced_architecture_review_id", p.references.produced_architecture_review_id);
+            insert_opt_owned(diff, merged, "duplicate_of_id", p.references.duplicate_of_id);
         }
         super::upstream_overlay::PrimaryTuple::Observation(p) => {
             insert_string(diff, merged, "lifecycle", p.lifecycle.as_str());
@@ -237,6 +244,11 @@ pub(crate) fn strip_framework_overlay_from_validation_diff(
         "addressed_by_task_id",
         "addressed_by_commit_sha",
         "superseded_by_id",
+        "produced_observation_id",
+        "produced_architecture_review_id",
+        "duplicate_of_id",
+        "produced_artifact_kind",
+        "produced_artifact_id",
     ] {
         d.remove(k);
     }
@@ -252,12 +264,12 @@ pub(crate) fn assert_upstream_tuple_matches_projection(
     };
     let status = value_as_string(merged, "status").unwrap_or_else(|| "".into());
     let refs = super::upstream_overlay::ReferencesIn {
-        routed_to_observation: value_as_string(merged, "routed_to_observation"),
-        routed_to_arch_review: value_as_string(merged, "routed_to_arch_review"),
+        routed_to_observation: first_string(merged, &["produced_observation_id", "routed_to_observation"]),
+        routed_to_arch_review: first_string(merged, &["produced_architecture_review_id", "routed_to_arch_review"]),
         produced_task_id: value_as_string(merged, "produced_task_id"),
         produced_artifact_kind: value_as_string(merged, "produced_artifact_kind"),
         produced_artifact_id: value_as_string(merged, "produced_artifact_id"),
-        duplicate_of: value_as_string(merged, "duplicate_of"),
+        duplicate_of: first_string(merged, &["duplicate_of_id", "duplicate_of"]),
         contract_state: intent_contract_state(merged),
         pending_architecture_review: bool_value(merged, "pending_architecture_review"),
         clearable_by_ruling: value_as_string(merged, "clearable_by_ruling"),
@@ -295,16 +307,27 @@ pub(crate) fn assert_upstream_tuple_matches_projection(
             compare_str(merged, "lifecycle", p.lifecycle.as_str())?;
             compare_opt(merged, "waiting_kind", p.waiting.map(|w| w.as_str()))?;
             compare_opt(merged, "outcome", p.outcome.map(|o| o.as_str()))?;
+            compare_opt(merged, "produced_observation_id", p.references.produced_observation_id.as_deref())?;
+            compare_opt(merged, "produced_architecture_review_id", p.references.produced_architecture_review_id.as_deref())?;
+            compare_opt(merged, "produced_task_id", p.references.produced_task_id.as_deref())?;
+            compare_opt(merged, "produced_artifact_kind", p.references.produced_artifact_kind.as_deref())?;
+            compare_opt(merged, "produced_artifact_id", p.references.produced_artifact_id.as_deref())?;
+            compare_opt(merged, "duplicate_of_id", p.references.duplicate_of_id.as_deref())?;
         }
         super::upstream_overlay::PrimaryTuple::Observation(p) => {
             compare_str(merged, "lifecycle", p.lifecycle.as_str())?;
             compare_str(merged, "contract_state", p.contract_state.as_str())?;
             compare_opt(merged, "waiting_kind", p.waiting.map(|w| w.as_str()))?;
             compare_opt(merged, "outcome", p.outcome.map(|o| o.as_str()))?;
+            compare_opt(merged, "addressed_by_task_id", p.references.addressed_by_task_id.as_deref())?;
+            compare_opt(merged, "addressed_by_commit_sha", p.references.addressed_by_commit_sha.as_deref())?;
+            compare_opt(merged, "superseded_by_id", p.references.superseded_by_id.as_deref())?;
         }
         super::upstream_overlay::PrimaryTuple::ArchitectureReview(p) => {
             compare_str(merged, "lifecycle", p.lifecycle.as_str())?;
             compare_opt(merged, "outcome", p.outcome.map(|o| o.as_str()))?;
+            compare_opt(merged, "produced_task_id", p.references.produced_task_id.as_deref())?;
+            compare_opt(merged, "superseded_by_id", p.references.superseded_by_id.as_deref())?;
         }
     }
     Ok(())
@@ -332,6 +355,101 @@ fn compare_opt(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod adr0002_primary_tuple_invariant {
+    use super::*;
+    use serde_json::Value;
+
+    fn schema(path: &str) -> Schema {
+        Schema::from_yaml(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn representative_row(schema_name: &str, t: &Transition) -> crate::validate::EntryMap {
+        let mut row = crate::validate::EntryMap::new();
+        row.insert("status".into(), Value::String(t.from.clone()));
+        match schema_name {
+            "intake" => {
+                let decision = if t.verb == "route" {
+                    match t.outcome.as_deref() {
+                        Some("marked_duplicate") => "duplicate",
+                        Some("fast_tracked") => "fast_track",
+                        Some("routed_to_observation") => "normal_observation",
+                        Some("escalated_to_architecture_review") => "arch_review_candidate",
+                        Some("dropped_as_noise") => "reject_noise",
+                        _ if t.to == "needs_info" => "needs_info",
+                        _ => "normal_observation",
+                    }
+                } else {
+                    "normal_observation"
+                };
+                row.insert("decision".into(), Value::String(decision.into()));
+                row.insert("routed_to_observation".into(), Value::String("L001".into()));
+                row.insert("produced_observation_id".into(), Value::String("L001".into()));
+                row.insert("routed_to_arch_review".into(), Value::String("A001".into()));
+                row.insert("produced_architecture_review_id".into(), Value::String("A001".into()));
+                row.insert("duplicate_of".into(), Value::String("I000".into()));
+                row.insert("duplicate_of_id".into(), Value::String("I000".into()));
+                if decision == "fast_track" {
+                    row.insert("produced_artifact_kind".into(), Value::String("observation".into()));
+                    row.insert("produced_artifact_id".into(), Value::String("L001".into()));
+                }
+            }
+            "observations" => {
+                row.insert("contract_state".into(), Value::String("approved".into()));
+                row.insert("intent_contract".into(), serde_json::json!({"contract_state":"ready"}));
+                if t.to == "resolved" {
+                    if t.verb == "supersede" {
+                        row.insert("resolution_kind".into(), Value::String("superseded".into()));
+                        row.insert("superseded_by_id".into(), Value::String("L999".into()));
+                    } else if t.verb == "auto_resolve" {
+                        row.insert("resolution_kind".into(), Value::String("auto_resolved".into()));
+                        row.insert("resolution".into(), Value::String("T001".into()));
+                    } else {
+                        row.insert("resolution_kind".into(), Value::String("addressed_by_task".into()));
+                        row.insert("resolution".into(), Value::String("T001".into()));
+                    }
+                }
+            }
+            "architecture_reviews" => {
+                row.insert("kind".into(), Value::String(if t.to == "awaiting_human_ratification" { "amend" } else { "interpret" }.into()));
+                row.insert("verdict".into(), Value::String(if t.to == "awaiting_human_ratification" { "propose_doctrine_update" } else { "allow_local_fix" }.into()));
+                row.insert("source_observation".into(), Value::String("L001".into()));
+                row.insert("source_intake".into(), Value::String("I001".into()));
+                row.insert("linked_observation_ids".into(), serde_json::json!(["L001"]));
+            }
+            _ => {}
+        }
+        row
+    }
+
+    #[test]
+    fn covers_every_declared_upstream_transition() {
+        for path in [
+            "stores/intake_items/schema.yaml",
+            "stores/observations/schema.yaml",
+            "stores/architecture_reviews/schema.yaml",
+        ] {
+            let schema = schema(path);
+            for t in schema.lifecycle.transitions.clone() {
+                let mut merged = representative_row(&schema.name, &t);
+                let mut diff = crate::validate::EntryMap::new();
+                inject_upstream_primary_tuple(
+                    &schema,
+                    &t,
+                    &t.verb,
+                    &t.from,
+                    &t.to,
+                    &mut diff,
+                    &mut merged,
+                )
+                .unwrap_or_else(|e| panic!("{} {} {} -> {}: {e}", schema.name, t.verb, t.from, t.to));
+                assert_upstream_tuple_matches_projection(&schema, &merged)
+                    .unwrap_or_else(|e| panic!("{} {} {} -> {}: {e}", schema.name, t.verb, t.from, t.to));
+            }
+        }
+    }
 }
 
 /// Read the policy_ref/policies_hash env vars set by the autonomous flow
@@ -1874,6 +1992,7 @@ fields:
             Value::String("normal_observation".into()),
         );
         entry.insert("routed_to_observation".into(), Value::String("L001".into()));
+        entry.insert("produced_observation_id".into(), Value::String("L001".into()));
         entry.insert("lifecycle".into(), Value::String("closed".into()));
         entry.insert(
             "outcome".into(),
@@ -1894,6 +2013,7 @@ fields:
             Value::String("normal_observation".into()),
         );
         entry.insert("routed_to_observation".into(), Value::String("L001".into()));
+        entry.insert("produced_observation_id".into(), Value::String("L001".into()));
         entry.insert("lifecycle".into(), Value::String("waiting".into()));
         entry.insert(
             "outcome".into(),
