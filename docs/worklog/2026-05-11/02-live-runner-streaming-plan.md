@@ -243,13 +243,23 @@ Use normalized `last_event_at`, not just PID, as the primary live signal.
 - `132c0b9 runner: show live runner in task status`
   - Teaches `stores tasks status <task>` and single-task follow frames to read the current marker.
   - Prints live runner role, runner, marker status, updated age, stdout transcript path, and stderr log path when a marker exists.
+- `85daf98 runner: write live semantic events`
+  - Adds per-session semantic live files: `<session_id>/events.jsonl` and `<session_id>/status.json`.
+  - Maps useful Pi and Claude Code stream events into normalized events while preserving raw transcript compatibility.
+  - Includes Claude retry/tool/text/usage mapping and basic status updates.
+- `37ac92d runner: map claude result errors`
+  - Maps Claude `result.error` into a semantic error event before final output.
+  - Adds regression coverage for result-error ordering.
+  - Documents Pi mapper fixture assumptions and SDK event-shape tolerance.
 
 ### Review status
 
 - First implementation review found missing discoverability, missing stderr live logs, and silent sink write failures.
 - Follow-up review of `bec81d9` was **PASS** for the coherent phase.
 - Review of `fd9bc6e` was **PASS** for the recommended minimal CLI chunk.
-- Status bridge implementation validated with focused tests in this pass; external review handoff still recommended by the parent workflow.
+- Status bridge implementation validated with focused tests and reviewed PASS.
+- Initial semantic events review found one medium gap: Claude result errors were not mapped as semantic errors.
+- Follow-up `37ac92d` review was **PASS** for semantic live events.
 - The implemented discoverability is filesystem-marker based, not the full planned `runner_invocations` DB layer.
 
 ## Implementation slices
@@ -282,23 +292,32 @@ Validation:
 - Worker ran focused streaming/invocation tests with runner features.
 - Reviewer independently ran `cargo test -q streaming_callback -- --nocapture`; passed.
 
-### Slice 2 — normalized event mapping for Pi and Claude Code
+### Slice 2 — normalized event mapping for Pi and Claude Code — status: complete for useful first subset via `85daf98` + `37ac92d`
 
 Goal: raw lines become useful semantic events without changing downstream final-output behavior.
 
-- Add `RunnerEvent` and sink.
-- Implement mappers:
-  - `map_pi_event`
-  - `map_claude_stream_json_event`
-- Append `events.jsonl` and update `status.json` on every semantic event.
-- Include API retry/rate-limit events as first-class events.
-- Track current tool by id where available, and render unknown tool end events without failing.
+Completed:
+
+- Added normalized live event/status writing for Pi and Claude Code.
+- Appends `<session_id>/events.jsonl` and updates `<session_id>/status.json` during streaming.
+- Preserves flat raw stdout transcript compatibility.
+- Implements useful first-subset mappers:
+  - Pi assistant/tool events based on sidecar-forwarded SDK event shape.
+  - Claude assistant text, tool use/result, usage, API retry, final output, and result errors.
+- Includes API retry/rate-limit events as first-class semantic events.
+- Tracks current/basic activity in `status.json`.
+
+Deferred:
+
+- Rich current-tool duration and full semantic liveness integration into `tasks status`.
+- Rendering normalized `events.jsonl` in `stores runs tail`.
+- Real-world Pi SDK fixture capture beyond documented/synthetic mapper fixtures.
 
 Validation:
 
-- Fixture-based mapper tests for Pi and Claude Code.
-- Tool start/end matching by id where available.
-- Claude `system.api_retry` fixture extends liveness and renders as retry, not as silence.
+- Worker ran focused mapper tests for Pi and Claude Code plus `cargo check --features runner-pi,runner-claude-code`.
+- Broader lib run had two pre-existing/unrelated failures noted by worker.
+- Reviewer found no blockers after `37ac92d`; PASS.
 
 ### Slice 3 — discoverability from stores
 
@@ -316,10 +335,10 @@ Current state:
 Remaining choices:
 
 1. **Stay marker/filesystem based:** improve `runs tail` into a following/blocking tail.
-2. **Semantic status path:** implement normalized `events.jsonl` / `status.json` so status can show current tool / last semantic event, not just marker update age.
+2. **Semantic status path:** teach status/runs CLI to read `status.json` / `events.jsonl` so status can show current tool / last semantic event, not just marker update age.
 3. **DB path:** implement `runner_invocations` and status integration, then build richer CLI on top.
 
-Recommended next step after status bridge review: normalized `events.jsonl` / `status.json` for Pi and Claude Code, because the status bridge currently reports marker update age rather than per-line/semantic liveness.
+Recommended next step: wire semantic `status.json` into `stores tasks status` and/or `stores runs current`, because semantic files now exist but operator-facing commands still mainly show marker metadata.
 
 Validation:
 
@@ -402,12 +421,13 @@ Goal: optional live dashboard like `pi-subagents`.
 
 ## Recommended next worker brief
 
-Do **not** redo Slice 1, the minimal `runs current/tail` CLI, or the status bridge once reviewed.
+Do **not** redo Slice 1, the minimal `runs current/tail` CLI, the status bridge, or semantic event writing. Start from accepted `37ac92d`.
 
 Recommended next coherent chunks; pick one:
 
-1. **Semantic events:** implement Slice 2 for Pi and Claude Code: normalized `events.jsonl`, `status.json`, retry/tool/text/usage event mapping, and tests.
-2. **Follow mode:** make `stores runs tail <task> --raw --follow` follow appended bytes until marker status becomes completed/failed.
-3. **DB-backed invocations:** replace/augment marker lookup with `runner_invocations` once the filesystem path has proven useful.
+1. **Semantic status bridge:** teach `stores tasks status <task>` and/or `stores runs current <task>` to read `<session_id>/status.json` and show last semantic event age/current activity in addition to marker update age.
+2. **Semantic tail:** teach `stores runs tail <task>` to render normalized `<session_id>/events.jsonl` by default, with `--raw` / `--stderr` remaining as escape hatches.
+3. **Follow mode:** make `stores runs tail <task> --raw --follow` follow appended bytes until marker status becomes completed/failed.
+4. **DB-backed invocations:** replace/augment marker lookup with `runner_invocations` once the filesystem path has proven useful.
 
-The highest operator-value next chunk after status bridge is probably **Semantic events**, because it upgrades the status bridge from marker discoverability to real liveness/current-tool reporting.
+The highest operator-value next chunk is probably **Semantic status bridge**, because semantic `status.json` now exists but the main status command does not yet expose semantic last-event/current-activity liveness.
