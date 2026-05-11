@@ -8,9 +8,12 @@
 /// schema, writes the full transcript to `.stores/runs/<session_id>.jsonl`, and
 /// returns it as `RunnerOutput.structured_output` with source `pi-tool`.
 use anyhow::{bail, Context, Result};
-use std::fs;
+use std::cell::RefCell;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 
 use super::liveness::{self, LivenessClass, LivenessThresholds};
 use super::{AgentRunTelemetry, Runner, RunnerOutput};
@@ -57,6 +60,47 @@ fn resolve_cwd(workspace_path: Option<&str>) -> Result<PathBuf> {
     }
 }
 
+fn transcript_path(cwd: &Path, session_id: &str) -> PathBuf {
+    let runs_dir = std::env::var_os("STORES_RUNS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.join(".stores").join("runs"));
+    runs_dir.join(format!("{session_id}.jsonl"))
+}
+
+fn open_live_transcript(
+    cwd: &Path,
+    session_id: &str,
+) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
+    let path = transcript_path(cwd, session_id);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("transcript path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "pi transcript write failed: could not create runs dir {} (no /tmp fallback)",
+            parent.display()
+        )
+    })?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| {
+            format!(
+                "pi transcript write failed: could not open {}",
+                path.display()
+            )
+        })?;
+    Ok((path, Rc::new(RefCell::new(file))))
+}
+
+fn append_live_line(file: &Rc<RefCell<File>>, line: &str) {
+    let mut file = file.borrow_mut();
+    let _ = writeln!(file, "{line}");
+    let _ = file.flush();
+}
+
 /// Write the JSONL transcript to `<runs_dir>/<session_id>.jsonl`.
 ///
 /// Returns `Ok(path)` where `path` is always under `runs_dir` (never under
@@ -68,6 +112,7 @@ fn resolve_cwd(workspace_path: Option<&str>) -> Result<PathBuf> {
 ///
 /// **Invariant:** a successful return value is ALWAYS under `.stores/runs/`.
 /// No `/tmp` fallback exists.
+#[cfg(test)]
 fn write_transcript(cwd: &Path, session_id: &str, stdout: &str) -> anyhow::Result<PathBuf> {
     let runs_dir = std::env::var_os("STORES_RUNS_DIR")
         .map(PathBuf::from)
@@ -203,11 +248,14 @@ impl Runner for PiRunner {
         if let Some(p) = &schema_path {
             cmd.arg("--schema").arg(p);
         }
+        let (live_transcript_path, live_transcript) = open_live_transcript(&cwd, &session_id)
+            .context("pi transcript write failed; not launching runner")?;
         let started_at = crate::handlers::row::now_iso8601();
+        let stdout_transcript = Rc::clone(&live_transcript);
         let output = liveness::run_streaming_with_liveness(
             &mut cmd,
             &LivenessThresholds::from_env(),
-            |_| {},
+            move |line| append_live_line(&stdout_transcript, line),
             |_| {},
         )
         .context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
@@ -215,15 +263,7 @@ impl Runner for PiRunner {
         let stdout = output.stdout;
         let stderr = output.stderr;
         let exit_code = output.exit_code;
-        // write_transcript returns Err if the path cannot be written under
-        // .stores/runs/ — no /tmp fallback. On Err, propagate so the drive
-        // layer marks the row failed without calling insert_agent_run.
-        let transcript_path = Some(
-            write_transcript(&cwd, &session_id, &stdout)
-                .context("pi transcript write failed; not persisting agent_run row")?
-                .to_string_lossy()
-                .to_string(),
-        );
+        let transcript_path = Some(live_transcript_path.to_string_lossy().to_string());
         let (raw_model_id, tokens_in, tokens_out, prompt_cache_hits) =
             extract_pi_telemetry(&stdout);
         // Pi runner MUST emit a deterministic model_id at the source layer so
@@ -247,7 +287,10 @@ impl Runner for PiRunner {
             stderr_log_path: None,
         };
 
-        if matches!(output.killed_for, Some(LivenessClass::StalledNoOutput { .. })) {
+        if matches!(
+            output.killed_for,
+            Some(LivenessClass::StalledNoOutput { .. })
+        ) {
             return Ok(RunnerOutput {
                 stdout,
                 stderr,
@@ -504,6 +547,12 @@ mod tests {
         assert_eq!(out.payload_error, None);
         assert_eq!(out.structured_output.unwrap()["summary"], "three");
         assert_eq!(out.stdout.lines().count(), 3);
+        let transcript_path = out.telemetry.transcript_path.as_deref().unwrap();
+        let transcript = std::fs::read_to_string(transcript_path).unwrap();
+        assert_eq!(
+            transcript, out.stdout,
+            "flat transcript is live stdout transcript"
+        );
         let mtime = std::fs::metadata(heartbeat.path())
             .unwrap()
             .modified()

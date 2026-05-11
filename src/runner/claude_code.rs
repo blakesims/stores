@@ -46,10 +46,14 @@
 /// rejects 2020-12 with a dialect error, swap the `$schema` URI to Draft-07
 /// and re-run (Decision Matrix row 8).
 use anyhow::{Context, Result};
-use std::fs;
+use std::cell::RefCell;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 
+use super::liveness::{self, LivenessThresholds};
 use super::{AgentRunTelemetry, Runner, RunnerOutput};
 
 use super::sap::{extract_all_json_objects, pick_best_sap_candidate};
@@ -293,6 +297,43 @@ pub fn resolve_cwd() -> Result<PathBuf> {
         .context("failed to canonicalize current_dir")
 }
 
+fn transcript_path(cwd: &Path, session_id: &str) -> PathBuf {
+    let runs_dir = match std::env::var_os("STORES_RUNS_DIR") {
+        Some(p) => PathBuf::from(p),
+        None => cwd.join(".stores").join("runs"),
+    };
+    runs_dir.join(format!("{session_id}.jsonl"))
+}
+
+fn open_live_transcript(
+    cwd: &Path,
+    session_id: &str,
+) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
+    let path = transcript_path(cwd, session_id);
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("transcript path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "transcript write failed: could not create runs dir {} (no /tmp fallback)",
+            parent.display()
+        )
+    })?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("transcript write failed: could not open {}", path.display()))?;
+    Ok((path, Rc::new(RefCell::new(file))))
+}
+
+fn append_live_line(file: &Rc<RefCell<File>>, line: &str) {
+    let mut file = file.borrow_mut();
+    let _ = writeln!(file, "{line}");
+    let _ = file.flush();
+}
+
 /// Write the stream-json transcript to `<runs_dir>/<session_id>.jsonl`.
 ///
 /// `runs_dir` defaults to `<cwd>/.stores/runs` but is overridden by
@@ -308,6 +349,7 @@ pub fn resolve_cwd() -> Result<PathBuf> {
 ///
 /// **Invariant:** a successful return value is ALWAYS under `.stores/runs/`.
 /// No `/tmp` fallback exists.
+#[cfg(test)]
 fn write_transcript(cwd: &Path, session_id: &str, stdout: &str) -> anyhow::Result<PathBuf> {
     let runs_dir = match std::env::var_os("STORES_RUNS_DIR") {
         Some(p) => PathBuf::from(p),
@@ -467,26 +509,25 @@ impl Runner for ClaudeCodeRunner {
             }
         }
 
+        let (live_transcript_path, live_transcript) = open_live_transcript(&cwd, &session_id)
+            .context("transcript write failed; not launching `claude`")?;
         let started_at = crate::handlers::row::now_iso8601();
-        let output = cmd
-            .arg(brief)
-            .output()
-            .context("failed to launch `claude`; ensure it is installed and on PATH")?;
+        cmd.arg(brief);
+        let stdout_transcript = Rc::clone(&live_transcript);
+        let output = liveness::run_streaming_with_liveness(
+            &mut cmd,
+            &LivenessThresholds::from_env(),
+            move |line| append_live_line(&stdout_transcript, line),
+            |_| {},
+        )
+        .context("failed to launch `claude`; ensure it is installed and on PATH")?;
         let ended_at = crate::handlers::row::now_iso8601();
 
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout = output.stdout;
+        let stderr = output.stderr;
+        let exit_code = output.exit_code;
 
-        // Write the full stream-json transcript. Returns Err if the path cannot
-        // be written under .stores/runs/ — no /tmp fallback. On Err, propagate
-        // so the caller (drive) marks the row failed without calling insert_agent_run.
-        let transcript_path = Some(
-            write_transcript(&cwd, &session_id, &stdout)
-                .context("transcript write failed; not persisting agent_run row")?
-                .to_string_lossy()
-                .to_string(),
-        );
+        let transcript_path = Some(live_transcript_path.to_string_lossy().to_string());
         let (raw_model_id, tokens_in, tokens_out, prompt_cache_hits) =
             extract_telemetry_from_stream_json(&stdout, self.model.as_deref());
 
@@ -956,6 +997,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn flat_transcript_is_written_from_streaming_stdout() {
+        let _env_guard = redirect_runs_dir();
+        let workspace = env!("CARGO_MANIFEST_DIR").to_string();
+        let runner = ClaudeCodeRunner::new().with_bin(shims().executor.clone());
+        let out = runner
+            .spawn("executor", "sys", "brief", None, Some(&workspace))
+            .expect("spawn should succeed with shim");
+        let transcript_path = out.telemetry.transcript_path.as_deref().unwrap();
+        let transcript = fs::read_to_string(transcript_path).unwrap();
+        assert_eq!(transcript, out.stdout, "flat transcript is raw stdout");
+        assert!(transcript.contains(r#"\"role\":\"executor\""#));
+    }
+
     /// AC1.5(d): session-id is a valid v4 UUID and is propagated to
     /// RunnerOutput.session_id when the shim exits 0.
     #[test]
@@ -1218,7 +1273,13 @@ mod tests {
         let runner = ClaudeCodeRunner::new().with_bin(shims().retries_exhausted.clone());
         let schema_text = r#"{"type":"object","required":["verdict"]}"#;
         let out = runner
-            .spawn("external-review", "", "review this", Some(schema_text), Some(&workspace))
+            .spawn(
+                "external-review",
+                "",
+                "review this",
+                Some(schema_text),
+                Some(&workspace),
+            )
             .expect("adapter spawn must succeed (infrastructure ok)");
 
         // The adapter must set payload_error when error_subtype is present.

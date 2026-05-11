@@ -250,10 +250,14 @@ pub fn run_streaming_with_liveness(
             Ok(Stream::Stdout(line)) => {
                 stdout.push_str(&line);
                 stdout.push('\n');
+                touch_heartbeat_file_from_env();
+                on_stdout_line(&line);
             }
             Ok(Stream::Stderr(line)) => {
                 stderr.push_str(&line);
                 stderr.push('\n');
+                touch_heartbeat_file_from_env();
+                on_stderr_line(&line);
             }
             Ok(Stream::Eof) => {
                 eof_count += 1;
@@ -413,6 +417,37 @@ mod tests {
             .unwrap();
         assert!(mtime.elapsed().unwrap() <= Duration::from_secs(2));
         std::env::remove_var("STORES_HEARTBEAT_FILE");
+    }
+
+    #[test]
+    fn streaming_callbacks_fire_before_child_exit() {
+        let started = Instant::now();
+        let mut first_stdout_at = None;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("echo first; sleep 1; echo second");
+        let out = run_streaming_with_liveness(
+            &mut cmd,
+            &LivenessThresholds {
+                no_output_secs: 5,
+                wall_clock_max_secs: 30,
+            },
+            |line| {
+                if line == "first" {
+                    first_stdout_at = Some(started.elapsed());
+                }
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("first"));
+        assert!(out.stdout.contains("second"));
+        let first = first_stdout_at.expect("first line callback must fire");
+        assert!(
+            first < Duration::from_millis(800),
+            "first callback should fire before child exit; got {first:?}"
+        );
+        assert!(started.elapsed() >= Duration::from_secs(1));
     }
 
     #[test]
