@@ -297,12 +297,55 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
         // Runner/model telemetry rollup
         .subcommand(
             Command::new("runner-stats")
-                .about("Summarize agent_runs by role, harness, and model")
+                .about("Summarize raw agent_runs telemetry by role, harness, model, and thinking effort")
+                .after_help("Warning: raw operational telemetry only. Rows marked payload_valid=0 are excluded by default when available; use --include-dirty-data to include them. Do not treat this output as statistical inference.")
                 .arg(
                     Arg::new("display_id")
                         .long("display-id")
                         .help("Restrict stats to a single task display ID")
                         .required(false),
+                )
+                .arg(
+                    Arg::new("role")
+                        .long("role")
+                        .help("Restrict stats to a single agent role")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("harness")
+                        .long("harness")
+                        .help("Restrict stats to a single harness ID")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("model")
+                        .long("model")
+                        .help("Restrict stats to a single model ID")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("thinking")
+                        .long("thinking")
+                        .help("Restrict stats to a single effective thinking effort")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("since")
+                        .long("since")
+                        .help("Restrict stats to runs with started_at at or after this RFC3339 timestamp")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("until")
+                        .long("until")
+                        .help("Restrict stats to runs with started_at at or before this RFC3339 timestamp")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("include_dirty_data")
+                        .long("include-dirty-data")
+                        .action(ArgAction::SetTrue)
+                        .help("Include rows marked payload_valid=0; excluded by default when that column exists"),
                 )
                 .arg(
                     Arg::new("json")
@@ -587,6 +630,10 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .subcommand(
                     Command::new("backfill")
                         .about("One-off scan for accepted-but-unmerged rows; applies accept-merge sequentially (Phase 7)"),
+                )
+                .subcommand(
+                    Command::new("telemetry-backfill")
+                        .about("Backfill missing historical Pi agent_run telemetry from transcript JSONL"),
                 ),
         );
 
@@ -1137,7 +1184,11 @@ fn build_external_review_import_pass_cmd() -> Command {
     Command::new("import-pass")
         .about("Import an already completed manual external-review PASS for the current task head")
         .arg(Arg::new("task_id").help("Task display ID").required(true))
-        .arg(Arg::new("transcript-path").long("transcript-path").required(true))
+        .arg(
+            Arg::new("transcript-path")
+                .long("transcript-path")
+                .required(true),
+        )
         .arg(Arg::new("base-sha").long("base-sha").required(true))
         .arg(Arg::new("head-sha").long("head-sha").required(true))
         .arg(
@@ -2051,6 +2102,36 @@ mod tests {
             args.contains(&"json".to_string()),
             "metrics must expose a local --json flag; got args: {args:?}"
         );
+    }
+
+    #[test]
+    fn runner_stats_exposes_raw_telemetry_filters() {
+        let manifest = Manifest::empty();
+        let schemas = HashMap::new();
+        let cmd = build_root(&manifest, &schemas);
+        let runner_stats = cmd
+            .find_subcommand("runner-stats")
+            .expect("runner-stats command");
+        let args: Vec<_> = runner_stats
+            .get_arguments()
+            .map(|a| a.get_id().as_str().to_string())
+            .collect();
+        for expected in [
+            "display_id",
+            "role",
+            "harness",
+            "model",
+            "thinking",
+            "since",
+            "until",
+            "include_dirty_data",
+            "json",
+        ] {
+            assert!(
+                args.contains(&expected.to_string()),
+                "missing {expected}: {args:?}"
+            );
+        }
     }
 
     #[test]

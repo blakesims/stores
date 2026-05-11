@@ -151,23 +151,35 @@ const LAUNCH_ERROR_EXIT_CODE: i32 = -1;
 /// all claude-code variants to `claude_code:unknown`.
 ///
 /// Mapping:
-/// - `pi` → `pi:default`
+/// - `pi` / `pi:<configured-model>` → `pi:default` (no effective model observed)
 /// - `claude-code:<model>` → `claude_code:<model>`
 /// - `claude-code` (no suffix) → `claude_code:unknown`
-/// - any other runner → `<runner_name>:unknown`
+/// - any other runner with a model suffix → `<runner>:<model>`
+/// - any other runner without a model suffix → `<runner_name>:unknown`
 fn derive_spawn_fail_model_id(runner_name: &str) -> String {
-    if runner_name == "pi" {
-        "pi:default".to_string()
-    } else if runner_name.starts_with("claude-code") {
-        // runner_name is either "claude-code" (no model) or "claude-code:<model>".
-        // Split on ':' to extract the model suffix.
-        match runner_name.split_once(':') {
-            Some((_base, model)) if !model.is_empty() => format!("claude_code:{model}"),
-            _ => "claude_code:unknown".to_string(),
-        }
-    } else {
-        format!("{runner_name}:unknown")
+    if runner_name == "pi" || runner_name.starts_with("pi:") {
+        return "pi:default".to_string();
     }
+
+    let normalized_runner = runner_name
+        .strip_prefix("claude-code")
+        .map(|suffix| format!("claude_code{suffix}"))
+        .unwrap_or_else(|| runner_name.to_string());
+
+    match normalized_runner.split_once(':') {
+        Some((base, model)) if !base.is_empty() && !model.is_empty() => {
+            format!("{base}:{model}")
+        }
+        _ if runner_name == "claude-code" => "claude_code:unknown".to_string(),
+        _ => format!("{runner_name}:unknown"),
+    }
+}
+
+fn split_runner_model_label(runner_name: &str) -> (&str, Option<&str>) {
+    runner_name
+        .split_once(':')
+        .map(|(runner, model)| (runner, Some(model)))
+        .unwrap_or((runner_name, None))
 }
 
 /// Write an error transcript stub under `<workspace_path>/.stores/runs/` for a
@@ -1079,6 +1091,7 @@ impl RoleRunner for FixedRoleRunner {
 struct RoleRunnerChoice {
     runner: String,
     model: Option<String>,
+    thinking: Option<String>,
 }
 
 struct ConfigRoleRunner {
@@ -1095,6 +1108,7 @@ impl ConfigRoleRunner {
             return Ok(RoleRunnerChoice {
                 runner: default_runner.clone(),
                 model: None,
+                thinking: None,
             });
         }
         bail!("no runner configured for role '{role}' and drive.default_runner is unset")
@@ -1118,12 +1132,20 @@ impl ConfigRoleRunner {
                     bail!("runner 'claude-code' requires the runner-claude-code cargo feature")
                 }
             }
-            other => {
-                if choice.model.is_some() {
-                    bail!("drive role config sets model for runner '{other}', but model is only supported for claude-code")
+            "pi" => {
+                #[cfg(feature = "runner-pi")]
+                {
+                    Ok(Box::new(crate::runner::PiRunner::with_config(
+                        choice.model.clone(),
+                        choice.thinking.clone(),
+                    )))
                 }
-                crate::runner::select(other)
+                #[cfg(not(feature = "runner-pi"))]
+                {
+                    bail!("runner 'pi' requires the runner-pi cargo feature")
+                }
             }
+            other => crate::runner::select(other),
         }
     }
 }
@@ -1132,7 +1154,7 @@ impl RoleRunner for ConfigRoleRunner {
     fn name_for_role(&self, role: &str) -> Result<String> {
         let choice = self.choice_for(role)?;
         Ok(match choice.model {
-            Some(model) if choice.runner == "claude-code" => format!("{}:{model}", choice.runner),
+            Some(model) => format!("{}:{model}", choice.runner),
             _ => choice.runner,
         })
     }
@@ -1394,6 +1416,7 @@ fn build_role_runner(args: &DriveArgs) -> Result<Box<dyn RoleRunner>> {
                 RoleRunnerChoice {
                     runner: cfg.runner,
                     model: cfg.model,
+                    thinking: cfg.thinking,
                 },
             )
         })
@@ -1960,14 +1983,20 @@ fn drive_loop_with_role_runner(
                     agent_role,
                     &spawn_err,
                 );
+                let (configured_harness, configured_model) = split_runner_model_label(&runner_name);
                 let synthetic_telemetry = crate::runner::AgentRunTelemetry {
                     model_id: Some(spawn_fail_model_id),
-                    harness_id: Some(runner_name.clone()),
+                    harness_id: Some(configured_harness.to_string()),
                     started_at: Some(spawn_failed_at.clone()),
                     ended_at: Some(spawn_failed_at),
                     tokens_in: Some(0),
                     tokens_out: Some(0),
                     transcript_path: Some(error_transcript_path),
+                    configured_harness_id: Some(configured_harness.to_string()),
+                    configured_model_id: configured_model.map(str::to_string),
+                    runner_exit_kind: Some("spawn_failed".to_string()),
+                    payload_valid: Some(false),
+                    payload_error: Some(spawn_err.to_string()),
                     ..Default::default()
                 };
                 // Insert the synthetic row before transitioning the task.
@@ -2958,8 +2987,7 @@ mod tests {
         let _ = child.wait();
         let msg = err.to_string();
         assert!(
-            msg.contains("refusing to start duplicate drive")
-                && msg.contains("live_drive_pid"),
+            msg.contains("refusing to start duplicate drive") && msg.contains("live_drive_pid"),
             "unexpected error: {msg}"
         );
     }
@@ -2980,7 +3008,9 @@ mod tests {
             None,
         );
         let row_id: i64 = conn
-            .query_row("SELECT id FROM tasks WHERE display_id='T999'", [], |r| r.get(0))
+            .query_row("SELECT id FROM tasks WHERE display_id='T999'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let mut child = std::process::Command::new("sleep")
             .arg("30")
@@ -3019,7 +3049,9 @@ mod tests {
             None,
         );
         let row_id: i64 = conn
-            .query_row("SELECT id FROM tasks WHERE display_id='T999'", [], |r| r.get(0))
+            .query_row("SELECT id FROM tasks WHERE display_id='T999'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let mut child = std::process::Command::new("sleep")
             .arg("30")
@@ -3055,7 +3087,9 @@ mod tests {
             None,
         );
         let row_id: i64 = conn
-            .query_row("SELECT id FROM tasks WHERE display_id='T999'", [], |r| r.get(0))
+            .query_row("SELECT id FROM tasks WHERE display_id='T999'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let mut child = std::process::Command::new("sleep")
             .arg("30")
@@ -3074,7 +3108,10 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         let msg = err.to_string();
-        assert!(msg.contains("live_dispatch_lock_pid"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("live_dispatch_lock_pid"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
@@ -3516,8 +3553,9 @@ mod tests {
 
     #[test]
     fn spawn_fail_model_id_preserves_suffix() {
-        // pi runner → pi:default
+        // pi runner → pi:default; configured Pi model is not treated as observed/effective.
         assert_eq!(derive_spawn_fail_model_id("pi"), "pi:default");
+        assert_eq!(derive_spawn_fail_model_id("pi:gpt-5.5"), "pi:default");
         // claude-code with model suffix → preserve as claude_code:<model>
         assert_eq!(
             derive_spawn_fail_model_id("claude-code:opus"),
@@ -3594,6 +3632,7 @@ mod tests {
             prompt_cache_hits: Some(0),
             transcript_path: Some(runs_dir.join(format!("{role}.jsonl")).display().to_string()),
             stderr_log_path: None,
+            ..crate::runner::AgentRunTelemetry::default()
         };
 
         let mut planner_out = make_run_output(planner_fixture_json(), 0);
@@ -3818,6 +3857,7 @@ mod tests {
             RoleRunnerChoice {
                 runner: "claude-code".to_string(),
                 model: Some("opus".to_string()),
+                thinking: Some("high".to_string()),
             },
         );
         roles.insert(
@@ -3825,6 +3865,7 @@ mod tests {
             RoleRunnerChoice {
                 runner: "pi".to_string(),
                 model: None,
+                thinking: None,
             },
         );
         let rr = ConfigRoleRunner {
@@ -3834,29 +3875,33 @@ mod tests {
         assert_eq!(rr.name_for_role("planner").unwrap(), "claude-code:opus");
         assert_eq!(rr.name_for_role("code_reviewer").unwrap(), "pi");
         assert_eq!(rr.name_for_role("executor").unwrap(), "claude-code");
+        assert_eq!(
+            rr.choice_for("planner").unwrap().thinking.as_deref(),
+            Some("high")
+        );
     }
 
     #[test]
-    fn config_role_runner_rejects_model_for_non_claude_name() {
+    fn config_role_runner_accepts_pi_model_name() {
         let mut roles = std::collections::BTreeMap::new();
         roles.insert(
             "plan_reviewer".to_string(),
             RoleRunnerChoice {
                 runner: "pi".to_string(),
-                model: Some("opus".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                thinking: Some("medium".to_string()),
             },
         );
         let rr = ConfigRoleRunner {
             default_runner: None,
             roles,
         };
-        let err = rr
-            .build_choice(&rr.choice_for("plan_reviewer").unwrap())
-            .err()
-            .expect("model on non-claude runner should be rejected");
-        assert!(err
-            .to_string()
-            .contains("model is only supported for claude-code"));
+        let choice = rr.choice_for("plan_reviewer").unwrap();
+        assert_eq!(choice.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(choice.thinking.as_deref(), Some("medium"));
+        assert_eq!(rr.name_for_role("plan_reviewer").unwrap(), "pi:gpt-5.5");
+        rr.build_choice(&choice)
+            .expect("pi model label should be accepted by role selection");
     }
 
     #[test]
@@ -4488,11 +4533,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut bad = make_run_output_with_session(
-            r#"{"role":"executor"}"#,
-            0,
-            "malformed-exit0-session",
-        );
+        let mut bad =
+            make_run_output_with_session(r#"{"role":"executor"}"#, 0, "malformed-exit0-session");
         bad.telemetry = crate::runner::AgentRunTelemetry::with_mock_defaults(workspace.path());
         bad.telemetry.transcript_path = Some(
             workspace
@@ -4533,7 +4575,14 @@ mod tests {
                 .contains("envelope parse failed"),
             "blocked_reason must include parse evidence: {reason}"
         );
-        assert_eq!(after.get("cycles").and_then(|v| v.as_array()).unwrap().len(), 0);
+        assert_eq!(
+            after
+                .get("cycles")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
+            0
+        );
 
         let exit_code: i64 = conn
             .query_row(
@@ -4549,7 +4598,10 @@ mod tests {
             .join(".stores/runs/current-T730-executor.json");
         let marker: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
-        assert_eq!(marker.get("status").and_then(|v| v.as_str()), Some("failed"));
+        assert_eq!(
+            marker.get("status").and_then(|v| v.as_str()),
+            Some("failed")
+        );
         assert!(
             marker
                 .get("payload_error")
@@ -5716,6 +5768,7 @@ mod tests {
             prompt_cache_hits: Some(0),
             transcript_path: Some(runs_dir.join("planner.jsonl").display().to_string()),
             stderr_log_path: None,
+            ..crate::runner::AgentRunTelemetry::default()
         };
         let mut planner_out = make_run_output(planner_fixture_json(), 0);
         planner_out.telemetry = make_telemetry();
@@ -5804,6 +5857,7 @@ mod tests {
             prompt_cache_hits: Some(0),
             transcript_path: Some(runs_dir.join("planner.jsonl").display().to_string()),
             stderr_log_path: None,
+            ..crate::runner::AgentRunTelemetry::default()
         };
         std::fs::write(runs_dir.join("planner.jsonl"), "{}\n").unwrap();
         db::insert_agent_run(

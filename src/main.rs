@@ -203,26 +203,35 @@ fn main() -> Result<()> {
                 window: sub.get_one::<String>("window").unwrap().clone(),
                 text: *sub.get_one::<bool>("text").unwrap_or(&false),
                 // Accept metrics-local --json or global --json flag.
-                json: *sub.get_one::<bool>("json").unwrap_or(&false)
-                    || matches.get_flag("json"),
+                json: *sub.get_one::<bool>("json").unwrap_or(&false) || matches.get_flag("json"),
                 now: sub.get_one::<String>("now").cloned(),
             };
             cli::metrics::run(args)?;
         }
         Some(("runner-stats", sub)) => {
             let json = *sub.get_one::<bool>("json").unwrap_or(&false) || matches.get_flag("json");
-            cli::runner_stats::run(json, sub.get_one::<String>("display_id").map(|s| s.as_str()))?;
+            let filters = cli::runner_stats::RunnerStatsFilters {
+                display_id: sub.get_one::<String>("display_id").map(|s| s.as_str()),
+                role: sub.get_one::<String>("role").map(|s| s.as_str()),
+                harness: sub.get_one::<String>("harness").map(|s| s.as_str()),
+                model: sub.get_one::<String>("model").map(|s| s.as_str()),
+                thinking: sub.get_one::<String>("thinking").map(|s| s.as_str()),
+                since: sub.get_one::<String>("since").map(|s| s.as_str()),
+                until: sub.get_one::<String>("until").map(|s| s.as_str()),
+                include_dirty_data: *sub.get_one::<bool>("include_dirty_data").unwrap_or(&false),
+            };
+            cli::runner_stats::run(json, filters)?;
         }
         Some(("engine", sub)) => {
             match sub.subcommand() {
                 Some(("locks", lsub)) => {
-                    let json = *lsub.get_one::<bool>("json").unwrap_or(&false)
-                        || matches.get_flag("json");
+                    let json =
+                        *lsub.get_one::<bool>("json").unwrap_or(&false) || matches.get_flag("json");
                     cli::engine::run_locks(json)?;
                 }
                 Some(("plan-start", psub)) => {
-                    let json = *psub.get_one::<bool>("json").unwrap_or(&false)
-                        || matches.get_flag("json");
+                    let json =
+                        *psub.get_one::<bool>("json").unwrap_or(&false) || matches.get_flag("json");
                     // Read-only end-to-end: plan-start opens the DB read-only and
                     // must NOT trigger startup sweeps, daemon ticks, or any
                     // side-effecting subscriber. (T140 P4 contract.)
@@ -366,6 +375,10 @@ fn main() -> Result<()> {
             }
             if let Some(("backfill", _)) = sub.subcommand() {
                 handlers::agents_backfill::run_backfill()?;
+                return Ok(());
+            }
+            if let Some(("telemetry-backfill", _)) = sub.subcommand() {
+                handlers::agent_run_telemetry_backfill::run_agent_run_telemetry_backfill()?;
                 return Ok(());
             }
             if let Some(("stop", stop_sub)) = sub.subcommand() {

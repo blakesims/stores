@@ -23,6 +23,8 @@ use super::{
 pub struct PiRunner {
     node_bin: PathBuf,
     helper_path: PathBuf,
+    configured_model: Option<String>,
+    configured_thinking: Option<String>,
 }
 
 impl PiRunner {
@@ -33,6 +35,19 @@ impl PiRunner {
                 .join("agents")
                 .join("sidecar")
                 .join("pi_runner.mjs"),
+            configured_model: None,
+            configured_thinking: None,
+        }
+    }
+
+    pub fn with_config(
+        configured_model: Option<String>,
+        configured_thinking: Option<String>,
+    ) -> Self {
+        Self {
+            configured_model,
+            configured_thinking,
+            ..Self::new()
         }
     }
 
@@ -41,6 +56,23 @@ impl PiRunner {
         Self {
             node_bin,
             helper_path,
+            configured_model: None,
+            configured_thinking: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_bin_helper_and_config(
+        node_bin: PathBuf,
+        helper_path: PathBuf,
+        configured_model: Option<String>,
+        configured_thinking: Option<String>,
+    ) -> Self {
+        Self {
+            node_bin,
+            helper_path,
+            configured_model,
+            configured_thinking,
         }
     }
 }
@@ -256,28 +288,137 @@ fn write_transcript(cwd: &Path, session_id: &str, stdout: &str) -> anyhow::Resul
     )
 }
 
-fn extract_pi_telemetry(stdout: &str) -> (Option<String>, Option<i64>, Option<i64>, Option<i64>) {
-    let mut model_id = None;
-    let mut tokens_in = None;
-    let mut tokens_out = None;
-    let mut prompt_cache_hits = None;
+#[derive(Debug, Default, PartialEq)]
+struct PiExtractedTelemetry {
+    model_id: Option<String>,
+    provider_id: Option<String>,
+    api_id: Option<String>,
+    tokens_in: Option<i64>,
+    tokens_out: Option<i64>,
+    prompt_cache_hits: Option<i64>,
+    cache_write_tokens: Option<i64>,
+    cost_total: Option<f64>,
+    configured_model_id: Option<String>,
+    configured_thinking_effort: Option<String>,
+    effective_thinking_effort: Option<String>,
+    thinking_effort_source: Option<String>,
+}
+
+fn usage_i64(usage: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| usage.get(*key).and_then(|x| x.as_i64()))
+}
+
+fn usage_f64(usage: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| usage.get(*key).and_then(|x| x.as_f64()))
+}
+
+fn value_string(v: &serde_json::Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    v.as_object().and_then(|obj| {
+        ["id", "name", "provider", "api"]
+            .iter()
+            .find_map(|key| obj.get(*key).and_then(|x| x.as_str()).map(str::to_string))
+    })
+}
+
+fn extract_pi_telemetry(stdout: &str) -> PiExtractedTelemetry {
+    let mut telemetry = PiExtractedTelemetry::default();
     for line in stdout.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
-        model_id = model_id.or_else(|| {
-            v.get("model")
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string())
+        if v.get("type").and_then(|x| x.as_str()) == Some("stores_config") {
+            telemetry.configured_model_id = telemetry.configured_model_id.or_else(|| {
+                v.get("configured_model")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string)
+            });
+            telemetry.configured_thinking_effort =
+                telemetry.configured_thinking_effort.or_else(|| {
+                    v.get("configured_thinking")
+                        .and_then(|x| x.as_str())
+                        .map(str::to_string)
+                });
+            telemetry.model_id = telemetry.model_id.or_else(|| {
+                v.get("effective_model")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty() && *s != "unknown")
+                    .map(str::to_string)
+            });
+            telemetry.effective_thinking_effort =
+                telemetry.effective_thinking_effort.or_else(|| {
+                    v.get("effective_thinking")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                });
+            telemetry.thinking_effort_source = telemetry.thinking_effort_source.or_else(|| {
+                v.get("thinking_source")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+        }
+        let message = v.get("message");
+        telemetry.model_id = telemetry.model_id.or_else(|| {
+            message
+                .and_then(|m| m.get("model"))
+                .or_else(|| v.get("model"))
+                .and_then(value_string)
         });
-        if let Some(u) = v.get("usage") {
-            tokens_in = tokens_in.or_else(|| u.get("input_tokens").and_then(|x| x.as_i64()));
-            tokens_out = tokens_out.or_else(|| u.get("output_tokens").and_then(|x| x.as_i64()));
-            prompt_cache_hits =
-                prompt_cache_hits.or_else(|| u.get("prompt_cache_hits").and_then(|x| x.as_i64()));
+        telemetry.provider_id = telemetry.provider_id.or_else(|| {
+            message
+                .and_then(|m| m.get("provider"))
+                .or_else(|| v.get("provider"))
+                .and_then(value_string)
+        });
+        telemetry.api_id = telemetry.api_id.or_else(|| {
+            message
+                .and_then(|m| m.get("api"))
+                .or_else(|| v.get("api"))
+                .and_then(value_string)
+        });
+        let usage = message
+            .and_then(|m| m.get("usage"))
+            .or_else(|| v.get("usage"));
+        if let Some(u) = usage {
+            telemetry.tokens_in = telemetry
+                .tokens_in
+                .or_else(|| usage_i64(u, &["input_tokens", "input", "prompt_tokens"]));
+            telemetry.tokens_out = telemetry
+                .tokens_out
+                .or_else(|| usage_i64(u, &["output_tokens", "output", "completion_tokens"]));
+            telemetry.prompt_cache_hits = telemetry.prompt_cache_hits.or_else(|| {
+                usage_i64(
+                    u,
+                    &[
+                        "prompt_cache_hits",
+                        "cache_read_input_tokens",
+                        "cacheRead",
+                        "cache_read_tokens",
+                    ],
+                )
+            });
+            telemetry.cache_write_tokens = telemetry.cache_write_tokens.or_else(|| {
+                usage_i64(
+                    u,
+                    &[
+                        "cache_creation_input_tokens",
+                        "cache_write_input_tokens",
+                        "cache_write_tokens",
+                    ],
+                )
+            });
+            telemetry.cost_total = telemetry
+                .cost_total
+                .or_else(|| usage_f64(u, &["cost_total", "cost"]));
         }
     }
-    (model_id, tokens_in, tokens_out, prompt_cache_hits)
+    telemetry
 }
 
 pub fn extract_final_output(stdout: &str) -> Option<serde_json::Value> {
@@ -348,6 +489,12 @@ impl PiRunner {
         if let Some(p) = &schema_path {
             cmd.arg("--schema").arg(p);
         }
+        if let Some(model) = &self.configured_model {
+            cmd.arg("--model").arg(model);
+        }
+        if let Some(thinking) = &self.configured_thinking {
+            cmd.arg("--thinking").arg(thinking);
+        }
         let (live_transcript_path, live_transcript) =
             open_live_transcript(&cwd, &session_id, invocation)
                 .context("pi transcript write failed; not launching runner")?;
@@ -383,33 +530,70 @@ impl PiRunner {
         let stderr = output.stderr;
         let exit_code = output.exit_code;
         let transcript_path = Some(live_transcript_path.to_string_lossy().to_string());
-        let (raw_model_id, tokens_in, tokens_out, prompt_cache_hits) =
-            extract_pi_telemetry(&stdout);
+        let extracted = extract_pi_telemetry(&stdout);
         // Pi runner MUST emit a deterministic model_id at the source layer so
         // insert_agent_run never receives None. If the child transcript carries a
         // model string, prefer it; otherwise fall back to the deterministic sentinel
-        // "pi:default". The DB contract is required = non-None, non-empty; the
-        // source layer (here) satisfies it — db.rs never provides defaults.
-        let model_id = raw_model_id.or_else(|| Some("pi:default".to_string()));
+        // "pi:default". Configured model is intentionally not treated as effective
+        // unless the transcript/provider reports it.
+        let model_id = extracted
+            .model_id
+            .clone()
+            .or_else(|| Some("pi:default".to_string()));
+
+        let runner_exit_kind = if matches!(
+            output.killed_for,
+            Some(LivenessClass::StalledNoOutput { .. })
+        ) {
+            "stalled_no_output"
+        } else if exit_code == 0 {
+            "ok"
+        } else {
+            "nonzero"
+        };
 
         // Build telemetry from invocation-level data regardless of payload
         // validity — telemetry belongs to the invocation, not the payload.
-        let telemetry = AgentRunTelemetry {
+        let mut telemetry = AgentRunTelemetry {
             model_id,
             harness_id: Some("pi".to_string()),
             started_at: Some(started_at),
             ended_at: Some(ended_at),
-            tokens_in,
-            tokens_out,
-            prompt_cache_hits,
+            tokens_in: extracted.tokens_in,
+            tokens_out: extracted.tokens_out,
+            prompt_cache_hits: extracted.prompt_cache_hits,
             transcript_path,
             stderr_log_path: Some(stderr_log_path.to_string_lossy().to_string()),
+            configured_harness_id: Some("pi".to_string()),
+            configured_model_id: self
+                .configured_model
+                .clone()
+                .or_else(|| extracted.configured_model_id.clone()),
+            configured_thinking_effort: self
+                .configured_thinking
+                .clone()
+                .or_else(|| extracted.configured_thinking_effort.clone()),
+            effective_model_id: extracted.model_id.clone(),
+            effective_thinking_effort: extracted.effective_thinking_effort.clone(),
+            thinking_effort_source: extracted.thinking_effort_source.clone(),
+            provider_id: extracted.provider_id,
+            api_id: extracted.api_id,
+            session_id: Some(session_id.clone()),
+            workspace_path: Some(cwd.to_string_lossy().to_string()),
+            runner_exit_kind: Some(runner_exit_kind.to_string()),
+            cache_read_tokens: extracted.prompt_cache_hits,
+            cache_write_tokens: extracted.cache_write_tokens,
+            cost_total: extracted.cost_total,
+            ..AgentRunTelemetry::default()
         };
+        if self.configured_thinking.is_some() && telemetry.effective_thinking_effort.is_none() {
+            telemetry.effective_thinking_effort = Some("unknown".to_string());
+            telemetry.thinking_effort_source = Some("unknown".to_string());
+        }
 
-        if matches!(
-            output.killed_for,
-            Some(LivenessClass::StalledNoOutput { .. })
-        ) {
+        if runner_exit_kind == "stalled_no_output" {
+            telemetry.payload_valid = Some(false);
+            telemetry.payload_error = output.payload_error.clone();
             return Ok(RunnerOutput {
                 stdout,
                 stderr,
@@ -429,6 +613,9 @@ impl PiRunner {
         // `payload_error` and surfaces it via the same abort path as non-zero exit.
         let payload = extract_final_output(&stdout);
         if exit_code == 0 && payload.is_none() {
+            let payload_error = "pi helper exited 0 but did not emit final_output".to_string();
+            telemetry.payload_valid = Some(false);
+            telemetry.payload_error = Some(payload_error.clone());
             return Ok(RunnerOutput {
                 stdout,
                 stderr,
@@ -438,11 +625,14 @@ impl PiRunner {
                 session_id: Some(session_id),
                 structured_output_source: None,
                 telemetry,
-                payload_error: Some("pi helper exited 0 but did not emit final_output".to_string()),
+                payload_error: Some(payload_error),
             });
         }
         if let (Some(s), Some(p)) = (schema, payload.as_ref()) {
             if let Err(e) = validate_payload(s, p) {
+                let payload_error = format!("{e:#}");
+                telemetry.payload_valid = Some(false);
+                telemetry.payload_error = Some(payload_error.clone());
                 return Ok(RunnerOutput {
                     stdout,
                     stderr,
@@ -452,10 +642,11 @@ impl PiRunner {
                     session_id: Some(session_id),
                     structured_output_source: None,
                     telemetry,
-                    payload_error: Some(format!("{e:#}")),
+                    payload_error: Some(payload_error),
                 });
             }
         }
+        telemetry.payload_valid = Some(exit_code == 0 && payload.is_some());
         Ok(RunnerOutput {
             stdout,
             stderr,
@@ -622,6 +813,92 @@ mod tests {
         );
         assert!(events.iter().any(|e| e["type"] == "assistant_text"));
         assert!(events.iter().any(|e| e["type"] == "usage"));
+    }
+
+    #[test]
+    fn extracts_nested_pi_message_telemetry() {
+        let stdout = r#"{"type":"message_end","message":{"role":"assistant","model":"gpt-5.5","provider":{"id":"openai-codex"},"api":{"name":"openai-codex-responses"},"usage":{"input_tokens":11,"output_tokens":22,"cache_read_input_tokens":3,"cache_creation_input_tokens":4,"cost_total":0.25}}}
+{"type":"final_output","payload":{"ok":true}}
+"#;
+        let telemetry = extract_pi_telemetry(stdout);
+        assert_eq!(telemetry.model_id.as_deref(), Some("gpt-5.5"));
+        assert_eq!(telemetry.provider_id.as_deref(), Some("openai-codex"));
+        assert_eq!(telemetry.api_id.as_deref(), Some("openai-codex-responses"));
+        assert_eq!(telemetry.tokens_in, Some(11));
+        assert_eq!(telemetry.tokens_out, Some(22));
+        assert_eq!(telemetry.prompt_cache_hits, Some(3));
+        assert_eq!(telemetry.cache_write_tokens, Some(4));
+        assert_eq!(telemetry.cost_total, Some(0.25));
+    }
+
+    #[test]
+    fn extracts_stores_config_telemetry_event() {
+        let stdout = r#"{"type":"stores_config","configured_model":"gpt-5.5","configured_thinking":"high","effective_model":"unknown","effective_thinking":"unknown","thinking_source":"unknown"}
+{"type":"final_output","payload":{"ok":true}}
+"#;
+        let telemetry = extract_pi_telemetry(stdout);
+        assert_eq!(telemetry.configured_model_id.as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            telemetry.configured_thinking_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(telemetry.model_id, None);
+        assert_eq!(
+            telemetry.effective_thinking_effort.as_deref(),
+            Some("unknown")
+        );
+        assert_eq!(telemetry.thinking_effort_source.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn configured_model_and_thinking_are_forwarded_to_sidecar_args() {
+        let (_d, helper) = shim(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\"\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"ok\"}}'\n",
+        );
+        let runner = PiRunner::with_bin_helper_and_config(
+            PathBuf::from("/bin/sh"),
+            helper,
+            Some("gpt-5.5".to_string()),
+            Some("high".to_string()),
+        );
+        let schema = r#"{"type":"object","required":["role","summary"],"properties":{"role":{"const":"executor"},"summary":{"type":"string"}}}"#;
+        let out = runner
+            .spawn(
+                "executor",
+                "sys",
+                "brief",
+                Some(schema),
+                Some(env!("CARGO_MANIFEST_DIR")),
+            )
+            .unwrap();
+        let lines = out.stdout.lines().collect::<Vec<_>>();
+        assert!(
+            lines.windows(2).any(|w| w == ["--model", "gpt-5.5"]),
+            "{}",
+            out.stdout
+        );
+        assert!(
+            lines.windows(2).any(|w| w == ["--thinking", "high"]),
+            "{}",
+            out.stdout
+        );
+        assert_eq!(out.telemetry.configured_harness_id.as_deref(), Some("pi"));
+        assert_eq!(
+            out.telemetry.configured_model_id.as_deref(),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            out.telemetry.configured_thinking_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            out.telemetry.effective_thinking_effort.as_deref(),
+            Some("unknown")
+        );
+        assert_eq!(out.telemetry.session_id, out.session_id);
+        assert_eq!(out.telemetry.runner_exit_kind.as_deref(), Some("ok"));
+        assert_eq!(out.telemetry.payload_valid, Some(true));
+        assert_eq!(out.structured_output.unwrap()["summary"], "ok");
     }
 
     #[test]

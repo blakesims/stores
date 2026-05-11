@@ -246,6 +246,23 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
             // L503-A: brief_text persists the rendered brief at dispatch time for observability.
             // Nullable so existing rows (and pre-L503 DBs) retain NULL without errors.
             FrameworkColumn { name: "brief_text", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "brief_text TEXT", additive: true },
+            // Runner telemetry expansion: nullable additive columns so existing DBs migrate safely.
+            FrameworkColumn { name: "configured_harness_id", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "configured_harness_id TEXT", additive: true },
+            FrameworkColumn { name: "configured_model_id", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "configured_model_id TEXT", additive: true },
+            FrameworkColumn { name: "configured_thinking_effort", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "configured_thinking_effort TEXT", additive: true },
+            FrameworkColumn { name: "effective_model_id", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "effective_model_id TEXT", additive: true },
+            FrameworkColumn { name: "effective_thinking_effort", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "effective_thinking_effort TEXT", additive: true },
+            FrameworkColumn { name: "thinking_effort_source", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "thinking_effort_source TEXT", additive: true },
+            FrameworkColumn { name: "provider_id", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "provider_id TEXT", additive: true },
+            FrameworkColumn { name: "api_id", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "api_id TEXT", additive: true },
+            FrameworkColumn { name: "session_id", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "session_id TEXT", additive: true },
+            FrameworkColumn { name: "workspace_path", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "workspace_path TEXT", additive: true },
+            FrameworkColumn { name: "runner_exit_kind", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "runner_exit_kind TEXT", additive: true },
+            FrameworkColumn { name: "payload_valid", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "payload_valid INTEGER", additive: true },
+            FrameworkColumn { name: "payload_error", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "payload_error TEXT", additive: true },
+            FrameworkColumn { name: "cache_read_tokens", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "cache_read_tokens INTEGER", additive: true },
+            FrameworkColumn { name: "cache_write_tokens", sql_type: "INTEGER", nullable: true, default_sql: None, full_def: "cache_write_tokens INTEGER", additive: true },
+            FrameworkColumn { name: "cost_total", sql_type: "REAL", nullable: true, default_sql: None, full_def: "cost_total REAL", additive: true },
         ],
     },
     FrameworkTable {
@@ -484,7 +501,23 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     tokens_out INTEGER,
     prompt_cache_hits INTEGER,
     transcript_path TEXT NOT NULL,
-    brief_text TEXT
+    brief_text TEXT,
+    configured_harness_id TEXT,
+    configured_model_id TEXT,
+    configured_thinking_effort TEXT,
+    effective_model_id TEXT,
+    effective_thinking_effort TEXT,
+    thinking_effort_source TEXT,
+    provider_id TEXT,
+    api_id TEXT,
+    session_id TEXT,
+    workspace_path TEXT,
+    runner_exit_kind TEXT,
+    payload_valid INTEGER,
+    payload_error TEXT,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    cost_total REAL
 );
 CREATE TABLE IF NOT EXISTS engine_runner_heartbeats (
     iteration INTEGER NOT NULL,
@@ -550,6 +583,83 @@ UNION ALL
     json_extract(c.value, '$.review.transcript_path') AS transcript_path
   FROM tasks t, json_each(t.cycles) c
   WHERE json_extract(c.value, '$.review.transcript_path') IS NOT NULL;
+";
+
+/// Read-only projection from runner telemetry to direct downstream outputs.
+///
+/// Phase 5 of the runner telemetry plan requires a stable primary join key before
+/// outcome projection.  The current schema provides that key only for executor
+/// and code-reviewer outputs: drive writes `agent_runs.session_id` and embeds the
+/// deterministic `.stores/runs/<session_id>.jsonl` transcript backlink into the
+/// committed `tasks.cycles` sub-record in the same submit transaction. Planner
+/// and plan-reviewer outputs do not yet have an equivalent downstream backlink,
+/// so this view intentionally excludes them rather than guessing by timestamp.
+pub const RUNNER_OUTCOMES_VIEW_DDL: &str = "\
+CREATE VIEW IF NOT EXISTS runner_outcomes AS
+WITH cycle_outputs AS (
+  SELECT
+    t.display_id,
+    CAST(json_extract(c.value, '$.phase') AS INTEGER) AS phase,
+    CAST(json_extract(c.value, '$.cycle') AS INTEGER) AS cycle,
+    'executor' AS role,
+    json_extract(c.value, '$.executor.transcript_path') AS transcript_path,
+    'submitted_execution' AS outcome_kind,
+    NULL AS gate,
+    json_extract(c.value, '$.executor.summary') AS summary,
+    json_extract(c.value, '$.executor.commit') AS commit_sha,
+    NULL AS critical,
+    NULL AS major,
+    NULL AS minor
+  FROM tasks t, json_each(t.cycles) c
+  WHERE json_extract(c.value, '$.executor.transcript_path') IS NOT NULL
+UNION ALL
+  SELECT
+    t.display_id,
+    CAST(json_extract(c.value, '$.phase') AS INTEGER) AS phase,
+    CAST(json_extract(c.value, '$.cycle') AS INTEGER) AS cycle,
+    'code_reviewer' AS role,
+    json_extract(c.value, '$.review.transcript_path') AS transcript_path,
+    'submitted_code_review' AS outcome_kind,
+    json_extract(c.value, '$.review.gate') AS gate,
+    json_extract(c.value, '$.review.summary') AS summary,
+    NULL AS commit_sha,
+    CAST(json_extract(c.value, '$.review.critical') AS INTEGER) AS critical,
+    CAST(json_extract(c.value, '$.review.major') AS INTEGER) AS major,
+    CAST(json_extract(c.value, '$.review.minor') AS INTEGER) AS minor
+  FROM tasks t, json_each(t.cycles) c
+  WHERE json_extract(c.value, '$.review.transcript_path') IS NOT NULL
+)
+SELECT
+  ar.id AS agent_run_id,
+  ar.display_id,
+  ar.phase,
+  ar.cycle,
+  ar.role,
+  ar.harness_id,
+  ar.model_id,
+  ar.configured_harness_id,
+  ar.configured_model_id,
+  ar.configured_thinking_effort,
+  ar.effective_model_id,
+  ar.effective_thinking_effort,
+  ar.session_id,
+  co.transcript_path AS downstream_transcript_path,
+  ar.transcript_path AS agent_run_transcript_path,
+  co.outcome_kind,
+  co.gate,
+  co.summary,
+  co.commit_sha,
+  co.critical,
+  co.major,
+  co.minor
+FROM agent_runs ar
+JOIN cycle_outputs co
+  ON co.display_id = ar.display_id
+ AND co.phase = ar.phase
+ AND co.cycle = ar.cycle
+ AND co.role = CASE WHEN ar.role = 'code-reviewer' THEN 'code_reviewer' ELSE ar.role END
+ AND ar.session_id IS NOT NULL
+ AND co.transcript_path = '.stores/runs/' || ar.session_id || '.jsonl';
 ";
 
 /// Reserved columns prepended to every generated table.

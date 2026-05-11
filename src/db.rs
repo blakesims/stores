@@ -4,7 +4,9 @@ use rusqlite::{Connection, Transaction};
 use crate::runner::AgentRunTelemetry;
 use std::path::Path;
 
-use crate::codegen::ddl::{validate_framework_ddl, RUNS_VIEW_DDL, SUBSTRATE_DDL};
+use crate::codegen::ddl::{
+    validate_framework_ddl, RUNNER_OUTCOMES_VIEW_DDL, RUNS_VIEW_DDL, SUBSTRATE_DDL,
+};
 use crate::handlers::framework_migrate::apply_framework_drift;
 
 /// Env var: when set to "1", `db::open` validates SUBSTRATE_DDL but skips
@@ -12,17 +14,17 @@ use crate::handlers::framework_migrate::apply_framework_drift;
 /// control over `stores migrate` runs.
 const DISABLE_AUTOAPPLY_ENV: &str = "STORES_DISABLE_FRAMEWORK_AUTOAPPLY";
 
-/// Apply the `runs` VIEW DDL only when the `tasks` table exists in the DB.
+/// Apply task-backed read-only VIEW DDL only when the `tasks` table exists in the DB.
 ///
 /// SQLite recompiles all views on every DDL statement; a view that references
 /// a missing base table causes every subsequent DDL (even on unrelated tables)
 /// to fail with "error in view runs: no such table: main.tasks".  The tasks
 /// store is installed separately from the substrate tables (via `stores install
 /// tasks`), so this guard lets connections that only have the substrate tables
-/// (e.g. a DB with only `observations` installed) proceed without the VIEW.
+/// (e.g. a DB with only `observations` installed) proceed without the VIEWs.
 ///
-/// When tasks is later installed (or already exists), the VIEW is created
-/// idempotently.  T072 / L059.
+/// When tasks is later installed (or already exists), the VIEWs are created
+/// idempotently.  T072 / L059; runner_outcomes phase-5 telemetry projection.
 pub(crate) fn ensure_runs_view_if_tasks_exists(conn: &Connection) -> Result<()> {
     let tasks_exists: bool = conn
         .query_row(
@@ -35,6 +37,8 @@ pub(crate) fn ensure_runs_view_if_tasks_exists(conn: &Connection) -> Result<()> 
     if tasks_exists {
         conn.execute_batch(RUNS_VIEW_DDL)
             .context("apply runs view DDL")?;
+        conn.execute_batch(RUNNER_OUTCOMES_VIEW_DDL)
+            .context("apply runner_outcomes view DDL")?;
     }
     Ok(())
 }
@@ -54,8 +58,7 @@ fn open_inner(path: &Path) -> Result<Connection> {
     // ALTER TABLE on unrelated tables) fails if a view references a missing
     // base table.  The tasks store is installed separately from the substrate
     // tables, so we guard the CREATE VIEW with a table-existence check.
-    ensure_runs_view_if_tasks_exists(&conn)
-        .context("apply runs view DDL")?;
+    ensure_runs_view_if_tasks_exists(&conn).context("apply runs view DDL")?;
     // L134 / T050 Phase 1: typed-buffer migration + legacy backfill.
     // Idempotent; safe to run on every CLI verb that opens the DB.
     crate::handlers::agents_run::ensure_dispatch_locks_typed(&conn)
@@ -155,8 +158,8 @@ pub(crate) fn insert_agent_run(
     );
     conn.execute(
         "INSERT INTO agent_runs \
-         (display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, tokens_in, tokens_out, prompt_cache_hits, transcript_path, brief_text) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         (display_id, phase, cycle, role, model_id, harness_id, started_at, ended_at, exit_code, tokens_in, tokens_out, prompt_cache_hits, transcript_path, brief_text, configured_harness_id, configured_model_id, configured_thinking_effort, effective_model_id, effective_thinking_effort, thinking_effort_source, provider_id, api_id, session_id, workspace_path, runner_exit_kind, payload_valid, payload_error, cache_read_tokens, cache_write_tokens, cost_total) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
         rusqlite::params![
             display_id,
             phase,
@@ -172,6 +175,22 @@ pub(crate) fn insert_agent_run(
             telemetry.prompt_cache_hits,
             transcript_path,
             brief_text,
+            telemetry.configured_harness_id,
+            telemetry.configured_model_id,
+            telemetry.configured_thinking_effort,
+            telemetry.effective_model_id,
+            telemetry.effective_thinking_effort,
+            telemetry.thinking_effort_source,
+            telemetry.provider_id,
+            telemetry.api_id,
+            telemetry.session_id,
+            telemetry.workspace_path,
+            telemetry.runner_exit_kind,
+            telemetry.payload_valid,
+            telemetry.payload_error,
+            telemetry.cache_read_tokens,
+            telemetry.cache_write_tokens,
+            telemetry.cost_total,
         ],
     )
     .context("insert agent_runs")?;
@@ -336,9 +355,233 @@ fields:
             "tokens_out",
             "prompt_cache_hits",
             "transcript_path",
+            "configured_harness_id",
+            "configured_model_id",
+            "configured_thinking_effort",
+            "effective_model_id",
+            "effective_thinking_effort",
+            "thinking_effort_source",
+            "provider_id",
+            "api_id",
+            "session_id",
+            "workspace_path",
+            "runner_exit_kind",
+            "payload_valid",
+            "payload_error",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost_total",
         ] {
             assert!(cols.iter().any(|c| c == name), "missing {name}: {cols:?}");
         }
+    }
+
+    #[test]
+    fn existing_db_open_adds_agent_runs_telemetry_columns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("db.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE agent_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    display_id TEXT NOT NULL,
+                    phase INTEGER NOT NULL,
+                    cycle INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    harness_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT NOT NULL,
+                    exit_code INTEGER NOT NULL,
+                    tokens_in INTEGER,
+                    tokens_out INTEGER,
+                    prompt_cache_hits INTEGER,
+                    transcript_path TEXT NOT NULL,
+                    brief_text TEXT
+                );",
+            )
+            .unwrap();
+        }
+
+        let conn = open(&path).unwrap();
+        let cols = agent_runs_columns(&conn);
+        for name in [
+            "configured_harness_id",
+            "configured_model_id",
+            "configured_thinking_effort",
+            "effective_model_id",
+            "effective_thinking_effort",
+            "thinking_effort_source",
+            "provider_id",
+            "api_id",
+            "session_id",
+            "workspace_path",
+            "runner_exit_kind",
+            "payload_valid",
+            "payload_error",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cost_total",
+        ] {
+            assert!(cols.iter().any(|c| c == name), "missing {name}: {cols:?}");
+        }
+    }
+
+    #[test]
+    fn runner_outcomes_view_projects_executor_and_code_review_by_session_backlink() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                display_id TEXT PRIMARY KEY,
+                cycles TEXT
+            );",
+        )
+        .unwrap();
+        ensure_runs_view_if_tasks_exists(&conn).unwrap();
+
+        insert_agent_run(
+            &conn,
+            "T001",
+            1,
+            1,
+            "executor",
+            0,
+            &AgentRunTelemetry {
+                model_id: Some("gpt-5.5".to_string()),
+                harness_id: Some("pi".to_string()),
+                started_at: Some("2026-01-01T00:00:00Z".to_string()),
+                ended_at: Some("2026-01-01T00:00:01Z".to_string()),
+                transcript_path: Some("/workspace/.stores/runs/exec-session.jsonl".to_string()),
+                session_id: Some("exec-session".to_string()),
+                ..AgentRunTelemetry::default()
+            },
+            None,
+        )
+        .unwrap();
+        insert_agent_run(
+            &conn,
+            "T001",
+            1,
+            1,
+            "code_reviewer",
+            0,
+            &AgentRunTelemetry {
+                model_id: Some("gpt-5.5".to_string()),
+                harness_id: Some("pi".to_string()),
+                started_at: Some("2026-01-01T00:00:02Z".to_string()),
+                ended_at: Some("2026-01-01T00:00:03Z".to_string()),
+                transcript_path: Some("/workspace/.stores/runs/review-session.jsonl".to_string()),
+                session_id: Some("review-session".to_string()),
+                ..AgentRunTelemetry::default()
+            },
+            None,
+        )
+        .unwrap();
+        let cycles = serde_json::json!([{
+            "phase": 1,
+            "cycle": 1,
+            "executor": {
+                "summary": "implemented",
+                "commit": "abc123",
+                "transcript_path": ".stores/runs/exec-session.jsonl"
+            },
+            "review": {
+                "gate": "PASS",
+                "critical": 0,
+                "major": 0,
+                "minor": 1,
+                "summary": "passes",
+                "transcript_path": ".stores/runs/review-session.jsonl"
+            }
+        }]);
+        conn.execute(
+            "INSERT INTO tasks (display_id, cycles) VALUES (?1, ?2)",
+            rusqlite::params!["T001", cycles.to_string()],
+        )
+        .unwrap();
+
+        let rows: Vec<(String, String, Option<String>, Option<String>, Option<i64>)> = conn
+            .prepare(
+                "SELECT role, outcome_kind, gate, summary, minor \
+                 FROM runner_outcomes ORDER BY agent_run_id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "executor".to_string(),
+                    "submitted_execution".to_string(),
+                    None,
+                    Some("implemented".to_string()),
+                    None,
+                ),
+                (
+                    "code_reviewer".to_string(),
+                    "submitted_code_review".to_string(),
+                    Some("PASS".to_string()),
+                    Some("passes".to_string()),
+                    Some(1),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn runner_outcomes_view_excludes_unlinked_planner_without_heuristics() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SUBSTRATE_DDL).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                display_id TEXT PRIMARY KEY,
+                plan TEXT,
+                plan_review_log TEXT,
+                cycles TEXT
+            );",
+        )
+        .unwrap();
+        ensure_runs_view_if_tasks_exists(&conn).unwrap();
+        insert_agent_run(
+            &conn,
+            "T002",
+            0,
+            0,
+            "planner",
+            0,
+            &AgentRunTelemetry {
+                model_id: Some("gpt-5.5".to_string()),
+                harness_id: Some("pi".to_string()),
+                started_at: Some("2026-01-01T00:00:00Z".to_string()),
+                ended_at: Some("2026-01-01T00:00:01Z".to_string()),
+                transcript_path: Some("/workspace/.stores/runs/planner-session.jsonl".to_string()),
+                session_id: Some("planner-session".to_string()),
+                ..AgentRunTelemetry::default()
+            },
+            None,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id, plan, plan_review_log, cycles) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["T002", r#"{"summary":"plan exists"}"#, "[]", "[]",],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runner_outcomes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "planner outputs lack a stable downstream backlink today"
+        );
     }
 
     #[test]
@@ -354,29 +597,110 @@ fields:
             prompt_cache_hits: Some(3),
             transcript_path: Some("/tmp/run.jsonl".to_string()),
             stderr_log_path: None,
+            configured_harness_id: Some("mock".to_string()),
+            configured_model_id: Some("mock-configured".to_string()),
+            configured_thinking_effort: Some("medium".to_string()),
+            effective_model_id: Some("mock-effective".to_string()),
+            effective_thinking_effort: Some("medium".to_string()),
+            thinking_effort_source: Some("config".to_string()),
+            provider_id: Some("mock-provider".to_string()),
+            api_id: Some("mock-api".to_string()),
+            session_id: Some("session-1".to_string()),
+            workspace_path: Some("/workspace".to_string()),
+            runner_exit_kind: Some("nonzero".to_string()),
+            payload_valid: Some(false),
+            payload_error: Some("payload failed".to_string()),
+            cache_read_tokens: Some(4),
+            cache_write_tokens: Some(5),
+            cost_total: Some(0.125),
         };
         insert_agent_run(&conn, "T001", 1, 2, "executor", 7, &telemetry, None).unwrap();
-        let row: (String, i64, i64, String, String, i64, i64, i64, String) = conn
+        let row: (
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+            i64,
+            i64,
+            f64,
+        ) = conn
             .query_row(
-                "SELECT display_id, phase, cycle, role, harness_id, tokens_in, tokens_out, prompt_cache_hits, transcript_path FROM agent_runs",
+                "SELECT display_id, phase, cycle, role, harness_id, tokens_in, tokens_out, prompt_cache_hits, transcript_path, configured_harness_id, configured_model_id, configured_thinking_effort, effective_model_id, effective_thinking_effort, thinking_effort_source, provider_id, api_id, session_id, workspace_path, runner_exit_kind, payload_valid, payload_error, cache_read_tokens, cache_write_tokens, cost_total FROM agent_runs",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                        r.get(11)?,
+                        r.get(12)?,
+                        r.get(13)?,
+                        r.get(14)?,
+                        r.get(15)?,
+                        r.get(16)?,
+                        r.get(17)?,
+                        r.get(18)?,
+                        r.get(19)?,
+                        r.get(20)?,
+                        r.get(21)?,
+                        r.get(22)?,
+                        r.get(23)?,
+                        r.get(24)?,
+                    ))
+                },
             )
             .unwrap();
-        assert_eq!(
-            row,
-            (
-                "T001".to_string(),
-                1,
-                2,
-                "executor".to_string(),
-                "mock".to_string(),
-                10,
-                20,
-                3,
-                "/tmp/run.jsonl".to_string()
-            )
-        );
+        assert_eq!(row.0, "T001");
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2, 2);
+        assert_eq!(row.3, "executor");
+        assert_eq!(row.4, "mock");
+        assert_eq!(row.5, 10);
+        assert_eq!(row.6, 20);
+        assert_eq!(row.7, 3);
+        assert_eq!(row.8, "/tmp/run.jsonl");
+        assert_eq!(row.9, "mock");
+        assert_eq!(row.10, "mock-configured");
+        assert_eq!(row.11, "medium");
+        assert_eq!(row.12, "mock-effective");
+        assert_eq!(row.13, "medium");
+        assert_eq!(row.14, "config");
+        assert_eq!(row.15, "mock-provider");
+        assert_eq!(row.16, "mock-api");
+        assert_eq!(row.17, "session-1");
+        assert_eq!(row.18, "/workspace");
+        assert_eq!(row.19, "nonzero");
+        assert_eq!(row.20, 0);
+        assert_eq!(row.21, "payload failed");
+        assert_eq!(row.22, 4);
+        assert_eq!(row.23, 5);
+        assert_eq!(row.24, 0.125);
     }
 
     #[test]
@@ -469,11 +793,26 @@ fields:
             prompt_cache_hits: Some(0),
             transcript_path: Some("/tmp/run.jsonl".to_string()),
             stderr_log_path: None,
+            ..AgentRunTelemetry::default()
         };
         let expected = "# Phase 1: Foo\nsome brief content\n";
-        insert_agent_run(&conn, "T001", 1, 1, "planner", 0, &telemetry, Some(expected)).unwrap();
+        insert_agent_run(
+            &conn,
+            "T001",
+            1,
+            1,
+            "planner",
+            0,
+            &telemetry,
+            Some(expected),
+        )
+        .unwrap();
         let got: String = conn
-            .query_row("SELECT brief_text FROM agent_runs WHERE display_id='T001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT brief_text FROM agent_runs WHERE display_id='T001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(got, expected, "brief_text must round-trip byte-equal");
     }
@@ -491,10 +830,15 @@ fields:
             prompt_cache_hits: Some(0),
             transcript_path: Some("/tmp/run.jsonl".to_string()),
             stderr_log_path: None,
+            ..AgentRunTelemetry::default()
         };
         insert_agent_run(&conn, "T001", 1, 1, "planner", 0, &telemetry, None).unwrap();
         let got: Option<String> = conn
-            .query_row("SELECT brief_text FROM agent_runs WHERE display_id='T001'", [], |r| r.get(0))
+            .query_row(
+                "SELECT brief_text FROM agent_runs WHERE display_id='T001'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(got.is_none(), "brief_text must be NULL when None passed");
     }

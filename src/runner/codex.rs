@@ -97,7 +97,10 @@ fn write_run_file(
     Ok(path)
 }
 
-fn spawn_with_text_busy_retry(cmd: &mut Command, bin: &std::path::Path) -> Result<std::process::Child> {
+fn spawn_with_text_busy_retry(
+    cmd: &mut Command,
+    bin: &std::path::Path,
+) -> Result<std::process::Child> {
     let mut last_err = None;
     for _ in 0..5 {
         match cmd.spawn() {
@@ -106,7 +109,9 @@ fn spawn_with_text_busy_retry(cmd: &mut Command, bin: &std::path::Path) -> Resul
                 last_err = Some(e);
                 thread::sleep(Duration::from_millis(20));
             }
-            Err(e) => return Err(e).with_context(|| format!("failed to launch `{}`", bin.display())),
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to launch `{}`", bin.display()))
+            }
         }
     }
     Err(last_err.expect("retry loop must record ETXTBSY"))
@@ -221,6 +226,7 @@ impl Runner for CodexRunner {
                 tokens_in: None,
                 tokens_out: None,
                 stderr_log_path: Some(log_path.to_string_lossy().to_string()),
+                ..AgentRunTelemetry::default()
             },
             payload_error: if status.success() {
                 None
