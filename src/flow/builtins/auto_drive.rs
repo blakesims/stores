@@ -1294,8 +1294,8 @@ mod tests {
         let now = "2026-05-03T00:00:00Z";
         let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
         conn.execute(
-            "INSERT INTO tasks (display_id, status, title, slug, branch, tier_hint, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, 'planning', 'test', 'tslug', 'feat/tslug', 'T2', ?2, ?3, ?4, ?4, 'ai_autonomous', 'ai_autonomous')",
+            "INSERT INTO tasks (display_id, status, title, slug, branch, tier_hint, workspace_path, contract, activation, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, 'planning', 'test', 'tslug', 'feat/tslug', 'T2', ?2, ?3, 'active', ?4, ?4, 'ai_autonomous', 'ai_autonomous')",
             rusqlite::params![display_id, workspace_path, contract, now],
         ).unwrap();
     }
@@ -1521,8 +1521,8 @@ mod tests {
         let now = "2026-05-03T00:00:00Z";
         let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
         conn.execute(
-            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, drive_pid, created_at, updated_at, created_by, updated_by) \
-             VALUES (?1, ?2, 'test', 't', 'feat/x', '/tmp/no-such', ?3, ?4, ?5, ?5, 'framework', 'framework')",
+            "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, drive_pid, activation, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, ?2, 'test', 't', 'feat/x', '/tmp/no-such', ?3, ?4, 'active', ?5, ?5, 'framework', 'framework')",
             rusqlite::params![display_id, status, contract, drive_pid, now],
         )
         .unwrap();

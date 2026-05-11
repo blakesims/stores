@@ -751,7 +751,7 @@ on_state:
         assert!(resolved.briefing_templates.contains_key("executor"));
         assert!(resolved.briefing_templates["planner"].contains("Planner Briefing"));
         assert!(resolved.render_template.is_some());
-        assert_eq!(resolved.max_revise_cycles, 3);
+        assert_eq!(resolved.max_revise_cycles, 5);
     }
 
     #[test]
