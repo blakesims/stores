@@ -1,3 +1,1 @@
-Batch C2 progress: implemented `external_reviews import-pass` CLI/handler, schema runner values for manual imports, and acceptance tests. Targeted tests pass with `LIBSQLITE3_SYS_USE_PKG_CONFIG=1`; default cargo build hit local assembler/libsqlite3-sys environment issue before code compile.
-
-Batch C1 progress: implemented narrow blocked-task ER REVISE reconciliation for drive/watchdog infrastructure blockers with current-head validation and blocker-reason guard. Added targeted tests for idempotent allowed reconciliation, wrong-head rejection, and non-watchdog blocker rejection. Targeted tests passed with `PATH=/usr/bin:/bin:$PATH` because `/home/blake/bin/as` shadows GNU as.
+Completed T148 git/integration-lane autopsy. Wrote docs/worklog/2026-05-11/11-t148-autopsy-git-integration.md with branch/main refs, DB evidence, integration attempts, stale agents.yaml finding, and follow-ups.
