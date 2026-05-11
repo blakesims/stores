@@ -8,6 +8,7 @@ pub mod architecture_reviews;
 pub mod architecture_reviews_backfill;
 pub mod brief;
 pub mod brief_contracts;
+pub mod cleanup_worktrees;
 pub mod cluster_keys;
 pub mod disposition;
 pub mod drive;

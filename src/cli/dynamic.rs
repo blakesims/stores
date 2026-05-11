@@ -724,6 +724,7 @@ fn build_store_command(schema: &Schema) -> Command {
         store_cmd = store_cmd.subcommand(build_reconcile_accepted_cmd());
         store_cmd = store_cmd.subcommand(build_enqueue_integration_cmd());
         store_cmd = store_cmd.subcommand(build_run_integration_cmd());
+        store_cmd = store_cmd.subcommand(build_cleanup_worktrees_cmd());
         // T140 P1: activation primitive — `tasks activate` / `tasks deactivate`.
         store_cmd = store_cmd
             .subcommand(build_activate_cmd())
@@ -1214,6 +1215,31 @@ fn build_external_review_run_cmd() -> Command {
     Command::new("run")
         .about("Run exactly one external_review row without daemon startup sweeps/watchdog/engine-runner")
         .arg(Arg::new("display_id").help("ER### display ID").required(true))
+}
+
+/// Build the `cleanup-worktrees` command (tasks only).
+fn build_cleanup_worktrees_cmd() -> Command {
+    Command::new("cleanup-worktrees")
+        .about("Audit and safely clean terminal task worktree build artifacts")
+        .arg(
+            Arg::new("dry-run")
+                .long("dry-run")
+                .action(ArgAction::SetTrue)
+                .help("Print candidates and reclaim estimates without deleting anything"),
+        )
+        .arg(
+            Arg::new("execute")
+                .long("execute")
+                .action(ArgAction::SetTrue)
+                .help("Execute an explicit cleanup action"),
+        )
+        .arg(
+            Arg::new("targets-only")
+                .long("targets-only")
+                .action(ArgAction::SetTrue)
+                .requires("execute")
+                .help("With --execute, delete only terminal worktree target/ directories"),
+        )
 }
 
 /// Build the `recover-stale-base` command (tasks only).

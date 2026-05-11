@@ -440,6 +440,30 @@ pub fn dispatch(
                             anyhow::bail!("run-integration for {display_id} failed with exit code {code}");
                         }
                         println!("Ran integration for {display_id}");
+                    } else if verb == "cleanup-worktrees" && store.name == "tasks" {
+                        let dry_run = sub.get_flag("dry-run");
+                        let execute = sub.get_flag("execute");
+                        let targets_only = sub.get_flag("targets-only");
+                        let mode = match (dry_run, execute, targets_only) {
+                            (true, false, false) | (false, false, false) => {
+                                handlers::cleanup_worktrees::CleanupMode::DryRun
+                            }
+                            (false, true, true) => {
+                                handlers::cleanup_worktrees::CleanupMode::ExecuteTargetsOnly
+                            }
+                            (true, true, _) => {
+                                anyhow::bail!(
+                                    "cleanup-worktrees accepts only one of --dry-run or --execute"
+                                )
+                            }
+                            (false, true, false) => {
+                                anyhow::bail!("cleanup-worktrees --execute requires an explicit action such as --targets-only")
+                            }
+                            (_, false, true) => {
+                                anyhow::bail!("cleanup-worktrees --targets-only requires --execute")
+                            }
+                        };
+                        handlers::cleanup_worktrees::run_cleanup_worktrees(&conn, mode)?;
                     // reconcile-accepted is a tasks-only operator-grounded recovery verb
                     // for I027-class strandings (accepted row, work merged, chain never fired).
                     } else if verb == "reconcile-accepted" && store.name == "tasks" {
