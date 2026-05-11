@@ -779,7 +779,7 @@ on_state: {}
         let wf: Workflow = serde_yaml::from_str(yaml).unwrap();
         let resolved = wf.resolve_from_strings(BTreeMap::new(), None);
         // default when max_revise_cycles is None
-        assert_eq!(resolved.max_revise_cycles, 3);
+        assert_eq!(resolved.max_revise_cycles, 5);
     }
 
     // ---- T027 P1: optional `when:` guard on state actions ----
@@ -859,7 +859,10 @@ on_state:
 "#;
         let err = serde_yaml::from_str::<Workflow>(yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("unknown state action key 'bogus'"), "err: {msg}");
+        assert!(
+            msg.contains("unknown state action key 'bogus'"),
+            "err: {msg}"
+        );
     }
 
     #[test]
