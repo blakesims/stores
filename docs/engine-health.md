@@ -2,7 +2,7 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-11 T148 live-runner/duplicate-dispatch repair. T146/ADR0001 landed via close-out-of-band after severe engine friction; T148/ADR0002 is active again and now serves as the live proof target. The newest installed batch (`30f965d`, `dbc45cb`, validation note `28b0125`) fixed two acute trust regressions: status now selects the active executor/code-reviewer instead of stale completed planner `final_output`, and autonomous engine ticks no longer spawn duplicate same-task runners when a live owner exists. The remaining high-risk class is binary identity / stale-exe clarity and broader resume/ER reconciliation semantics.
+**Last updated:** 2026-05-11 T148 runner-safety partials batch. T146/ADR0001 landed via close-out-of-band after severe engine friction; T148/ADR0002 is active again and now serves as the live proof target. Installed batches now fix: live-run selection (`30f965d`), autonomous duplicate dispatch (`dbc45cb`), and the follow-on runner safety partials (`ec7f67f`/`e194249`, `a957ab9`/`c27c341`, `669825e`/`3a30782`, `38bb6b2`, validation note `1dcb16e`). Updating the main/private binary while T148 had a live runner now logs stale-exe drift as advisory and does not block/kill the task. The remaining high-risk class is richer binary identity diagnostics plus broader resume/ER reconciliation semantics.
 
 ## The picture in one sentence
 
@@ -11,7 +11,7 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 ## Read-this-first priority ladder
 
 1. **Keep T148 moving while watching the repaired live-runner path.** Current live proof: one drive process, one runner, status shows the active executor/code-reviewer, and repeated `agents run --once` does not duplicate. Any regression here outranks backlog work.
-2. **Fix binary identity / stale-exe clarity.** The installed repair still prints `daemon binary stale; reexecing ... (was version 0.7.0)` with no git/path/build identity. This confuses live debugging and caused T148 to block once as `drive_failed:stale_binary_inode`.
+2. **Improve binary identity diagnostics.** The task-killing stale-exe behavior is fixed for running workers, but logs still say `daemon binary stale; reexecing ... (was version 0.7.0)` with no git/path/build identity. Add path/git/build identity so future stale-binary debugging is explainable.
 3. **Move authoritative external review to the integration point.** T138 gave the substrate a real integration lane, but review timing can still be invalidated by refresh/rebase/main movement. Durable shape: candidate refreshes against current main → authoritative ER on the to-be-merged head → merge/post-land.
 4. **Separate recovery from dispatch.** T148/T146 showed `resume` can be operationally dangerous when state repair immediately re-enters dispatch. Add dispatch-inhibited recovery semantics before relying on resume for orphaned result import.
 5. **Make prioritization real, not markdown-only.** `priority`, `priority_rank`, and `priority_rank_at` exist, and watch/list can read them, but current open observations have no `priority_rank` values. L084 names the severity-vs-scheduling conflation.
@@ -65,7 +65,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L068 | ✅ T080 | cross-project daemon SIGTERM scoped per-project (cross-listed in Layer 8) |
 | GAP-stop-foreground | — | `stores agents stop` requires `--detach`-mode pidfile; foreground daemons can't be stopped via the verb. Hit during 2026-05-08 cleanup. |
 | GAP-log-fd-drift | — | `--log-file` flag doesn't redirect fd 1/2 when the daemon runs without `--detach`; configured log file goes silent while activity flows to wherever the launching shell pointed stdout. Hit during 2026-05-08 cleanup. |
-| T148-dup-dispatch | ✅ direct | 2026-05-11 T148 live incident: duplicate `stores tasks drive T148` + duplicate `pi_runner executor` spawned against one worktree. Fixed by central autonomous dispatch ownership checks: inactive rows, live `drive_pid`, unfinished live dispatch lock, and fresh running current-run marker now hold/skip instead of spawning. Merge `dbc45cb`; validation note `docs/worklog/2026-05-11/04-t148-duplicate-dispatch-live-runner-repair-plan.md`. |
+| T148-dup-dispatch | ✅ direct | 2026-05-11 T148 live incident: duplicate `stores tasks drive T148` + duplicate `pi_runner executor` spawned against one worktree. Fixed by central autonomous dispatch ownership checks plus manual drive singleton guard: inactive rows, live `drive_pid`, unfinished live dispatch lock, fresh running marker, and same-worktree live owners now hold/refuse instead of spawning. Merges `dbc45cb`, `a957ab9`, `c27c341`; validation notes `04-...repair-plan.md` and `05-...partials-plan.md`. |
+| T148-stale-exe-worker | ✅ direct | Updating/installing main/private binary while a worktree worker is running no longer blocks the task as `drive_failed:stale_binary_inode`. Post-spawn stale exe drift is advisory; normal no-output liveness still applies. Live validation updated binaries during T148 executor run: runner survived, no duplicate, no new stale_binary_inode transition. Commits `ec7f67f`, `e194249`. |
 
 ### Layer 2 — State / idempotency
 
@@ -138,7 +139,8 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 | L529/L540/T139 | 🟢 T139 | watch/flowtop cockpit P1 is active: default surface should show store-flow, active lanes, recent terminal exhaust only by policy, and focused detail instead of raw task/observation/intake noise. |
 | L084 | ⚪ T2 | priority conflates scheduling and severity; `priority_rank` exists but is unused (`0` ranked open observations as of 2026-05-10). Need a focus/ranking primitive before backlog ordering is trustworthy. |
 | L554 | ⚪ T2 | cluster_key registry coverage gap: cleanup had to reject/drop legitimate friction because the curated key set was too narrow. This is a front-door fidelity issue, not just taxonomy polish. |
-| T148-live-status | ✅ direct | `stores tasks status` / `stores runs current` selected completed planner `final_output` over the running executor because marker `updated_at` outranked semantic liveness. Fixed central selector in `src/cli/runs.rs`: running markers first, then `status.json.last_event_at`, then marker `updated_at`; merge `30f965d`. |
+| T148-live-status | ✅ direct | `stores tasks status` / `stores runs current` selected completed planner `final_output` over the running executor because marker `updated_at` outranked semantic liveness. Fixed central selector in `src/cli/runs.rs`: running/live markers first, semantic `status.json.last_event_at`, marker `updated_at`; stale uncorroborated running markers are labeled `stale_marker` and do not outrank completed evidence forever. Merges `30f965d`, `669825e`, `3a30782`. |
+| T148-payload-errors | ✅ direct | Malformed runner `final_output` / envelope parse failures with child exit 0 now become visible typed `runner_payload_error` blocked reasons, do not advance state, preserve real child exit code in `agent_runs`, and rewrite current-run marker to `status=failed` with `payload_error`. Commit `38bb6b2`. |
 
 ### Layer 6 — Auth / security
 
