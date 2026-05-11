@@ -2017,6 +2017,7 @@ pub(crate) fn compute_resume(
     conn: &Connection,
     display_id: &str,
     invoker: Actor,
+    no_dispatch: bool,
 ) -> Result<ResumeOutput> {
     require_workflow(schema, "resume")?;
 
@@ -2088,6 +2089,9 @@ pub(crate) fn compute_resume(
     }
     let mut txt_fields: BTreeMap<String, String> = BTreeMap::new();
     txt_fields.insert("blocked_reason".to_string(), String::new());
+    if no_dispatch && schema.fields.iter().any(|f| f.name == "activation") {
+        txt_fields.insert("activation".to_string(), "inactive".to_string());
+    }
 
     // Step 8: write blocked → resume_target
     write_status_and_fields(
@@ -2107,10 +2111,26 @@ pub(crate) fn compute_resume(
         }),
     )?;
 
+    if no_dispatch && table_has_column(&tx, "transition_history", "actor_note")? {
+        tx.execute(
+            "UPDATE transition_history SET actor_note = ?1 \
+             WHERE id = (SELECT id FROM transition_history \
+                         WHERE store = ?2 AND row_id = ?3 AND display_id = ?4 AND verb = 'resume' \
+                         ORDER BY id DESC LIMIT 1)",
+            rusqlite::params!["no-dispatch: recovery resume left activation inactive and skipped on-entry follow-ons", schema.name, row_id, display_id],
+        )
+        .context("resume --no-dispatch: annotate transition history")?;
+    }
+
     // Step 9: fire on-entry follow-ons. For target=ready this cascades
     // ready → executing; for target=planning there's no follow-on (planner
-    // is dispatched by the daemon's auto-drive subscriber on next poll).
-    fire_on_entry_follow_ons(&tx, schema, display_id, row_id, resume_target)?;
+    // is dispatched by the daemon's auto-drive subscriber on next poll). The
+    // recovery-only --no-dispatch path intentionally skips these immediate
+    // follow-ons and leaves activation inactive to suppress auto-drive on the
+    // same command/daemon path.
+    if !no_dispatch {
+        fire_on_entry_follow_ons(&tx, schema, display_id, row_id, resume_target)?;
+    }
 
     // Clear stale auto-drive ownership. A blocked row may carry drive_pid and an
     // auto-drive dispatch_lock from a previous detached drive. If left intact,
@@ -2141,7 +2161,7 @@ pub(crate) fn compute_resume(
     let final_status = final_entry
         .get("status")
         .and_then(|v| v.as_str())
-        .unwrap_or("executing")
+        .unwrap_or(resume_target)
         .to_string();
 
     // Step 10: release lock
@@ -2153,7 +2173,11 @@ pub(crate) fn compute_resume(
     Ok(ResumeOutput {
         display_id: display_id.to_string(),
         new_status: final_status.clone(),
-        summary: format!("Resumed {display_id}; status now: {final_status}"),
+        summary: if no_dispatch {
+            format!("Resumed {display_id} without dispatch; status now: {final_status}")
+        } else {
+            format!("Resumed {display_id}; status now: {final_status}")
+        },
     })
 }
 
@@ -2180,8 +2204,9 @@ pub fn run_resume(
     conn: &Connection,
     display_id: &str,
     invoker: InvokerCtx,
+    no_dispatch: bool,
 ) -> Result<()> {
-    let out = compute_resume(schema, conn, display_id, invoker.actor)?;
+    let out = compute_resume(schema, conn, display_id, invoker.actor, no_dispatch)?;
     println!("{}", out.summary);
     Ok(())
 }
@@ -3947,7 +3972,7 @@ fields:
         .unwrap();
 
         // Call through compute_resume (production code path, not raw helpers)
-        let out = compute_resume(&schema, &conn, "WF001", Actor::AiWithHuman).unwrap();
+        let out = compute_resume(&schema, &conn, "WF001", Actor::AiWithHuman, false).unwrap();
 
         assert_eq!(out.new_status, "planning");
         assert!(out.summary.contains("WF001"));
@@ -4058,7 +4083,7 @@ fields:
         )
         .unwrap();
 
-        let out = compute_resume(&task_schema, &conn, "T914", Actor::AiWithHuman).unwrap();
+        let out = compute_resume(&task_schema, &conn, "T914", Actor::AiWithHuman, false).unwrap();
         assert_eq!(out.new_status, "executing");
 
         let (status, cycle, reason, pid): (String, i64, Option<String>, Option<i64>) = conn
@@ -4124,7 +4149,7 @@ fields:
         )
         .unwrap();
 
-        let out = compute_resume(&task_schema, &conn, "T900", Actor::AiWithHuman).unwrap();
+        let out = compute_resume(&task_schema, &conn, "T900", Actor::AiWithHuman, false).unwrap();
         assert_eq!(out.new_status, "planning");
 
         let (status, reason, pid): (String, Option<String>, Option<i64>) = conn
@@ -4172,6 +4197,79 @@ fields:
     /// resume cascades blocked → ready → executing and the executor blocks
     /// again on "Phase 1 of 0" because plan_phases is empty.
     #[test]
+    fn resume_no_dispatch_repairs_state_without_combusting_auto_drive() {
+        let task_schema =
+            Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&task_schema))
+            .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+
+        let now = "2026-05-11T00:00:00Z";
+        let contract = r#"{"done_when":"fixed","scope_in":"resume","scope_out":"none"}"#;
+        let plan = r#"{"phases":[{"name":"phase 1"}]}"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, created_by, updated_by, \
+             title, slug, branch, workspace_path, activation, tier_hint, contract, plan, current_phase, current_cycle, \
+             blocked_reason, drive_pid, drive_started_at) \
+             VALUES ('T905', 'blocked', ?1, ?1, 'framework', 'framework', \
+             'resume no dispatch', 'resume-no-dispatch', 'feat/t905', '/tmp/no-such', 'active', 'T3', \
+             ?2, ?3, 1, 2, 'operator recovery', 999999, ?1)",
+            rusqlite::params![now, contract, plan],
+        )
+        .unwrap();
+        let row_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, claimed_by, last_status, finished_at) \
+             VALUES ('tasks', ?1, 'T905', 'auto-drive', 1, ?2, 'auto-drive-watchdog', 'drive_failed', ?2)",
+            rusqlite::params![row_id, now],
+        )
+        .unwrap();
+
+        let out = compute_resume(&task_schema, &conn, "T905", Actor::AiWithHuman, true).unwrap();
+        assert_eq!(out.new_status, "planning");
+        assert!(out.summary.contains("without dispatch"));
+
+        let (status, activation, cycle, reason, pid): (String, String, i64, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT status, activation, current_cycle, blocked_reason, drive_pid FROM tasks WHERE display_id='T905'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "planning");
+        assert_eq!(activation, "inactive", "--no-dispatch must durably suppress auto-drive");
+        assert_eq!(cycle, 1);
+        assert!(reason.unwrap_or_default().is_empty());
+        assert!(pid.is_none());
+
+        let lock_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_locks WHERE store='tasks' AND row_id=?1 AND agent_name='auto-drive'",
+                rusqlite::params![row_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lock_count, 0, "--no-dispatch must not leave or create an auto-drive lock");
+
+        let (to_s, note): (String, String) = conn
+            .query_row(
+                "SELECT to_status, COALESCE(actor_note, '') FROM transition_history WHERE display_id='T905' AND verb='resume' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(to_s, "planning");
+        assert!(note.contains("no-dispatch"), "resume transition should be auditable: {note}");
+    }
+
+    #[test]
     fn resume_with_null_plan_routes_to_planning_for_non_t1() {
         let task_schema =
             Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
@@ -4199,7 +4297,7 @@ fields:
         )
         .unwrap();
 
-        let out = compute_resume(&task_schema, &conn, "T901", Actor::AiWithHuman).unwrap();
+        let out = compute_resume(&task_schema, &conn, "T901", Actor::AiWithHuman, false).unwrap();
         assert_eq!(
             out.new_status, "planning",
             "non-T1 with plan=NULL must route to planning, not ready/executing"
@@ -4263,7 +4361,7 @@ fields:
         )
         .unwrap();
 
-        let out = compute_resume(&task_schema, &conn, "T903", Actor::AiWithHuman).unwrap();
+        let out = compute_resume(&task_schema, &conn, "T903", Actor::AiWithHuman, false).unwrap();
         assert_eq!(
             out.new_status, "planning",
             "non-T1 with latest plan review NEEDS_WORK must resume to planning, not ready/executing"
@@ -4323,7 +4421,7 @@ fields:
         )
         .unwrap();
 
-        let out = compute_resume(&task_schema, &conn, "T904", Actor::AiWithHuman).unwrap();
+        let out = compute_resume(&task_schema, &conn, "T904", Actor::AiWithHuman, false).unwrap();
         assert_eq!(
             out.new_status, "planning",
             "non-T1 resume must return to planning even when an old plan was READY"
@@ -4369,7 +4467,7 @@ fields:
         )
         .unwrap();
 
-        let out = compute_resume(&task_schema, &conn, "T902", Actor::AiWithHuman).unwrap();
+        let out = compute_resume(&task_schema, &conn, "T902", Actor::AiWithHuman, false).unwrap();
         // T1 ready→executing follow-on still fires.
         assert_eq!(out.new_status, "executing");
     }
@@ -4394,7 +4492,7 @@ fields:
         );
 
         // ai_autonomous invoker must be rejected because resume declares actor: ai_with_human
-        let err = compute_resume(&schema, &conn, "WF001", Actor::AiAutonomous).unwrap_err();
+        let err = compute_resume(&schema, &conn, "WF001", Actor::AiAutonomous, false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("ai_with_human"),
@@ -4446,7 +4544,7 @@ fields:
         ).unwrap();
 
         // compute_resume must fail with a lock-contention error
-        let err = compute_resume(&schema, &conn, "WF001", Actor::AiWithHuman).unwrap_err();
+        let err = compute_resume(&schema, &conn, "WF001", Actor::AiWithHuman, false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("other-agent") || msg.contains("claimed"),
@@ -6148,7 +6246,7 @@ workflow:
         )
         .unwrap();
 
-        let out = compute_resume(&task_schema, &conn, "T911", Actor::AiWithHuman).unwrap();
+        let out = compute_resume(&task_schema, &conn, "T911", Actor::AiWithHuman, false).unwrap();
         // Cascade: blocked → planning → ready → executing
         assert_eq!(out.new_status, "executing");
 
@@ -6232,7 +6330,7 @@ workflow:
         let (schema, conn) = setup_bundled_tasks_for_retry();
         insert_task_for_retry(&conn, "T920", "deploy_blocked");
 
-        let err = compute_resume(&schema, &conn, "T920", Actor::AiWithHuman).unwrap_err();
+        let err = compute_resume(&schema, &conn, "T920", Actor::AiWithHuman, false).unwrap_err();
         let msg = err.to_string();
         for needle in [
             "deploy_blocked",

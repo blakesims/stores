@@ -1026,6 +1026,13 @@ fn build_resume_cmd() -> Command {
                 .help("Optional reason for resuming blocked work-cycle execution")
                 .required(false),
         )
+        .arg(
+            Arg::new("no-dispatch")
+                .long("no-dispatch")
+                .help("Recovery only: repair blocked task state but skip immediate on-entry dispatch/follow-ons and leave activation inactive for orphaned-result/manual reconciliation workflows")
+                .action(clap::ArgAction::SetTrue)
+                .required(false),
+        )
 }
 
 /// Build the `retry-deploy` command.
