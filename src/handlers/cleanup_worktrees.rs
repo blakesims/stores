@@ -109,6 +109,15 @@ pub struct CleanupReport {
     pub wal_bytes: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct TerminalCleanupReport {
+    pub display_id: String,
+    pub target_deleted: Option<CleanupCandidate>,
+    pub target_skip: Option<CleanupClassification>,
+    pub worktree_removed: Option<CleanupCandidate>,
+    pub worktree_skip: Option<CleanupClassification>,
+}
+
 impl CleanupReport {
     pub fn candidate_count(&self) -> usize {
         self.candidates.len()
@@ -124,12 +133,7 @@ impl CleanupReport {
 }
 
 pub fn run_cleanup_worktrees(conn: &Connection, mode: CleanupMode) -> Result<CleanupReport> {
-    let stores_dir = crate::paths::stores_dir()?;
-    let main_repo = stores_dir
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let main_repo = canonicalize_lossy(&main_repo);
+    let main_repo = cleanup_main_repo()?;
     let db_path = crate::paths::db_path()?;
     let db_bytes = file_len(&db_path);
     let wal_bytes = file_len(&db_path.with_file_name("db.sqlite-wal"));
@@ -193,6 +197,82 @@ pub fn run_cleanup_worktrees(conn: &Connection, mode: CleanupMode) -> Result<Cle
 
     print_report(&report, mode);
     Ok(report)
+}
+
+pub fn cleanup_terminal_task(conn: &Connection, display_id: &str) -> Result<TerminalCleanupReport> {
+    let main_repo = cleanup_main_repo()?;
+    let mut report = TerminalCleanupReport {
+        display_id: display_id.to_string(),
+        ..TerminalCleanupReport::default()
+    };
+
+    let Some(row) = load_task_row(conn, display_id)? else {
+        report.target_skip = Some(CleanupClassification::MissingWorkspace);
+        report.worktree_skip = Some(CleanupClassification::MissingWorkspace);
+        return Ok(report);
+    };
+
+    let target_classification = classify_row_for_target_cleanup(&row, &main_repo);
+    if target_classification == CleanupClassification::TargetCandidate {
+        let target_path = row.workspace_path.join("target");
+        let target_bytes = dir_size_bytes(&target_path).unwrap_or(0);
+        fs::remove_dir_all(&target_path)
+            .with_context(|| format!("removing target dir {}", target_path.display()))?;
+        report.target_deleted = Some(CleanupCandidate {
+            row: row.clone(),
+            classification: CleanupClassification::TargetCandidate,
+            target_path,
+            target_bytes,
+        });
+    } else {
+        report.target_skip = Some(target_classification);
+    }
+
+    let Some(fresh_row) = load_task_row(conn, display_id)? else {
+        report.worktree_skip = Some(CleanupClassification::MissingWorkspace);
+        return Ok(report);
+    };
+    let removal_classification = classify_row_for_worktree_removal(&fresh_row, &main_repo);
+    if removal_classification == CleanupClassification::WorktreeRemovalCandidate {
+        let out = Command::new("git")
+            .args([
+                "-C",
+                main_repo.to_str().unwrap_or("."),
+                "worktree",
+                "remove",
+                fresh_row.workspace_path.to_str().unwrap_or(""),
+            ])
+            .output()
+            .with_context(|| {
+                format!("spawning git worktree remove for {}", fresh_row.display_id)
+            })?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git worktree remove {} failed: {}",
+                fresh_row.workspace_path.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        report.worktree_removed = Some(CleanupCandidate {
+            target_path: fresh_row.workspace_path.join("target"),
+            target_bytes: 0,
+            row: fresh_row,
+            classification: CleanupClassification::WorktreeRemovalCandidate,
+        });
+    } else {
+        report.worktree_skip = Some(removal_classification);
+    }
+
+    Ok(report)
+}
+
+fn cleanup_main_repo() -> Result<PathBuf> {
+    let stores_dir = crate::paths::stores_dir()?;
+    let main_repo = stores_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Ok(canonicalize_lossy(&main_repo))
 }
 
 fn execute_targets_only(
@@ -995,6 +1075,121 @@ mod tests {
         let report = run_cleanup_worktrees(&conn, CleanupMode::ExecuteRemoveClean).unwrap();
         assert_eq!(report.removed_worktrees.len(), 1);
         assert!(!clean.exists(), "clean merged worktree should be removed");
+        crate::paths::clear_stores_dir_override_for_tests();
+    }
+
+    #[test]
+    fn terminal_cleanup_deletes_target_then_removes_clean_worktree() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        let stores = main.join(".stores");
+        let clean = tmp.path().join("clean-terminal");
+        init_main_repo(&main);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/clean-terminal",
+                clean.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(clean.join("target")).unwrap();
+        fs::write(clean.join("target/file"), b"artifact").unwrap();
+
+        let _guard = crate::cli::test_support::ENV_LOCK.lock().unwrap();
+        crate::paths::clear_stores_dir_override_for_tests();
+        crate::paths::set_stores_dir_override(stores.clone()).unwrap();
+        let conn = setup_cleanup_db(&stores, "T777", "integrated", &clean);
+
+        let report = cleanup_terminal_task(&conn, "T777").unwrap();
+        assert!(report.target_deleted.is_some());
+        assert!(report.worktree_removed.is_some());
+        assert!(!clean.exists(), "clean terminal worktree should be removed");
+        crate::paths::clear_stores_dir_override_for_tests();
+    }
+
+    #[test]
+    fn terminal_cleanup_keeps_dirty_worktree_source_only() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        let stores = main.join(".stores");
+        let dirty = tmp.path().join("dirty-terminal");
+        init_main_repo(&main);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/dirty-terminal",
+                dirty.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(dirty.join("target")).unwrap();
+        fs::write(dirty.join("target/file"), b"artifact").unwrap();
+        fs::write(dirty.join("untracked.txt"), b"keep me").unwrap();
+
+        let _guard = crate::cli::test_support::ENV_LOCK.lock().unwrap();
+        crate::paths::clear_stores_dir_override_for_tests();
+        crate::paths::set_stores_dir_override(stores.clone()).unwrap();
+        let conn = setup_cleanup_db(&stores, "T778", "closed_out_of_band", &dirty);
+
+        let report = cleanup_terminal_task(&conn, "T778").unwrap();
+        assert!(report.target_deleted.is_some());
+        assert_eq!(
+            report.worktree_skip,
+            Some(CleanupClassification::DirtyWorktree)
+        );
+        assert!(dirty.exists(), "dirty terminal worktree source must remain");
+        assert!(!dirty.join("target").exists(), "target should be deleted");
+        assert!(
+            dirty.join("untracked.txt").exists(),
+            "source residue must remain"
+        );
+        crate::paths::clear_stores_dir_override_for_tests();
+    }
+
+    #[test]
+    fn terminal_cleanup_abandoned_deletes_target_but_does_not_remove_worktree() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        let stores = main.join(".stores");
+        let abandoned = tmp.path().join("abandoned-terminal");
+        init_main_repo(&main);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/abandoned-terminal",
+                abandoned.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(abandoned.join("target")).unwrap();
+        fs::write(abandoned.join("target/file"), b"artifact").unwrap();
+
+        let _guard = crate::cli::test_support::ENV_LOCK.lock().unwrap();
+        crate::paths::clear_stores_dir_override_for_tests();
+        crate::paths::set_stores_dir_override(stores.clone()).unwrap();
+        let conn = setup_cleanup_db(&stores, "T779", "abandoned", &abandoned);
+
+        let report = cleanup_terminal_task(&conn, "T779").unwrap();
+        assert!(report.target_deleted.is_some());
+        assert_eq!(
+            report.worktree_skip,
+            Some(CleanupClassification::WorktreeRemovalStatusNotEligible)
+        );
+        assert!(
+            abandoned.exists(),
+            "abandoned worktree stays for disposition"
+        );
+        assert!(
+            !abandoned.join("target").exists(),
+            "target should be deleted"
+        );
         crate::paths::clear_stores_dir_override_for_tests();
     }
 }

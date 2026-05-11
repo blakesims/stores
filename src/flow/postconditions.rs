@@ -28,6 +28,7 @@ pub enum PostconditionId {
     CargoInstalledState,
     SchemaMigratedState,
     IntegratedState,
+    CleanupWorktreeTerminal,
     Other(String),
 }
 
@@ -40,6 +41,7 @@ impl PostconditionId {
             PostconditionId::CargoInstalledState => "cargo_installed_state",
             PostconditionId::SchemaMigratedState => "schema_migrated_state",
             PostconditionId::IntegratedState => "integrated_state",
+            PostconditionId::CleanupWorktreeTerminal => "cleanup_worktree_terminal",
             PostconditionId::Other(s) => s.as_str(),
         }
     }
@@ -52,6 +54,7 @@ impl PostconditionId {
             "cargo_installed_state" => PostconditionId::CargoInstalledState,
             "schema_migrated_state" => PostconditionId::SchemaMigratedState,
             "integrated_state" => PostconditionId::IntegratedState,
+            "cleanup_worktree_terminal" => PostconditionId::CleanupWorktreeTerminal,
             other => PostconditionId::Other(other.to_string()),
         }
     }
@@ -68,6 +71,7 @@ pub fn lookup(id: &str) -> Option<PostconditionFn> {
         "cargo_installed_state" => Some(cargo_installed_state),
         "schema_migrated_state" => Some(schema_migrated_state),
         "integrated_state" => Some(integrated_state),
+        "cleanup_worktree_terminal" => Some(cleanup_worktree_terminal),
         _ => None,
     }
 }
@@ -202,6 +206,28 @@ pub fn schema_migrated_state(
     Ok(n > 0)
 }
 
+/// True iff the cleanup-worktree builtin ran for a terminal task row. The
+/// filesystem cleanup itself is intentionally best-effort and may leave a dirty
+/// source-only worktree for disposition; the postcondition only requires that
+/// the triggering row is in a cleanup-eligible terminal state.
+///
+/// Args: `{"display_id": "T123"}`.
+pub fn cleanup_worktree_terminal(
+    conn: &Connection,
+    args: &Value,
+    _ctx: Option<&Value>,
+) -> Result<bool> {
+    let display_id =
+        arg_str(args, "display_id").ok_or_else(|| anyhow::anyhow!("missing arg: display_id"))?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE display_id = ?1 AND status IN \
+         ('integrated','schema_migrated','cargo_installed','closed_out_of_band','rejected','abandoned')",
+        rusqlite::params![display_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +345,18 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_worktree_terminal_satisfies_and_fails() {
+        let conn = fresh_db();
+        insert_task(&conn, "T600", "integrated", None, None, None);
+        insert_task(&conn, "T601", "abandoned", None, None, None);
+        insert_task(&conn, "T602", "executing", None, None, None);
+
+        assert!(cleanup_worktree_terminal(&conn, &json!({"display_id": "T600"}), None).unwrap());
+        assert!(cleanup_worktree_terminal(&conn, &json!({"display_id": "T601"}), None).unwrap());
+        assert!(!cleanup_worktree_terminal(&conn, &json!({"display_id": "T602"}), None).unwrap());
+    }
+
+    #[test]
     fn lookup_returns_some_for_known_ids_and_none_for_unknown() {
         for id in [
             "task_exists_for_linked_observation",
@@ -327,6 +365,7 @@ mod tests {
             "cargo_installed_state",
             "schema_migrated_state",
             "integrated_state",
+            "cleanup_worktree_terminal",
         ] {
             assert!(lookup(id).is_some(), "lookup({}) returned None", id);
         }
@@ -343,6 +382,7 @@ mod tests {
             "cargo_installed_state",
             "schema_migrated_state",
             "integrated_state",
+            "cleanup_worktree_terminal",
         ] {
             assert_eq!(PostconditionId::parse(id).as_str(), id);
         }

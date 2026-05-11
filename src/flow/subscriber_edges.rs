@@ -808,8 +808,9 @@ agents:
     ///
     /// Post-T138: the integration-lane entry edges dispatch the `integrate`
     /// builtin (and only that builtin); the post-integrated edge dispatches
-    /// `cargo-install` and `auto-resolve-observation`; cargo_installed →
-    /// schema_migrated dispatches `schema-migrate` (and auto-resolve).
+    /// `cargo-install` and `auto-resolve-observation`; integrated self-step
+    /// subscribers include schema-migrate and cleanup-worktree gated by
+    /// different `post_integration_step` predicates.
     #[test]
     fn subscribers_fire_unchanged_for_integration_lane_edges() {
         let agents = load_canonical_agents();
@@ -846,8 +847,8 @@ agents:
         cargo_post_step_subscribers.sort_unstable();
         assert_eq!(
             cargo_post_step_subscribers,
-            vec!["schema-migrate"],
-            "(integrated → integrated with post_integration_step=cargo_installed) must dispatch exactly schema-migrate"
+            vec!["cleanup-worktree", "schema-migrate"],
+            "(integrated → integrated) subscribers must be schema-migrate and cleanup-worktree; predicates select cargo_installed vs schema_migrated"
         );
     }
 }

@@ -426,6 +426,31 @@ agents:
         assert_eq!(sub.transition.to, "schema_migrated");
     }
 
+    #[test]
+    fn fixture_yaml_includes_cleanup_worktree_terminal_hooks() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agents.yaml");
+        let p = load_from_path(&path).expect("fixture must parse");
+        let cleanup = p
+            .agents
+            .iter()
+            .find(|a| a.name == "cleanup-worktree")
+            .expect("fixture missing cleanup-worktree entry");
+        assert_eq!(cleanup.command, "builtin:cleanup-worktree");
+        assert_eq!(cleanup.retry_policy.max_attempts, 1);
+        assert!(cleanup.subscribes_to.iter().any(|s| {
+            s.store == "tasks"
+                && s.transition.from == "integrated"
+                && s.transition.to == "integrated"
+        }));
+        assert!(cleanup.subscribes_to.iter().any(|s| {
+            s.store == "tasks" && s.transition.from == "in_review" && s.transition.to == "rejected"
+        }));
+        assert!(cleanup.subscribes_to.iter().any(|s| {
+            s.store == "tasks" && s.transition.from == "planning" && s.transition.to == "abandoned"
+        }));
+    }
+
     /// T022 P6 / AC6.1: tests/fixtures/agents.yaml carries the auto-drive entry
     /// with the `workspace_path != ""` predicate gate.
     #[test]

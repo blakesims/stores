@@ -152,6 +152,67 @@ agents:
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }
 
+  - name: cleanup-worktree
+    subscribes_to:
+      # Stores-repo post-land completion: only clean up after schema-migrate
+      # has finished. Repos without a post-land chain can wire this builtin to
+      # their own final integrated/done edge instead.
+      - store: tasks
+        transition: { from: integrated, to: integrated }
+        predicate:
+          op: "=="
+          left: "$post_integration_step"
+          right: "schema_migrated"
+      - store: tasks
+        transition: { from: in_review, to: rejected }
+      - store: tasks
+        transition: { from: planning, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: plan_review, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: ready, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: executing, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: code_review, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: blocked, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: complete, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: in_review, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: rejected, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: deploy_blocked, to: closed_out_of_band }
+      - store: tasks
+        transition: { from: planning, to: abandoned }
+      - store: tasks
+        transition: { from: plan_review, to: abandoned }
+      - store: tasks
+        transition: { from: ready, to: abandoned }
+      - store: tasks
+        transition: { from: executing, to: abandoned }
+      - store: tasks
+        transition: { from: code_review, to: abandoned }
+      - store: tasks
+        transition: { from: blocked, to: abandoned }
+      - store: tasks
+        transition: { from: in_review, to: abandoned }
+      - store: tasks
+        transition: { from: complete, to: abandoned }
+      - store: tasks
+        transition: { from: integration_queued, to: abandoned }
+      - store: tasks
+        transition: { from: integrating, to: abandoned }
+      - store: tasks
+        transition: { from: integration_blocked, to: abandoned }
+      - store: tasks
+        transition: { from: integrated, to: abandoned }
+    command: "builtin:cleanup-worktree"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
   - name: auto-resolve-observation
     subscribes_to:
       - store: tasks

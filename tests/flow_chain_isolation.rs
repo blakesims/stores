@@ -252,8 +252,10 @@ fn ac4_2_post_accept_chain_fixture_parses() {
 ///   * `cargo-install` subscribes ONLY to `(integrating, integrated)` — no
 ///     accepted-entry subscription, no `(integration_blocked, integrated)`
 ///     edge (which doesn't exist in the schema; Phase 1 forbids it).
-///   * `schema-migrate` subscribes to `(integrated, cargo_installed)` —
-///     the source state moved from `accepted` to `integrated`.
+///   * `schema-migrate` subscribes to integrated self-transition gated on
+///     `post_integration_step=cargo_installed`.
+///   * `cleanup-worktree` subscribes after the stores post-land chain reaches
+///     `post_integration_step=schema_migrated` and on terminal retirements.
 #[test]
 fn t138_agents_yaml_example_subscribes_integration_lane_and_post_integrated_chain() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/agents-yaml-example.yaml");
@@ -328,6 +330,26 @@ fn t138_agents_yaml_example_subscribes_integration_lane_and_post_integrated_chai
             .any(|s| s.transition.from == "accepted" && s.transition.to == "cargo_installed"),
         "schema-migrate must NOT carry the legacy (accepted, cargo_installed) \
          subscription post-T138"
+    );
+
+    let cleanup = parsed
+        .agents
+        .iter()
+        .find(|a| a.name == "cleanup-worktree")
+        .expect("docs example must declare cleanup-worktree");
+    assert!(
+        cleanup
+            .subscribes_to
+            .iter()
+            .any(|s| s.transition.from == "integrated" && s.transition.to == "integrated"),
+        "cleanup-worktree must subscribe after schema-migrate's integrated self-transition"
+    );
+    assert!(
+        cleanup
+            .subscribes_to
+            .iter()
+            .any(|s| s.transition.from == "planning" && s.transition.to == "abandoned"),
+        "cleanup-worktree must clean abandoned target artifacts while preserving worktree disposition"
     );
 }
 

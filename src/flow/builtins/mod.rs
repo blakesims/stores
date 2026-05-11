@@ -38,6 +38,7 @@ pub mod auto_promote;
 pub mod auto_resolve_observation;
 pub mod auto_scaffold;
 pub mod cargo_install;
+pub mod cleanup_worktree;
 pub mod external_review;
 pub mod gatekeeper_router;
 pub mod gatekeeper_router_drain;
@@ -79,6 +80,7 @@ pub fn dispatch_builtin(keyword: &str, row: &Value, ctx: &DispatchCtx) -> Option
         "auto-resolve-observation" => Some(auto_resolve_observation::run(row, ctx)),
         "auto-scaffold" => Some(auto_scaffold::run(row, ctx)),
         "cargo-install" => Some(cargo_install::run(row, ctx)),
+        "cleanup-worktree" => Some(cleanup_worktree::run(row, ctx)),
         "external-review" => Some(external_review::run(row, ctx).map(|outcome| match outcome {
             external_review::DispatchOutcome::Dispatched => 0,
             external_review::DispatchOutcome::CapHeld => 0,
@@ -105,6 +107,7 @@ pub fn postcondition_for_builtin(keyword: &str) -> Option<&'static str> {
         "auto-scaffold" => Some("task_workspace_exists"),
         "auto-drive" => Some("drive_pid_recorded_or_terminal"),
         "cargo-install" => Some("cargo_installed_state"),
+        "cleanup-worktree" => Some("cleanup_worktree_terminal"),
         "integrate" => Some("integrated_state"),
         "release-to-integration" => Some("release_to_integration_state"),
         "schema-migrate" => Some("schema_migrated_state"),
@@ -1504,6 +1507,10 @@ mod tests {
             postcondition_for_builtin("schema-migrate"),
             Some("schema_migrated_state")
         );
+        assert_eq!(
+            postcondition_for_builtin("cleanup-worktree"),
+            Some("cleanup_worktree_terminal")
+        );
         assert_eq!(postcondition_for_builtin("unknown-keyword"), None);
         assert_eq!(postcondition_for_builtin(""), None);
 
@@ -1514,6 +1521,7 @@ mod tests {
             "auto-drive",
             "cargo-install",
             "schema-migrate",
+            "cleanup-worktree",
         ] {
             let id = postcondition_for_builtin(kw).unwrap();
             assert!(

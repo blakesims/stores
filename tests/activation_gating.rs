@@ -411,6 +411,7 @@ fn ungated_subscribers_have_no_activation_predicate() {
     let ungated_names = [
         "user-escalation",
         "auto-resolve-observation",
+        "cleanup-worktree",
         "auto-scaffold",
         "auto-promote",
         "investigator",
