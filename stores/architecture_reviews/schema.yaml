@@ -136,7 +136,6 @@ fields:
   - name: produced_task_id
     type: text
     required: false
-    actor: framework
     description: "ADR 0002 typed reference: T### task produced by primitive task outcomes."
 
   - name: doctrine_refs

@@ -19,6 +19,64 @@ struct RulingRow {
     merge_target_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RulingOutcome {
+    LocalFixAllowed,
+    ContractReframeRequired,
+    MergedWithCluster,
+    PrimitiveTaskCreated,
+    PrimitiveTaskRequired,
+    HumanDecisionRequired,
+    DoctrineUpdateProposed,
+    Withdrawn,
+    Superseded,
+}
+
+impl RulingOutcome {
+    pub(crate) fn parse(s: &str) -> Result<Self> {
+        match s {
+            "allow_local_fix" | "local_fix_allowed" => Ok(Self::LocalFixAllowed),
+            "reframe_contract" | "contract_reframe_required" => Ok(Self::ContractReframeRequired),
+            "merge_with_cluster" | "merged_with_cluster" => Ok(Self::MergedWithCluster),
+            "create_primitive_task" | "primitive_task_created" => Ok(Self::PrimitiveTaskCreated),
+            "block_pending_fixes" | "primitive_task_required" => Ok(Self::PrimitiveTaskRequired),
+            "request_human_arch_decision" | "human_decision_required" => {
+                Ok(Self::HumanDecisionRequired)
+            }
+            "propose_doctrine_update" | "doctrine_update_proposed" => {
+                Ok(Self::DoctrineUpdateProposed)
+            }
+            "withdrawn" => Ok(Self::Withdrawn),
+            "superseded" => Ok(Self::Superseded),
+            other => bail!("unknown architecture-review outcome '{other}'"),
+        }
+    }
+}
+
+fn linked_observations(merged_ruling: &EntryMap) -> Vec<String> {
+    let mut out: Vec<String> = merged_ruling
+        .get("linked_observation_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if out.is_empty() {
+        if let Some(source) = merged_ruling
+            .get("source_observation")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            out.push(source.to_string());
+        }
+    }
+    out
+}
+
 /// Enforces the observations U1 architecture-review gate before confirmed→ready
 /// ratification. If a pending observation is clearable by the referenced A###
 /// ruling, this injects pending_architecture_review=false into the transition
@@ -129,56 +187,154 @@ fn enforce_reframe_ack(observation_id: &str, merged: &EntryMap, ruling: &RulingR
     Ok(())
 }
 
-/// Applies merge_with_cluster verdict side effects to the source observation in
-/// the same transaction as issue-verdict: resolved terminal, A### provenance,
-/// target L###, distinct resolution_kind, and pending gate cleared.
-pub(crate) fn apply_merge_with_cluster_verdict(
+/// Applies ADR 0002 architecture-review verdict side effects to every linked
+/// observation in the caller's transaction.
+pub(crate) fn apply_verdict_effects(
     tx: &Transaction,
     ruling_id: &str,
     merged_ruling: &EntryMap,
     actor: Actor,
+    ruling_outcome: RulingOutcome,
 ) -> Result<()> {
-    if merged_ruling.get("verdict").and_then(|v| v.as_str()) != Some("merge_with_cluster") {
+    let linked = linked_observations(merged_ruling);
+    if linked.is_empty() {
         return Ok(());
     }
-    let source = merged_ruling
-        .get("source_observation")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("merge_with_cluster verdict requires source_observation"))?;
-    let target = merged_ruling
-        .get("merge_target_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("merge_with_cluster verdict requires merge_target_id"))?;
-    if source == target {
-        bail!(
-            "merge_with_cluster verdict requires merge_target_id distinct from source_observation"
-        );
-    }
-
-    let status: Option<String> = tx
-        .query_row(
-            "SELECT status FROM observations WHERE display_id = ?1",
-            [source],
-            |r| r.get(0),
-        )
-        .optional()
-        .context("merge_with_cluster: read source observation")?;
-    let status = status.ok_or_else(|| {
-        anyhow::anyhow!("merge_with_cluster source observation {source} not found")
-    })?;
-    if status == "resolved" {
-        bail!("merge_with_cluster source observation {source} is already resolved/merged");
-    }
-
     let now = now_iso8601();
     let actor_s = actor.to_string();
-    tx.execute(
-        "UPDATE observations SET updated_at=?1, updated_by=?2, status='resolved', lifecycle='closed', waiting=0, waiting_kind=NULL, outcome='merged_with_cluster', pending_architecture_review=0, resolved_at=?1, resolved_by=?3, merge_target_id=?4, resolution_kind='merged_with_cluster' WHERE display_id=?5",
-        rusqlite::params![now, actor_s, ruling_id, target, source],
-    )
-    .context("merge_with_cluster: update source observation")?;
+    match ruling_outcome {
+        RulingOutcome::LocalFixAllowed | RulingOutcome::DoctrineUpdateProposed => {
+            for obs_id in linked {
+                update_one(
+                    tx,
+                    "UPDATE observations SET updated_at=?1, updated_by=?2, waiting=0, waiting_kind=NULL, pending_architecture_review=0, open_architecture_review_id=NULL WHERE display_id=?3",
+                    rusqlite::params![now, actor_s, obs_id],
+                    &obs_id,
+                )?;
+            }
+        }
+        RulingOutcome::ContractReframeRequired => {
+            for obs_id in linked {
+                update_one(
+                    tx,
+                    "UPDATE observations SET updated_at=?1, updated_by=?2, waiting=1, waiting_kind='architecture_review', pending_architecture_review=1, open_architecture_review_id=?3, clearable_by_ruling=?3 WHERE display_id=?4",
+                    rusqlite::params![now, actor_s, ruling_id, obs_id],
+                    &obs_id,
+                )?;
+            }
+        }
+        RulingOutcome::MergedWithCluster => {
+            let target = merged_ruling
+                .get("merge_target_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("merge_with_cluster verdict requires merge_target_id")
+                })?;
+            for obs_id in linked {
+                if obs_id == target {
+                    bail!("merge_with_cluster verdict requires merge_target_id distinct from linked observation {obs_id}");
+                }
+                let status: Option<String> = tx
+                    .query_row(
+                        "SELECT status FROM observations WHERE display_id = ?1",
+                        [&obs_id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .context("merge_with_cluster: read linked observation")?;
+                let status = status.ok_or_else(|| {
+                    anyhow::anyhow!("merge_with_cluster linked observation {obs_id} not found")
+                })?;
+                if status == "resolved" {
+                    bail!(
+                        "merge_with_cluster linked observation {obs_id} is already resolved/merged"
+                    );
+                }
+                update_one(
+                    tx,
+                    "UPDATE observations SET updated_at=?1, updated_by=?2, status='resolved', lifecycle='closed', waiting=0, waiting_kind=NULL, outcome='merged_with_cluster', pending_architecture_review=0, open_architecture_review_id=NULL, resolved_at=?1, resolved_by=?3, merge_target_id=?4, resolution_kind='merged_with_cluster' WHERE display_id=?5",
+                    rusqlite::params![now, actor_s, ruling_id, target, obs_id],
+                    &obs_id,
+                )?;
+            }
+        }
+        RulingOutcome::PrimitiveTaskCreated => {
+            let task_id = merged_ruling
+                .get("produced_task_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("create_primitive_task verdict requires produced_task_id")
+                })?;
+            for obs_id in linked {
+                update_one(
+                    tx,
+                    "UPDATE observations SET updated_at=?1, updated_by=?2, waiting=0, waiting_kind=NULL, pending_architecture_review=0, open_architecture_review_id=NULL, task_id=?3 WHERE display_id=?4",
+                    rusqlite::params![now, actor_s, task_id, obs_id],
+                    &obs_id,
+                )?;
+            }
+        }
+        RulingOutcome::PrimitiveTaskRequired => {
+            for obs_id in linked {
+                update_one(
+                    tx,
+                    "UPDATE observations SET updated_at=?1, updated_by=?2, waiting=1, waiting_kind='linked_task_blocked', pending_architecture_review=1, open_architecture_review_id=?3 WHERE display_id=?4",
+                    rusqlite::params![now, actor_s, ruling_id, obs_id],
+                    &obs_id,
+                )?;
+            }
+        }
+        RulingOutcome::HumanDecisionRequired => {
+            for obs_id in linked {
+                update_one(
+                    tx,
+                    "UPDATE observations SET updated_at=?1, updated_by=?2, waiting=1, waiting_kind='human_ratification', pending_architecture_review=1, open_architecture_review_id=?3 WHERE display_id=?4",
+                    rusqlite::params![now, actor_s, ruling_id, obs_id],
+                    &obs_id,
+                )?;
+            }
+        }
+        RulingOutcome::Withdrawn => {
+            for obs_id in linked {
+                update_one(
+                    tx,
+                    "UPDATE observations SET updated_at=?1, updated_by=?2, waiting=0, waiting_kind=NULL, pending_architecture_review=0, open_architecture_review_id=NULL WHERE display_id=?3",
+                    rusqlite::params![now, actor_s, obs_id],
+                    &obs_id,
+                )?;
+            }
+        }
+        RulingOutcome::Superseded => {
+            let superseding = merged_ruling
+                .get("superseded_by_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("superseded outcome requires superseded_by_id"))?;
+            for obs_id in linked {
+                update_one(
+                    tx,
+                    "UPDATE observations SET updated_at=?1, updated_by=?2, waiting=1, waiting_kind='architecture_review', pending_architecture_review=1, open_architecture_review_id=?3, clearable_by_ruling=?3 WHERE display_id=?4",
+                    rusqlite::params![now, actor_s, superseding, obs_id],
+                    &obs_id,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn update_one<P: rusqlite::Params>(
+    tx: &Transaction,
+    sql: &str,
+    params: P,
+    obs_id: &str,
+) -> Result<()> {
+    let changed = tx.execute(sql, params)?;
+    if changed != 1 {
+        bail!("architecture-review verdict effect expected one linked observation update for {obs_id}; changed {changed}");
+    }
     Ok(())
 }
 
@@ -431,6 +587,12 @@ mod tests {
     }
 
     #[test]
+    fn apply_verdict_effects_rejects_unknown_outcome() {
+        let err = RulingOutcome::parse("not_a_real_outcome").unwrap_err();
+        assert!(err.to_string().contains("not_a_real_outcome"));
+    }
+
+    #[test]
     fn merge_verdict_resolves_source_and_blocks_later_u1_by_status() {
         let conn = setup();
         conn.execute(
@@ -444,7 +606,11 @@ mod tests {
         let mut cmd = clap::Command::new("issue-verdict")
             .arg(clap::Arg::new("display_id").required(true).index(1));
         for leaf in crate::schema::flatten::leaf_args(&arch).unwrap() {
-            cmd = cmd.arg(clap::Arg::new(leaf.cli_name.clone()).long(leaf.cli_name).required(false));
+            cmd = cmd.arg(
+                clap::Arg::new(leaf.cli_name.clone())
+                    .long(leaf.cli_name)
+                    .required(false),
+            );
         }
         let matches = cmd.get_matches_from([
             "issue-verdict",

@@ -1515,6 +1515,16 @@ fn build_add_cmd(leaves: &[crate::schema::flatten::LeafArg<'_>], schema: &Schema
     // (ai_with_human) means --activate combined with --invoker ai_autonomous
     // is rejected fail-loud by the validator. No new authority gate here —
     // the schema is the enforcement surface.
+    if schema.name == "architecture_reviews" {
+        cmd = cmd.arg(
+            Arg::new("linked-observations")
+                .long("linked-observations")
+                .action(ArgAction::Append)
+                .value_name("L###[,L###]")
+                .help("Comma-separated or repeated L### ids covered by this architecture review; source_observation is included if supplied")
+                .required(false),
+        );
+    }
     if schema.name == "tasks" {
         cmd = cmd.arg(
             Arg::new("activate")

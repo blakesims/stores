@@ -73,6 +73,11 @@ fn issue_verdict_in_tx(
     }
 
     let mut diff = cli_diff(schema, matches)?;
+    let produced_task_id = matches
+        .try_get_one::<String>("produced-task-id")
+        .ok()
+        .flatten()
+        .cloned();
     let kind = required_str(&diff, "kind", "issue-verdict requires --kind")?.to_string();
     let verdict = required_str(&diff, "verdict", "issue-verdict requires --verdict")?.to_string();
     if !diff.contains_key("rationale") {
@@ -101,11 +106,23 @@ fn issue_verdict_in_tx(
     let mut merged = existing.clone();
     merge_diff(&mut merged, &diff);
     if verdict == "merge_with_cluster" {
-        required_str(
-            &merged,
-            "source_observation",
-            "merge_with_cluster requires --source-observation",
-        )?;
+        let has_source = merged
+            .get("source_observation")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some();
+        let has_linked = merged
+            .get("linked_observation_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+        if !has_source && !has_linked {
+            required_str(
+                &merged,
+                "source_observation",
+                "merge_with_cluster requires --source-observation or linked_observation_ids",
+            )?;
+        }
         required_str(
             &merged,
             "merge_target_id",
@@ -139,6 +156,16 @@ fn issue_verdict_in_tx(
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
 
+    if let Some(task_id) = produced_task_id {
+        if verdict == "create_primitive_task" {
+            diff.insert(
+                "produced_task_id".to_string(),
+                Value::String(task_id.clone()),
+            );
+            merged.insert("produced_task_id".to_string(), Value::String(task_id));
+        }
+    }
+
     let (pref, phash) = read_policy_env();
     execute_transition_write(
         tx,
@@ -164,11 +191,18 @@ fn issue_verdict_in_tx(
         mark_superseded_if_present(tx, schema, supersedes, invoker.actor)?;
     }
 
-    super::observation_arch_gate::apply_merge_with_cluster_verdict(
+    let outcome = merged
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .or_else(|| merged.get("verdict").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let ruling_outcome = super::observation_arch_gate::RulingOutcome::parse(outcome)?;
+    super::observation_arch_gate::apply_verdict_effects(
         tx,
         display_id,
         &merged,
         invoker.actor,
+        ruling_outcome,
     )?;
 
     println!(
@@ -255,6 +289,19 @@ fn ratify_amend_in_tx(
         phash.as_deref(),
         None,
     )?;
+    let outcome = merged
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .or_else(|| merged.get("verdict").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let ruling_outcome = super::observation_arch_gate::RulingOutcome::parse(outcome)?;
+    super::observation_arch_gate::apply_verdict_effects(
+        tx,
+        display_id,
+        &merged,
+        invoker.actor,
+        ruling_outcome,
+    )?;
     println!(
         "Transitioned {display_id}: {} → {}",
         transition.from, transition.to
@@ -271,6 +318,15 @@ fn supersede_in_tx(
     require_actor(invoker, Actor::AiWithHuman, "supersede")?;
     let display_id = display_id(matches);
     mark_superseded_if_present(tx, schema, display_id, invoker.actor)?;
+    if let Ok((_, row)) = read_row(schema, tx, display_id) {
+        super::observation_arch_gate::apply_verdict_effects(
+            tx,
+            display_id,
+            &row,
+            invoker.actor,
+            super::observation_arch_gate::RulingOutcome::Superseded,
+        )?;
+    }
     println!("Superseded {display_id}");
     Ok(())
 }
