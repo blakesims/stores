@@ -672,7 +672,8 @@ fn build_store_command(schema: &Schema) -> Command {
     if schema.name == "external_reviews" {
         store_cmd = store_cmd
             .subcommand(build_external_review_run_cmd())
-            .subcommand(build_external_review_create_pending_cmd());
+            .subcommand(build_external_review_create_pending_cmd())
+            .subcommand(build_external_review_import_pass_cmd());
     }
 
     // `guide` is also registered on the `gate` store (full form), which has no workflow.
@@ -1113,6 +1114,22 @@ fn build_external_review_create_pending_cmd() -> Command {
         .arg(Arg::new("task_id").help("Task display ID").required(true))
         .arg(Arg::new("base-sha").long("base-sha").required(true))
         .arg(Arg::new("head-sha").long("head-sha").required(true))
+}
+
+/// Build the `external_reviews import-pass` command.
+fn build_external_review_import_pass_cmd() -> Command {
+    Command::new("import-pass")
+        .about("Import an already completed manual external-review PASS for the current task head")
+        .arg(Arg::new("task_id").help("Task display ID").required(true))
+        .arg(Arg::new("transcript-path").long("transcript-path").required(true))
+        .arg(Arg::new("base-sha").long("base-sha").required(true))
+        .arg(Arg::new("head-sha").long("head-sha").required(true))
+        .arg(
+            Arg::new("runner")
+                .long("runner")
+                .required(true)
+                .value_parser(["manual-codex", "manual"]),
+        )
 }
 
 /// Build the `external_reviews run` command.

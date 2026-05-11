@@ -357,6 +357,40 @@ pub fn dispatch(
                         )?;
                         tx.commit()?;
                         println!("Created {display_id} for {task_id}");
+                    } else if verb == "import-pass" && store.name == "external_reviews" {
+                        let task_id = sub
+                            .get_one::<String>("task_id")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let transcript_path = sub
+                            .get_one::<String>("transcript-path")
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_default();
+                        let base_sha = sub
+                            .get_one::<String>("base-sha")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let head_sha = sub
+                            .get_one::<String>("head-sha")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let runner = sub
+                            .get_one::<String>("runner")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        let actor = invoker.to_string();
+                        let display_id = handlers::external_reviews::import_manual_pass(
+                            &conn,
+                            handlers::external_reviews::ImportPassArgs {
+                                task_id,
+                                transcript_path: &transcript_path,
+                                base_sha,
+                                head_sha,
+                                runner,
+                                actor: &actor,
+                            },
+                        )?;
+                        println!("Imported PASS {display_id} for {task_id}");
                     } else if verb == "recover-stale-base" && store.name == "tasks" {
                         let display_id = sub
                             .get_one::<String>("display_id")
