@@ -851,6 +851,7 @@ impl Row {
 
 const LIVE_ACTIVITY_LIMIT: usize = 5;
 const LIVE_EVENTS_READ_BYTES: u64 = 32 * 1024;
+const LIVE_EVENTS_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 const LIVE_MARKER_STATUS_READ_BYTES: u64 = 8 * 1024;
 const LIVE_TEXT_LIMIT: usize = 100;
 
@@ -938,39 +939,51 @@ fn read_live_event_summaries(path: &Path) -> Vec<LiveRunEventSummary> {
     let Ok(len) = file.metadata().map(|m| m.len()) else {
         return Vec::new();
     };
-    let start = len.saturating_sub(LIVE_EVENTS_READ_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return Vec::new();
-    }
-    let mut buf = String::new();
-    if file.read_to_string(&mut buf).is_err() {
-        return Vec::new();
-    }
-    if start > 0 {
-        if let Some(pos) = buf.find('\n') {
-            buf = buf[pos + 1..].to_string();
+
+    let mut read_bytes = LIVE_EVENTS_READ_BYTES.min(len.max(1));
+    let mut last_fallback = None;
+    loop {
+        let start = len.saturating_sub(read_bytes);
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return Vec::new();
         }
-    }
-    let mut meaningful = Vec::new();
-    let mut fallback = None;
-    for line in buf.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
-        };
-        let Some(summary) = summarize_live_event(&v) else {
-            continue;
-        };
-        if summary.event_type == "heartbeat" {
-            fallback = Some(summary);
-        } else {
-            meaningful.push(summary);
+        let mut buf = String::new();
+        if file.read_to_string(&mut buf).is_err() {
+            return Vec::new();
         }
+        if start > 0 {
+            if let Some(pos) = buf.find('\n') {
+                buf = buf[pos + 1..].to_string();
+            }
+        }
+
+        let mut meaningful = Vec::new();
+        let mut fallback = None;
+        for line in buf.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+                continue;
+            };
+            let Some(summary) = summarize_live_event(&v) else {
+                continue;
+            };
+            if summary.event_type == "heartbeat" {
+                fallback = Some(summary);
+            } else {
+                meaningful.push(summary);
+            }
+        }
+        if fallback.is_some() {
+            last_fallback = fallback;
+        }
+        if !meaningful.is_empty() || start == 0 || read_bytes >= LIVE_EVENTS_SCAN_BYTES {
+            if meaningful.is_empty() {
+                return last_fallback.into_iter().collect();
+            }
+            let keep_from = meaningful.len().saturating_sub(LIVE_ACTIVITY_LIMIT);
+            return meaningful.split_off(keep_from);
+        }
+        read_bytes = (read_bytes * 2).min(len).min(LIVE_EVENTS_SCAN_BYTES);
     }
-    if meaningful.is_empty() {
-        return fallback.into_iter().collect();
-    }
-    let keep_from = meaningful.len().saturating_sub(LIVE_ACTIVITY_LIMIT);
-    meaningful.split_off(keep_from)
 }
 
 fn summarize_live_event(v: &Value) -> Option<LiveRunEventSummary> {
@@ -2901,6 +2914,34 @@ mod tests {
         );
         assert_eq!(live.events[0].text, "message 1");
         assert_eq!(live.events[4].text, "message 5");
+    }
+
+    #[test]
+    fn live_run_summary_scans_past_heartbeat_only_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events = tmp.path().join("events.jsonl");
+        let mut event_lines = Vec::new();
+        for i in 0..5 {
+            event_lines.push(
+                serde_json::json!({
+                    "type":"assistant_text",
+                    "ts": format!("2026-05-11T00:00:0{i}Z"),
+                    "text": format!("message {i}")
+                })
+                .to_string(),
+            );
+        }
+        let heartbeat = r#"{"type":"heartbeat","ts":"2026-05-11T00:00:09Z"}"#;
+        while event_lines.join("\n").len() < (LIVE_EVENTS_READ_BYTES as usize + 1024) {
+            event_lines.push(heartbeat.to_string());
+        }
+        std::fs::write(&events, event_lines.join("\n")).unwrap();
+
+        let summaries = read_live_event_summaries(&events);
+        assert_eq!(summaries.len(), 5);
+        assert!(summaries.iter().all(|e| e.event_type == "assistant_text"));
+        assert_eq!(summaries[0].text, "message 0");
+        assert_eq!(summaries[4].text, "message 4");
     }
 
     #[test]
