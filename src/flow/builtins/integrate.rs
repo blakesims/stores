@@ -637,10 +637,6 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
 
     fire_integration_step(ctx, &tasks_schema, display_id, "mark_deploy_done")?;
 
-    // Main truth mutation remains protected through the optional push and
-    // landed-main capture. Failure returns rely on LockGuard::drop for release.
-    lock_guard.release()?;
-
     // 10. Capture landed_main_sha; finalize the in-progress entry; fire
     //     mark_verify_done.
     let landed_main_sha = git_rev_parse(&main_repo, &cfg.main_branch)
@@ -665,6 +661,10 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         None,
     )
     .with_context(|| format!("firing mark_verify_done for {}", display_id))?;
+
+    // Main truth mutation remains protected through push, landed-main capture,
+    // and final task transition. Failure returns rely on LockGuard::drop.
+    lock_guard.release()?;
     Ok(0)
 }
 
