@@ -697,6 +697,9 @@ fn fire_task_external_review_revise(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    if current_status == "blocked" {
+        ensure_blocked_er_reconcile_allowed(conn, task_id, &existing)?;
+    }
     let current_cycle = existing
         .get("current_cycle")
         .and_then(Value::as_i64)
@@ -706,6 +709,10 @@ fn fire_task_external_review_revise(
     let mut merged = existing.clone();
     merged.insert("current_cycle".to_string(), Value::from(bumped_cycle));
     diff.insert("current_cycle".to_string(), Value::from(bumped_cycle));
+    if current_status == "blocked" {
+        merged.insert("blocked_reason".to_string(), Value::String(String::new()));
+        diff.insert("blocked_reason".to_string(), Value::String(String::new()));
+    }
     let transition = select_transition(
         &schema.lifecycle.transitions,
         &current_status,
@@ -747,6 +754,70 @@ fn fire_task_external_review_revise(
     )?;
     tx.commit()?;
     Ok(())
+}
+
+fn ensure_blocked_er_reconcile_allowed(
+    conn: &Connection,
+    task_id: &str,
+    existing: &EntryMap,
+) -> Result<()> {
+    let reason = existing
+        .get("blocked_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !is_drive_watchdog_blocked_reason(reason) {
+        anyhow::bail!(
+            "external review REVISE cannot reconcile blocked task {task_id}: blocked_reason={reason:?} is not drive/watchdog infrastructure failure"
+        );
+    }
+
+    let review_head: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(head_sha,'') FROM external_reviews \
+             WHERE task_id=?1 AND status='revise' AND verdict='REVISE' \
+             ORDER BY attempt DESC, id DESC LIMIT 1",
+            rusqlite::params![task_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let review_head = review_head.filter(|s| !s.is_empty()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "external review REVISE cannot reconcile blocked task {task_id}: terminal review head_sha missing"
+        )
+    })?;
+    let current_head = resolve_task_head(existing)?;
+    if review_head != current_head {
+        anyhow::bail!(
+            "external review REVISE cannot reconcile blocked task {task_id}: reviewed head {review_head}, current head is {current_head}"
+        );
+    }
+    Ok(())
+}
+
+fn is_drive_watchdog_blocked_reason(reason: &str) -> bool {
+    reason.starts_with("drive_failed")
+        || reason.contains("watchdog")
+        || reason.contains("drive failed")
+}
+
+fn resolve_task_head(existing: &EntryMap) -> Result<String> {
+    let workspace = existing
+        .get("workspace_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(".");
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .with_context(|| format!("resolve current HEAD in {workspace}"))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "external review REVISE cannot reconcile blocked task: current head could not be resolved in {workspace}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn add_secs(base: &str, secs: i64) -> Option<String> {
@@ -802,4 +873,64 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
         |r| r.get(0),
     )?;
     Ok(n > 0)
+}
+
+#[cfg(test)]
+mod blocked_reconcile_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::process::Command;
+
+    fn git_repo() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git").args(["config", "user.email", "test@example.com"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git").args(["config", "user.name", "Test"]).current_dir(dir.path()).output().unwrap();
+        std::fs::write(dir.path().join("f"), "x").unwrap();
+        Command::new("git").args(["add", "f"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git").args(["commit", "-m", "init"]).current_dir(dir.path()).output().unwrap();
+        let out = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(dir.path()).output().unwrap();
+        (dir, String::from_utf8(out.stdout).unwrap().trim().to_string())
+    }
+
+    fn conn_with_review(task_id: &str, head: &str) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE external_reviews (id INTEGER PRIMARY KEY, display_id TEXT, task_id TEXT, attempt INTEGER, status TEXT, verdict TEXT, head_sha TEXT);").unwrap();
+        conn.execute("INSERT INTO external_reviews (display_id, task_id, attempt, status, verdict, head_sha) VALUES ('ER001', ?1, 1, 'revise', 'REVISE', ?2)", params![task_id, head]).unwrap();
+        conn
+    }
+
+    fn task_row(workspace: &std::path::Path, reason: &str) -> EntryMap {
+        let mut row = EntryMap::new();
+        row.insert("workspace_path".to_string(), Value::String(workspace.display().to_string()));
+        row.insert("blocked_reason".to_string(), Value::String(reason.to_string()));
+        row
+    }
+
+    #[test]
+    fn blocked_drive_failed_terminal_revise_reconciles_idempotently() {
+        let (dir, head) = git_repo();
+        let conn = conn_with_review("T001", &head);
+        let row = task_row(dir.path(), "drive_failed: runner exited");
+        ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap();
+        ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap();
+    }
+
+    #[test]
+    fn blocked_reconcile_rejects_wrong_head() {
+        let (dir, _head) = git_repo();
+        let conn = conn_with_review("T001", "deadbeef");
+        let row = task_row(dir.path(), "drive_failed: runner exited");
+        let err = ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap_err();
+        assert!(err.to_string().contains("reviewed head deadbeef"));
+    }
+
+    #[test]
+    fn blocked_reconcile_rejects_non_watchdog_reason() {
+        let (dir, head) = git_repo();
+        let conn = conn_with_review("T001", &head);
+        let row = task_row(dir.path(), "needs human decision");
+        let err = ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap_err();
+        assert!(err.to_string().contains("not drive/watchdog"));
+    }
 }
