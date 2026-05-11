@@ -15,6 +15,14 @@ const TERMINAL_TARGET_STATUSES: &[&str] = &[
     "abandoned",
 ];
 
+const TERMINAL_WORKTREE_REMOVAL_STATUSES: &[&str] = &[
+    "integrated",
+    "schema_migrated",
+    "cargo_installed",
+    "closed_out_of_band",
+    "rejected",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupMode {
     DryRun,
@@ -40,6 +48,7 @@ pub enum CleanupClassification {
     WorktreeRemovalCandidate,
     MainRepo,
     ActiveStatus,
+    WorktreeRemovalStatusNotEligible,
     MissingWorkspace,
     MissingTarget,
     LiveDrivePid(i64),
@@ -59,6 +68,9 @@ impl CleanupClassification {
             }
             CleanupClassification::MainRepo => "skip_main_repo".to_string(),
             CleanupClassification::ActiveStatus => "skip_active_status".to_string(),
+            CleanupClassification::WorktreeRemovalStatusNotEligible => {
+                "skip_worktree_removal_status_not_eligible".to_string()
+            }
             CleanupClassification::MissingWorkspace => "skip_missing_workspace".to_string(),
             CleanupClassification::MissingTarget => "skip_missing_target".to_string(),
             CleanupClassification::LiveDrivePid(pid) => format!("skip_live_drive_pid:{pid}"),
@@ -321,7 +333,7 @@ pub fn classify_row_for_target_cleanup(
     row: &CleanupTaskRow,
     main_repo: &Path,
 ) -> CleanupClassification {
-    if let Some(skip) = common_terminal_live_skip(row, main_repo) {
+    if let Some(skip) = common_terminal_live_skip(row, main_repo, TERMINAL_TARGET_STATUSES) {
         return skip;
     }
     let target = row.workspace_path.join("target");
@@ -335,7 +347,12 @@ pub fn classify_row_for_worktree_removal(
     row: &CleanupTaskRow,
     main_repo: &Path,
 ) -> CleanupClassification {
-    if let Some(skip) = common_terminal_live_skip(row, main_repo) {
+    if let Some(skip) =
+        common_terminal_live_skip(row, main_repo, TERMINAL_WORKTREE_REMOVAL_STATUSES)
+    {
+        if skip == CleanupClassification::ActiveStatus && row.status == "abandoned" {
+            return CleanupClassification::WorktreeRemovalStatusNotEligible;
+        }
         return skip;
     }
     match git_status_clean(&row.workspace_path) {
@@ -353,13 +370,14 @@ pub fn classify_row_for_worktree_removal(
 fn common_terminal_live_skip(
     row: &CleanupTaskRow,
     main_repo: &Path,
+    eligible_statuses: &[&str],
 ) -> Option<CleanupClassification> {
     let workspace = canonicalize_lossy(&row.workspace_path);
     let main_repo = canonicalize_lossy(main_repo);
     if workspace == main_repo {
         return Some(CleanupClassification::MainRepo);
     }
-    if !TERMINAL_TARGET_STATUSES.contains(&row.status.as_str()) {
+    if !eligible_statuses.contains(&row.status.as_str()) {
         return Some(CleanupClassification::ActiveStatus);
     }
     if !row.workspace_path.is_dir() {
@@ -881,6 +899,29 @@ mod tests {
         assert_eq!(
             classify_row_for_worktree_removal(&row("T001", "integrated", &wt), &main),
             CleanupClassification::WorktreeRemovalCandidate
+        );
+    }
+
+    #[test]
+    fn abandoned_worktrees_are_not_removal_candidates_without_disposition_policy() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        init_main_repo(&main);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/abandoned",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        assert_eq!(
+            classify_row_for_worktree_removal(&row("T999", "abandoned", &wt), &main),
+            CleanupClassification::WorktreeRemovalStatusNotEligible
         );
     }
 
