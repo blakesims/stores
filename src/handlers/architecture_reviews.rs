@@ -327,16 +327,16 @@ fn ratify_amend_in_tx(
 }
 
 fn supersede_in_tx(
-    tx: &Transaction,
-    schema: &Schema,
+    _tx: &Transaction,
+    _schema: &Schema,
     matches: &ArgMatches,
     invoker: InvokerCtx,
 ) -> Result<()> {
     require_actor(invoker, Actor::AiWithHuman, "supersede")?;
     let display_id = display_id(matches);
-    mark_superseded_if_present(tx, schema, display_id, invoker.actor, None)?;
-    println!("Superseded {display_id}");
-    Ok(())
+    bail!(
+        "supersede requires a successor review so superseded_by_id can be recorded; use issue-verdict --supersedes {display_id} on the successor review"
+    )
 }
 
 fn withdraw_in_tx(
@@ -777,15 +777,16 @@ mod tests {
     }
 
     #[test]
-    fn supersede_command_without_successor_does_not_require_superseded_by_id() {
+    fn supersede_command_without_successor_is_rejected() {
         let (schema, conn) = setup();
         insert_row(&conn, "A001", "verdict_issued", "interpret");
         let m = supersede_cmd().get_matches_from(["supersede", "A001"]);
-        run_supersede(&schema, &conn, &m, Actor::AiWithHuman.into()).unwrap();
+        let err = run_supersede(&schema, &conn, &m, Actor::AiWithHuman.into()).unwrap_err();
+        assert!(err.to_string().contains("superseded_by_id"));
         let (_, old) = read_row(&schema, &conn, "A001").unwrap();
         assert_eq!(
             old.get("status").and_then(|v| v.as_str()),
-            Some("superseded")
+            Some("verdict_issued")
         );
     }
 

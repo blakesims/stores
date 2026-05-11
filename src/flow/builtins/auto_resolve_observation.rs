@@ -159,7 +159,10 @@ fn resolve_one(
     let Some((status, lifecycle, outcome)) = current else {
         return Ok(ResolveOutcome::Orphan);
     };
-    if lifecycle.as_deref() == Some("closed") || outcome.as_deref() == Some("addressed") {
+    if status == "resolved"
+        || lifecycle.as_deref() == Some("closed")
+        || outcome.as_deref() == Some("addressed")
+    {
         return Ok(ResolveOutcome::AlreadyResolved);
     }
 
