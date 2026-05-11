@@ -221,31 +221,56 @@ Current tool: bash cargo test (running 41s)
 
 Use normalized `last_event_at`, not just PID, as the primary live signal.
 
+## Progress so far
+
+### Completed commits
+
+- `92b22c5 runner: live-write pi and claude transcripts`
+  - Pi and Claude Code live-write the existing flat stdout transcript during execution.
+  - Claude Code uses the shared streaming/liveness helper instead of blocking `.output()`.
+  - Late drained stdout/stderr lines pass through callbacks.
+- `bec81d9 runner: add live invocation discoverability`
+  - Added `RunnerInvocationContext` and preallocated session/transcript/stderr paths.
+  - Drive writes a discoverability marker before runner spawn: `current-<task>-<role>.json`.
+  - Pi and Claude honor preallocated invocation paths.
+  - Added live stderr logs: `<session_id>.stderr.log`.
+  - Sink write failures now propagate and kill the child instead of being silently ignored.
+
+### Review status
+
+- First implementation review found missing discoverability, missing stderr live logs, and silent sink write failures.
+- Follow-up review of `bec81d9` was **PASS** for the coherent phase.
+- The implemented discoverability is filesystem-marker based, not the full planned `runner_invocations` DB/CLI layer.
+
 ## Implementation slices
 
-### Slice 1 — pre-spawn context + live raw transcript for Pi and Claude Code
+### Slice 1 — pre-spawn context + live raw transcript for Pi and Claude Code — status: mostly complete via `92b22c5` + `bec81d9`
 
 Goal: tailers can discover and see raw output before process exit.
 
-- Add `RunnerInvocationContext` allocation in `drive` immediately before the runner spawn.
-- Keep `.stores/runs/<session_id>.jsonl` as the flat raw stdout transcript and create `<session_id>/` for live status/events.
-- Insert a `runner_invocations` row before `Runner::spawn` blocks.
-- Update `liveness::run_streaming_with_liveness` to accept a streaming sink/callback policy, or introduce a `StreamingSink` wrapper around it.
-- Callback semantics:
-  - all stdout/stderr lines, including post-`wait()` drained lines, must pass through the same sink path;
-  - sink write failures should surface as runner infrastructure errors unless explicitly downgraded with a warning;
-  - heartbeat/status updates should happen after durable append succeeds when possible.
-- Pi runner: write stdout/stderr lines to live files immediately and flush.
-- Claude Code runner: replace `.output()` with streaming spawn and write raw JSONL live.
-- Preserve returned `RunnerOutput.stdout` so existing parsers/tests keep working.
-- Do **not** enable Claude `--include-partial-messages` by default in Slice 1.
-- Defer Codex JSON mode to a dedicated compatibility slice.
+Completed:
+
+- Added `RunnerInvocationContext` allocation in `drive` immediately before the runner spawn.
+- Kept `.stores/runs/<session_id>.jsonl` as the flat raw stdout transcript.
+- Added a filesystem discoverability marker before `Runner::spawn` blocks: `current-<task>-<role>.json`.
+- Updated streaming/liveness callback behavior so stdout/stderr lines, including post-`wait()` drained lines, pass through callbacks.
+- Pi runner writes stdout/stderr lines to live files immediately and flushes.
+- Claude Code runner replaces `.output()` with streaming spawn and writes raw JSONL live.
+- Preserved returned `RunnerOutput.stdout`/`stderr` so existing parsers/tests keep working.
+- Claude `--include-partial-messages` remains off by default.
+- Codex JSON mode remains deferred.
+- Sink write failures surface instead of being silently ignored.
+
+Deferred from original Slice 1 wording:
+
+- Full `runner_invocations` DB row was not implemented; current phase uses filesystem `current-*.json` markers.
+- Per-session `<session_id>/events.jsonl` / `status.json` are not implemented yet; only flat stdout transcript and sibling stderr log are live-written.
+- Marker is not updated per line/event, so it provides discoverability, not semantic liveness.
 
 Validation:
 
-- Unit test with a shim that emits one line, sleeps, emits second line, then exits; assert file contains first line before exit and `runner_invocations` resolves before exit.
-- Unit test that late drained lines after child exit are written through the same sink.
-- Regression for long silent child: no-output timeout still kills and writes a terminal status.
+- Worker ran focused streaming/invocation tests with runner features.
+- Reviewer independently ran `cargo test -q streaming_callback -- --nocapture`; passed.
 
 ### Slice 2 — normalized event mapping for Pi and Claude Code
 
@@ -269,14 +294,24 @@ Validation:
 
 Goal: operator can find the current live log without spelunking `/proc`.
 
-- Complete the `runner_invocations` table/query layer if Slice 1 used a minimal internal form.
-- Insert/update at spawn start, PID observation, line event, semantic event, and completion.
-- Surface in `tasks status`.
+Current state:
+
+- Minimal filesystem discoverability exists via `current-<task>-<role>.json` marker.
+- No DB-backed `runner_invocations` table/query layer yet.
+- No `stores runs current` command yet.
+- `tasks status` does not yet render live transcript/stderr paths or last event age.
+
+Next worker should choose one of two paths:
+
+1. **Minimal CLI path:** implement `stores runs current <task>` by reading current marker files, plus optional `stores runs tail <task> --raw` for the flat transcript.
+2. **DB path:** implement `runner_invocations` and status integration, then build CLI on top.
+
+Recommended next step: minimal CLI path first, because the marker already exists and gives immediate operator value.
 
 Validation:
 
 - Start a shim runner and assert `stores runs current <task>` resolves before child exits.
-- Assert `tasks status` reports live path, last event age, runner, role, and PID when known.
+- Assert `tasks status` reports live path, last event age, runner, role, and PID when known once status integration exists.
 
 ### Slice 4 — `stores runs tail`
 
@@ -338,17 +373,19 @@ Goal: optional live dashboard like `pi-subagents`.
 
 ## Open questions for review
 
-1. Should Slice 1 include both `stores runs current` and `tasks status` live path rendering, or is one enough for the first debugging pass?
-2. Should sink write failure abort the runner as infrastructure failure in all cases, or warn-and-continue for secondary files while requiring the flat transcript append to succeed?
-3. What retention/cleanup policy should apply to per-session live directories once flat transcript compatibility remains?
+1. Should the next step stay marker/filesystem based (`stores runs current/tail`) or move immediately to DB-backed `runner_invocations`?
+2. What retention/cleanup policy should apply to `current-*.json`, `*.stderr.log`, and future per-session live directories?
+3. Should `tasks status` read marker files directly as an interim bridge, or wait for DB-backed invocation metadata?
 
-## Recommended first commit
+## Recommended next worker brief
 
-Implement Slice 1 for Pi + Claude Code first:
+Do **not** redo Slice 1. Start from the accepted `bec81d9` phase.
 
-- Add pre-spawn invocation context and `runner_invocations` row creation.
-- Keep the existing flat raw transcript path and live-write it.
-- Pi first because T146 is currently exposing the blind spot.
-- Claude Code second because it already emits canonical stream-json and the change is mechanical.
+Recommended next coherent chunk:
 
-Leave Codex JSON mode for the compatibility slice, not the first commit.
+- Implement `stores runs current <task>` using the existing `current-<task>-<role>.json` marker.
+- Implement `stores runs tail <task> --raw` against the live flat transcript path from the marker.
+- Optionally show stderr path and a `--stderr` mode.
+- Add tests with a long-running shim proving `current` resolves before child exit and `tail --raw` can read appended content.
+
+After that, decide whether to build normalized `events.jsonl` / `status.json` (Slice 2) or DB-backed `runner_invocations` + `tasks status` (Slice 3).
