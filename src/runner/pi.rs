@@ -457,6 +457,7 @@ impl PiRunner {
         schema: Option<&str>,
         workspace_path: Option<&str>,
         invocation: Option<&RunnerInvocationContext>,
+        extra_env: &[(String, String)],
     ) -> Result<RunnerOutput> {
         let session_id = invocation
             .map(|i| i.session_id.clone())
@@ -476,8 +477,11 @@ impl PiRunner {
         };
 
         let mut cmd = Command::new(&self.node_bin);
-        cmd.current_dir(&cwd)
-            .arg(&self.helper_path)
+        cmd.current_dir(&cwd);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        cmd.arg(&self.helper_path)
             .arg("--role")
             .arg(role)
             .arg("--cwd")
@@ -674,7 +678,15 @@ impl Runner for PiRunner {
         schema: Option<&str>,
         workspace_path: Option<&str>,
     ) -> Result<RunnerOutput> {
-        self.spawn_inner(role, system_prompt, brief, schema, workspace_path, None)
+        self.spawn_inner(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            None,
+            &[],
+        )
     }
 
     fn spawn_with_invocation(
@@ -693,6 +705,28 @@ impl Runner for PiRunner {
             schema,
             workspace_path,
             invocation,
+            &[],
+        )
+    }
+
+    fn spawn_with_invocation_and_env(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+        invocation: Option<&RunnerInvocationContext>,
+        extra_env: &[(String, String)],
+    ) -> Result<RunnerOutput> {
+        self.spawn_inner(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            invocation,
+            extra_env,
         )
     }
 }

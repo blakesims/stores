@@ -593,6 +593,7 @@ impl ClaudeCodeRunner {
         schema: Option<&str>,
         workspace_path: Option<&str>,
         invocation: Option<&RunnerInvocationContext>,
+        extra_env: &[(String, String)],
     ) -> Result<RunnerOutput> {
         // Mint UUID and canonicalise cwd on entry.
         let session_id = invocation
@@ -609,6 +610,9 @@ impl ClaudeCodeRunner {
 
         let mut cmd = Command::new(&self.bin);
         cmd.current_dir(&cwd);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
         cmd.arg("-p")
             .arg("--append-system-prompt")
             .arg(system_prompt)
@@ -813,7 +817,15 @@ impl Runner for ClaudeCodeRunner {
         schema: Option<&str>,
         workspace_path: Option<&str>,
     ) -> Result<RunnerOutput> {
-        self.spawn_inner(role, system_prompt, brief, schema, workspace_path, None)
+        self.spawn_inner(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            None,
+            &[],
+        )
     }
 
     fn spawn_with_invocation(
@@ -832,6 +844,28 @@ impl Runner for ClaudeCodeRunner {
             schema,
             workspace_path,
             invocation,
+            &[],
+        )
+    }
+
+    fn spawn_with_invocation_and_env(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+        invocation: Option<&RunnerInvocationContext>,
+        extra_env: &[(String, String)],
+    ) -> Result<RunnerOutput> {
+        self.spawn_inner(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            invocation,
+            extra_env,
         )
     }
 }

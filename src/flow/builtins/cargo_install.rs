@@ -58,6 +58,9 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         .context("creating isolated cargo install root")?;
 
     let mut cmd = Command::new("cargo");
+    for (key, value) in crate::flow::config::cargo_target_env(ctx.config_path) {
+        cmd.env(key, value);
+    }
     cmd.args([
         "install",
         "--path",

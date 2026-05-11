@@ -37,6 +37,7 @@ pub struct MockRunner {
     queue: RefCell<Vec<RunnerOutput>>,
     workspace_paths_seen: RefCell<Vec<Option<String>>>,
     roles_seen: RefCell<Vec<String>>,
+    envs_seen: RefCell<Vec<Vec<(String, String)>>>,
 }
 
 impl MockRunner {
@@ -52,6 +53,7 @@ impl MockRunner {
             queue: RefCell::new(q),
             workspace_paths_seen: RefCell::new(Vec::new()),
             roles_seen: RefCell::new(Vec::new()),
+            envs_seen: RefCell::new(Vec::new()),
         }
     }
 
@@ -71,6 +73,11 @@ impl MockRunner {
     /// Return the `workspace_path` arguments recorded across all `spawn` calls, in order.
     pub fn workspace_paths_seen(&self) -> Vec<Option<String>> {
         self.workspace_paths_seen.borrow().clone()
+    }
+
+    /// Return extra environment variables recorded across all spawn calls.
+    pub fn envs_seen(&self) -> Vec<Vec<(String, String)>> {
+        self.envs_seen.borrow().clone()
     }
 }
 
@@ -92,10 +99,35 @@ impl Runner for MockRunner {
         _schema: Option<&str>,
         workspace_path: Option<&str>,
     ) -> Result<RunnerOutput> {
+        self.record_and_pop(role, workspace_path, &[])
+    }
+
+    fn spawn_with_invocation_and_env(
+        &self,
+        role: &str,
+        _system_prompt: &str,
+        _brief: &str,
+        _schema: Option<&str>,
+        workspace_path: Option<&str>,
+        _invocation: Option<&crate::runner::RunnerInvocationContext>,
+        extra_env: &[(String, String)],
+    ) -> Result<RunnerOutput> {
+        self.record_and_pop(role, workspace_path, extra_env)
+    }
+}
+
+impl MockRunner {
+    fn record_and_pop(
+        &self,
+        role: &str,
+        workspace_path: Option<&str>,
+        extra_env: &[(String, String)],
+    ) -> Result<RunnerOutput> {
         self.workspace_paths_seen
             .borrow_mut()
             .push(workspace_path.map(|s| s.to_string()));
         self.roles_seen.borrow_mut().push(role.to_string());
+        self.envs_seen.borrow_mut().push(extra_env.to_vec());
         let mut queue = self.queue.borrow_mut();
         match queue.pop() {
             Some(output) => Ok(output),

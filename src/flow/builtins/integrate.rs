@@ -136,6 +136,7 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     }
 
     let cfg = IntegrateCfg::from_ctx(ctx);
+    let command_env = crate::flow::config::cargo_target_env(ctx.config_path);
     let tasks_schema = load_tasks_schema()?;
 
     // 1. Atomic capacity claim. Phase 1's partial UNIQUE index on
@@ -387,7 +388,12 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     // 7. Run pre_land_check.
     let pre_land_summary = match cfg.pre_land_check.as_deref() {
         Some(cmd) if !cmd.trim().is_empty() => {
-            match run_pre_land(cmd, &workspace_buf, cfg.pre_land_check_timeout_secs) {
+            match run_pre_land(
+                cmd,
+                &workspace_buf,
+                cfg.pre_land_check_timeout_secs,
+                &command_env,
+            ) {
                 Ok(()) => "ok".to_string(),
                 Err(msg) => {
                     update_last_attempt(
@@ -1183,15 +1189,23 @@ fn ensure_branch_checked_out(workspace: &Path, branch: &str) -> std::result::Res
     Ok(())
 }
 
-fn run_pre_land(cmd: &str, workspace: &Path, timeout_secs: u64) -> std::result::Result<(), String> {
-    let mut child = match Command::new("sh")
+fn run_pre_land(
+    cmd: &str,
+    workspace: &Path,
+    timeout_secs: u64,
+    extra_env: &[(String, String)],
+) -> std::result::Result<(), String> {
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(cmd)
         .current_dir(workspace)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::piped());
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => return Err(format!("pre_land_check spawn failed: {}", e)),
     };
@@ -1358,10 +1372,40 @@ mod tests {
     #[test]
     fn pre_land_check_large_stdout_does_not_deadlock() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = run_pre_land("python3 - <<'PY'\nprint('x' * 200000)\nPY", tmp.path(), 5);
+        let result = run_pre_land(
+            "python3 - <<'PY'\nprint('x' * 200000)\nPY",
+            tmp.path(),
+            5,
+            &[],
+        );
         assert!(
             result.is_ok(),
             "large stdout from a successful pre_land_check must not fill a pipe and timeout: {result:?}"
+        );
+    }
+
+    #[test]
+    fn pre_land_check_receives_configured_cargo_target_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("cargo-target-marker");
+        let target = tmp.path().join("shared-target");
+        let cmd = format!(
+            "python3 - <<'PY'\nimport os, pathlib\npathlib.Path(r'{}').write_text(os.environ.get('CARGO_TARGET_DIR', ''))\nPY",
+            marker.display()
+        );
+        let result = run_pre_land(
+            &cmd,
+            tmp.path(),
+            5,
+            &[(
+                "CARGO_TARGET_DIR".to_string(),
+                target.to_string_lossy().to_string(),
+            )],
+        );
+        assert!(result.is_ok(), "pre-land check failed: {result:?}");
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            target.to_string_lossy()
         );
     }
 

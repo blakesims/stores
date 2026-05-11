@@ -1026,6 +1026,7 @@ trait RoleRunner {
         schema: Option<&str>,
         workspace_path: Option<&str>,
         invocation: Option<&crate::runner::RunnerInvocationContext>,
+        extra_env: &[(String, String)],
     ) -> Result<RunnerOutput>;
 }
 
@@ -1046,14 +1047,16 @@ impl RoleRunner for BorrowedRoleRunner<'_> {
         schema: Option<&str>,
         workspace_path: Option<&str>,
         invocation: Option<&crate::runner::RunnerInvocationContext>,
+        extra_env: &[(String, String)],
     ) -> Result<RunnerOutput> {
-        self.runner.spawn_with_invocation(
+        self.runner.spawn_with_invocation_and_env(
             role,
             system_prompt,
             brief,
             schema,
             workspace_path,
             invocation,
+            extra_env,
         )
     }
 }
@@ -1075,14 +1078,16 @@ impl RoleRunner for FixedRoleRunner {
         schema: Option<&str>,
         workspace_path: Option<&str>,
         invocation: Option<&crate::runner::RunnerInvocationContext>,
+        extra_env: &[(String, String)],
     ) -> Result<RunnerOutput> {
-        self.runner.spawn_with_invocation(
+        self.runner.spawn_with_invocation_and_env(
             role,
             system_prompt,
             brief,
             schema,
             workspace_path,
             invocation,
+            extra_env,
         )
     }
 }
@@ -1167,16 +1172,18 @@ impl RoleRunner for ConfigRoleRunner {
         schema: Option<&str>,
         workspace_path: Option<&str>,
         invocation: Option<&crate::runner::RunnerInvocationContext>,
+        extra_env: &[(String, String)],
     ) -> Result<RunnerOutput> {
         let choice = self.choice_for(role)?;
         let runner = self.build_choice(&choice)?;
-        runner.spawn_with_invocation(
+        runner.spawn_with_invocation_and_env(
             role,
             system_prompt,
             brief,
             schema,
             workspace_path,
             invocation,
+            extra_env,
         )
     }
 }
@@ -1679,6 +1686,10 @@ fn drive_loop_with_role_runner(
     // successful submit. Drives that die before this point leave the lock
     // open for the watchdog to detect as a silent zombie.
     let mut auto_drive_lock_closed = false;
+    let runner_extra_env = crate::flow::config::default_config_path()
+        .ok()
+        .map(|p| crate::flow::config::cargo_target_env(&p))
+        .unwrap_or_default();
 
     loop {
         // ── Step 2a: compute next-action ──────────────────────────────────
@@ -1955,6 +1966,7 @@ fn drive_loop_with_role_runner(
             schema_text,
             Some(workspace_path),
             Some(&invocation),
+            &runner_extra_env,
         ) {
             Ok(out) => out,
             Err(spawn_err) => {
@@ -6187,6 +6199,34 @@ mod tests {
             );
         }
         let _ = canonical_str; // computed for the cross-reference in the comment above
+    }
+
+    #[test]
+    fn role_runner_propagates_cargo_target_dir_as_child_env() {
+        let shared_target = tempdir().expect("shared cargo target tempdir");
+        let target_str = shared_target.path().to_string_lossy().to_string();
+        let runner = MockRunner::new(vec![make_run_output(planner_fixture_json(), 0)]);
+        let role_runner = BorrowedRoleRunner { runner: &runner };
+        role_runner
+            .spawn_for_role(
+                "planner",
+                "sys",
+                "brief",
+                None,
+                Some("/tmp/workspace"),
+                None,
+                &[("CARGO_TARGET_DIR".to_string(), target_str.clone())],
+            )
+            .unwrap();
+
+        let envs = runner.envs_seen();
+        assert_eq!(envs.len(), 1, "runner must have been invoked once");
+        assert!(
+            envs[0]
+                .iter()
+                .any(|(k, v)| k == "CARGO_TARGET_DIR" && v == &target_str),
+            "CARGO_TARGET_DIR must be passed to runner child env, got {envs:?}"
+        );
     }
 
     /// AC1.6: row with workspace_path set to a non-existent directory — drive returns Err

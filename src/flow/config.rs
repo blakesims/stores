@@ -21,6 +21,8 @@ pub struct StoresConfig {
     #[serde(default)]
     pub codex: Option<CodexCfg>,
     #[serde(default)]
+    pub cleanup: Option<CleanupCfg>,
+    #[serde(default)]
     pub integration_steps: BTreeMap<String, IntegrationStepCfg>,
 }
 
@@ -32,6 +34,12 @@ pub struct NtfyCfg {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ScaffoldCfg {
     pub command: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CleanupCfg {
+    #[serde(default)]
+    pub cargo_target_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -222,6 +230,45 @@ pub fn resolve_codex_config(config_path: &Path) -> CodexCfg {
     CodexCfg::default()
 }
 
+/// Resolve the shared Cargo target directory for child commands.
+///
+/// Resolution order:
+///   1. Existing `CARGO_TARGET_DIR` environment variable, so tests/operators can
+///      force isolation without editing repo config.
+///   2. `cleanup.cargo_target_dir` from `.stores/config.yaml`, resolved relative
+///      to the config file's parent (`.stores/`) when not absolute.
+///   3. `None` — callers leave Cargo's default per-workspace target behavior.
+pub fn resolve_cargo_target_dir(config_path: &Path) -> Option<PathBuf> {
+    if let Some(env) = std::env::var_os("CARGO_TARGET_DIR") {
+        if !env.is_empty() {
+            return Some(PathBuf::from(env));
+        }
+    }
+
+    let cfg = load(config_path).ok().flatten()?;
+    let configured = cfg.cleanup?.cargo_target_dir?;
+    if configured.as_os_str().is_empty() {
+        return None;
+    }
+    if configured.is_absolute() {
+        Some(configured)
+    } else {
+        let base = config_path.parent().unwrap_or_else(|| Path::new("."));
+        Some(base.join(configured))
+    }
+}
+
+pub fn cargo_target_env(config_path: &Path) -> Vec<(String, String)> {
+    resolve_cargo_target_dir(config_path)
+        .map(|p| {
+            vec![(
+                "CARGO_TARGET_DIR".to_string(),
+                p.to_string_lossy().to_string(),
+            )]
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +434,52 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("does-not-exist.yaml");
         assert_eq!(resolve_drive_max_parallel(&path), 1);
+    }
+
+    #[test]
+    fn parses_cleanup_cargo_target_dir_and_resolves_relative_to_config_parent() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CARGO_TARGET_DIR");
+        let tmp = tempfile::tempdir().unwrap();
+        let stores = tmp.path().join(".stores");
+        std::fs::create_dir_all(&stores).unwrap();
+        let path = stores.join("config.yaml");
+        std::fs::write(
+            &path,
+            "cleanup:\n  cargo_target_dir: ../.cargo-target/stores\n",
+        )
+        .unwrap();
+
+        let cfg = load(&path).unwrap().unwrap();
+        assert_eq!(
+            cfg.cleanup.unwrap().cargo_target_dir.unwrap(),
+            PathBuf::from("../.cargo-target/stores")
+        );
+        let resolved = stores.join("../.cargo-target/stores");
+        assert_eq!(resolve_cargo_target_dir(&path).unwrap(), resolved);
+        assert_eq!(
+            cargo_target_env(&path),
+            vec![(
+                "CARGO_TARGET_DIR".to_string(),
+                stores
+                    .join("../.cargo-target/stores")
+                    .to_string_lossy()
+                    .to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn cargo_target_dir_env_overrides_config_for_test_isolation() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(&path, "cleanup:\n  cargo_target_dir: configured\n").unwrap();
+        let override_dir = tmp.path().join("override-target");
+        std::env::set_var("CARGO_TARGET_DIR", &override_dir);
+        let resolved = resolve_cargo_target_dir(&path);
+        std::env::remove_var("CARGO_TARGET_DIR");
+        assert_eq!(resolved.as_deref(), Some(override_dir.as_path()));
     }
 
     #[test]

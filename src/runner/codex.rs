@@ -157,8 +157,29 @@ impl Runner for CodexRunner {
         role: &str,
         system_prompt: &str,
         brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Result<RunnerOutput> {
+        self.spawn_with_invocation_and_env(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            None,
+            &[],
+        )
+    }
+
+    fn spawn_with_invocation_and_env(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
         _schema: Option<&str>,
         workspace_path: Option<&str>,
+        _invocation: Option<&crate::runner::RunnerInvocationContext>,
+        extra_env: &[(String, String)],
     ) -> Result<RunnerOutput> {
         let session_id = uuid::Uuid::new_v4().to_string();
         let cwd = resolve_cwd(workspace_path)?;
@@ -169,8 +190,11 @@ impl Runner for CodexRunner {
         };
 
         let mut cmd = Command::new(&self.bin);
-        cmd.current_dir(&cwd)
-            .args(&self.args)
+        cmd.current_dir(&cwd);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        cmd.args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

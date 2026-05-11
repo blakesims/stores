@@ -388,6 +388,31 @@ pub trait Runner: Send {
     ) -> Result<RunnerOutput> {
         self.spawn(role, system_prompt, brief, schema, workspace_path)
     }
+
+    /// Spawn with extra environment variables that must be applied only to the
+    /// child command, not by mutating process-global environment. Implementors
+    /// that shell out should call `Command::envs(extra_env.iter().map(...))`.
+    /// The default keeps legacy/mock behavior for runners that do not launch a
+    /// process directly.
+    fn spawn_with_invocation_and_env(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+        invocation: Option<&RunnerInvocationContext>,
+        _extra_env: &[(String, String)],
+    ) -> Result<RunnerOutput> {
+        self.spawn_with_invocation(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            invocation,
+        )
+    }
 }
 
 /// Returns a comma-separated list of always-available runners (no feature gate).
