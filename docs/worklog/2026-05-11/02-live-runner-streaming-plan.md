@@ -240,7 +240,7 @@ Use normalized `last_event_at`, not just PID, as the primary live signal.
   - Added `stores runs tail <task> --raw` for the live flat stdout transcript.
   - Added `stores runs tail <task> --stderr` for the sibling stderr log.
   - Current `tail` is a one-shot dump of current file contents, not a blocking/following `tail -f`.
-- `<pending> runner: show live runner in task status`
+- `132c0b9 runner: show live runner in task status`
   - Teaches `stores tasks status <task>` and single-task follow frames to read the current marker.
   - Prints live runner role, runner, marker status, updated age, stdout transcript path, and stderr log path when a marker exists.
 
@@ -249,7 +249,7 @@ Use normalized `last_event_at`, not just PID, as the primary live signal.
 - First implementation review found missing discoverability, missing stderr live logs, and silent sink write failures.
 - Follow-up review of `bec81d9` was **PASS** for the coherent phase.
 - Review of `fd9bc6e` was **PASS** for the recommended minimal CLI chunk.
-- Status bridge implementation is awaiting review.
+- Status bridge implementation validated with focused tests in this pass; external review handoff still recommended by the parent workflow.
 - The implemented discoverability is filesystem-marker based, not the full planned `runner_invocations` DB layer.
 
 ## Implementation slices
