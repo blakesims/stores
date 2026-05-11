@@ -251,6 +251,10 @@ Use normalized `last_event_at`, not just PID, as the primary live signal.
   - Maps Claude `result.error` into a semantic error event before final output.
   - Adds regression coverage for result-error ordering.
   - Documents Pi mapper fixture assumptions and SDK event-shape tolerance.
+- `bbeedd5 runner: show semantic live status`
+  - Teaches `stores runs current` and `stores tasks status` status bridge helpers to read `<session_id>/status.json`.
+  - Shows semantic last event age, current activity, and last event type alongside marker update age.
+  - Preserves existing marker/raw transcript/stderr behavior.
 
 ### Review status
 
@@ -425,9 +429,9 @@ Do **not** redo Slice 1, the minimal `runs current/tail` CLI, the status bridge,
 
 Recommended next coherent chunks; pick one:
 
-1. **Semantic status bridge:** teach `stores tasks status <task>` and/or `stores runs current <task>` to read `<session_id>/status.json` and show last semantic event age/current activity in addition to marker update age.
+1. **Semantic status bridge — implemented in `bbeedd5`, pending review:** `stores tasks status <task>` and `stores runs current <task>` read `<session_id>/status.json` and show last semantic event age/current activity in addition to marker update age.
 2. **Semantic tail:** teach `stores runs tail <task>` to render normalized `<session_id>/events.jsonl` by default, with `--raw` / `--stderr` remaining as escape hatches.
 3. **Follow mode:** make `stores runs tail <task> --raw --follow` follow appended bytes until marker status becomes completed/failed.
 4. **DB-backed invocations:** replace/augment marker lookup with `runner_invocations` once the filesystem path has proven useful.
 
-The highest operator-value next chunk is probably **Semantic status bridge**, because semantic `status.json` now exists but the main status command does not yet expose semantic last-event/current-activity liveness.
+If `bbeedd5` passes review, the next highest operator-value chunk is probably **Semantic tail**, because semantic event files and status summaries are then both exposed.
