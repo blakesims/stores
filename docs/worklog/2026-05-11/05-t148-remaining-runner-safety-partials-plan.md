@@ -154,3 +154,47 @@ Oracle reviewed and sharpened the plan:
 - Bad payload remains visible as payload_error/tooling failure.
 - Bad payload does not advance state.
 - Bad payload does not leave an eternal running marker.
+
+## Implementation / validation update
+
+Shipped reviewed fixes on main:
+
+- `ec7f67f` / `e194249` — stale-exe boundary split. Running drive executable drift is advisory; normal no-output liveness still fires if the runner is actually stalled.
+- `a957ab9` / `c27c341` — manual drive and same-worktree singleton guard, with auto-drive handoff exemption so legitimate auto-drive children do not self-block on their parent claim lock.
+- `669825e` / `3a30782` — stale/dead marker truth. Stale running markers are labeled and do not outrank completed markers forever.
+- `38bb6b2` — malformed runner final output is visible as typed `runner_payload_error`; task does not advance; current-run marker is rewritten failed.
+
+Targeted tests/build run after the batch:
+
+```text
+cargo test -q auto_drive_handoff_
+cargo test -q manual_drive_refuses
+cargo test -q manual_drive_ignores_stale_uncorroborated_running_marker
+cargo test -q live_runner_lines_label_stale_running_marker
+cargo test -q stale_running_marker_does_not_outrank_completed_marker
+cargo test -q malformed_exit0_final_output_blocks_and_marks_run_failed
+cargo build --locked
+cargo install --path . --locked
+install -m 755 ~/.cargo/bin/stores ~/.local/share/stores/bin/stores
+```
+
+Live validation against T148 while a runner was active:
+
+- Before install/update: T148 had one live drive (`902183`) and one executor runner (`1540420`).
+- Installed main binary and copied it to the private daemon path while the executor was running.
+- `stores agents run --once` emitted the expected advisory line:
+
+```text
+[auto-drive-watchdog] T148: drive_pid=902183 stale_binary_inode (/proc/902183/exe -> deleted); advisory only for already-running drive
+```
+
+- T148 remained `executing`, was not blocked, and no new `mark_drive_failed stale_binary_inode` transition was written after the update.
+- The process set remained one drive + one runner; no duplicate spawned.
+- Manual duplicate check:
+
+```text
+stores tasks drive T148 --invoker ai_autonomous
+# Error: refusing to start duplicate drive for T148: live owner exists (live_drive_pid:902183)
+```
+
+This proves the user acceptance criterion for this batch: updating the binary on main no longer kills/stale-blocks an already-running worktree worker, and manual/autonomous duplicate same-task drive is refused while the live owner exists.
