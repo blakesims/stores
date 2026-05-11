@@ -142,7 +142,7 @@ pub fn drive_pid_recorded_or_terminal(
     Ok(result.is_pass())
 }
 
-/// True iff the named task row is at `cargo_installed`.
+/// True iff the named task row reached the stores-only cargo-installed post-integration step.
 ///
 /// Args: `{"display_id": "T123"}`.
 pub fn cargo_installed_state(
@@ -153,7 +153,7 @@ pub fn cargo_installed_state(
     let display_id =
         arg_str(args, "display_id").ok_or_else(|| anyhow::anyhow!("missing arg: display_id"))?;
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tasks WHERE display_id = ?1 AND status = 'cargo_installed'",
+        "SELECT COUNT(*) FROM tasks WHERE display_id = ?1 AND (post_integration_step = 'cargo_installed' OR status = 'cargo_installed')",
         rusqlite::params![display_id],
         |r| r.get(0),
     )?;
@@ -184,7 +184,7 @@ pub fn integrated_state(
     Ok(n > 0)
 }
 
-/// True iff the named task row is at `schema_migrated`.
+/// True iff the named task row reached the stores-only schema-migrated post-integration step.
 ///
 /// Args: `{"display_id": "T123"}`.
 pub fn schema_migrated_state(
@@ -195,7 +195,7 @@ pub fn schema_migrated_state(
     let display_id =
         arg_str(args, "display_id").ok_or_else(|| anyhow::anyhow!("missing arg: display_id"))?;
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tasks WHERE display_id = ?1 AND status = 'schema_migrated'",
+        "SELECT COUNT(*) FROM tasks WHERE display_id = ?1 AND (post_integration_step = 'schema_migrated' OR status = 'schema_migrated')",
         rusqlite::params![display_id],
         |r| r.get(0),
     )?;

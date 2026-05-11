@@ -121,6 +121,8 @@ pub enum Disposition {
     /// Mid-cycle row: status in `executing | code_review | integrating`.
     /// Drive is presumed underway.
     ActiveEngineWork,
+    /// Finished work parked at the human acceptance gate, before integration release.
+    AwaitingHumanAcceptance,
     /// Row in the integration lane (`integration_queued | integration_blocked`).
     /// Combustion gated by activation.
     AwaitingIntegration { activation_active: bool },
@@ -172,6 +174,7 @@ impl Disposition {
     pub fn plan_start_bucket(&self) -> PlanStartBucket {
         match self {
             Disposition::ActiveEngineWork => PlanStartBucket::WouldRun,
+            Disposition::AwaitingHumanAcceptance => PlanStartBucket::NeedsOperator,
             Disposition::AwaitingIntegration { activation_active } => {
                 if *activation_active {
                     PlanStartBucket::WouldRun
@@ -203,6 +206,7 @@ impl Disposition {
     pub fn display_label(&self) -> &'static str {
         match self {
             Disposition::ActiveEngineWork => "Active engine work",
+            Disposition::AwaitingHumanAcceptance => "Awaiting human acceptance",
             Disposition::AwaitingIntegration {
                 activation_active: true,
             } => "Awaiting integration (active)",
@@ -267,6 +271,38 @@ pub fn operator_disposition(
         return Disposition::NeedsOperatorReview;
     }
 
+    let lifecycle = row_str(row, "lifecycle");
+    let active_step = row_str(row, "active_step").unwrap_or("none");
+    let integration_step = row_str(row, "integration_step").unwrap_or("none");
+    let blocked = row
+        .get("blocked")
+        .and_then(|v| v.as_bool().or_else(|| v.as_i64().map(|i| i != 0)))
+        .unwrap_or(false);
+    let blocker_kind = row_str(row, "blocker_kind").unwrap_or("none");
+
+    if lifecycle.is_some() {
+        if blocked || blocker_kind != "none" {
+            return Disposition::BlockedRecoverable;
+        }
+        return match lifecycle.unwrap_or("active") {
+            "done" => Disposition::TerminalSuccessModern,
+            "integration" => {
+                if matches!(integration_step, "deploying" | "verifying") {
+                    Disposition::DeployCeremonyPending
+                } else {
+                    Disposition::AwaitingIntegration { activation_active }
+                }
+            }
+            "queued" => Disposition::EngineActionable { activation_active },
+            "active" => match active_step {
+                "coding" | "coding_review" => Disposition::ActiveEngineWork,
+                "wrapping" => Disposition::AwaitingHumanAcceptance,
+                _ => Disposition::EngineActionable { activation_active },
+            },
+            _ => Disposition::NeedsOperatorReview,
+        };
+    }
+
     if IN_FLIGHT_STATES.contains(&status) {
         return Disposition::ActiveEngineWork;
     }
@@ -278,10 +314,13 @@ pub fn operator_disposition(
         "schema_migrated" => Disposition::TerminalSuccessModern,
         "blocked" => Disposition::BlockedRecoverable,
         "deploy_blocked" => Disposition::NeedsOperatorReview,
-        "planning" | "plan_review" | "ready" => {
-            Disposition::EngineActionable { activation_active }
-        }
+        "planning" | "plan_review" | "ready" => Disposition::EngineActionable { activation_active },
         "in_review" => {
+            let acceptance_policy = row_str(row, "human_acceptance_policy").unwrap_or("optional");
+            let accepted = row_str(row, "acceptance_decided_by").is_some();
+            if acceptance_policy == "required" && !accepted {
+                return Disposition::AwaitingHumanAcceptance;
+            }
             // Sanity refinement: if the branch already shipped (merged into
             // target) but the row is still parked in_review, the operator
             // needs to disposition it. Errors and missing-branch fall back
@@ -676,6 +715,21 @@ mod tests {
         assert_eq!(
             operator_disposition(&row, today(), &mock),
             Disposition::NeedsOperatorReview
+        );
+    }
+
+    #[test]
+    fn primary_blocked_integration_classifies_as_blocked_recoverable() {
+        let mock = MockBranchState::empty();
+        let mut row = fixture_row("T310", "legacy_unknown");
+        row["lifecycle"] = json!("integration");
+        row["active_step"] = json!("none");
+        row["integration_step"] = json!("none");
+        row["blocked"] = json!(true);
+        row["blocker_kind"] = json!("main_red");
+        assert_eq!(
+            operator_disposition(&row, today(), &mock),
+            Disposition::BlockedRecoverable
         );
     }
 

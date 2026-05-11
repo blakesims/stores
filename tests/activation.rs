@@ -106,7 +106,10 @@ fn integration_ac1_4_framework_migrate_backfill_classes() {
     assert_eq!(select_activation(&conn, "T203").unwrap(), "active");
     assert_eq!(select_activation(&conn, "T204").unwrap(), "inactive");
 
-    assert_eq!(IN_FLIGHT_STATES, &["executing", "code_review", "integrating"]);
+    assert_eq!(
+        IN_FLIGHT_STATES,
+        &["executing", "code_review", "integrating"]
+    );
 }
 
 /// AC1.5 — ai_with_human activate flips to 'active' and writes audit row with
@@ -127,17 +130,20 @@ fn integration_ac1_5_ai_with_human_activate_flips_and_audits() {
 
     assert_eq!(select_activation(&conn, "T999").unwrap(), "active");
 
-    let (verb, note, invoker): (String, Option<String>, String) = conn
-        .query_row(
+    let rows: Vec<(String, Option<String>, String)> = conn
+        .prepare(
             "SELECT verb, actor_note, invoker FROM transition_history \
-             WHERE display_id = 'T999' ORDER BY id DESC LIMIT 1",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+             WHERE display_id = 'T999' ORDER BY id",
         )
-        .unwrap();
-    assert_eq!(verb, "activate");
-    assert_eq!(note.as_deref(), Some("operator armed for integration"));
-    assert_eq!(invoker, "ai_with_human");
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows[0].0, "activate");
+    assert_eq!(rows[0].1.as_deref(), Some("operator armed for integration"));
+    assert_eq!(rows[0].2, "ai_with_human");
+    assert_eq!(rows[1].0, "activate-task");
 }
 
 /// AC1.6 — ai_autonomous activate is rejected and the row is unchanged.
@@ -146,19 +152,12 @@ fn integration_ac1_6_ai_autonomous_rejected_row_unchanged() {
     let (schema, conn) = fresh_db_with_tasks();
     insert_minimal_task(&conn, "T999", "planning");
 
-    let m = build_activate_matches(&[
-        "activate",
-        "T999",
-        "--reason",
-        "should be rejected",
-    ]);
+    let m = build_activate_matches(&["activate", "T999", "--reason", "should be rejected"]);
     let err = run_activate(&schema, &conn, &m, Actor::AiAutonomous.into())
         .expect_err("ai_autonomous activate MUST be rejected");
     let msg = err.to_string();
     assert!(
-        msg.contains("ai_with_human")
-            || msg.contains("ai_autonomous")
-            || msg.contains("actor"),
+        msg.contains("ai_with_human") || msg.contains("ai_autonomous") || msg.contains("actor"),
         "expected actor-rejection wording; got: {msg}"
     );
 
@@ -201,12 +200,8 @@ fn integration_deactivate_mirrors_activate() {
     run_activate(&schema, &conn, &m_arm, Actor::AiWithHuman.into()).unwrap();
     assert_eq!(select_activation(&conn, "T700").unwrap(), "active");
 
-    let m_disarm = build_activate_matches(&[
-        "deactivate",
-        "T700",
-        "--reason",
-        "stand down for review",
-    ]);
+    let m_disarm =
+        build_activate_matches(&["deactivate", "T700", "--reason", "stand down for review"]);
     run_deactivate(&schema, &conn, &m_disarm, Actor::AiWithHuman.into())
         .expect("ai_with_human deactivate must succeed");
     assert_eq!(select_activation(&conn, "T700").unwrap(), "inactive");

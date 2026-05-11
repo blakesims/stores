@@ -1221,6 +1221,28 @@ mod tests {
         L.get_or_init(|| Mutex::new(()))
     }
 
+    struct EnvRestore {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     fn fresh_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SUBSTRATE_DDL).unwrap();
@@ -1480,6 +1502,10 @@ mod tests {
 
     #[test]
     fn watchdog_classifies_alive_but_stalled_runner() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _no_output = EnvRestore::set("STORES_RUNNER_NO_OUTPUT_SECS", "300");
+        let _wall_clock = EnvRestore::set("STORES_RUNNER_WALL_CLOCK_MAX_SECS", "1800");
+
         let conn = fresh_db_with_obs();
         let row_id = insert_task_full(&conn, "T143W", "planning", Some(std::process::id() as i64));
         insert_lock(&conn, row_id, "T143W");
@@ -2740,6 +2766,7 @@ mod tests {
                     from: "".to_string(),
                     to: "planning".to_string(),
                 },
+                integration_step: None,
                 predicate: None,
             }],
             command: "builtin:auto-drive".to_string(),

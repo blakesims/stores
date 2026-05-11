@@ -14,6 +14,7 @@ const SECS_PER_DAY: i64 = 86_400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
+    TasksQueued,
     TasksActionableCurrentWork,
     ObsRatifiable,
     TasksAcceptU3,
@@ -37,9 +38,10 @@ pub enum Section {
 impl Section {
     pub fn label(self) -> &'static str {
         match self {
-            Section::TasksActionableCurrentWork => "ACTIVE WORK",
+            Section::TasksQueued => "QUEUED",
+            Section::TasksActionableCurrentWork => "ACTIVE",
             Section::ObsRatifiable => "RATIFY-U1",
-            Section::TasksAcceptU3 => "ACCEPT-U3",
+            Section::TasksAcceptU3 => "AWAITING HUMAN ACCEPTANCE",
             Section::TasksIntegration => "INTEGRATION",
             Section::TasksIntegratedAwaitingPostLand => "INTEGRATED",
             Section::TasksIntegrationBlocked => "HELD-INTEGRATION",
@@ -49,7 +51,7 @@ impl Section {
             Section::IntakeHeld => "HELD-INTAKE",
             Section::TasksHeldAiReview => "HELD-AI-REVIEW",
             Section::TasksHeldZombie => "HELD-ZOMBIE",
-            Section::TasksRecentlyTerminal => "TERMINAL",
+            Section::TasksRecentlyTerminal => "DONE",
             Section::ObsOpenNoContract => "PRIORITY",
             Section::ObsOther => "OBSERVATIONS",
             Section::IntakeOpen => "INTAKE-OPEN",
@@ -58,7 +60,8 @@ impl Section {
         }
     }
 
-    pub const ALL: [Section; 18] = [
+    pub const ALL: [Section; 19] = [
+        Section::TasksQueued,
         Section::TasksActionableCurrentWork,
         Section::ObsRatifiable,
         Section::TasksAcceptU3,
@@ -177,6 +180,9 @@ pub struct TaskRow {
     /// the operator-disposition glyph. `None` means the substrate did not
     /// expose the column (legacy schema); render falls back to "inactive".
     pub activation: Option<String>,
+    pub human_acceptance_policy: Option<String>,
+    pub task_review_policy: Option<String>,
+    pub acceptance_decided_by: Option<String>,
     /// T140 P5: latest `accepted_at` recovered from `transition_history`,
     /// used by the disposition function to distinguish historical-legacy
     /// from deploy-ceremony-pending accepted rows.
@@ -374,28 +380,24 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
         }
         match row {
             Row::Task(t) => {
-                if matches!(t.status.as_str(), "executing") {
+                if task_lifecycle(t) == "active" && task_active_step(t) == "coding" {
                     model.execution += 1;
                 }
-                if matches!(
-                    t.status.as_str(),
-                    "plan_review" | "code_review" | "in_review"
-                ) {
+                if task_lifecycle(t) == "active"
+                    && matches!(
+                        task_active_step(t),
+                        "planning_review" | "coding_review" | "wrapping"
+                    )
+                {
                     model.review += 1;
                 }
-                if matches!(
-                    t.status.as_str(),
-                    "accepted" | "complete" | "cargo_installed" | "schema_migrated"
-                ) {
+                if task_is_terminal_with_compat(t) {
                     model.accept += 1;
                 }
-                if matches!(
-                    t.status.as_str(),
-                    "blocked" | "deploy_blocked" | "integration_blocked"
-                ) {
+                if task_is_blocked(t) {
                     model.held += 1;
                 }
-                if is_in_flight_task_status(&t.status) {
+                if !task_is_terminal_with_compat(t) && !task_is_blocked(t) && task_is_in_flight_primary(t) {
                     model.active += 1;
                 }
                 if is_priority_task(t) {
@@ -541,7 +543,7 @@ fn store_flow_model_at(
             Row::CollapsedObs(c) => {
                 apply_obs_to_flow(&c.representative.status, c.count, &mut model.observations)
             }
-            Row::Task(t) => apply_task_to_flow(&t.status, &mut model.tasks),
+            Row::Task(t) => apply_task_to_flow(t, &mut model.tasks),
             Row::Review(r) => apply_review_to_flow(&r.status, &mut model.external_reviews),
         }
     }
@@ -579,14 +581,20 @@ fn apply_obs_to_flow(status: &str, count: usize, flow: &mut ObsFlow) {
     }
 }
 
-fn apply_task_to_flow(status: &str, flow: &mut TasksFlow) {
-    match status {
-        "planning" | "ready" | "executing" => flow.active += 1,
-        "blocked" | "deploy_blocked" => flow.held += 1,
-        "plan_review" => flow.plan_review += 1,
-        "code_review" => flow.code_review += 1,
-        "in_review" => flow.in_review += 1,
-        s if is_terminal_task_status(s) => flow.recently_terminal += 1,
+fn apply_task_to_flow(t: &TaskRow, flow: &mut TasksFlow) {
+    if task_is_terminal_primary(t) {
+        flow.recently_terminal += 1;
+        return;
+    }
+    if task_is_blocked(t) {
+        flow.held += 1;
+        return;
+    }
+    match (task_lifecycle(t), task_active_step(t)) {
+        ("active", "planning_review") => flow.plan_review += 1,
+        ("active", "coding_review") => flow.code_review += 1,
+        ("active", "wrapping") => flow.in_review += 1,
+        ("active", _) | ("queued", _) | ("integration", _) => flow.active += 1,
         _ => {}
     }
 }
@@ -640,9 +648,6 @@ pub fn row_visibility_class(
 }
 
 pub fn task_visibility_class(t: &TaskRow) -> VisibilityClass {
-    if is_in_flight_task_status(&t.status) {
-        return VisibilityClass::ActionableRecovery;
-    }
     let reason = t
         .blocked_reason
         .as_deref()
@@ -652,26 +657,17 @@ pub fn task_visibility_class(t: &TaskRow) -> VisibilityClass {
     if is_silent_zombie_reason(&reason) {
         return VisibilityClass::ActionableRecovery;
     }
-    if reason.contains("accept_installed_inert")
-        && matches!(
-            t.status.as_str(),
-            "cargo_installed"
-                | "schema_migrated"
-                | "accepted"
-                | "complete"
-                | "closed_out_of_band"
-                | "abandoned"
-        )
-    {
+    if reason.contains("accept_installed_inert") {
         return VisibilityClass::HistoricalNoise;
     }
-    if t.status == "deploy_blocked" {
-        if is_recoverable_deploy_reason(&reason) {
-            return VisibilityClass::ActionableRecovery;
+    if task_is_blocked(t) {
+        if t.status == "deploy_blocked" {
+            return if is_recoverable_deploy_reason(&reason) {
+                VisibilityClass::ActionableRecovery
+            } else {
+                VisibilityClass::NeedsTriage
+            };
         }
-        return VisibilityClass::NeedsTriage;
-    }
-    if t.status == "blocked" {
         return match reason_class {
             "rate_limit" | "retry" | "dependency" | "user" | "deploy" => {
                 VisibilityClass::ActionableRecovery
@@ -680,7 +676,14 @@ pub fn task_visibility_class(t: &TaskRow) -> VisibilityClass {
             _ => VisibilityClass::ActionableRecovery,
         };
     }
+    if task_is_in_flight_primary(t) {
+        return VisibilityClass::ActionableRecovery;
+    }
     VisibilityClass::ActionableRecovery
+}
+
+fn is_recoverable_deploy_reason(reason: &str) -> bool {
+    reason.contains("retry-deploy-recoverable") || reason.contains("recoverable")
 }
 
 pub fn obs_visibility_class(
@@ -721,10 +724,6 @@ fn is_silent_zombie_reason(reason: &str) -> bool {
             | "drive_failed:silent_zombie_pid_dead"
             | "drive_failed:pid_never_recorded"
     )
-}
-
-fn is_recoverable_deploy_reason(reason: &str) -> bool {
-    reason.contains("retry-deploy-recoverable") || reason.contains("recoverable")
 }
 
 fn extract_task_id(s: &str) -> Option<String> {
@@ -787,7 +786,14 @@ pub fn surface_counts(rows: &[Row], _show_all_history: bool) -> ((usize, usize),
 fn task_status_by_id(rows: &[Row]) -> HashMap<String, String> {
     rows.iter()
         .filter_map(|r| match r {
-            Row::Task(t) => Some((t.display_id.clone(), t.status.clone())),
+            Row::Task(t) => Some((
+                t.display_id.clone(),
+                if task_is_terminal_with_compat(t) {
+                    "done".to_string()
+                } else {
+                    task_lifecycle(t).to_string()
+                },
+            )),
             Row::Obs(_) | Row::CollapsedObs(_) | Row::Review(_) | Row::Intake(_) => None,
         })
         .collect()
@@ -832,7 +838,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
                 {current_phase}, {current_cycle}, {total_phases}, {plan_source}, \
                 {contract_executive_intent}, {contract_done_when}, {contract_scope_in}, {contract_scope_out}, \
                 {plan_review_log}, {cycles}, {wrap_log}, {branch}, {workspace_path}, {drive_pid}, {drive_started_at}, \
-                {activation}, {claimed_at}, {integration_attempts_expr}, rowid FROM tasks",
+                {activation}, {human_acceptance_policy}, {task_review_policy}, {acceptance_decided_by}, {claimed_at}, {integration_attempts_expr}, rowid FROM tasks",
         title = sql_col(&task_cols, "title", "''"),
         claimed_by = sql_col(&task_cols, "claimed_by", "NULL"),
         updated_at = sql_col(&task_cols, "updated_at", "''"),
@@ -855,6 +861,9 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         drive_pid = sql_col(&task_cols, "drive_pid", "NULL"),
         drive_started_at = sql_col(&task_cols, "drive_started_at", "NULL"),
         activation = sql_col(&task_cols, "activation", "NULL"),
+        human_acceptance_policy = sql_col(&task_cols, "human_acceptance_policy", "NULL"),
+        task_review_policy = sql_col(&task_cols, "task_review_policy", "NULL"),
+        acceptance_decided_by = sql_col(&task_cols, "acceptance_decided_by", "NULL"),
         claimed_at = sql_col(&task_cols, "claimed_at", "NULL"),
     );
 
@@ -896,9 +905,12 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         let drive_pid: Option<i64> = r.get(26).ok().flatten();
         let drive_started_at: Option<String> = r.get(27).ok().flatten();
         let activation: Option<String> = r.get(28).ok().flatten();
-        let claimed_at: Option<String> = r.get(29).ok().flatten();
-        let integration_attempts_raw: Option<String> = r.get(30).ok().flatten();
-        let row_id: i64 = r.get(31)?;
+        let human_acceptance_policy: Option<String> = r.get(29).ok().flatten();
+        let task_review_policy: Option<String> = r.get(30).ok().flatten();
+        let acceptance_decided_by: Option<String> = r.get(31).ok().flatten();
+        let claimed_at: Option<String> = r.get(32).ok().flatten();
+        let integration_attempts_raw: Option<String> = r.get(33).ok().flatten();
+        let row_id: i64 = r.get(34)?;
         let display_id: String = r.get(0)?;
         let (integration_attempts_count, last_integration_outcome) =
             integration_attempts_summary(integration_attempts_raw.as_deref());
@@ -941,6 +953,9 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             artifact_pointers: Vec::new(),
             recent_events: Vec::new(),
             activation,
+            human_acceptance_policy,
+            task_review_policy,
+            acceptance_decided_by,
             accepted_at: accepted_at_map.get(&row_id).cloned(),
             claimed_at,
             integration_attempts_count,
@@ -1644,9 +1659,18 @@ fn classify_with_options_at(
     let task_ctx = task_status_by_id(rows);
 
     for (i, row) in rows.iter().enumerate() {
-        if !opts.show_all_history
-            && row_visibility_class(row, &task_ctx) == VisibilityClass::HistoricalNoise
-        {
+        let visibility = row_visibility_class(row, &task_ctx);
+        if visibility == VisibilityClass::HistoricalNoise {
+            if opts.show_all_history {
+                match row {
+                    Row::Task(_) => terminal.push(i),
+                    Row::Obs(_) | Row::CollapsedObs(_) | Row::Review(_) | Row::Intake(_) => {
+                        if let Some(sec) = section_for(row) {
+                            push_bucket(&mut buckets, sec, i);
+                        }
+                    }
+                }
+            }
             continue;
         }
         match section_for(row) {
@@ -1671,7 +1695,7 @@ fn classify_with_options_at(
             opts.show_all_history
                 || task_updated_epoch(&rows[*idx])
                     .map(|updated| updated >= cutoff)
-                    .unwrap_or(false)
+                    .unwrap_or(true)
         })
         .take(if opts.show_all_history {
             usize::MAX
@@ -1709,6 +1733,109 @@ pub(crate) fn visible_step(t: &TaskRow) -> Option<&str> {
     })
 }
 
+pub fn task_lifecycle(t: &TaskRow) -> &str {
+    if let Some(v) = t
+        .lifecycle
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return v;
+    }
+    legacy_lifecycle(&t.status)
+}
+
+pub fn task_active_step(t: &TaskRow) -> &str {
+    if let Some(v) = t
+        .active_step
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return v;
+    }
+    legacy_active_step(&t.status)
+}
+
+pub fn task_integration_step(t: &TaskRow) -> &str {
+    if let Some(v) = t
+        .integration_step
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return v;
+    }
+    legacy_integration_step(&t.status)
+}
+
+pub fn task_is_blocked(t: &TaskRow) -> bool {
+    if task_is_terminal_with_compat(t) {
+        return false;
+    }
+    t.blocked.unwrap_or_else(|| {
+        matches!(
+            t.status.as_str(),
+            "blocked" | "deploy_blocked" | "integration_blocked"
+        )
+    }) || t
+        .blocker_kind
+        .as_deref()
+        .map(|s| !s.is_empty() && s != "none")
+        .unwrap_or(false)
+}
+
+fn legacy_lifecycle(status: &str) -> &str {
+    match status {
+        "integration_queued" | "integrating" | "integrated" | "integration_blocked" => {
+            "integration"
+        }
+        "accepted" | "complete" | "cargo_installed" | "schema_migrated" | "rejected"
+        | "abandoned" | "closed_out_of_band" => "done",
+        _ => "active",
+    }
+}
+
+fn legacy_active_step(status: &str) -> &str {
+    match status {
+        "planning" => "planning",
+        "plan_review" => "planning_review",
+        "executing" => "coding",
+        "code_review" => "coding_review",
+        "in_review" => "wrapping",
+        _ => "none",
+    }
+}
+
+fn legacy_integration_step(status: &str) -> &str {
+    match status {
+        "integration_queued" => "queued",
+        "integrating" => "merging",
+        "integrated" => "deploying",
+        _ => "none",
+    }
+}
+
+pub fn task_is_terminal_primary(t: &TaskRow) -> bool {
+    task_lifecycle(t) == "done"
+}
+
+pub fn task_is_terminal_with_compat(t: &TaskRow) -> bool {
+    if t.lifecycle
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        return task_is_terminal_primary(t);
+    }
+    is_terminal_task_status(&t.status)
+}
+
+pub fn task_is_in_flight_primary(t: &TaskRow) -> bool {
+    matches!(task_lifecycle(t), "queued" | "active" | "integration")
+}
+
 fn section_for(row: &Row) -> Option<Section> {
     match row {
         Row::Task(t) => {
@@ -1717,39 +1844,39 @@ fn section_for(row: &Row) -> Option<Section> {
                 .as_deref()
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if is_terminal_task_status(&t.status) {
+            if task_is_terminal_with_compat(t) {
                 return Some(Section::TasksRecentlyTerminal);
             }
             if is_silent_zombie_reason(&reason) {
                 return Some(Section::TasksHeldZombie);
             }
-            if t.lifecycle.as_deref().map(str::trim) == Some("active")
-                && matches!(
-                    active_overlay_step(t),
-                    Some("planning" | "planning_review" | "coding" | "coding_review")
-                )
-            {
-                return Some(Section::TasksActionableCurrentWork);
+            if task_active_step(t) == "wrapping" {
+                return Some(Section::TasksAcceptU3);
             }
-            match t.status.as_str() {
-                "blocked" => {
-                    if task_visibility_class(t) == VisibilityClass::NeedsTriage {
-                        Some(Section::TasksNeedsTriage)
-                    } else {
-                        Some(Section::TasksBlockedNeedsAction)
-                    }
+            if task_is_blocked(t) {
+                if task_lifecycle(t) == "integration" {
+                    return Some(Section::TasksIntegrationBlocked);
                 }
-                "deploy_blocked" => {
-                    if task_visibility_class(t) == VisibilityClass::NeedsTriage {
-                        Some(Section::TasksNeedsTriage)
-                    } else {
-                        Some(Section::TasksDeployRecovery)
-                    }
+                if task_visibility_class(t) == VisibilityClass::NeedsTriage {
+                    return Some(Section::TasksNeedsTriage);
                 }
-                "integration_queued" | "integrating" => Some(Section::TasksIntegration),
-                "integrated" => Some(Section::TasksIntegratedAwaitingPostLand),
-                "integration_blocked" => Some(Section::TasksIntegrationBlocked),
-                "in_review" => Some(Section::TasksAcceptU3),
+                if t.status == "deploy_blocked" || t.blocker_kind.as_deref() == Some("deploy") {
+                    return Some(Section::TasksDeployRecovery);
+                }
+                return Some(Section::TasksBlockedNeedsAction);
+            }
+            match task_lifecycle(t) {
+                "active" => match task_active_step(t) {
+                    "wrapping" => Some(Section::TasksAcceptU3),
+                    _ if is_priority_task(t) => Some(Section::ObsOpenNoContract),
+                    _ => Some(Section::TasksActionableCurrentWork),
+                },
+                "integration" => match task_integration_step(t) {
+                    "deploying" | "verifying" => Some(Section::TasksIntegratedAwaitingPostLand),
+                    _ => Some(Section::TasksIntegration),
+                },
+                "done" => Some(Section::TasksRecentlyTerminal),
+                "queued" => Some(Section::TasksQueued),
                 _ if is_priority_task(t) => Some(Section::ObsOpenNoContract),
                 _ => Some(Section::TasksActionableCurrentWork),
             }
@@ -1801,21 +1928,11 @@ pub fn recent_exhaust(rows: &[Row], limit: usize) -> Vec<&Row> {
     if limit == 0 {
         return Vec::new();
     }
-    let opts = WatchClassifyOptions::default();
-    let cutoff =
-        now_epoch().saturating_sub((opts.recent_terminal_days as i64).saturating_mul(SECS_PER_DAY));
     let mut indices: Vec<usize> = rows
         .iter()
         .enumerate()
         .filter_map(|(i, r)| match r {
-            Row::Task(t)
-                if is_terminal_task_status(&t.status)
-                    && task_updated_epoch(r)
-                        .map(|updated| updated >= cutoff)
-                        .unwrap_or(false) =>
-            {
-                Some(i)
-            }
+            Row::Task(t) if task_is_terminal_with_compat(t) => Some(i),
             _ => None,
         })
         .collect();
@@ -1838,6 +1955,7 @@ pub fn is_terminal_task_status(s: &str) -> bool {
             | "schema_migrated"
             | "rejected"
             | "abandoned"
+            | "done"
     )
 }
 
@@ -1976,6 +2094,18 @@ mod tests {
         })
     }
 
+    #[test]
+    fn primary_task_steps_keep_explicit_none() {
+        let row = TaskRow {
+            status: "planning".to_string(),
+            active_step: Some("none".to_string()),
+            integration_step: Some("none".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(task_active_step(&row), "none");
+        assert_eq!(task_integration_step(&row), "none");
+    }
+
     fn task_with_id(id: &str, status: &str, updated_at: i64) -> Row {
         Row::Task(TaskRow {
             display_id: id.to_string(),
@@ -2085,9 +2215,10 @@ mod tests {
     fn section_all_labels_match_contract_order_and_are_unique() {
         let labels: Vec<&str> = Section::ALL.iter().map(|s| s.label()).collect();
         let expected = vec![
-            "ACTIVE WORK",
+            "QUEUED",
+            "ACTIVE",
             "RATIFY-U1",
-            "ACCEPT-U3",
+            "AWAITING HUMAN ACCEPTANCE",
             "INTEGRATION",
             "INTEGRATED",
             "HELD-INTEGRATION",
@@ -2097,7 +2228,7 @@ mod tests {
             "HELD-INTAKE",
             "HELD-AI-REVIEW",
             "HELD-ZOMBIE",
-            "TERMINAL",
+            "DONE",
             "PRIORITY",
             "OBSERVATIONS",
             "INTAKE-OPEN",
@@ -2130,6 +2261,7 @@ mod tests {
         let b = |sec: Section| -> Vec<usize> {
             buckets.iter().find(|(s, _)| *s == sec).unwrap().1.clone()
         };
+        assert_eq!(b(Section::TasksQueued), Vec::<usize>::new());
         assert_eq!(b(Section::TasksActionableCurrentWork), vec![0usize]);
         assert_eq!(b(Section::TasksBlockedNeedsAction), Vec::<usize>::new());
         assert_eq!(b(Section::TasksDeployRecovery), Vec::<usize>::new());
@@ -2188,6 +2320,44 @@ mod tests {
                 "task status {status} reason {reason:?}"
             );
         }
+    }
+
+    #[test]
+    fn primary_queued_lifecycle_classifies_to_queued_section() {
+        let row = Row::Task(TaskRow {
+            display_id: "T-queued-primary".to_string(),
+            status: "executing".to_string(),
+            title: "queued by primary lifecycle".to_string(),
+            lifecycle: Some("queued".to_string()),
+            active_step: Some("none".to_string()),
+            integration_step: Some("none".to_string()),
+            blocked: Some(false),
+            blocker_kind: Some("none".to_string()),
+            updated_at: NOW.to_string(),
+            ..Default::default()
+        });
+        let rows = vec![row];
+        let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
+        assert_eq!(bucket(&buckets, Section::TasksQueued), vec![0usize]);
+        assert!(bucket(&buckets, Section::TasksActionableCurrentWork).is_empty());
+        assert_eq!(section_for(&rows[0]), Some(Section::TasksQueued));
+    }
+
+    #[test]
+    fn primary_lifecycle_overrides_terminal_compat_status() {
+        let row = Row::Task(TaskRow {
+            display_id: "T-queued-compat".to_string(),
+            status: "accepted".to_string(),
+            title: "queued primary beats legacy terminal status".to_string(),
+            lifecycle: Some("queued".to_string()),
+            active_step: Some("none".to_string()),
+            integration_step: Some("none".to_string()),
+            blocked: Some(false),
+            blocker_kind: Some("none".to_string()),
+            updated_at: NOW.to_string(),
+            ..Default::default()
+        });
+        assert_eq!(section_for(&row), Some(Section::TasksQueued));
     }
 
     #[test]

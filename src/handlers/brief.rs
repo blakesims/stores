@@ -492,12 +492,21 @@ fields:
             .expect("tasks schema");
         let schema = Schema::from_yaml(tasks_yaml).unwrap();
 
-        // Build a minimal fixture entry (planning state)
+        // Build a minimal fixture entry with primary ADR 0001 state columns.
         let entry: crate::validate::EntryMap = {
             let mut m = std::collections::BTreeMap::new();
             m.insert("display_id".to_string(), serde_json::json!("T001"));
-            m.insert("status".to_string(), serde_json::json!("planning"));
+            m.insert("status".to_string(), serde_json::json!("legacy_unknown"));
             m.insert("title".to_string(), serde_json::json!("Test Task"));
+            m.insert("lifecycle".to_string(), serde_json::json!("integration"));
+            m.insert("active_step".to_string(), serde_json::json!("none"));
+            m.insert("integration_step".to_string(), serde_json::json!("testing"));
+            m.insert("blocked".to_string(), serde_json::json!(true));
+            m.insert("blocker_kind".to_string(), serde_json::json!("main_red"));
+            m.insert(
+                "post_integration_step".to_string(),
+                serde_json::json!("repo_specific"),
+            );
             m.insert("slug".to_string(), serde_json::json!("test-task"));
             m.insert("current_phase".to_string(), serde_json::json!(1));
             m.insert("current_cycle".to_string(), serde_json::json!(1));
@@ -536,12 +545,13 @@ fields:
             .map(|(_, t)| *t)
             .expect("tasks templates");
 
-        let roles = ["planner", "plan_reviewer", "executor", "code_reviewer"];
+        let roles = ["planner", "plan_reviewer", "executor", "code_reviewer", "wrap"];
         let template_paths = [
             "templates/planner-brief.md.tpl",
             "templates/plan-reviewer-brief.md.tpl",
             "templates/executor-brief.md.tpl",
             "templates/code-reviewer-brief.md.tpl",
+            "templates/wrap-brief.md.tpl",
         ];
 
         for (role, tpl_path) in roles.iter().zip(template_paths.iter()) {
@@ -564,6 +574,20 @@ fields:
                 "{} brief must contain done_when",
                 role
             );
+            for expected in [
+                "lifecycle=integration",
+                "active_step=none",
+                "integration_step=testing",
+                "blocked=true",
+                "blocker_kind=main_red",
+                "post_integration_step=repo_specific",
+            ] {
+                assert!(
+                    rendered.contains(expected),
+                    "{} brief must contain primary task-state token {expected}: {rendered}",
+                    role
+                );
+            }
         }
     }
 
@@ -1361,8 +1385,8 @@ fields:
             }),
         );
 
-        let rendered = render_template_with_overlay(executor_tpl, &ctx, &overlay)
-            .expect("executor render");
+        let rendered =
+            render_template_with_overlay(executor_tpl, &ctx, &overlay).expect("executor render");
 
         // Section header is present.
         assert!(
@@ -1442,8 +1466,8 @@ fields:
             serde_json::Value::Null,
         );
 
-        let rendered = render_template_with_overlay(executor_tpl, &ctx, &overlay)
-            .expect("executor render");
+        let rendered =
+            render_template_with_overlay(executor_tpl, &ctx, &overlay).expect("executor render");
 
         assert!(
             !rendered.contains("## External Review Backpressure"),

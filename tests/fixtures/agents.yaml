@@ -1,5 +1,5 @@
-# Sample .stores/agents.yaml fixture — generic integration lane plus the
-# stores-specific post-`integrated` chain.
+# Sample .stores/agents.yaml fixture — durable release-to-integration subscriber,
+# generic integration lane, plus the stores-specific post-`integrated` chain.
 #
 # Kept in sync with docs/agents-yaml-example.yaml for the post-integrate
 # agents (integrate, cargo-install, schema-migrate, auto-resolve-observation)
@@ -7,11 +7,59 @@
 # not yet carry. The subscriber-edge contracts in
 # src/flow/subscriber_edges.rs evaluate against this file.
 agents:
+  - name: release-to-integration
+    subscribes_to:
+      - store: tasks
+        transition:
+          from: code_review
+          to: complete
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition:
+          from: complete
+          to: in_review
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition:
+          from: in_review
+          to: accepted
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+    command: "builtin:release-to-integration"
+    claim_window_secs: 300
+    retry_policy:
+      max_attempts: 1
+      backoff: linear
+
   - name: integrate
     subscribes_to:
       - store: tasks
         transition:
           from: accepted
+          to: integration_queued
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition:
+          from: complete
+          to: integration_queued
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition:
+          from: in_review
           to: integration_queued
         # T140 P2: gate on per-row activation. Only `active` rows enter the
         # integration lane; inactive rows queue but never combust.
@@ -54,7 +102,11 @@ agents:
       - store: tasks
         transition:
           from: integrated
-          to: cargo_installed
+          to: integrated
+        predicate:
+          op: "=="
+          left: "$post_integration_step"
+          right: "cargo_installed"
     command: "builtin:schema-migrate"
     claim_window_secs: 300
     retry_policy:
@@ -62,15 +114,7 @@ agents:
       backoff: linear
 
   - name: user-escalation
-    subscribes_to:
-      - store: tasks
-        transition:
-          from: accepted
-          to: deploy_blocked
-      - store: tasks
-        transition:
-          from: cargo_installed
-          to: deploy_blocked
+    subscribes_to: []
     command: "builtin:user-escalation"
     claim_window_secs: 300
     retry_policy:

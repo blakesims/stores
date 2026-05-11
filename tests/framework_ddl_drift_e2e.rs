@@ -89,7 +89,7 @@ fn version_n_db_auto_applies_actor_note_on_open() {
         "actor_note must be present post-open; got: {cols:?}"
     );
 
-    // substrate_migrations contains exactly one matching row.
+    // substrate_migrations contains actor_note plus newer additive transition_history tuple columns.
     let rows: Vec<(String, String, String, String)> = conn
         .prepare(
             "SELECT table_name, column_name, binary_version, applied_at \
@@ -107,12 +107,13 @@ fn version_n_db_auto_applies_actor_note_on_open() {
         .unwrap()
         .map(|r| r.unwrap())
         .collect();
-    assert_eq!(rows.len(), 1, "rows: {rows:?}");
-    assert_eq!(rows[0].0, "transition_history");
-    assert_eq!(rows[0].1, "actor_note");
-    assert_eq!(rows[0].2, env!("CARGO_PKG_VERSION"));
+    let actor_note = rows
+        .iter()
+        .find(|r| r.0 == "transition_history" && r.1 == "actor_note")
+        .expect("rows must include transition_history.actor_note");
+    assert_eq!(actor_note.2, env!("CARGO_PKG_VERSION"));
     // RFC-3339 UTC with trailing Z + lexicographically <= now.
-    let applied_at = &rows[0].3;
+    let applied_at = &actor_note.3;
     assert!(
         applied_at.ends_with('Z') && applied_at.len() == 20,
         "applied_at {applied_at:?} not RFC-3339 UTC seconds-precision"
@@ -137,7 +138,7 @@ fn second_open_is_idempotent() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(n, 1, "second open must not insert a duplicate audit row");
+    assert_eq!(n, 7, "second open must not insert duplicate audit rows");
 }
 
 #[test]

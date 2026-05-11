@@ -4,9 +4,10 @@
 //! planning/plan_review/ready/executing/code_review are the active-lane rows;
 //! blocked is reached from plan_review/code_review and drive-failure rows;
 //! complete/in_review/accepted/integration_queued/integrating/integration_blocked
-//! are the integration-lane rows; rejected/integrated/cargo_installed/
-//! schema_migrated/closed_out_of_band/abandoned are terminal/done rows;
-//! deploy_blocked is the deployment blocker row. Blocked-kind derivation rows
+//! are the integration-lane rows; rejected/integrated/closed_out_of_band/abandoned
+//! are terminal/done rows. Legacy cargo_installed/schema_migrated/deploy_blocked
+//! statuses are compatibility-only projections for pre-ADR0001 rows; new writes
+//! use post_integration_step instead. Blocked-kind derivation rows
 //! correspond to the schema comments around submit-review fallback/FAIL,
 //! submit-plan-review fallback/NOT_READY, and mark_drive_failed transitions.
 
@@ -19,6 +20,7 @@ pub struct LifecycleOverlay {
     pub integration_step: String,
     pub blocked: bool,
     pub blocker_kind: Option<String>,
+    pub legacy_status: Option<String>,
 }
 
 fn overlay(
@@ -34,6 +36,7 @@ fn overlay(
         integration_step: integration_step.to_string(),
         blocked,
         blocker_kind,
+        legacy_status: None,
     }
 }
 
@@ -44,41 +47,132 @@ pub fn derive(
     blocked_reason: Option<&str>,
     integration_blocked_reason: Option<&str>,
 ) -> Result<LifecycleOverlay> {
-    let out = match to_status {
-        "planning" => overlay("active", "planning", "none", false, None),
-        "plan_review" => overlay("active", "planning_review", "none", false, None),
-        "ready" => overlay("active", "none", "none", false, None),
-        "executing" => overlay("active", "coding", "none", false, None),
-        "code_review" => overlay("active", "coding_review", "none", false, None),
-        "blocked" => overlay(
+    if verb == "backfill_queued" {
+        let mut out = match to_status {
+            "blocked" => overlay(
+                "queued",
+                "none",
+                "none",
+                true,
+                derive_blocked_kind(verb, from_status, blocked_reason),
+            ),
+            "deploy_blocked" => overlay("queued", "none", "none", true, Some("deploy".into())),
+            "integration_blocked" => overlay(
+                "queued",
+                "none",
+                "none",
+                true,
+                derive_integration_blocker_kind(integration_blocked_reason),
+            ),
+            "planning" | "plan_review" | "ready" | "complete" | "in_review" | "accepted"
+            | "rejected" | "integration_queued" | "integrated" | "cargo_installed"
+            | "schema_migrated" | "closed_out_of_band" | "abandoned" => {
+                overlay("queued", "none", "none", false, None)
+            }
+            other => bail!("unknown task to_status for queued lifecycle backfill: {other}"),
+        };
+        out.legacy_status = Some(to_status.to_string());
+        return Ok(out);
+    }
+
+    let mut out = match (verb, to_status) {
+        ("create", "planning") => overlay("queued", "none", "none", false, None),
+        ("start-integration", "integrating") => {
+            overlay("integration", "none", "refreshing", false, None)
+        }
+        ("mark_refresh_done", "integrating") => {
+            overlay("integration", "none", "task_review", false, None)
+        }
+        ("mark_task_review_done", "integrating") => {
+            overlay("integration", "none", "testing", false, None)
+        }
+        ("mark_testing_done", "integrating") => {
+            overlay("integration", "none", "merging", false, None)
+        }
+        ("mark_merge_done", "integrating") => {
+            overlay("integration", "none", "deploying", false, None)
+        }
+        ("mark_deploy_done", "integrating") => {
+            overlay("integration", "none", "verifying", false, None)
+        }
+        ("mark_deploy_blocked", "integrated") => {
+            overlay("integration", "none", "none", true, Some("deploy".into()))
+        }
+        (_, "planning") => overlay("active", "planning", "none", false, None),
+        (_, "plan_review") => overlay("active", "planning_review", "none", false, None),
+        (_, "ready") => overlay("active", "none", "none", false, None),
+        (_, "executing") => overlay("active", "coding", "none", false, None),
+        (_, "code_review") => overlay("active", "coding_review", "none", false, None),
+        (_, "blocked") => overlay(
             "active",
             "none",
             "none",
             true,
             derive_blocked_kind(verb, from_status, blocked_reason),
         ),
-        "complete" => overlay("integration", "wrapping", "none", false, None),
-        "in_review" => overlay("integration", "wrapping", "none", false, None),
-        "accepted" => overlay("integration", "none", "none", false, None),
-        "rejected" => overlay("done", "none", "none", false, None),
-        "deploy_blocked" => overlay("integration", "none", "none", true, Some("deploy".into())),
-        "integration_queued" => overlay("integration", "none", "none", false, None),
-        "integrating" => overlay("integration", "none", "merging", false, None),
-        "integration_blocked" => overlay(
+        (_, "complete") => overlay("active", "wrapping", "none", false, None),
+        (_, "in_review") => overlay("active", "wrapping", "none", false, None),
+        ("accept", "accepted") => overlay("active", "wrapping", "none", false, None),
+        (_, "accepted") => overlay("integration", "none", "none", false, None),
+        (_, "rejected") => overlay("done", "none", "none", false, None),
+        (_, "deploy_blocked") => {
+            overlay("integration", "none", "none", true, Some("deploy".into()))
+        }
+        (_, "integration_queued") => overlay("integration", "none", "queued", false, None),
+        (_, "integrating") => overlay("integration", "none", "merging", false, None),
+        (_, "integration_blocked") => overlay(
             "integration",
             "none",
             "none",
             true,
             derive_integration_blocker_kind(integration_blocked_reason),
         ),
-        "integrated" => overlay("done", "none", "none", false, None),
-        "cargo_installed" => overlay("done", "none", "none", false, None),
-        "schema_migrated" => overlay("done", "none", "none", false, None),
-        "closed_out_of_band" => overlay("done", "none", "none", false, None),
-        "abandoned" => overlay("done", "none", "none", false, None),
-        other => bail!("unknown task to_status for lifecycle overlay: {other}"),
+        (_, "integrated") => overlay("done", "none", "none", false, None),
+        (_, "cargo_installed") => overlay("done", "none", "none", false, None),
+        (_, "schema_migrated") => overlay("done", "none", "none", false, None),
+        (_, "closed_out_of_band") => overlay("done", "none", "none", false, None),
+        (_, "abandoned") => overlay("done", "none", "none", false, None),
+        (_, other) => bail!("unknown task to_status for lifecycle overlay: {other}"),
     };
+    out.legacy_status = Some(to_status.to_string());
     Ok(out)
+}
+
+pub fn legacy(overlay: &LifecycleOverlay) -> Result<String> {
+    if let Some(status) = overlay.legacy_status.as_ref() {
+        return Ok(status.clone());
+    }
+    match (
+        overlay.lifecycle.as_str(),
+        overlay.active_step.as_str(),
+        overlay.integration_step.as_str(),
+        overlay.blocked,
+        overlay.blocker_kind.as_deref(),
+    ) {
+        ("queued", "none", "none", false, None) => Ok("planning".into()),
+        ("active", "planning", "none", false, None) => Ok("planning".into()),
+        ("active", "planning_review", "none", false, None) => Ok("plan_review".into()),
+        ("active", "none", "none", false, None) => Ok("ready".into()),
+        ("active", "coding", "none", false, None) => Ok("executing".into()),
+        ("active", "coding_review", "none", false, None) => Ok("code_review".into()),
+        ("active", "wrapping", "none", false, None) => Ok("complete".into()),
+        ("active", "none", "none", true, _) => Ok("blocked".into()),
+        ("integration", "none", "queued", false, None) => Ok("integration_queued".into()),
+        ("integration", "none", "none", false, None) => Ok("accepted".into()),
+        ("integration", "none", "none", true, Some("deploy")) => Ok("deploy_blocked".into()),
+        ("integration", "none", "refreshing", false, None)
+        | ("integration", "none", "task_review", false, None)
+        | ("integration", "none", "testing", false, None)
+        | ("integration", "none", "merging", false, None)
+        | ("integration", "none", "deploying", false, None)
+        | ("integration", "none", "verifying", false, None) => Ok("integrating".into()),
+        ("integration", "none", "none", true, _) => Ok("integration_blocked".into()),
+        ("done", "none", "none", false, None) => Ok("integrated".into()),
+        _ => bail!(
+            "no legacy status projection for lifecycle overlay: {:?}",
+            overlay
+        ),
+    }
 }
 
 fn derive_blocked_kind(
@@ -144,10 +238,10 @@ mod tests {
                 ("active", "coding_review", "none", false, None),
             ),
             ("blocked", ("active", "none", "none", true, Some("runner"))),
-            ("complete", ("integration", "wrapping", "none", false, None)),
+            ("complete", ("active", "wrapping", "none", false, None)),
             (
                 "in_review",
-                ("integration", "wrapping", "none", false, None),
+                ("active", "wrapping", "none", false, None),
             ),
             ("accepted", ("integration", "none", "none", false, None)),
             ("rejected", ("done", "none", "none", false, None)),
@@ -157,7 +251,7 @@ mod tests {
             ),
             (
                 "integration_queued",
-                ("integration", "none", "none", false, None),
+                ("integration", "none", "queued", false, None),
             ),
             (
                 "integrating",

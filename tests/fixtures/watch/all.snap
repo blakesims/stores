@@ -1,11 +1,12 @@
 daemon:DEAD
 lanes: execution=1 review=1 accept=1 held=8 active=6 priority=3
 external review: unavailable / not installed
-ACTIVE WORK (2)
+QUEUED (0)
+ACTIVE (2)
 T010 executing ▮▱ ··· in-flight
 T011 code_review ▰◐▱ ●●· in-flight
 RATIFY-U1 (0)
-ACCEPT-U3 (0)
+AWAITING HUMAN ACCEPTANCE (0)
 INTEGRATION (0)
 INTEGRATED (0)
 HELD-INTEGRATION (0)
@@ -23,7 +24,7 @@ HELD-AI-REVIEW (0)
 HELD-ZOMBIE (2)
 T001 blocked silent_zombie reason:silent_zombie
 T002 blocked drive_failed:silent_zombie_pid_dead reason:drive_failed:silent_zombie_pid_dead
-TERMINAL (3)
+DONE (3)
 T003 cargo_installed ✓ deploy accept_installed_inert reason:accept_installed_inert
 T004 schema_migrated ✓ deploy accept_installed_inert reason:accept_installed_inert
 T030 accepted ✓ accepted terminal reason:terminal

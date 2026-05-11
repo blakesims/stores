@@ -580,26 +580,26 @@ fields:
                 )
                 .unwrap();
             stmt.query_row([], |r| {
-                    let mut m = std::collections::BTreeMap::new();
-                    m.insert(
-                        "display_id".to_string(),
-                        serde_json::Value::String(r.get::<_, String>(0).unwrap()),
-                    );
-                    m.insert(
-                        "status".to_string(),
-                        serde_json::Value::String(r.get::<_, String>(1).unwrap()),
-                    );
-                    m.insert(
-                        "title".to_string(),
-                        serde_json::Value::String(r.get::<_, String>(2).unwrap()),
-                    );
-                    m.insert(
-                        "notes".to_string(),
-                        serde_json::Value::String(r.get::<_, String>(3).unwrap()),
-                    );
-                    Ok(m)
-                })
-                .unwrap()
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(
+                    "display_id".to_string(),
+                    serde_json::Value::String(r.get::<_, String>(0).unwrap()),
+                );
+                m.insert(
+                    "status".to_string(),
+                    serde_json::Value::String(r.get::<_, String>(1).unwrap()),
+                );
+                m.insert(
+                    "title".to_string(),
+                    serde_json::Value::String(r.get::<_, String>(2).unwrap()),
+                );
+                m.insert(
+                    "notes".to_string(),
+                    serde_json::Value::String(r.get::<_, String>(3).unwrap()),
+                );
+                Ok(m)
+            })
+            .unwrap()
         };
 
         // Apply the same decode logic as list.rs
@@ -675,18 +675,18 @@ fields:
                 .prepare("SELECT tags, refs FROM lrstore WHERE display_id = 'R001'")
                 .unwrap();
             stmt.query_row([], |r| {
-                    let mut m = std::collections::BTreeMap::new();
-                    m.insert(
-                        "tags".to_string(),
-                        serde_json::Value::String(r.get::<_, String>(0).unwrap()),
-                    );
-                    m.insert(
-                        "refs".to_string(),
-                        serde_json::Value::String(r.get::<_, String>(1).unwrap()),
-                    );
-                    Ok(m)
-                })
-                .unwrap()
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(
+                    "tags".to_string(),
+                    serde_json::Value::String(r.get::<_, String>(0).unwrap()),
+                );
+                m.insert(
+                    "refs".to_string(),
+                    serde_json::Value::String(r.get::<_, String>(1).unwrap()),
+                );
+                Ok(m)
+            })
+            .unwrap()
         };
 
         let mut entry: std::collections::BTreeMap<String, serde_json::Value> =

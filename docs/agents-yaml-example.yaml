@@ -1,18 +1,21 @@
 # Reference `.stores/agents.yaml` — the generic integration lane plus the
 # stores-specific post-`integrated` chain (T138).
 #
-# Post-T138 ceremony for an `accepted` row:
+# Post-T146 ceremony for a row whose acceptance policy permits release:
 #
-#   1. accepted → integration_queued (framework on_entry; enqueues the row).
+#   1. builtin:release-to-integration fires from the framework subscriber and
+#      moves complete/in_review/accepted → integration_queued.
 #   2. builtin:integrate (this file) — the generic, repo-agnostic
-#      integration lane. Subscribes to (accepted→integration_queued) and
-#      (integration_blocked→integration_queued). Atomically claims the
-#      capacity-1 `integrating` slot, refreshes the candidate against
+#      integration lane. Subscribes to (complete|in_review|accepted→integration_queued)
+#      and (integration_blocked→integration_queued). Advances ADR0001
+#      integration_step through refreshing → task_review → testing →
+#      merging → deploying → verifying, refreshes the candidate against
 #      current main via the configured `refresh_strategy`, re-checks the
 #      candidate's external_review HEAD freshness, runs the configured
-#      `pre_land_check` command, fast-merges into main, and on success
-#      fires `mark_integrated`. Failure surfaces as
-#      `mark_integration_blocked` with a typed `integration_blocked_reason`
+#      `pre_land_check` command, fast-merges into main while holding only
+#      the main_branch ResourceLock, and on success fires `mark_verify_done`.
+#      Failure surfaces as `mark_integration_blocked` with a typed
+#      `integration_blocked_reason`
 #      (rebase_conflict | stale_base | stale_external_review |
 #      pre_land_check_failed | merge_failure | push_failure). The
 #      integration lane records single-record provenance per attempt in
@@ -59,10 +62,46 @@
 # integration lane.
 
 agents:
+  - name: release-to-integration
+    subscribes_to:
+      - store: tasks
+        transition: { from: code_review, to: complete }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition: { from: complete, to: in_review }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition: { from: in_review, to: accepted }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+    command: "builtin:release-to-integration"
+    claim_window_secs: 300
+    retry_policy: { max_attempts: 1, backoff: linear }
+
   - name: integrate
     subscribes_to:
       - store: tasks
         transition: { from: accepted, to: integration_queued }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition: { from: complete, to: integration_queued }
+        predicate:
+          op: "=="
+          left: "$activation"
+          right: "active"
+      - store: tasks
+        transition: { from: in_review, to: integration_queued }
         # T140 P2: per-row activation gate on the work-starting class.
         # Inactive rows enqueue (so plan-start surfaces them) but never
         # enter the integration lane until an operator activates them.
@@ -84,6 +123,12 @@ agents:
       refresh_strategy: rebase
       allow_push: false
 
+  # Optional per-step registrations may subscribe to ADR0001 integration_step
+  # self-transitions, but they must use step-specific commands. The monolithic
+  # `builtin:integrate` above owns the whole lane and always begins with
+  # `start-integration`, so do not register it on `integrating -> integrating`
+  # substep edges.
+
   - name: cargo-install
     subscribes_to:
       - store: tasks
@@ -98,7 +143,11 @@ agents:
   - name: schema-migrate
     subscribes_to:
       - store: tasks
-        transition: { from: integrated, to: cargo_installed }
+        transition: { from: integrated, to: integrated }
+        predicate:
+          op: "=="
+          left: "$post_integration_step"
+          right: "cargo_installed"
     command: "builtin:schema-migrate"
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }
@@ -134,11 +183,9 @@ agents:
     retry_policy: { max_attempts: 1, backoff: linear }
 
   - name: user-escalation
-    subscribes_to:
-      - store: tasks
-        transition: { from: accepted, to: deploy_blocked }
-      - store: tasks
-        transition: { from: cargo_installed, to: deploy_blocked }
+    # Invoked via `deployment_specialist` by failure paths; no legacy
+    # deploy_blocked status subscriber edges in ADR0001 primary lifecycle mode.
+    subscribes_to: []
     command: "builtin:user-escalation"
     claim_window_secs: 300
     retry_policy: { max_attempts: 1, backoff: linear }

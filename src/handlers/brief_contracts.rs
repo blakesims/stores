@@ -461,7 +461,10 @@ impl BriefContract for ExecutorExternalReviseMustIncludeExternalReviewBackpressu
         // Assert the actual numeric count values appear (e.g. "0 critical", "1 major") rather
         // than the bare words — bare-word checks would pass if findings text contains "[major]"
         // while the template's count line was dropped.
-        let critical_count = er.get("critical_count").and_then(|v| v.as_i64()).unwrap_or(0);
+        let critical_count = er
+            .get("critical_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         let major_count = er.get("major_count").and_then(|v| v.as_i64()).unwrap_or(0);
         let minor_count = er.get("minor_count").and_then(|v| v.as_i64()).unwrap_or(0);
 
@@ -640,9 +643,10 @@ impl BriefContract for ProvenanceLabelsMustDistinguishInternalVsExternal {
             let findings_prefix = utf8_safe_prefix(findings, 32);
 
             if !findings_prefix.is_empty() {
-                if let (Some(int_pos), Some(ext_pos)) =
-                    (rendered.find(INTERNAL_HEADER), rendered.find(EXTERNAL_HEADER))
-                {
+                if let (Some(int_pos), Some(ext_pos)) = (
+                    rendered.find(INTERNAL_HEADER),
+                    rendered.find(EXTERNAL_HEADER),
+                ) {
                     if int_pos > ext_pos {
                         return CheckResult::fail(
                             id,
@@ -863,10 +867,7 @@ mod tests {
 
     fn empty_overlay() -> HashMap<String, Value> {
         let mut m = HashMap::new();
-        m.insert(
-            "external_review_backpressure".to_string(),
-            Value::Null,
-        );
+        m.insert("external_review_backpressure".to_string(), Value::Null);
         m
     }
 
@@ -1031,7 +1032,10 @@ mod tests {
         };
         let results = apply_all(&ctx);
         // Contracts 1 and 5 apply for this planner+revision+linked_obs fixture.
-        assert!(!results.is_empty(), "apply_all must return results when contracts apply");
+        assert!(
+            !results.is_empty(),
+            "apply_all must return results when contracts apply"
+        );
         for r in &results {
             assert!(
                 r.outcome == CheckOutcome::Pass || r.outcome == CheckOutcome::Fail,
@@ -1059,9 +1063,16 @@ mod tests {
             overlay: &overlay,
             agent_role: "planner",
         };
-        assert!(CONTRACT_1.applies(&ctx), "contract 1 must apply to planner+revision fixture");
+        assert!(
+            CONTRACT_1.applies(&ctx),
+            "contract 1 must apply to planner+revision fixture"
+        );
         let result = CONTRACT_1.evaluate(&ctx);
-        assert!(result.is_pass(), "contract 1 must pass on full planner revision brief: {:?}", result.reason);
+        assert!(
+            result.is_pass(),
+            "contract 1 must pass on full planner revision brief: {:?}",
+            result.reason
+        );
     }
 
     #[test]
@@ -1074,7 +1085,11 @@ mod tests {
         // Strip the unique plan-objective and review-summary substrings.
         let stripped = strip_substrings(
             &rendered,
-            &["UNIQUE_REJECTED_PLAN_OBJECTIVE", "UNIQUE_REVIEW_BACKPRESSURE", "NEEDS_WORK"],
+            &[
+                "UNIQUE_REJECTED_PLAN_OBJECTIVE",
+                "UNIQUE_REVIEW_BACKPRESSURE",
+                "NEEDS_WORK",
+            ],
         );
         let overlay = empty_overlay();
         let ctx = BriefContext {
@@ -1084,7 +1099,11 @@ mod tests {
             agent_role: "planner",
         };
         let result = CONTRACT_1.evaluate(&ctx);
-        assert_eq!(result.outcome, CheckOutcome::Fail, "must fail when objective+review stripped");
+        assert_eq!(
+            result.outcome,
+            CheckOutcome::Fail,
+            "must fail when objective+review stripped"
+        );
         let reason_str = result.reason.as_ref().unwrap().to_string();
         assert!(
             reason_str.contains("missing"),
@@ -1110,9 +1129,16 @@ mod tests {
             overlay: &overlay,
             agent_role: "executor",
         };
-        assert!(CONTRACT_2.applies(&ctx), "contract 2 must apply to executor cycle-2 fixture");
+        assert!(
+            CONTRACT_2.applies(&ctx),
+            "contract 2 must apply to executor cycle-2 fixture"
+        );
         let result = CONTRACT_2.evaluate(&ctx);
-        assert!(result.is_pass(), "contract 2 must pass on full executor revision brief: {:?}", result.reason);
+        assert!(
+            result.is_pass(),
+            "contract 2 must pass on full executor revision brief: {:?}",
+            result.reason
+        );
     }
 
     #[test]
@@ -1151,7 +1177,10 @@ mod tests {
         let ctx_val = build_context(&schema, &entry);
         let rendered = render_template(tpl, &ctx_val).expect("render");
         // Verify the commit is actually rendered before stripping it.
-        assert!(rendered.contains("abc123"), "fixture must render prior executor commit");
+        assert!(
+            rendered.contains("abc123"),
+            "fixture must render prior executor commit"
+        );
         // Strip the commit SHA; leave the summary and review text intact.
         let stripped = strip_substrings(&rendered, &["abc123"]);
         let overlay = empty_overlay();
@@ -1243,8 +1272,15 @@ mod tests {
 
         // Contract 3's applies() must fire on exactly the row the overlay builder returns.
         let er_val = overlay.get("external_review_backpressure").unwrap();
-        assert!(!er_val.is_null(), "overlay must have a non-null ER entry for T107");
-        assert_eq!(er_val["display_id"], json!("ER003"), "must select newest REVISE row");
+        assert!(
+            !er_val.is_null(),
+            "overlay must have a non-null ER entry for T107"
+        );
+        assert_eq!(
+            er_val["display_id"],
+            json!("ER003"),
+            "must select newest REVISE row"
+        );
 
         // Render executor template with the real overlay.
         let schema = tasks_schema();
@@ -1525,8 +1561,14 @@ mod tests {
             overlay: &overlay,
             agent_role: "executor",
         };
-        assert!(CONTRACT_4.applies(&ctx), "contract 4 must apply when external is present");
-        assert!(!has_prior_internal_revise(&entry), "must NOT have internal revise");
+        assert!(
+            CONTRACT_4.applies(&ctx),
+            "contract 4 must apply when external is present"
+        );
+        assert!(
+            !has_prior_internal_revise(&entry),
+            "must NOT have internal revise"
+        );
         let result = CONTRACT_4.evaluate(&ctx);
         assert!(
             result.is_pass(),
@@ -1817,8 +1859,8 @@ mod tests {
         // These constants were computed from the bundled templates at time of authoring (T109).
         // If this test fails, a template was changed — update these constants to the new values
         // shown in the assertion failure message.
-        const EXPECTED_EXECUTOR_HASH: u64 = 0x3059c33b637615d1;
-        const EXPECTED_PLANNER_HASH: u64 = 0x69bcb3633f12fb2e;
+        const EXPECTED_EXECUTOR_HASH: u64 = 0x11dc88afb0531250;
+        const EXPECTED_PLANNER_HASH: u64 = 0x03fd2d5e2f9a4a25;
 
         assert_eq!(
             actual_exec_hash, EXPECTED_EXECUTOR_HASH,

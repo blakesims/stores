@@ -73,8 +73,8 @@ fn insert_cargo_installed_task(conn: &Connection, display_id: &str, workspace_pa
     let now = "2026-05-03T00:00:00Z";
     let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
     conn.execute(
-        "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, created_at, updated_at, created_by, updated_by) \
-         VALUES (?1, 'cargo_installed', 'test', 't', 'feat/x', ?2, ?3, ?4, ?4, 'framework', 'framework')",
+        "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, lifecycle, active_step, integration_step, post_integration_step, created_at, updated_at, created_by, updated_by) \
+         VALUES (?1, 'integrated', 'test', 't', 'feat/x', ?2, ?3, 'done', 'none', 'none', 'cargo_installed', ?4, ?4, 'framework', 'framework')",
         rusqlite::params![display_id, workspace_path, contract, now],
     )
     .unwrap();
@@ -184,15 +184,16 @@ fn post_accept_schema_migrate_applies_addition_via_subprocess() {
         cols
     );
 
-    // (b) task row at schema_migrated.
-    let status: String = conn
+    // (b) task row remains integrated with stores-specific post step schema_migrated.
+    let (status, post_step): (String, String) = conn
         .query_row(
-            "SELECT status FROM tasks WHERE display_id='T700'",
+            "SELECT status, post_integration_step FROM tasks WHERE display_id='T700'",
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(status, "schema_migrated");
+    assert_eq!(status, "integrated");
+    assert_eq!(post_step, "schema_migrated");
 
     // (c) transition_history records mark_schema_migrated.
     let (verb, from, to): (String, String, String) = conn
@@ -204,8 +205,8 @@ fn post_accept_schema_migrate_applies_addition_via_subprocess() {
         )
         .unwrap();
     assert_eq!(verb, "mark_schema_migrated");
-    assert_eq!(from, "cargo_installed");
-    assert_eq!(to, "schema_migrated");
+    assert_eq!(from, "integrated");
+    assert_eq!(to, "integrated");
 
     std::env::remove_var("STORES_BIN");
 }
@@ -247,7 +248,15 @@ fn post_accept_schema_migrate_blocks_when_subprocess_fails() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(status, "deploy_blocked");
+    assert_eq!(status, "integrated");
+    let post_step: String = conn
+        .query_row(
+            "SELECT post_integration_step FROM tasks WHERE display_id='T701'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(post_step, "deploy_blocked");
     let reason = reason.unwrap_or_default();
     assert!(
         !reason.is_empty(),

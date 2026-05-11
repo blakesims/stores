@@ -1272,6 +1272,7 @@ mod tests {
                         from: String::new(),
                         to: "planning".to_string(),
                     },
+                    integration_step: None,
                     predicate: None,
                 }],
                 command: "builtin:auto-drive".to_string(),

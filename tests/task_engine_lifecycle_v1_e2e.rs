@@ -140,6 +140,7 @@ fn agents() -> AgentsYaml {
                     from: "accepted".into(),
                     to: "integration_queued".into(),
                 },
+                integration_step: None,
                 predicate: None,
             }],
             command: "builtin:integrate".into(),
@@ -207,7 +208,7 @@ fn t3_lifecycle_overlay_and_main_branch_lock_span_integration() {
     )
     .unwrap();
     assert_eq!(status(&conn, "T144E2E"), "integration_queued");
-    assert_overlay(&conn, "T144E2E", ("integration", "none", "none", 0, None));
+    assert_overlay(&conn, "T144E2E", ("integration", "none", "queued", 0, None));
 
     let cfg = db_tmp.path().join("agents.yaml");
     let p = policies();
@@ -265,7 +266,7 @@ fn t3_lifecycle_overlay_and_main_branch_lock_span_integration() {
         .query_row(
             "SELECT \
              MAX(CASE WHEN verb='start-integration' THEN occurred_at END), \
-             MAX(CASE WHEN verb='mark_integrated' THEN occurred_at END) \
+             MAX(CASE WHEN verb='mark_verify_done' THEN occurred_at END) \
              FROM transition_history WHERE store='tasks' AND display_id='T144E2E'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -283,7 +284,7 @@ fn t3_lifecycle_overlay_and_main_branch_lock_span_integration() {
         .unwrap();
     assert!(start_at <= acquire_at, "lock acquired after integrating entry");
     assert!(acquire_at <= release_at, "lock release follows acquisition");
-    assert!(mark_at <= release_at, "lock released after integrating exit");
+    assert!(release_at <= mark_at, "lock released before verifying exit");
 
     let bad_integrating_steps: i64 = conn
         .query_row(

@@ -126,8 +126,14 @@ pub fn run_reconcile_accepted(
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let post_integration_step_after_cargo = row_after_cargo
+        .get("post_integration_step")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
 
-    if status_after_cargo == "cargo_installed" {
+    if status_after_cargo == "cargo_installed"
+        || (status_after_cargo == "integrated" && post_integration_step_after_cargo == "cargo_installed")
+    {
         schema_migrate::run(&row_after_cargo, &ctx).with_context(|| {
             format!(
                 "reconcile-accepted: schema-migrate step failed for {}",

@@ -54,6 +54,10 @@ impl AgentEntry {
 pub struct Subscription {
     pub store: String,
     pub transition: TransitionEdge,
+    /// Optional ADR0001 integration substep selector for tasks rows that stay
+    /// in the historical `integrating` status while integration_step changes.
+    #[serde(default)]
+    pub integration_step: Option<String>,
     /// Optional row-state predicate. When present, the daemon evaluates it
     /// against the row JSON after the policy gate; a false result skips the
     /// claim+dispatch (no ntfy). Reuses `flow::predicate::PredicateExpr` so
@@ -449,16 +453,20 @@ agents:
         // gate. Both inner predicates must be present.
         match pred {
             crate::flow::predicate::PredicateExpr::AllOf { all } => {
-                let has_workspace_neq = all.iter().any(|p| matches!(
-                    p,
-                    crate::flow::predicate::PredicateExpr::Neq { left, right }
-                    if left.as_str() == Some("$workspace_path") && right.as_str() == Some("")
-                ));
-                let has_activation_eq = all.iter().any(|p| matches!(
-                    p,
-                    crate::flow::predicate::PredicateExpr::Eq { left, right }
-                    if left.as_str() == Some("$activation") && right.as_str() == Some("active")
-                ));
+                let has_workspace_neq = all.iter().any(|p| {
+                    matches!(
+                        p,
+                        crate::flow::predicate::PredicateExpr::Neq { left, right }
+                        if left.as_str() == Some("$workspace_path") && right.as_str() == Some("")
+                    )
+                });
+                let has_activation_eq = all.iter().any(|p| {
+                    matches!(
+                        p,
+                        crate::flow::predicate::PredicateExpr::Eq { left, right }
+                        if left.as_str() == Some("$activation") && right.as_str() == Some("active")
+                    )
+                });
                 assert!(
                     has_workspace_neq,
                     "AllOf must contain workspace_path != '' (T022 P2 contract); got: {:?}",
@@ -526,6 +534,7 @@ agents:
                 from: String::new(),
                 to: "planning".to_string(),
             },
+            integration_step: None,
             predicate: None,
         }
     }
@@ -571,6 +580,7 @@ agents:
                         from: "accepted".to_string(),
                         to: "planning".to_string(),
                     },
+                    integration_step: None,
                     predicate: None,
                 },
             )],
@@ -591,6 +601,7 @@ agents:
                         from: String::new(),
                         to: "accepted".to_string(),
                     },
+                    integration_step: None,
                     predicate: None,
                 },
             )],
@@ -611,6 +622,7 @@ agents:
                         from: String::new(),
                         to: "planning".to_string(),
                     },
+                    integration_step: None,
                     predicate: None,
                 },
             )],

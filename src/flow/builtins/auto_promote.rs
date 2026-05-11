@@ -242,17 +242,14 @@ fn promote(
         rusqlite::types::Value::Text(tier_hint.to_string())
     };
 
-    // T140 P2: auto-promoted tasks land at activation='inactive' explicitly.
-    // The schema column DEFAULT would also yield 'inactive', but writing the
-    // value into the SQL keeps the gate visible to anyone auditing the
-    // auto-promote source — it pairs with the `--activate` flag on direct
-    // `tasks add` (also defaults to inactive). Operator must `tasks activate`
-    // before drive/integrate combust.
+    // ADR0001 queued semantics: auto-promoted tasks are born as queued rows,
+    // arm activation from the human-ratified observation, then synchronously
+    // attempt queued→active below when capacity/dependencies permit.
     tx.execute(
         "INSERT INTO tasks \
          (display_id, status, title, slug, tier_hint, contract, linked_observations, \
-          activation, created_at, updated_at, created_by, updated_by) \
-         VALUES (?1, 'planning', ?2, ?3, ?4, ?5, ?6, 'inactive', ?7, ?7, 'ai_autonomous', 'ai_autonomous')",
+          activation, lifecycle, active_step, integration_step, blocked, created_at, updated_at, created_by, updated_by) \
+         VALUES (?1, 'planning', ?2, ?3, ?4, ?5, ?6, 'active', 'queued', 'none', 'none', 0, ?7, ?7, 'ai_autonomous', 'ai_autonomous')",
         rusqlite::params![
             "__PLACEHOLDER__",
             title,
@@ -297,22 +294,19 @@ fn promote(
     )
     .context("UPDATE observations.task_id (auto-promote back-link)")?;
 
-    // Fire on-entry follow-ons for the planning state (L117). Without this,
-    // tier-conditional actions declared on tasks.workflow.on_state.planning
-    // never evaluate — most visibly, T1 rows stay at planning and `tasks
-    // drive` errors with `next-action returned no agent for status 'planning'`
-    // because the schema's `{transition_to: ready, when: tier_hint == 'T1'}`
-    // never fires. submit handlers all call this; auto-promote was the gap.
     let tasks_schema = crate::flow::builtins::load_tasks_schema()
-        .context("auto-promote: load tasks schema for on-entry hooks")?;
-    crate::handlers::submit::fire_on_entry_follow_ons(
+        .context("auto-promote: load tasks schema for queued activation")?;
+    let (_rid, existing) = crate::handlers::row::read_row(&tasks_schema, &tx, &new_display_id)?;
+    crate::handlers::activate::try_release_queued_in_tx(
         &tx,
         &tasks_schema,
-        &new_display_id,
         rowid,
-        "planning",
+        &new_display_id,
+        &existing,
+        "activate-task",
+        Some("auto_promote"),
     )
-    .context("auto-promote: fire on-entry hooks for planning state")?;
+    .context("auto-promote: queued activation")?;
 
     tx.commit().context("commit auto-promote")?;
     Ok(new_display_id)
@@ -752,36 +746,17 @@ mod tests {
         let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
         assert_eq!(res, 0);
 
-        let (status, tier, plan_json, plan_source): (
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = conn
+        let (status, tier, lifecycle, active_step): (String, Option<String>, String, String) = conn
             .query_row(
-                "SELECT status, tier_hint, plan, plan_source FROM tasks LIMIT 1",
+                "SELECT status, tier_hint, lifecycle, active_step FROM tasks LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert_eq!(tier.as_deref(), Some("T1"));
-        assert_eq!(
-            status, "executing",
-            "T1 task must cascade planning → ready → executing via on-entry follow-ons (L117)"
-        );
-        // T054: assert synthesized plan was written during skip-plan cascade.
-        let plan_v: serde_json::Value =
-            serde_json::from_str(&plan_json.expect("plan must be populated")).unwrap();
-        assert_eq!(
-            plan_v["phases"].as_array().unwrap().len(),
-            1,
-            "T1 auto-promoted task must have exactly 1 synthesized phase"
-        );
-        assert_eq!(
-            plan_source.as_deref(),
-            Some("contract_synthesized"),
-            "T1 auto-promoted task plan_source must be contract_synthesized"
-        );
+        assert_eq!(status, "planning");
+        assert_eq!(lifecycle, "active");
+        assert_eq!(active_step, "planning");
     }
 
     /// Companion to the L117 regression: a T2 promotion MUST stay at planning
@@ -828,21 +803,16 @@ mod tests {
         );
     }
 
-    /// T140 P2 / Task 2.4 / AC2.8: auto-promoted tasks land at
-    /// activation='inactive'. The INSERT statement explicitly lists the
-    /// activation column (verified by grepping the source) so the gate is
-    /// visible to anyone reading auto_promote.rs without needing to
-    /// remember the schema DEFAULT.
+    /// ADR0001 queued activation: auto-promoted tasks explicitly arm
+    /// activation and attempt queued→active release in the same transaction.
     #[test]
-    fn auto_promote_inactive_default() {
-        // Pre-condition: assert the INSERT statement explicitly lists the
-        // activation column — protects against silently relying on the
-        // schema default.
+    fn auto_promote_active_release_default() {
         let src = include_str!("auto_promote.rs");
         assert!(
-            src.contains("activation,") && src.contains("'inactive'"),
-            "auto_promote.rs INSERT must explicitly list activation column \
-             and bind 'inactive'; the schema DEFAULT alone is insufficient"
+            src.contains("activation,")
+                && src.contains("'active'")
+                && src.contains("try_release_queued_in_tx"),
+            "auto_promote.rs INSERT must explicitly arm activation and call queued release"
         );
 
         let conn = fresh_db();
@@ -853,18 +823,16 @@ mod tests {
         let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
         assert_eq!(res, 0);
 
-        let activation: String = conn
+        let (activation, lifecycle): (String, String) = conn
             .query_row(
-                "SELECT activation FROM tasks WHERE \
+                "SELECT activation, lifecycle FROM tasks WHERE \
                  linked_observations LIKE '%L501%' LIMIT 1",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(
-            activation, "inactive",
-            "auto-promoted tasks must land at activation='inactive'"
-        );
+        assert_eq!(activation, "active");
+        assert_eq!(lifecycle, "active");
     }
 
     #[test]

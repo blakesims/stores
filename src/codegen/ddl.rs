@@ -66,8 +66,8 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
                 name: "lifecycle",
                 sql_type: "TEXT",
                 nullable: false,
-                default_sql: Some("'active'"),
-                full_def: "lifecycle TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle IN ('queued','active','integration','done'))",
+                default_sql: Some("'queued'"),
+                full_def: "lifecycle TEXT NOT NULL DEFAULT 'queued' CHECK(lifecycle IN ('queued','active','integration','done'))",
                 additive: true,
             },
             FrameworkColumn {
@@ -83,7 +83,7 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
                 sql_type: "TEXT",
                 nullable: false,
                 default_sql: Some("'none'"),
-                full_def: "integration_step TEXT NOT NULL DEFAULT 'none' CHECK(integration_step IN ('none','refreshing','task_review','testing','merging','deploying','verifying'))",
+                full_def: "integration_step TEXT NOT NULL DEFAULT 'none' CHECK(integration_step IN ('none','queued','refreshing','task_review','testing','merging','deploying','verifying'))",
                 additive: true,
             },
             FrameworkColumn {
@@ -102,6 +102,39 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
                 full_def: "blocker_kind TEXT CHECK(blocker_kind IN ('capacity','dependency','runner','rate_limit','human_acceptance','task_review','stale_base','config','test_failure','main_red','deploy','migration'))",
                 additive: true,
             },
+            FrameworkColumn {
+                name: "post_integration_step",
+                sql_type: "TEXT",
+                nullable: false,
+                default_sql: Some("'none'"),
+                full_def: "post_integration_step TEXT NOT NULL DEFAULT 'none' CHECK(post_integration_step IN ('none','cargo_installed','schema_migrated','deploy_blocked','deploy_verified'))",
+                additive: true,
+            },
+            FrameworkColumn {
+                name: "human_acceptance_policy",
+                sql_type: "TEXT",
+                nullable: false,
+                default_sql: Some("'optional'"),
+                full_def: "human_acceptance_policy TEXT NOT NULL DEFAULT 'optional' CHECK(human_acceptance_policy IN ('required','optional','delegated_by_policy'))",
+                additive: true,
+            },
+            FrameworkColumn {
+                name: "task_review_policy",
+                sql_type: "TEXT",
+                nullable: false,
+                default_sql: Some("'none'"),
+                full_def: "task_review_policy TEXT NOT NULL DEFAULT 'none' CHECK(task_review_policy IN ('none','advisory','authoritative','both'))",
+                additive: true,
+            },
+            FrameworkColumn {
+                name: "acceptance_decided_by",
+                sql_type: "TEXT",
+                nullable: true,
+                default_sql: None,
+                full_def: "acceptance_decided_by TEXT CHECK(acceptance_decided_by IN ('human','policy_delegate'))",
+                additive: true,
+            },
+            FrameworkColumn { name: "acceptance_decided_at", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "acceptance_decided_at TEXT", additive: true },
         ],
     },
     FrameworkTable {
@@ -121,6 +154,12 @@ pub const FRAMEWORK_DDL_TABLES: &[FrameworkTable] = &[
             // L144: actor_note added post-v0.1; older DBs lack it. Nullable so
             // ALTER TABLE ADD COLUMN against existing rows is well-defined.
             FrameworkColumn { name: "actor_note", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "actor_note TEXT", additive: true },
+            FrameworkColumn { name: "lifecycle_from", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "lifecycle_from TEXT", additive: true },
+            FrameworkColumn { name: "active_step_from", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "active_step_from TEXT", additive: true },
+            FrameworkColumn { name: "integration_step_from", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "integration_step_from TEXT", additive: true },
+            FrameworkColumn { name: "lifecycle_to", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "lifecycle_to TEXT", additive: true },
+            FrameworkColumn { name: "active_step_to", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "active_step_to TEXT", additive: true },
+            FrameworkColumn { name: "integration_step_to", sql_type: "TEXT", nullable: true, default_sql: None, full_def: "integration_step_to TEXT", additive: true },
         ],
     },
     FrameworkTable {
@@ -371,7 +410,13 @@ CREATE TABLE IF NOT EXISTS transition_history (
     policy_ref TEXT,
     policies_hash TEXT,
     occurred_at TEXT NOT NULL,
-    actor_note TEXT
+    actor_note TEXT,
+    lifecycle_from TEXT,
+    active_step_from TEXT,
+    integration_step_from TEXT,
+    lifecycle_to TEXT,
+    active_step_to TEXT,
+    integration_step_to TEXT
 );
 CREATE TABLE IF NOT EXISTS dispatch_locks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

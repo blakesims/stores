@@ -519,7 +519,9 @@ pub fn run(
     // workflow-shaped row.  Without this, on_state actions on the initial
     // state (e.g. `transition_to: ready` gated by `when: tier_hint == 'T1'`)
     // never fire because no submit-* verb runs before the row is observed.
-    if schema.workflow.is_some() {
+    if schema.workflow.is_some()
+        && !(schema.name == "tasks" && effective_initial_status == "planning")
+    {
         fire_on_entry_follow_ons(&tx, schema, &display_id, rowid, &effective_initial_status)?;
     }
 
@@ -931,7 +933,7 @@ fields:
             .unwrap();
         assert_eq!(
             got,
-            ("active".into(), "planning".into(), "none".into(), 0, None)
+            ("queued".into(), "none".into(), "none".into(), 0, None)
         );
     }
 

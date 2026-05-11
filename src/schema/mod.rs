@@ -1630,8 +1630,9 @@ fields:
         }
     }
 
-    /// AC1.2 (b): the seven integration-lane verbs are declared as transition
-    /// verbs in tasks lifecycle.
+    /// AC1.2 (b): generic integration-lane verbs are declared as transition
+    /// verbs in tasks lifecycle; stores-only post-integration subscriber verbs
+    /// live outside lifecycle.transitions.
     #[test]
     fn t138_p1_integration_lane_verbs_present() {
         let schema = bundled_tasks_schema();
@@ -1647,7 +1648,6 @@ fields:
             "mark_integrated",
             "mark_integration_blocked",
             "retry-integration",
-            "mark_cargo_installed",
             "supersede",
         ] {
             // 'supersede' lives on external_reviews, not tasks; check below

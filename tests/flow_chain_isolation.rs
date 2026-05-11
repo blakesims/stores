@@ -318,9 +318,8 @@ fn t138_agents_yaml_example_subscribes_integration_lane_and_post_integrated_chai
         migrate
             .subscribes_to
             .iter()
-            .any(|s| s.transition.from == "integrated" && s.transition.to == "cargo_installed"),
-        "schema-migrate must subscribe (integrated, cargo_installed) under T138 \
-         (source state moved from accepted → integrated)"
+            .any(|s| s.transition.from == "integrated" && s.transition.to == "integrated"),
+        "schema-migrate must subscribe (integrated, integrated) with post_integration_step=cargo_installed under T146 P6"
     );
     assert!(
         !migrate
@@ -574,14 +573,21 @@ fn i027_reconcile_accepted_advances_integrated_to_schema_migrated_for_merged_bra
 
     result.expect("reconcile-accepted T902 must succeed on merged-branch integrated row");
 
-    // Final state: schema_migrated. transition_history shows the framework
-    // verbs were fired (NOT mark_deploy_blocked / NOT a synthetic flip back —
-    // the row stayed truthful at integrated → cargo_installed → schema_migrated).
+    // Final state: generic status remains integrated; stores-specific progress
+    // is represented by post_integration_step=schema_migrated.
     assert_eq!(
         status_of(&conn, "T902"),
-        "schema_migrated",
-        "T902 must reach schema_migrated via direct chain re-fire"
+        "integrated",
+        "T902 must keep generic status integrated after direct chain re-fire"
     );
+    let post_step: String = conn
+        .query_row(
+            "SELECT post_integration_step FROM tasks WHERE display_id='T902'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(post_step, "schema_migrated");
     assert_eq!(
         count_history(&conn, "T902", "mark_cargo_installed"),
         1,

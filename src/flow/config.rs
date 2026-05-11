@@ -20,6 +20,8 @@ pub struct StoresConfig {
     pub review: Option<ReviewCfg>,
     #[serde(default)]
     pub codex: Option<CodexCfg>,
+    #[serde(default)]
+    pub integration_steps: BTreeMap<String, IntegrationStepCfg>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -78,6 +80,11 @@ pub struct CodexCfg {
     pub command: String,
     #[serde(default = "default_codex_args")]
     pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct IntegrationStepCfg {
+    pub agent: String,
 }
 
 impl Default for CodexCfg {

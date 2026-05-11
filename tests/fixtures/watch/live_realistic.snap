@@ -15,11 +15,11 @@ system-alert: daemon DEAD; 8 dangling locks; oldest started 8h ago
   L199  open                     priority:normal ×31 deploy-blocked: task T304 m
   L230  open                     priority:normal ×28 deploy-blocked: task T305 m
   L258  open                     priority:normal ×24 deploy-blocked: task T306 m
-▾ ACTIVE WORK (2)
-  T500  plan_review              plan ◐ runner:none age:NNN tier:T2 · planner
-▾ ACCEPT-U3 (4)
-  T400  in_review                wrap → external review: unavailable / not insta
+▾ ACTIVE (2)
+  T500  plan_review lifecycle=active active_step=planning_review integration_ste
+▾ AWAITING HUMAN ACCEPTANCE (4)
+  T400  in_review lifecycle=active active_step=wrapping integration_step=none wr
 ▾ HELD-DEPLOY (7)
-  T300  deploy:retry-deploy-recoverable runner:none age:NNN tier:T2 · reason:
+  T300  blocked:retry            active:none:none runner:none age:NNN tier:T2
 ▾ HELD-ZOMBIE (2)
-  T600  blocked:unknown          runner:none age:NNN tier:T2 · reason:silent_
+  T600  blocked:unknown          active:none:none runner:none age:NNN tier:T2

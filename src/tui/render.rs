@@ -524,7 +524,14 @@ fn draw_recent_exhaust(f: &mut Frame, app: &App, area: Rect) {
         let parts: Vec<String> = exhaust
             .iter()
             .filter_map(|row| match row {
-                Row::Task(t) => Some(format!("{} {}", t.display_id, t.status)),
+                Row::Task(t) => Some(format!(
+                    "{} {} lifecycle={} active_step={} integration_step={}",
+                    t.display_id,
+                    t.status,
+                    super::data::task_lifecycle(t),
+                    super::data::task_active_step(t),
+                    super::data::task_integration_step(t)
+                )),
                 _ => None,
             })
             .collect();
@@ -557,6 +564,7 @@ fn mission_compact_window(app: &App, flat: &[FlatRow]) -> Vec<FlatRow> {
     // (historical noise) and ObsOther (handled via the collapsed-row extend below)
     // are the only intentional exclusions.
     let wanted_single = [
+        Section::TasksQueued,
         Section::TasksActionableCurrentWork,
         Section::ObsRatifiable,
         Section::TasksAcceptU3,
@@ -877,42 +885,53 @@ fn format_review_line(r: &super::data::ReviewRow) -> Vec<Span<'static>> {
 }
 
 fn task_status_label(t: &super::data::TaskRow) -> String {
-    match t.status.as_str() {
-        "closed_out_of_band" | "accepted" | "complete" | "cargo_installed" | "schema_migrated" => {
-            "recovered/done".to_string()
-        }
-        "rejected" => "terminal-unless-amended".to_string(),
-        "blocked" => format!(
-            "blocked:{}",
-            t.blocked_reason_class
-                .as_deref()
-                .unwrap_or_else(|| blocked_reason_class(t.blocked_reason.as_deref()))
-        ),
-        "deploy_blocked" => format!(
-            "deploy:{}",
-            t.blocked_reason
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("unknown")
-        ),
-        "integration_blocked" => format!(
-            "integration:{}",
-            t.blocked_reason
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("unknown")
-        ),
-        "integration_queued" => "integration:queued".to_string(),
-        "integrating" => "integration:running".to_string(),
-        "integrated" => "integration:landed".to_string(),
-        other => other.to_string(),
+    if t.status == "rejected" {
+        return format!(
+            "terminal-unless-amended lifecycle={} active_step={} integration_step={}",
+            super::data::task_lifecycle(t),
+            super::data::task_active_step(t),
+            super::data::task_integration_step(t)
+        );
+    }
+    if super::data::task_is_terminal_primary(t) {
+        return format!(
+            "recovered/done lifecycle={} active_step={} integration_step={}",
+            super::data::task_lifecycle(t),
+            super::data::task_active_step(t),
+            super::data::task_integration_step(t)
+        );
+    }
+    if super::data::task_is_blocked(t) {
+        let kind = t
+            .blocker_kind
+            .as_deref()
+            .filter(|s| !s.is_empty() && *s != "none")
+            .or(t.blocked_reason_class.as_deref())
+            .unwrap_or_else(|| blocked_reason_class(t.blocked_reason.as_deref()));
+        return format!("blocked:{kind}");
+    }
+    let primary = format!(
+        "lifecycle={} active_step={} integration_step={}",
+        super::data::task_lifecycle(t),
+        super::data::task_active_step(t),
+        super::data::task_integration_step(t)
+    );
+    if t.status == "legacy_unknown" {
+        primary
+    } else {
+        format!("{} {primary}", t.status)
     }
 }
 
 fn task_progress_text(t: &super::data::TaskRow, external_review: &ExternalReviewState) -> String {
     let progress = super::progress::task_progress(t, external_review);
     if progress.text == t.status {
-        String::new()
+        format!(
+            "{}:{}:{} ",
+            super::data::task_lifecycle(t),
+            super::data::task_active_step(t),
+            super::data::task_integration_step(t)
+        )
     } else {
         format!("{} ", progress.text)
     }
@@ -923,7 +942,8 @@ fn task_snippet(t: &super::data::TaskRow) -> String {
     if let Some(tier) = t.tier_hint.as_deref().filter(|s| !s.is_empty()) {
         parts.push(format!("tier:{tier}"));
     }
-    if t.status == "planning" {
+    if super::data::task_lifecycle(t) == "active" && super::data::task_active_step(t) == "planning"
+    {
         if let Some(pid) = t.drive_pid {
             parts.push(format!("drive_pid:{pid}"));
         } else if t
@@ -937,10 +957,7 @@ fn task_snippet(t: &super::data::TaskRow) -> String {
             parts.push("workspace:none".to_string());
         }
     }
-    if matches!(
-        t.status.as_str(),
-        "blocked" | "deploy_blocked" | "integration_blocked"
-    ) {
+    if super::data::task_is_blocked(t) {
         if let Some(reason) = t.blocked_reason.as_deref().filter(|s| !s.is_empty()) {
             parts.push(format!("reason:{reason}"));
         }

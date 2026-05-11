@@ -1,13 +1,15 @@
 //! `builtin:schema-migrate` — apply additive schema migrations after the
 //! refreshed `stores` binary is in place.
 //!
-//! Subscribes to the post-cargo-install transition (row=cargo_installed).
-//! Delegates the migration to a `stores migrate --apply` subprocess (resolved
+//! Subscribes after cargo-install via `post_integration_step='cargo_installed'`
+//! while the generic task status remains `integrated`. Delegates the migration
+//! to a `stores migrate --apply` subprocess (resolved
 //! via the `STORES_BIN` env override or PATH lookup) with `cwd =
 //! workspace_path` so the freshly cargo-installed binary's bundled schemas
 //! drive the diff — not the daemon's stale in-process schemas. On success
-//! fires `mark_schema_migrated` (framework actor) — terminal in the
-//! post-accept chain. On failure flips the row to `deploy_blocked` with the
+//! fires `mark_schema_migrated` (framework actor), setting
+//! `post_integration_step='schema_migrated'`. On failure sets the stores-only
+//! post-integration step to `deploy_blocked` with the
 //! subprocess stderr captured in `blocked_reason`, fires `ntfy`, and
 //! dispatches the row to the configured `deployment_specialist`.
 

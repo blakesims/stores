@@ -15,6 +15,11 @@ You are the gate. If the plan isn't ready, send it back.
 
 **ID:** {{display_id}}
 **Title:** {{title}}
+
+## Task State (ADR 0001 primary columns)
+
+lifecycle={{lifecycle}} active_step={{active_step}} integration_step={{integration_step}} blocked={{blocked}} blocker_kind={{blocker_kind}} post_integration_step={{post_integration_step}}
+
 {{#if slug}}**Slug:** {{slug}}{{/if}}
 
 ## Contract

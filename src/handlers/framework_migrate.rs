@@ -24,28 +24,26 @@ use crate::codegen::ddl::{quote_ident, FrameworkColumn, FRAMEWORK_DDL_TABLES};
 /// combustion-class subscribers — single source of truth.
 pub const IN_FLIGHT_STATES: &[&str] = &["executing", "code_review", "integrating"];
 
-/// Name of the partial UNIQUE index that enforces the integration-lane
-/// capacity-1 invariant on the `tasks` table. T138 P1.
+/// Name of the partial UNIQUE index that enforces the integration-lane merge
+/// capacity invariant on the `tasks` table.
 ///
-/// At most one row substrate-wide can hold `status='integrating'`. Concurrent
-/// `start-integration` attempts surface as a SQLite UNIQUE ConstraintViolation
-/// at the schema layer, which the integrate builtin treats as capacity-busy
-/// (returns Ok(0)) rather than as a runtime error.
+/// ADR0001 P3 permits multiple rows to be in `status='integrating'` while they
+/// are refreshing, task_review, or testing. Only the truth-mutating merging
+/// substep is singleton.
 pub const INTEGRATION_SINGLETON_INDEX: &str = "idx_tasks_integration_singleton";
 
 /// SQL for the partial UNIQUE index. Index value `1` is constant for every
 /// row that matches the WHERE predicate, so the UNIQUE constraint reduces to
-/// "at most one row may match". Idempotent (`IF NOT EXISTS`); safe to run on
-/// every boot. T138 P1.
+/// "at most one row may be merging".
 pub const INTEGRATION_SINGLETON_INDEX_DDL: &str = concat!(
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_integration_singleton ",
-    "ON tasks((1)) WHERE status='integrating'"
+    "ON tasks((1)) WHERE status='integrating' AND integration_step='merging'"
 );
 
-/// Create the integration-lane capacity-1 partial UNIQUE index on `tasks` if
-/// the `tasks` table exists. The `tasks` store is installed separately from
-/// the substrate tables, so we guard the CREATE INDEX with a table-existence
-/// check (mirrors `ensure_runs_view_if_tasks_exists`). Idempotent. T138 P1.
+/// Create or upgrade the integration-lane merge capacity partial UNIQUE index
+/// on `tasks` if the `tasks` table exists. The `tasks` store is installed
+/// separately from the substrate tables, so we guard the CREATE INDEX with a
+/// table-existence check (mirrors `ensure_runs_view_if_tasks_exists`).
 pub fn ensure_integration_singleton_index(conn: &Connection) -> Result<()> {
     let tasks_exists: bool = conn
         .query_row(
@@ -57,6 +55,21 @@ pub fn ensure_integration_singleton_index(conn: &Connection) -> Result<()> {
         > 0;
     if !tasks_exists {
         return Ok(());
+    }
+    let existing_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+            [INTEGRATION_SINGLETON_INDEX],
+            |r| r.get(0),
+        )
+        .ok();
+    if existing_sql
+        .as_deref()
+        .map(|sql| !sql.contains("integration_step='merging'"))
+        .unwrap_or(false)
+    {
+        conn.execute_batch("DROP INDEX idx_tasks_integration_singleton")
+            .context("drop legacy idx_tasks_integration_singleton")?;
     }
     conn.execute_batch(INTEGRATION_SINGLETON_INDEX_DDL)
         .context("create idx_tasks_integration_singleton")?;
@@ -127,14 +140,9 @@ pub fn compute_framework_drift(conn: &Connection) -> Result<FrameworkDrift> {
 /// applied column in `substrate_migrations`. Returns the materialised audit
 /// rows. No-op (returns empty Vec) when there is no drift.
 pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMigration>> {
-    // T138 P1: ensure the integration-lane capacity-1 partial UNIQUE index on
-    // `tasks` exists before the column drift loop runs. Independent of the
-    // additive-column flow (this is a CREATE INDEX, not an ALTER), idempotent,
-    // and a no-op when the `tasks` table is absent.
-    ensure_integration_singleton_index(conn)?;
-
     let drift = compute_framework_drift(conn)?;
     if drift.additive.is_empty() {
+        ensure_integration_singleton_index(conn)?;
         return Ok(Vec::new());
     }
     let binary_version = env!("CARGO_PKG_VERSION").to_string();
@@ -155,7 +163,12 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
         if table == "tasks"
             && matches!(
                 col.name,
-                "lifecycle" | "active_step" | "integration_step" | "blocked" | "blocker_kind"
+                "lifecycle"
+                    | "active_step"
+                    | "integration_step"
+                    | "blocked"
+                    | "blocker_kind"
+                    | "post_integration_step"
             )
         {
             backfill_tasks_lifecycle_overlay = true;
@@ -257,24 +270,66 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
             }
             drop(stmt);
             for (id, display_id, status, blocked_reason, integration_blocked_reason) in backfills {
-                let overlay = crate::handlers::lifecycle_overlay::derive(
-                    "backfill",
-                    "",
-                    &status,
-                    blocked_reason.as_deref(),
-                    integration_blocked_reason.as_deref(),
-                )
-                .with_context(|| {
-                    format!("T144 P1: derive lifecycle overlay backfill for {display_id}")
-                })?;
+                let overlay = if IN_FLIGHT_STATES.contains(&status.as_str()) {
+                    let (lifecycle, active_step, integration_step) = match status.as_str() {
+                        "executing" => ("active", "coding", "none"),
+                        "code_review" => ("active", "coding_review", "none"),
+                        "integrating" => ("integration", "none", "merging"),
+                        _ => ("active", "none", "none"),
+                    };
+                    crate::handlers::lifecycle_overlay::LifecycleOverlay {
+                        lifecycle: lifecycle.to_string(),
+                        active_step: active_step.to_string(),
+                        integration_step: integration_step.to_string(),
+                        blocked: false,
+                        blocker_kind: None,
+                        legacy_status: Some(status.clone()),
+                    }
+                } else {
+                    crate::handlers::lifecycle_overlay::derive(
+                        "backfill_queued",
+                        "",
+                        &status,
+                        blocked_reason.as_deref(),
+                        integration_blocked_reason.as_deref(),
+                    )
+                    .with_context(|| {
+                        format!("T144 P1: derive lifecycle overlay backfill for {display_id}")
+                    })?
+                };
+                let repo_specific_post_integration =
+                    matches!(status.as_str(), "cargo_installed" | "schema_migrated" | "deploy_blocked");
+                let post_integration_step = match status.as_str() {
+                    "cargo_installed" => "cargo_installed",
+                    "schema_migrated" => "schema_migrated",
+                    "deploy_blocked" => "deploy_blocked",
+                    _ => "none",
+                };
+                let migrated_status = if repo_specific_post_integration {
+                    "integrated"
+                } else {
+                    status.as_str()
+                };
+                let lifecycle = if repo_specific_post_integration {
+                    "done".to_string()
+                } else {
+                    overlay.lifecycle
+                };
+                let integration_step = if repo_specific_post_integration {
+                    "none".to_string()
+                } else {
+                    overlay.integration_step
+                };
                 tx.execute(
-                    "UPDATE tasks SET lifecycle=?1, active_step=?2, integration_step=?3, blocked=?4, blocker_kind=?5 WHERE id=?6",
+                    "UPDATE tasks SET status=?1, lifecycle=?2, active_step=?3, integration_step=?4, blocked=?5, blocker_kind=?6, post_integration_step=?7 WHERE id=?8",
                     rusqlite::params![
-                        overlay.lifecycle,
+                        migrated_status,
+                        lifecycle,
                         overlay.active_step,
-                        overlay.integration_step,
+                        integration_step,
                         if overlay.blocked { 1 } else { 0 },
                         overlay.blocker_kind,
+                        post_integration_step,
                         id
                     ],
                 )
@@ -287,6 +342,7 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
     tx.commit()
         .context("failed to commit atomic framework-DDL apply + audit")?;
 
+    ensure_integration_singleton_index(conn)?;
     Ok(applied)
 }
 
@@ -361,8 +417,9 @@ mod tests {
     }
 
     /// AC1.5: framework_migrate handler creates the partial UNIQUE index
-    /// `idx_tasks_integration_singleton` on tasks(status) WHERE
-    /// status='integrating'. Verified via sqlite_master introspection.
+    /// `idx_tasks_integration_singleton` on tasks(status,integration_step)
+    /// WHERE status='integrating' AND integration_step='merging'. Verified
+    /// via sqlite_master introspection.
     #[test]
     fn t138_p1_integration_singleton_index_created() {
         let conn = fresh_db_with_tasks();
@@ -382,17 +439,18 @@ mod tests {
         let upper = sql.to_ascii_uppercase();
         assert!(upper.contains("UNIQUE"), "index must be UNIQUE: {sql}");
         assert!(
-            upper.contains("WHERE STATUS='INTEGRATING'")
-                || upper.contains("WHERE STATUS = 'INTEGRATING'"),
+            upper.contains("STATUS='INTEGRATING'") || upper.contains("STATUS = 'INTEGRATING'"),
             "index must filter on status='integrating': {sql}"
+        );
+        assert!(
+            upper.contains("INTEGRATION_STEP='MERGING'")
+                || upper.contains("INTEGRATION_STEP = 'MERGING'"),
+            "index must filter on integration_step='merging': {sql}"
         );
     }
 
-    /// AC1.5: two rows attempting to UPDATE status='integrating' simultaneously
-    /// result in exactly one success and one ConstraintViolation. The partial
-    /// UNIQUE index makes the integrating slot a substrate-wide singleton at
-    /// the schema level — concurrent ticks no longer rely on best-effort
-    /// SELECT-then-INSERT.
+    /// ADR0001 P3: two rows may be `status='integrating'` in non-merging
+    /// substeps, but only one row may hold `integration_step='merging'`.
     #[test]
     fn t138_p1_integration_singleton_index_enforces_capacity_one() {
         let conn = fresh_db_with_tasks();
@@ -410,22 +468,28 @@ mod tests {
             [],
         ).unwrap();
 
-        // First UPDATE to 'integrating' must succeed.
-        let r1 = conn.execute(
-            "UPDATE tasks SET status='integrating' WHERE display_id='T801'",
+        conn.execute(
+            "UPDATE tasks SET status='integrating', integration_step='task_review' WHERE display_id='T801'",
             [],
-        );
-        assert!(
-            r1.is_ok(),
-            "first UPDATE to integrating must succeed: {r1:?}"
-        );
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tasks SET status='integrating', integration_step='testing' WHERE display_id='T802'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE tasks SET integration_step='merging' WHERE display_id='T801'",
+            [],
+        )
+        .unwrap();
 
-        // Second UPDATE to 'integrating' must fail with ConstraintViolation.
+        // Second UPDATE to merging must fail with ConstraintViolation.
         let r2 = conn.execute(
-            "UPDATE tasks SET status='integrating' WHERE display_id='T802'",
+            "UPDATE tasks SET integration_step='merging' WHERE display_id='T802'",
             [],
         );
-        let err = r2.expect_err("second UPDATE to integrating must fail");
+        let err = r2.expect_err("second UPDATE to merging must fail");
         let msg = format!("{err}");
         assert!(
             msg.to_ascii_uppercase().contains("UNIQUE")
@@ -433,7 +497,7 @@ mod tests {
             "error must surface UNIQUE/constraint violation: {msg}"
         );
 
-        // Sanity: only T801 holds the integrating slot.
+        // Sanity: both rows are integrating, but only T801 is merging.
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM tasks WHERE status='integrating'",
@@ -441,7 +505,15 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1, "exactly one row may hold status='integrating'");
+        assert_eq!(n, 2, "non-merging substeps may run in parallel");
+        let merging: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status='integrating' AND integration_step='merging'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(merging, 1, "exactly one row may be merging");
     }
 
     /// `ensure_integration_singleton_index` is idempotent — repeated calls do
@@ -463,6 +535,57 @@ mod tests {
             n, 1,
             "exactly one index named idx_tasks_integration_singleton"
         );
+    }
+
+    #[test]
+    fn queued_lifecycle_backfill() {
+        let conn = fresh_db_with_tasks();
+        for col in [
+            "lifecycle",
+            "active_step",
+            "integration_step",
+            "blocked",
+            "blocker_kind",
+        ] {
+            conn.execute_batch(&format!("ALTER TABLE tasks DROP COLUMN {col};"))
+                .unwrap();
+        }
+        let cases = [
+            ("T901", "planning", "queued"),
+            ("T902", "ready", "queued"),
+            ("T903", "blocked", "queued"),
+            ("T904", "complete", "queued"),
+            ("T905", "in_review", "queued"),
+            ("T906", "integrated", "queued"),
+            ("T907", "executing", "active"),
+            ("T908", "code_review", "active"),
+            ("T909", "integrating", "integration"),
+        ];
+        for (display_id, status, _) in cases {
+            conn.execute(
+                "INSERT INTO tasks (display_id,status,title,slug,created_at,updated_at,created_by,updated_by) VALUES (?1,?2,?3,?3,'n','n','framework','framework')",
+                rusqlite::params![display_id, status, status],
+            ).unwrap();
+        }
+        apply_framework_drift(&conn).unwrap();
+        for (display_id, status, expected_lifecycle) in cases {
+            let got: (String, String, String) = conn
+                .query_row(
+                    "SELECT lifecycle, active_step, integration_step FROM tasks WHERE display_id=?1",
+                    [display_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(got.0, expected_lifecycle, "{status}");
+            if expected_lifecycle == "queued" {
+                assert_eq!(got.1, "none", "active_step for {status}");
+                assert_eq!(got.2, "none", "integration_step for {status}");
+            }
+            if status == "integrating" {
+                assert_eq!(got.1, "none", "active_step for {status}");
+                assert_eq!(got.2, "merging", "integration_step for {status}");
+            }
+        }
     }
 
     #[test]
