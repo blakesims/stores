@@ -7,7 +7,10 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SECS_PER_DAY: i64 = 86_400;
@@ -144,6 +147,26 @@ pub enum Row {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct LiveRunEventSummary {
+    pub ts: Option<String>,
+    pub event_type: String,
+    pub label: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LiveRunSummary {
+    pub role: String,
+    pub runner: Option<String>,
+    pub status: Option<String>,
+    pub updated_at: Option<String>,
+    pub last_event_at: Option<String>,
+    pub last_event_type: Option<String>,
+    pub current_activity: Option<String>,
+    pub events: Vec<LiveRunEventSummary>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct TaskRow {
     pub display_id: String,
     pub status: String,
@@ -190,6 +213,7 @@ pub struct TaskRow {
     pub claimed_at: Option<String>,
     pub integration_attempts_count: usize,
     pub last_integration_outcome: Option<String>,
+    pub live_run: Option<LiveRunSummary>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -397,7 +421,10 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
                 if task_is_blocked(t) {
                     model.held += 1;
                 }
-                if !task_is_terminal_with_compat(t) && !task_is_blocked(t) && task_is_in_flight_primary(t) {
+                if !task_is_terminal_with_compat(t)
+                    && !task_is_blocked(t)
+                    && task_is_in_flight_primary(t)
+                {
                     model.active += 1;
                 }
                 if is_priority_task(t) {
@@ -821,6 +848,221 @@ impl Row {
     }
 }
 
+const LIVE_ACTIVITY_LIMIT: usize = 5;
+const LIVE_EVENTS_READ_BYTES: u64 = 32 * 1024;
+const LIVE_TEXT_LIMIT: usize = 100;
+
+fn load_live_run_summary(display_id: &str, workspace_path: Option<&str>) -> Option<LiveRunSummary> {
+    let workspace = workspace_path?.trim();
+    if workspace.is_empty() {
+        return None;
+    }
+    let stores_dir = Path::new(workspace).join(".stores");
+    let runs_dir = stores_dir.join("runs");
+    let prefix = format!("current-{display_id}-");
+    let entries = std::fs::read_dir(&runs_dir).ok()?;
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(marker) = serde_json::from_str::<crate::cli::runs::CurrentRunMarker>(&body) else {
+            continue;
+        };
+        candidates.push(crate::cli::runs::CurrentRun {
+            marker_path: path,
+            marker,
+        });
+    }
+    candidates.sort_by(|a, b| {
+        let au = a.marker.updated_at.as_deref().unwrap_or("");
+        let bu = b.marker.updated_at.as_deref().unwrap_or("");
+        au.cmp(bu).then_with(|| a.marker.role.cmp(&b.marker.role))
+    });
+    let current = candidates.pop()?;
+    let status = crate::cli::runs::read_current_status(&stores_dir, &current)
+        .ok()
+        .flatten();
+    let events_path = current
+        .marker
+        .events_path
+        .as_ref()
+        .map(|p| crate::cli::runs::resolve_marker_path(&stores_dir, &current.marker_path, p))
+        .or_else(|| {
+            current
+                .marker
+                .status_path
+                .as_ref()
+                .map(|p| {
+                    crate::cli::runs::resolve_marker_path(&stores_dir, &current.marker_path, p)
+                })
+                .and_then(|p| p.parent().map(|parent| parent.join("events.jsonl")))
+        });
+    let events = events_path
+        .as_deref()
+        .map(read_live_event_summaries)
+        .unwrap_or_default();
+    Some(LiveRunSummary {
+        role: current.marker.role,
+        runner: current.marker.runner,
+        status: current.marker.status,
+        updated_at: current.marker.updated_at,
+        last_event_at: status.as_ref().and_then(|s| s.last_event_at.clone()),
+        last_event_type: status.as_ref().and_then(|s| s.last_event_type.clone()),
+        current_activity: status.and_then(|s| s.current_activity),
+        events,
+    })
+}
+
+fn read_live_event_summaries(path: &Path) -> Vec<LiveRunEventSummary> {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return Vec::new();
+    };
+    let start = len.saturating_sub(LIVE_EVENTS_READ_BYTES);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = String::new();
+    if file.read_to_string(&mut buf).is_err() {
+        return Vec::new();
+    }
+    if start > 0 {
+        if let Some(pos) = buf.find('\n') {
+            buf = buf[pos + 1..].to_string();
+        }
+    }
+    let mut meaningful = Vec::new();
+    let mut fallback = None;
+    for line in buf.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        let Some(summary) = summarize_live_event(&v) else {
+            continue;
+        };
+        if summary.event_type == "heartbeat" {
+            fallback = Some(summary);
+        } else {
+            meaningful.push(summary);
+        }
+    }
+    if meaningful.is_empty() {
+        return fallback.into_iter().collect();
+    }
+    let keep_from = meaningful.len().saturating_sub(LIVE_ACTIVITY_LIMIT);
+    meaningful.split_off(keep_from)
+}
+
+fn summarize_live_event(v: &Value) -> Option<LiveRunEventSummary> {
+    let event_type = v.get("type").and_then(|x| x.as_str()).unwrap_or("event");
+    let ts = v.get("ts").and_then(|x| x.as_str()).map(str::to_string);
+    let (label, text) = match event_type {
+        "heartbeat" => ("heartbeat".to_string(), String::new()),
+        "assistant_text" => (
+            if v.get("partial").and_then(|x| x.as_bool()).unwrap_or(false) {
+                "assistant*".to_string()
+            } else {
+                "assistant".to_string()
+            },
+            string_field(v, "text").unwrap_or_default(),
+        ),
+        "tool_start" => {
+            let name = string_field(v, "name").unwrap_or_else(|| "tool".to_string());
+            let args = string_field(v, "args_preview").unwrap_or_default();
+            ("tool_start".to_string(), join_nonempty(&[name, args]))
+        }
+        "tool_end" => {
+            let ok = v
+                .get("ok")
+                .and_then(|x| x.as_bool())
+                .map(|ok| if ok { "ok" } else { "error" })
+                .unwrap_or("done");
+            let summary = string_field(v, "summary").unwrap_or_default();
+            (
+                "tool_end".to_string(),
+                join_nonempty(&[ok.to_string(), summary]),
+            )
+        }
+        "retry" => {
+            let reason = string_field(v, "reason").unwrap_or_else(|| "api retry".to_string());
+            ("retry".to_string(), reason)
+        }
+        "usage" => {
+            let input = v.get("input_tokens").and_then(|x| x.as_i64());
+            let output = v.get("output_tokens").and_then(|x| x.as_i64());
+            let cache = v.get("cache_read_tokens").and_then(|x| x.as_i64());
+            (
+                "usage".to_string(),
+                format!(
+                    "in={} out={} cache={}",
+                    input
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".to_string()),
+                    output
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".to_string()),
+                    cache
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                ),
+            )
+        }
+        "final_output" => ("final".to_string(), "final output received".to_string()),
+        "error" => (
+            "error".to_string(),
+            string_field(v, "message")
+                .or_else(|| string_field(v, "subtype"))
+                .unwrap_or_default(),
+        ),
+        other => ("event".to_string(), other.to_string()),
+    };
+    Some(LiveRunEventSummary {
+        ts,
+        event_type: event_type.to_string(),
+        label,
+        text: truncate_chars(&one_line(&text), LIVE_TEXT_LIMIT),
+    })
+}
+
+fn string_field(v: &Value, key: &str) -> Option<String> {
+    v.get(key).map(|x| match x {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    })
+}
+
+fn join_nonempty(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out = s.chars().take(max.saturating_sub(1)).collect::<String>();
+    out.push('…');
+    out
+}
+
 /// Load tasks + observations (+ intake when installed) from the db. Errors out only on
 /// hard sqlite failures; optional tables/columns degrade to empty/default data.
 pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
@@ -947,7 +1189,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
                 "executive_summary",
             ),
             branch,
-            workspace_path,
+            workspace_path: workspace_path.clone(),
             drive_pid,
             drive_started_at,
             artifact_pointers: Vec::new(),
@@ -960,6 +1202,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             claimed_at,
             integration_attempts_count,
             last_integration_outcome,
+            live_run: load_live_run_summary(&display_id, workspace_path.as_deref()),
         })
     })?;
     for r in task_iter.flatten() {
@@ -2550,10 +2793,110 @@ mod tests {
         let rows = load_rows(&conn).unwrap();
         assert_eq!(rows.iter().filter(|r| matches!(r, Row::Task(_))).count(), 1);
         assert_eq!(rows.iter().filter(|r| matches!(r, Row::Obs(_))).count(), 1);
+        let task = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Task(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            task.live_run.is_none(),
+            "missing workspace/marker should not create live section"
+        );
         assert!(matches!(
             load_external_review_state(&conn).unwrap(),
             ExternalReviewState::Unavailable { .. }
         ));
+    }
+
+    #[test]
+    fn load_rows_adds_live_run_summary_and_suppresses_heartbeat_noise() {
+        let conn = cockpit_conn();
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("wt");
+        let runs = workspace.join(".stores/runs");
+        std::fs::create_dir_all(runs.join("sess")).unwrap();
+        std::fs::write(
+            runs.join("current-T777-planner.json"),
+            serde_json::json!({
+                "display_id":"T777",
+                "role":"planner",
+                "runner":"claude-code:opus",
+                "status":"running",
+                "session_id":"sess",
+                "updated_at":"2026-05-11T00:00:00Z",
+                "events_path": runs.join("sess/events.jsonl"),
+                "status_path": runs.join("sess/status.json")
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            runs.join("sess/status.json"),
+            r#"{"last_event_at":"2026-05-11T00:00:07Z","last_event_type":"tool_start","current_activity":"tool:bash"}"#,
+        ).unwrap();
+        let mut event_lines = Vec::new();
+        event_lines.push(r#"{"type":"heartbeat","ts":"2026-05-11T00:00:01Z"}"#.to_string());
+        for i in 0..6 {
+            event_lines.push(
+                serde_json::json!({
+                    "type":"assistant_text",
+                    "ts": format!("2026-05-11T00:00:0{}Z", i + 2),
+                    "text": format!("message {i}")
+                })
+                .to_string(),
+            );
+        }
+        event_lines.push("{not json".to_string());
+        std::fs::write(runs.join("sess/events.jsonl"), event_lines.join("\n")).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,updated_at,linked_observations,workspace_path) VALUES ('T777','planning','task','2026-05-01','[]',?1)",
+            [workspace.to_string_lossy().to_string()],
+        ).unwrap();
+
+        let rows = load_rows(&conn).unwrap();
+        let task = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Task(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        let live = task.live_run.as_ref().expect("live summary");
+        assert_eq!(live.role, "planner");
+        assert_eq!(live.runner.as_deref(), Some("claude-code:opus"));
+        assert_eq!(live.current_activity.as_deref(), Some("tool:bash"));
+        assert_eq!(
+            live.events.len(),
+            5,
+            "sliding window keeps last five meaningful events"
+        );
+        assert!(
+            live.events.iter().all(|e| e.event_type != "heartbeat"),
+            "heartbeat noise suppressed: {:?}",
+            live.events
+        );
+        assert_eq!(live.events[0].text, "message 1");
+        assert_eq!(live.events[4].text, "message 5");
+    }
+
+    #[test]
+    fn live_event_summary_truncates_long_text() {
+        let long = "x".repeat(160);
+        let summary = summarize_live_event(&serde_json::json!({
+            "type": "assistant_text",
+            "ts": "2026-05-11T00:00:00Z",
+            "text": long
+        }))
+        .unwrap();
+        assert_eq!(summary.label, "assistant");
+        assert!(summary.text.chars().count() <= LIVE_TEXT_LIMIT);
+        assert!(
+            summary.text.ends_with('…'),
+            "expected ellipsis: {}",
+            summary.text
+        );
     }
 
     #[test]

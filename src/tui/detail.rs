@@ -81,12 +81,15 @@ fn task_lines(t: &TaskRow, app: &App) -> Vec<String> {
             opt_i64(t.total_phases)
         ),
         format!("  cycle: {}", opt_i64(t.current_cycle)),
+    ];
+    append_live_runner(&mut lines, t);
+    lines.extend([
         String::new(),
         "Blockers / held reasons".to_string(),
         format!("  {}", present_opt(t.blocked_reason.as_deref())),
         String::new(),
         "Recent events".to_string(),
-    ];
+    ]);
     append_events(&mut lines, &t.recent_events);
     lines.extend([
         String::new(),
@@ -118,6 +121,63 @@ fn task_lines(t: &TaskRow, app: &App) -> Vec<String> {
         ]);
     }
     lines
+}
+
+fn append_live_runner(lines: &mut Vec<String>, t: &TaskRow) {
+    let Some(live) = &t.live_run else {
+        return;
+    };
+    let now = now_epoch_secs();
+    let mut summary = format!(
+        "  {} · {} · {}",
+        present(&live.role),
+        present_opt(live.runner.as_deref()),
+        present_opt(live.status.as_deref())
+    );
+    if let Some(ts) = live.last_event_at.as_deref() {
+        summary.push_str(&format!(
+            " · last event {}",
+            crate::tui::footer::relative_time(ts, now)
+        ));
+    } else if let Some(ts) = live.updated_at.as_deref() {
+        summary.push_str(&format!(
+            " · updated {}",
+            crate::tui::footer::relative_time(ts, now)
+        ));
+    }
+    if let Some(kind) = live.last_event_type.as_deref() {
+        summary.push_str(&format!(" · {kind}"));
+    }
+    if let Some(activity) = live.current_activity.as_deref() {
+        summary.push_str(&format!(" · {activity}"));
+    }
+    lines.extend([String::new(), "Live runner".to_string(), summary]);
+    lines.push(String::new());
+    lines.push(format!("Live activity · last {}", live.events.len().max(1)));
+    if live.events.is_empty() {
+        lines.push("  runner alive; no semantic activity yet".to_string());
+        return;
+    }
+    for event in &live.events {
+        let age = event
+            .ts
+            .as_deref()
+            .map(|ts| crate::tui::footer::relative_time(ts, now))
+            .unwrap_or_else(|| "?".to_string());
+        let text = if event.text.trim().is_empty() {
+            event.label.clone()
+        } else {
+            format!("{}   {}", event.label, event.text)
+        };
+        lines.push(format!("  {:<7} {}", age, text));
+    }
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn observation_lines(o: &ObsRow, app: &App) -> Vec<String> {
@@ -486,6 +546,48 @@ mod tests {
         ] {
             assert!(text.contains(needle), "missing {needle}: {text}");
         }
+    }
+
+    #[test]
+    fn task_detail_renders_live_runner_activity_window() {
+        let app = App::new(TuiOpts::default());
+        let row = Row::Task(TaskRow {
+            display_id: "T901".to_string(),
+            status: "planning".to_string(),
+            title: "live task".to_string(),
+            current_cycle: Some(1),
+            live_run: Some(crate::tui::data::LiveRunSummary {
+                role: "planner".to_string(),
+                runner: Some("claude-code:opus".to_string()),
+                status: Some("running".to_string()),
+                last_event_at: Some("2026-05-11T00:00:05Z".to_string()),
+                last_event_type: Some("tool_start".to_string()),
+                current_activity: Some("tool:bash".to_string()),
+                events: vec![crate::tui::data::LiveRunEventSummary {
+                    ts: Some("2026-05-11T00:00:04Z".to_string()),
+                    event_type: "tool_start".to_string(),
+                    label: "tool_start".to_string(),
+                    text: "Bash cargo test live_runner_window".to_string(),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let text = render_text_for_row(&row, &app);
+        assert!(text.contains("Live runner"), "missing live section: {text}");
+        assert!(
+            text.contains("planner · claude-code:opus · running"),
+            "missing summary: {text}"
+        );
+        assert!(text.contains("tool:bash"), "missing activity: {text}");
+        assert!(
+            text.contains("Live activity · last 1"),
+            "missing activity heading: {text}"
+        );
+        assert!(
+            text.contains("Bash cargo test live_runner_window"),
+            "missing event: {text}"
+        );
     }
 
     #[test]
