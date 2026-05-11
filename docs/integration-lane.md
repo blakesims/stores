@@ -19,7 +19,7 @@ of the queueing business.
 A row that was just accepted enters `lifecycle='integration'` and advances by `integration_step`:
 
 ```
-integration/queued
+integration/none (status=integration_queued; enqueued/pending)
    │ refresh without main_branch lock
    ▼
 integration/refreshing
@@ -34,7 +34,7 @@ integration/merging
    └──► integration/none blocked=true blocker_kind=<typed outcome>
 ```
 
-- `integration_step='queued'` — enqueued, awaiting capacity.
+- `status='integration_queued'` with `integration_step='none'` — enqueued/pending and awaiting integration capacity. This compatibility shape is intentional for existing DBs whose `integration_step` CHECK constraint predates the brief `queued` enum value.
 - `refreshing`, `task_review`, and `testing` — slow freshness/gate work; these steps do not hold `main_branch`.
 - `merging` — the only step that holds the `main_branch` ResourceLock.
 - `deploying` / `verifying` — optional post-merge integration substeps before generic `done`.
@@ -57,7 +57,7 @@ The partial UNIQUE index reduces to "at most one row may match the
 predicate" — atomic at the SQLite level. Concurrent
 `start-integration` attempts surface as a `ConstraintViolation`, which
 the integrate builtin treats as capacity-busy and returns `Ok(0)`. The
-queued row stays in `integration_queued` and is retried on the next
+pending row stays in `integration_queued` and is retried on the next
 dispatch tick. No application-level lock or scheduler is involved.
 
 This is why client repos must not implement competing queues: the

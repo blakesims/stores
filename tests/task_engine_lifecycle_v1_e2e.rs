@@ -208,7 +208,7 @@ fn t3_lifecycle_overlay_and_main_branch_lock_span_integration() {
     )
     .unwrap();
     assert_eq!(status(&conn, "T144E2E"), "integration_queued");
-    assert_overlay(&conn, "T144E2E", ("integration", "none", "queued", 0, None));
+    assert_overlay(&conn, "T144E2E", ("integration", "none", "none", 0, None));
 
     let cfg = db_tmp.path().join("agents.yaml");
     let p = policies();

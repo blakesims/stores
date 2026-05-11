@@ -164,7 +164,7 @@ agents:
         ).unwrap();
         assert_eq!(
             (lifecycle.as_str(), step.as_str(), by.as_str()),
-            ("integration", "queued", "policy_delegate")
+            ("integration", "none", "policy_delegate")
         );
     }
 
@@ -210,7 +210,7 @@ agents:
             .unwrap();
         assert_eq!(
             (lifecycle.as_str(), step.as_str()),
-            ("integration", "queued")
+            ("integration", "none")
         );
     }
 
