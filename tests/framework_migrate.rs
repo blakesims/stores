@@ -33,7 +33,7 @@ mod framework_migrate {
             ("T906", "integrated", "queued"),
             ("T907", "executing", "active"),
             ("T908", "code_review", "active"),
-            ("T909", "integrating", "active"),
+            ("T909", "integrating", "integration"),
         ];
         for (display_id, status, _) in cases {
             conn.execute(
@@ -54,6 +54,10 @@ mod framework_migrate {
             if expected_lifecycle == "queued" {
                 assert_eq!(got.1, "none", "active_step for {status}");
                 assert_eq!(got.2, "none", "integration_step for {status}");
+            }
+            if status == "integrating" {
+                assert_eq!(got.1, "none", "active_step for {status}");
+                assert_eq!(got.2, "merging", "integration_step for {status}");
             }
         }
     }

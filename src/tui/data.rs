@@ -1750,7 +1750,7 @@ pub fn task_active_step(t: &TaskRow) -> &str {
         .active_step
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != "none")
+        .filter(|s| !s.is_empty())
     {
         return v;
     }
@@ -1762,7 +1762,7 @@ pub fn task_integration_step(t: &TaskRow) -> &str {
         .integration_step
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != "none")
+        .filter(|s| !s.is_empty())
     {
         return v;
     }
@@ -2092,6 +2092,18 @@ mod tests {
             blocked_reason_class: Some(blocked_reason_class(blocked_reason).to_string()),
             ..Default::default()
         })
+    }
+
+    #[test]
+    fn primary_task_steps_keep_explicit_none() {
+        let row = TaskRow {
+            status: "planning".to_string(),
+            active_step: Some("none".to_string()),
+            integration_step: Some("none".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(task_active_step(&row), "none");
+        assert_eq!(task_integration_step(&row), "none");
     }
 
     fn task_with_id(id: &str, status: &str, updated_at: i64) -> Row {

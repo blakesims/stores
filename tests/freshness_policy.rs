@@ -60,6 +60,35 @@ fn fresh_inputs_allow_merge() {
 }
 
 #[test]
+fn branch_head_change_after_review_forces_rereview() {
+    let (_tmp, repo, _base, head) = repo();
+    let mut row = row(&repo, &head, json!(["src/lib.rs"]));
+    row.as_object_mut()
+        .unwrap()
+        .insert("branch_head_sha".to_string(), json!("new-candidate-head"));
+    assert_eq!(
+        check_freshness(&row, &head).unwrap(),
+        FreshnessOutcome::StaleRequiresRereview(vec!["src/lib.rs".to_string()])
+    );
+}
+
+#[test]
+fn branch_head_change_after_tests_forces_retest_when_review_is_current() {
+    let (_tmp, repo, _base, head) = repo();
+    let mut row = row(&repo, &head, json!(["src/lib.rs"]));
+    row.as_object_mut()
+        .unwrap()
+        .insert("branch_head_sha".to_string(), json!("new-candidate-head"));
+    row.as_object_mut()
+        .unwrap()
+        .insert("review_head_sha".to_string(), json!("new-candidate-head"));
+    assert_eq!(
+        check_freshness(&row, &head).unwrap(),
+        FreshnessOutcome::StaleRequiresRetest(vec!["src/lib.rs".to_string()])
+    );
+}
+
+#[test]
 fn missing_durable_inputs_forces_rerun() {
     let (_tmp, repo, base, head) = repo();
     let mut row = row(&repo, &base, json!(["src/lib.rs"]));

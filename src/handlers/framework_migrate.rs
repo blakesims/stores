@@ -271,16 +271,16 @@ pub fn apply_framework_drift(conn: &Connection) -> Result<Vec<AppliedFrameworkMi
             drop(stmt);
             for (id, display_id, status, blocked_reason, integration_blocked_reason) in backfills {
                 let overlay = if IN_FLIGHT_STATES.contains(&status.as_str()) {
-                    let active_step = match status.as_str() {
-                        "executing" => "coding",
-                        "code_review" => "coding_review",
-                        "integrating" => "none",
-                        _ => "none",
+                    let (lifecycle, active_step, integration_step) = match status.as_str() {
+                        "executing" => ("active", "coding", "none"),
+                        "code_review" => ("active", "coding_review", "none"),
+                        "integrating" => ("integration", "none", "merging"),
+                        _ => ("active", "none", "none"),
                     };
                     crate::handlers::lifecycle_overlay::LifecycleOverlay {
-                        lifecycle: "active".to_string(),
+                        lifecycle: lifecycle.to_string(),
                         active_step: active_step.to_string(),
-                        integration_step: "none".to_string(),
+                        integration_step: integration_step.to_string(),
                         blocked: false,
                         blocker_kind: None,
                         legacy_status: Some(status.clone()),

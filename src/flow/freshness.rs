@@ -33,10 +33,19 @@ pub fn check_freshness(row: &Value, current_main_sha: &str) -> Result<FreshnessO
         Some(v) => v,
         None => return Ok(FreshnessOutcome::StaleRequiresRetest(affected_scope(row))),
     };
-    if field(row, "review_head_sha").is_none() {
+    let branch_head = field(row, "branch_head_sha").expect("checked above");
+    let review_head = match field(row, "review_head_sha") {
+        Some(v) => v,
+        None => return Ok(FreshnessOutcome::StaleRequiresRereview(affected_scope(row))),
+    };
+    let test_head = match field(row, "test_head_sha") {
+        Some(v) => v,
+        None => return Ok(FreshnessOutcome::StaleRequiresRetest(affected_scope(row))),
+    };
+    if review_head != branch_head {
         return Ok(FreshnessOutcome::StaleRequiresRereview(affected_scope(row)));
     }
-    if field(row, "test_head_sha").is_none() {
+    if test_head != branch_head {
         return Ok(FreshnessOutcome::StaleRequiresRetest(affected_scope(row)));
     }
 
