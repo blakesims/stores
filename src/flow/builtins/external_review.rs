@@ -723,6 +723,12 @@ fn fire_task_external_review_revise(
     }
     if current_status == "blocked" {
         ensure_blocked_er_reconcile_allowed(conn, task_id, &existing)?;
+    } else {
+        let current_head = resolve_task_head(&existing)?;
+        if review_head.is_empty() || review_head != current_head {
+            tx.commit()?;
+            return Ok(());
+        }
     }
     let current_cycle = existing
         .get("current_cycle")
@@ -979,6 +985,29 @@ mod blocked_reconcile_tests {
         conn
     }
 
+    fn conn_with_tasks_schema() -> Connection {
+        let conn = conn_with_transition_history();
+        let schema =
+            crate::schema::Schema::from_yaml(include_str!("../../../stores/tasks/schema.yaml"))
+                .unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&schema))
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE external_reviews (id INTEGER PRIMARY KEY, display_id TEXT, task_id TEXT, attempt INTEGER, status TEXT, verdict TEXT, head_sha TEXT);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn task_contract_json() -> String {
+        serde_json::json!({
+            "done_when": "done",
+            "scope_in": "in",
+            "scope_out": "out"
+        })
+        .to_string()
+    }
+
     fn task_row(workspace: &std::path::Path, reason: &str) -> EntryMap {
         let mut row = EntryMap::new();
         row.insert(
@@ -1063,8 +1092,61 @@ mod blocked_reconcile_tests {
             Some("external_review:ER001:head1"),
         )
         .unwrap();
-        assert!(task_external_review_revise_already_applied(&tx, 7, "T001", "external_review:ER001:head1").unwrap());
-        assert!(!task_external_review_revise_already_applied(&tx, 7, "T001", "external_review:ER002:head1").unwrap());
+        assert!(task_external_review_revise_already_applied(
+            &tx,
+            7,
+            "T001",
+            "external_review:ER001:head1"
+        )
+        .unwrap());
+        assert!(!task_external_review_revise_already_applied(
+            &tx,
+            7,
+            "T001",
+            "external_review:ER002:head1"
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn stale_head_revise_does_not_bounce_in_review_task() {
+        let (dir, current_head) = git_repo();
+        let conn = conn_with_tasks_schema();
+        let stale_head = "deadbeef";
+        conn.execute(
+            "INSERT INTO tasks (display_id, status, title, slug, workspace_path, contract, current_phase, current_cycle, created_at, updated_at, created_by, updated_by) \
+             VALUES ('T001', 'in_review', 'test', 'test', ?1, ?2, 1, 2, '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z', 'framework', 'framework')",
+            params![dir.path().display().to_string(), task_contract_json()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, task_id, attempt, status, verdict, head_sha) \
+             VALUES ('ER001', 'T001', 1, 'revise', 'REVISE', ?1)",
+            params![stale_head],
+        )
+        .unwrap();
+
+        fire_task_external_review_revise(&conn, "T001", "ER001", stale_head, "policy-hash")
+            .unwrap();
+
+        let (status, cycle): (String, i64) = conn
+            .query_row(
+                "SELECT status, current_cycle FROM tasks WHERE display_id='T001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "in_review");
+        assert_eq!(cycle, 2);
+        let transitions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transition_history WHERE store='tasks' AND display_id='T001' AND verb='submit-external-review'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(transitions, 0);
+        assert_ne!(stale_head, current_head);
     }
 
     #[test]
