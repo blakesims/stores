@@ -908,17 +908,19 @@ pub fn sweep_drive_watchdog(
             // Spawn UPDATE not yet committed; defer until next sweep.
             continue;
         }
-        if pid_is_alive(pid as i32) && drive_pid_exe_is_stale(pid as i32) {
+        let pid_alive = pid_is_alive(pid as i32);
+        if pid_alive && drive_pid_exe_is_stale(pid as i32) {
             // Boundary split: daemon/control-plane stale-exe checks remain
             // fail-loud before spawning work, but an already-running drive is
             // pinned to the executable image it started with. Linux permits
             // that image to continue after the install path is replaced; this
             // watchdog must not convert safe post-spawn inode drift into a
-            // task-level drive failure.
+            // task-level drive failure. Stale-exe drift is advisory metadata;
+            // continue into the normal alive-PID liveness classifier below so
+            // it cannot mask unrelated stalled/no-output failures.
             eprintln!("{}", stale_exe_log_line(&display_id, pid));
-            continue;
         }
-        if pid_is_alive(pid as i32) {
+        if pid_alive {
             let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
             if !is_watchdog_actionable_status(status)
                 || task_has_active_external_review_lane(conn, &display_id, &now_iso)
@@ -3032,6 +3034,11 @@ mod tests {
         let conn = fresh_db_with_obs();
         let row_id = insert_task_full(&conn, "T795", "executing", Some(child_pid as i64));
         insert_lock(&conn, row_id, "T795");
+        conn.execute(
+            "UPDATE dispatch_locks SET claimed_at=?1, heartbeat_at=?1 WHERE row_id=?2",
+            rusqlite::params![super::now_epoch().to_string(), row_id],
+        )
+        .unwrap();
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
@@ -3086,6 +3093,114 @@ mod tests {
         );
 
         // Reap: kill explicitly so wait() returns immediately; guard is backup.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Alive stale-exe drift is advisory only, but it must not make the drive
+    /// immune to the normal alive-PID liveness watchdog. If heartbeat/claimed_at
+    /// are stale beyond the no-output threshold, the row should fail with the
+    /// normal no_output reason, never stale_binary_inode.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watchdog_alive_deleted_exe_with_stale_heartbeat_fails_normal_liveness() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _no_output = EnvRestore::set("STORES_RUNNER_NO_OUTPUT_SECS", "300");
+        let _wall_clock = EnvRestore::set("STORES_RUNNER_WALL_CLOCK_MAX_SECS", "1800");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sleep_copy = tmp.path().join("sleep_copy_stalled");
+        std::fs::copy("/bin/sleep", &sleep_copy).expect("copy /bin/sleep");
+
+        let mut child = spawn_sleep_copy(&sleep_copy);
+        let child_pid = child.id();
+        let _guard = KillOnDrop(child_pid);
+
+        std::fs::remove_file(&sleep_copy).expect("remove sleep copy");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if crate::handlers::agents_run::drive_pid_exe_is_stale(child_pid as i32) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "drive_pid_exe_is_stale never returned true within 1s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T797", "executing", Some(child_pid as i64));
+        insert_lock(&conn, row_id, "T797");
+        let stale = (super::now_epoch() - 600).to_string();
+        conn.execute(
+            "UPDATE dispatch_locks SET claimed_at=?1, heartbeat_at=?1 WHERE row_id=?2",
+            rusqlite::params![stale, row_id],
+        )
+        .unwrap();
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+        assert_eq!(
+            acted, 1,
+            "stale exe must not mask normal stalled/no-output liveness failure"
+        );
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T797'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "blocked");
+        let reason = reason.expect("blocked_reason must be written");
+        assert!(
+            reason.starts_with("drive_failed:no_output_idle_"),
+            "expected normal liveness reason, got {reason}"
+        );
+        assert!(
+            !reason.contains("stale_binary_inode"),
+            "stale exe must not be the failure reason: {reason}"
+        );
+
+        let (finished_at, terminal_reason, last_status): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT finished_at, terminal_reason, last_status FROM dispatch_locks WHERE row_id=?1",
+                rusqlite::params![row_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!(finished_at.is_some(), "stalled lock should be closed");
+        assert_eq!(terminal_reason.as_deref(), Some("silent_zombie"));
+        assert!(
+            last_status.unwrap_or_default().starts_with("drive_failed:no_output_idle_"),
+            "last_status should record normal liveness failure"
+        );
+
+        let note: String = conn
+            .query_row(
+                "SELECT COALESCE(actor_note,'') FROM transition_history \
+                 WHERE display_id='T797' AND verb='mark_drive_failed' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            note.starts_with("no_output_idle_"),
+            "actor_note must be normal liveness detail, got {note}"
+        );
+        assert!(
+            !note.contains("stale_binary_inode"),
+            "actor_note must not use stale_binary_inode: {note}"
+        );
+
         let _ = child.kill();
         let _ = child.wait();
     }
