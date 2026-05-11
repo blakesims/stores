@@ -1031,6 +1031,32 @@ mod tests {
     }
 
     #[test]
+    fn render_frame_uses_adr0002_bucket_headers() {
+        let conn = watch_conn();
+        conn.execute(
+            "INSERT INTO observations (display_id, status, priority, summary, updated_at) VALUES ('L010', 'open', 'normal', 'candidate obs', '2026-05-01')",
+            [],
+        )
+        .unwrap();
+        let db_path = std::path::Path::new(":memory:");
+        let frame = render_frame(&conn, db_path, 1000, false).unwrap();
+        let plain = strip_ansi(&frame);
+        assert!(
+            plain.contains("INLET: new triaging waiting closed"),
+            "missing ADR 0002 inlet buckets:\n{plain}"
+        );
+        assert!(
+            plain.contains("OBSERVATIONS: candidate ready in_progress closed"),
+            "missing ADR 0002 observation buckets:\n{plain}"
+        );
+        assert!(plain.contains("closure_rate:"), "missing closure_rate row:\n{plain}");
+        assert!(
+            !plain.contains("OBSERVATIONS: open investigating"),
+            "legacy observation status labels must not be the primary lane header:\n{plain}"
+        );
+    }
+
+    #[test]
     fn render_frame_shows_system_alert_when_daemon_dead_and_unfinished_locks() {
         let conn = watch_conn();
         // Seed one unfinished dispatch lock with a known claimed_at epoch.
