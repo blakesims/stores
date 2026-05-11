@@ -214,7 +214,7 @@ resource_lock = main_branch
 
 8. Before merge, revalidate freshness. Reuse of prior review/test results is forbidden unless durable inputs exist: review base, test base, branch head, and machine-checkable affected scope. If those inputs are missing, any main change forces refresh plus required review/testing rerun. If inputs exist and main changed since review/test base:
    - no relevant overlap: refresh/cheap-test/merge;
-   - relevant overlap: release merge lock and route to `integration_blocked`; authorized `retry-integration` re-enters `integration_queued` and reruns refresh plus `task_review`/`testing` as needed.
+   - relevant overlap: release merge lock and move the row back to the required integration substep (`refreshing`, `task_review`, or `testing`) so the lane reruns stale gates before merge.
 9. Deploy/verify as project policy requires.
 10. Transition to:
 

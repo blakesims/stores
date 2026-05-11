@@ -325,18 +325,17 @@ fn stale_freshness_reroute_releases_main_branch_lock() {
     drive_until(
         &conn,
         &agents("accepted", "integration_queued", &script),
-        |c| status(c, "T_FAIL") == "integration_blocked",
+        |c| {
+            let step: String = c
+                .query_row(
+                    "SELECT integration_step FROM tasks WHERE display_id='T_FAIL'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            status(c, "T_FAIL") == "integrating" && step == "task_review"
+        },
     );
-    let (blocked, blocker_kind, reason): (bool, Option<String>, Option<String>) = conn
-        .query_row(
-            "SELECT blocked, blocker_kind, integration_blocked_reason FROM tasks WHERE display_id='T_FAIL'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .unwrap();
-    assert!(blocked);
-    assert_eq!(blocker_kind.as_deref(), Some("main_red"));
-    assert!(reason.unwrap_or_default().starts_with("stale_review"));
     assert!(
         lock_owner(&conn).is_none(),
         "Drop guard must release after stale freshness reroute"
