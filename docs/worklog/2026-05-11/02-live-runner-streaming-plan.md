@@ -255,6 +255,10 @@ Use normalized `last_event_at`, not just PID, as the primary live signal.
   - Teaches `stores runs current` and `stores tasks status` status bridge helpers to read `<session_id>/status.json`.
   - Shows semantic last event age, current activity, and last event type alongside marker update age.
   - Preserves existing marker/raw transcript/stderr behavior.
+- `2f884b2 runner: honor explicit live status path`
+  - Makes status readers honor explicit `status_path` / `events_path` fields in the marker.
+  - Preserves fallback derivation for older markers.
+  - Reviewed PASS for the semantic status bridge refinement.
 
 ### Review status
 
@@ -434,4 +438,4 @@ Recommended next coherent chunks; pick one:
 3. **Follow mode:** make `stores runs tail <task> --raw --follow` follow appended bytes until marker status becomes completed/failed.
 4. **DB-backed invocations:** replace/augment marker lookup with `runner_invocations` once the filesystem path has proven useful.
 
-If `bbeedd5` passes review, the next highest operator-value chunk is probably **Semantic tail**, because semantic event files and status summaries are then both exposed.
+Semantic status bridge has passed review through `2f884b2`. The next highest operator-value chunk is probably **Semantic tail**, because semantic event files and status summaries are now both present and status-path discovery is explicit.
