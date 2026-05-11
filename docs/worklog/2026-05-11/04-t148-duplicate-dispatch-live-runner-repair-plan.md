@@ -153,3 +153,32 @@ Canonical executor selection rule for this incident:
 - older duplicate tree `471567 -> 510248` is not the current lock owner.
 
 Therefore preserve `530874 -> 530908` and terminate `471567 -> 510248` before validation.
+
+## Implementation / validation update
+
+Implemented as reviewed worker tracks and merged to main:
+
+- `30f965d Merge T148 live-run status selection fix`
+- `dbc45cb Merge T148 duplicate dispatch guard`
+
+Targeted validation run on main:
+
+```text
+cargo test -q cli::runs::tests::current_without_role        # 3 passed
+cargo test -q scanner_holds_fresh_running_current_run_marker_as_owner  # 3 passed
+cargo build --locked                                        # passed
+cargo install --path . --locked                             # installed
+install -m 755 ~/.cargo/bin/stores ~/.local/share/stores/bin/stores
+```
+
+Live validation against T148 after install:
+
+- Before resume, `stores tasks status T148` correctly selected `role=executor` instead of the completed planner despite the planner marker being newer by marker timestamp.
+- `stores runs current T148` also selected executor, proving the central selector is shared by status and runs commands.
+- After `resume T148` and one agent tick, exactly one new drive/runner spawned:
+  - `902183 stores tasks drive T148 --invoker ai_autonomous`
+  - `902185 pi_runner --role executor ... session 42e09852-d9d5-421a-b771-a5d1604e7aa3`
+- A second `stores agents run --once` while that executor was live dispatched zero new jobs and left the process set unchanged.
+- `stores tasks status T148` now shows the running executor with fresh heartbeat rather than stale planner final_output.
+
+Residual known issue: daemon still prints `daemon binary stale; reexecing ... (was version 0.7.0)` because binary identity lacks git/path/build detail. This was explicitly non-goal for this batch and remains a follow-up from the T146 friction note.
