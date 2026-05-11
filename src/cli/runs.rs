@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,28 @@ pub enum RunsCmd {
         raw: bool,
         stderr: bool,
     },
+    Gc(RunsGcOpts),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunsGcOpts {
+    pub execute: bool,
+    pub max_bytes: u64,
+    pub warn_bytes: u64,
+    pub per_file_warn_bytes: u64,
+    pub largest: usize,
+}
+
+impl Default for RunsGcOpts {
+    fn default() -> Self {
+        Self {
+            execute: false,
+            max_bytes: 20 * 1024 * 1024 * 1024,
+            warn_bytes: 10 * 1024 * 1024 * 1024,
+            per_file_warn_bytes: 1024 * 1024 * 1024,
+            largest: 20,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -179,6 +202,10 @@ pub fn run(cmd: RunsCmd) -> Result<()> {
             io::stdout().flush().ok();
             Ok(())
         }
+        RunsCmd::Gc(opts) => {
+            let stores_dir = crate::paths::stores_dir()?;
+            run_gc(&stores_dir, &opts)
+        }
     }
 }
 
@@ -231,8 +258,8 @@ fn print_current_run(stores_dir: &Path, current: &CurrentRun) {
             println!("current_activity\t{current_activity}");
         }
     }
-    let liveness = current_run_liveness(stores_dir, current, now_utc())
-        .unwrap_or(CurrentRunLiveness::Unknown);
+    let liveness =
+        current_run_liveness(stores_dir, current, now_utc()).unwrap_or(CurrentRunLiveness::Unknown);
     println!("liveness\t{}", liveness.label());
     if let CurrentRunLiveness::RunningStale { reason } = liveness {
         println!("liveness_reason\t{reason}");
@@ -297,14 +324,18 @@ fn compare_current_run_candidates(
 }
 
 fn current_run_selection_key(stores_dir: &Path, current: &CurrentRun) -> (u8, String, String) {
-    let liveness = current_run_liveness(stores_dir, current, now_utc())
-        .unwrap_or(CurrentRunLiveness::Unknown);
+    let liveness =
+        current_run_liveness(stores_dir, current, now_utc()).unwrap_or(CurrentRunLiveness::Unknown);
     let running_rank = match liveness {
         CurrentRunLiveness::RunningLive => 2,
         CurrentRunLiveness::RunningStale { .. } => 0,
         CurrentRunLiveness::NotRunning => 1,
         CurrentRunLiveness::Unknown => {
-            if current.marker.status.as_deref() == Some("running") { 1 } else { 0 }
+            if current.marker.status.as_deref() == Some("running") {
+                1
+            } else {
+                0
+            }
         }
     };
     let semantic_freshness = read_current_status(stores_dir, current)
@@ -659,6 +690,416 @@ fn resolve_transcript_path(stores_dir: &Path, path: &Path) -> PathBuf {
     stores_dir.join(path)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunOutcomeClass {
+    Success,
+    Unknown,
+    Failed,
+}
+
+impl RunOutcomeClass {
+    fn label(self) -> &'static str {
+        match self {
+            RunOutcomeClass::Success => "success",
+            RunOutcomeClass::Unknown => "unknown",
+            RunOutcomeClass::Failed => "failed",
+        }
+    }
+
+    fn gc_rank(self) -> u8 {
+        match self {
+            RunOutcomeClass::Success => 0,
+            RunOutcomeClass::Unknown => 1,
+            RunOutcomeClass::Failed => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RunGcFile {
+    path: PathBuf,
+    rel_path: String,
+    size: u64,
+    mtime_secs: i64,
+    protected: bool,
+    protected_reason: Option<String>,
+    outcome: RunOutcomeClass,
+}
+
+#[derive(Debug, Clone)]
+struct RunsGcPlan {
+    total_bytes: u64,
+    protected_bytes: u64,
+    candidate_bytes: u64,
+    reclaim_bytes: u64,
+    files: Vec<RunGcFile>,
+    reclaim: Vec<RunGcFile>,
+}
+
+pub fn parse_size_bytes(input: &str) -> Result<u64> {
+    let s = input.trim();
+    if s.is_empty() {
+        bail!("size must not be empty");
+    }
+    let split_at = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let (num, unit) = s.split_at(split_at);
+    let value: f64 = num
+        .parse()
+        .with_context(|| format!("invalid size number '{num}'"))?;
+    let multiplier = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1_f64,
+        "k" | "kb" | "kib" => 1024_f64,
+        "m" | "mb" | "mib" => 1024_f64.powi(2),
+        "g" | "gb" | "gib" => 1024_f64.powi(3),
+        "t" | "tb" | "tib" => 1024_f64.powi(4),
+        other => bail!("unknown size unit '{other}' in '{input}'"),
+    };
+    Ok((value * multiplier).round() as u64)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.2}G", bytes as f64 / GIB)
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.2}M", bytes as f64 / MIB)
+    } else if bytes >= 1024 {
+        format!("{:.2}K", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+fn run_gc(stores_dir: &Path, opts: &RunsGcOpts) -> Result<()> {
+    let plan = build_runs_gc_plan(stores_dir, opts)?;
+    print_runs_gc_plan(&plan, opts);
+    if opts.execute {
+        execute_runs_gc(&plan)?;
+    }
+    Ok(())
+}
+
+fn print_runs_gc_plan(plan: &RunsGcPlan, opts: &RunsGcOpts) {
+    println!("mode\t{}", if opts.execute { "execute" } else { "dry-run" });
+    println!(
+        "total_bytes\t{}\t{}",
+        plan.total_bytes,
+        format_bytes(plan.total_bytes)
+    );
+    println!(
+        "max_bytes\t{}\t{}",
+        opts.max_bytes,
+        format_bytes(opts.max_bytes)
+    );
+    println!(
+        "warn_bytes\t{}\t{}",
+        opts.warn_bytes,
+        format_bytes(opts.warn_bytes)
+    );
+    println!(
+        "per_file_warn_bytes\t{}\t{}",
+        opts.per_file_warn_bytes,
+        format_bytes(opts.per_file_warn_bytes)
+    );
+    println!(
+        "protected_bytes\t{}\t{}",
+        plan.protected_bytes,
+        format_bytes(plan.protected_bytes)
+    );
+    println!(
+        "candidate_bytes\t{}\t{}",
+        plan.candidate_bytes,
+        format_bytes(plan.candidate_bytes)
+    );
+    println!(
+        "reclaim_bytes\t{}\t{}",
+        plan.reclaim_bytes,
+        format_bytes(plan.reclaim_bytes)
+    );
+    if plan.total_bytes > opts.warn_bytes {
+        println!("warning\truns_dir_above_warn_threshold");
+    }
+
+    println!("largest_files:");
+    println!("size\toutcome\tprotected\tpath");
+    let mut largest = plan.files.clone();
+    largest.sort_by(|a, b| {
+        b.size
+            .cmp(&a.size)
+            .then_with(|| a.rel_path.cmp(&b.rel_path))
+    });
+    for file in largest.into_iter().take(opts.largest) {
+        let protected = file
+            .protected_reason
+            .as_deref()
+            .unwrap_or(if file.protected { "protected" } else { "no" });
+        let warn = if file.size > opts.per_file_warn_bytes {
+            "\tPER_FILE_WARN"
+        } else {
+            ""
+        };
+        println!(
+            "{}\t{}\t{}\t{}{}",
+            file.size,
+            file.outcome.label(),
+            protected,
+            file.rel_path,
+            warn
+        );
+    }
+
+    println!("gc_candidates:");
+    println!("size\toutcome\tpath");
+    for file in &plan.reclaim {
+        println!("{}\t{}\t{}", file.size, file.outcome.label(), file.rel_path);
+    }
+}
+
+fn execute_runs_gc(plan: &RunsGcPlan) -> Result<()> {
+    for file in &plan.reclaim {
+        if file.protected {
+            bail!(
+                "refusing to GC protected run file {} ({})",
+                file.path.display(),
+                file.protected_reason.as_deref().unwrap_or("protected")
+            );
+        }
+        let current_size = fs::metadata(&file.path)
+            .with_context(|| format!("stat before GC {}", file.path.display()))?
+            .len();
+        let tombstone = RunGcTombstone {
+            gc_kind: "stores_runs_gc_tombstone",
+            gc_at: now_iso8601_for_gc(),
+            original_size_bytes: current_size,
+            outcome: file.outcome.label().to_string(),
+            note: "Transcript body was removed by stores runs gc; agent_runs metadata/backlinks remain in the DB.".to_string(),
+        };
+        let body = serde_json::to_string_pretty(&tombstone)?;
+        fs::write(&file.path, format!("{body}\n"))
+            .with_context(|| format!("write GC tombstone {}", file.path.display()))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct RunGcTombstone {
+    gc_kind: &'static str,
+    gc_at: String,
+    original_size_bytes: u64,
+    outcome: String,
+    note: String,
+}
+
+fn now_iso8601_for_gc() -> String {
+    now_utc().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn build_runs_gc_plan(stores_dir: &Path, opts: &RunsGcOpts) -> Result<RunsGcPlan> {
+    let runs_dir = stores_dir.join("runs");
+    let protected = collect_protected_run_paths(stores_dir, &runs_dir)?;
+    let outcomes = load_agent_run_outcomes(stores_dir)?;
+    let mut files = Vec::new();
+    collect_run_files(stores_dir, &runs_dir, &protected, &outcomes, &mut files)?;
+    let total_bytes: u64 = files.iter().map(|f| f.size).sum();
+    let protected_bytes: u64 = files.iter().filter(|f| f.protected).map(|f| f.size).sum();
+    let candidate_bytes: u64 = files.iter().filter(|f| !f.protected).map(|f| f.size).sum();
+
+    let mut reclaim = Vec::new();
+    if total_bytes > opts.max_bytes {
+        let mut candidate_files: Vec<_> = files.iter().filter(|f| !f.protected).cloned().collect();
+        candidate_files.sort_by(|a, b| {
+            a.outcome
+                .gc_rank()
+                .cmp(&b.outcome.gc_rank())
+                .then_with(|| a.mtime_secs.cmp(&b.mtime_secs))
+                .then_with(|| b.size.cmp(&a.size))
+                .then_with(|| a.rel_path.cmp(&b.rel_path))
+        });
+        let mut projected = total_bytes;
+        for file in candidate_files {
+            if projected <= opts.max_bytes {
+                break;
+            }
+            projected = projected.saturating_sub(file.size);
+            reclaim.push(file);
+        }
+    }
+    let reclaim_bytes = reclaim.iter().map(|f| f.size).sum();
+    Ok(RunsGcPlan {
+        total_bytes,
+        protected_bytes,
+        candidate_bytes,
+        reclaim_bytes,
+        files,
+        reclaim,
+    })
+}
+
+fn collect_run_files(
+    stores_dir: &Path,
+    dir: &Path,
+    protected: &HashMap<PathBuf, String>,
+    outcomes: &HashMap<PathBuf, RunOutcomeClass>,
+    out: &mut Vec<RunGcFile>,
+) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).with_context(|| format!("read runs dir {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("read runs entry in {}", dir.display()))?;
+        let path = entry.path();
+        let meta = entry
+            .metadata()
+            .with_context(|| format!("stat runs entry {}", path.display()))?;
+        if meta.is_dir() {
+            collect_run_files(stores_dir, &path, protected, outcomes, out)?;
+            continue;
+        }
+        if !meta.is_file() || !is_gc_candidate_extension(&path) {
+            continue;
+        }
+        let canonical = canonicalish(&path);
+        let protected_reason = protected.get(&canonical).cloned();
+        let rel_path = path
+            .strip_prefix(stores_dir)
+            .map(|p| format!(".stores/{}", p.display()))
+            .unwrap_or_else(|_| path.display().to_string());
+        let mtime_secs = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        out.push(RunGcFile {
+            outcome: outcomes
+                .get(&canonical)
+                .copied()
+                .unwrap_or(RunOutcomeClass::Unknown),
+            path,
+            rel_path,
+            size: meta.len(),
+            mtime_secs,
+            protected: protected_reason.is_some(),
+            protected_reason,
+        });
+    }
+    Ok(())
+}
+
+fn is_gc_candidate_extension(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    (name.ends_with(".jsonl")
+        || name.ends_with(".stderr.log")
+        || name.ends_with(".log")
+        || name.ends_with(".txt"))
+        && !name.starts_with("current-")
+}
+
+fn collect_protected_run_paths(
+    stores_dir: &Path,
+    runs_dir: &Path,
+) -> Result<HashMap<PathBuf, String>> {
+    let mut protected = HashMap::new();
+    if !runs_dir.exists() {
+        return Ok(protected);
+    }
+    for entry in
+        fs::read_dir(runs_dir).with_context(|| format!("read runs dir {}", runs_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("read runs entry in {}", runs_dir.display()))?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("current-") || !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(current) = read_current_marker(&path) else {
+            protected.insert(
+                canonicalish(&path),
+                "unparseable_current_marker".to_string(),
+            );
+            continue;
+        };
+        protected.insert(canonicalish(&path), "current_marker".to_string());
+        for referenced in current_marker_referenced_paths(stores_dir, &current) {
+            protected.insert(
+                canonicalish(&referenced),
+                "referenced_by_current_marker".to_string(),
+            );
+        }
+    }
+    Ok(protected)
+}
+
+fn current_marker_referenced_paths(stores_dir: &Path, current: &CurrentRun) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = &current.marker.transcript_path {
+        paths.push(resolve_marker_path(stores_dir, &current.marker_path, path));
+    }
+    if let Some(path) = &current.marker.stderr_log_path {
+        paths.push(resolve_marker_path(stores_dir, &current.marker_path, path));
+    }
+    if let Some(path) = &current.marker.events_path {
+        paths.push(resolve_marker_path(stores_dir, &current.marker_path, path));
+    }
+    if let Some(path) = &current.marker.status_path {
+        paths.push(resolve_marker_path(stores_dir, &current.marker_path, path));
+    }
+    if let Some(path) = current_status_path(stores_dir, current) {
+        paths.push(path);
+    }
+    paths
+}
+
+fn load_agent_run_outcomes(stores_dir: &Path) -> Result<HashMap<PathBuf, RunOutcomeClass>> {
+    let db_path = stores_dir.join("db.sqlite");
+    let mut outcomes = HashMap::new();
+    if !db_path.exists() {
+        return Ok(outcomes);
+    }
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open substrate DB {}", db_path.display()))?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_runs'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !exists {
+        return Ok(outcomes);
+    }
+    let mut stmt = conn.prepare("SELECT transcript_path, exit_code FROM agent_runs WHERE transcript_path IS NOT NULL AND transcript_path != ''")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<i64>>(1).ok().flatten(),
+        ))
+    })?;
+    for row in rows {
+        let (path_str, exit_code) = row?;
+        let path = resolve_transcript_path(stores_dir, Path::new(&path_str));
+        let outcome = match exit_code {
+            Some(0) => RunOutcomeClass::Success,
+            Some(_) => RunOutcomeClass::Failed,
+            None => RunOutcomeClass::Unknown,
+        };
+        outcomes.insert(canonicalish(&path), outcome);
+    }
+    Ok(outcomes)
+}
+
+fn canonicalish(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,7 +1391,10 @@ mod tests {
         let current = find_current_run(&stores, "T999", None).unwrap();
         assert_eq!(current.marker.role, "executor");
         let status = read_current_status(&stores, &current).unwrap().unwrap();
-        assert_eq!(status.last_event_at.as_deref(), Some("2026-05-11T04:40:33Z"));
+        assert_eq!(
+            status.last_event_at.as_deref(),
+            Some("2026-05-11T04:40:33Z")
+        );
     }
 
     #[test]
@@ -1182,6 +1626,120 @@ mod tests {
         assert!(err
             .to_string()
             .contains("missing transcript for T999 phase 2 cycle 1 role code-reviewer"));
+    }
+
+    #[test]
+    fn runs_gc_reports_largest_and_selects_reclaim_to_cap() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        fs::write(stores.join("runs/big-success.jsonl"), vec![b'a'; 100]).unwrap();
+        fs::write(stores.join("runs/small-unknown.jsonl"), vec![b'b'; 20]).unwrap();
+        let conn = Connection::open(stores.join("db.sqlite")).unwrap();
+        conn.execute(
+            "CREATE TABLE agent_runs (transcript_path TEXT, exit_code INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_runs (transcript_path, exit_code) VALUES (?1, 0)",
+            [".stores/runs/big-success.jsonl"],
+        )
+        .unwrap();
+
+        let opts = RunsGcOpts {
+            max_bytes: 60,
+            largest: 10,
+            ..RunsGcOpts::default()
+        };
+        let plan = build_runs_gc_plan(&stores, &opts).unwrap();
+        assert!(plan.total_bytes > 60);
+        assert!(plan
+            .reclaim
+            .iter()
+            .any(|f| f.rel_path == ".stores/runs/big-success.jsonl"));
+        assert_eq!(
+            plan.files
+                .iter()
+                .find(|f| f.rel_path == ".stores/runs/big-success.jsonl")
+                .unwrap()
+                .outcome,
+            RunOutcomeClass::Success
+        );
+    }
+
+    #[test]
+    fn runs_gc_protects_current_marker_references() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        let live = stores.join("runs/live.jsonl");
+        let old = stores.join("runs/old.jsonl");
+        fs::write(&live, vec![b'l'; 100]).unwrap();
+        fs::write(&old, vec![b'o'; 100]).unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "status": "running",
+                "transcript_path": live,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let opts = RunsGcOpts {
+            max_bytes: 20,
+            ..RunsGcOpts::default()
+        };
+        let plan = build_runs_gc_plan(&stores, &opts).unwrap();
+        let live_file = plan
+            .files
+            .iter()
+            .find(|f| f.rel_path == ".stores/runs/live.jsonl")
+            .unwrap();
+        assert!(live_file.protected);
+        assert!(!plan
+            .reclaim
+            .iter()
+            .any(|f| f.rel_path == ".stores/runs/live.jsonl"));
+        assert!(plan
+            .reclaim
+            .iter()
+            .any(|f| f.rel_path == ".stores/runs/old.jsonl"));
+    }
+
+    #[test]
+    fn runs_gc_execute_replaces_transcript_with_tombstone_and_show_still_reads() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        let transcript = stores.join("runs/executor-session.jsonl");
+        fs::write(&transcript, vec![b'x'; 200]).unwrap();
+        let opts = RunsGcOpts {
+            execute: true,
+            max_bytes: 1,
+            ..RunsGcOpts::default()
+        };
+        let plan = build_runs_gc_plan(&stores, &opts).unwrap();
+        assert!(plan
+            .reclaim
+            .iter()
+            .any(|f| f.rel_path == ".stores/runs/executor-session.jsonl"));
+        execute_runs_gc(&plan).unwrap();
+
+        let body = fs::read_to_string(&transcript).unwrap();
+        assert!(body.contains("stores_runs_gc_tombstone"));
+        assert!(body.contains("original_size_bytes"));
+        let row = find_transcript(&stores, "T999", 2, Some(1), "executor").unwrap();
+        let read_path = resolve_transcript_path(&stores, &row.path);
+        let show_body = fs::read_to_string(read_path).unwrap();
+        assert!(show_body.contains("Transcript body was removed by stores runs gc"));
+    }
+
+    #[test]
+    fn parse_size_bytes_accepts_common_units() {
+        assert_eq!(parse_size_bytes("1G").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("1.5M").unwrap(), 1572864);
+        assert!(parse_size_bytes("12wat").is_err());
     }
 
     // ---- T072 r2: runs VIEW tests ----

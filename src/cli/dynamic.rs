@@ -459,6 +459,43 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .help("Print the live stderr log")
                                 .action(clap::ArgAction::SetTrue),
                         ),
+                )
+                .subcommand(
+                    Command::new("gc")
+                        .about("Dry-run or execute .stores/runs transcript garbage collection")
+                        .arg(
+                            Arg::new("dry-run")
+                                .long("dry-run")
+                                .help("Report GC candidates without mutating files (default)")
+                                .action(clap::ArgAction::SetTrue),
+                        )
+                        .arg(
+                            Arg::new("execute")
+                                .long("execute")
+                                .help("Replace selected transcript/log files with tombstones")
+                                .action(clap::ArgAction::SetTrue),
+                        )
+                        .arg(
+                            Arg::new("max-bytes")
+                                .long("max-bytes")
+                                .help("Total .stores/runs cap before GC stops (default 20G)"),
+                        )
+                        .arg(
+                            Arg::new("warn-bytes")
+                                .long("warn-bytes")
+                                .help("Warn when .stores/runs exceeds this size (default 10G)"),
+                        )
+                        .arg(
+                            Arg::new("per-file-warn-bytes")
+                                .long("per-file-warn-bytes")
+                                .help("Warn on individual run files above this size (default 1G)"),
+                        )
+                        .arg(
+                            Arg::new("largest")
+                                .long("largest")
+                                .help("Number of largest files to report (default 20)")
+                                .value_parser(clap::value_parser!(usize)),
+                        ),
                 ),
         )
         // Watch subcommand — ratatui TUI (T028); --legacy falls back to ANSI POC

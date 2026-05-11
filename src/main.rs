@@ -271,6 +271,26 @@ fn main() -> Result<()> {
                     raw: *tsub.get_one::<bool>("raw").unwrap_or(&false),
                     stderr: *tsub.get_one::<bool>("stderr").unwrap_or(&false),
                 },
+                Some(("gc", gsub)) => {
+                    let mut opts = cli::runs::RunsGcOpts::default();
+                    opts.execute = *gsub.get_one::<bool>("execute").unwrap_or(&false);
+                    if *gsub.get_one::<bool>("dry-run").unwrap_or(&false) && opts.execute {
+                        anyhow::bail!("runs gc accepts only one of --dry-run or --execute");
+                    }
+                    if let Some(s) = gsub.get_one::<String>("max-bytes") {
+                        opts.max_bytes = cli::runs::parse_size_bytes(s)?;
+                    }
+                    if let Some(s) = gsub.get_one::<String>("warn-bytes") {
+                        opts.warn_bytes = cli::runs::parse_size_bytes(s)?;
+                    }
+                    if let Some(s) = gsub.get_one::<String>("per-file-warn-bytes") {
+                        opts.per_file_warn_bytes = cli::runs::parse_size_bytes(s)?;
+                    }
+                    if let Some(n) = gsub.get_one::<usize>("largest") {
+                        opts.largest = *n;
+                    }
+                    RunsCmd::Gc(opts)
+                }
                 _ => {
                     let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
                     if let Some(runs_cmd) = cmd2.find_subcommand_mut("runs") {
