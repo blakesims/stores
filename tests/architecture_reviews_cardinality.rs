@@ -37,7 +37,8 @@ fn add_cmd() -> Command {
         .arg(
             Arg::new("linked-observations")
                 .long("linked-observations")
-                .action(ArgAction::Append),
+                .action(ArgAction::Append)
+                .value_delimiter(','),
         )
 }
 
