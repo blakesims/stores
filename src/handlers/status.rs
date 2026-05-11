@@ -689,15 +689,26 @@ fn live_runner_lines(
         .as_ref()
         .and_then(|s| s.last_event_type.as_deref())
         .map(|t| format!(" event={t}"));
+    let liveness = crate::cli::runs::current_run_liveness(stores_dir, current, now)
+        .unwrap_or(crate::cli::runs::CurrentRunLiveness::Unknown);
+    let liveness_label = liveness.label();
+    let stale_reason = match &liveness {
+        crate::cli::runs::CurrentRunLiveness::RunningStale { reason } => {
+            format!(" stale_reason={reason}")
+        }
+        _ => String::new(),
+    };
     let mut lines = vec![format!(
-        "Live runner: role={} runner={} status={}{}{}{}{}",
+        "Live runner: role={} runner={} status={} liveness={}{}{}{}{}{}",
         marker.role,
         runner,
         status,
+        liveness_label,
         updated.unwrap_or_default(),
         semantic_age.unwrap_or_default(),
         activity.unwrap_or_default(),
-        event_type.unwrap_or_default()
+        event_type.unwrap_or_default(),
+        stale_reason
     )];
     if let Some(path) = &marker.transcript_path {
         lines.push(format!(
@@ -958,7 +969,7 @@ mod tests {
 
         assert_eq!(
             lines[0],
-            "Live runner: role=executor runner=pi status=running updated=1m ago last_event=5s ago activity=tool:bash event=tool_start"
+            "Live runner: role=executor runner=pi status=running liveness=live updated=1m ago last_event=5s ago activity=tool:bash event=tool_start"
         );
         assert_eq!(
             lines[1],
@@ -998,7 +1009,10 @@ mod tests {
             .with_timezone(&Utc);
         let lines = live_runner_lines(&stores_dir, &current, now);
 
-        assert_eq!(lines, vec!["Live runner: role=executor runner=? status=?"]);
+        assert_eq!(
+            lines,
+            vec!["Live runner: role=executor runner=? status=? liveness=not_running"]
+        );
     }
 
     // -----------------------------------------------------------------------

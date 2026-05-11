@@ -1,9 +1,11 @@
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunTranscript {
@@ -63,6 +65,37 @@ pub struct CurrentRunStatus {
 pub struct CurrentRun {
     pub marker_path: PathBuf,
     pub marker: CurrentRunMarker,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurrentRunLiveness {
+    NotRunning,
+    RunningLive,
+    RunningStale { reason: String },
+    Unknown,
+}
+
+impl CurrentRunLiveness {
+    pub fn label(&self) -> &'static str {
+        match self {
+            CurrentRunLiveness::NotRunning => "not_running",
+            CurrentRunLiveness::RunningLive => "live",
+            CurrentRunLiveness::RunningStale { .. } => "stale_marker",
+            CurrentRunLiveness::Unknown => "unknown",
+        }
+    }
+}
+
+const CURRENT_RUN_FRESH_SECS: i64 = 15 * 60;
+
+fn now_utc() -> DateTime<Utc> {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    DateTime::<Utc>::from_timestamp(secs, 0).unwrap_or_else(|| {
+        DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is a valid DateTime")
+    })
 }
 
 pub fn run(cmd: RunsCmd) -> Result<()> {
@@ -198,6 +231,12 @@ fn print_current_run(stores_dir: &Path, current: &CurrentRun) {
             println!("current_activity\t{current_activity}");
         }
     }
+    let liveness = current_run_liveness(stores_dir, current, now_utc())
+        .unwrap_or(CurrentRunLiveness::Unknown);
+    println!("liveness\t{}", liveness.label());
+    if let CurrentRunLiveness::RunningStale { reason } = liveness {
+        println!("liveness_reason\t{reason}");
+    }
 }
 
 pub fn find_current_run(
@@ -258,10 +297,15 @@ fn compare_current_run_candidates(
 }
 
 fn current_run_selection_key(stores_dir: &Path, current: &CurrentRun) -> (u8, String, String) {
-    let running_rank = if current.marker.status.as_deref() == Some("running") {
-        1
-    } else {
-        0
+    let liveness = current_run_liveness(stores_dir, current, now_utc())
+        .unwrap_or(CurrentRunLiveness::Unknown);
+    let running_rank = match liveness {
+        CurrentRunLiveness::RunningLive => 2,
+        CurrentRunLiveness::RunningStale { .. } => 0,
+        CurrentRunLiveness::NotRunning => 1,
+        CurrentRunLiveness::Unknown => {
+            if current.marker.status.as_deref() == Some("running") { 1 } else { 0 }
+        }
     };
     let semantic_freshness = read_current_status(stores_dir, current)
         .ok()
@@ -316,6 +360,83 @@ pub fn read_current_status(
     let status: CurrentRunStatus = serde_json::from_str(&body)
         .with_context(|| format!("failed to parse live runner status {}", path.display()))?;
     Ok(Some(status))
+}
+
+pub fn current_run_liveness(
+    stores_dir: &Path,
+    current: &CurrentRun,
+    now: DateTime<Utc>,
+) -> Result<CurrentRunLiveness> {
+    if current.marker.status.as_deref() != Some("running") {
+        return Ok(CurrentRunLiveness::NotRunning);
+    }
+    if has_corroborating_live_owner(stores_dir, &current.marker.display_id)? {
+        return Ok(CurrentRunLiveness::RunningLive);
+    }
+    let last_at = read_current_status(stores_dir, current)
+        .ok()
+        .flatten()
+        .and_then(|status| status.last_event_at)
+        .or_else(|| current.marker.updated_at.clone());
+    let Some(last_at) = last_at else {
+        return Ok(CurrentRunLiveness::RunningStale {
+            reason: "running marker has no semantic heartbeat, marker timestamp, or live owner"
+                .to_string(),
+        });
+    };
+    if timestamp_is_fresh(&last_at, now, CURRENT_RUN_FRESH_SECS) {
+        Ok(CurrentRunLiveness::RunningLive)
+    } else {
+        Ok(CurrentRunLiveness::RunningStale {
+            reason: format!(
+                "running marker has stale last_event_at/updated_at {last_at} and no live owner"
+            ),
+        })
+    }
+}
+
+fn timestamp_is_fresh(ts: &str, now: DateTime<Utc>, fresh_secs: i64) -> bool {
+    let Ok(parsed) = DateTime::parse_from_rfc3339(ts).map(|dt| dt.with_timezone(&Utc)) else {
+        return false;
+    };
+    now.signed_duration_since(parsed) <= Duration::seconds(fresh_secs)
+}
+
+fn has_corroborating_live_owner(stores_dir: &Path, display_id: &str) -> Result<bool> {
+    let db_path = stores_dir.join("db.sqlite");
+    if !db_path.exists() {
+        return Ok(false);
+    }
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open substrate DB {}", db_path.display()))?;
+    let row: Option<(i64, Option<i64>)> = conn
+        .query_row(
+            "SELECT id, drive_pid FROM tasks WHERE display_id = ?1",
+            [display_id],
+            |r| Ok((r.get(0)?, r.get(1).ok().flatten())),
+        )
+        .optional()
+        .context("lookup task live owner row")?;
+    let Some((row_id, drive_pid)) = row else {
+        return Ok(false);
+    };
+    if drive_pid
+        .filter(|pid| *pid > 0)
+        .is_some_and(|pid| crate::handlers::agents_run::pid_is_alive(pid as i32))
+    {
+        return Ok(true);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(pid, 0) FROM dispatch_locks \
+         WHERE store='tasks' AND row_id=?1 AND agent_name='auto-drive' AND finished_at IS NULL",
+    )?;
+    let pids = stmt.query_map([row_id], |r| r.get::<_, i64>(0))?;
+    for pid in pids.filter_map(|r| r.ok()) {
+        if pid > 0 && crate::handlers::agents_run::pid_is_alive(pid as i32) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn live_stores_dir_for_task(stores_dir: &Path, display_id: &str) -> Result<PathBuf> {
@@ -833,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn current_without_role_tolerates_missing_semantic_status() {
+    fn current_without_role_treats_missing_semantic_status_as_non_authoritative() {
         let tmp = fixture();
         let stores = tmp.path().join(".stores");
         fs::write(
@@ -863,8 +984,184 @@ mod tests {
         .unwrap();
 
         let current = find_current_run(&stores, "T999", None).unwrap();
-        assert_eq!(current.marker.role, "executor");
-        assert!(read_current_status(&stores, &current).unwrap().is_none());
+        assert_eq!(current.marker.role, "planner");
+    }
+
+    #[test]
+    fn running_marker_with_stale_heartbeat_and_no_live_owner_is_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stores = tmp.path().join(".stores");
+        fs::create_dir_all(stores.join("runs/stale-session")).unwrap();
+        let conn = Connection::open(stores.join("db.sqlite")).unwrap();
+        conn.execute(
+            "CREATE TABLE tasks (id INTEGER PRIMARY KEY, display_id TEXT UNIQUE NOT NULL, drive_pid INTEGER, workspace_path TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE dispatch_locks (store TEXT, row_id INTEGER, agent_name TEXT, finished_at TEXT, pid INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, drive_pid, workspace_path) VALUES (1, 'T999', NULL, '')",
+            [],
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/stale-session/status.json"),
+            r#"{
+  "last_event_at": "2026-05-11T01:00:00Z",
+  "last_event_type": "heartbeat",
+  "current_activity": "tool:bash"
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "session_id": "stale-session",
+                "status": "running",
+                "updated_at": "2026-05-11T01:00:00Z",
+                "transcript_path": stores.join("runs/stale-session.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let current = find_current_run(&stores, "T999", Some("executor")).unwrap();
+        let liveness = current_run_liveness(
+            &stores,
+            &current,
+            DateTime::parse_from_rfc3339("2026-05-11T02:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        )
+        .unwrap();
+        assert_eq!(
+            liveness,
+            CurrentRunLiveness::RunningStale {
+                reason: "running marker has stale last_event_at/updated_at 2026-05-11T01:00:00Z and no live owner".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn running_marker_with_live_drive_pid_is_live_even_with_stale_heartbeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stores = tmp.path().join(".stores");
+        fs::create_dir_all(stores.join("runs/stale-session")).unwrap();
+        let conn = Connection::open(stores.join("db.sqlite")).unwrap();
+        conn.execute(
+            "CREATE TABLE tasks (id INTEGER PRIMARY KEY, display_id TEXT UNIQUE NOT NULL, drive_pid INTEGER, workspace_path TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE dispatch_locks (store TEXT, row_id INTEGER, agent_name TEXT, finished_at TEXT, pid INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, drive_pid, workspace_path) VALUES (1, 'T999', ?1, '')",
+            [std::process::id() as i64],
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/stale-session/status.json"),
+            r#"{
+  "last_event_at": "2026-05-11T01:00:00Z",
+  "last_event_type": "heartbeat",
+  "current_activity": "tool:bash"
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "session_id": "stale-session",
+                "status": "running",
+                "updated_at": "2026-05-11T01:00:00Z",
+                "transcript_path": stores.join("runs/stale-session.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let current = find_current_run(&stores, "T999", Some("executor")).unwrap();
+        let liveness = current_run_liveness(
+            &stores,
+            &current,
+            DateTime::parse_from_rfc3339("2026-05-11T02:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        )
+        .unwrap();
+        assert_eq!(liveness, CurrentRunLiveness::RunningLive);
+    }
+
+    #[test]
+    fn stale_running_marker_does_not_outrank_completed_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stores = tmp.path().join(".stores");
+        fs::create_dir_all(stores.join("runs/stale-session")).unwrap();
+        let conn = Connection::open(stores.join("db.sqlite")).unwrap();
+        conn.execute(
+            "CREATE TABLE tasks (id INTEGER PRIMARY KEY, display_id TEXT UNIQUE NOT NULL, drive_pid INTEGER, workspace_path TEXT)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE dispatch_locks (store TEXT, row_id INTEGER, agent_name TEXT, finished_at TEXT, pid INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (id, display_id, drive_pid, workspace_path) VALUES (1, 'T999', NULL, '')",
+            [],
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/stale-session/status.json"),
+            r#"{
+  "last_event_at": "2026-05-11T01:00:00Z",
+  "last_event_type": "heartbeat",
+  "current_activity": "tool:bash"
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "session_id": "stale-session",
+                "status": "running",
+                "updated_at": "2026-05-11T01:00:00Z",
+                "transcript_path": stores.join("runs/stale-session.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-code_reviewer.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "code_reviewer",
+                "status": "completed",
+                "updated_at": "2026-05-11T01:30:00Z",
+                "transcript_path": stores.join("runs/review.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let current = find_current_run(&stores, "T999", None).unwrap();
+        assert_eq!(current.marker.role, "code_reviewer");
     }
 
     #[test]
