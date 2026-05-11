@@ -1,0 +1,3 @@
+{
+  "shellCommandPrefix": "source .agent-guard/pi-shell-guard.sh"
+}

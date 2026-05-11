@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Last-resort guard: do not let agents commit huge Rust formatting-only churn by accident.
+set -euo pipefail
+
+if [[ "${ALLOW_AGENT_FORMAT:-}" == "1" || "${STORES_ALLOW_FORMAT_CHURN:-}" == "1" ]]; then
+  exit 0
+fi
+
+rust_changed=$(git diff --cached --name-only -- '*.rs' | wc -l | tr -d ' ')
+if [[ "$rust_changed" -ge 20 ]]; then
+  cat >&2 <<MSG
+BLOCKED: staged diff touches $rust_changed Rust files.
+
+This looks like broad rustfmt churn, which has repeatedly polluted stores worktrees.
+If this is an intentional formatting-only commit, rerun with:
+  ALLOW_AGENT_FORMAT=1 git commit ...
+
+Otherwise unstage/revert incidental formatter changes and commit only task files.
+MSG
+  exit 1
+fi
