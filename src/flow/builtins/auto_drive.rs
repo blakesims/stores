@@ -389,6 +389,20 @@ pub(crate) fn redispatch_orphaned_next_agent(
         }
     }
 
+    if crate::flow::engine_runner::has_fresh_running_current_run_marker(
+        &tx,
+        row_id,
+        &now_iso8601(),
+    )
+    .unwrap_or(false)
+    {
+        eprintln!(
+            "[engine-runner] {display_id_tx}: raced; fresh running current-run marker exists; skipping redispatch"
+        );
+        tx.rollback()?;
+        return Ok(None);
+    }
+
     // Still an orphan — perform the refresh and mutate drive_pid to Null so
     // `run()` treats this as a fresh spawn (not an already-running drive).
     let Some(mut row) = refresh_task_row(&tx, &display_id_tx) else {
@@ -458,6 +472,10 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         return Ok(1);
     }
     let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if row.get("activation").and_then(|v| v.as_str()) == Some("inactive") {
+        eprintln!("[auto-drive] {}: activation inactive; skipping", display_id);
+        return Ok(0);
+    }
 
     // Idempotency: if a PID is recorded and alive, no-op.
     if let Some(pid) = row.get("drive_pid").and_then(|v| v.as_i64()) {
@@ -476,6 +494,22 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             eprintln!(
                 "[auto-drive] {}: stored drive_pid={} is dead; deferring to watchdog",
                 display_id, pid
+            );
+            return Ok(0);
+        }
+    }
+
+    if let Some(row_id) = row.get("id").and_then(|v| v.as_i64()) {
+        if crate::flow::engine_runner::has_fresh_running_current_run_marker(
+            ctx.conn,
+            row_id,
+            &now_iso8601(),
+        )
+        .unwrap_or(false)
+        {
+            eprintln!(
+                "[auto-drive] {}: fresh running current-run marker exists; skipping",
+                display_id
             );
             return Ok(0);
         }

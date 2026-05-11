@@ -849,7 +849,7 @@ fn scan_tasks(
 ) -> Result<Vec<ClassifiedRow>> {
     let table = quote_ident(&schema.name);
     let sql = format!(
-        "SELECT id, status, current_phase, current_cycle, tier_hint, plan, blocked_reason, drive_pid \
+        "SELECT id, status, current_phase, current_cycle, tier_hint, plan, blocked_reason, drive_pid, COALESCE(activation, 'active') \
          FROM {table} WHERE status IN ('planning','plan_review','ready','executing','code_review','complete','in_review','blocked')"
     );
     let mut stmt = conn.prepare(&sql).context("prepare task scanner")?;
@@ -864,6 +864,7 @@ fn scan_tasks(
             r.get::<_, Option<String>>(5)?,
             r.get::<_, Option<String>>(6)?,
             r.get::<_, Option<i64>>(7)?,
+            r.get::<_, String>(8)?,
         ))
     })?;
 
@@ -878,6 +879,7 @@ fn scan_tasks(
             plan,
             blocked_reason,
             drive_pid,
+            activation,
         ) = row?;
         let mut entry: EntryMap = BTreeMap::new();
         entry.insert("status".into(), json!(status));
@@ -912,6 +914,8 @@ fn scan_tasks(
                     "held".to_string(),
                     Some("no_autonomous_reviewer_runner".to_string()),
                 )
+            } else if activation != "active" {
+                ("held".to_string(), Some("inactive".to_string()))
             } else if live_drive_owner {
                 ("held".to_string(), Some("live_drive_owner".to_string()))
             } else if has_live_dispatch_lock(
@@ -923,6 +927,8 @@ fn scan_tasks(
                 claim_window_secs,
             )? {
                 ("held".to_string(), Some("live_dispatch_lock".to_string()))
+            } else if has_fresh_running_current_run_marker(conn, row_id, started_at)? {
+                ("held".to_string(), Some("live_runner_marker".to_string()))
             } else {
                 ("actionable_task_redrive".to_string(), None)
             }
@@ -1065,6 +1071,8 @@ fn scan_observations(conn: &Connection, schema: &Schema) -> Result<Vec<Classifie
     Ok(out)
 }
 
+const LIVE_RUN_MARKER_FRESH_SECS: u64 = 15 * 60;
+
 fn has_live_dispatch_lock(
     conn: &Connection,
     store: &str,
@@ -1088,6 +1096,59 @@ fn has_live_dispatch_lock(
     Ok(pids
         .into_iter()
         .any(|pid| pid <= 0 || pid_is_alive(pid as i32)))
+}
+
+pub(crate) fn has_fresh_running_current_run_marker(
+    conn: &Connection,
+    row_id: i64,
+    started_at: &str,
+) -> Result<bool> {
+    let (display_id, workspace_path): (String, Option<String>) = conn.query_row(
+        "SELECT display_id, workspace_path FROM tasks WHERE id=?1",
+        rusqlite::params![row_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let Some(workspace_path) = workspace_path.filter(|p| !p.trim().is_empty()) else {
+        return Ok(false);
+    };
+    let cutoff = iso8601_sub_secs(started_at, LIVE_RUN_MARKER_FRESH_SECS).unwrap_or_default();
+    let runs_dir = Path::new(&workspace_path).join(".stores").join("runs");
+    let Ok(entries) = std::fs::read_dir(&runs_dir) else {
+        return Ok(false);
+    };
+    let prefix = format!("current-{display_id}-");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(".json") {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(marker) = serde_json::from_str::<crate::cli::runs::CurrentRunMarker>(&body) else {
+            continue;
+        };
+        if marker.status.as_deref() != Some("running") {
+            continue;
+        }
+        let current = crate::cli::runs::CurrentRun { marker_path: path, marker };
+        let status_at = crate::cli::runs::read_current_status(
+            &Path::new(&workspace_path).join(".stores"),
+            &current,
+        )
+        .ok()
+        .flatten()
+        .and_then(|s| s.last_event_at)
+        .or_else(|| current.marker.updated_at.clone())
+        .unwrap_or_default();
+        if status_at >= cutoff {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Count occupied auto-drive capacity as the union of active task owners and
@@ -1461,8 +1522,8 @@ mod tests {
 
     fn insert_task(conn: &Connection, display_id: &str, status: &str) -> i64 {
         conn.execute(
-            "INSERT INTO tasks (display_id, status, created_at, updated_at, title, slug, current_phase, current_cycle, tier_hint, plan) \
-             VALUES (?1, ?2, '2026-05-07T00:00:00Z', '2026-05-07T00:00:00Z', 'Task', 'task', 1, 1, 'T2', ?3)",
+            "INSERT INTO tasks (display_id, status, created_at, updated_at, title, slug, current_phase, current_cycle, tier_hint, plan, activation) \
+             VALUES (?1, ?2, '2026-05-07T00:00:00Z', '2026-05-07T00:00:00Z', 'Task', 'task', 1, 1, 'T2', ?3, 'active')",
             rusqlite::params![display_id, status, r#"{"phases":[{"name":"p1"}]}"#],
         )
         .unwrap();
@@ -1749,6 +1810,86 @@ mod tests {
             )
             .unwrap();
         assert_eq!(drive_pid, 999_999_999_i64);
+    }
+
+    fn write_running_marker(workspace: &Path, display_id: &str, last_event_at: &str) {
+        let runs_dir = workspace.join(".stores").join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        let status_path = runs_dir.join("status.json");
+        std::fs::write(
+            &status_path,
+            format!(
+                r#"{{"last_event_at":"{last_event_at}","last_event_type":"heartbeat","current_activity":"tool:bash"}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            runs_dir.join(format!("current-{display_id}-executor.json")),
+            format!(
+                r#"{{"display_id":"{display_id}","phase":1,"cycle":1,"role":"executor","runner":"test","session_id":"s1","status":"running","status_path":"{}","updated_at":"2026-05-07T00:00:00Z"}}"#,
+                status_path.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scanner_holds_fresh_running_current_run_marker_as_owner() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let task_id = insert_task(&conn, "T918", "executing");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1, workspace_path=?2 WHERE id=?3",
+            rusqlite::params![999_999_993_i64, tmp.path().to_str().unwrap(), task_id],
+        )
+        .unwrap();
+        write_running_marker(tmp.path(), "T918", "2026-05-07T00:09:30Z");
+
+        let result = scan_and_record_actionability(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            15,
+            "2026-05-07T00:10:00Z",
+        )
+        .unwrap();
+
+        assert!(result.rows.iter().any(|r| r.store == "tasks"
+            && r.row_id == task_id
+            && r.classification == "held"
+            && r.held_reason.as_deref() == Some("live_runner_marker")));
+    }
+
+    #[test]
+    fn scanner_does_not_autodrive_inactive_workspace_task() {
+        let (conn, tasks, intake, observations) = open_scanner_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let task_id = insert_task(&conn, "T919", "executing");
+        conn.execute(
+            "UPDATE tasks SET activation='inactive', workspace_path=?1 WHERE id=?2",
+            rusqlite::params![tmp.path().to_str().unwrap(), task_id],
+        )
+        .unwrap();
+
+        let result = scan_and_record_actionability(
+            &conn,
+            ScannerSchemas {
+                tasks: &tasks,
+                intake: &intake,
+                observations: &observations,
+            },
+            16,
+            "2026-05-07T00:10:00Z",
+        )
+        .unwrap();
+
+        assert!(result.rows.iter().any(|r| r.store == "tasks"
+            && r.row_id == task_id
+            && r.classification == "held"
+            && r.held_reason.as_deref() == Some("inactive")));
     }
 
     #[test]
