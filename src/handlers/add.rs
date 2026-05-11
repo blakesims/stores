@@ -55,6 +55,7 @@ fn validate_architecture_review_linked_observations(
          FROM architecture_reviews \
          WHERE COALESCE(lifecycle,'') != 'closed' \
            AND status NOT IN ('verdict_issued','withdrawn','superseded') \
+         /* ADR 0002 compatibility-only T148 task 6.1: legacy rows may lack lifecycle. */ \
          ORDER BY id",
     )?;
     let mut rows = stmt.query([])?;

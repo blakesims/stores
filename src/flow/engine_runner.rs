@@ -993,7 +993,11 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
 
 fn scan_intake(conn: &Connection, schema: &Schema) -> Result<Vec<ClassifiedRow>> {
     let table = quote_ident(&schema.name);
-    let sql = format!("SELECT id, status FROM {table} WHERE status IN ('triaging','needs_info')");
+    let sql = format!(
+        "SELECT id, status FROM {table} \
+         WHERE status IN ('triaging','needs_info') \
+         /* ADR 0002 compatibility-only T148 task 6.1: engine-health scanner reads legacy status projection. */"
+    );
     let mut stmt = conn.prepare(&sql).context("prepare intake scanner")?;
     let workflow = schema.workflow.as_ref();
     let mut out = Vec::new();
@@ -1023,7 +1027,8 @@ fn scan_observations(conn: &Connection, schema: &Schema) -> Result<Vec<Classifie
     let table = quote_ident(&schema.name);
     let sql = format!(
         "SELECT id, status, intent_contract, risk_class, approval_policy \
-         FROM {table} WHERE status IN ('open','needs_investigation','investigating','investigated','confirmed','ready','needs_info','in_progress')"
+         FROM {table} WHERE status IN ('open','needs_investigation','investigating','investigated','confirmed','ready','needs_info','in_progress') \
+         /* ADR 0002 compatibility-only T148 task 6.1: engine-health scanner reads legacy status projection. */"
     );
     let mut stmt = conn.prepare(&sql).context("prepare observations scanner")?;
     let mut out = Vec::new();
@@ -2190,7 +2195,8 @@ mod tests {
             && r.held_reason.as_deref() == Some("needs_human")));
         let row: (String, String, String, String) = conn
             .query_row(
-                "SELECT status, intent_contract, risk_class, approval_policy FROM observations WHERE id=?1",
+                "SELECT status, intent_contract, risk_class, approval_policy FROM observations WHERE id=?1 \
+                 /* ADR 0002 compatibility-only T148 task 6.1: scanner regression fixture asserts legacy projection unchanged. */",
                 rusqlite::params![obs_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
@@ -2235,7 +2241,8 @@ mod tests {
             && r.held_reason.as_deref() == Some("needs_human")));
         let row: (String, String) = conn
             .query_row(
-                "SELECT status, intent_contract FROM observations WHERE id=?1",
+                "SELECT status, intent_contract FROM observations WHERE id=?1 \
+                 /* ADR 0002 compatibility-only T148 task 6.1: scanner regression fixture asserts legacy projection unchanged. */",
                 rusqlite::params![obs_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )

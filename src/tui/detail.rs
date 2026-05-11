@@ -229,10 +229,7 @@ fn observation_lines(o: &ObsRow, app: &App) -> Vec<String> {
         String::new(),
         "Next action / held reason".to_string(),
         format!("  {}", obs_next_action(o)),
-        String::new(),
-        "Recent events".to_string(),
     ];
-    append_events(&mut lines, &o.recent_events);
     let mut linked: Vec<String> = Vec::new();
     if let Some(tid) = o.task_id.as_deref().filter(|s| !s.trim().is_empty()) {
         linked.push(tid.to_string());
@@ -259,6 +256,8 @@ fn observation_lines(o: &ObsRow, app: &App) -> Vec<String> {
         ),
     ]);
     append_artifacts(&mut lines, &o.evidence_pointers);
+    lines.extend([String::new(), "Recent events".to_string()]);
+    append_events(&mut lines, &o.recent_events);
     lines
 }
 

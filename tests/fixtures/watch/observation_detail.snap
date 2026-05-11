@@ -26,9 +26,6 @@ Contract state
 Next action / held reason
   ratify contract
 
-Recent events
-  tasks ready -> executing via start at 2026-05-01
-
 Linked tasks
   T700
 
@@ -36,3 +33,6 @@ Artifact pointers
   linked task: T700
   resolution: resolution.md
   log: runs/x.log
+
+Recent events
+  tasks ready -> executing via start at 2026-05-01

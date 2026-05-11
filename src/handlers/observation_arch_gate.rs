@@ -235,20 +235,20 @@ pub(crate) fn apply_verdict_effects(
                 if obs_id == target {
                     bail!("merge_with_cluster verdict requires merge_target_id distinct from linked observation {obs_id}");
                 }
-                let status: Option<String> = tx
+                let lifecycle: Option<String> = tx
                     .query_row(
-                        "SELECT status FROM observations WHERE display_id = ?1",
+                        "SELECT lifecycle FROM observations WHERE display_id = ?1",
                         [&obs_id],
                         |r| r.get(0),
                     )
                     .optional()
                     .context("merge_with_cluster: read linked observation")?;
-                let status = status.ok_or_else(|| {
+                let lifecycle = lifecycle.ok_or_else(|| {
                     anyhow::anyhow!("merge_with_cluster linked observation {obs_id} not found")
                 })?;
-                if status == "resolved" {
+                if lifecycle == "closed" {
                     bail!(
-                        "merge_with_cluster linked observation {obs_id} is already resolved/merged"
+                        "merge_with_cluster linked observation {obs_id} is already closed/merged"
                     );
                 }
                 update_one(

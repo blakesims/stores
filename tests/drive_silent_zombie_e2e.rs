@@ -138,6 +138,7 @@ fn silent_zombie_lock_already_closed_e2e() {
     let output = Command::new(&bin)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(workspace)
+        .env("STORES_DAEMON_BIN_PATH", stores_dir.join("bin/stores"))
         .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
         .output()
         .expect("invoke daemon");
@@ -296,6 +297,7 @@ fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
     let out1 = Command::new(&bin)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(workspace)
+        .env("STORES_DAEMON_BIN_PATH", stores_dir.join("bin/stores"))
         .env("STORES_DRIVE_CMD", stub_cmd)
         // T040 epoch override so the watchdog gate doesn't filter the row.
         .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
@@ -378,6 +380,7 @@ fn auto_drive_dead_pid_post_spawn_flips_to_blocked_e2e() {
     let out2 = Command::new(&bin)
         .args(["agents", "run", "--once", "--poll-interval", "0.05"])
         .current_dir(workspace)
+        .env("STORES_DAEMON_BIN_PATH", stores_dir.join("bin/stores"))
         .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
         .output()
         .expect("invoke daemon (2)");
@@ -523,6 +526,7 @@ fn pending_wrap_handoff_redispatched_by_agents_run_once_e2e() {
             "0.2",
         ])
         .current_dir(workspace)
+        .env("STORES_DAEMON_BIN_PATH", stores_dir.join("bin/stores"))
         .env("STORES_DAEMON_EPOCH", "1970-01-01T00:00:00Z")
         .env("STORES_DRIVE_CMD", &drive_cmd)
         .output()

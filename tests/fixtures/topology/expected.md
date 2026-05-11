@@ -113,6 +113,10 @@ stateDiagram-v2
   ready --> resolved :  F auto_resolve
   needs_info --> resolved :  F auto_resolve
   in_progress --> resolved :  F auto_resolve
+  open --> resolved :  H+ supersede
+  confirmed --> resolved :  H+ supersede
+  ready --> resolved :  H+ supersede
+  in_progress --> resolved :  H+ supersede
 ```
 
 ---

@@ -471,4 +471,4 @@ This ADR should seed a follow-up implementation task. A reasonable phase-1/phase
 
 ## Status
 
-Implemented in task `T148` on 2026-05-11. Merge PR/commit: T148 implementation branch; final upstream merge commit to be recorded by the repository merge operator after this executor phase lands.
+Implemented in task `T148` on 2026-05-11. Merge PR/commit: implementation commit `4f1f250fd5e9652c0d97e06bfbc1cd3a15da24dc`.

@@ -1,5 +1,5 @@
 daemon:DEAD · cap active 15/15
-lanes: execution=0 review=6 accept=0 held=10 active=291 priority=0
+lanes: execution=0 review=6 accept=0 held=9 active=291 priority=0
 external review: unavailable / not installed
 
 system-alert: daemon DEAD; 8 dangling locks; oldest started 8h ago

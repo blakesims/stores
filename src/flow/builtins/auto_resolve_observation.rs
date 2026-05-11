@@ -143,7 +143,8 @@ fn resolve_one(
     let current: Option<(String, Option<String>, Option<String>)> = ctx
         .conn
         .query_row(
-            "SELECT status, lifecycle, outcome FROM observations WHERE display_id = ?1",
+            "SELECT status, lifecycle, outcome FROM observations WHERE display_id = ?1 \
+             /* ADR 0002 compatibility-only T148 task 6.1: status is emitted in log text only. */",
             rusqlite::params![obs_id],
             |r| {
                 Ok((
@@ -262,7 +263,8 @@ pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
             let now_resolved: bool = ctx
                 .conn
                 .query_row(
-                    "SELECT status, lifecycle FROM observations WHERE display_id = ?1",
+                    "SELECT status, lifecycle FROM observations WHERE display_id = ?1 \
+                     /* ADR 0002 compatibility-only T148 task 6.1: status is emitted in startup-sweep log text only. */",
                     rusqlite::params![obs_id],
                     |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1).ok().flatten())),
                 )
