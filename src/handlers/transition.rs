@@ -1156,6 +1156,18 @@ pub(crate) fn execute_transition_write(
     let where_param_idx = param_idx;
     sql_values.push(rusqlite::types::Value::Integer(row_id));
 
+    let prior_primary_tuple: Option<(Option<String>, Option<String>, Option<String>)> =
+        if schema.name == "tasks" {
+            tx.query_row(
+                "SELECT lifecycle, active_step, integration_step FROM tasks WHERE id=?1",
+                rusqlite::params![row_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok()
+        } else {
+            None
+        };
+
     let set_clause = set_parts.join(", ");
     let sql = format!(
         "UPDATE {} SET {set_clause} WHERE id = ?{where_param_idx}",
@@ -1200,19 +1212,26 @@ pub(crate) fn execute_transition_write(
         .iter()
         .all(|c| history_cols.iter().any(|h| h == c))
         {
-            let from_overlay = crate::handlers::lifecycle_overlay::derive(
-                "history",
-                "",
-                from_status,
-                None,
-                None,
-            )?;
+            let derived_from =
+                crate::handlers::lifecycle_overlay::derive("history", "", from_status, None, None)?;
+            let lifecycle_from = prior_primary_tuple
+                .as_ref()
+                .and_then(|(lifecycle, _, _)| lifecycle.as_deref())
+                .unwrap_or(&derived_from.lifecycle);
+            let active_step_from = prior_primary_tuple
+                .as_ref()
+                .and_then(|(_, active_step, _)| active_step.as_deref())
+                .unwrap_or(&derived_from.active_step);
+            let integration_step_from = prior_primary_tuple
+                .as_ref()
+                .and_then(|(_, _, integration_step)| integration_step.as_deref())
+                .unwrap_or(&derived_from.integration_step);
             tx.execute(
                 "UPDATE transition_history SET lifecycle_from=?1, active_step_from=?2, integration_step_from=?3, lifecycle_to=?4, active_step_to=?5, integration_step_to=?6 WHERE id=last_insert_rowid()",
                 rusqlite::params![
-                    from_overlay.lifecycle,
-                    from_overlay.active_step,
-                    from_overlay.integration_step,
+                    lifecycle_from,
+                    active_step_from,
+                    integration_step_from,
                     merged.get("lifecycle").and_then(Value::as_str),
                     merged.get("active_step").and_then(Value::as_str),
                     merged.get("integration_step").and_then(Value::as_str),

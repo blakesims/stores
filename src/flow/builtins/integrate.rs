@@ -489,17 +489,17 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         FreshnessOutcome::Ready => {}
         FreshnessOutcome::StaleRequiresRefresh(scope) => {
             lock_guard.release()?;
-            reset_for_stale_freshness(ctx.conn, display_id, "refresh", "refreshing", &scope)?;
+            reset_for_stale_freshness(ctx, display_id, "refresh", &scope)?;
             return Ok(0);
         }
         FreshnessOutcome::StaleRequiresRereview(scope) => {
             lock_guard.release()?;
-            reset_for_stale_freshness(ctx.conn, display_id, "review", "task_review", &scope)?;
+            reset_for_stale_freshness(ctx, display_id, "review", &scope)?;
             return Ok(0);
         }
         FreshnessOutcome::StaleRequiresRetest(scope) => {
             lock_guard.release()?;
-            reset_for_stale_freshness(ctx.conn, display_id, "test", "testing", &scope)?;
+            reset_for_stale_freshness(ctx, display_id, "test", &scope)?;
             return Ok(0);
         }
     }
@@ -740,10 +740,9 @@ fn task_row_value(conn: &rusqlite::Connection, display_id: &str) -> Result<Value
 }
 
 fn reset_for_stale_freshness(
-    conn: &rusqlite::Connection,
+    ctx: &DispatchCtx,
     display_id: &str,
     dim: &str,
-    integration_step: &str,
     scope: &[String],
 ) -> Result<()> {
     let reason = format!("stale_{dim}");
@@ -752,12 +751,7 @@ fn reset_for_stale_freshness(
     } else {
         format!("{}: {}", reason, scope.join(","))
     };
-    conn.execute(
-        "UPDATE tasks SET integration_step=?1, blocked=1, blocker_kind='stale_base', \
-         integration_blocked_reason=?2 WHERE display_id=?3",
-        params![integration_step, summary, display_id],
-    )?;
-    Ok(())
+    fire_mark_integration_blocked(ctx, display_id, &summary)
 }
 
 fn fire_testing_done_when_merge_free(

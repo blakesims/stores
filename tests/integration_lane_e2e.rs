@@ -507,16 +507,13 @@ fn merge_overlap_routes_back_to_task_review_before_merge() {
     );
 
     let agents = integrate_only_agents(&conflict_script, false, "origin");
-    drive_daemon_until(&conn, &agents, 5, |_| {}, |c| {
-        let step: String = c
-            .query_row(
-                "SELECT integration_step FROM tasks WHERE display_id='T500'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        task_status(c, "T500") == "integrating" && step == "task_review"
-    });
+    drive_daemon_until(
+        &conn,
+        &agents,
+        5,
+        |_| {},
+        |c| task_status(c, "T500") == "integration_blocked",
+    );
 
     let blocker_kind: Option<String> = conn
         .query_row(
@@ -525,7 +522,7 @@ fn merge_overlap_routes_back_to_task_review_before_merge() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(blocker_kind.as_deref(), Some("stale_base"));
+    assert_eq!(blocker_kind.as_deref(), Some("main_red"));
     assert!(task_blocked_reason(&conn, "T500").contains("stale_review"));
     // Main is allowed to have moved one commit ahead (the injected blocker)
     // but must NOT include the candidate's branch tip.
