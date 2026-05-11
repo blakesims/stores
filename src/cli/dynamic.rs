@@ -138,10 +138,26 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                 .require_equals(true)
                 .value_hint(ValueHint::DirPath)
                 .help(
-                    "Route this invocation at the META substrate (the substrate's \
-                     own substrate). With a value: --meta=<PATH> uses <PATH>. \
-                     Without a value: reads STORES_META_PATH. Errors clean if \
-                     neither resolves to a directory containing .stores/.",
+                    "File this invocation against the META substrate (the substrate's own substrate) \
+                     — for substrate self-issue filing only. With a value: --meta=<PATH>. \
+                     Without a value: reads STORES_META_PATH. NOT a generic store-routing flag; \
+                     for that use --stores-root <PATH>.",
+                ),
+        )
+        .arg(
+            Arg::new("stores-root")
+                .long("stores-root")
+                .global(true)
+                .num_args(0..=1)
+                .default_missing_value("")
+                .require_equals(true)
+                .value_hint(ValueHint::DirPath)
+                .help(
+                    "Route this invocation at the substratum store rooted at PATH (the directory \
+                     containing .stores/). Use when running a stores subcommand from a cwd that \
+                     is not the store root (e.g. a worktree or adapter-style cwd whose .stores/ \
+                     does not exist). For filing META observations/intake/tasks against the \
+                     substrate itself, use --meta instead.",
                 ),
         )
         .arg(
