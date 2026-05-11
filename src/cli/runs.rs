@@ -263,7 +263,7 @@ fn live_stores_dir_for_task(stores_dir: &Path, display_id: &str) -> Result<PathB
     Ok(stores_dir.to_path_buf())
 }
 
-fn resolve_marker_path(stores_dir: &Path, marker_path: &Path, path: &Path) -> PathBuf {
+pub(crate) fn resolve_marker_path(stores_dir: &Path, marker_path: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }

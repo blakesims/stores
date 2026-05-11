@@ -240,12 +240,16 @@ Use normalized `last_event_at`, not just PID, as the primary live signal.
   - Added `stores runs tail <task> --raw` for the live flat stdout transcript.
   - Added `stores runs tail <task> --stderr` for the sibling stderr log.
   - Current `tail` is a one-shot dump of current file contents, not a blocking/following `tail -f`.
+- `<pending> runner: show live runner in task status`
+  - Teaches `stores tasks status <task>` and single-task follow frames to read the current marker.
+  - Prints live runner role, runner, marker status, updated age, stdout transcript path, and stderr log path when a marker exists.
 
 ### Review status
 
 - First implementation review found missing discoverability, missing stderr live logs, and silent sink write failures.
 - Follow-up review of `bec81d9` was **PASS** for the coherent phase.
 - Review of `fd9bc6e` was **PASS** for the recommended minimal CLI chunk.
+- Status bridge implementation is awaiting review.
 - The implemented discoverability is filesystem-marker based, not the full planned `runner_invocations` DB layer.
 
 ## Implementation slices
@@ -307,14 +311,15 @@ Current state:
 - `stores runs tail <task> --raw` dumps the current live stdout transcript contents.
 - `stores runs tail <task> --stderr` dumps the current live stderr log contents.
 - No DB-backed `runner_invocations` table/query layer yet.
-- `tasks status` does not yet render live transcript/stderr paths or last event age.
+- `tasks status <task>` now renders live runner marker details when present: role, runner, marker status, updated age, stdout transcript path, and stderr log path.
 
 Remaining choices:
 
-1. **Stay marker/filesystem based:** improve `runs tail` into a following/blocking tail and/or bridge marker info into `tasks status`.
-2. **DB path:** implement `runner_invocations` and status integration, then build richer CLI on top.
+1. **Stay marker/filesystem based:** improve `runs tail` into a following/blocking tail.
+2. **Semantic status path:** implement normalized `events.jsonl` / `status.json` so status can show current tool / last semantic event, not just marker update age.
+3. **DB path:** implement `runner_invocations` and status integration, then build richer CLI on top.
 
-Recommended next step: bridge marker info into `tasks status` or implement normalized `events.jsonl` / `status.json`; do not redo the minimal `runs current/tail` CLI.
+Recommended next step after status bridge review: normalized `events.jsonl` / `status.json` for Pi and Claude Code, because the status bridge currently reports marker update age rather than per-line/semantic liveness.
 
 Validation:
 
@@ -397,12 +402,12 @@ Goal: optional live dashboard like `pi-subagents`.
 
 ## Recommended next worker brief
 
-Do **not** redo Slice 1 or the minimal `runs current/tail` CLI. Start from accepted `fd9bc6e`.
+Do **not** redo Slice 1, the minimal `runs current/tail` CLI, or the status bridge once reviewed.
 
 Recommended next coherent chunks; pick one:
 
-1. **Status bridge:** teach `stores tasks status <task>` to read current marker files and show live transcript/stderr paths, runner, role, status, and updated age.
-2. **Semantic events:** implement Slice 2 for Pi and Claude Code: normalized `events.jsonl`, `status.json`, retry/tool/text/usage event mapping, and tests.
-3. **Follow mode:** make `stores runs tail <task> --raw --follow` follow appended bytes until marker status becomes completed/failed.
+1. **Semantic events:** implement Slice 2 for Pi and Claude Code: normalized `events.jsonl`, `status.json`, retry/tool/text/usage event mapping, and tests.
+2. **Follow mode:** make `stores runs tail <task> --raw --follow` follow appended bytes until marker status becomes completed/failed.
+3. **DB-backed invocations:** replace/augment marker lookup with `runner_invocations` once the filesystem path has proven useful.
 
-The highest operator-value next chunk is probably **Status bridge**, because it makes the live log discoverable from the command operators already run.
+The highest operator-value next chunk after status bridge is probably **Semantic events**, because it upgrades the status bridge from marker discoverability to real liveness/current-tool reporting.

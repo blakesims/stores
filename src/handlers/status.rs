@@ -39,7 +39,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::db;
 use crate::handlers::disposition::{operator_disposition, GitBranchStateSource};
@@ -146,7 +146,10 @@ fn is_terminal(status: &str) -> bool {
     // accepted: human signed off — nothing more to do.
     // rejected: human said no — requires amend, which is a human decision.
     // abandoned: intentionally retired — no further workflow action.
-    matches!(status, "accepted" | "rejected" | "abandoned" | "closed_out_of_band" | "schema_migrated")
+    matches!(
+        status,
+        "accepted" | "rejected" | "abandoned" | "closed_out_of_band" | "schema_migrated"
+    )
 }
 
 /// Active integration-lane states (queued/in-progress). These are still in
@@ -389,14 +392,12 @@ fn fetch_disposition_row_json(conn: &Connection, display_id: &str) -> Result<Val
     } else {
         "''"
     };
-    let sql = format!(
-        "SELECT id, {activation_expr}, {branch_expr} FROM tasks WHERE display_id = ?1"
-    );
-    let (row_id, activation, branch): (i64, String, String) = conn.query_row(
-        &sql,
-        rusqlite::params![display_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+    let sql =
+        format!("SELECT id, {activation_expr}, {branch_expr} FROM tasks WHERE display_id = ?1");
+    let (row_id, activation, branch): (i64, String, String) =
+        conn.query_row(&sql, rusqlite::params![display_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
 
     let mut row_json = json!({
         "display_id": display_id,
@@ -469,6 +470,74 @@ fn print_task_disposition(conn: &Connection, task: &TaskState, status: &str) {
     println!("Disposition: {}", disposition.display_label());
 }
 
+fn format_age_from_rfc3339(updated_at: &str, now: DateTime<Utc>) -> Option<String> {
+    let ts = DateTime::parse_from_rfc3339(updated_at)
+        .ok()?
+        .with_timezone(&Utc);
+    let delta = now.signed_duration_since(ts);
+    let std_delta = if delta.num_seconds() < 0 {
+        Duration::from_secs(0)
+    } else {
+        delta.to_std().ok()?
+    };
+    let secs = std_delta.as_secs();
+    if secs < 60 {
+        Some(format!("{secs}s ago"))
+    } else if secs < 60 * 60 {
+        Some(format!("{}m ago", secs / 60))
+    } else if secs < 24 * 60 * 60 {
+        Some(format!("{}h ago", secs / 3600))
+    } else {
+        Some(format!("{}d ago", secs / 86_400))
+    }
+}
+
+fn live_runner_lines(
+    stores_dir: &Path,
+    current: &crate::cli::runs::CurrentRun,
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let marker = &current.marker;
+    let runner = marker.runner.as_deref().unwrap_or("?");
+    let status = marker.status.as_deref().unwrap_or("?");
+    let updated = marker
+        .updated_at
+        .as_deref()
+        .and_then(|u| format_age_from_rfc3339(u, now).map(|age| format!(" updated={age}")));
+    let mut lines = vec![format!(
+        "Live runner: role={} runner={} status={}{}",
+        marker.role,
+        runner,
+        status,
+        updated.unwrap_or_default()
+    )];
+    if let Some(path) = &marker.transcript_path {
+        lines.push(format!(
+            "Live stdout: {}",
+            crate::cli::runs::resolve_marker_path(stores_dir, &current.marker_path, path).display()
+        ));
+    }
+    if let Some(path) = &marker.stderr_log_path {
+        lines.push(format!(
+            "Live stderr: {}",
+            crate::cli::runs::resolve_marker_path(stores_dir, &current.marker_path, path).display()
+        ));
+    }
+    lines
+}
+
+fn print_live_runner_status(db: &Path, task: &TaskState) {
+    let Some(stores_dir) = db.parent() else {
+        return;
+    };
+    let Ok(current) = crate::cli::runs::find_current_run(stores_dir, &task.display_id, None) else {
+        return;
+    };
+    for line in live_runner_lines(stores_dir, &current, wall_clock_today()) {
+        println!("{line}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -493,6 +562,7 @@ pub fn run_status(args: StatusArgs) -> Result<()> {
                 // status. Single source of truth — display_label() lives
                 // in handlers::disposition.
                 print_task_disposition(&conn, &task, &task.status);
+                print_live_runner_status(&db, &task);
             }
             None => {
                 let tasks = fetch_all_tasks(&conn)?;
@@ -525,6 +595,7 @@ fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
                 if should_print(prev_keys.get(id), &key) {
                     println!("{}", compute_status_frame(&task));
                     print_task_disposition(&conn, &task, &task.status);
+                    print_live_runner_status(db, &task);
                     prev_keys.insert(id.clone(), key.clone());
                 }
                 if is_awaiting_human(&task.status) {
@@ -533,9 +604,7 @@ fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
                 // `integrated` is the framework-terminal lane state; only exit
                 // here when no post-integrated subscriber is wired (otherwise
                 // the row will advance via mark_cargo_installed soon).
-                if task.status == "integrated"
-                    && integrated_is_terminal_no_post_subscriber(db)
-                {
+                if task.status == "integrated" && integrated_is_terminal_no_post_subscriber(db) {
                     return Ok(());
                 }
             }
@@ -556,11 +625,10 @@ fn run_follow_loop(db: &Path, args: StatusArgs) -> Result<()> {
                 // subscriber is wired; otherwise it's awaiting post-land and
                 // remains active. Compute active_tasks accordingly so the
                 // multi-task follow loop exits in the no-subscriber case.
-                let integrated_terminal =
-                    integrated_is_terminal_no_post_subscriber(db);
-                let active_tasks_remaining = tasks.iter().any(|t| {
-                    !(t.status == "integrated" && integrated_terminal)
-                });
+                let integrated_terminal = integrated_is_terminal_no_post_subscriber(db);
+                let active_tasks_remaining = tasks
+                    .iter()
+                    .any(|t| !(t.status == "integrated" && integrated_terminal));
                 if !active_tasks_remaining {
                     // All remaining tasks are framework-terminal
                     return Ok(());
@@ -658,6 +726,77 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn live_runner_lines_include_marker_paths_and_updated_age() {
+        let dir = tempdir().unwrap();
+        let stores_dir = dir.path().join(".stores");
+        let runs_dir = stores_dir.join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        let marker_path = runs_dir.join("current-T123-executor.json");
+        let current = crate::cli::runs::CurrentRun {
+            marker_path,
+            marker: crate::cli::runs::CurrentRunMarker {
+                display_id: "T123".to_string(),
+                phase: Some(2),
+                cycle: Some(1),
+                role: "executor".to_string(),
+                runner: Some("pi".to_string()),
+                session_id: Some("abc".to_string()),
+                status: Some("running".to_string()),
+                transcript_path: Some(std::path::PathBuf::from(".stores/runs/abc.jsonl")),
+                stderr_log_path: Some(std::path::PathBuf::from(".stores/runs/abc.stderr.log")),
+                updated_at: Some("2026-05-11T00:00:00Z".to_string()),
+            },
+        };
+        let now = DateTime::parse_from_rfc3339("2026-05-11T00:01:05Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let lines = live_runner_lines(&stores_dir, &current, now);
+
+        assert_eq!(
+            lines[0],
+            "Live runner: role=executor runner=pi status=running updated=1m ago"
+        );
+        assert_eq!(
+            lines[1],
+            format!("Live stdout: {}", runs_dir.join("abc.jsonl").display())
+        );
+        assert_eq!(
+            lines[2],
+            format!("Live stderr: {}", runs_dir.join("abc.stderr.log").display())
+        );
+    }
+
+    #[test]
+    fn live_runner_lines_tolerate_minimal_marker() {
+        let dir = tempdir().unwrap();
+        let stores_dir = dir.path().join(".stores");
+        let marker_path = stores_dir.join("runs/current-T123-executor.json");
+        let current = crate::cli::runs::CurrentRun {
+            marker_path,
+            marker: crate::cli::runs::CurrentRunMarker {
+                display_id: "T123".to_string(),
+                phase: None,
+                cycle: None,
+                role: "executor".to_string(),
+                runner: None,
+                session_id: None,
+                status: None,
+                transcript_path: None,
+                stderr_log_path: None,
+                updated_at: None,
+            },
+        };
+
+        let now = DateTime::parse_from_rfc3339("2026-05-11T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let lines = live_runner_lines(&stores_dir, &current, now);
+
+        assert_eq!(lines, vec!["Live runner: role=executor runner=? status=?"]);
     }
 
     // -----------------------------------------------------------------------
