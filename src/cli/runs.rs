@@ -777,7 +777,7 @@ fn run_gc(stores_dir: &Path, opts: &RunsGcOpts) -> Result<()> {
     let plan = build_runs_gc_plan(stores_dir, opts)?;
     print_runs_gc_plan(&plan, opts);
     if opts.execute {
-        execute_runs_gc(&plan)?;
+        execute_runs_gc(stores_dir, &plan)?;
     }
     Ok(())
 }
@@ -858,7 +858,8 @@ fn print_runs_gc_plan(plan: &RunsGcPlan, opts: &RunsGcOpts) {
     }
 }
 
-fn execute_runs_gc(plan: &RunsGcPlan) -> Result<()> {
+fn execute_runs_gc(stores_dir: &Path, plan: &RunsGcPlan) -> Result<()> {
+    let runs_dir = stores_dir.join("runs");
     for file in &plan.reclaim {
         if file.protected {
             bail!(
@@ -867,9 +868,31 @@ fn execute_runs_gc(plan: &RunsGcPlan) -> Result<()> {
                 file.protected_reason.as_deref().unwrap_or("protected")
             );
         }
+
+        // Re-check current markers immediately before each mutation. A dry-run
+        // plan can become stale if a new agent starts and writes a
+        // current-*.json marker between planning and execute.
+        let protected_now = collect_protected_run_paths(stores_dir, &runs_dir)?;
+        let canonical = canonicalish(&file.path);
+        if let Some(reason) = protected_now.get(&canonical) {
+            bail!(
+                "refusing to GC newly protected run file {} ({})",
+                file.path.display(),
+                reason
+            );
+        }
+
         let current_size = fs::metadata(&file.path)
             .with_context(|| format!("stat before GC {}", file.path.display()))?
             .len();
+        if current_size != file.size {
+            bail!(
+                "refusing to GC run file {} because size changed since planning (planned={}, current={})",
+                file.path.display(),
+                file.size,
+                current_size
+            );
+        }
         let tombstone = RunGcTombstone {
             gc_kind: "stores_runs_gc_tombstone",
             gc_at: now_iso8601_for_gc(),
@@ -1724,7 +1747,7 @@ mod tests {
             .reclaim
             .iter()
             .any(|f| f.rel_path == ".stores/runs/executor-session.jsonl"));
-        execute_runs_gc(&plan).unwrap();
+        execute_runs_gc(&stores, &plan).unwrap();
 
         let body = fs::read_to_string(&transcript).unwrap();
         assert!(body.contains("stores_runs_gc_tombstone"));
@@ -1733,6 +1756,61 @@ mod tests {
         let read_path = resolve_transcript_path(&stores, &row.path);
         let show_body = fs::read_to_string(read_path).unwrap();
         assert!(show_body.contains("Transcript body was removed by stores runs gc"));
+    }
+
+    #[test]
+    fn runs_gc_execute_rechecks_new_current_marker_before_tombstone() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        let transcript = stores.join("runs/executor-session.jsonl");
+        fs::write(&transcript, vec![b'x'; 200]).unwrap();
+        let opts = RunsGcOpts {
+            execute: true,
+            max_bytes: 1,
+            ..RunsGcOpts::default()
+        };
+        let plan = build_runs_gc_plan(&stores, &opts).unwrap();
+        assert!(plan
+            .reclaim
+            .iter()
+            .any(|f| f.rel_path == ".stores/runs/executor-session.jsonl"));
+
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "status": "running",
+                "transcript_path": transcript,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let err = execute_runs_gc(&stores, &plan).unwrap_err();
+        assert!(err.to_string().contains("newly protected run file"));
+        let body = fs::read_to_string(&transcript).unwrap();
+        assert!(!body.contains("stores_runs_gc_tombstone"));
+    }
+
+    #[test]
+    fn runs_gc_execute_rejects_size_changed_since_planning() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        let transcript = stores.join("runs/executor-session.jsonl");
+        fs::write(&transcript, vec![b'x'; 200]).unwrap();
+        let opts = RunsGcOpts {
+            execute: true,
+            max_bytes: 1,
+            ..RunsGcOpts::default()
+        };
+        let plan = build_runs_gc_plan(&stores, &opts).unwrap();
+        fs::write(&transcript, vec![b'y'; 201]).unwrap();
+
+        let err = execute_runs_gc(&stores, &plan).unwrap_err();
+        assert!(err.to_string().contains("size changed since planning"));
+        let body = fs::read_to_string(&transcript).unwrap();
+        assert!(!body.contains("stores_runs_gc_tombstone"));
     }
 
     #[test]
