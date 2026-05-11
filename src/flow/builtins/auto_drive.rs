@@ -548,12 +548,32 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let ts = now_iso8601().replace(':', "-");
     let log_path = logs_dir.join(format!("drive-{}-{}.log", display_id, ts));
 
-    let pid = match spawn_detached_drive(
-        &argv,
-        &cwd,
-        &log_path,
-        &[("STORES_AUTO_DRIVE_HANDOFF_DISPLAY_ID", display_id)],
-    ) {
+    let canonical_stores_dir = match crate::paths::stores_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "[auto-drive] {}: resolving stores_dir failed: {:#}",
+                display_id, e
+            );
+            return Ok(1);
+        }
+    };
+    let Some(canonical_root) = canonical_stores_dir.parent().map(|p| p.to_path_buf()) else {
+        eprintln!(
+            "[auto-drive] {}: stores_dir has no parent: {}",
+            display_id,
+            canonical_stores_dir.display()
+        );
+        return Ok(1);
+    };
+    let canonical_root_string = canonical_root.to_string_lossy().to_string();
+    let env_overrides = [
+        ("STORES_AUTO_DRIVE_HANDOFF_DISPLAY_ID", display_id),
+        ("STORES_ROOT", canonical_root_string.as_str()),
+    ];
+
+    // Contract: cwd stays at the worktree for the runner; STORES_ROOT routes the child to the canonical substratum store.
+    let pid = match spawn_detached_drive(&argv, &cwd, &log_path, &env_overrides) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[auto-drive] {}: spawn failed: {:#}", display_id, e);
@@ -1337,6 +1357,57 @@ mod tests {
             libc::kill(pid as i32, libc::SIGTERM);
         }
         std::env::remove_var("STORES_DRIVE_CMD");
+    }
+
+    #[test]
+    fn vii_spawn_passes_canonical_stores_root_for_adapter_cwd() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        crate::paths::clear_stores_dir_override_for_tests();
+        let conn = fresh_db();
+        let worktree = temp_cwd();
+        let canonical = tempfile::tempdir().unwrap();
+        let canonical_stores = canonical.path().join(".stores");
+        std::fs::create_dir(&canonical_stores).unwrap();
+        crate::paths::set_stores_dir_override(canonical_stores).unwrap();
+
+        let marker = worktree.path().join("stores-root-marker.txt");
+        assert!(
+            !worktree.path().join(".stores").exists(),
+            "adapter cwd must not start with .stores/"
+        );
+        let cmd = r#"printf '%s' "$STORES_ROOT" > stores-root-marker.txt; sleep 30 #"#;
+        std::env::set_var("STORES_DRIVE_CMD", cmd);
+
+        insert_planning_task(&conn, "T706", worktree.path().to_str().unwrap());
+        let row = task_row_json(&conn, "T706");
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+
+        let res = run(&row, &ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(res, 0);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline && !marker.exists() {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(marker.exists(), "marker must land under workspace_path cwd");
+        let got = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(got, canonical.path().to_string_lossy());
+
+        let pid: i64 = conn
+            .query_row(
+                "SELECT COALESCE(drive_pid, 0) FROM tasks WHERE display_id='T706'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if pid > 0 {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+        }
+        std::env::remove_var("STORES_DRIVE_CMD");
+        crate::paths::clear_stores_dir_override_for_tests();
     }
 
     /// AC4.1 test (ii): re-run with live PID is a no-op (no second spawn).

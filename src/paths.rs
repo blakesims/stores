@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::schema::StoreScope;
 
@@ -13,20 +13,40 @@ use crate::schema::StoreScope;
 // substrate without touching the caller's CWD.
 // ---------------------------------------------------------------------------
 
-static STORES_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+static STORES_DIR_OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn stores_dir_override_slot() -> &'static Mutex<Option<PathBuf>> {
+    STORES_DIR_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
 
 /// Set the process-wide stores-dir override. Idempotent: a second call is a
 /// no-op (the first set wins). Returns Ok(()) regardless of whether the value
 /// was actually installed; callers that need to know can compare via
 /// `stores_dir()` afterwards.
 pub fn set_stores_dir_override(p: PathBuf) -> Result<()> {
-    let _ = STORES_DIR_OVERRIDE.set(p);
+    let mut guard = stores_dir_override_slot()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("stores-dir override lock poisoned"))?;
+    if guard.is_none() {
+        *guard = Some(p);
+    }
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn clear_stores_dir_override_for_tests() {
+    if let Ok(mut guard) = stores_dir_override_slot().lock() {
+        *guard = None;
+    }
+}
+
 pub fn stores_dir() -> Result<PathBuf> {
-    if let Some(p) = STORES_DIR_OVERRIDE.get() {
-        return Ok(p.clone());
+    if let Some(p) = stores_dir_override_slot()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("stores-dir override lock poisoned"))?
+        .clone()
+    {
+        return Ok(p);
     }
     let cwd = std::env::current_dir()?;
     Ok(cwd.join(".stores"))
@@ -71,6 +91,38 @@ pub fn resolve_meta_path(flag: Option<&str>) -> Result<PathBuf> {
     if !stores.exists() {
         bail!(
             "META path '{}' is missing a .stores/ directory; run `stores init` there first",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+/// Resolve the substratum store root from the parsed --stores-root flag value plus
+/// the `STORES_ROOT` env var. Returns the root directory containing `.stores/`.
+pub fn resolve_stores_root(flag: Option<&str>) -> Result<PathBuf> {
+    let raw: String = match flag {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => match std::env::var("STORES_ROOT") {
+            Ok(v) if !v.is_empty() => v,
+            _ => bail!(
+                "STORES_ROOT is not set and no --stores-root <PATH> provided; \
+                 set the env var or pass --stores-root <PATH> to route to a substratum store"
+            ),
+        },
+    };
+
+    let path = PathBuf::from(&raw);
+    if !path.exists() {
+        bail!(
+            "STORES_ROOT target does not exist: {} (resolved from '{}')",
+            path.display(),
+            raw
+        );
+    }
+    let stores = path.join(".stores");
+    if !stores.exists() {
+        bail!(
+            "--stores-root target '{}' is missing a .stores/ directory; run `stores init` there first",
             path.display()
         );
     }
@@ -346,6 +398,7 @@ mod tests {
     #[test]
     fn override_changes_stores_db_and_manifest_paths() {
         let _guard = cwd_lock().lock().unwrap();
+        clear_stores_dir_override_for_tests();
         // Before override (first observation in the process): cwd/.stores
         let cwd = std::env::current_dir().unwrap();
         let before = stores_dir().unwrap();
@@ -360,6 +413,7 @@ mod tests {
         assert_eq!(stores_dir().unwrap(), override_dir);
         assert_eq!(db_path().unwrap(), override_dir.join("db.sqlite"));
         assert_eq!(manifest_path().unwrap(), override_dir.join("manifest.yaml"));
+        clear_stores_dir_override_for_tests();
     }
 
     #[test]
@@ -425,6 +479,64 @@ mod tests {
         let err = result.expect_err("must error when .stores/ missing");
         let msg = err.to_string();
         assert!(msg.contains(".stores"), "error must mention .stores: {msg}");
+    }
+
+    #[test]
+    fn resolve_stores_root_errors_when_env_unset_and_flag_none() {
+        let _guard = cwd_lock().lock().unwrap();
+        let saved = std::env::var("STORES_ROOT").ok();
+        std::env::remove_var("STORES_ROOT");
+
+        let result = resolve_stores_root(None);
+
+        if let Some(v) = saved {
+            std::env::set_var("STORES_ROOT", v);
+        }
+
+        let err = result.expect_err("must error when env unset and flag None");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("STORES_ROOT"),
+            "error must mention env var name: {msg}"
+        );
+        assert!(
+            msg.contains("--stores-root"),
+            "error must mention flag name: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_stores_root_errors_when_target_missing_dot_stores() {
+        let _guard = cwd_lock().lock().unwrap();
+        let saved = std::env::var("STORES_ROOT").ok();
+        let tmp = tempfile::tempdir().expect("tempdir failed");
+        std::env::set_var("STORES_ROOT", tmp.path());
+
+        let result = resolve_stores_root(None);
+
+        match saved {
+            Some(v) => std::env::set_var("STORES_ROOT", v),
+            None => std::env::remove_var("STORES_ROOT"),
+        }
+
+        let err = result.expect_err("must error when .stores/ missing");
+        let msg = err.to_string();
+        assert!(msg.contains(".stores"), "error must mention .stores: {msg}");
+        assert!(
+            msg.contains("--stores-root"),
+            "error must mention flag: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_stores_root_happy_path_via_flag() {
+        let _guard = cwd_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir failed");
+        std::fs::create_dir(tmp.path().join(".stores")).unwrap();
+
+        let result = resolve_stores_root(Some(tmp.path().to_str().unwrap())).unwrap();
+
+        assert_eq!(result, tmp.path());
     }
 
     #[test]

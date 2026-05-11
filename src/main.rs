@@ -43,18 +43,81 @@ fn parse_meta_from_argv() -> Option<String> {
     None
 }
 
+/// Pre-parse `--stores-root` from raw argv. Returns `Some("")` for bare
+/// `--stores-root` (sentinel: defer to STORES_ROOT), `Some(val)` for
+/// `--stores-root=val`, `None` if absent.
+fn parse_stores_root_from_argv() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--stores-root" {
+            return Some(String::new());
+        } else if let Some(rest) = a.strip_prefix("--stores-root=") {
+            return Some(rest.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteChoice {
+    Default,
+    Meta,
+    StoresRoot,
+}
+
+fn decide_route(
+    meta_flag: Option<&str>,
+    meta_env_present: bool,
+    root_flag: Option<&str>,
+    root_env_present: bool,
+) -> Result<RouteChoice> {
+    let meta_non_empty = meta_flag.is_some_and(|s| !s.is_empty()) || meta_env_present;
+    let root_non_empty = root_flag.is_some_and(|s| !s.is_empty()) || root_env_present;
+    if meta_non_empty && root_non_empty {
+        anyhow::bail!(
+            "--meta and --stores-root are mutually exclusive: --meta files at the META substrate, --stores-root operates on a substratum store. Pick one."
+        );
+    }
+    if root_flag.is_some() || root_env_present {
+        Ok(RouteChoice::StoresRoot)
+    } else if meta_flag.is_some() || meta_env_present {
+        Ok(RouteChoice::Meta)
+    } else {
+        Ok(RouteChoice::Default)
+    }
+}
+
 fn main() -> Result<()> {
     // T023 P2: --meta early-bind. If --meta is present on argv or
     // STORES_META_PATH is set, resolve and install the stores-dir override
     // BEFORE manifest/schema loading so every downstream consumer of
     // `paths::stores_dir()` routes to the META substrate.
     let meta_flag = parse_meta_from_argv();
-    let env_present = std::env::var("STORES_META_PATH")
+    let stores_root_flag = parse_stores_root_from_argv();
+    let meta_env_present = std::env::var("STORES_META_PATH")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
-    if meta_flag.is_some() || env_present {
-        let meta_root = paths::resolve_meta_path(meta_flag.as_deref())?;
-        paths::set_stores_dir_override(meta_root.join(".stores"))?;
+    let stores_root_env_present = std::env::var("STORES_ROOT")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    match decide_route(
+        meta_flag.as_deref(),
+        meta_env_present,
+        stores_root_flag.as_deref(),
+        stores_root_env_present,
+    )? {
+        RouteChoice::StoresRoot => {
+            let root = paths::resolve_stores_root(stores_root_flag.as_deref())?;
+            paths::set_stores_dir_override(root.join(".stores"))?;
+        }
+        RouteChoice::Meta => {
+            let meta_root = paths::resolve_meta_path(meta_flag.as_deref())?;
+            paths::set_stores_dir_override(meta_root.join(".stores"))?;
+        }
+        RouteChoice::Default => {}
     }
 
     // Determine whether a manifest exists (init must work without one)
@@ -352,4 +415,34 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decide_route_errors_when_meta_and_stores_root_conflict() {
+        let err = decide_route(Some("/meta"), false, Some("/root"), false).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+
+        let err = decide_route(None, true, None, true).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn decide_route_selects_single_route_sources() {
+        assert_eq!(
+            decide_route(None, false, Some("/root"), false).unwrap(),
+            RouteChoice::StoresRoot
+        );
+        assert_eq!(
+            decide_route(Some("/meta"), false, None, false).unwrap(),
+            RouteChoice::Meta
+        );
+        assert_eq!(
+            decide_route(None, false, None, false).unwrap(),
+            RouteChoice::Default
+        );
+    }
 }
