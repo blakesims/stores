@@ -982,6 +982,56 @@ mod tests {
     }
 
     #[test]
+    fn live_runner_lines_label_stale_running_marker() {
+        let dir = tempdir().unwrap();
+        let stores_dir = dir.path().join(".stores");
+        let runs_dir = stores_dir.join("runs");
+        std::fs::create_dir_all(runs_dir.join("stale")).unwrap();
+        std::fs::write(
+            runs_dir.join("stale/status.json"),
+            r#"{
+  "last_event_at": "2026-05-11T00:00:00Z",
+  "last_event_type": "heartbeat",
+  "current_activity": "tool:bash"
+}"#,
+        )
+        .unwrap();
+        let current = crate::cli::runs::CurrentRun {
+            marker_path: runs_dir.join("current-T123-executor.json"),
+            marker: crate::cli::runs::CurrentRunMarker {
+                display_id: "T123".to_string(),
+                phase: Some(2),
+                cycle: Some(1),
+                role: "executor".to_string(),
+                runner: Some("pi".to_string()),
+                session_id: Some("stale".to_string()),
+                status: Some("running".to_string()),
+                transcript_path: Some(std::path::PathBuf::from(".stores/runs/stale.jsonl")),
+                stderr_log_path: None,
+                events_path: None,
+                status_path: None,
+                updated_at: Some("2026-05-11T00:00:00Z".to_string()),
+            },
+        };
+        let now = DateTime::parse_from_rfc3339("2026-05-11T01:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let lines = live_runner_lines(&stores_dir, &current, now);
+
+        assert!(
+            lines[0].contains("liveness=stale_marker"),
+            "stale running marker must be labelled stale: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("stale_reason="),
+            "stale reason must be visible: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
     fn live_runner_lines_tolerate_minimal_marker() {
         let dir = tempdir().unwrap();
         let stores_dir = dir.path().join(".stores");
