@@ -796,17 +796,33 @@ fn current_process_owns_pidfile(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn stale_reexec_attempt_line(path: &Path) -> String {
+fn current_exe_diagnostic_path() -> String {
+    std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn binary_identity_diagnostic(identity: BinaryIdentity) -> String {
+    format!("dev={} ino={}", identity.dev, identity.ino)
+}
+
+fn stale_reexec_attempt_line_with_identity(path: &Path, startup_identity: BinaryIdentity) -> String {
     format!(
-        "daemon binary stale; reexecing into {} (was version {})",
+        "daemon binary stale; reexecing into {} (launch_path={} current_exe={} startup_identity={} build_identity={})",
         path.display(),
-        crate::version::build_identity()
+        path.display(),
+        current_exe_diagnostic_path(),
+        binary_identity_diagnostic(startup_identity),
+        crate::version::build_identity_diagnostics()
     )
 }
 
 fn log_stale_reexec_attempt_once<P: BinaryIdentityProvider>(guard: &DaemonExeGuard<P>) {
     if !STALE_HALTED.swap(true, Ordering::SeqCst) {
-        eprintln!("{}", stale_reexec_attempt_line(guard.launch_path()));
+        eprintln!(
+            "{}",
+            stale_reexec_attempt_line_with_identity(guard.launch_path(), guard.startup_identity())
+        );
     }
 }
 
@@ -980,8 +996,10 @@ fn validate_stale_reexec_candidate(
 
 fn candidate_validation_error_message(f: &CandidateValidationFailure) -> String {
     format!(
-        "candidate stores binary failed validation: path={} size={} command='{}' exit_status={} reason={} stdout='{}' stderr='{}'",
+        "candidate stores binary failed validation: path={} current_exe={} build_identity={} size={} command='{}' exit_status={} reason={} stdout='{}' stderr='{}'",
         f.path.display(),
+        current_exe_diagnostic_path(),
+        crate::version::build_identity_diagnostics(),
         f.size.map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string()),
         f.command,
         f.exit_status.as_deref().unwrap_or("unknown"),
@@ -993,8 +1011,10 @@ fn candidate_validation_error_message(f: &CandidateValidationFailure) -> String 
 
 fn log_candidate_validation_failure(f: &CandidateValidationFailure) {
     eprintln!(
-        "candidate stores binary failed validation: path={} size={} command='{}' exit_status={} reason={} stdout='{}' stderr='{}'; {}",
+        "candidate stores binary failed validation: path={} current_exe={} build_identity={} size={} command='{}' exit_status={} reason={} stdout='{}' stderr='{}'; {}",
         f.path.display(),
+        current_exe_diagnostic_path(),
+        crate::version::build_identity_diagnostics(),
         f.size.map(|s| s.to_string()).unwrap_or_else(|| "unknown".to_string()),
         f.command,
         f.exit_status.as_deref().unwrap_or("unknown"),
@@ -3822,13 +3842,20 @@ mod tests {
             message,
             "daemon binary stale after cargo install; restart required"
         );
-        assert_eq!(
-            stale_reexec_attempt_line(guard.launch_path()),
-            format!(
-                "daemon binary stale; reexecing into /tmp/stores (was version {})",
-                crate::version::build_identity()
-            )
+        let line = stale_reexec_attempt_line_with_identity(guard.launch_path(), guard.startup_identity());
+        assert!(
+            line.starts_with("daemon binary stale; reexecing into /tmp/stores "),
+            "unexpected stale reexec line: {line}"
         );
+        assert!(line.contains("launch_path=/tmp/stores"), "{line}");
+        assert!(line.contains("current_exe="), "{line}");
+        assert!(line.contains("startup_identity=dev=1 ino=2"), "{line}");
+        assert!(
+            line.contains(&format!("version={}", env!("CARGO_PKG_VERSION"))),
+            "{line}"
+        );
+        assert!(line.contains("git_sha="), "{line}");
+        assert!(line.contains("build_timestamp="), "{line}");
     }
 
     /// AC4.2 test (b): a tasks row freshly transitioned to in_review is

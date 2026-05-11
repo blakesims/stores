@@ -115,6 +115,7 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
     let mut root = Command::new("stores")
         .about("Schema-driven store framework")
         .version(env!("CARGO_PKG_VERSION"))
+        .long_version(crate::version::build_identity_diagnostics())
         .arg(
             Arg::new("json")
                 .long("json")

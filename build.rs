@@ -30,5 +30,11 @@ fn emit_git_rerun_inputs() {
 fn main() {
     let sha = git_stdout(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=VERGEN_GIT_SHA={sha}");
+    println!("cargo:rustc-env=STORES_GIT_SHA={sha}");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=STORES_BUILD_TIMESTAMP={timestamp}");
     emit_git_rerun_inputs();
 }
