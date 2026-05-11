@@ -8,7 +8,7 @@
 
 Implement live, runner-agnostic streaming for stores task runners so operators can see what an executor/reviewer/planner is doing while it runs, instead of waiting for post-exit transcripts. The target experience is similar to `pi-subagents`: live JSONL/event logs, durable progress snapshots, and a tail/view command that shows assistant text, tool starts/ends, retries, usage, and last activity.
 
-The first slice should be intentionally narrow: preserve current runner behavior, but change transcript writing from "buffer until child exits" to "append and flush as stdout/stderr lines arrive". Then layer normalized events and UI/TUI affordances on top.
+The first slice should be intentionally narrow but must still make live paths discoverable: preserve current runner behavior, allocate a pre-spawn invocation context, and change transcript writing from "buffer until child exits" to "append and flush as stdout/stderr lines arrive". Then layer normalized events and UI/TUI affordances on top.
 
 ## Problem
 
@@ -99,12 +99,26 @@ Map `command_execution` start/completion to tool events; map `agent_message` to 
 
 ## Proposed architecture
 
-### 1. Add a runner event sink abstraction
+### 1. Add a pre-spawn runner invocation context and event sink
+
+Live streaming needs one architectural change up front: `drive` must know the session id and live path before it blocks in `Runner::spawn`. Today each runner mints `session_id` internally and returns only after completion, so raw live files could exist without any stable way for `stores tasks status` or `stores runs tail` to find them.
 
 Introduce a small common layer, not a giant rewrite:
 
 ```rust
+pub struct RunnerInvocationContext {
+    pub session_id: String,
+    pub live_dir: PathBuf,
+    pub flat_transcript_path: PathBuf,
+    pub runner: String,
+    pub display_id: String,
+    pub phase: i64,
+    pub cycle: i64,
+    pub role: String,
+}
+
 pub enum RunnerEvent {
+    Spawned { pid: u32 },
     RawStdout { line: String },
     RawStderr { line: String },
     AssistantText { text: String },
@@ -122,7 +136,7 @@ pub trait RunnerEventSink {
 }
 ```
 
-Keep it append-only and best-effort where possible. The sink should never hide runner failures, but observability write failures should be explicit and diagnosable.
+`drive` should allocate `RunnerInvocationContext` immediately before spawn and pass it into the runner/sink. The runner emits `Spawned { pid }` after `cmd.spawn()` so PID recording does not rely on post-hoc process inspection. Keep the sink append-only and best-effort where possible. The sink should never hide runner failures, but observability write failures should be explicit and diagnosable.
 
 ### 2. Create live run directories at spawn start
 
@@ -137,23 +151,13 @@ For every runner invocation, create a stable live directory immediately:
   final.json          # written on completion
 ```
 
-Compatibility option: also maintain the existing flat transcript path (`.stores/runs/<session_id>.jsonl`) as the raw stdout transcript, but write it live instead of post-exit.
+Compatibility decision: keep the existing flat transcript path (`.stores/runs/<session_id>.jsonl`) as the canonical raw stdout transcript and write it live instead of post-exit. Add the per-session directory for normalized events and snapshots. Existing telemetry/tests can continue to point at the flat path while new live viewers use `<session_id>/events.jsonl` and `<session_id>/status.json`.
 
 ### 3. Persist running-attempt metadata before completion
 
 Current `agent_runs` rows are inserted after the runner returns, so operators cannot discover live paths from the DB while a run is active.
 
-Minimal first option:
-
-- Add running fields to task row / dispatch lock only:
-  - current runner session id
-  - live run path
-  - last event at
-  - current tool summary
-
-Better option:
-
-- Add `agent_run_attempts` or allow `agent_runs` start rows with nullable `ended_at`/`exit_code`.
+Avoid relaxing `agent_runs` in the first pass: existing code assumes `agent_runs` is post-completion telemetry with non-null `ended_at` and `exit_code`.
 
 Recommended initial implementation: add a small `runner_invocations` table to avoid destabilizing `agent_runs` invariants:
 
@@ -178,7 +182,7 @@ runner_invocations
   ended_at nullable
 ```
 
-Then later fold or relate this to `agent_runs` once stable.
+Insert the `runner_invocations` row before calling `Runner::spawn`, update it on `Spawned`, line/event heartbeat, current tool changes, and completion. Then later fold or relate this to `agent_runs` once stable.
 
 ### 4. Add a CLI viewer
 
@@ -219,49 +223,60 @@ Use normalized `last_event_at`, not just PID, as the primary live signal.
 
 ## Implementation slices
 
-### Slice 1 — live raw transcript, no schema changes if possible
+### Slice 1 — pre-spawn context + live raw transcript for Pi and Claude Code
 
-Goal: tailers can see raw output before process exit.
+Goal: tailers can discover and see raw output before process exit.
 
-- Update `liveness::run_streaming_with_liveness` to accept callbacks that can fail or introduce a `StreamingSink` wrapper.
+- Add `RunnerInvocationContext` allocation in `drive` immediately before the runner spawn.
+- Keep `.stores/runs/<session_id>.jsonl` as the flat raw stdout transcript and create `<session_id>/` for live status/events.
+- Insert a `runner_invocations` row before `Runner::spawn` blocks.
+- Update `liveness::run_streaming_with_liveness` to accept a streaming sink/callback policy, or introduce a `StreamingSink` wrapper around it.
+- Callback semantics:
+  - all stdout/stderr lines, including post-`wait()` drained lines, must pass through the same sink path;
+  - sink write failures should surface as runner infrastructure errors unless explicitly downgraded with a warning;
+  - heartbeat/status updates should happen after durable append succeeds when possible.
 - Pi runner: write stdout/stderr lines to live files immediately and flush.
 - Claude Code runner: replace `.output()` with streaming spawn and write raw JSONL live.
-- Codex runner: ensure JSONL mode (`--json`) and write raw JSONL live.
 - Preserve returned `RunnerOutput.stdout` so existing parsers/tests keep working.
+- Do **not** enable Claude `--include-partial-messages` by default in Slice 1.
+- Defer Codex JSON mode to a dedicated compatibility slice.
 
 Validation:
 
-- Unit test with a shim that emits one line, sleeps, emits second line, then exits; assert file contains first line before exit.
-- Regression for long silent child: no-output timeout still kills.
+- Unit test with a shim that emits one line, sleeps, emits second line, then exits; assert file contains first line before exit and `runner_invocations` resolves before exit.
+- Unit test that late drained lines after child exit are written through the same sink.
+- Regression for long silent child: no-output timeout still kills and writes a terminal status.
 
-### Slice 2 — normalized event mapping
+### Slice 2 — normalized event mapping for Pi and Claude Code
 
-Goal: raw lines become useful semantic events.
+Goal: raw lines become useful semantic events without changing downstream final-output behavior.
 
 - Add `RunnerEvent` and sink.
 - Implement mappers:
   - `map_pi_event`
   - `map_claude_stream_json_event`
-  - `map_codex_json_event`
 - Append `events.jsonl` and update `status.json` on every semantic event.
 - Include API retry/rate-limit events as first-class events.
+- Track current tool by id where available, and render unknown tool end events without failing.
 
 Validation:
 
-- Fixture-based mapper tests for each runner.
+- Fixture-based mapper tests for Pi and Claude Code.
 - Tool start/end matching by id where available.
+- Claude `system.api_retry` fixture extends liveness and renders as retry, not as silence.
 
 ### Slice 3 — discoverability from stores
 
 Goal: operator can find the current live log without spelunking `/proc`.
 
-- Add `runner_invocations` table or equivalent running metadata.
-- Insert/update at spawn start, line event, and completion.
+- Complete the `runner_invocations` table/query layer if Slice 1 used a minimal internal form.
+- Insert/update at spawn start, PID observation, line event, semantic event, and completion.
 - Surface in `tasks status`.
 
 Validation:
 
 - Start a shim runner and assert `stores runs current <task>` resolves before child exits.
+- Assert `tasks status` reports live path, last event age, runner, role, and PID when known.
 
 ### Slice 4 — `stores runs tail`
 
@@ -275,7 +290,25 @@ Validation:
 
 - CLI smoke test against a temp runs dir and fixture event stream.
 
-### Slice 5 — Pi/TUI extension integration
+### Slice 5 — Codex JSON compatibility
+
+Goal: add Codex semantic streaming without breaking existing Codex consumers.
+
+- Audit current Codex downstream parsing, especially external-review verdict/final-message handling.
+- Add `--json` only after preserving or deriving the existing final human text expected by callers.
+- Map Codex JSONL events:
+  - `item.started` / `item.completed` with `command_execution` → tool start/end
+  - `item.completed` with `agent_message` → assistant text
+  - `turn.completed.usage` → usage
+  - `turn.failed` / `error` → error events
+- Keep raw stdout live transcript compatibility.
+
+Validation:
+
+- Existing external-review parsing remains green.
+- Codex JSON fixtures map to normalized events.
+
+### Slice 6 — Pi/TUI extension integration
 
 Goal: optional live dashboard like `pi-subagents`.
 
@@ -292,19 +325,30 @@ Goal: optional live dashboard like `pi-subagents`.
 - Observability must not mask child exit status or payload errors.
 - The same abstraction must cover Pi, Claude Code, and Codex; no Pi-only special path.
 - Retry/rate-limit events should extend liveness and render explicitly.
+- `--include-partial-messages` for Claude Code is opt-in/config-gated, not default, until event volume and UI rendering are proven.
+- Codex `--json` is opt-in/deferred until compatibility with existing final-message/verdict consumers is proven.
+
+## Resolved decisions from plan review
+
+1. Claude `--include-partial-messages` is config-gated/off by default.
+2. Keep the existing flat `.stores/runs/<session_id>.jsonl` raw transcript path for compatibility; add per-session live directory alongside it.
+3. Use a new `runner_invocations` table rather than relaxing `agent_runs` in the first pass.
+4. Drive must allocate/pass pre-spawn invocation context so live paths are discoverable while the runner is active.
+5. Runner implementations must emit `Spawned { pid }` or equivalent through the sink; PID is not available from the current post-completion `RunnerOutput` API.
 
 ## Open questions for review
 
-1. Should `--include-partial-messages` be enabled by default for Claude Code, or gated by config because it increases event volume?
-2. Should live raw stdout keep the existing flat `.stores/runs/<session_id>.jsonl` path, or should we migrate all consumers to per-run directories?
-3. Should running metadata be a new `runner_invocations` table, or should `agent_runs` be relaxed to allow in-flight rows?
-4. What is the minimum viewer needed now: `stores runs tail`, `stores tasks status` enhancement, or both?
+1. Should Slice 1 include both `stores runs current` and `tasks status` live path rendering, or is one enough for the first debugging pass?
+2. Should sink write failure abort the runner as infrastructure failure in all cases, or warn-and-continue for secondary files while requiring the flat transcript append to succeed?
+3. What retention/cleanup policy should apply to per-session live directories once flat transcript compatibility remains?
 
 ## Recommended first commit
 
 Implement Slice 1 for Pi + Claude Code first:
 
-- Pi because T146 is currently exposing the blind spot.
-- Claude Code because it already emits canonical stream-json and the change is mechanical.
+- Add pre-spawn invocation context and `runner_invocations` row creation.
+- Keep the existing flat raw transcript path and live-write it.
+- Pi first because T146 is currently exposing the blind spot.
+- Claude Code second because it already emits canonical stream-json and the change is mechanical.
 
-Leave Codex for the next commit unless its current runner is equally small.
+Leave Codex JSON mode for the compatibility slice, not the first commit.
