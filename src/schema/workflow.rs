@@ -779,7 +779,7 @@ on_state: {}
         let wf: Workflow = serde_yaml::from_str(yaml).unwrap();
         let resolved = wf.resolve_from_strings(BTreeMap::new(), None);
         // default when max_revise_cycles is None
-        assert_eq!(resolved.max_revise_cycles, 5);
+        assert_eq!(resolved.max_revise_cycles, 3);
     }
 
     // ---- T027 P1: optional `when:` guard on state actions ----

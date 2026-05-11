@@ -785,17 +785,27 @@ fn build_store_command(schema: &Schema) -> Command {
         // observation-id (L###), or a commit-sha (7-40 hex chars). Substrate
         // verifies the shape; the verb refuses without it.
         if verb == "close_as_addressed" {
-            // The schema already declares a `resolution` text field, so the
-            // leaf-arg walker registered a non-required `--resolution`. Promote
-            // it to required and override the help text so the three accepted
-            // forms (T###, L###, commit-sha) are visible at --help.
-            transition_cmd = transition_cmd.mut_arg("resolution", |a| {
-                a.required(true).help(
-                    "Reference to the artifact that addressed this observation: \
+            // The schema usually registers a non-required `--resolution` leaf.
+            // Some transition-specific leaf filtering can omit it; keep command
+            // construction total by adding the verb-required flag in that case.
+            let resolution_help = "Reference to the artifact that addressed this observation: \
                      task-id (T###), observation-id (L###), or commit-sha \
-                     (7-40 hex chars)",
-                )
-            });
+                     (7-40 hex chars)";
+            if transition_cmd
+                .get_arguments()
+                .any(|a| a.get_id() == "resolution")
+            {
+                transition_cmd = transition_cmd
+                    .mut_arg("resolution", |a| a.required(true).help(resolution_help));
+            } else {
+                transition_cmd = transition_cmd.arg(
+                    Arg::new("resolution")
+                        .long("resolution")
+                        .value_name("ref")
+                        .help(resolution_help)
+                        .required(true),
+                );
+            }
         }
         // close-out-of-band (tasks recovery-terminal) requires --commit <SHA>:
         // the merge-target SHA recorded as provenance in transition_history.
