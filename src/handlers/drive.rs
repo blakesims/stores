@@ -717,7 +717,7 @@ fn live_owner_for_task(
             }));
         }
     }
-    if let Some(pid) = live_dispatch_lock_pid(conn, row_id, current_pid)? {
+    if let Some(pid) = live_dispatch_lock_pid(conn, row_id, current_pid, display_id)? {
         return Ok(Some(LiveDriveOwner {
             display_id: display_id.to_string(),
             reason: format!("live_dispatch_lock_pid:{pid}"),
@@ -733,21 +733,39 @@ fn live_owner_for_task(
     Ok(None)
 }
 
-fn live_dispatch_lock_pid(conn: &Connection, row_id: i64, current_pid: i64) -> Result<Option<i64>> {
+fn live_dispatch_lock_pid(
+    conn: &Connection,
+    row_id: i64,
+    current_pid: i64,
+    display_id: &str,
+) -> Result<Option<i64>> {
     if !dispatch_locks_table_exists(conn)? {
         return Ok(None);
     }
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(pid, 0) FROM dispatch_locks \
+        "SELECT agent_name, COALESCE(pid, 0) FROM dispatch_locks \
          WHERE store='tasks' AND row_id=?1 AND finished_at IS NULL",
     )?;
-    let pids = stmt.query_map(rusqlite::params![row_id], |r| r.get::<_, i64>(0))?;
-    for pid in pids.filter_map(|r| r.ok()) {
+    let rows = stmt.query_map(rusqlite::params![row_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    for (agent_name, pid) in rows.filter_map(|r| r.ok()) {
+        if auto_drive_handoff_matches(display_id, &agent_name) {
+            continue;
+        }
         if pid > 0 && pid != current_pid && pid_is_live(pid) {
             return Ok(Some(pid));
         }
     }
     Ok(None)
+}
+
+fn auto_drive_handoff_matches(display_id: &str, agent_name: &str) -> bool {
+    agent_name == "auto-drive"
+        && std::env::var("STORES_AUTO_DRIVE_HANDOFF_DISPLAY_ID")
+            .ok()
+            .as_deref()
+            == Some(display_id)
 }
 
 fn dispatch_locks_table_exists(conn: &Connection) -> Result<bool> {
@@ -2894,6 +2912,80 @@ mod tests {
             msg.contains("live_dispatch_lock_pid"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn auto_drive_handoff_child_allows_parent_auto_drive_dispatch_lock() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        insert_task(
+            &conn,
+            &schema,
+            "T999",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        let row_id: i64 = conn
+            .query_row("SELECT id FROM tasks WHERE display_id='T999'", [], |r| r.get(0))
+            .unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn parent auto-drive lock owner");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store,row_id,display_id,agent_name,claimed_at,claimed_by,finished_at,pid) \
+             VALUES ('tasks',?1,'T999','auto-drive','2026-01-01T00:00:00Z','daemon-test',NULL,?2)",
+            rusqlite::params![row_id, child.id() as i64],
+        )
+        .unwrap();
+        std::env::set_var("STORES_AUTO_DRIVE_HANDOFF_DISPLAY_ID", "T999");
+        let result = enforce_singleton_drive_owner(&conn, "T999");
+        std::env::remove_var("STORES_AUTO_DRIVE_HANDOFF_DISPLAY_ID");
+        let _ = child.kill();
+        let _ = child.wait();
+        result.expect("auto-drive handoff child must not self-block on parent claim lock");
+    }
+
+    #[test]
+    fn auto_drive_handoff_env_does_not_allow_unrelated_manual_lock() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        insert_task(
+            &conn,
+            &schema,
+            "T999",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        let row_id: i64 = conn
+            .query_row("SELECT id FROM tasks WHERE display_id='T999'", [], |r| r.get(0))
+            .unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn manual lock owner");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store,row_id,display_id,agent_name,claimed_at,claimed_by,finished_at,pid) \
+             VALUES ('tasks',?1,'T999','manual-drive','2026-01-01T00:00:00Z','operator',NULL,?2)",
+            rusqlite::params![row_id, child.id() as i64],
+        )
+        .unwrap();
+        std::env::set_var("STORES_AUTO_DRIVE_HANDOFF_DISPLAY_ID", "T999");
+        let err = enforce_singleton_drive_owner(&conn, "T999")
+            .expect_err("handoff env must not bypass non-auto-drive duplicate lock");
+        std::env::remove_var("STORES_AUTO_DRIVE_HANDOFF_DISPLAY_ID");
+        let _ = child.kill();
+        let _ = child.wait();
+        let msg = err.to_string();
+        assert!(msg.contains("live_dispatch_lock_pid"), "unexpected error: {msg}");
     }
 
     #[test]

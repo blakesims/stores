@@ -3122,7 +3122,12 @@ pub(crate) fn count_live_drive_pids(conn: &Connection) -> Result<usize> {
 /// Uses double-fork + a pipe so the parent can read the grandchild PID and
 /// reap the intermediate child without leaving a zombie. The grandchild is
 /// reparented to PID 1 once the intermediate child exits.
-pub(crate) fn spawn_detached_drive(argv: &[String], cwd: &Path, log_path: &Path) -> Result<i32> {
+pub(crate) fn spawn_detached_drive(
+    argv: &[String],
+    cwd: &Path,
+    log_path: &Path,
+    env_overrides: &[(&str, &str)],
+) -> Result<i32> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::AsRawFd;
 
@@ -3153,6 +3158,15 @@ pub(crate) fn spawn_detached_drive(argv: &[String], cwd: &Path, log_path: &Path)
         .map_err(|_| anyhow!("cwd contains NUL"))?;
     let log_c = std::ffi::CString::new(log_path.as_os_str().as_bytes())
         .map_err(|_| anyhow!("log_path contains NUL"))?;
+    let env_owned: Vec<(std::ffi::CString, std::ffi::CString)> = env_overrides
+        .iter()
+        .map(|(k, v)| {
+            Ok((
+                std::ffi::CString::new(k.as_bytes()).map_err(|_| anyhow!("env key contains NUL"))?,
+                std::ffi::CString::new(v.as_bytes()).map_err(|_| anyhow!("env value contains NUL"))?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     unsafe {
         let pid1 = libc::fork();
@@ -3192,6 +3206,12 @@ pub(crate) fn spawn_detached_drive(argv: &[String], cwd: &Path, log_path: &Path)
 
                 if libc::chdir(cwd_c.as_ptr()) != 0 {
                     libc::_exit(13);
+                }
+
+                for (key, value) in &env_owned {
+                    if libc::setenv(key.as_ptr(), value.as_ptr(), 1) != 0 {
+                        libc::_exit(14);
+                    }
                 }
 
                 // Build argv ptr array (NULL-terminated).

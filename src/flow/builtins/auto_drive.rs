@@ -548,7 +548,12 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let ts = now_iso8601().replace(':', "-");
     let log_path = logs_dir.join(format!("drive-{}-{}.log", display_id, ts));
 
-    let pid = match spawn_detached_drive(&argv, &cwd, &log_path) {
+    let pid = match spawn_detached_drive(
+        &argv,
+        &cwd,
+        &log_path,
+        &[("STORES_AUTO_DRIVE_HANDOFF_DISPLAY_ID", display_id)],
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[auto-drive] {}: spawn failed: {:#}", display_id, e);
