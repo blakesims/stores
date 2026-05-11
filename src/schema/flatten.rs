@@ -35,9 +35,8 @@ fn walk_field<'a>(field: &'a Field, parent_path: &[String], out: &mut Vec<LeafAr
             // Leaf
             let mut path = parent_path.to_vec();
             path.push(field.name.clone());
-            let cli_name = if path == ["intent_contract".to_string(), "contract_state".to_string()]
-            {
-                "intent-contract-contract-state".to_string()
+            let cli_name = if path == ["contract_state".to_string()] {
+                "primary-contract-state".to_string()
             } else {
                 to_kebab(&field.name)
             };
@@ -201,6 +200,34 @@ fields:
         let schema = Schema::from_yaml(yaml).unwrap();
         let args = leaf_args(&schema).unwrap();
         assert_eq!(args[0].path, vec!["contract", "done_when"]);
+    }
+
+    #[test]
+    fn primary_contract_state_uses_prefixed_cli_name() {
+        let yaml = r#"
+name: observations
+id_format: "L{:01d}"
+lifecycle:
+  states: [open]
+  transitions: []
+fields:
+  - name: contract_state
+    type: enum
+    enum_values: [none, draft, approved]
+  - name: intent_contract
+    type: record
+    fields:
+      - name: contract_state
+        type: enum
+        enum_values: [draft, ready]
+"#;
+        let schema = Schema::from_yaml(yaml).unwrap();
+        let args = leaf_args(&schema).unwrap();
+        let names: Vec<&str> = args.iter().map(|a| a.cli_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["primary-contract-state", "contract-state"]
+        );
     }
 
     #[test]
