@@ -1,7 +1,7 @@
 # ADR 0002: Inlet triage and observation routing
 
 **Date:** 2026-05-10
-**Status:** accepted
+**Status:** accepted (implemented in T148)
 **Deciders:** Blake + pi-architect
 
 ## Context
@@ -468,3 +468,7 @@ This ADR should seed a follow-up implementation task. A reasonable phase-1/phase
 - Gatekeeper design: `docs/gatekeeper-design.md`
 - Risk and cluster taxonomy: `docs/risk-and-cluster-taxonomy.md`
 - Related primitives: `docs/primitives.md`
+
+## Status
+
+Implemented in task `T148` on 2026-05-11. Merge PR/commit: T148 implementation branch; final upstream merge commit to be recorded by the repository merge operator after this executor phase lands.

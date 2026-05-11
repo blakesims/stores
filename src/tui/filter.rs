@@ -73,7 +73,8 @@ fn state_matches(state: &str, row: &Row, section: Section) -> bool {
         "blocked_needs_action" => section == Section::TasksBlockedNeedsAction,
         "needs_triage" => section == Section::TasksNeedsTriage,
         "recently_terminal" => section == Section::TasksRecentlyTerminal,
-        // Otherwise match the raw status field.
+        // Otherwise match the raw status field. ADR 0002 compatibility-only T148 task 6.1:
+        // upstream rows retain this legacy filter only for explicit status queries.
         other => match row {
             Row::Task(t) => t.status == other,
             Row::Obs(o) => o.status == other,

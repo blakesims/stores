@@ -208,6 +208,7 @@ fn observation_lines(o: &ObsRow, app: &App) -> Vec<String> {
             "  superseded_by_id: {}",
             present_opt(o.superseded_by_id.as_deref())
         ),
+        // ADR 0002 compatibility-only T148 task 6.1: display legacy observation status explicitly.
         format!("  Legacy status: {}", present(&o.status)),
         String::new(),
         "Contract state".to_string(),
@@ -537,7 +538,7 @@ fn obs_next_action(o: &ObsRow) -> String {
         format!("held: {reason}")
     } else if o.contract_state.as_deref() == Some("ready") {
         "ratify contract".to_string()
-    } else if o.status == "investigation_failed" {
+    } else if o.status == "investigation_failed" { // ADR 0002 compatibility-only T148 task 6.1
         format!(
             "investigation failed: {}",
             present_opt(o.investigation_failure_reason.as_deref())

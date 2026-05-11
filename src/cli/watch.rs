@@ -472,6 +472,7 @@ fn render_tui_task_line(t: &crate::tui::data::TaskRow) -> String {
 }
 
 fn render_tui_obs_line(o: &crate::tui::data::ObsRow) -> String {
+    // ADR 0002 compatibility-only T148 task 6.1: legacy watch renders raw status as a label.
     let status_color = obs_status_color(&o.status);
     let priority_color = match o.priority.as_str() {
         "high" => ANSI_RED,
@@ -489,6 +490,7 @@ fn render_tui_obs_line(o: &crate::tui::data::ObsRow) -> String {
 
 fn render_tui_collapsed_obs_line(c: &crate::tui::data::CollapsedObsRow) -> String {
     let o = &c.representative;
+    // ADR 0002 compatibility-only T148 task 6.1: legacy watch renders raw status as a label.
     let status_color = obs_status_color(&o.status);
     let priority_color = match o.priority.as_str() {
         "high" => ANSI_RED,
@@ -671,6 +673,7 @@ fn visible_width(s: &str) -> usize {
 #[cfg(test)]
 #[allow(dead_code)]
 fn render_obs_line(o: &ObsRow) -> String {
+    // ADR 0002 compatibility-only T148 task 6.1: legacy test renderer keeps raw status label.
     let status_color = obs_status_color(&o.status);
     let priority_color = match o.priority.as_str() {
         "high" => ANSI_RED,

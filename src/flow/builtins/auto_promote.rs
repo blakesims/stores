@@ -75,9 +75,9 @@ where
         .and_then(|v| v.as_str())
         .or_else(|| ic_value.get("contract_state").and_then(|v| v.as_str()))
         .unwrap_or("");
-    if state != "ready" {
+    if !matches!(state, "ready" | "approved") {
         eprintln!(
-            "[auto-promote] {}: intent_contract.contract_state != 'ready' (got '{}'); skipping",
+            "[auto-promote] {}: intent_contract.contract_state != 'ready'/'approved' (got '{}'); skipping",
             obs_display_id, state
         );
         return Ok(1);

@@ -1,5 +1,6 @@
-//! Sweep-style subscriber: processes `intake.status='draft'` rows through the
-//! production gatekeeper Router on every daemon poll tick.
+//! Sweep-style subscriber: processes ADR 0002 `intake.lifecycle='new'` rows through the
+//! production gatekeeper Router on every daemon poll tick. Legacy `intake.status='draft'`
+//! is ADR 0002 compatibility-only T148 task 6.1.
 //!
 //! Wired into `poll_once_with_guard` after `sweep_drive_watchdog` and before
 //! `run_engine_runner_iteration`. Errors and panics are caught at the call site
@@ -45,7 +46,7 @@ pub fn run_drain_sweep(
         .prepare(
             "SELECT display_id FROM intake \
              WHERE lifecycle='new' \
-                OR (lifecycle IS NULL AND status='draft') \
+                OR (lifecycle IS NULL AND status='draft') /* ADR 0002 compatibility-only T148 task 6.1 */ \
              ORDER BY id ASC",
         )?
         .query_map([], |r| r.get::<_, String>(0))?

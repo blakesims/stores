@@ -2,7 +2,7 @@
 
 A long-standing snapshot of where the substrate engine bleeds, what's filed against each weakness, and what's already shipped. Refreshed by hand at significant inflection points (a batch of fixes lands; a new bug class surfaces; an architectural shift is proposed). For session-by-session detail, see `docs/worklog/`.
 
-**Last updated:** 2026-05-11 open-issues batch after T148 runner-safety partials. T146/ADR0001 landed via close-out-of-band after severe engine friction; T148/ADR0002 is active again and remains the live proof target. Installed batches now fix: live-run selection (`30f965d`), autonomous duplicate dispatch (`dbc45cb`), runner safety partials (`ec7f67f`/`e194249`, `a957ab9`/`c27c341`, `669825e`/`3a30782`, `38bb6b2`, validation note `1dcb16e`), binary identity diagnostics (`f44145b`), recovery-only resume (`4c0806b`), ER blocked-REVISE reconciliation (`30ffd7d`), and manual ER PASS import (`a7682a9`). Updating the main/private binary while T148 has a live runner logs stale-exe drift as advisory and does not block/kill the task. Remaining high-risk class: broader ER semantics/acceptance policy hardening and workspace hygiene/stash cleanup.
+**Last updated:** 2026-05-11 ADR 0002 completion pass after runner-safety partials. T148 makes ADR 0002 lifecycle/waiting/outcome/typed-reference fields the primary upstream model for inlet, observations, and architecture reviews; raw upstream `status` is compatibility-only. Installed batches now fix live-run selection, autonomous duplicate dispatch, runner safety partials, binary identity diagnostics, recovery-only resume, ER blocked-REVISE reconciliation, and manual ER PASS import. The top risk remains control-plane truth under live runner pressure: active work must show the right owner/PID/session, stale-exe drift must be advisory rather than destructive, and external-review/rebase policy must be visible and recoverable.
 
 ## The picture in one sentence
 
@@ -10,12 +10,12 @@ A long-standing snapshot of where the substrate engine bleeds, what's filed agai
 
 ## Read-this-first priority ladder
 
-1. **Keep T148 moving while watching the repaired live-runner path.** Current live proof: one drive process, one runner, status shows the active executor/code-reviewer, and repeated `agents run --once` does not duplicate. Any regression here outranks backlog work.
-2. **Harden ER acceptance/reconciliation semantics in live use.** Blocked REVISE reconciliation and manual PASS import are now present; next risk is proving them through a full real integration/acceptance cycle and ensuring policy cannot be bypassed.
-3. **Move authoritative external review to the integration point.** T138 gave the substrate a real integration lane, but review timing can still be invalidated by refresh/rebase/main movement. Durable shape: candidate refreshes against current main → authoritative ER on the to-be-merged head → merge/post-land.
-4. **Use recovery-only resume where appropriate.** `resume --no-dispatch` now exists; update SOP/briefs and prove it during the next orphaned-result recovery instead of blind resume.
-5. **Make prioritization real, not markdown-only.** `priority`, `priority_rank`, and `priority_rank_at` exist, and watch/list can read them, but current open observations have no `priority_rank` values. L084 names the severity-vs-scheduling conflation.
-6. **Keep cockpit/control-plane safety visible.** T139/watch remains important, but T148 proved `status`/`runs current` correctness is the first cockpit primitive: active lanes must not be masked by historical exhaust.
+1. **Keep live-runner/control-plane truth visible.** T148 proved `status`/`runs current` correctness is the first cockpit primitive: active lanes must not be masked by historical exhaust, duplicate dispatch, stale binaries, or heartbeat-only stalls.
+2. **Move authoritative external review to the integration point.** T138 gave the substrate a real integration lane, but review timing can still be invalidated by refresh/rebase/main movement. Durable shape: candidate refreshes against current main → authoritative ER on the to-be-merged head → merge/post-land.
+3. **Harden ER acceptance/reconciliation semantics in live use.** Blocked REVISE reconciliation and manual PASS import are now present; next risk is proving them through a full real integration/acceptance cycle and ensuring policy cannot be bypassed.
+4. **Finish/land L540/T139 watch cockpit P1.** `stores watch` must become a store-flow cockpit, not a raw mixed dump. T139 should hide historical exhaust, surface live lanes, and make drill-down explicit.
+5. **Use recovery-only resume where appropriate.** `resume --no-dispatch` now exists; update SOP/briefs and prove it during the next orphaned-result recovery instead of blind resume.
+6. **Make prioritization real, not markdown-only.** `priority`, `priority_rank`, and `priority_rank_at` exist, and watch/list can read them, but current open observations have no `priority_rank` values. L084 names the severity-vs-scheduling conflation.
 7. **Right-sized ceremony / T1 fast path.** Tiny safe repairs still pay too much ceremony. Preserve gates for risky work, but add a mechanically-audited fast path for small local fixes.
 8. **Empirical runner/model selection.** Per-agent telemetry exists, but model/runner choice is still not a first-class experiment loop. Capture role×runner×model, prompt/config hash, duration, token/cost, and outcome before tuning by vibe.
 9. **Auto-resolve / lifecycle residue hardening.** Recent cleanup routed the current intake residue, but L555 shows schema edges still strand obsolete observations (`investigating → resolved` lacks autonomous close-as-addressed). Prevent remint/residue recurrence instead of periodic sweeps.
@@ -272,9 +272,9 @@ This is a hand-curated snapshot, not a generated report. Refresh it at inflectio
 - **A bug class is named that wasn't previously visible.** Add a new Layer or GAP line only if it changes current priorities.
 - **The "highest-leverage next picks" section drifts.** Re-rank based on current ratifiable contracts and the day's pain.
 
-To regenerate the obs status snapshot, query the DB:
+To regenerate the observation lifecycle snapshot, query the DB:
 ```
-sqlite3 .stores/db.sqlite "SELECT display_id, status, json_extract(intent_contract,'$.tier_hint') as tier, COALESCE(task_id,'') as tid, summary FROM observations WHERE status NOT IN ('resolved','wont_fix') ORDER BY display_id;"
+sqlite3 .stores/db.sqlite "SELECT display_id, lifecycle, contract_state, json_extract(intent_contract,'$.tier_hint') as tier, COALESCE(task_id,'') as tid, summary FROM observations WHERE COALESCE(lifecycle,'') != 'closed' ORDER BY display_id;"
 ```
 
 For the deeper reasoning behind any single shipped item, the worklog under `docs/worklog/<date>/` has the session detail. Promote insights here when they become long-standing; archive verbose history rather than growing this dashboard indefinitely.

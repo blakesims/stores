@@ -485,6 +485,8 @@ fn display_id(matches: &ArgMatches) -> &str {
 }
 
 fn status_of(entry: &EntryMap) -> &str {
+    // ADR 0002 compatibility-only T148 task 6.1: schema transition selection
+    // still consumes the legacy architecture_reviews.status state-machine label.
     entry.get("status").and_then(|v| v.as_str()).unwrap_or("")
 }
 

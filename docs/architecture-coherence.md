@@ -28,11 +28,11 @@ In each case, an architecture-review layer would have asked: *what abstraction a
 
 ## What this doctrine grounds
 
-Future work in T045 (the gatekeeper / intake / architecture-review layer) is grounded by this doctrine. Specifically:
+Future work in T045 (the gatekeeper / intake / architecture-review layer) is grounded by this doctrine. ADR 0002 is now the primary upstream lifecycle model for inlet, observations, and architecture reviews; legacy raw `status` is compatibility projection only. Specifically:
 
 - **Why an intake/gatekeeper layer is needed at all.** If local correctness implied architectural coherence, raw observations could flow straight to mature observations and contracts. The doctrine says they cannot — coherence is a separate concern, requiring a separate routing layer.
 - **Why risk class is orthogonal to size tier.** A 30-line fix can be high-risk (authority surface) and a 500-line snapshot regen can be low-risk (cosmetic). Coherence concerns track risk, not size; the gatekeeper must classify on both axes.
-- **When architecture review fires.** Risk-flag triggers, cluster thresholds, pre-ratification gates, periodic sweeps, post-accept batches — all stand on the claim that local correctness checks (tests, code review, contract ratification) do not catch architectural drift, so a separate trigger surface is required.
+- **When architecture review fires.** Risk-flag triggers, cluster thresholds, pre-ratification gates, periodic sweeps, post-accept batches — all stand on the claim that local correctness checks (tests, code review, contract ratification) do not catch architectural drift, so a separate trigger surface is required. Open architecture reviews are ADR 0002 waiting/gate overlays on observations, not observation lifecycle states.
 - **What fast-track is allowed for.** Fast-track is safe only when the change provably cannot affect coherence: docs typos, snapshot regens, narrow display tweaks. Anything touching authority, lifecycle, schema core, subscriber semantics, or runner boundary is forbidden from fast-track because those are the surfaces where local correctness most reliably hides architectural drift.
 
 ## Client adapter boundary: substrate primitives vs repo-specific wiring

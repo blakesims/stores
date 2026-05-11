@@ -235,7 +235,7 @@ pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
             SELECT 1 FROM json_each(t.linked_observations) je \
             JOIN observations o ON o.display_id = je.value \
             WHERE COALESCE(o.lifecycle, '') != 'closed' \
-              AND o.status != 'resolved' \
+              AND o.status != 'resolved' /* ADR 0002 compatibility-only T148 task 6.1 */ \
          )",
     )?;
     let task_ids: Vec<String> = stmt
@@ -290,7 +290,7 @@ fn unresolved_linked_obs(
         "SELECT o.display_id, o.status \
          FROM tasks t, json_each(t.linked_observations) je \
          JOIN observations o ON o.display_id = je.value \
-         WHERE t.display_id = ?1 AND COALESCE(o.lifecycle, '') != 'closed' AND o.status != 'resolved'\n         /* ADR 0002 compatibility-only (T148): select legacy status for log text only. */",
+         WHERE t.display_id = ?1 AND COALESCE(o.lifecycle, '') != 'closed' AND o.status != 'resolved'\n         /* ADR 0002 compatibility-only T148 task 6.1: select legacy status for log text only. */",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),

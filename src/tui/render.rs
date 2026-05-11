@@ -753,6 +753,8 @@ fn format_obs_line(
     o: &super::data::ObsRow,
     collapsed: Option<&super::data::CollapsedObsRow>,
 ) -> Vec<Span<'static>> {
+    // ADR 0002 compatibility-only T148 task 6.1: raw observation.status is rendered
+    // only as a legacy label; lifecycle/contract/waiting drive section placement.
     let status = if o.status == "investigation_failed" {
         match o.investigation_failure_reason.as_deref() {
             Some(reason) if !reason.trim().is_empty() => {
@@ -830,6 +832,7 @@ fn format_intake_line(i: &super::data::IntakeRow) -> Vec<Span<'static>> {
             format!("{:<6}", i.display_id),
             Style::default().fg(Color::Green),
         ),
+        // ADR 0002 compatibility-only T148 task 6.1: raw intake.status label.
         Span::styled(
             format!("{:<24}", i.status),
             Style::default().fg(Color::Yellow),
@@ -885,6 +888,7 @@ fn format_review_line(r: &super::data::ReviewRow) -> Vec<Span<'static>> {
             format!("{:<6}", r.display_id),
             Style::default().fg(Color::Cyan),
         ),
+        // ADR 0002 compatibility-only T148 task 6.1: raw architecture review.status label.
         Span::styled(
             format!("{:<24}", format!("review:{}", r.status)),
             Style::default().fg(Color::Yellow),

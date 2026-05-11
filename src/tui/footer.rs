@@ -45,6 +45,7 @@ pub fn render_text(app: &App, now_secs: u64) -> String {
 fn format_text(row: &Row, cursor: usize, total: usize, now_secs: u64) -> String {
     let id = row.display_id();
     let summary = row.title_or_summary();
+    // ADR 0002 compatibility-only T148 task 6.1: upstream raw status is a footer label only.
     let (status, tier, linked, updated_at) = match row {
         Row::Task(t) => (
             t.status.as_str(),
@@ -83,6 +84,7 @@ fn format_text(row: &Row, cursor: usize, total: usize, now_secs: u64) -> String 
     } else {
         format!(" linked:{linked}")
     };
+    // ADR 0002 compatibility-only T148 task 6.1: legacy investigation_failed label detail.
     let failure_seg = match row {
         Row::Obs(o) if o.status == "investigation_failed" => {
             let reason = o

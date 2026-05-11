@@ -657,6 +657,21 @@ pub fn run_close_as_addressed(
              or commit-sha (7-40 lowercase hex chars)."
         );
     }
+    if resolution.starts_with('T') {
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM tasks WHERE display_id = ?1 LIMIT 1",
+                rusqlite::params![resolution],
+                |_| Ok(()),
+            )
+            .is_ok();
+        if !exists {
+            anyhow::bail!(
+                "--resolution '{resolution}' references a task that does not exist; \
+                 addressed_by_task closure requires an existing T### row"
+            );
+        }
+    }
 
     let display_id = matches
         .get_one::<String>("display_id")
@@ -2154,9 +2169,11 @@ fields:
 
     fn setup() -> (Schema, Connection) {
         let schema = Schema::from_yaml(OBS_SCHEMA).unwrap();
+        let tasks = Schema::from_yaml(include_str!("../../stores/tasks/schema.yaml")).unwrap();
         let conn = Connection::open_in_memory().unwrap();
         let ddl = crate::codegen::ddl::ddl_for(&schema);
         conn.execute_batch(&ddl).unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&tasks)).unwrap();
         (schema, conn)
     }
 
@@ -2267,6 +2284,15 @@ fields:
         let err = enforce_external_review_accept_precheck(&tx, "T900", &entry).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("current-head attempt ER904 is TOOLING_FAILURE/held"), "{msg}");
+    }
+
+    fn insert_task(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,slug,contract,created_at,updated_at,created_by,updated_by) \
+             VALUES (?1,'planning','test task','test-task',?2,'now','now','human','human')",
+            rusqlite::params![id, serde_json::json!({"done_when":"done","scope_in":"in","scope_out":"out"}).to_string()],
+        )
+        .unwrap();
     }
 
     fn insert_open_row(schema: &Schema, conn: &Connection) {
@@ -2867,6 +2893,7 @@ transitions:
     fn close_as_addressed_with_task_id_succeeds() {
         let (schema, conn) = setup();
         insert_open_row(&schema, &conn);
+        insert_task(&conn, "T001");
 
         let cmd = build_close_cmd(&schema);
         let matches = cmd.get_matches_from(["close_as_addressed", "L001", "--resolution", "T001"]);
@@ -2928,6 +2955,7 @@ transitions:
             [],
         )
         .unwrap();
+        insert_task(&conn, "T001");
 
         let cmd = build_close_cmd(&schema);
         let matches = cmd.get_matches_from(["close_as_addressed", "L001", "--resolution", "T001"]);

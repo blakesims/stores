@@ -455,22 +455,22 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
             Row::Obs(o) => apply_obs_to_model(o, 1, &mut model),
             Row::CollapsedObs(c) => apply_obs_to_model(&c.representative, c.count, &mut model),
             Row::Intake(i) => {
-                if i.status == "needs_info" {
+                if i.waiting_kind.as_deref() == Some("human_info") {
                     model.held += 1;
                 }
                 if is_priority_text(i.priority.as_deref().unwrap_or("")) || !i.risk_flags.is_empty()
                 {
                     model.priority += 1;
                 }
-                if i.status != "routed" && i.status != "dropped" {
+                if i.lifecycle.as_deref() != Some("closed") {
                     model.active += 1;
                 }
             }
             Row::Review(r) => {
-                if matches!(r.status.as_str(), "running" | "tooling_held" | "pending") {
+                if r.lifecycle.as_deref() != Some("closed") {
                     model.active += 1;
                 }
-                if r.status == "tooling_held" {
+                if r.lifecycle.as_deref() == Some("waiting") || r.held_reason.as_deref().is_some_and(|s| !s.is_empty()) {
                     model.held += 1;
                 }
             }
@@ -490,7 +490,7 @@ fn apply_obs_to_model(o: &ObsRow, count: usize, model: &mut CockpitModel) {
     {
         model.held += count;
     }
-    if o.status != "resolved" && o.status != "rejected" {
+    if o.lifecycle.as_deref() != Some("closed") {
         model.active += count;
     }
 }
@@ -2293,9 +2293,9 @@ fn section_for(row: &Row) -> Option<Section> {
         }
         Row::CollapsedObs(c) => Some(c.section),
         Row::Review(_) => Some(Section::ExternalReviewLane),
-        Row::Intake(i) => match i.status.as_str() {
-            "routed" | "dropped" => None,
-            "needs_info" => Some(Section::IntakeHeld),
+        Row::Intake(i) => match intake_lifecycle(i) {
+            "closed" => None,
+            "waiting" => Some(Section::IntakeHeld),
             _ if is_priority_text(i.priority.as_deref().unwrap_or(""))
                 || !i.risk_flags.is_empty() =>
             {
