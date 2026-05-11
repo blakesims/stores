@@ -268,11 +268,23 @@ pub fn cleanup_terminal_task(conn: &Connection, display_id: &str) -> Result<Term
 
 fn cleanup_main_repo() -> Result<PathBuf> {
     let stores_dir = crate::paths::stores_dir()?;
-    let main_repo = stores_dir
+    let substrate_root = stores_dir
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    Ok(canonicalize_lossy(&main_repo))
+
+    // `stores_dir()` is intentionally cwd-relative. In task worktrees,
+    // `.stores/` is a symlink back to the main substrate, so `parent()` is the
+    // task worktree, not necessarily the main checkout. Resolve through git's
+    // common-dir when possible so cleanup can run safely from either main or a
+    // symlinked task worktree.
+    if let Some(main_repo) =
+        crate::flow::builtins::resolve_main_repo(&substrate_root.to_string_lossy())
+    {
+        return Ok(canonicalize_lossy(&main_repo));
+    }
+
+    Ok(canonicalize_lossy(&substrate_root))
 }
 
 fn execute_targets_only(
@@ -905,6 +917,27 @@ mod tests {
             observed.is_some(),
             "a process with cwd under workspace must block target cleanup"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_main_repo_resolves_through_worktree_stores_symlink() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        init_main_repo(&main);
+        fs::create_dir_all(main.join(".stores")).unwrap();
+        git(
+            &main,
+            &["worktree", "add", "-b", "feat/t1", wt.to_str().unwrap()],
+        );
+        std::os::unix::fs::symlink(main.join(".stores"), wt.join(".stores")).unwrap();
+
+        let _guard = crate::cli::test_support::ENV_LOCK.lock().unwrap();
+        crate::paths::clear_stores_dir_override_for_tests();
+        crate::paths::set_stores_dir_override(wt.join(".stores")).unwrap();
+        assert_eq!(cleanup_main_repo().unwrap(), main.canonicalize().unwrap());
+        crate::paths::clear_stores_dir_override_for_tests();
     }
 
     #[test]
