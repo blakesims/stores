@@ -210,7 +210,8 @@ pub fn dispatch(
                         .get_one::<String>("display_id")
                         .map(|s| s.as_str())
                         .unwrap_or("");
-                    handlers::submit::run_resume(schema, &conn, display_id, invoker)?;
+                    let no_dispatch = sub.get_flag("no-dispatch");
+                    handlers::submit::run_resume(schema, &conn, display_id, invoker, no_dispatch)?;
                 }
                 Some(("retry-deploy", sub)) if schema.workflow.is_some() => {
                     let display_id = sub
