@@ -775,6 +775,8 @@ mod tests {
                 status: Some("running".to_string()),
                 transcript_path: Some(std::path::PathBuf::from(".stores/runs/abc.jsonl")),
                 stderr_log_path: Some(std::path::PathBuf::from(".stores/runs/abc.stderr.log")),
+                events_path: None,
+                status_path: None,
                 updated_at: Some("2026-05-11T00:00:00Z".to_string()),
             },
         };
@@ -815,6 +817,8 @@ mod tests {
                 status: None,
                 transcript_path: None,
                 stderr_log_path: None,
+                events_path: None,
+                status_path: None,
                 updated_at: None,
             },
         };

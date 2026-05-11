@@ -47,6 +47,8 @@ pub struct CurrentRunMarker {
     pub status: Option<String>,
     pub transcript_path: Option<PathBuf>,
     pub stderr_log_path: Option<PathBuf>,
+    pub events_path: Option<PathBuf>,
+    pub status_path: Option<PathBuf>,
     pub updated_at: Option<String>,
 }
 
@@ -179,6 +181,12 @@ fn print_current_run(stores_dir: &Path, current: &CurrentRun) {
             resolve_marker_path(stores_dir, &current.marker_path, path).display()
         );
     }
+    if let Some(path) = &m.status_path {
+        println!(
+            "status_path\t{}",
+            resolve_marker_path(stores_dir, &current.marker_path, path).display()
+        );
+    }
     if let Ok(Some(status)) = read_current_status(stores_dir, current) {
         if let Some(last_event_at) = status.last_event_at {
             println!("last_event_at\t{last_event_at}");
@@ -255,6 +263,13 @@ fn read_current_marker(path: &Path) -> Result<CurrentRun> {
 }
 
 pub fn current_status_path(stores_dir: &Path, current: &CurrentRun) -> Option<PathBuf> {
+    if let Some(status_path) = &current.marker.status_path {
+        return Some(resolve_marker_path(
+            stores_dir,
+            &current.marker_path,
+            status_path,
+        ));
+    }
     let session_id = current.marker.session_id.as_deref()?;
     let transcript_path = current.marker.transcript_path.as_ref()?;
     let resolved_transcript =
@@ -668,6 +683,52 @@ mod tests {
         let status = read_current_status(&stores, &current).unwrap().unwrap();
         assert_eq!(status.last_event_type.as_deref(), Some("retry"));
         assert_eq!(status.current_activity.as_deref(), Some("api_retry"));
+    }
+
+    #[test]
+    fn current_status_prefers_explicit_marker_status_path() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        let derived = stores.join("runs/live-session/status.json");
+        let explicit = stores.join("runs/custom-status.json");
+        fs::create_dir_all(derived.parent().unwrap()).unwrap();
+        fs::write(
+            &derived,
+            r#"{
+  "last_event_at": "2026-05-11T02:00:00Z",
+  "last_event_type": "heartbeat",
+  "current_activity": null
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            &explicit,
+            r#"{
+  "last_event_at": "2026-05-11T02:06:00Z",
+  "last_event_type": "tool_start",
+  "current_activity": "tool:bash"
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "session_id": "live-session",
+                "status": "running",
+                "transcript_path": stores.join("runs/live-session.jsonl"),
+                "status_path": explicit,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let current = find_current_run(&stores, "T999", Some("executor")).unwrap();
+        assert_eq!(current_status_path(&stores, &current).unwrap(), explicit);
+        let status = read_current_status(&stores, &current).unwrap().unwrap();
+        assert_eq!(status.last_event_type.as_deref(), Some("tool_start"));
+        assert_eq!(status.current_activity.as_deref(), Some("tool:bash"));
     }
 
     #[test]
