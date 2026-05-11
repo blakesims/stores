@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -139,18 +139,28 @@ pub fn run_cleanup_worktrees(conn: &Connection, mode: CleanupMode) -> Result<Cle
 
     if mode == CleanupMode::ExecuteTargetsOnly {
         for candidate in report.candidates.clone() {
-            // Re-check immediately before mutation so an operator cannot race a stale
-            // dry-run classification into deleting a target that became active.
-            if classify_row_for_target_cleanup(&candidate.row, &main_repo)
+            // Re-fetch the row and re-check filesystem/process state immediately
+            // before mutation. A long-running cleanup must not delete a target for
+            // a task that changed status, picked up a live drive_pid, or restarted
+            // a current run after the initial audit pass.
+            let Some(fresh_row) = load_task_row(conn, &candidate.row.display_id)? else {
+                continue;
+            };
+            if classify_row_for_target_cleanup(&fresh_row, &main_repo)
                 != CleanupClassification::TargetCandidate
             {
                 continue;
             }
-            if candidate.target_path.is_dir() {
-                fs::remove_dir_all(&candidate.target_path).with_context(|| {
-                    format!("removing target dir {}", candidate.target_path.display())
+            let fresh_target_path = fresh_row.workspace_path.join("target");
+            if fresh_target_path.is_dir() {
+                fs::remove_dir_all(&fresh_target_path).with_context(|| {
+                    format!("removing target dir {}", fresh_target_path.display())
                 })?;
-                report.deleted_targets.push(candidate);
+                report.deleted_targets.push(CleanupCandidate {
+                    row: fresh_row,
+                    target_path: fresh_target_path,
+                    ..candidate
+                });
             }
         }
     }
@@ -160,6 +170,25 @@ pub fn run_cleanup_worktrees(conn: &Connection, mode: CleanupMode) -> Result<Cle
 }
 
 fn load_task_rows(conn: &Connection) -> Result<Vec<CleanupTaskRow>> {
+    let sql = task_row_select_sql(
+        conn,
+        "WHERE COALESCE(workspace_path, '') != '' ORDER BY display_id",
+    )?;
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([], cleanup_task_row_from_sql)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn load_task_row(conn: &Connection, display_id: &str) -> Result<Option<CleanupTaskRow>> {
+    let sql = task_row_select_sql(conn, "WHERE display_id = ?1")?;
+    conn.query_row(&sql, [display_id], cleanup_task_row_from_sql)
+        .optional()
+        .map_err(Into::into)
+}
+
+fn task_row_select_sql(conn: &Connection, suffix: &str) -> Result<String> {
     let cols = table_columns(conn, "tasks")?;
     let opt = |name: &str, default_sql: &str| -> String {
         if cols.iter().any(|c| c == name) {
@@ -168,33 +197,30 @@ fn load_task_rows(conn: &Connection) -> Result<Vec<CleanupTaskRow>> {
             default_sql.to_string()
         }
     };
-    let sql = format!(
+    Ok(format!(
         "SELECT display_id, status, {lifecycle}, {active_step}, {integration_step}, {blocked}, workspace_path, {drive_pid} \
-         FROM tasks WHERE COALESCE(workspace_path, '') != '' ORDER BY display_id",
+         FROM tasks {suffix}",
         lifecycle = opt("lifecycle", "NULL"),
         active_step = opt("active_step", "NULL"),
         integration_step = opt("integration_step", "NULL"),
         blocked = opt("blocked", "NULL"),
         drive_pid = opt("drive_pid", "NULL"),
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map([], |r| {
-            let blocked_int: Option<i64> = r.get(5)?;
-            let workspace: String = r.get(6)?;
-            Ok(CleanupTaskRow {
-                display_id: r.get(0)?,
-                status: r.get(1)?,
-                lifecycle: r.get(2)?,
-                active_step: r.get(3)?,
-                integration_step: r.get(4)?,
-                blocked: blocked_int.map(|v| v != 0),
-                workspace_path: PathBuf::from(workspace),
-                drive_pid: r.get(7)?,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
+    ))
+}
+
+fn cleanup_task_row_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<CleanupTaskRow> {
+    let blocked_int: Option<i64> = r.get(5)?;
+    let workspace: String = r.get(6)?;
+    Ok(CleanupTaskRow {
+        display_id: r.get(0)?,
+        status: r.get(1)?,
+        lifecycle: r.get(2)?,
+        active_step: r.get(3)?,
+        integration_step: r.get(4)?,
+        blocked: blocked_int.map(|v| v != 0),
+        workspace_path: PathBuf::from(workspace),
+        drive_pid: r.get(7)?,
+    })
 }
 
 fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
@@ -282,11 +308,23 @@ fn process_under_path(path: &Path) -> Option<u32> {
         if pid == std::process::id() {
             continue;
         }
-        let cwd = entry.path().join("cwd");
+        let proc_dir = entry.path();
+        let cwd = proc_dir.join("cwd");
         if let Ok(cwd_target) = fs::read_link(cwd) {
             let cwd_target = canonicalize_lossy(&cwd_target);
             if cwd_target.starts_with(&root) {
                 return Some(pid);
+            }
+        }
+        let fd_dir = proc_dir.join("fd");
+        if let Ok(fds) = fs::read_dir(fd_dir) {
+            for fd in fds.flatten() {
+                if let Ok(fd_target) = fs::read_link(fd.path()) {
+                    let fd_target = canonicalize_lossy(&fd_target);
+                    if fd_target.starts_with(&root) {
+                        return Some(pid);
+                    }
+                }
             }
         }
     }
@@ -437,6 +475,66 @@ mod tests {
             classify_row_for_target_cleanup(&row("TACT", "executing", &wt), &main),
             CleanupClassification::ActiveStatus
         );
+    }
+
+    #[test]
+    fn classify_live_current_marker_is_skipped() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&main).unwrap();
+        fs::create_dir_all(wt.join("target")).unwrap();
+        fs::create_dir_all(wt.join(".stores/runs")).unwrap();
+        fs::write(
+            wt.join(".stores/runs/current-T001-executor.json"),
+            r#"{"display_id":"T001","role":"executor","status":"running"}"#,
+        )
+        .unwrap();
+        match classify_row_for_target_cleanup(&row("T001", "integrated", &wt), &main) {
+            CleanupClassification::LiveCurrentRunMarker(path) => {
+                assert!(path.ends_with("current-T001-executor.json"));
+            }
+            other => panic!("expected live current marker skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_reloads_row_before_deleting_target() {
+        let tmp = tempdir().unwrap();
+        let stores = tmp.path().join("repo/.stores");
+        let term = tmp.path().join("term");
+        fs::create_dir_all(&stores).unwrap();
+        fs::create_dir_all(term.join("target")).unwrap();
+        fs::write(stores.join("db.sqlite"), b"db").unwrap();
+        fs::write(term.join("target/file"), b"artifact").unwrap();
+
+        let _guard = crate::cli::test_support::ENV_LOCK.lock().unwrap();
+        crate::paths::clear_stores_dir_override_for_tests();
+        crate::paths::set_stores_dir_override(stores.clone()).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                display_id TEXT,
+                status TEXT,
+                lifecycle TEXT,
+                active_step TEXT,
+                integration_step TEXT,
+                blocked INTEGER,
+                workspace_path TEXT,
+                drive_pid INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,workspace_path,drive_pid) VALUES ('T001','integrated',?1,?2)",
+            rusqlite::params![term.to_str().unwrap(), std::process::id() as i64],
+        )
+        .unwrap();
+
+        let report = run_cleanup_worktrees(&conn, CleanupMode::ExecuteTargetsOnly).unwrap();
+        assert_eq!(report.deleted_targets.len(), 0);
+        assert!(term.join("target").exists());
+        crate::paths::clear_stores_dir_override_for_tests();
     }
 
     #[test]
