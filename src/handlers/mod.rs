@@ -33,6 +33,7 @@ pub mod show;
 pub mod status;
 pub mod submit;
 pub mod transition;
+pub mod upstream_overlay;
 pub mod update;
 
 // T140 P3: re-export the derived operator_disposition surface for P4/P5/P6.

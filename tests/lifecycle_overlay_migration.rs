@@ -106,9 +106,9 @@ fn pre_t144_tasks_rows_backfill_lifecycle_overlay_on_open() {
             ),
             (
                 "T006".into(),
-                "active".into(),
+                "integration".into(),
                 "none".into(),
-                "none".into(),
+                "merging".into(),
                 0,
                 None
             ),

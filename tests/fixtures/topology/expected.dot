@@ -136,6 +136,10 @@ digraph stores_topology {
     "z1_observations__ready" -> "z1_observations__resolved" [label=" F\nauto_resolve", color=gray, fontcolor=gray];
     "z1_observations__needs_info" -> "z1_observations__resolved" [label=" F\nauto_resolve", color=gray, fontcolor=gray];
     "z1_observations__in_progress" -> "z1_observations__resolved" [label=" F\nauto_resolve", color=gray, fontcolor=gray];
+    "z1_observations__open" -> "z1_observations__resolved" [label=" H+\nsupersede", color=gold, fontcolor=gold];
+    "z1_observations__confirmed" -> "z1_observations__resolved" [label=" H+\nsupersede", color=gold, fontcolor=gold];
+    "z1_observations__ready" -> "z1_observations__resolved" [label=" H+\nsupersede", color=gold, fontcolor=gold];
+    "z1_observations__in_progress" -> "z1_observations__resolved" [label=" H+\nsupersede", color=gold, fontcolor=gold];
   }
 
   subgraph cluster_z1_gate {

@@ -7,72 +7,17 @@ lifecycle:
   states: [draft, triaging, needs_info, routed, dropped]
   initial_state: draft
   transitions:
-    # draft → triaging: gatekeeper claims the row for triage (ai_autonomous)
-    - from: draft
-      to: triaging
-      verb: claim-triage
-      actor: ai_autonomous
+    - {from: draft, to: triaging, verb: claim-triage, actor: ai_autonomous, lifecycle: triaging, waiting_kind: triage_capacity, legacy_status: triaging}
+    - {from: triaging, to: needs_info, verb: route, actor: ai_autonomous, guard: "decision == 'needs_info'", lifecycle: waiting, waiting_kind: evidence_needed, legacy_status: needs_info}
+    - {from: triaging, to: routed, verb: route, actor: ai_autonomous, guard: "decision == 'duplicate'", lifecycle: closed, outcome: marked_duplicate, legacy_status: routed}
+    - {from: triaging, to: routed, verb: route, actor: ai_autonomous, guard: "decision == 'fast_track'", lifecycle: closed, outcome: fast_tracked, legacy_status: routed}
+    - {from: triaging, to: routed, verb: route, actor: ai_autonomous, guard: "decision == 'normal_observation'", lifecycle: closed, outcome: routed_to_observation, legacy_status: routed}
+    - {from: triaging, to: routed, verb: route, actor: ai_autonomous, guard: "decision == 'arch_review_candidate'", lifecycle: closed, outcome: escalated_to_architecture_review, legacy_status: routed}
+    - {from: triaging, to: dropped, verb: route, actor: ai_autonomous, guard: "decision == 'reject_noise'", lifecycle: closed, outcome: dropped_as_noise, legacy_status: dropped}
+    - {from: needs_info, to: triaging, verb: recon-return, actor: ai_autonomous, lifecycle: triaging, legacy_status: triaging}
+    - {from: dropped, to: draft, verb: reopen, actor: ai_with_human, lifecycle: new, legacy_status: draft}
+    - {from: dropped, to: triaging, verb: amend, actor: ai_with_human, lifecycle: triaging, legacy_status: triaging}
 
-    # triaging → needs_info: insufficient evidence; gatekeeper needs recon
-    - from: triaging
-      to: needs_info
-      verb: route
-      actor: ai_autonomous
-      guard: "decision == 'needs_info'"
-
-    # triaging → routed: duplicate detected
-    - from: triaging
-      to: routed
-      verb: route
-      actor: ai_autonomous
-      guard: "decision == 'duplicate'"
-
-    # triaging → routed: fast-track eligible (T0/T1, low risk flags only)
-    - from: triaging
-      to: routed
-      verb: route
-      actor: ai_autonomous
-      guard: "decision == 'fast_track'"
-
-    # triaging → routed: creates a regular observation
-    - from: triaging
-      to: routed
-      verb: route
-      actor: ai_autonomous
-      guard: "decision == 'normal_observation'"
-
-    # triaging → routed: architecture review candidate (dedicated architecture_reviews A### row)
-    - from: triaging
-      to: routed
-      verb: route
-      actor: ai_autonomous
-      guard: "decision == 'arch_review_candidate'"
-
-    # triaging → dropped: noise; terminal unless reopened by human
-    - from: triaging
-      to: dropped
-      verb: route
-      actor: ai_autonomous
-      guard: "decision == 'reject_noise'"
-
-    # needs_info → triaging: recon agent returns evidence; bumps recon_round
-    - from: needs_info
-      to: triaging
-      verb: recon-return
-      actor: ai_autonomous
-
-    # dropped → draft: human disagrees with reject_noise decision (rare escape hatch)
-    - from: dropped
-      to: draft
-      verb: reopen
-      actor: ai_with_human
-
-    # dropped → triaging: human corrects a misrouted reject_noise (Q4 resolution)
-    # Skips draft to avoid re-filing; returns directly to triaging for re-triage.
-    - from: dropped
-      to: triaging
-      verb: amend
-      actor: ai_with_human
 
 workflow:
   agent_roles:
@@ -90,6 +35,29 @@ workflow:
       - dispatch_agent: recon
 
 fields:
+  # --- ADR 0002 primary model (status remains compatibility-only legacy projection). ---
+  - name: lifecycle
+    type: enum
+    enum_values: [new, triaging, waiting, closed]
+    required: false
+    default: new
+    actor: framework
+    description: "ADR 0002 inlet lifecycle primary column; legacy status is compatibility-only projection."
+
+  - name: waiting_kind
+    type: enum
+    enum_values: [evidence_needed, triage_capacity, external_input]
+    required: false
+    actor: framework
+    description: "ADR 0002 inlet waiting kind primary column."
+
+  - name: outcome
+    type: enum
+    enum_values: [routed_to_observation, marked_duplicate, fast_tracked, escalated_to_architecture_review, dropped_as_noise]
+    required: false
+    actor: framework
+    description: "ADR 0002 inlet outcome primary column."
+
   # --- Core identity ---
   - name: summary
     type: text
@@ -157,19 +125,56 @@ fields:
     type: text
     required: false
     required_when: "decision == 'duplicate'"
-    description: "Soft-FK to intake_items.display_id (I###) when decision=duplicate"
+    description: "Legacy soft-FK to intake_items.display_id (I###) when decision=duplicate; mirrored into ADR 0002 duplicate_of_id."
+
+  - name: duplicate_of_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 canonical typed reference for duplicate intake causality."
 
   - name: routed_to_observation
     type: text
     required: false
     required_when: "decision IN ['normal_observation', 'arch_review_candidate']"
-    description: "Soft-FK to observations.display_id (L###) when decision=normal_observation or arch_review_candidate; arch_review_candidate rows are also linked to architecture_reviews A### via routed_to_arch_review"
+    description: "Legacy soft-FK to observations.display_id (L###); mirrored into ADR 0002 produced_observation_id."
+
+  - name: produced_observation_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 canonical typed reference for produced observation causality."
 
   - name: routed_to_arch_review
     type: text
     required: false
     pattern: "^A[0-9]{3,}$"
-    description: "Soft-FK to architecture_reviews.display_id (A###) created for decision=arch_review_candidate"
+    description: "Legacy soft-FK to architecture_reviews.display_id (A###); mirrored into ADR 0002 produced_architecture_review_id."
+
+  - name: produced_architecture_review_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 canonical typed reference for produced architecture-review causality."
+
+  - name: produced_task_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: T### task produced by fast-track routing."
+
+  - name: produced_artifact_kind
+    type: enum
+    enum_values: [observation, architecture_review, task, commit, other]
+    required: false
+    actor: framework
+    description: "ADR 0002 generic produced-artifact discriminator for tooling."
+
+  - name: produced_artifact_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 canonical id of produced artifact for generic tooling."
 
   # --- Recon loop counter ---
   - name: recon_round

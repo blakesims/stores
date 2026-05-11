@@ -58,6 +58,21 @@ pub fn run_supersede(
     Ok(())
 }
 
+pub fn run_withdraw(
+    schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    invoker: InvokerCtx,
+) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("architecture_reviews withdraw: begin tx")?;
+    withdraw_in_tx(&tx, schema, matches, invoker)?;
+    tx.commit()
+        .context("architecture_reviews withdraw: commit tx")?;
+    Ok(())
+}
+
 fn issue_verdict_in_tx(
     tx: &Transaction,
     schema: &Schema,
@@ -73,6 +88,11 @@ fn issue_verdict_in_tx(
     }
 
     let mut diff = cli_diff(schema, matches)?;
+    let produced_task_id = matches
+        .try_get_one::<String>("produced-task-id")
+        .ok()
+        .flatten()
+        .cloned();
     let kind = required_str(&diff, "kind", "issue-verdict requires --kind")?.to_string();
     let verdict = required_str(&diff, "verdict", "issue-verdict requires --verdict")?.to_string();
     if !diff.contains_key("rationale") {
@@ -101,11 +121,23 @@ fn issue_verdict_in_tx(
     let mut merged = existing.clone();
     merge_diff(&mut merged, &diff);
     if verdict == "merge_with_cluster" {
-        required_str(
-            &merged,
-            "source_observation",
-            "merge_with_cluster requires --source-observation",
-        )?;
+        let has_source = merged
+            .get("source_observation")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some();
+        let has_linked = merged
+            .get("linked_observation_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+        if !has_source && !has_linked {
+            required_str(
+                &merged,
+                "source_observation",
+                "merge_with_cluster requires --source-observation or linked_observation_ids",
+            )?;
+        }
         required_str(
             &merged,
             "merge_target_id",
@@ -119,13 +151,35 @@ fn issue_verdict_in_tx(
         None,
         &merged,
     )?;
+    super::transition::inject_upstream_primary_tuple(
+        schema,
+        transition,
+        "issue-verdict",
+        current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
     validate::validate(
         schema,
         &merged,
-        Op::Transition("issue-verdict".to_string(), diff.clone()),
+        Op::Transition(
+            "issue-verdict".to_string(),
+            super::transition::strip_framework_overlay_from_validation_diff(schema, &diff),
+        ),
         invoker,
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
+
+    if let Some(task_id) = produced_task_id {
+        if verdict == "create_primitive_task" {
+            diff.insert(
+                "produced_task_id".to_string(),
+                Value::String(task_id.clone()),
+            );
+            merged.insert("produced_task_id".to_string(), Value::String(task_id));
+        }
+    }
 
     let (pref, phash) = read_policy_env();
     execute_transition_write(
@@ -149,15 +203,24 @@ fn issue_verdict_in_tx(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
     {
-        mark_superseded_if_present(tx, schema, supersedes, invoker.actor)?;
+        mark_superseded_if_present(tx, schema, supersedes, invoker.actor, Some(display_id))?;
     }
 
-    super::observation_arch_gate::apply_merge_with_cluster_verdict(
-        tx,
-        display_id,
-        &merged,
-        invoker.actor,
-    )?;
+    if transition.to == "verdict_issued" {
+        let outcome = merged
+            .get("outcome")
+            .and_then(|v| v.as_str())
+            .or_else(|| merged.get("verdict").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let ruling_outcome = super::observation_arch_gate::RulingOutcome::parse(outcome)?;
+        super::observation_arch_gate::apply_verdict_effects(
+            tx,
+            display_id,
+            &merged,
+            invoker.actor,
+            ruling_outcome,
+        )?;
+    }
 
     println!(
         "Transitioned {display_id}: {} → {}",
@@ -207,10 +270,22 @@ fn ratify_amend_in_tx(
         None,
         &merged,
     )?;
+    super::transition::inject_upstream_primary_tuple(
+        schema,
+        transition,
+        "ratify-amend",
+        current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
     validate::validate(
         schema,
         &merged,
-        Op::Transition("ratify-amend".to_string(), diff.clone()),
+        Op::Transition(
+            "ratify-amend".to_string(),
+            super::transition::strip_framework_overlay_from_validation_diff(schema, &diff),
+        ),
         invoker,
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
@@ -231,6 +306,19 @@ fn ratify_amend_in_tx(
         phash.as_deref(),
         None,
     )?;
+    let outcome = merged
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .or_else(|| merged.get("verdict").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let ruling_outcome = super::observation_arch_gate::RulingOutcome::parse(outcome)?;
+    super::observation_arch_gate::apply_verdict_effects(
+        tx,
+        display_id,
+        &merged,
+        invoker.actor,
+        ruling_outcome,
+    )?;
     println!(
         "Transitioned {display_id}: {} → {}",
         transition.from, transition.to
@@ -239,16 +327,35 @@ fn ratify_amend_in_tx(
 }
 
 fn supersede_in_tx(
-    tx: &Transaction,
-    schema: &Schema,
+    _tx: &Transaction,
+    _schema: &Schema,
     matches: &ArgMatches,
     invoker: InvokerCtx,
 ) -> Result<()> {
     require_actor(invoker, Actor::AiWithHuman, "supersede")?;
     let display_id = display_id(matches);
-    mark_superseded_if_present(tx, schema, display_id, invoker.actor)?;
-    println!("Superseded {display_id}");
-    Ok(())
+    bail!(
+        "supersede requires a successor review so superseded_by_id can be recorded; use issue-verdict --supersedes {display_id} on the successor review"
+    )
+}
+
+fn withdraw_in_tx(
+    tx: &Transaction,
+    schema: &Schema,
+    matches: &ArgMatches,
+    invoker: InvokerCtx,
+) -> Result<()> {
+    require_actor(invoker, Actor::AiWithHuman, "withdraw")?;
+    let display_id = display_id(matches);
+    super::transition::run_in_tx(tx, schema, matches, invoker, "withdraw")?;
+    let (_, row) = read_row(schema, tx, display_id)?;
+    super::observation_arch_gate::apply_verdict_effects(
+        tx,
+        display_id,
+        &row,
+        invoker.actor,
+        super::observation_arch_gate::RulingOutcome::Withdrawn,
+    )
 }
 
 fn mark_superseded_if_present(
@@ -256,6 +363,7 @@ fn mark_superseded_if_present(
     schema: &Schema,
     display_id: &str,
     actor: Actor,
+    superseded_by: Option<&str>,
 ) -> Result<()> {
     let (row_id, existing) = match read_row(schema, tx, display_id) {
         Ok(row) => row,
@@ -265,13 +373,23 @@ fn mark_superseded_if_present(
     if current_status == "superseded" {
         return Ok(());
     }
-    let diff = EntryMap::new();
+    let mut diff = EntryMap::new();
+    let mut merged = existing.clone();
     let transition = select_transition(
         &schema.lifecycle.transitions,
         current_status,
         "supersede",
         None,
-        &existing,
+        &merged,
+    )?;
+    super::transition::inject_upstream_primary_tuple(
+        schema,
+        transition,
+        "supersede",
+        current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
     )?;
     let invoker = InvokerCtx {
         actor,
@@ -279,8 +397,11 @@ fn mark_superseded_if_present(
     };
     validate::validate(
         schema,
-        &existing,
-        Op::Transition("supersede".to_string(), diff.clone()),
+        &merged,
+        Op::Transition(
+            "supersede".to_string(),
+            super::transition::strip_framework_overlay_from_validation_diff(schema, &diff),
+        ),
         invoker,
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
@@ -294,12 +415,27 @@ fn mark_superseded_if_present(
         &transition.to,
         "supersede",
         &diff,
-        &existing,
+        &merged,
         actor,
         pref.as_deref(),
         phash.as_deref(),
         None,
-    )
+    )?;
+    if let Some(successor) = superseded_by {
+        tx.execute(
+            "UPDATE architecture_reviews SET superseded_by_id=?1 WHERE display_id=?2",
+            rusqlite::params![successor, display_id],
+        )?;
+        let (_, redirected) = read_row(schema, tx, display_id)?;
+        super::observation_arch_gate::apply_verdict_effects(
+            tx,
+            display_id,
+            &redirected,
+            actor,
+            super::observation_arch_gate::RulingOutcome::Superseded,
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_cascade_decisions(value: Option<&Value>) -> Result<()> {
@@ -358,6 +494,8 @@ fn display_id(matches: &ArgMatches) -> &str {
 }
 
 fn status_of(entry: &EntryMap) -> &str {
+    // ADR 0002 compatibility-only T148 task 6.1: schema transition selection
+    // still consumes the legacy architecture_reviews.status state-machine label.
     entry.get("status").and_then(|v| v.as_str()).unwrap_or("")
 }
 
@@ -427,6 +565,10 @@ mod tests {
         Command::new("ratify-amend").arg(Arg::new("display_id").required(true))
     }
 
+    fn supersede_cmd() -> Command {
+        Command::new("supersede").arg(Arg::new("display_id").required(true))
+    }
+
     #[test]
     fn interpret_issue_goes_to_verdict_issued() {
         let (schema, conn) = setup();
@@ -489,9 +631,18 @@ mod tests {
     }
 
     #[test]
-    fn amend_issue_awaits_human_ratification() {
+    fn amend_issue_awaits_human_ratification_without_applying_verdict_effects() {
         let (schema, conn) = setup();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+        conn.execute("INSERT INTO observations (display_id,status,lifecycle,created_at,updated_at,created_by,updated_by,summary,source,priority,captured_at,captured_week,pending_architecture_review,open_architecture_review_id) VALUES ('L001','confirmed','in_progress','now','now','human','human','s','dev','normal','2026-05-07','w19-d4',1,'A001')", []).unwrap();
         insert_row(&conn, "A001", "in_review", "amend");
+        conn.execute(
+            "UPDATE architecture_reviews SET source_observation='L001', linked_observation_ids='[\"L001\"]' WHERE display_id='A001'",
+            [],
+        ).unwrap();
         let m = issue_cmd().get_matches_from([
             "issue-verdict",
             "A001",
@@ -516,6 +667,12 @@ mod tests {
                 .unwrap_or(""),
             ""
         );
+        let pending: i64 = conn.query_row(
+            "SELECT pending_architecture_review FROM observations WHERE display_id='L001'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(pending, 1, "amend effects must wait for ratify-amend");
     }
 
     #[test]
@@ -620,6 +777,20 @@ mod tests {
     }
 
     #[test]
+    fn supersede_command_without_successor_is_rejected() {
+        let (schema, conn) = setup();
+        insert_row(&conn, "A001", "verdict_issued", "interpret");
+        let m = supersede_cmd().get_matches_from(["supersede", "A001"]);
+        let err = run_supersede(&schema, &conn, &m, Actor::AiWithHuman.into()).unwrap_err();
+        assert!(err.to_string().contains("superseded_by_id"));
+        let (_, old) = read_row(&schema, &conn, "A001").unwrap();
+        assert_eq!(
+            old.get("status").and_then(|v| v.as_str()),
+            Some("verdict_issued")
+        );
+    }
+
+    #[test]
     fn supersedes_marks_prior_terminal_and_keeps_new_status() {
         let (schema, conn) = setup();
         insert_row(&conn, "A001", "verdict_issued", "interpret");
@@ -642,6 +813,10 @@ mod tests {
         assert_eq!(
             old.get("status").and_then(|v| v.as_str()),
             Some("superseded")
+        );
+        assert_eq!(
+            old.get("superseded_by_id").and_then(|v| v.as_str()),
+            Some("A002")
         );
         assert_eq!(
             new.get("status").and_then(|v| v.as_str()),

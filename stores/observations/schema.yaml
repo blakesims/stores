@@ -9,154 +9,72 @@ lifecycle:
   states: [open, needs_investigation, investigating, investigated, investigation_failed, confirmed, ready, needs_info, in_progress, resolved, wont_fix]
   initial_state: open
   transitions:
-    # open → investigating: triage begins
-    # investigate is autonomous (closes L007). Drafting an investigation note
-    # does not require user-presence; subsequent confirm + intent_contract
-    # approval are the U-moments and remain actor:human / actor:ai_with_human.
-    - from: open
-      to: investigating
-      verb: investigate
-      actor: ai_autonomous
+    - {from: open, to: investigating, verb: investigate, actor: ai_autonomous, lifecycle: candidate, contract_state: draft, waiting_kind: human_ratification, legacy_status: investigating}
+    - {from: open, to: needs_investigation, verb: request-investigation, actor: ai_with_human, lifecycle: candidate, contract_state: draft, waiting_kind: human_ratification, legacy_status: needs_investigation}
+    - {from: needs_investigation, to: investigating, verb: investigation-started, actor: framework, lifecycle: candidate, contract_state: draft, waiting_kind: human_ratification, legacy_status: investigating}
+    - {from: investigating, to: investigated, verb: investigation-succeeded, actor: framework, lifecycle: candidate, contract_state: draft, waiting_kind: human_ratification, legacy_status: investigated}
+    - {from: investigating, to: investigation_failed, verb: investigation-failed, actor: framework, lifecycle: candidate, contract_state: draft, waiting_kind: human_ratification, legacy_status: investigation_failed}
+    - {from: open, to: wont_fix, verb: wont_fix, actor: ai_with_human, lifecycle: closed, outcome: closed_wont_fix, legacy_status: wont_fix}
+    - {from: open, to: resolved, verb: close_as_addressed, actor: ai_autonomous, lifecycle: closed, legacy_status: resolved}
+    - {from: ready, to: resolved, verb: close_as_addressed, actor: ai_autonomous, lifecycle: closed, legacy_status: resolved}
+    - {from: investigating, to: confirmed, verb: confirm, actor: ai_with_human, guard: "intent_contract.contract_state == 'ready'", lifecycle: candidate, contract_state: approved, legacy_status: confirmed}
+    - {from: confirmed, to: ready, verb: ratify, actor: framework, guard: "intent_contract.contract_state == 'ready'", lifecycle: ready, contract_state: approved, legacy_status: ready}
+    - {from: investigating, to: needs_info, verb: request_info, actor: ai_autonomous, lifecycle: candidate, waiting_kind: info_needed, legacy_status: needs_info}
+    - {from: confirmed, to: needs_info, verb: park, actor: ai_autonomous, lifecycle: candidate, waiting_kind: info_needed, legacy_status: needs_info}
+    - {from: needs_info, to: confirmed, verb: provide_info, actor: human, lifecycle: candidate, legacy_status: confirmed}
+    - {from: confirmed, to: in_progress, verb: claim, actor: ai_autonomous, lifecycle: in_progress, legacy_status: in_progress}
+    - {from: in_progress, to: resolved, verb: resolve, actor: ai_autonomous, lifecycle: closed, legacy_status: resolved}
+    - {from: confirmed, to: wont_fix, verb: wont_fix, actor: ai_with_human, lifecycle: closed, outcome: closed_wont_fix, legacy_status: wont_fix}
+    - {from: ready, to: wont_fix, verb: wont_fix, actor: ai_with_human, lifecycle: closed, outcome: closed_wont_fix, legacy_status: wont_fix}
+    - {from: open, to: resolved, verb: auto_resolve, actor: framework, lifecycle: closed, legacy_status: resolved}
+    - {from: investigating, to: resolved, verb: auto_resolve, actor: framework, lifecycle: closed, legacy_status: resolved}
+    - {from: confirmed, to: resolved, verb: auto_resolve, actor: framework, lifecycle: closed, legacy_status: resolved}
+    - {from: ready, to: resolved, verb: auto_resolve, actor: framework, lifecycle: closed, legacy_status: resolved}
+    - {from: needs_info, to: resolved, verb: auto_resolve, actor: framework, lifecycle: closed, legacy_status: resolved}
+    - {from: in_progress, to: resolved, verb: auto_resolve, actor: framework, lifecycle: closed, legacy_status: resolved}
+    - {from: open, to: resolved, verb: supersede, actor: ai_with_human, lifecycle: closed, outcome: superseded, legacy_status: resolved}
+    - {from: confirmed, to: resolved, verb: supersede, actor: ai_with_human, lifecycle: closed, outcome: superseded, legacy_status: resolved}
+    - {from: ready, to: resolved, verb: supersede, actor: ai_with_human, lifecycle: closed, outcome: superseded, legacy_status: resolved}
+    - {from: in_progress, to: resolved, verb: supersede, actor: ai_with_human, lifecycle: closed, outcome: superseded, legacy_status: resolved}
 
-    # open → needs_investigation: operator-pull route to the dedicated
-    # investigator subagent queue. A human-supervised AI flags specific rows;
-    # the framework subscriber performs the spawn and follow-up transitions.
-    - from: open
-      to: needs_investigation
-      verb: request-investigation
-      actor: ai_with_human
-
-    # needs_investigation → investigating → investigated/investigation_failed:
-    # framework-only edges used by the investigator subscriber. Hidden from the
-    # operator CLI; direct observation creation remains status=open.
-    - from: needs_investigation
-      to: investigating
-      verb: investigation-started
-      actor: framework
-    - from: investigating
-      to: investigated
-      verb: investigation-succeeded
-      actor: framework
-    - from: investigating
-      to: investigation_failed
-      verb: investigation-failed
-      actor: framework
-
-    # open → wont_fix: direct discard path (per 10.06 lifecycle diagram)
-    - from: open
-      to: wont_fix
-      verb: wont_fix
-      actor: ai_with_human
-
-    # open → resolved: close-as-addressed shortcut (T004 / L017).
-    # First propulsion-visible task: drain the queue without walking the full
-    # 4-hop investigate → confirm → claim → resolve sequence when an
-    # observation has already been addressed by a prior task / observation /
-    # commit. Handler requires --resolution <T###|L###|commit-sha> and writes
-    # resolved_at atomically; autonomy is appropriate because the reference is
-    # an objective, externally-verifiable artifact.
-    - from: open
-      to: resolved
-      verb: close_as_addressed
-      actor: ai_autonomous
-    - from: ready
-      to: resolved
-      verb: close_as_addressed
-      actor: ai_autonomous
-
-    # investigating → confirmed: contract must be ready before this fires (clause 2+3 backbone)
-    - from: investigating
-      to: confirmed
-      verb: confirm
-      actor: ai_with_human
-      guard: "intent_contract.contract_state == 'ready'"
-
-    # confirmed → ready: framework synchronously ratifies the contract immediately
-    # after a successful confirm (T020 P1 auto-promote upstream signal). The hook
-    # in src/handlers/transition.rs re-checks intent_contract.approved_by /
-    # approved_at != null in code (the guard parser does not support compound
-    # expressions). actor: framework — only the post-confirm hook fires this.
-    - from: confirmed
-      to: ready
-      verb: ratify
-      actor: framework
-      guard: "intent_contract.contract_state == 'ready'"
-
-    # investigating → needs_info: request more context
-    - from: investigating
-      to: needs_info
-      verb: request_info
-      actor: ai_autonomous
-
-    # confirmed → needs_info: parking (clause 7)
-    - from: confirmed
-      to: needs_info
-      verb: park
-      actor: ai_autonomous
-
-    # needs_info → confirmed: human provides the missing context (clause 7 resume)
-    - from: needs_info
-      to: confirmed
-      verb: provide_info
-      actor: human
-
-    # confirmed → in_progress: claim the work
-    - from: confirmed
-      to: in_progress
-      verb: claim
-      actor: ai_autonomous
-
-    # in_progress → resolved: work done
-    - from: in_progress
-      to: resolved
-      verb: resolve
-      actor: ai_autonomous
-
-    # confirmed/ready → wont_fix: bailout after investigation or ratified-but-superseded work
-    - from: confirmed
-      to: wont_fix
-      verb: wont_fix
-      actor: ai_with_human
-    - from: ready
-      to: wont_fix
-      verb: wont_fix
-      actor: ai_with_human
-
-    # auto_resolve: framework-fired by the auto-resolve-observation subscriber
-    # when the observation's linked task hits cargo_installed → schema_migrated.
-    # Mirror image of auto-promote (T020 P1) — the upstream ratify created the
-    # task; this closes the back-link by setting status=resolved and resolution
-    # to the task's commit_sha. T037 P1.
-    #
-    # Source states cover every state where auto-promotion or direct promotion
-    # could have left an observation. wont_fix and resolved are intentionally
-    # excluded (terminal states; no auto-resolve from there).
-    - from: open
-      to: resolved
-      verb: auto_resolve
-      actor: framework
-    - from: investigating
-      to: resolved
-      verb: auto_resolve
-      actor: framework
-    - from: confirmed
-      to: resolved
-      verb: auto_resolve
-      actor: framework
-    - from: ready
-      to: resolved
-      verb: auto_resolve
-      actor: framework
-    - from: needs_info
-      to: resolved
-      verb: auto_resolve
-      actor: framework
-    - from: in_progress
-      to: resolved
-      verb: auto_resolve
-      actor: framework
 
 fields:
+  # --- ADR 0002 primary model (status remains compatibility-only legacy projection). ---
+  - name: lifecycle
+    type: enum
+    enum_values: [candidate, ready, in_progress, closed]
+    required: false
+    default: candidate
+    actor: framework
+    description: "ADR 0002 observation lifecycle primary column; legacy status is compatibility-only projection."
+
+  - name: contract_state
+    type: enum
+    enum_values: [none, draft, approved]
+    required: false
+    actor: framework
+    description: "ADR 0002 primary contract state; source-of-truth nested field is intent_contract.contract_state; nested ready aliases to primary approved."
+
+  - name: waiting
+    type: bool
+    required: false
+    actor: framework
+    description: "ADR 0002 waiting/gate overlay flag; not an observation lifecycle state."
+
+  - name: waiting_kind
+    type: enum
+    enum_values: [info_needed, architecture_review, human_ratification, linked_task_blocked, external_dependency]
+    required: false
+    actor: framework
+    description: "ADR 0002 observation waiting/gate overlay kind."
+
+  - name: outcome
+    type: enum
+    enum_values: [addressed_by_task, addressed_by_commit, closed_as_duplicate, closed_wont_fix, merged_with_cluster, superseded]
+    required: false
+    actor: framework
+    description: "ADR 0002 observation outcome primary column."
+
   # --- Core identity ---
   - name: summary
     type: text
@@ -315,11 +233,18 @@ fields:
     default: false
     description: "True when a routed architecture_reviews A### ruling must clear this observation before U1 ratification."
 
+  # ADR 0002 alias: clearable_by_ruling co-exists with open_architecture_review_id; clearable narrows authorization, open broadcasts the gate.
   - name: clearable_by_ruling
     type: text
     required: false
     pattern: "^A[0-9]{3,}$"
-    description: "Soft-FK to architecture_reviews.display_id (A###) whose verdict can clear pending_architecture_review."
+    description: "Soft-FK to architecture_reviews.display_id (A###) whose verdict can clear pending_architecture_review; ADR 0002 clearable authorization counterpart."
+
+  - name: open_architecture_review_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: open A### gating this observation; distinct from clearable_by_ruling authorization."
 
   - name: resolved_by
     type: text
@@ -341,15 +266,34 @@ fields:
 
   - name: resolution_kind
     type: enum
-    enum_values: [addressed_by_task, addressed_by_observation, addressed_by_commit, auto_resolved, merged_with_cluster]
+    enum_values: [addressed_by_task, addressed_by_observation, addressed_by_commit, auto_resolved, merged_with_cluster, superseded]
     required: false
-    description: "Typed resolution category; merged_with_cluster is reserved for architecture-review merge redirects."
+    description: "Typed resolution category; merged_with_cluster is reserved for architecture-review merge redirects; superseded maps to ADR 0002 superseded outcome."
 
   # --- Cross-store reference (soft-FK, plain text per D4) ---
+  # ADR 0002 alias: task_id IS linked_task_id.
   - name: task_id
     type: text
     required: false
-    description: "Display id of the linked task (e.g. T123); soft-FK, no referential guard (T010)"
+    description: "Display id of the linked task (e.g. T123); ADR 0002 linked_task_id; soft-FK, no referential guard (T010)."
+
+  - name: addressed_by_task_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: T### task that addressed this observation."
+
+  - name: addressed_by_commit_sha
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: commit sha when outcome=addressed_by_commit."
+
+  - name: superseded_by_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: L### or A### that supersedes this observation."
 
   # --- Auto-file cascade dedup metadata (framework-written) ---
   - name: summary_signature

@@ -202,11 +202,10 @@ impl ArchReviewOutcome {
 pub struct InletReferences {
     pub produced_observation_id: Option<String>,
     pub produced_architecture_review_id: Option<String>,
-    pub duplicate_of_id: Option<String>,
-    /// ADR 0002 v1: no current intake schema column yet.
+    pub produced_task_id: Option<String>,
     pub produced_artifact_kind: Option<String>,
-    /// ADR 0002 v1: no current intake schema column yet.
     pub produced_artifact_id: Option<String>,
+    pub duplicate_of_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -215,17 +214,21 @@ pub struct ObsReferences {
     pub open_architecture_review_id: Option<String>,
     pub addressed_by_task_id: Option<String>,
     pub addressed_by_commit: Option<String>,
+    pub addressed_by_commit_sha: Option<String>,
     pub duplicate_of_id: Option<String>,
     pub merged_into_id: Option<String>,
-    // Intentionally absent: superseded_by_id has no typed observations column in v1.
+    pub superseded_by_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ArchReviewReferences {
     pub source_observation_id: Option<String>,
     pub source_intake_id: Option<String>,
+    pub linked_observation_ids: Vec<String>,
     pub supersedes_id: Option<String>,
     pub merge_target_id: Option<String>,
+    pub produced_task_id: Option<String>,
+    pub superseded_by_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +264,9 @@ pub struct IntakeRowInput<'a> {
     pub decision: Option<&'a str>,
     pub routed_to_observation: Option<&'a str>,
     pub routed_to_arch_review: Option<&'a str>,
+    pub produced_task_id: Option<&'a str>,
+    pub produced_artifact_kind: Option<&'a str>,
+    pub produced_artifact_id: Option<&'a str>,
     pub duplicate_of: Option<&'a str>,
 }
 
@@ -271,12 +277,15 @@ pub struct ObsRowInput<'a> {
     pub pending_architecture_review: Option<bool>,
     /// Informational only; not consulted for overlay emission.
     pub clearable_by_ruling: Option<&'a str>,
+    pub open_architecture_review_id: Option<&'a str>,
     pub resolution_kind: Option<&'a str>,
     /// Raw resolution text. Parsing precedence: T### => task, L### => observation duplicate, otherwise commit sha.
     pub resolution: Option<&'a str>,
     pub merge_target_id: Option<&'a str>,
     pub resolved_by: Option<&'a str>,
     pub task_id: Option<&'a str>,
+    pub addressed_by_commit_sha: Option<&'a str>,
+    pub superseded_by_id: Option<&'a str>,
 }
 
 pub struct ArchReviewRowInput<'a> {
@@ -285,8 +294,11 @@ pub struct ArchReviewRowInput<'a> {
     pub verdict: Option<&'a str>,
     pub source_observation: Option<&'a str>,
     pub source_intake: Option<&'a str>,
+    pub linked_observation_ids: Vec<&'a str>,
     pub supersedes: Option<&'a str>,
     pub merge_target_id: Option<&'a str>,
+    pub produced_task_id: Option<&'a str>,
+    pub superseded_by_id: Option<&'a str>,
     pub updated_at: Option<&'a str>,
 }
 
@@ -312,9 +324,10 @@ pub fn project_intake(input: &IntakeRowInput<'_>) -> InletProjection {
         references: InletReferences {
             produced_observation_id: input.routed_to_observation.map(str::to_string),
             produced_architecture_review_id: input.routed_to_arch_review.map(str::to_string),
+            produced_task_id: input.produced_task_id.map(str::to_string),
+            produced_artifact_kind: input.produced_artifact_kind.map(str::to_string),
+            produced_artifact_id: input.produced_artifact_id.map(str::to_string),
             duplicate_of_id: input.duplicate_of.map(str::to_string),
-            produced_artifact_kind: None,
-            produced_artifact_id: None,
         },
     }
 }
@@ -342,7 +355,12 @@ pub fn project_observation(
     let outcome = obs_outcome(obs.status, obs.resolution_kind);
     let mut references = ObsReferences {
         linked_task_id: obs.task_id.map(str::to_string),
-        open_architecture_review_id: open_arch_review.map(|r| r.display_id.to_string()),
+        open_architecture_review_id: obs
+            .open_architecture_review_id
+            .map(str::to_string)
+            .or_else(|| open_arch_review.map(|r| r.display_id.to_string())),
+        addressed_by_commit_sha: obs.addressed_by_commit_sha.map(str::to_string),
+        superseded_by_id: obs.superseded_by_id.map(str::to_string),
         ..ObsReferences::default()
     };
     populate_obs_resolution_references(&mut references, obs);
@@ -377,8 +395,15 @@ pub fn project_arch_review(input: &ArchReviewRowInput<'_>) -> ArchReviewProjecti
         references: ArchReviewReferences {
             source_observation_id: input.source_observation.map(str::to_string),
             source_intake_id: input.source_intake.map(str::to_string),
+            linked_observation_ids: input
+                .linked_observation_ids
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             supersedes_id: input.supersedes.map(str::to_string),
             merge_target_id: input.merge_target_id.map(str::to_string),
+            produced_task_id: input.produced_task_id.map(str::to_string),
+            superseded_by_id: input.superseded_by_id.map(str::to_string),
         },
     }
 }
@@ -430,6 +455,7 @@ fn obs_outcome(status: &str, resolution_kind: Option<&str>) -> Option<ObsOutcome
         ("resolved", Some("addressed_by_observation")) => Some(ObsOutcome::ClosedAsDuplicate),
         ("resolved", Some("auto_resolved")) => Some(ObsOutcome::AddressedByTask),
         ("resolved", Some("merged_with_cluster")) => Some(ObsOutcome::MergedWithCluster),
+        ("resolved", Some("superseded")) => Some(ObsOutcome::Superseded),
         ("resolved", None) => None,
         ("resolved", Some(other)) => panic!("unknown observations.resolution_kind {other}"),
         _ => None,
@@ -438,6 +464,12 @@ fn obs_outcome(status: &str, resolution_kind: Option<&str>) -> Option<ObsOutcome
 
 /// Parses legacy resolution references. Precedence is kind first, then text: addressed_by_task
 /// accepts T###, addressed_by_observation accepts L###, addressed_by_commit treats other text as sha.
+///
+/// Migration note for T148 P3: legacy `addressed_by_observation` prose is ambiguous. Only
+/// `resolution_kind='superseded'` is authoritative supersede semantics; old
+/// `addressed_by_observation` rows with an `L###` resolution default conservatively to
+/// `closed_as_duplicate` / duplicate_of_id unless a migration caller supplies the explicit
+/// ADR 0002 `superseded_by_id` column.
 pub fn parse_resolution_reference(
     resolution_kind: Option<&str>,
     resolution: Option<&str>,
@@ -467,7 +499,13 @@ fn populate_obs_resolution_references(references: &mut ObsReferences, obs: &ObsR
         });
     }
     if obs.resolution_kind == Some("addressed_by_commit") {
-        references.addressed_by_commit = commit.or_else(|| obs.resolved_by.map(str::to_string));
+        let sha = obs
+            .addressed_by_commit_sha
+            .map(str::to_string)
+            .or(commit)
+            .or_else(|| obs.resolved_by.map(str::to_string));
+        references.addressed_by_commit = sha.clone();
+        references.addressed_by_commit_sha = sha;
     }
     if obs.resolution_kind == Some("addressed_by_observation") {
         references.duplicate_of_id = duplicate.or_else(|| {
@@ -478,6 +516,9 @@ fn populate_obs_resolution_references(references: &mut ObsReferences, obs: &ObsR
     }
     if obs.resolution_kind == Some("merged_with_cluster") {
         references.merged_into_id = obs.merge_target_id.or(obs.resolved_by).map(str::to_string);
+    }
+    if obs.resolution_kind == Some("superseded") && references.superseded_by_id.is_none() {
+        references.superseded_by_id = obs.resolved_by.map(str::to_string);
     }
 }
 
@@ -505,6 +546,9 @@ mod tests {
             decision,
             routed_to_observation: None,
             routed_to_arch_review: None,
+            produced_task_id: None,
+            produced_artifact_kind: None,
+            produced_artifact_id: None,
             duplicate_of: None,
         }
     }
@@ -515,11 +559,14 @@ mod tests {
             contract_state: Some("approved"),
             pending_architecture_review: None,
             clearable_by_ruling: None,
+            open_architecture_review_id: None,
             resolution_kind: None,
             resolution: None,
             merge_target_id: None,
             resolved_by: None,
             task_id: None,
+            addressed_by_commit_sha: None,
+            superseded_by_id: None,
         }
     }
     fn arch<'a>(status: &'a str, verdict: Option<&'a str>) -> ArchReviewRowInput<'a> {
@@ -529,8 +576,11 @@ mod tests {
             verdict,
             source_observation: None,
             source_intake: None,
+            linked_observation_ids: Vec::new(),
             supersedes: None,
             merge_target_id: None,
+            produced_task_id: None,
+            superseded_by_id: None,
             updated_at: None,
         }
     }
@@ -875,6 +925,26 @@ mod tests {
         );
     }
     #[test]
+    fn refs_inlet_produced_task_round_trip() {
+        let mut i = intake("routed", Some("fast_track"));
+        i.produced_task_id = Some("T123");
+        assert_eq!(
+            project_intake(&i).references.produced_task_id.as_deref(),
+            Some("T123")
+        );
+    }
+
+    #[test]
+    fn refs_inlet_produced_artifact_round_trip() {
+        let mut i = intake("routed", Some("fast_track"));
+        i.produced_artifact_kind = Some("task");
+        i.produced_artifact_id = Some("T123");
+        let r = project_intake(&i).references;
+        assert_eq!(r.produced_artifact_kind.as_deref(), Some("task"));
+        assert_eq!(r.produced_artifact_id.as_deref(), Some("T123"));
+    }
+
+    #[test]
     fn refs_obs_addressed_by_task_only() {
         let mut o = obs("resolved");
         o.resolution_kind = Some("addressed_by_task");
@@ -891,8 +961,19 @@ mod tests {
         o.resolution = Some("abc1234");
         let r = project_observation(&o, None).references;
         assert_eq!(r.addressed_by_commit.as_deref(), Some("abc1234"));
+        assert_eq!(r.addressed_by_commit_sha.as_deref(), Some("abc1234"));
         assert_eq!(r.addressed_by_task_id, None);
         assert_eq!(r.duplicate_of_id, None);
+    }
+    #[test]
+    fn refs_obs_addressed_by_commit_sha_column_wins_round_trip() {
+        let mut o = obs("resolved");
+        o.resolution_kind = Some("addressed_by_commit");
+        o.resolution = Some("legacysha");
+        o.addressed_by_commit_sha = Some("primarysha");
+        let r = project_observation(&o, None).references;
+        assert_eq!(r.addressed_by_commit.as_deref(), Some("primarysha"));
+        assert_eq!(r.addressed_by_commit_sha.as_deref(), Some("primarysha"));
     }
     #[test]
     fn refs_obs_addressed_by_observation_only() {
@@ -904,6 +985,43 @@ mod tests {
         assert_eq!(r.addressed_by_task_id, None);
         assert_eq!(r.addressed_by_commit, None);
     }
+    #[test]
+    fn refs_obs_addressed_by_commit_sha_alias_round_trip() {
+        let mut o = obs("resolved");
+        o.resolution_kind = Some("addressed_by_commit");
+        o.addressed_by_commit_sha = Some("def5678");
+        let r = project_observation(&o, None).references;
+        assert_eq!(r.addressed_by_commit.as_deref(), Some("def5678"));
+        assert_eq!(r.addressed_by_commit_sha.as_deref(), Some("def5678"));
+    }
+
+    #[test]
+    fn refs_obs_superseded_by_round_trip() {
+        let mut o = obs("resolved");
+        o.resolution_kind = Some("superseded");
+        o.superseded_by_id = Some("A123");
+        assert_eq!(
+            project_observation(&o, None)
+                .references
+                .superseded_by_id
+                .as_deref(),
+            Some("A123")
+        );
+    }
+
+    #[test]
+    fn refs_obs_open_architecture_review_id_round_trip() {
+        let mut o = obs("open");
+        o.open_architecture_review_id = Some("A222");
+        assert_eq!(
+            project_observation(&o, None)
+                .references
+                .open_architecture_review_id
+                .as_deref(),
+            Some("A222")
+        );
+    }
+
     #[test]
     fn refs_obs_merged_with_cluster_only() {
         let mut o = obs("resolved");
@@ -928,6 +1046,27 @@ mod tests {
         );
     }
     #[test]
+    fn refs_obs_open_architecture_review_id_column_round_trip() {
+        let mut o = obs("open");
+        o.open_architecture_review_id = Some("A777");
+        assert_eq!(
+            project_observation(&o, None)
+                .references
+                .open_architecture_review_id
+                .as_deref(),
+            Some("A777")
+        );
+    }
+    #[test]
+    fn refs_obs_superseded_by_id_round_trip() {
+        let mut o = obs("resolved");
+        o.resolution_kind = Some("superseded");
+        o.superseded_by_id = Some("L777");
+        let p = project_observation(&o, None);
+        assert_eq!(p.outcome, Some(ObsOutcome::Superseded));
+        assert_eq!(p.references.superseded_by_id.as_deref(), Some("L777"));
+    }
+    #[test]
     fn refs_arch_sources() {
         let a = ArchReviewRowInput {
             display_id: "A002",
@@ -935,15 +1074,60 @@ mod tests {
             verdict: None,
             source_observation: Some("L001"),
             source_intake: Some("I001"),
+            linked_observation_ids: vec!["L001", "L002"],
             supersedes: Some("A001"),
             merge_target_id: Some("L010"),
+            produced_task_id: Some("T333"),
+            superseded_by_id: Some("A003"),
             updated_at: Some("now"),
         };
         let r = project_arch_review(&a).references;
         assert_eq!(r.source_observation_id.as_deref(), Some("L001"));
         assert_eq!(r.source_intake_id.as_deref(), Some("I001"));
+        assert_eq!(
+            r.linked_observation_ids,
+            vec!["L001".to_string(), "L002".to_string()]
+        );
         assert_eq!(r.supersedes_id.as_deref(), Some("A001"));
         assert_eq!(r.merge_target_id.as_deref(), Some("L010"));
+        assert_eq!(r.produced_task_id.as_deref(), Some("T333"));
+        assert_eq!(r.superseded_by_id.as_deref(), Some("A003"));
+    }
+
+    #[test]
+    fn refs_arch_linked_observation_ids_round_trip() {
+        let mut a = arch("pending", None);
+        a.linked_observation_ids = vec!["L001", "L002"];
+        assert_eq!(
+            project_arch_review(&a).references.linked_observation_ids,
+            vec!["L001".to_string(), "L002".to_string()]
+        );
+    }
+
+    #[test]
+    fn refs_arch_produced_task_round_trip() {
+        let mut a = arch("verdict_issued", Some("create_primitive_task"));
+        a.produced_task_id = Some("T555");
+        assert_eq!(
+            project_arch_review(&a)
+                .references
+                .produced_task_id
+                .as_deref(),
+            Some("T555")
+        );
+    }
+
+    #[test]
+    fn refs_arch_superseded_by_round_trip() {
+        let mut a = arch("superseded", None);
+        a.superseded_by_id = Some("A999");
+        assert_eq!(
+            project_arch_review(&a)
+                .references
+                .superseded_by_id
+                .as_deref(),
+            Some("A999")
+        );
     }
 
     #[test]

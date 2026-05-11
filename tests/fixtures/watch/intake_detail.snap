@@ -9,8 +9,16 @@ Priority / risk
   risk: touches_lifecycle
   cluster: watch
 
-Status
-  needs_info
+ADR 0002 state
+  lifecycle: —
+  waiting_kind: —
+  outcome: —
+  produced_observation_id: —
+  produced_architecture_review_id: —
+  produced_task_id: —
+  produced_artifact: — —
+  duplicate_of_id: —
+  Legacy status: needs_info
   captured: —
   recon_round: —
 

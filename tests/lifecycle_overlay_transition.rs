@@ -114,7 +114,7 @@ fn t1_walk_updates_overlay_on_every_edge() {
         row(&conn),
         (
             "in_review".into(),
-            "integration".into(),
+            "active".into(),
             "wrapping".into(),
             "none".into(),
             0,

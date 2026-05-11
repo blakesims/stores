@@ -18,6 +18,9 @@ pub struct Transition {
     pub blocked: Option<bool>,
     pub blocker_kind: Option<String>,
     pub legacy_status: Option<String>,
+    pub waiting_kind: Option<String>,
+    pub outcome: Option<String>,
+    pub contract_state: Option<String>,
     /// Optional gate key that must match the submit verb's `--gate` argument for
     /// this transition to be selected.  When multiple transitions share the same
     /// `(from, verb)` pair, all but at most one must declare `requires_gate`.
@@ -52,6 +55,12 @@ impl<'de> Deserialize<'de> for Transition {
             #[serde(default)]
             legacy_status: Option<String>,
             #[serde(default)]
+            waiting_kind: Option<String>,
+            #[serde(default)]
+            outcome: Option<String>,
+            #[serde(default)]
+            contract_state: Option<String>,
+            #[serde(default)]
             requires_gate: Option<String>,
             #[serde(default)]
             guard: Option<String>,
@@ -80,6 +89,9 @@ impl<'de> Deserialize<'de> for Transition {
             blocked: r.blocked,
             blocker_kind: r.blocker_kind,
             legacy_status: r.legacy_status,
+            waiting_kind: r.waiting_kind,
+            outcome: r.outcome,
+            contract_state: r.contract_state,
             requires_gate: r.requires_gate,
             guard,
         })

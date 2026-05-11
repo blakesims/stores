@@ -785,17 +785,27 @@ fn build_store_command(schema: &Schema) -> Command {
         // observation-id (L###), or a commit-sha (7-40 hex chars). Substrate
         // verifies the shape; the verb refuses without it.
         if verb == "close_as_addressed" {
-            // The schema already declares a `resolution` text field, so the
-            // leaf-arg walker registered a non-required `--resolution`. Promote
-            // it to required and override the help text so the three accepted
-            // forms (T###, L###, commit-sha) are visible at --help.
-            transition_cmd = transition_cmd.mut_arg("resolution", |a| {
-                a.required(true).help(
-                    "Reference to the artifact that addressed this observation: \
+            // The schema usually registers a non-required `--resolution` leaf.
+            // Some transition-specific leaf filtering can omit it; keep command
+            // construction total by adding the verb-required flag in that case.
+            let resolution_help = "Reference to the artifact that addressed this observation: \
                      task-id (T###), observation-id (L###), or commit-sha \
-                     (7-40 hex chars)",
-                )
-            });
+                     (7-40 hex chars)";
+            if transition_cmd
+                .get_arguments()
+                .any(|a| a.get_id() == "resolution")
+            {
+                transition_cmd = transition_cmd
+                    .mut_arg("resolution", |a| a.required(true).help(resolution_help));
+            } else {
+                transition_cmd = transition_cmd.arg(
+                    Arg::new("resolution")
+                        .long("resolution")
+                        .value_name("ref")
+                        .help(resolution_help)
+                        .required(true),
+                );
+            }
         }
         // close-out-of-band (tasks recovery-terminal) requires --commit <SHA>:
         // the merge-target SHA recorded as provenance in transition_history.
@@ -1505,6 +1515,17 @@ fn build_add_cmd(leaves: &[crate::schema::flatten::LeafArg<'_>], schema: &Schema
     // (ai_with_human) means --activate combined with --invoker ai_autonomous
     // is rejected fail-loud by the validator. No new authority gate here —
     // the schema is the enforcement surface.
+    if schema.name == "architecture_reviews" {
+        cmd = cmd.arg(
+            Arg::new("linked-observations")
+                .long("linked-observations")
+                .action(ArgAction::Append)
+                .value_delimiter(',')
+                .value_name("L###[,L###]")
+                .help("Comma-separated or repeated L### ids covered by this architecture review; source_observation is included if supplied")
+                .required(false),
+        );
+    }
     if schema.name == "tasks" {
         cmd = cmd.arg(
             Arg::new("activate")
@@ -1986,6 +2007,33 @@ mod tests {
                 "rendered gatekeeper brief missing `{expected}`:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn architecture_reviews_add_splits_comma_linked_observations() {
+        let ar_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "architecture_reviews")
+            .map(|(_, yaml)| *yaml)
+            .expect("architecture_reviews schema bundled");
+        let schema = crate::schema::Schema::from_yaml(ar_yaml).unwrap();
+        let mut cmd = build_store_command(&schema);
+        let add = cmd.find_subcommand_mut("add").unwrap().clone();
+        let matches = add
+            .try_get_matches_from([
+                "add",
+                "--linked-observations",
+                "L010,L011,L012",
+                "--linked-observations",
+                "L013",
+            ])
+            .unwrap();
+        let got: Vec<String> = matches
+            .get_many::<String>("linked-observations")
+            .unwrap()
+            .cloned()
+            .collect();
+        assert_eq!(got, vec!["L010", "L011", "L012", "L013"]);
     }
 
     #[test]

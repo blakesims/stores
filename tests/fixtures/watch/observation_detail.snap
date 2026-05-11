@@ -7,8 +7,15 @@ Summary / story
 Priority
   high
 
-Status
-  open
+ADR 0002 state
+  lifecycle: —
+  contract_state: ready
+  waiting: —
+  outcome: —
+  open_architecture_review_id: —
+  task_id: T700
+  superseded_by_id: —
+  Legacy status: open
 
 Contract state
   state: ready
@@ -19,9 +26,6 @@ Contract state
 Next action / held reason
   ratify contract
 
-Recent events
-  tasks ready -> executing via start at 2026-05-01
-
 Linked tasks
   T700
 
@@ -29,3 +33,6 @@ Artifact pointers
   linked task: T700
   resolution: resolution.md
   log: runs/x.log
+
+Recent events
+  tasks ready -> executing via start at 2026-05-01

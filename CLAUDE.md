@@ -110,7 +110,7 @@ When friction surfaces, **the orchestrator's job is to route, not investigate**.
 
 1. **≤3 cheap tool calls** (a file read, a grep, a quick command) to triangulate.
 2. If the root cause is obvious within that budget — fix it (or file an observation describing the fix shape) and move on.
-3. If not — file the observation with `intent_contract.tier_hint` set, then **STOP**. Either flag `status=needs_investigation` (when L043 ships an investigator subagent) or halt and ask the user how to route.
+3. If not — file the observation with `intent_contract.tier_hint` set, then **STOP**. Under ADR 0002, route by upstream lifecycle/waiting/outcome fields; legacy observation `status` is compatibility-only. Either set the investigation waiting/gate overlay (when L043 ships an investigator subagent) or halt and ask the user how to route.
 
 **Never start a 15-tool-call inline investigation as the orchestrator-on-main.** That is the L043 anti-pattern: the user-facing thread blocks on multi-minute reads while a subagent could have carried the dive in parallel without holding the orchestrator's context. The pain that earned this rule was a long L042 misdiagnosis followed by a long `eval_length` root-cause hunt, both of which should have been routed to a fresh subagent (or filed and halted) instead of swallowing the main thread.
 
@@ -164,7 +164,7 @@ The 2-hour T098 wedge taught us: when a task is non-convergent because the subst
 
 ### Pointers
 
-- `tasks/CLAUDE.md` — task lifecycle protocol (status state machine, section ownership, orchestrator rules). Still applies — the DB is just the new source of truth.
+- `tasks/CLAUDE.md` — ADR 0001 task lifecycle protocol (task status compatibility, lifecycle/step columns, section ownership, orchestrator rules). Still applies; ADR 0002 governs only upstream inlet/observation/architecture-review lifecycle before task promotion.
 - `docs/philosophy.md` — the substrate's design principles. § *What's outside the substrate* is the doctrine that grounds `--invoker` enforcement and the wrapper boundary.
 - `docs/architecture-coherence.md` — doctrine that local correctness is not architectural coherence (T045); grounds the gatekeeper / intake / architecture-review layer.
 - `docs/integration-lane.md` — substrate-owned integration lane contract (T138): lifecycle, capacity-1 partial UNIQUE index, refresh strategies, pre-land check, external-review freshness, stale_base vs stale_external_review, JSON-column `integration_attempts` provenance, retry-integration. `cargo-install` and `schema-migrate` are stores-repo-specific post-integrated subscribers, NOT universal lifecycle — other repos wire their own post-integrated chain off `integrating → integrated`.

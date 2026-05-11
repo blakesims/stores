@@ -192,9 +192,10 @@ fn run_stores(
 ) -> std::process::Output {
     let mut cmd = Command::new(bin);
     cmd.current_dir(repo)
-        // Isolate test from any host token so --invoker ai_with_human is treated
-        // as the tier-B (no-token) path; AC2.6/2.7 only care about the
-        // activation field's actor gate, which fires regardless.
+        // Isolate test from host stores routing/token env so each temp repo owns
+        // its db and --invoker ai_with_human is treated as the tier-B path.
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         .env_remove("STORES_TOKEN_DIR")
         .args(args);
     cmd.output().expect("failed to invoke stores binary")
@@ -209,6 +210,8 @@ fn fresh_repo() -> tempfile::TempDir {
     // "unrecognized subcommand 'tasks'".
     let out = Command::new(bin)
         .current_dir(tmp.path())
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         .env("STORES_SUPPRESS_SETUP_OUTPUT", "1")
         .args(["setup"])
         .output()

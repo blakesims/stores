@@ -191,8 +191,25 @@ fn observation_lines(o: &ObsRow, app: &App) -> Vec<String> {
         "Priority".to_string(),
         format!("  {}", present(&o.priority)),
         String::new(),
-        "Status".to_string(),
-        format!("  {}", present(&o.status)),
+        "ADR 0002 state".to_string(),
+        format!("  lifecycle: {}", present_opt(o.lifecycle.as_deref())),
+        format!(
+            "  contract_state: {}",
+            present_opt(o.contract_state.as_deref())
+        ),
+        format!("  waiting: {}", obs_waiting_label(o)),
+        format!("  outcome: {}", present_opt(o.outcome.as_deref())),
+        format!(
+            "  open_architecture_review_id: {}",
+            present_opt(o.open_architecture_review_id.as_deref())
+        ),
+        format!("  task_id: {}", present_opt(o.task_id.as_deref())),
+        format!(
+            "  superseded_by_id: {}",
+            present_opt(o.superseded_by_id.as_deref())
+        ),
+        // ADR 0002 compatibility-only T148 task 6.1: display legacy observation status explicitly.
+        format!("  Legacy status: {}", present(&o.status)),
         String::new(),
         "Contract state".to_string(),
         format!("  state: {}", present_opt(o.contract_state.as_deref())),
@@ -212,10 +229,7 @@ fn observation_lines(o: &ObsRow, app: &App) -> Vec<String> {
         String::new(),
         "Next action / held reason".to_string(),
         format!("  {}", obs_next_action(o)),
-        String::new(),
-        "Recent events".to_string(),
     ];
-    append_events(&mut lines, &o.recent_events);
     let mut linked: Vec<String> = Vec::new();
     if let Some(tid) = o.task_id.as_deref().filter(|s| !s.trim().is_empty()) {
         linked.push(tid.to_string());
@@ -242,6 +256,8 @@ fn observation_lines(o: &ObsRow, app: &App) -> Vec<String> {
         ),
     ]);
     append_artifacts(&mut lines, &o.evidence_pointers);
+    lines.extend([String::new(), "Recent events".to_string()]);
+    append_events(&mut lines, &o.recent_events);
     lines
 }
 
@@ -272,8 +288,32 @@ fn intake_lines(i: &IntakeRow) -> Vec<String> {
         format!("  risk: {}", list_or_dash(&i.risk_flags)),
         format!("  cluster: {}", present_opt(i.cluster_key.as_deref())),
         String::new(),
-        "Status".to_string(),
-        format!("  {}", present(&i.status)),
+        "ADR 0002 state".to_string(),
+        format!("  lifecycle: {}", present_opt(i.lifecycle.as_deref())),
+        format!("  waiting_kind: {}", present_opt(i.waiting_kind.as_deref())),
+        format!("  outcome: {}", present_opt(i.outcome.as_deref())),
+        format!(
+            "  produced_observation_id: {}",
+            present_opt(i.produced_observation_id.as_deref())
+        ),
+        format!(
+            "  produced_architecture_review_id: {}",
+            present_opt(i.produced_architecture_review_id.as_deref())
+        ),
+        format!(
+            "  produced_task_id: {}",
+            present_opt(i.produced_task_id.as_deref())
+        ),
+        format!(
+            "  produced_artifact: {} {}",
+            present_opt(i.produced_artifact_kind.as_deref()),
+            present_opt(i.produced_artifact_id.as_deref())
+        ),
+        format!(
+            "  duplicate_of_id: {}",
+            present_opt(i.duplicate_of_id.as_deref())
+        ),
+        format!("  Legacy status: {}", present(&i.status)),
         format!("  captured: {}", present_opt(i.captured_at.as_deref())),
         format!("  recon_round: {}", opt_i64(i.recon_round)),
         String::new(),
@@ -330,8 +370,18 @@ fn review_lines(r: &ReviewRow) -> Vec<String> {
     vec![
         format!("External review detail · {}", r.display_id),
         String::new(),
-        "Review state".to_string(),
-        format!("  status: {}", present(&r.status)),
+        "ADR 0002 review state".to_string(),
+        format!("  lifecycle: {}", present_opt(r.lifecycle.as_deref())),
+        format!("  outcome: {}", present_opt(r.outcome.as_deref())),
+        format!(
+            "  linked_observation_ids: {}",
+            list_or_dash(&r.linked_observation_ids)
+        ),
+        format!(
+            "  produced_task_id: {}",
+            present_opt(r.produced_task_id.as_deref())
+        ),
+        format!("  Legacy status: {}", present(&r.status)),
         format!("  task: {}", present(&r.task_id)),
         format!(
             "  runner: {}",
@@ -469,12 +519,25 @@ fn append_artifacts(lines: &mut Vec<String>, artifacts: &[ArtifactPointer]) {
     }
 }
 
+fn obs_waiting_label(o: &ObsRow) -> String {
+    if let Some(kind) = o.waiting_kind.as_deref().filter(|s| !s.trim().is_empty()) {
+        return kind.to_string();
+    }
+    if o.pending_architecture_review.unwrap_or(false) {
+        return "architecture_review".to_string();
+    }
+    if o.waiting.unwrap_or(false) {
+        return "true".to_string();
+    }
+    "—".to_string()
+}
+
 fn obs_next_action(o: &ObsRow) -> String {
     if let Some(reason) = o.lock_reason.as_deref().filter(|s| !s.is_empty()) {
         format!("held: {reason}")
     } else if o.contract_state.as_deref() == Some("ready") {
         "ratify contract".to_string()
-    } else if o.status == "investigation_failed" {
+    } else if o.status == "investigation_failed" { // ADR 0002 compatibility-only T148 task 6.1
         format!(
             "investigation failed: {}",
             present_opt(o.investigation_failure_reason.as_deref())

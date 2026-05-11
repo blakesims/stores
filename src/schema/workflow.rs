@@ -859,7 +859,10 @@ on_state:
 "#;
         let err = serde_yaml::from_str::<Workflow>(yaml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("unknown state action key 'bogus'"), "err: {msg}");
+        assert!(
+            msg.contains("unknown state action key 'bogus'"),
+            "err: {msg}"
+        );
     }
 
     #[test]

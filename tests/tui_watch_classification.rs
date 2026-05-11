@@ -121,13 +121,13 @@ fn tui_watch_classification_adr_0001_review_steps_stay_in_active_work() {
     let buckets = classify_with_options(&rows, WatchClassifyOptions::default());
     assert_eq!(
         bucket(&buckets, Section::TasksActionableCurrentWork),
-        vec![0usize, 1]
+        vec![0usize, 1, 2]
     );
     assert_eq!(
         bucket(&buckets, Section::TasksHeldAiReview),
         Vec::<usize>::new()
     );
-    assert_eq!(bucket(&buckets, Section::TasksAcceptU3), vec![2usize]);
+    assert_eq!(bucket(&buckets, Section::TasksAcceptU3), Vec::<usize>::new());
     assert_eq!(bucket(&buckets, Section::ObsRatifiable), vec![3usize]);
 }
 

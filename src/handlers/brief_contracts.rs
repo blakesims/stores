@@ -1264,6 +1264,7 @@ mod tests {
 
         let mut entry: EntryMap = std::collections::BTreeMap::new();
         entry.insert("display_id".to_string(), json!("T107"));
+        entry.insert("branch_head_sha".to_string(), json!("ccc333"));
         entry.insert("current_cycle".to_string(), json!(1));
         entry.insert("cycles".to_string(), json!([]));
 

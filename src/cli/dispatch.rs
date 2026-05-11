@@ -56,6 +56,9 @@ pub fn dispatch(
                 Some(("supersede", sub)) if store.name == "architecture_reviews" => {
                     handlers::architecture_reviews::run_supersede(schema, &conn, sub, invoker)?;
                 }
+                Some(("withdraw", sub)) if store.name == "architecture_reviews" => {
+                    handlers::architecture_reviews::run_withdraw(schema, &conn, sub, invoker)?;
+                }
                 Some(("next-action", sub)) => {
                     handlers::next_action::run(schema, &conn, sub, invoker)?;
                 }

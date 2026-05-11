@@ -108,6 +108,24 @@ fn render_frame(
         crate::tui::data::dedup_observation_summaries_by_section(&raw_rows, &raw_sections);
     let ((task_visible, task_total), (obs_visible, obs_total)) =
         crate::tui::data::surface_counts(&rows, show_all_history);
+    let flow = crate::tui::data::store_flow_model(
+        &rows,
+        &system_health,
+        &daemon_liveness,
+        &crate::tui::data::ExternalReviewState::default(),
+    );
+    out.push_str(&format!(
+        "{ANSI_BOLD}INLET:{ANSI_RESET} new triaging waiting closed  {} {} {} {}\n",
+        flow.intake.new, flow.intake.triaging, flow.intake.waiting, flow.intake.closed
+    ));
+    out.push_str(&format!(
+        "{ANSI_BOLD}OBSERVATIONS:{ANSI_RESET} candidate ready in_progress closed  {} {} {} {}\n",
+        flow.observations.candidate,
+        flow.observations.ready,
+        flow.observations.in_progress,
+        flow.observations.closed
+    ));
+    out.push_str("closure_rate: n/a\n\n");
 
     // ---- SYSTEM ALERT (dead daemon + dangling locks) --------------------
     let unfinished = system_health.unfinished_dispatch_locks;
@@ -454,6 +472,7 @@ fn render_tui_task_line(t: &crate::tui::data::TaskRow) -> String {
 }
 
 fn render_tui_obs_line(o: &crate::tui::data::ObsRow) -> String {
+    // ADR 0002 compatibility-only T148 task 6.1: legacy watch renders raw status as a label.
     let status_color = obs_status_color(&o.status);
     let priority_color = match o.priority.as_str() {
         "high" => ANSI_RED,
@@ -471,6 +490,7 @@ fn render_tui_obs_line(o: &crate::tui::data::ObsRow) -> String {
 
 fn render_tui_collapsed_obs_line(c: &crate::tui::data::CollapsedObsRow) -> String {
     let o = &c.representative;
+    // ADR 0002 compatibility-only T148 task 6.1: legacy watch renders raw status as a label.
     let status_color = obs_status_color(&o.status);
     let priority_color = match o.priority.as_str() {
         "high" => ANSI_RED,
@@ -653,6 +673,7 @@ fn visible_width(s: &str) -> usize {
 #[cfg(test)]
 #[allow(dead_code)]
 fn render_obs_line(o: &ObsRow) -> String {
+    // ADR 0002 compatibility-only T148 task 6.1: legacy test renderer keeps raw status label.
     let status_color = obs_status_color(&o.status);
     let priority_color = match o.priority.as_str() {
         "high" => ANSI_RED,
@@ -709,6 +730,8 @@ fn legacy_task_status_color(s: &str) -> &'static str {
 
 fn obs_status_color(s: &str) -> &'static str {
     match s {
+        // ADR 0002 compatibility-only (T148): legacy observation row color for
+        // row-list display; cockpit buckets above use primary lifecycle.
         "open" => ANSI_YELLOW,
         "investigating" | "confirming" | "claiming" => ANSI_GREEN,
         "resolved" | "rejected" => ANSI_DIM,
@@ -1008,6 +1031,32 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn render_frame_uses_adr0002_bucket_headers() {
+        let conn = watch_conn();
+        conn.execute(
+            "INSERT INTO observations (display_id, status, priority, summary, updated_at) VALUES ('L010', 'open', 'normal', 'candidate obs', '2026-05-01')",
+            [],
+        )
+        .unwrap();
+        let db_path = std::path::Path::new(":memory:");
+        let frame = render_frame(&conn, db_path, 1000, false).unwrap();
+        let plain = strip_ansi(&frame);
+        assert!(
+            plain.contains("INLET: new triaging waiting closed"),
+            "missing ADR 0002 inlet buckets:\n{plain}"
+        );
+        assert!(
+            plain.contains("OBSERVATIONS: candidate ready in_progress closed"),
+            "missing ADR 0002 observation buckets:\n{plain}"
+        );
+        assert!(plain.contains("closure_rate:"), "missing closure_rate row:\n{plain}");
+        assert!(
+            !plain.contains("OBSERVATIONS: open investigating"),
+            "legacy observation status labels must not be the primary lane header:\n{plain}"
+        );
     }
 
     #[test]

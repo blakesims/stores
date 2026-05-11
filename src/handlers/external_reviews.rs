@@ -423,9 +423,16 @@ pub fn import_manual_pass(conn: &Connection, args: ImportPassArgs<'_>) -> Result
     )?;
     let now = now_iso8601();
     let transcript = args.transcript_path.display().to_string();
+    // Older live DBs still constrain external_reviews.runner to the executable
+    // runner enum (codex/pi/claude-code). Keep import-pass compatible there;
+    // transition history below preserves the operator-supplied manual label.
+    let stored_runner = match args.runner {
+        "manual-codex" | "manual" => "codex",
+        other => other,
+    };
     tx.execute(
         "INSERT INTO external_reviews (display_id,status,created_at,updated_at,created_by,updated_by,task_id,attempt,adapter,runner,base_sha,head_sha,verdict,critical_count,major_count,minor_count,started_at,completed_at,duration_ms,transcript_path,contract_ref,plan_ref,wrap_log_ref,diff_ref,prior_review_ref) VALUES (?1,'passed',?2,?2,?3,?3,?4,?5,'external_review',?6,?7,?8,'PASS',0,0,0,?2,?2,0,?9,?10,?11,?12,?13,?14)",
-        params![display_id, now, args.actor, args.task_id, attempt, args.runner, args.base_sha, args.head_sha, transcript, format!("tasks:{}:contract", args.task_id), format!("tasks:{}:plan", args.task_id), format!("tasks:{}:wrap_log", args.task_id), format!("git-diff:{}..{}", args.base_sha, args.head_sha), format!("tasks:{}:cycles", args.task_id)],
+        params![display_id, now, args.actor, args.task_id, attempt, stored_runner, args.base_sha, args.head_sha, transcript, format!("tasks:{}:contract", args.task_id), format!("tasks:{}:plan", args.task_id), format!("tasks:{}:wrap_log", args.task_id), format!("git-diff:{}..{}", args.base_sha, args.head_sha), format!("tasks:{}:cycles", args.task_id)],
     )?;
     let row_id = tx.last_insert_rowid();
     crate::db::insert_transition_history(

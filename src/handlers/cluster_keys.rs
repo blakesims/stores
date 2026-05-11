@@ -91,7 +91,8 @@ pub(crate) fn build_clusters(conn: &Connection) -> Result<Vec<Bucket>> {
     let mut stmt = conn.prepare(
         "SELECT display_id, cluster_key, captured_at, summary \
          FROM observations \
-         WHERE status IN ('open','ready') \
+         WHERE lifecycle IN ('candidate','ready') \
+            OR (COALESCE(lifecycle,'') = '' AND status IN ('open','ready')) /* ADR 0002 compatibility-only T148 task 6.1 */ \
          ORDER BY cluster_key NULLS LAST, captured_at DESC",
     )?;
     let rows: Vec<(String, Option<String>, String, String)> = stmt
@@ -202,7 +203,7 @@ pub(crate) fn run_overdue_ready_cmd_to(
         "SELECT o.display_id, o.task_id, o.captured_at, o.summary \
          FROM observations o \
          JOIN tasks t ON o.task_id = t.display_id \
-         WHERE o.status = 'ready' \
+         WHERE (o.lifecycle = 'ready' OR (COALESCE(o.lifecycle,'') = '' AND o.status = 'ready')) /* ADR 0002 compatibility-only T148 task 6.1 */ \
            AND t.status IN ('accepted','closed_out_of_band','schema_migrated') \
          ORDER BY o.captured_at",
     )?;
@@ -277,13 +278,14 @@ mod tests {
         let tid_val: rusqlite::types::Value = task_id
             .map(|s| rusqlite::types::Value::Text(s.to_string()))
             .unwrap_or(rusqlite::types::Value::Null);
+        let lifecycle = if status == "ready" { "ready" } else { "candidate" };
         conn.execute(
             "INSERT INTO observations \
-             (display_id, status, created_at, updated_at, created_by, updated_by, \
+             (display_id, status, lifecycle, created_at, updated_at, created_by, updated_by, \
               summary, source, priority, captured_at, captured_week, cluster_key, task_id) \
-             VALUES (?1, ?2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', \
-                     'ai_autonomous', 'ai_autonomous', ?3, 'dev', 'normal', ?4, 'w20-d1', ?5, ?6)",
-            rusqlite::params![display_id, status, summary, captured_at, ck_val, tid_val],
+             VALUES (?1, ?2, ?3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', \
+                     'ai_autonomous', 'ai_autonomous', ?4, 'dev', 'normal', ?5, 'w20-d1', ?6, ?7)",
+            rusqlite::params![display_id, status, lifecycle, summary, captured_at, ck_val, tid_val],
         )
         .expect("insert observation");
     }
@@ -558,7 +560,7 @@ mod tests {
                     "SELECT o.display_id \
                      FROM observations o \
                      JOIN tasks t ON o.task_id = t.display_id \
-                     WHERE o.status = 'ready' \
+                     WHERE (o.lifecycle = 'ready' OR (COALESCE(o.lifecycle,'') = '' AND o.status = 'ready')) /* ADR 0002 compatibility-only T148 task 6.1 */ \
                        AND t.status IN ('accepted','closed_out_of_band','schema_migrated') \
                      ORDER BY o.captured_at",
                 )

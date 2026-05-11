@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::ArgMatches;
 use rusqlite::{Connection, Transaction};
 use serde_json::Value;
@@ -13,6 +13,88 @@ use crate::validate::{self, Op, SideEffectAuthority};
 
 use super::row::{build_entry_map, now_iso8601};
 use super::submit::fire_on_entry_follow_ons;
+
+fn string_array(entry: &crate::validate::EntryMap, field: &str) -> Vec<String> {
+    entry
+        .get(field)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn validate_architecture_review_linked_observations(
+    conn: &Connection,
+    entry: &crate::validate::EntryMap,
+) -> Result<()> {
+    let linked = string_array(entry, "linked_observation_ids");
+    if linked.is_empty() {
+        return Ok(());
+    }
+
+    for obs_id in &linked {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM observations WHERE display_id = ?1",
+                rusqlite::params![obs_id],
+                |r| r.get(0),
+            )
+            .ok();
+        if exists.is_none() {
+            bail!("linked observation {obs_id} not found");
+        }
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT display_id, COALESCE(lifecycle,''), COALESCE(linked_observation_ids,'[]') \
+         FROM architecture_reviews \
+         WHERE COALESCE(lifecycle,'') != 'closed' \
+           AND status NOT IN ('verdict_issued','withdrawn','superseded') \
+         /* ADR 0002 compatibility-only T148 task 6.1: legacy rows may lack lifecycle. */ \
+         ORDER BY id",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let existing_id: String = row.get(0)?;
+        let raw: String = row.get(2)?;
+        let existing_linked: Vec<String> =
+            serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default();
+        for obs_id in &linked {
+            if existing_linked.iter().any(|id| id == obs_id) {
+                bail!(
+                    "linked observation {obs_id} already has open architecture review {existing_id}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mark_architecture_review_gate_on_observations(
+    tx: &Transaction,
+    review_id: &str,
+    linked: &[String],
+    actor: Actor,
+) -> Result<()> {
+    if linked.is_empty() {
+        return Ok(());
+    }
+    let now = now_iso8601();
+    let actor_s = actor.to_string();
+    for obs_id in linked {
+        tx.execute(
+            "UPDATE observations SET updated_at=?1, updated_by=?2, waiting=1, waiting_kind='architecture_review', pending_architecture_review=1, open_architecture_review_id=?3, clearable_by_ruling=?3 WHERE display_id=?4",
+            rusqlite::params![now, actor_s, review_id, obs_id],
+        )
+        .with_context(|| format!("architecture_reviews add: mark linked observation {obs_id}"))?;
+    }
+    Ok(())
+}
 
 fn inject_tasks_create_overlay(
     schema: &Schema,
@@ -104,7 +186,13 @@ pub fn run(
                     .map(|s| vec![s.trim_end_matches('\n').to_string()]);
             }
         }
-        match matches.try_get_many::<String>(cli_name) {
+        let lookup_cli_name =
+            if schema.name == "architecture_reviews" && cli_name == "linked-observation-ids" {
+                "linked-observations"
+            } else {
+                cli_name
+            };
+        match matches.try_get_many::<String>(lookup_cli_name) {
             Ok(Some(vals)) => {
                 let collected: Vec<String> = vals.cloned().collect();
                 if collected.is_empty() {
@@ -119,6 +207,24 @@ pub fn run(
 
     if schema.name == "observations" {
         super::observations_source::normalize_cli_source_tuple(matches, &mut entry)?;
+    }
+
+    if schema.name == "architecture_reviews" {
+        if let Some(source) = entry
+            .get("source_observation")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            let mut linked = string_array(&entry, "linked_observation_ids");
+            if !linked.iter().any(|id| id == source) {
+                linked.push(source.to_string());
+                entry.insert(
+                    "linked_observation_ids".to_string(),
+                    serde_json::json!(linked),
+                );
+            }
+        }
+        validate_architecture_review_linked_observations(conn, &entry)?;
     }
 
     // T013 P2: --lock-contract finalisation. Reject ai_autonomous up front
@@ -235,9 +341,19 @@ pub fn run(
         );
     }
 
+    let arch_linked_observation_ids = if schema.name == "architecture_reviews" {
+        entry.remove("linked_observation_ids")
+    } else {
+        None
+    };
+
     // Run validator
     validate::validate(schema, &entry, Op::Add, invoker)
         .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
+
+    if let Some(linked) = arch_linked_observation_ids {
+        entry.insert("linked_observation_ids".to_string(), linked);
+    }
 
     // T052 P1: materialise field-level defaults for any top-level field the CLI
     // did not supply. Applied AFTER validation so framework-applied defaults
@@ -476,6 +592,11 @@ pub fn run(
     // T020 P2 (Task 2.1 / Decision Matrix Q1): --lock-contract synthesises the
     // open→investigating→confirmed walk and then fires the Phase 1 auto-ratify
     // hook (confirmed→ready) so the row lands at 'ready' in a single transaction.
+    if schema.name == "architecture_reviews" {
+        let linked = string_array(&entry, "linked_observation_ids");
+        mark_architecture_review_gate_on_observations(&tx, &display_id, &linked, invoker.actor)?;
+    }
+
     if lock_contract && schema.name == "observations" {
         crate::db::insert_transition_history(
             &tx,

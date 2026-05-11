@@ -1,5 +1,6 @@
-//! Sweep-style subscriber: processes `intake.status='draft'` rows through the
-//! production gatekeeper Router on every daemon poll tick.
+//! Sweep-style subscriber: processes ADR 0002 `intake.lifecycle='new'` rows through the
+//! production gatekeeper Router on every daemon poll tick. Legacy `intake.status='draft'`
+//! is ADR 0002 compatibility-only T148 task 6.1.
 //!
 //! Wired into `poll_once_with_guard` after `sweep_drive_watchdog` and before
 //! `run_engine_runner_iteration`. Errors and panics are caught at the call site
@@ -40,9 +41,14 @@ pub fn run_drain_sweep(
         )
         .unwrap_or(1);
 
-    // Snapshot draft rows ONCE at function entry — no re-scan within this call.
+    // Snapshot new inlet rows ONCE at function entry — no re-scan within this call.
     let draft_ids: Vec<String> = conn
-        .prepare("SELECT display_id FROM intake WHERE status='draft' ORDER BY id ASC")?
+        .prepare(
+            "SELECT display_id FROM intake \
+             WHERE lifecycle='new' \
+                OR (lifecycle IS NULL AND status='draft') /* ADR 0002 compatibility-only T148 task 6.1 */ \
+             ORDER BY id ASC",
+        )?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -91,6 +97,8 @@ fn process_one_row(
 
     // (a) Read row
     let (row_id, existing) = read_row(schema, &tx, display_id)?;
+    // ADR 0002 primary lifecycle gates row selection; raw status remains the
+    // framework transition source token until schema transitions are renamed.
     let current_status = existing
         .get("status")
         .and_then(|v| v.as_str())
@@ -152,8 +160,12 @@ fn process_one_row(
     // (d) Build decision payload
     let intake_decision_str = gatekeeper_router::to_intake_decision(&decision);
     let timestamp = crate::handlers::row::now_iso8601();
-    let decision_json =
-        gatekeeper_router::build_decision_json(&decision, "gatekeeper_router_drain", &timestamp, &[]);
+    let decision_json = gatekeeper_router::build_decision_json(
+        &decision,
+        "gatekeeper_router_drain",
+        &timestamp,
+        &[],
+    );
 
     let mut diff = EntryMap::new();
     diff.insert(
@@ -173,7 +185,12 @@ fn process_one_row(
         &mut merged,
     )?;
 
-    crate::handlers::intake_route::inject_pre_validation_fields(&tx, &mut diff, &mut merged, "route")?;
+    crate::handlers::intake_route::inject_pre_validation_fields(
+        &tx,
+        &mut diff,
+        &mut merged,
+        "route",
+    )?;
 
     let route_transition = select_transition(
         &schema.lifecycle.transitions,
@@ -183,10 +200,25 @@ fn process_one_row(
         &merged,
     )?;
 
+    crate::handlers::transition::inject_upstream_primary_tuple(
+        schema,
+        route_transition,
+        "route",
+        &triaging_status,
+        &route_transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
+
     validate::validate(
         schema,
         &merged,
-        Op::Transition("route".to_string(), diff.clone()),
+        Op::Transition(
+            "route".to_string(),
+            crate::handlers::transition::strip_framework_overlay_from_validation_diff(
+                schema, &diff,
+            ),
+        ),
         Actor::AiAutonomous.into(),
     )
     .map_err(|errs| {
@@ -237,8 +269,8 @@ mod tests {
                 .find(|(n, _)| *n == name)
                 .map(|(_, y)| *y)
                 .unwrap_or_else(|| panic!("bundled {} schema missing", name));
-            let schema = Schema::from_yaml(yaml)
-                .unwrap_or_else(|e| panic!("parse {} schema: {}", name, e));
+            let schema =
+                Schema::from_yaml(yaml).unwrap_or_else(|e| panic!("parse {} schema: {}", name, e));
             conn.execute_batch(&ddl_for(&schema))
                 .unwrap_or_else(|e| panic!("ddl for {}: {}", name, e));
         }
@@ -312,7 +344,10 @@ mod tests {
             .expect("gatekeeper_decision_json must be valid");
         assert_eq!(djson["source_agent"], "gatekeeper_router_drain");
         assert!(
-            djson["timestamp"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+            djson["timestamp"]
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
             "timestamp must be non-empty"
         );
         assert!(djson["evidence"].is_array(), "evidence must be array");
@@ -549,7 +584,8 @@ mod tests {
         );
 
         // Drop observations table to cause inject_pre_validation_fields to fail
-        conn.execute_batch("DROP TABLE IF EXISTS observations").unwrap();
+        conn.execute_batch("DROP TABLE IF EXISTS observations")
+            .unwrap();
 
         let a = agents();
         let c = cfg();
@@ -577,7 +613,8 @@ mod tests {
     fn t8_no_hot_loop_within_single_pass() {
         let conn = fresh_db();
         // Drop observations to make normal_observation routing fail
-        conn.execute_batch("DROP TABLE IF EXISTS observations").unwrap();
+        conn.execute_batch("DROP TABLE IF EXISTS observations")
+            .unwrap();
 
         // Insert a row that will error (needs observations table)
         insert_draft(
@@ -657,7 +694,10 @@ mod tests {
         assert_eq!(s1.errored, 0);
 
         let status = row_status(&conn, "I001");
-        assert_eq!(status, "needs_info", "UnableToRoute must exit to needs_info state");
+        assert_eq!(
+            status, "needs_info",
+            "UnableToRoute must exit to needs_info state"
+        );
 
         let djson = decision_json_for(&conn, "I001");
         assert_eq!(djson["decision"], "needs_info");
@@ -668,7 +708,10 @@ mod tests {
             rationale
         );
         assert!(
-            djson["missing_info_question"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+            djson["missing_info_question"]
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
             "missing_info_question must be non-empty"
         );
 
@@ -719,7 +762,10 @@ mod tests {
                 id
             );
             assert!(
-                djson["timestamp"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+                djson["timestamp"]
+                    .as_str()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
                 "timestamp must be non-empty for {}",
                 id
             );

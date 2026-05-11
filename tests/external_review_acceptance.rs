@@ -273,7 +273,7 @@ fn manual_import_pass_creates_auditable_pass_row() {
         .unwrap();
     assert_eq!(row.0, "passed");
     assert_eq!(row.1, "PASS");
-    assert_eq!(row.2, "manual-codex");
+    assert_eq!(row.2, "codex");
     assert_eq!(row.3, transcript.display().to_string());
     assert_eq!(row.4, head);
     assert_eq!((row.5, row.6, row.7), (0, 0, 0));
