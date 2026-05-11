@@ -241,6 +241,20 @@ fn classify_runner_exit(out: &RunnerOutput) -> String {
     serde_json::to_string(&Value::Object(payload)).unwrap_or_else(|_| "{}".to_string())
 }
 
+fn classify_runner_payload_error(out: &RunnerOutput, error: &str) -> String {
+    if let Some((provider, until)) = classify_rate_limit(out) {
+        return format!("rate_limit:{provider}:{until}");
+    }
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "kind".to_string(),
+        Value::String("runner_payload_error".to_string()),
+    );
+    payload.insert("exit_code".to_string(), Value::from(out.exit_code as i64));
+    payload.insert("error".to_string(), Value::String(error.to_string()));
+    serde_json::to_string(&Value::Object(payload)).unwrap_or_else(|_| "{}".to_string())
+}
+
 fn classify_rate_limit(out: &RunnerOutput) -> Option<(String, String)> {
     let haystack = format!(
         "{}\n{}\n{}",
@@ -1244,7 +1258,7 @@ fn fail_runner_invocation(
     Ok(())
 }
 
-fn finish_runner_invocation(
+fn write_runner_invocation_marker(
     display_id: &str,
     phase: i64,
     cycle: i64,
@@ -1252,15 +1266,12 @@ fn finish_runner_invocation(
     runner: &str,
     workspace_path: &str,
     out: &RunnerOutput,
+    status: &str,
+    payload_error: Option<&str>,
 ) -> Result<()> {
     let runs_dir = runner_runs_dir(workspace_path);
     let current_path = runs_dir.join(format!("current-{display_id}-{role}.json"));
     let now = crate::handlers::row::now_iso8601();
-    let status = if out.exit_code == 0 && out.payload_error.is_none() {
-        "completed"
-    } else {
-        "failed"
-    };
     let payload = serde_json::json!({
         "display_id": display_id,
         "phase": phase,
@@ -1277,7 +1288,7 @@ fn finish_runner_invocation(
         "stderr_log_path": out.telemetry.stderr_log_path,
         "events_path": out.telemetry.transcript_path.as_deref().zip(out.session_id.as_deref()).map(|(p, s)| crate::runner::events_path_for_transcript(std::path::Path::new(p), s)),
         "status_path": out.telemetry.transcript_path.as_deref().zip(out.session_id.as_deref()).map(|(p, s)| crate::runner::status_path_for_transcript(std::path::Path::new(p), s)),
-        "payload_error": out.payload_error,
+        "payload_error": payload_error,
     });
     std::fs::write(&current_path, serde_json::to_vec_pretty(&payload)?).with_context(|| {
         format!(
@@ -1286,6 +1297,56 @@ fn finish_runner_invocation(
         )
     })?;
     Ok(())
+}
+
+fn finish_runner_invocation(
+    display_id: &str,
+    phase: i64,
+    cycle: i64,
+    role: &str,
+    runner: &str,
+    workspace_path: &str,
+    out: &RunnerOutput,
+) -> Result<()> {
+    let status = if out.exit_code == 0 && out.payload_error.is_none() {
+        "completed"
+    } else {
+        "failed"
+    };
+    write_runner_invocation_marker(
+        display_id,
+        phase,
+        cycle,
+        role,
+        runner,
+        workspace_path,
+        out,
+        status,
+        out.payload_error.as_deref(),
+    )
+}
+
+fn fail_finished_runner_invocation_payload(
+    display_id: &str,
+    phase: i64,
+    cycle: i64,
+    role: &str,
+    runner: &str,
+    workspace_path: &str,
+    out: &RunnerOutput,
+    payload_error: &str,
+) -> Result<()> {
+    write_runner_invocation_marker(
+        display_id,
+        phase,
+        cycle,
+        role,
+        runner,
+        workspace_path,
+        out,
+        "failed",
+        Some(payload_error),
+    )
 }
 
 fn build_role_runner(args: &DriveArgs) -> Result<Box<dyn RoleRunner>> {
@@ -2001,7 +2062,7 @@ fn drive_loop_with_role_runner(
                 run_out.exit_code
             );
             let _ = std::io::stderr().flush();
-            let blocked_reason = classify_runner_exit(&run_out);
+            let blocked_reason = classify_runner_payload_error(&run_out, payload_err);
             match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
                 Ok(()) => {
                     bail!(
@@ -2082,19 +2143,47 @@ fn drive_loop_with_role_runner(
                 }
             }
         } else {
-            parsed_envelope.map_err(|e| {
-                eprintln!("[{display_id}] envelope parse failed: {e}");
-                let _ = std::io::stderr().flush();
-                if !run_out.stdout.is_empty() {
-                    eprintln!("runner stdout:\n{}", run_out.stdout);
+            match parsed_envelope {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    let payload_err = format!("envelope parse failed: {e}");
+                    eprintln!("[{display_id}] {payload_err}");
                     let _ = std::io::stderr().flush();
+                    if !run_out.stdout.is_empty() {
+                        eprintln!("runner stdout:\n{}", run_out.stdout);
+                        let _ = std::io::stderr().flush();
+                    }
+                    if !run_out.stderr.is_empty() {
+                        eprintln!("runner stderr:\n{}", run_out.stderr);
+                        let _ = std::io::stderr().flush();
+                    }
+                    let _ = fail_finished_runner_invocation_payload(
+                        display_id,
+                        phase_for_log,
+                        cycle_for_log,
+                        agent_role,
+                        &runner_name,
+                        workspace_path,
+                        &run_out,
+                        &payload_err,
+                    );
+                    let blocked_reason = classify_runner_payload_error(&run_out, &payload_err);
+                    match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
+                        Ok(()) => {
+                            bail!(
+                                "runner payload validation failed (exit={}): {payload_err}; transitioned to blocked",
+                                run_out.exit_code
+                            );
+                        }
+                        Err(mark_err) => {
+                            bail!(
+                                "runner payload validation failed (exit={}): {payload_err}; mark_drive_failed FAILED: {mark_err:#}",
+                                run_out.exit_code
+                            );
+                        }
+                    }
                 }
-                if !run_out.stderr.is_empty() {
-                    eprintln!("runner stderr:\n{}", run_out.stderr);
-                    let _ = std::io::stderr().flush();
-                }
-                anyhow::anyhow!("envelope parse error: {e}")
-            })?
+            }
         };
 
         // T072 r6: compute transcript_path BEFORE dispatch_submit so it can be
@@ -4374,6 +4463,100 @@ mod tests {
         assert_eq!(
             reason.strip_prefix("rate_limit:anthropic:").unwrap().len(),
             20
+        );
+    }
+
+    #[test]
+    fn malformed_exit0_final_output_blocks_and_marks_run_failed() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        let workspace = tempfile::tempdir().unwrap();
+        insert_task(
+            &conn,
+            &schema,
+            "T730",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        conn.execute(
+            "UPDATE tasks SET workspace_path=?1 WHERE display_id='T730'",
+            rusqlite::params![workspace.path().to_str().unwrap()],
+        )
+        .unwrap();
+
+        let mut bad = make_run_output_with_session(
+            r#"{"role":"executor"}"#,
+            0,
+            "malformed-exit0-session",
+        );
+        bad.telemetry = crate::runner::AgentRunTelemetry::with_mock_defaults(workspace.path());
+        bad.telemetry.transcript_path = Some(
+            workspace
+                .path()
+                .join(".stores/runs/malformed-exit0-session.jsonl")
+                .display()
+                .to_string(),
+        );
+        let runner = MockRunner::new(vec![bad]);
+
+        let err = drive_loop(&schema, &conn, "T730", &runner, 50)
+            .expect_err("malformed exit-0 payload must block, not advance");
+        assert!(
+            err.to_string().contains("runner payload validation failed"),
+            "unexpected error: {err}"
+        );
+
+        let (_, after) = crate::handlers::row::read_row(&schema, &conn, "T730").unwrap();
+        assert_eq!(
+            after.get("status").and_then(|v| v.as_str()),
+            Some("blocked"),
+            "bad final_output must not advance to code_review"
+        );
+        let reason = after
+            .get("blocked_reason")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        let reason_json: serde_json::Value = serde_json::from_str(reason).unwrap();
+        assert_eq!(
+            reason_json.get("kind").and_then(|v| v.as_str()),
+            Some("runner_payload_error")
+        );
+        assert!(
+            reason_json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .contains("envelope parse failed"),
+            "blocked_reason must include parse evidence: {reason}"
+        );
+        assert_eq!(after.get("cycles").and_then(|v| v.as_array()).unwrap().len(), 0);
+
+        let exit_code: i64 = conn
+            .query_row(
+                "SELECT exit_code FROM agent_runs WHERE display_id='T730' AND role='executor'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exit_code, 0, "agent_runs preserves real child exit code");
+
+        let marker_path = workspace
+            .path()
+            .join(".stores/runs/current-T730-executor.json");
+        let marker: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+        assert_eq!(marker.get("status").and_then(|v| v.as_str()), Some("failed"));
+        assert!(
+            marker
+                .get("payload_error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .contains("envelope parse failed"),
+            "current marker must expose payload_error: {marker}"
         );
     }
 
