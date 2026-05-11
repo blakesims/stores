@@ -206,19 +206,21 @@ fn issue_verdict_in_tx(
         mark_superseded_if_present(tx, schema, supersedes, invoker.actor, Some(display_id))?;
     }
 
-    let outcome = merged
-        .get("outcome")
-        .and_then(|v| v.as_str())
-        .or_else(|| merged.get("verdict").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    let ruling_outcome = super::observation_arch_gate::RulingOutcome::parse(outcome)?;
-    super::observation_arch_gate::apply_verdict_effects(
-        tx,
-        display_id,
-        &merged,
-        invoker.actor,
-        ruling_outcome,
-    )?;
+    if transition.to == "verdict_issued" {
+        let outcome = merged
+            .get("outcome")
+            .and_then(|v| v.as_str())
+            .or_else(|| merged.get("verdict").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let ruling_outcome = super::observation_arch_gate::RulingOutcome::parse(outcome)?;
+        super::observation_arch_gate::apply_verdict_effects(
+            tx,
+            display_id,
+            &merged,
+            invoker.actor,
+            ruling_outcome,
+        )?;
+    }
 
     println!(
         "Transitioned {display_id}: {} → {}",
@@ -333,15 +335,6 @@ fn supersede_in_tx(
     require_actor(invoker, Actor::AiWithHuman, "supersede")?;
     let display_id = display_id(matches);
     mark_superseded_if_present(tx, schema, display_id, invoker.actor, None)?;
-    if let Ok((_, row)) = read_row(schema, tx, display_id) {
-        super::observation_arch_gate::apply_verdict_effects(
-            tx,
-            display_id,
-            &row,
-            invoker.actor,
-            super::observation_arch_gate::RulingOutcome::Superseded,
-        )?;
-    }
     println!("Superseded {display_id}");
     Ok(())
 }
@@ -432,6 +425,14 @@ fn mark_superseded_if_present(
         tx.execute(
             "UPDATE architecture_reviews SET superseded_by_id=?1 WHERE display_id=?2",
             rusqlite::params![successor, display_id],
+        )?;
+        let (_, redirected) = read_row(schema, tx, display_id)?;
+        super::observation_arch_gate::apply_verdict_effects(
+            tx,
+            display_id,
+            &redirected,
+            actor,
+            super::observation_arch_gate::RulingOutcome::Superseded,
         )?;
     }
     Ok(())
@@ -564,6 +565,10 @@ mod tests {
         Command::new("ratify-amend").arg(Arg::new("display_id").required(true))
     }
 
+    fn supersede_cmd() -> Command {
+        Command::new("supersede").arg(Arg::new("display_id").required(true))
+    }
+
     #[test]
     fn interpret_issue_goes_to_verdict_issued() {
         let (schema, conn) = setup();
@@ -626,9 +631,18 @@ mod tests {
     }
 
     #[test]
-    fn amend_issue_awaits_human_ratification() {
+    fn amend_issue_awaits_human_ratification_without_applying_verdict_effects() {
         let (schema, conn) = setup();
+        let obs_schema =
+            Schema::from_yaml(include_str!("../../stores/observations/schema.yaml")).unwrap();
+        conn.execute_batch(&crate::codegen::ddl::ddl_for(&obs_schema))
+            .unwrap();
+        conn.execute("INSERT INTO observations (display_id,status,lifecycle,created_at,updated_at,created_by,updated_by,summary,source,priority,captured_at,captured_week,pending_architecture_review,open_architecture_review_id) VALUES ('L001','confirmed','in_progress','now','now','human','human','s','dev','normal','2026-05-07','w19-d4',1,'A001')", []).unwrap();
         insert_row(&conn, "A001", "in_review", "amend");
+        conn.execute(
+            "UPDATE architecture_reviews SET source_observation='L001', linked_observation_ids='[\"L001\"]' WHERE display_id='A001'",
+            [],
+        ).unwrap();
         let m = issue_cmd().get_matches_from([
             "issue-verdict",
             "A001",
@@ -653,6 +667,12 @@ mod tests {
                 .unwrap_or(""),
             ""
         );
+        let pending: i64 = conn.query_row(
+            "SELECT pending_architecture_review FROM observations WHERE display_id='L001'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(pending, 1, "amend effects must wait for ratify-amend");
     }
 
     #[test]
@@ -753,6 +773,19 @@ mod tests {
                 "L999".into(),
                 "merged_with_cluster".into()
             )
+        );
+    }
+
+    #[test]
+    fn supersede_command_without_successor_does_not_require_superseded_by_id() {
+        let (schema, conn) = setup();
+        insert_row(&conn, "A001", "verdict_issued", "interpret");
+        let m = supersede_cmd().get_matches_from(["supersede", "A001"]);
+        run_supersede(&schema, &conn, &m, Actor::AiWithHuman.into()).unwrap();
+        let (_, old) = read_row(&schema, &conn, "A001").unwrap();
+        assert_eq!(
+            old.get("status").and_then(|v| v.as_str()),
+            Some("superseded")
         );
     }
 
