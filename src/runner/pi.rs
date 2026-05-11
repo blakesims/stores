@@ -247,10 +247,7 @@ impl Runner for PiRunner {
             stderr_log_path: None,
         };
 
-        if matches!(
-            output.killed_for,
-            Some(LivenessClass::StalledNoOutput { .. } | LivenessClass::WallClockTimeout { .. })
-        ) {
+        if matches!(output.killed_for, Some(LivenessClass::StalledNoOutput { .. })) {
             return Ok(RunnerOutput {
                 stdout,
                 stderr,

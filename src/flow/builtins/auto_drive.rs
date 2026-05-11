@@ -941,13 +941,9 @@ pub fn sweep_drive_watchdog(
                 } => {
                     format!("no_output_idle_{idle_secs}s_threshold_{threshold_secs}s")
                 }
-                LivenessClass::WallClockTimeout {
-                    runtime_secs,
-                    max_secs,
-                } => {
-                    format!("wall_clock_{runtime_secs}s_max_{max_secs}s")
-                }
-                LivenessClass::Active { .. } | LivenessClass::Unknown => continue,
+                LivenessClass::WallClockElapsed { .. }
+                | LivenessClass::Active { .. }
+                | LivenessClass::Unknown => continue,
             };
             match fire_mark_drive_failed(
                 conn,

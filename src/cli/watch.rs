@@ -131,6 +131,28 @@ fn render_frame(
         ));
     }
 
+    if let Ok(engine_detail) = crate::tui::data::load_engine_detail(conn) {
+        let warnings: Vec<_> = engine_detail
+            .unfinished_lock_rows
+            .iter()
+            .filter(|lock| lock.liveness_label.contains("wall_clock_elapsed"))
+            .take(5)
+            .collect();
+        if !warnings.is_empty() {
+            out.push_str(&format!(
+                "{ANSI_YELLOW}{ANSI_BOLD}runner-warning:{ANSI_RESET}{ANSI_YELLOW} long-running active agent(s); advisory only, not killed{ANSI_RESET}\n"
+            ));
+            for lock in warnings {
+                let agent = lock.agent_name.as_deref().unwrap_or("-");
+                let heartbeat = lock.heartbeat_at.as_deref().unwrap_or("-");
+                out.push_str(&format!(
+                    "{ANSI_YELLOW}  {} runner={} last_progress={} {}{ANSI_RESET}\n",
+                    lock.display_id, agent, heartbeat, lock.liveness_label
+                ));
+            }
+        }
+    }
+
     let mut task_indices: Vec<usize> = sections
         .iter()
         .flat_map(|(sec, idxs)| match sec {

@@ -43,7 +43,7 @@ impl LivenessThresholds {
 pub enum LivenessClass {
     Active { idle_secs: i64 },
     StalledNoOutput { idle_secs: i64, threshold_secs: i64 },
-    WallClockTimeout { runtime_secs: i64, max_secs: i64 },
+    WallClockElapsed { runtime_secs: i64, warn_secs: i64 },
     Unknown,
 }
 
@@ -57,11 +57,11 @@ impl LivenessClass {
             } => {
                 format!("state=stalled_no_output idle={idle_secs}s threshold={threshold_secs}s")
             }
-            Self::WallClockTimeout {
+            Self::WallClockElapsed {
                 runtime_secs,
-                max_secs,
+                warn_secs,
             } => {
-                format!("state=wall_clock_timeout runtime={runtime_secs}s max={max_secs}s")
+                format!("state=active warning=wall_clock_elapsed runtime={runtime_secs}s warn={warn_secs}s")
             }
             Self::Unknown => "state=unknown".to_string(),
         }
@@ -78,18 +78,17 @@ pub fn classify(
         return LivenessClass::Unknown;
     };
     let runtime = now_epoch.saturating_sub(claimed_at);
-    if runtime >= t.wall_clock_max_secs {
-        return LivenessClass::WallClockTimeout {
-            runtime_secs: runtime,
-            max_secs: t.wall_clock_max_secs,
-        };
-    }
     let progress_at = heartbeat_at_epoch.unwrap_or(claimed_at);
     let idle = now_epoch.saturating_sub(progress_at);
     if idle >= t.no_output_secs {
         LivenessClass::StalledNoOutput {
             idle_secs: idle,
             threshold_secs: t.no_output_secs,
+        }
+    } else if runtime >= t.wall_clock_max_secs {
+        LivenessClass::WallClockElapsed {
+            runtime_secs: runtime,
+            warn_secs: t.wall_clock_max_secs,
         }
     } else {
         LivenessClass::Active { idle_secs: idle }
@@ -159,12 +158,7 @@ fn killed_payload_error(c: &LivenessClass) -> Option<String> {
         } => Some(format!(
             "runner timed out: no output for {idle_secs}s (threshold {threshold_secs}s)"
         )),
-        LivenessClass::WallClockTimeout {
-            runtime_secs,
-            max_secs,
-        } => Some(format!(
-            "runner timed out: total runtime {runtime_secs}s exceeded wall_clock_max {max_secs}s"
-        )),
+        LivenessClass::WallClockElapsed { .. } => None,
         _ => None,
     }
 }
@@ -215,16 +209,6 @@ pub fn run_streaming_with_liveness(
 
     loop {
         let idle = last_output_at.elapsed().as_secs() as i64;
-        let runtime = started.elapsed().as_secs() as i64;
-        if runtime > t.wall_clock_max_secs {
-            let c = LivenessClass::WallClockTimeout {
-                runtime_secs: runtime,
-                max_secs: t.wall_clock_max_secs,
-            };
-            let _ = child.kill();
-            killed_for = Some(c);
-            break;
-        }
         if idle > t.no_output_secs {
             let c = LivenessClass::StalledNoOutput {
                 idle_secs: idle,
@@ -327,12 +311,23 @@ mod tests {
     }
 
     #[test]
-    fn wall_clock_timeout_precedes_stalled_no_output() {
+    fn stalled_no_output_precedes_wall_clock_elapsed() {
         assert_eq!(
             classify(Some(0), Some(0), 100, &thresholds()),
-            LivenessClass::WallClockTimeout {
+            LivenessClass::StalledNoOutput {
+                idle_secs: 100,
+                threshold_secs: 10
+            }
+        );
+    }
+
+    #[test]
+    fn wall_clock_elapsed_is_advisory_when_active() {
+        assert_eq!(
+            classify(Some(0), Some(99), 100, &thresholds()),
+            LivenessClass::WallClockElapsed {
                 runtime_secs: 100,
-                max_secs: 100
+                warn_secs: 100
             }
         );
     }
@@ -379,12 +374,12 @@ mod tests {
             "state=stalled_no_output idle=4s threshold=2s"
         );
         assert_eq!(
-            LivenessClass::WallClockTimeout {
+            LivenessClass::WallClockElapsed {
                 runtime_secs: 5,
-                max_secs: 4
+                warn_secs: 4
             }
             .label(),
-            "state=wall_clock_timeout runtime=5s max=4s"
+            "state=active warning=wall_clock_elapsed runtime=5s warn=4s"
         );
         assert_eq!(LivenessClass::Unknown.label(), "state=unknown");
     }
@@ -448,11 +443,10 @@ mod tests {
     }
 
     #[test]
-    fn wall_clock_timeout_drains_noisy_child_before_join() {
-        let started = Instant::now();
+    fn wall_clock_elapsed_does_not_kill_noisy_child() {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
-            .arg("while :; do i=0; while [ $i -lt 200 ]; do echo noisy; i=$((i+1)); done; sleep 0.01; done");
+            .arg("echo start; sleep 2; echo still-active; sleep 1; echo done");
         let out = run_streaming_with_liveness(
             &mut cmd,
             &LivenessThresholds {
@@ -463,15 +457,8 @@ mod tests {
             |_| {},
         )
         .unwrap();
-        assert!(
-            started.elapsed() <= Duration::from_secs(4),
-            "elapsed={:?}",
-            started.elapsed()
-        );
-        assert_eq!(out.exit_code, -1);
-        assert!(matches!(
-            out.killed_for,
-            Some(LivenessClass::WallClockTimeout { .. })
-        ));
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.contains("still-active"));
+        assert!(out.killed_for.is_none());
     }
 }
