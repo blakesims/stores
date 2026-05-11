@@ -114,15 +114,7 @@ agents:
       backoff: linear
 
   - name: user-escalation
-    subscribes_to:
-      - store: tasks
-        transition:
-          from: accepted
-          to: deploy_blocked
-      - store: tasks
-        transition:
-          from: cargo_installed
-          to: deploy_blocked
+    subscribes_to: []
     command: "builtin:user-escalation"
     claim_window_secs: 300
     retry_policy:
