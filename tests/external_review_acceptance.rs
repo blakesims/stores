@@ -11,7 +11,8 @@ use stores::flow::builtins::{external_review, DispatchCtx};
 use stores::flow::config::{CodexCfg, ReviewCfg};
 use stores::flow::{AgentEntry, AgentsYaml, BackoffKind, RetryPolicy, Subscription};
 use stores::handlers::{
-    external_reviews::run_external_review_attempt, next_action, row, transition,
+    external_reviews::{import_manual_pass, run_external_review_attempt, ImportPassArgs},
+    next_action, row, transition,
 };
 use stores::schema::actor::Actor;
 use stores::schema::Schema;
@@ -175,6 +176,26 @@ fn insert_review(
     ).unwrap();
 }
 
+fn import_pass(
+    conn: &Connection,
+    task_id: &str,
+    transcript_path: &Path,
+    base_sha: &str,
+    head_sha: &str,
+) -> anyhow::Result<String> {
+    import_manual_pass(
+        conn,
+        ImportPassArgs {
+            task_id,
+            transcript_path,
+            base_sha,
+            head_sha,
+            runner: "manual-codex",
+            actor: "ai_autonomous",
+        },
+    )
+}
+
 fn accept_cmd() -> Command {
     Command::new("accept").arg(Arg::new("display_id").required(true).index(1))
 }
@@ -228,6 +249,85 @@ fn external_review_accept_precheck_t3_current_head_pass_succeeds() {
         )
         .unwrap();
     assert_eq!(status, "accepted");
+}
+
+#[test]
+fn manual_import_pass_creates_auditable_pass_row() {
+    let conn = Connection::open_in_memory().unwrap();
+    let _schema = install_db(&conn);
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "T3", "in_review");
+    let transcript = ws.path().join("manual-codex.txt");
+    std::fs::write(&transcript, "PASS\nreview transcript\n").unwrap();
+    let base = rev_parse(ws.path(), "main");
+    let head = head(ws.path());
+
+    let er_id = import_pass(&conn, "T900", &transcript, &base, &head).unwrap();
+    assert_eq!(er_id, "ER001");
+    let row: (String, String, String, String, String, i64, i64, i64) = conn
+        .query_row(
+            "SELECT status, verdict, runner, transcript_path, head_sha, critical_count, major_count, minor_count FROM external_reviews WHERE display_id='ER001'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, "passed");
+    assert_eq!(row.1, "PASS");
+    assert_eq!(row.2, "manual-codex");
+    assert_eq!(row.3, transcript.display().to_string());
+    assert_eq!(row.4, head);
+    assert_eq!((row.5, row.6, row.7), (0, 0, 0));
+    let verb: String = conn
+        .query_row(
+            "SELECT verb FROM transition_history WHERE store='external_reviews' AND display_id='ER001'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(verb, "import-pass");
+}
+
+#[test]
+fn accept_precheck_recognizes_manual_import_at_current_head() {
+    let conn = Connection::open_in_memory().unwrap();
+    let schema = install_db(&conn);
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "T3", "in_review");
+    let transcript = ws.path().join("manual.txt");
+    std::fs::write(&transcript, "PASS\n").unwrap();
+    let base = rev_parse(ws.path(), "main");
+    let head = head(ws.path());
+    import_pass(&conn, "T900", &transcript, &base, &head).unwrap();
+
+    accept(&schema, &conn).unwrap();
+    let status: String = conn
+        .query_row("SELECT status FROM tasks WHERE display_id='T900'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "accepted");
+}
+
+#[test]
+fn manual_import_rejects_wrong_head_or_base() {
+    let conn = Connection::open_in_memory().unwrap();
+    let _schema = install_db(&conn);
+    let ws = git_workspace();
+    insert_task(&conn, ws.path(), "T3", "in_review");
+    let transcript = ws.path().join("manual.txt");
+    std::fs::write(&transcript, "PASS\n").unwrap();
+    let head = head(ws.path());
+    let base = rev_parse(ws.path(), "main");
+    let wrong = "0000000000000000000000000000000000000000";
+
+    let err = import_pass(&conn, "T900", &transcript, &base, wrong).unwrap_err().to_string();
+    assert!(err.contains("head mismatch"), "{err}");
+    let err = import_pass(&conn, "T900", &transcript, wrong, &head).unwrap_err().to_string();
+    assert!(err.contains("base mismatch"), "{err}");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM external_reviews", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[test]

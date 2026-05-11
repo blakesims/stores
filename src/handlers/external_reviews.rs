@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use crate::flow::builtins::accept_merge;
+use crate::handlers::row::now_iso8601;
 
 use crate::flow::config::{CodexCfg, ReviewCfg};
 use crate::runner::{Runner, RunnerOutput};
@@ -353,6 +354,101 @@ pub(crate) fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportPassArgs<'a> {
+    pub task_id: &'a str,
+    pub transcript_path: &'a Path,
+    pub base_sha: &'a str,
+    pub head_sha: &'a str,
+    pub runner: &'a str,
+    pub actor: &'a str,
+}
+
+pub fn import_manual_pass(conn: &Connection, args: ImportPassArgs<'_>) -> Result<String> {
+    if args.runner != "manual-codex" && args.runner != "manual" {
+        anyhow::bail!("import-pass runner must be manual-codex or manual");
+    }
+    if !args.transcript_path.exists() {
+        anyhow::bail!(
+            "import-pass transcript does not exist: {}",
+            args.transcript_path.display()
+        );
+    }
+
+    let task = load_task_row(conn, args.task_id)?;
+    let workspace = task
+        .workspace_path
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "import-pass requires task {task_id} workspace_path",
+                task_id = args.task_id
+            )
+        })?;
+    let current_head =
+        resolve_sha(&workspace, "HEAD", "head").map_err(|e| anyhow::anyhow!(e.message))?;
+    if args.head_sha != current_head {
+        anyhow::bail!(
+            "import-pass head mismatch for {}: supplied {}, current head is {}",
+            args.task_id,
+            args.head_sha,
+            current_head
+        );
+    }
+    let current_base =
+        resolve_sha(&workspace, "main", "base").map_err(|e| anyhow::anyhow!(e.message))?;
+    if args.base_sha != current_base {
+        anyhow::bail!(
+            "import-pass base mismatch for {}: supplied {}, current main is {}",
+            args.task_id,
+            args.base_sha,
+            current_base
+        );
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let next_id_num: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(id), 0) + 1 FROM external_reviews",
+        [],
+        |r| r.get(0),
+    )?;
+    let display_id = format!("ER{next_id_num:03}");
+    let attempt: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(attempt), 0) + 1 FROM external_reviews WHERE task_id=?1",
+        params![args.task_id],
+        |r| r.get(0),
+    )?;
+    let now = now_iso8601();
+    let transcript = args.transcript_path.display().to_string();
+    tx.execute(
+        "INSERT INTO external_reviews (display_id,status,created_at,updated_at,created_by,updated_by,task_id,attempt,adapter,runner,base_sha,head_sha,verdict,critical_count,major_count,minor_count,started_at,completed_at,duration_ms,transcript_path,contract_ref,plan_ref,wrap_log_ref,diff_ref,prior_review_ref) VALUES (?1,'passed',?2,?2,?3,?3,?4,?5,'external_review',?6,?7,?8,'PASS',0,0,0,?2,?2,0,?9,?10,?11,?12,?13,?14)",
+        params![display_id, now, args.actor, args.task_id, attempt, args.runner, args.base_sha, args.head_sha, transcript, format!("tasks:{}:contract", args.task_id), format!("tasks:{}:plan", args.task_id), format!("tasks:{}:wrap_log", args.task_id), format!("git-diff:{}..{}", args.base_sha, args.head_sha), format!("tasks:{}:cycles", args.task_id)],
+    )?;
+    let row_id = tx.last_insert_rowid();
+    crate::db::insert_transition_history(
+        &tx,
+        "external_reviews",
+        row_id,
+        &display_id,
+        "",
+        "passed",
+        "import-pass",
+        args.actor,
+        None,
+        None,
+        Some(&format!(
+            "manual PASS import runner={} transcript_path={} base_sha={} head_sha={}",
+            args.runner,
+            args.transcript_path.display(),
+            args.base_sha,
+            args.head_sha
+        )),
+    )?;
+    tx.commit()?;
+    Ok(display_id)
 }
 
 pub fn render_codex_prompt(bundle: &ReviewInputBundle) -> String {
