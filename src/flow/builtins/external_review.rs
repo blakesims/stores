@@ -975,23 +975,29 @@ mod blocked_reconcile_tests {
     }
 
     #[test]
-    fn blocked_drive_failed_terminal_revise_reconcile_allows_structured_reasons() {
+    fn blocked_reason_drive_failed_token_namespace_is_structured_legacy() {
         let (dir, head) = git_repo();
         for reason in [
             "drive_failed",
+            "drive_failed:stale_binary_inode",
             "drive_failed:silent_zombie_pid_dead",
             r#"{"kind":"drive_failed","detail":"watchdog"}"#,
         ] {
             let conn = conn_with_review("T001", &head);
             let row = task_row(dir.path(), reason);
-            ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap();
+            ensure_blocked_er_reconcile_allowed(&conn, "T001", &row)
+                .unwrap_or_else(|e| panic!("expected {reason:?} to be accepted: {e}"));
         }
     }
 
     #[test]
-    fn blocked_reconcile_rejects_unstructured_drive_or_watchdog_text() {
+    fn blocked_reconcile_rejects_arbitrary_raw_strings() {
         let (dir, head) = git_repo();
         for reason in [
+            "drive failed",
+            "watchdog said no",
+            "merge_conflict",
+            "external_dependency",
             "watchdog noticed a human blocker",
             "drive failed after user decision needed",
             "drive_failedness is not a structured reason",
@@ -999,7 +1005,10 @@ mod blocked_reconcile_tests {
             let conn = conn_with_review("T001", &head);
             let row = task_row(dir.path(), reason);
             let err = ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap_err();
-            assert!(err.to_string().contains("not drive/watchdog"));
+            assert!(
+                err.to_string().contains("not drive/watchdog"),
+                "expected {reason:?} to be rejected as non-drive/watchdog, got {err}"
+            );
         }
     }
 
