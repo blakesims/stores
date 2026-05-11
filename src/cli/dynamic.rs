@@ -1238,7 +1238,16 @@ fn build_cleanup_worktrees_cmd() -> Command {
                 .long("targets-only")
                 .action(ArgAction::SetTrue)
                 .requires("execute")
+                .conflicts_with("remove-clean")
                 .help("With --execute, delete only terminal worktree target/ directories"),
+        )
+        .arg(
+            Arg::new("remove-clean")
+                .long("remove-clean")
+                .action(ArgAction::SetTrue)
+                .requires("execute")
+                .conflicts_with("targets-only")
+                .help("With --execute, remove clean, merged terminal worktrees without --force"),
         )
 }
 

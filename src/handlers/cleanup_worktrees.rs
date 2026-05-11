@@ -4,6 +4,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const TERMINAL_TARGET_STATUSES: &[&str] = &[
     "integrated",
@@ -18,6 +19,7 @@ const TERMINAL_TARGET_STATUSES: &[&str] = &[
 pub enum CleanupMode {
     DryRun,
     ExecuteTargetsOnly,
+    ExecuteRemoveClean,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +37,7 @@ pub struct CleanupTaskRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CleanupClassification {
     TargetCandidate,
+    WorktreeRemovalCandidate,
     MainRepo,
     ActiveStatus,
     MissingWorkspace,
@@ -42,12 +45,18 @@ pub enum CleanupClassification {
     LiveDrivePid(i64),
     LiveCurrentRunMarker(PathBuf),
     LiveProcessUnderWorkspace(u32),
+    DirtyWorktree,
+    UnmergedBranch,
+    GitCheckFailed(String),
 }
 
 impl CleanupClassification {
     fn label(&self) -> String {
         match self {
             CleanupClassification::TargetCandidate => "target_candidate".to_string(),
+            CleanupClassification::WorktreeRemovalCandidate => {
+                "worktree_removal_candidate".to_string()
+            }
             CleanupClassification::MainRepo => "skip_main_repo".to_string(),
             CleanupClassification::ActiveStatus => "skip_active_status".to_string(),
             CleanupClassification::MissingWorkspace => "skip_missing_workspace".to_string(),
@@ -59,6 +68,9 @@ impl CleanupClassification {
             CleanupClassification::LiveProcessUnderWorkspace(pid) => {
                 format!("skip_live_process_under_workspace:{pid}")
             }
+            CleanupClassification::DirtyWorktree => "skip_dirty_worktree".to_string(),
+            CleanupClassification::UnmergedBranch => "skip_unmerged_branch".to_string(),
+            CleanupClassification::GitCheckFailed(msg) => format!("skip_git_check_failed:{msg}"),
         }
     }
 }
@@ -77,7 +89,10 @@ pub struct CleanupReport {
     pub rows_seen: usize,
     pub candidates: Vec<CleanupCandidate>,
     pub skipped: Vec<CleanupCandidate>,
+    pub removal_candidates: Vec<CleanupCandidate>,
+    pub removal_skipped: Vec<CleanupCandidate>,
     pub deleted_targets: Vec<CleanupCandidate>,
+    pub removed_worktrees: Vec<CleanupCandidate>,
     pub db_bytes: u64,
     pub wal_bytes: u64,
 }
@@ -137,36 +152,109 @@ pub fn run_cleanup_worktrees(conn: &Connection, mode: CleanupMode) -> Result<Cle
         }
     }
 
-    if mode == CleanupMode::ExecuteTargetsOnly {
-        for candidate in report.candidates.clone() {
-            // Re-fetch the row and re-check filesystem/process state immediately
-            // before mutation. A long-running cleanup must not delete a target for
-            // a task that changed status, picked up a live drive_pid, or restarted
-            // a current run after the initial audit pass.
-            let Some(fresh_row) = load_task_row(conn, &candidate.row.display_id)? else {
-                continue;
-            };
-            if classify_row_for_target_cleanup(&fresh_row, &main_repo)
-                != CleanupClassification::TargetCandidate
-            {
-                continue;
-            }
-            let fresh_target_path = fresh_row.workspace_path.join("target");
-            if fresh_target_path.is_dir() {
-                fs::remove_dir_all(&fresh_target_path).with_context(|| {
-                    format!("removing target dir {}", fresh_target_path.display())
-                })?;
-                report.deleted_targets.push(CleanupCandidate {
-                    row: fresh_row,
-                    target_path: fresh_target_path,
-                    ..candidate
-                });
-            }
+    for row in load_task_rows(conn)? {
+        let classification = classify_row_for_worktree_removal(&row, &main_repo);
+        let target_path = row.workspace_path.join("target");
+        let target_bytes = if target_path.is_dir() {
+            dir_size_bytes(&target_path).unwrap_or(0)
+        } else {
+            0
+        };
+        let candidate = CleanupCandidate {
+            row,
+            classification: classification.clone(),
+            target_path,
+            target_bytes,
+        };
+        if classification == CleanupClassification::WorktreeRemovalCandidate {
+            report.removal_candidates.push(candidate);
+        } else {
+            report.removal_skipped.push(candidate);
         }
+    }
+
+    match mode {
+        CleanupMode::DryRun => {}
+        CleanupMode::ExecuteTargetsOnly => execute_targets_only(conn, &main_repo, &mut report)?,
+        CleanupMode::ExecuteRemoveClean => execute_remove_clean(conn, &main_repo, &mut report)?,
     }
 
     print_report(&report, mode);
     Ok(report)
+}
+
+fn execute_targets_only(
+    conn: &Connection,
+    main_repo: &Path,
+    report: &mut CleanupReport,
+) -> Result<()> {
+    for candidate in report.candidates.clone() {
+        // Re-fetch the row and re-check filesystem/process state immediately
+        // before mutation. A long-running cleanup must not delete a target for
+        // a task that changed status, picked up a live drive_pid, or restarted
+        // a current run after the initial audit pass.
+        let Some(fresh_row) = load_task_row(conn, &candidate.row.display_id)? else {
+            continue;
+        };
+        if classify_row_for_target_cleanup(&fresh_row, main_repo)
+            != CleanupClassification::TargetCandidate
+        {
+            continue;
+        }
+        let fresh_target_path = fresh_row.workspace_path.join("target");
+        if fresh_target_path.is_dir() {
+            fs::remove_dir_all(&fresh_target_path)
+                .with_context(|| format!("removing target dir {}", fresh_target_path.display()))?;
+            report.deleted_targets.push(CleanupCandidate {
+                row: fresh_row,
+                target_path: fresh_target_path,
+                ..candidate
+            });
+        }
+    }
+    Ok(())
+}
+
+fn execute_remove_clean(
+    conn: &Connection,
+    main_repo: &Path,
+    report: &mut CleanupReport,
+) -> Result<()> {
+    for candidate in report.removal_candidates.clone() {
+        // Re-fetch and re-classify immediately before removing a worktree.
+        let Some(fresh_row) = load_task_row(conn, &candidate.row.display_id)? else {
+            continue;
+        };
+        if classify_row_for_worktree_removal(&fresh_row, main_repo)
+            != CleanupClassification::WorktreeRemovalCandidate
+        {
+            continue;
+        }
+        let out = Command::new("git")
+            .args([
+                "-C",
+                main_repo.to_str().unwrap_or("."),
+                "worktree",
+                "remove",
+                fresh_row.workspace_path.to_str().unwrap_or(""),
+            ])
+            .output()
+            .with_context(|| {
+                format!("spawning git worktree remove for {}", fresh_row.display_id)
+            })?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git worktree remove {} failed: {}",
+                fresh_row.workspace_path.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        report.removed_worktrees.push(CleanupCandidate {
+            row: fresh_row,
+            ..candidate
+        });
+    }
+    Ok(())
 }
 
 fn load_task_rows(conn: &Connection) -> Result<Vec<CleanupTaskRow>> {
@@ -233,33 +321,125 @@ pub fn classify_row_for_target_cleanup(
     row: &CleanupTaskRow,
     main_repo: &Path,
 ) -> CleanupClassification {
-    let workspace = canonicalize_lossy(&row.workspace_path);
-    let main_repo = canonicalize_lossy(main_repo);
-    if workspace == main_repo {
-        return CleanupClassification::MainRepo;
-    }
-    if !TERMINAL_TARGET_STATUSES.contains(&row.status.as_str()) {
-        return CleanupClassification::ActiveStatus;
-    }
-    if !row.workspace_path.is_dir() {
-        return CleanupClassification::MissingWorkspace;
+    if let Some(skip) = common_terminal_live_skip(row, main_repo) {
+        return skip;
     }
     let target = row.workspace_path.join("target");
     if !target.is_dir() {
         return CleanupClassification::MissingTarget;
     }
+    CleanupClassification::TargetCandidate
+}
+
+pub fn classify_row_for_worktree_removal(
+    row: &CleanupTaskRow,
+    main_repo: &Path,
+) -> CleanupClassification {
+    if let Some(skip) = common_terminal_live_skip(row, main_repo) {
+        return skip;
+    }
+    match git_status_clean(&row.workspace_path) {
+        Ok(true) => {}
+        Ok(false) => return CleanupClassification::DirtyWorktree,
+        Err(msg) => return CleanupClassification::GitCheckFailed(msg),
+    }
+    match branch_merged_to_main(&row.workspace_path, main_repo) {
+        Ok(true) => CleanupClassification::WorktreeRemovalCandidate,
+        Ok(false) => CleanupClassification::UnmergedBranch,
+        Err(msg) => CleanupClassification::GitCheckFailed(msg),
+    }
+}
+
+fn common_terminal_live_skip(
+    row: &CleanupTaskRow,
+    main_repo: &Path,
+) -> Option<CleanupClassification> {
+    let workspace = canonicalize_lossy(&row.workspace_path);
+    let main_repo = canonicalize_lossy(main_repo);
+    if workspace == main_repo {
+        return Some(CleanupClassification::MainRepo);
+    }
+    if !TERMINAL_TARGET_STATUSES.contains(&row.status.as_str()) {
+        return Some(CleanupClassification::ActiveStatus);
+    }
+    if !row.workspace_path.is_dir() {
+        return Some(CleanupClassification::MissingWorkspace);
+    }
     if let Some(pid) = row.drive_pid {
         if pid > 0 && pid_is_live(pid) {
-            return CleanupClassification::LiveDrivePid(pid);
+            return Some(CleanupClassification::LiveDrivePid(pid));
         }
     }
     if let Some(marker) = live_current_marker(&row.workspace_path, &row.display_id) {
-        return CleanupClassification::LiveCurrentRunMarker(marker);
+        return Some(CleanupClassification::LiveCurrentRunMarker(marker));
     }
     if let Some(pid) = process_under_path(&row.workspace_path) {
-        return CleanupClassification::LiveProcessUnderWorkspace(pid);
+        return Some(CleanupClassification::LiveProcessUnderWorkspace(pid));
     }
-    CleanupClassification::TargetCandidate
+    None
+}
+
+fn git_status_clean(workspace: &Path) -> std::result::Result<bool, String> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            workspace.to_str().unwrap_or("."),
+            "status",
+            "--porcelain",
+        ])
+        .output()
+        .map_err(|e| format!("git_status_spawn:{e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git_status:{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().is_empty())
+}
+
+fn branch_merged_to_main(workspace: &Path, main_repo: &Path) -> std::result::Result<bool, String> {
+    let head = git_rev_parse(workspace, "HEAD")?;
+    let main = git_rev_parse(main_repo, "main")?;
+    let out = Command::new("git")
+        .args([
+            "-C",
+            main_repo.to_str().unwrap_or("."),
+            "merge-base",
+            "--is-ancestor",
+            &head,
+            &main,
+        ])
+        .output()
+        .map_err(|e| format!("merge_base_spawn:{e}"))?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "merge_base:{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+fn git_rev_parse(repo: &Path, rev: &str) -> std::result::Result<String, String> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            repo.to_str().unwrap_or("."),
+            "rev-parse",
+            "--verify",
+            rev,
+        ])
+        .output()
+        .map_err(|e| format!("rev_parse_spawn:{e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "rev_parse_{rev}:{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn live_current_marker(workspace: &Path, display_id: &str) -> Option<PathBuf> {
@@ -391,6 +571,7 @@ fn print_report(report: &CleanupReport, mode: CleanupMode) {
         match mode {
             CleanupMode::DryRun => "dry-run",
             CleanupMode::ExecuteTargetsOnly => "execute-targets-only",
+            CleanupMode::ExecuteRemoveClean => "execute-remove-clean",
         }
     );
     println!("main_repo\t{}", report.main_repo.display());
@@ -399,9 +580,16 @@ fn print_report(report: &CleanupReport, mode: CleanupMode) {
     println!("wal_bytes\t{}", report.wal_bytes);
     println!("target_candidates\t{}", report.candidate_count());
     println!("target_reclaimable_bytes\t{}", report.reclaimable_bytes());
+    println!(
+        "worktree_removal_candidates\t{}",
+        report.removal_candidates.len()
+    );
     if mode == CleanupMode::ExecuteTargetsOnly {
         println!("target_deleted_count\t{}", report.deleted_targets.len());
         println!("target_deleted_bytes\t{}", report.deleted_bytes());
+    }
+    if mode == CleanupMode::ExecuteRemoveClean {
+        println!("worktree_removed_count\t{}", report.removed_worktrees.len());
     }
     println!("\n# target cleanup candidates");
     println!("display_id\tstatus\ttarget_bytes\tworkspace_path\ttarget_path");
@@ -426,13 +614,99 @@ fn print_report(report: &CleanupReport, mode: CleanupMode) {
             c.row.workspace_path.display()
         );
     }
+    println!("\n# clean worktree removal candidates");
+    println!("display_id\tstatus\tworkspace_path");
+    for c in &report.removal_candidates {
+        println!(
+            "{}\t{}\t{}",
+            c.row.display_id,
+            c.row.status,
+            c.row.workspace_path.display()
+        );
+    }
+    println!("\n# skipped worktree removals");
+    println!("display_id\tstatus\treason\tworkspace_path");
+    for c in &report.removal_skipped {
+        println!(
+            "{}\t{}\t{}\t{}",
+            c.row.display_id,
+            c.row.status,
+            c.classification.label(),
+            c.row.workspace_path.display()
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
+    use std::process::Command;
     use tempfile::tempdir;
+
+    fn git(repo: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git -C {} {:?} failed: {}",
+            repo.display(),
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_main_repo(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        let out = Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init failed");
+        git(path, &["config", "user.email", "test@example.com"]);
+        git(path, &["config", "user.name", "Test User"]);
+        fs::write(path.join("README.md"), b"hello").unwrap();
+        fs::write(path.join(".gitignore"), b"target/\n").unwrap();
+        git(path, &["add", "README.md", ".gitignore"]);
+        git(path, &["commit", "-m", "init"]);
+    }
+
+    fn setup_cleanup_db(
+        stores: &Path,
+        task_id: &str,
+        status: &str,
+        workspace: &Path,
+    ) -> Connection {
+        fs::create_dir_all(stores).unwrap();
+        fs::write(stores.join("db.sqlite"), b"db").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                display_id TEXT,
+                status TEXT,
+                lifecycle TEXT,
+                active_step TEXT,
+                integration_step TEXT,
+                blocked INTEGER,
+                workspace_path TEXT,
+                drive_pid INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,workspace_path) VALUES (?1,?2,?3)",
+            rusqlite::params![task_id, status, workspace.to_str().unwrap()],
+        )
+        .unwrap();
+        conn
+    }
 
     fn row(id: &str, status: &str, workspace: &Path) -> CleanupTaskRow {
         CleanupTaskRow {
@@ -590,6 +864,96 @@ mod tests {
         assert!(!term.join("target").exists());
         assert!(active.join("target").exists());
         assert!(main.join("target").exists());
+        crate::paths::clear_stores_dir_override_for_tests();
+    }
+
+    #[test]
+    fn classify_clean_merged_worktree_as_removal_candidate() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        let wt = tmp.path().join("wt");
+        init_main_repo(&main);
+        git(
+            &main,
+            &["worktree", "add", "-b", "feat/t1", wt.to_str().unwrap()],
+        );
+
+        assert_eq!(
+            classify_row_for_worktree_removal(&row("T001", "integrated", &wt), &main),
+            CleanupClassification::WorktreeRemovalCandidate
+        );
+    }
+
+    #[test]
+    fn classify_dirty_and_unmerged_worktrees_are_skipped_for_removal() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        let dirty = tmp.path().join("dirty");
+        let unmerged = tmp.path().join("unmerged");
+        init_main_repo(&main);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/dirty",
+                dirty.to_str().unwrap(),
+            ],
+        );
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/unmerged",
+                unmerged.to_str().unwrap(),
+            ],
+        );
+        fs::write(dirty.join("untracked.txt"), b"dirty").unwrap();
+        fs::write(unmerged.join("new.txt"), b"new").unwrap();
+        git(&unmerged, &["add", "new.txt"]);
+        git(&unmerged, &["commit", "-m", "unmerged"]);
+
+        assert_eq!(
+            classify_row_for_worktree_removal(&row("TDIRTY", "integrated", &dirty), &main),
+            CleanupClassification::DirtyWorktree
+        );
+        assert_eq!(
+            classify_row_for_worktree_removal(&row("TUNMERGED", "integrated", &unmerged), &main),
+            CleanupClassification::UnmergedBranch
+        );
+    }
+
+    #[test]
+    fn execute_remove_clean_removes_only_clean_merged_worktree() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        let stores = main.join(".stores");
+        let clean = tmp.path().join("clean");
+        init_main_repo(&main);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/clean",
+                clean.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(clean.join("target")).unwrap();
+        fs::write(clean.join("target/file"), b"artifact").unwrap();
+
+        let _guard = crate::cli::test_support::ENV_LOCK.lock().unwrap();
+        crate::paths::clear_stores_dir_override_for_tests();
+        crate::paths::set_stores_dir_override(stores.clone()).unwrap();
+        let conn = setup_cleanup_db(&stores, "T001", "integrated", &clean);
+
+        let report = run_cleanup_worktrees(&conn, CleanupMode::ExecuteRemoveClean).unwrap();
+        assert_eq!(report.removed_worktrees.len(), 1);
+        assert!(!clean.exists(), "clean merged worktree should be removed");
         crate::paths::clear_stores_dir_override_for_tests();
     }
 }

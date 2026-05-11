@@ -437,30 +437,44 @@ pub fn dispatch(
                         };
                         let code = crate::flow::builtins::integrate::run(&row, &ctx)?;
                         if code != 0 {
-                            anyhow::bail!("run-integration for {display_id} failed with exit code {code}");
+                            anyhow::bail!(
+                                "run-integration for {display_id} failed with exit code {code}"
+                            );
                         }
                         println!("Ran integration for {display_id}");
                     } else if verb == "cleanup-worktrees" && store.name == "tasks" {
                         let dry_run = sub.get_flag("dry-run");
                         let execute = sub.get_flag("execute");
                         let targets_only = sub.get_flag("targets-only");
-                        let mode = match (dry_run, execute, targets_only) {
-                            (true, false, false) | (false, false, false) => {
+                        let remove_clean = sub.get_flag("remove-clean");
+                        let mode = match (dry_run, execute, targets_only, remove_clean) {
+                            (true, false, false, false) | (false, false, false, false) => {
                                 handlers::cleanup_worktrees::CleanupMode::DryRun
                             }
-                            (false, true, true) => {
+                            (false, true, true, false) => {
                                 handlers::cleanup_worktrees::CleanupMode::ExecuteTargetsOnly
                             }
-                            (true, true, _) => {
+                            (false, true, false, true) => {
+                                handlers::cleanup_worktrees::CleanupMode::ExecuteRemoveClean
+                            }
+                            (true, true, _, _) => {
                                 anyhow::bail!(
                                     "cleanup-worktrees accepts only one of --dry-run or --execute"
                                 )
                             }
-                            (false, true, false) => {
-                                anyhow::bail!("cleanup-worktrees --execute requires an explicit action such as --targets-only")
+                            (false, true, false, false) => {
+                                anyhow::bail!("cleanup-worktrees --execute requires an explicit action such as --targets-only or --remove-clean")
                             }
-                            (_, false, true) => {
+                            (_, false, true, _) => {
                                 anyhow::bail!("cleanup-worktrees --targets-only requires --execute")
+                            }
+                            (_, false, _, true) => {
+                                anyhow::bail!("cleanup-worktrees --remove-clean requires --execute")
+                            }
+                            (_, _, true, true) => {
+                                anyhow::bail!(
+                                    "cleanup-worktrees accepts only one explicit execute action"
+                                )
                             }
                         };
                         handlers::cleanup_worktrees::run_cleanup_worktrees(&conn, mode)?;
@@ -679,7 +693,6 @@ fn detect_invoker(matches: &ArgMatches) -> Result<InvokerCtx> {
     Ok(InvokerCtx { actor, token_valid })
 }
 
-
 fn require_resource_lock_mutation_authority(ctx: InvokerCtx) -> Result<Actor> {
     match ctx.actor {
         Actor::AiAutonomous => bail!("ai_autonomous rejected for resource-locks mutation; use human or ai_with_human with --approve-token"),
@@ -704,7 +717,10 @@ pub fn dispatch_resource_locks(root: &ArgMatches, sub: &ArgMatches) -> Result<()
                 invoker: actor,
             };
             match handlers::resource_locks::acquire(&conn, &p) {
-                Ok(tok) => { println!("{}", tok.0); Ok(()) }
+                Ok(tok) => {
+                    println!("{}", tok.0);
+                    Ok(())
+                }
                 Err(e) if e.to_string().contains("ResourceLockBusy") => bail!("BUSY: {e}"),
                 Err(e) => Err(e),
             }
@@ -728,8 +744,17 @@ pub fn dispatch_resource_locks(root: &ArgMatches, sub: &ArgMatches) -> Result<()
         }
         Some(("recover-stale", _)) => {
             let actor = require_resource_lock_mutation_authority(ctx)?;
-            let recovered = handlers::resource_locks::recover_stale(&conn, std::time::SystemTime::now().into(), actor)?;
-            for r in recovered { println!("{}\t{}\t{}", r.resource_id, r.owner_display_id, r.fencing_token); }
+            let recovered = handlers::resource_locks::recover_stale(
+                &conn,
+                std::time::SystemTime::now().into(),
+                actor,
+            )?;
+            for r in recovered {
+                println!(
+                    "{}\t{}\t{}",
+                    r.resource_id, r.owner_display_id, r.fencing_token
+                );
+            }
             Ok(())
         }
         _ => bail!("resource-locks requires a subcommand"),
