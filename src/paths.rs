@@ -119,6 +119,9 @@ pub fn resolve_stores_root(flag: Option<&str>) -> Result<PathBuf> {
             raw
         );
     }
+    let path = path
+        .canonicalize()
+        .with_context(|| format!("canonicalizing --stores-root target '{}'", raw))?;
     if !path.is_dir() {
         bail!(
             "--stores-root target '{}' is not a directory; pass the directory containing .stores/",
@@ -555,7 +558,23 @@ mod tests {
 
         let result = resolve_stores_root(Some(tmp.path().to_str().unwrap())).unwrap();
 
-        assert_eq!(result, tmp.path());
+        assert_eq!(result, tmp.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_stores_root_returns_canonical_path_for_relative_flag() {
+        let _guard = cwd_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir failed");
+        let root = tmp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join(".stores")).unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+
+        std::env::set_current_dir(tmp.path()).expect("set_current_dir failed");
+        let result = resolve_stores_root(Some("root"));
+        std::env::set_current_dir(&old_cwd).expect("restore cwd failed");
+
+        assert_eq!(result.unwrap(), root.canonicalize().unwrap());
     }
 
     #[test]
