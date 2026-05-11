@@ -123,51 +123,11 @@ agents:
       refresh_strategy: rebase
       allow_push: false
 
-  # Optional per-step registrations. A production repo may split builtin or
-  # shell agents per ADR0001 integration_step; the monolithic builtin above
-  # still emits the same durable substep transitions.
-  - name: integration-refresh
-    subscribes_to:
-      - store: tasks
-        transition: { from: integration_queued, to: integrating }
-        integration_step: refreshing
-    command: "builtin:integrate"
-    retry_policy: { max_attempts: 1, backoff: linear }
-  - name: integration-task-review
-    subscribes_to:
-      - store: tasks
-        transition: { from: integrating, to: integrating }
-        integration_step: task_review
-    command: "builtin:integrate"
-    retry_policy: { max_attempts: 1, backoff: linear }
-  - name: integration-test
-    subscribes_to:
-      - store: tasks
-        transition: { from: integrating, to: integrating }
-        integration_step: testing
-    command: "builtin:integrate"
-    retry_policy: { max_attempts: 1, backoff: linear }
-  - name: integration-merge
-    subscribes_to:
-      - store: tasks
-        transition: { from: integrating, to: integrating }
-        integration_step: merging
-    command: "builtin:integrate"
-    retry_policy: { max_attempts: 1, backoff: linear }
-  - name: integration-deploy
-    subscribes_to:
-      - store: tasks
-        transition: { from: integrating, to: integrating }
-        integration_step: deploying
-    command: "builtin:integrate"
-    retry_policy: { max_attempts: 1, backoff: linear }
-  - name: integration-verify
-    subscribes_to:
-      - store: tasks
-        transition: { from: integrating, to: integrating }
-        integration_step: verifying
-    command: "builtin:integrate"
-    retry_policy: { max_attempts: 1, backoff: linear }
+  # Optional per-step registrations may subscribe to ADR0001 integration_step
+  # self-transitions, but they must use step-specific commands. The monolithic
+  # `builtin:integrate` above owns the whole lane and always begins with
+  # `start-integration`, so do not register it on `integrating -> integrating`
+  # substep edges.
 
   - name: cargo-install
     subscribes_to:
