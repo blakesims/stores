@@ -81,11 +81,6 @@ const IN_CYCLE_STATUSES: &[&str] = &[
     "in_review",
 ];
 
-/// Typed reason token for the stale-binary-inode watchdog detection path.
-/// Exact-token matchable per L180 discipline: single source of truth for the
-/// `drive_failed:stale_binary_inode` `blocked_reason` suffix.
-pub(crate) const STALE_BINARY_REASON: &str = "stale_binary_inode";
-
 fn is_watchdog_actionable_status(status: &str) -> bool {
     IN_CYCLE_STATUSES.contains(&status)
 }
@@ -851,7 +846,7 @@ fn dead_pid_still_within_heartbeat_grace(heartbeat_at: Option<&str>) -> bool {
 pub(crate) fn stale_exe_log_line(display_id: &str, pid: i64) -> String {
     format!(
         "[auto-drive-watchdog] {display_id}: drive_pid={pid} stale_binary_inode \
-         (/proc/{pid}/exe -> deleted); marking drive_failed"
+         (/proc/{pid}/exe -> deleted); advisory only for already-running drive"
     )
 }
 
@@ -914,53 +909,13 @@ pub fn sweep_drive_watchdog(
             continue;
         }
         if pid_is_alive(pid as i32) && drive_pid_exe_is_stale(pid as i32) {
+            // Boundary split: daemon/control-plane stale-exe checks remain
+            // fail-loud before spawning work, but an already-running drive is
+            // pinned to the executable image it started with. Linux permits
+            // that image to continue after the install path is replaced; this
+            // watchdog must not convert safe post-spawn inode drift into a
+            // task-level drive failure.
             eprintln!("{}", stale_exe_log_line(&display_id, pid));
-            let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            if !is_watchdog_actionable_status(status)
-                || task_has_active_external_review_lane(conn, &display_id, &now_iso)
-            {
-                continue;
-            }
-            let ctx = DispatchCtx {
-                conn,
-                agents,
-                config_path,
-                policies_hash,
-            };
-            let agent = agents.agents.iter().find(|a| a.name == "auto-drive");
-            match fire_mark_drive_failed(
-                conn,
-                &display_id,
-                "drive_failed",
-                policies_hash,
-                Some(STALE_BINARY_REASON),
-            ) {
-                Ok(()) => {
-                    annotate_drive_failed_history(conn, &display_id, STALE_BINARY_REASON);
-                    dispatch_to_specialist(
-                        &row,
-                        &ctx,
-                        &display_id,
-                        "auto-drive-watchdog-stale-exe",
-                    );
-                    let _ = mark_claim_silent_zombie(
-                        conn,
-                        "tasks",
-                        row_id,
-                        agent,
-                        "auto-drive",
-                        STALE_BINARY_REASON,
-                    );
-                    acted += 1;
-                    handled.insert(display_id.clone());
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[auto-drive-watchdog] {}: mark_drive_failed stale-exe failed: {:#}",
-                        display_id, e
-                    );
-                }
-            }
             continue;
         }
         if pid_is_alive(pid as i32) {
@@ -3042,11 +2997,13 @@ mod tests {
         panic!("spawn sleep copy: {}", last_err.unwrap());
     }
 
-    /// AC1.2 / AC1.5: alive drive PID whose exe inode is deleted → watchdog
-    /// marks the task drive_failed:stale_binary_inode within one tick.
+    /// Alive drive PID whose exe inode is deleted is post-spawn binary drift,
+    /// not a drive failure. The daemon/control-plane still fail-louds before
+    /// spawning stale work, but the watchdog must not block an already-running
+    /// task solely because its launch-path inode was replaced by install.
     #[cfg(target_os = "linux")]
     #[test]
-    fn watchdog_alive_pid_with_deleted_exe_marks_stale_binary_inode() {
+    fn watchdog_alive_pid_with_deleted_exe_is_advisory_no_block() {
         let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3079,9 +3036,11 @@ mod tests {
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
         let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
-        assert_eq!(acted, 1, "watchdog must act on stale-exe alive PID");
+        assert_eq!(
+            acted, 0,
+            "watchdog must not block an already-running stale-exe PID"
+        );
 
-        // AC1.5: exact token form.
         let (status, reason): (String, Option<String>) = conn
             .query_row(
                 "SELECT status, blocked_reason FROM tasks WHERE display_id='T795'",
@@ -3089,14 +3048,13 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(status, "blocked");
+        assert_eq!(status, "executing");
         assert_eq!(
             reason.as_deref(),
-            Some("drive_failed:stale_binary_inode"),
-            "blocked_reason must be exact-token drive_failed:stale_binary_inode"
+            None,
+            "stale installed binary must not write drive_failed:stale_binary_inode"
         );
 
-        // Lock must be closed as silent_zombie.
         let (finished_at, terminal_reason): (Option<String>, Option<String>) = conn
             .query_row(
                 "SELECT finished_at, terminal_reason FROM dispatch_locks WHERE row_id=?1",
@@ -3105,29 +3063,26 @@ mod tests {
             )
             .unwrap();
         assert!(
-            finished_at.is_some(),
-            "lock must be closed (finished_at IS NOT NULL)"
+            finished_at.is_none(),
+            "lock must remain open while the drive PID is alive"
         );
         assert_eq!(
             terminal_reason.as_deref(),
-            Some("silent_zombie"),
-            "terminal_reason must be silent_zombie"
+            None,
+            "alive stale-exe drift must not close as silent_zombie"
         );
 
-        // transition_history must have a mark_drive_failed row with actor_note.
-        let actor_note: Option<String> = conn
+        let transition_count: i64 = conn
             .query_row(
-                "SELECT actor_note FROM transition_history \
-                 WHERE display_id='T795' AND verb='mark_drive_failed' \
-                 ORDER BY id DESC LIMIT 1",
+                "SELECT COUNT(*) FROM transition_history \
+                 WHERE display_id='T795' AND verb='mark_drive_failed'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(
-            actor_note.as_deref(),
-            Some("stale_binary_inode"),
-            "transition_history actor_note must be stale_binary_inode"
+            transition_count, 0,
+            "alive stale-exe drift must not write mark_drive_failed transition"
         );
 
         // Reap: kill explicitly so wait() returns immediately; guard is backup.
