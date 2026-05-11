@@ -1520,6 +1520,7 @@ fn build_add_cmd(leaves: &[crate::schema::flatten::LeafArg<'_>], schema: &Schema
             Arg::new("linked-observations")
                 .long("linked-observations")
                 .action(ArgAction::Append)
+                .value_delimiter(',')
                 .value_name("L###[,L###]")
                 .help("Comma-separated or repeated L### ids covered by this architecture review; source_observation is included if supplied")
                 .required(false),
@@ -2006,6 +2007,33 @@ mod tests {
                 "rendered gatekeeper brief missing `{expected}`:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn architecture_reviews_add_splits_comma_linked_observations() {
+        let ar_yaml = BUNDLED_STORE_SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "architecture_reviews")
+            .map(|(_, yaml)| *yaml)
+            .expect("architecture_reviews schema bundled");
+        let schema = crate::schema::Schema::from_yaml(ar_yaml).unwrap();
+        let mut cmd = build_store_command(&schema);
+        let add = cmd.find_subcommand_mut("add").unwrap().clone();
+        let matches = add
+            .try_get_matches_from([
+                "add",
+                "--linked-observations",
+                "L010,L011,L012",
+                "--linked-observations",
+                "L013",
+            ])
+            .unwrap();
+        let got: Vec<String> = matches
+            .get_many::<String>("linked-observations")
+            .unwrap()
+            .cloned()
+            .collect();
+        assert_eq!(got, vec!["L010", "L011", "L012", "L013"]);
     }
 
     #[test]

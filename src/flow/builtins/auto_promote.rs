@@ -353,7 +353,8 @@ pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
     let mut stmt = ctx.conn.prepare(
         "SELECT display_id FROM observations \
          WHERE (lifecycle = 'ready' OR status = 'ready') \
-         AND (contract_state = 'ready' OR json_extract(intent_contract, '$.contract_state') = 'ready') \
+         AND (contract_state IN ('ready', 'approved') \
+              OR json_extract(intent_contract, '$.contract_state') IN ('ready', 'approved')) \
          AND task_id IS NOT NULL \
          AND NOT EXISTS ( \
             SELECT 1 FROM tasks t, json_each(t.linked_observations) je \
@@ -985,6 +986,33 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(total, 2, "exactly T-old + new task must exist");
+    }
+
+    #[test]
+    fn auto_promote_startup_sweep_accepts_primary_approved_contract_state() {
+        let conn = fresh_db();
+        insert_abandoned_task(&conn, "T-old", &["L201"]);
+        insert_obs_with_task_id(&conn, "L201", "T-old");
+        let ic = serde_json::json!({
+            "objective": "fix the Y bug",
+            "type": "work",
+            "in_scope": ["fix module B"],
+            "out_of_scope": [],
+            "acceptance": ["test_y passes"],
+            "tier_hint": "T3",
+            "approved_by": "blake",
+            "approved_at": "2026-05-09T00:00:00Z"
+        });
+        conn.execute(
+            "UPDATE observations SET lifecycle='ready', contract_state='approved', intent_contract=?1 WHERE display_id='L201'",
+            [serde_json::to_string(&ic).unwrap()],
+        )
+        .unwrap();
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let n = startup_sweep(&ctx_for(&conn, &agents, &cfg)).unwrap();
+        assert_eq!(n, 1, "approved primary contract_state must be swept");
     }
 
     #[test]
