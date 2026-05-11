@@ -586,7 +586,6 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     }
 
     fire_integration_step(ctx, &tasks_schema, display_id, "mark_merge_done")?;
-    lock_guard.release()?;
 
     // 9. Optional push/deploy.
     if cfg.allow_push {
@@ -637,6 +636,10 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     }
 
     fire_integration_step(ctx, &tasks_schema, display_id, "mark_deploy_done")?;
+
+    // Main truth mutation remains protected through the optional push and
+    // landed-main capture. Failure returns rely on LockGuard::drop for release.
+    lock_guard.release()?;
 
     // 10. Capture landed_main_sha; finalize the in-progress entry; fire
     //     mark_verify_done.
