@@ -6,7 +6,10 @@ use std::process::Command;
 
 fn run_ok(bin: &str, cwd: &Path, args: &[&str], token_dir: Option<&Path>) {
     let mut cmd = Command::new(bin);
-    cmd.current_dir(cwd).args(args);
+    cmd.current_dir(cwd)
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
+        .args(args);
     if let Some(dir) = token_dir {
         cmd.env("STORES_TOKEN_DIR", dir);
     }
@@ -27,6 +30,8 @@ fn auth_show_help_is_plaintext_from_repo_root() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let output = Command::new(bin)
         .current_dir(root)
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         .args(["auth", "show", "--help"])
         .output()
         .expect("failed to invoke stores binary");
@@ -119,6 +124,8 @@ fn ratify_amend_rejects_non_human_even_with_valid_token() {
     for actor in ["ai_with_human", "ai_autonomous"] {
         let output = Command::new(bin)
             .current_dir(tmp.path())
+            .env_remove("STORES_ROOT")
+            .env_remove("STORES_META_PATH")
             .env("STORES_TOKEN_DIR", &token_dir)
             .args([
                 "architecture-reviews",

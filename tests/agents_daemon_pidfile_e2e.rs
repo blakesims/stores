@@ -12,6 +12,8 @@ fn run(project: &Path, args: &[&str]) -> Output {
     Command::new(stores_bin())
         .args(args)
         .current_dir(project)
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         .output()
         .expect("stores command spawns")
 }
@@ -88,6 +90,8 @@ fn start_detached(project: &Path, log_name: &str) -> Output {
         .arg(log)
         .args(["--poll-interval", "0.1"])
         .current_dir(project)
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         // Pin the daemon binary path to the test binary so the stale-binary
         // detector doesn't re-exec into an installed (different-inode) stores
         // binary. Without this, the re-exec'd binary can take >5 s to respond
@@ -338,6 +342,8 @@ fn stop_without_force_times_out_daemon_stays_alive() {
     let out = Command::new(stores_bin())
         .args(["agents", "stop"])
         .current_dir(tmp.path())
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         .env("STORES_AGENTS_STOP_TIMEOUT_SEC", "1")
         .output()
         .expect("stores agents stop");
@@ -403,6 +409,8 @@ fn stop_force_sigkill_skipped_on_pid_reuse_during_timeout() {
     let stop_child = std::process::Command::new(stores_bin())
         .args(["agents", "stop", "--force"])
         .current_dir(tmp.path())
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         .env("STORES_AGENTS_STOP_TIMEOUT_SEC", "2")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -533,6 +541,8 @@ fn stop_with_force_kills_non_responsive_daemon() {
     let out = Command::new(stores_bin())
         .args(["agents", "stop", "--force"])
         .current_dir(tmp.path())
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         .env("STORES_AGENTS_STOP_TIMEOUT_SEC", "1")
         .output()
         .expect("stores agents stop --force");

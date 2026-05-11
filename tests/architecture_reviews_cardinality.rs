@@ -50,10 +50,7 @@ fn issue_cmd() -> Command {
         .arg(Arg::new("rationale").long("rationale"))
         .arg(Arg::new("merge-target-id").long("merge-target-id"))
         .arg(Arg::new("produced-task-id").long("produced-task-id"))
-}
-
-fn supersede_cmd() -> Command {
-    Command::new("supersede").arg(Arg::new("display_id").required(true))
+        .arg(Arg::new("supersedes").long("supersedes"))
 }
 
 fn withdraw_cmd() -> Command {
@@ -285,9 +282,29 @@ fn human_decision_required_sets_human_ratification() {
 #[test]
 fn superseded_redirects_to_superseding_review() {
     let (arch, conn) = setup();
-    conn.execute("INSERT INTO architecture_reviews (display_id,status,lifecycle,created_at,updated_at,created_by,updated_by,kind,summary,linked_observation_ids,superseded_by_id) VALUES ('A001','in_review','reviewing','now','now','ai_with_human','ai_with_human','interpret','s',?1,'A002')", [json!(["L010","L011","L012"]).to_string()]).unwrap();
-    let m = supersede_cmd().get_matches_from(["supersede", "A001"]);
-    architecture_reviews::run_supersede(&arch, &conn, &m, Actor::AiWithHuman.into()).unwrap();
+    conn.execute("INSERT INTO architecture_reviews (display_id,status,lifecycle,created_at,updated_at,created_by,updated_by,kind,summary,linked_observation_ids) VALUES ('A001','in_review','reviewing','now','now','ai_with_human','ai_with_human','interpret','s',?1)", [json!(["L010","L011","L012"]).to_string()]).unwrap();
+    conn.execute("INSERT INTO architecture_reviews (display_id,status,lifecycle,created_at,updated_at,created_by,updated_by,kind,summary) VALUES ('A002','in_review','reviewing','now','now','ai_with_human','ai_with_human','interpret','successor')", []).unwrap();
+    let m = issue_cmd().get_matches_from([
+        "issue-verdict",
+        "A002",
+        "--kind",
+        "interpret",
+        "--verdict",
+        "allow_local_fix",
+        "--rationale",
+        "why",
+        "--supersedes",
+        "A001",
+    ]);
+    architecture_reviews::run_issue_verdict(&arch, &conn, &m, Actor::AiWithHuman.into()).unwrap();
+    let superseded_by: String = conn
+        .query_row(
+            "SELECT superseded_by_id FROM architecture_reviews WHERE display_id='A001'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(superseded_by, "A002");
     for id in ["L010", "L011", "L012"] {
         assert_eq!(obs_tuple(&conn, id).5.as_deref(), Some("A002"));
     }

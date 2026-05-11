@@ -200,7 +200,10 @@ fn count_table(conn: &Connection, table: &str) -> i64 {
 fn run_plan_start(cwd: &Path, json: bool) -> std::process::Output {
     let bin = env!("CARGO_BIN_EXE_stores");
     let mut cmd = Command::new(bin);
-    cmd.current_dir(cwd).args(["engine", "plan-start"]);
+    cmd.current_dir(cwd)
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
+        .args(["engine", "plan-start"]);
     if json {
         cmd.arg("--json");
     }
@@ -213,6 +216,8 @@ fn run_plan_start(cwd: &Path, json: bool) -> std::process::Output {
 fn plan_start_help_is_listed_under_engine() {
     let bin = env!("CARGO_BIN_EXE_stores");
     let engine_help = Command::new(bin)
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         .args(["engine", "--help"])
         .output()
         .expect("run engine --help");
@@ -228,6 +233,8 @@ fn plan_start_help_is_listed_under_engine() {
     );
 
     let ps_help = Command::new(bin)
+        .env_remove("STORES_ROOT")
+        .env_remove("STORES_META_PATH")
         .args(["engine", "plan-start", "--help"])
         .output()
         .expect("run plan-start --help");
