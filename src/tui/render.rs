@@ -294,17 +294,24 @@ fn lane_card_lines(lane: StoreLane, model: &StoreFlowModel) -> (String, String) 
     match lane {
         StoreLane::Intake => {
             let i = &model.intake;
-            let open = i.draft + i.triaging + i.needs_info;
+            let open = i.new + i.triaging + i.waiting;
             (
                 format!("open: {open}"),
-                format!("needs_info {} · routed {}", i.needs_info, i.routed),
+                format!(
+                    "new {} · triaging {} · waiting {} · closed {}",
+                    i.new, i.triaging, i.waiting, i.closed
+                ),
             )
         }
         StoreLane::Observations => {
             let o = &model.observations;
+            let open = o.candidate + o.ready + o.in_progress;
             (
-                format!("open: {}", o.open),
-                format!("invest {} · ready {}", o.investigating, o.ready),
+                format!("open: {open}"),
+                format!(
+                    "candidate {} · ready {} · in_progress {} · closed {}",
+                    o.candidate, o.ready, o.in_progress, o.closed
+                ),
             )
         }
         StoreLane::Tasks => {

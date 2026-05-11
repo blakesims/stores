@@ -108,6 +108,24 @@ fn render_frame(
         crate::tui::data::dedup_observation_summaries_by_section(&raw_rows, &raw_sections);
     let ((task_visible, task_total), (obs_visible, obs_total)) =
         crate::tui::data::surface_counts(&rows, show_all_history);
+    let flow = crate::tui::data::store_flow_model(
+        &rows,
+        &system_health,
+        &daemon_liveness,
+        &crate::tui::data::ExternalReviewState::default(),
+    );
+    out.push_str(&format!(
+        "{ANSI_BOLD}INLET:{ANSI_RESET} new triaging waiting closed  {} {} {} {}\n",
+        flow.intake.new, flow.intake.triaging, flow.intake.waiting, flow.intake.closed
+    ));
+    out.push_str(&format!(
+        "{ANSI_BOLD}OBSERVATIONS:{ANSI_RESET} candidate ready in_progress closed  {} {} {} {}\n",
+        flow.observations.candidate,
+        flow.observations.ready,
+        flow.observations.in_progress,
+        flow.observations.closed
+    ));
+    out.push_str("closure_rate: n/a\n\n");
 
     // ---- SYSTEM ALERT (dead daemon + dangling locks) --------------------
     let unfinished = system_health.unfinished_dispatch_locks;
@@ -709,6 +727,8 @@ fn legacy_task_status_color(s: &str) -> &'static str {
 
 fn obs_status_color(s: &str) -> &'static str {
     match s {
+        // ADR 0002 compatibility-only (T148): legacy observation row color for
+        // row-list display; cockpit buckets above use primary lifecycle.
         "open" => ANSI_YELLOW,
         "investigating" | "confirming" | "claiming" => ANSI_GREEN,
         "resolved" | "rejected" => ANSI_DIM,

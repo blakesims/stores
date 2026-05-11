@@ -1,6 +1,7 @@
 use stores::tui::app::{App, DetailKind, DetailSelection, Mode, TuiOpts};
 use stores::tui::data::{
-    ArtifactPointer, CollapsedObsRow, IntakeRow, ObsRow, RecentEvent, Row, Section, TaskRow,
+    ArtifactPointer, CollapsedObsRow, IntakeRow, ObsRow, RecentEvent, ReviewRow, Row, Section,
+    TaskRow,
 };
 use stores::tui::detail::render_text_for_row;
 
@@ -145,8 +146,8 @@ fn observation_detail_rendering_contains_summary_priority_status_contract_next_a
         "observation story",
         "Priority",
         "high",
-        "Status",
-        "open",
+        "ADR 0002 state",
+        "Legacy status: open",
         "Contract state",
         "Next action / held reason",
         "ratify contract",
@@ -184,6 +185,44 @@ fn collapsed_observation_detail_lists_every_hidden_display_id() {
 }
 
 #[test]
+fn adr0002_observation_and_arch_review_detail_primary_block_precedes_legacy_status() {
+    let obs = Row::Obs(ObsRow {
+        display_id: "L900".to_string(),
+        status: "confirmed".to_string(),
+        priority: "normal".to_string(),
+        summary: "pending arch gate".to_string(),
+        lifecycle: Some("ready".to_string()),
+        contract_state: Some("approved".to_string()),
+        pending_architecture_review: Some(true),
+        open_architecture_review_id: Some("A900".to_string()),
+        ..Default::default()
+    });
+    let text = render_text_for_row(&obs, &app());
+    let waiting = text.find("waiting: architecture_review").expect(&text);
+    let open = text.find("open_architecture_review_id: A900").expect(&text);
+    let legacy = text.find("Legacy status: confirmed").expect(&text);
+    assert!(waiting < legacy, "{text}");
+    assert!(open < legacy, "{text}");
+
+    let review = Row::Review(ReviewRow {
+        display_id: "A900".to_string(),
+        task_id: "T900".to_string(),
+        status: "verdict_issued".to_string(),
+        lifecycle: Some("closed".to_string()),
+        outcome: Some("primitive_task_created".to_string()),
+        linked_observation_ids: vec!["L900".to_string(), "L901".to_string()],
+        produced_task_id: Some("T901".to_string()),
+        ..Default::default()
+    });
+    let text = render_text_for_row(&review, &app());
+    assert!(
+        text.contains("linked_observation_ids: L900, L901"),
+        "{text}"
+    );
+    assert!(text.contains("produced_task_id: T901"), "{text}");
+}
+
+#[test]
 fn intake_detail_rendering_contains_summary_risk_status_routing_next_artifacts() {
     let text = render_text_for_row(&intake(), &app());
     for needle in [
@@ -192,8 +231,8 @@ fn intake_detail_rendering_contains_summary_risk_status_routing_next_artifacts()
         "Priority / risk",
         "priority: —",
         "risk: touches_lifecycle",
-        "Status",
-        "needs_info",
+        "ADR 0002 state",
+        "Legacy status: needs_info",
         "Contract / routing state",
         "Next action / held reason",
         "missing evidence",

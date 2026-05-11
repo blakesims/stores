@@ -140,19 +140,25 @@ fn resolve_one(
     obs_id: &str,
     resolution: &str,
 ) -> Result<ResolveOutcome> {
-    let current: Option<String> = ctx
+    let current: Option<(String, Option<String>, Option<String>)> = ctx
         .conn
         .query_row(
-            "SELECT status FROM observations WHERE display_id = ?1",
+            "SELECT status, lifecycle, outcome FROM observations WHERE display_id = ?1",
             rusqlite::params![obs_id],
-            |r| r.get(0),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get::<_, Option<String>>(1).ok().flatten(),
+                    r.get::<_, Option<String>>(2).ok().flatten(),
+                ))
+            },
         )
         .optional()?;
 
-    let Some(status) = current else {
+    let Some((status, lifecycle, outcome)) = current else {
         return Ok(ResolveOutcome::Orphan);
     };
-    if status == "resolved" {
+    if lifecycle.as_deref() == Some("closed") || outcome.as_deref() == Some("addressed") {
         return Ok(ResolveOutcome::AlreadyResolved);
     }
 
@@ -228,7 +234,8 @@ pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
          AND EXISTS ( \
             SELECT 1 FROM json_each(t.linked_observations) je \
             JOIN observations o ON o.display_id = je.value \
-            WHERE o.status != 'resolved' \
+            WHERE COALESCE(o.lifecycle, '') != 'closed' \
+              AND o.status != 'resolved' \
          )",
     )?;
     let task_ids: Vec<String> = stmt
@@ -255,11 +262,11 @@ pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
             let now_resolved: bool = ctx
                 .conn
                 .query_row(
-                    "SELECT status FROM observations WHERE display_id = ?1",
+                    "SELECT status, lifecycle FROM observations WHERE display_id = ?1",
                     rusqlite::params![obs_id],
-                    |r| r.get::<_, String>(0),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1).ok().flatten())),
                 )
-                .map(|s| s == "resolved")
+                .map(|(status, lifecycle)| lifecycle.as_deref() == Some("closed") || status == "resolved")
                 .unwrap_or(false);
             if now_resolved {
                 eprintln!(
@@ -283,7 +290,7 @@ fn unresolved_linked_obs(
         "SELECT o.display_id, o.status \
          FROM tasks t, json_each(t.linked_observations) je \
          JOIN observations o ON o.display_id = je.value \
-         WHERE t.display_id = ?1 AND o.status != 'resolved'",
+         WHERE t.display_id = ?1 AND COALESCE(o.lifecycle, '') != 'closed' AND o.status != 'resolved'\n         /* ADR 0002 compatibility-only (T148): select legacy status for log text only. */",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -530,12 +537,7 @@ mod tests {
         assert_eq!(invoker, "framework");
     }
 
-    fn insert_shipped_task(
-        conn: &Connection,
-        display_id: &str,
-        commit: &str,
-        linked: &str,
-    ) {
+    fn insert_shipped_task(conn: &Connection, display_id: &str, commit: &str, linked: &str) {
         let now = "2026-05-03T00:00:00Z";
         let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
         let cycles = format!(r#"[{{"executor":{{"commit":"{}"}}}}]"#, commit);
@@ -632,7 +634,13 @@ mod tests {
         assert_eq!(status, "wont_fix", "row must not have been force-flipped");
     }
 
-    fn insert_task_at_status(conn: &Connection, display_id: &str, status: &str, commit: &str, linked: &str) {
+    fn insert_task_at_status(
+        conn: &Connection,
+        display_id: &str,
+        status: &str,
+        commit: &str,
+        linked: &str,
+    ) {
         let now = "2026-05-09T00:00:00Z";
         let contract = r#"{"done_when":"x","scope_in":"y","scope_out":"z"}"#;
         let cycles = format!(r#"[{{"executor":{{"commit":"{}"}}}}]"#, commit);
@@ -707,7 +715,13 @@ mod tests {
         insert_obs(&conn, "L301", "ready", None);
         insert_obs(&conn, "L302", "ready", None);
         insert_task_at_status(&conn, "T301", "accepted", "sha-acc-301", r#"["L301"]"#);
-        insert_task_at_status(&conn, "T302", "closed_out_of_band", "sha-oob-302", r#"["L302"]"#);
+        insert_task_at_status(
+            &conn,
+            "T302",
+            "closed_out_of_band",
+            "sha-oob-302",
+            r#"["L302"]"#,
+        );
 
         let agents = AgentsYaml::default_empty();
         let cfg = std::path::PathBuf::from("/tmp/stores-test-config.yaml");

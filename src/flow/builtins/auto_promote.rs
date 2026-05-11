@@ -70,9 +70,10 @@ where
         None => Value::Null,
     };
 
-    let state = ic_value
+    let state = row
         .get("contract_state")
         .and_then(|v| v.as_str())
+        .or_else(|| ic_value.get("contract_state").and_then(|v| v.as_str()))
         .unwrap_or("");
     if state != "ready" {
         eprintln!(
@@ -346,9 +347,13 @@ fn refresh_obs_row(conn: &rusqlite::Connection, display_id: &str) -> Option<Valu
 /// Emits `[startup-sweep] auto-promote <obs> (prior task abandoned)` per row
 /// plus `[startup-sweep] auto-promote re-minted N task(s)` summary.
 pub fn startup_sweep(ctx: &DispatchCtx) -> Result<usize> {
+    // ADR 0002 compatibility-only (T148): status='ready' remains a fallback
+    // for legacy test fixtures whose primary lifecycle/contract_state columns
+    // were absent or blank before framework drift/backfill.
     let mut stmt = ctx.conn.prepare(
         "SELECT display_id FROM observations \
-         WHERE status = 'ready' \
+         WHERE (lifecycle = 'ready' OR status = 'ready') \
+         AND (contract_state = 'ready' OR json_extract(intent_contract, '$.contract_state') = 'ready') \
          AND task_id IS NOT NULL \
          AND NOT EXISTS ( \
             SELECT 1 FROM tasks t, json_each(t.linked_observations) je \

@@ -228,6 +228,13 @@ pub struct ObsRow {
     pub source: Option<String>,
     pub task_id: Option<String>,
     pub priority_rank: Option<i64>,
+    pub lifecycle: Option<String>,
+    pub waiting: Option<bool>,
+    pub waiting_kind: Option<String>,
+    pub outcome: Option<String>,
+    pub pending_architecture_review: Option<bool>,
+    pub open_architecture_review_id: Option<String>,
+    pub superseded_by_id: Option<String>,
     /// `intent_contract.contract_state`, when present.
     pub contract_state: Option<String>,
     pub tier_hint: Option<String>,
@@ -261,6 +268,10 @@ pub struct ReviewRow {
     pub display_id: String,
     pub task_id: String,
     pub status: String,
+    pub lifecycle: Option<String>,
+    pub outcome: Option<String>,
+    pub linked_observation_ids: Vec<String>,
+    pub produced_task_id: Option<String>,
     pub runner: String,
     pub held_reason: Option<String>,
     pub next_retry_at: Option<String>,
@@ -300,6 +311,9 @@ pub struct IntakeRow {
     pub display_id: String,
     pub status: String,
     pub summary: String,
+    pub lifecycle: Option<String>,
+    pub waiting_kind: Option<String>,
+    pub outcome: Option<String>,
     pub body: Option<String>,
     pub updated_at: String,
     pub source_task: Option<String>,
@@ -314,6 +328,12 @@ pub struct IntakeRow {
     pub routed_to_observation: Option<String>,
     pub routed_to_arch_review: Option<String>,
     pub duplicate_of: Option<String>,
+    pub duplicate_of_id: Option<String>,
+    pub produced_observation_id: Option<String>,
+    pub produced_architecture_review_id: Option<String>,
+    pub produced_task_id: Option<String>,
+    pub produced_artifact_kind: Option<String>,
+    pub produced_artifact_id: Option<String>,
     pub evidence_pointer: Option<String>,
     pub recent_events: Vec<RecentEvent>,
     pub captured_at: Option<String>,
@@ -485,22 +505,23 @@ fn is_priority_task(t: &TaskRow) -> bool {
 /// Per-status counts the cockpit renders for the intake lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IntakeFlow {
-    pub draft: usize,
+    pub new: usize,
     pub triaging: usize,
-    pub needs_info: usize,
-    pub routed: usize,
-    pub dropped: usize,
+    pub waiting: usize,
+    pub closed: usize,
+    pub waiting_kinds: BTreeMap<String, usize>,
+    pub outcomes: BTreeMap<String, usize>,
 }
 
 /// Per-status counts the cockpit renders for the observations lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObsFlow {
-    pub open: usize,
-    pub investigating: usize,
+    pub candidate: usize,
     pub ready: usize,
-    pub resolved: usize,
-    pub wont_fix: usize,
-    pub investigation_failed: usize,
+    pub in_progress: usize,
+    pub closed: usize,
+    pub waiting_kinds: BTreeMap<String, usize>,
+    pub outcomes: BTreeMap<String, usize>,
 }
 
 /// Per-status counts the cockpit renders for the tasks lane.
@@ -566,10 +587,10 @@ fn store_flow_model_at(
     let mut model = StoreFlowModel::default();
     for row in rows {
         match row {
-            Row::Intake(i) => apply_intake_to_flow(&i.status, 1, &mut model.intake),
-            Row::Obs(o) => apply_obs_to_flow(&o.status, 1, &mut model.observations),
+            Row::Intake(i) => apply_intake_to_flow(i, 1, &mut model.intake),
+            Row::Obs(o) => apply_obs_to_flow(o, 1, &mut model.observations),
             Row::CollapsedObs(c) => {
-                apply_obs_to_flow(&c.representative.status, c.count, &mut model.observations)
+                apply_obs_to_flow(&c.representative, c.count, &mut model.observations)
             }
             Row::Task(t) => apply_task_to_flow(t, &mut model.tasks),
             Row::Review(r) => apply_review_to_flow(&r.status, &mut model.external_reviews),
@@ -586,26 +607,75 @@ fn store_flow_model_at(
     model
 }
 
-fn apply_intake_to_flow(status: &str, count: usize, flow: &mut IntakeFlow) {
-    match status {
-        "draft" => flow.draft += count,
+fn apply_intake_to_flow(row: &IntakeRow, count: usize, flow: &mut IntakeFlow) {
+    match intake_lifecycle(row) {
+        "new" => flow.new += count,
         "triaging" => flow.triaging += count,
-        "needs_info" => flow.needs_info += count,
-        "routed" => flow.routed += count,
-        "dropped" => flow.dropped += count,
+        "waiting" => flow.waiting += count,
+        "closed" => flow.closed += count,
         _ => {}
+    }
+    if let Some(kind) = row.waiting_kind.as_deref().filter(|s| !s.is_empty()) {
+        *flow.waiting_kinds.entry(kind.to_string()).or_default() += count;
+    }
+    if let Some(outcome) = row.outcome.as_deref().filter(|s| !s.is_empty()) {
+        *flow.outcomes.entry(outcome.to_string()).or_default() += count;
     }
 }
 
-fn apply_obs_to_flow(status: &str, count: usize, flow: &mut ObsFlow) {
-    match status {
-        "open" => flow.open += count,
-        "investigating" => flow.investigating += count,
+fn apply_obs_to_flow(row: &ObsRow, count: usize, flow: &mut ObsFlow) {
+    match obs_lifecycle(row) {
+        "candidate" => flow.candidate += count,
         "ready" => flow.ready += count,
-        "resolved" => flow.resolved += count,
-        "wont_fix" => flow.wont_fix += count,
-        "investigation_failed" => flow.investigation_failed += count,
+        "in_progress" => flow.in_progress += count,
+        "closed" => flow.closed += count,
         _ => {}
+    }
+    if let Some(kind) = row.waiting_kind.as_deref().filter(|s| !s.is_empty()) {
+        *flow.waiting_kinds.entry(kind.to_string()).or_default() += count;
+    }
+    if let Some(outcome) = row.outcome.as_deref().filter(|s| !s.is_empty()) {
+        *flow.outcomes.entry(outcome.to_string()).or_default() += count;
+    }
+}
+
+pub fn intake_lifecycle(row: &IntakeRow) -> &str {
+    if let Some(v) = row
+        .lifecycle
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return v;
+    }
+    // ADR 0002 compatibility-only (T148): legacy intake.status fallback for
+    // old test schemas and rows not yet carrying primary lifecycle columns.
+    match row.status.as_str() {
+        "draft" => "new",
+        "triaging" => "triaging",
+        "needs_info" => "waiting",
+        "routed" | "dropped" => "closed",
+        _ => "new",
+    }
+}
+
+pub fn obs_lifecycle(row: &ObsRow) -> &str {
+    if let Some(v) = row
+        .lifecycle
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return v;
+    }
+    // ADR 0002 compatibility-only (T148): legacy observations.status fallback
+    // for old test schemas and migrated rows absent primary lifecycle fields.
+    match row.status.as_str() {
+        "open" | "needs_info" => "candidate",
+        "confirmed" | "ready" => "ready",
+        "investigating" | "confirming" | "claiming" | "in_progress" => "in_progress",
+        "resolved" | "wont_fix" | "rejected" | "investigation_failed" => "closed",
+        _ => "candidate",
     }
 }
 
@@ -1247,10 +1317,12 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
     let obs_cols = table_columns(conn, "observations")?;
     let obs_sql = format!(
         "SELECT display_id, status, {priority}, {summary}, {updated_at}, {body}, {source}, {task_id}, {priority_rank}, \
+                {lifecycle}, {waiting}, {waiting_kind}, {outcome}, {pending_architecture_review}, {open_architecture_review_id}, {superseded_by_id}, \
                 {contract_state}, {tier_hint}, {objective}, {itype}, {acceptance}, {in_scope}, {out_of_scope}, {known_solution}, \
                 {locked_by}, {locked_at}, {lock_reason}, {evidence}, {resolution}, {investigation_failure_reason} FROM observations",
         priority = sql_col(&obs_cols, "priority", "''"), summary = sql_col(&obs_cols, "summary", "''"), updated_at = sql_col(&obs_cols, "updated_at", "''"),
         body = sql_col(&obs_cols, "body", "NULL"), source = sql_col(&obs_cols, "source", "NULL"), task_id = sql_col(&obs_cols, "task_id", "NULL"), priority_rank = sql_col(&obs_cols, "priority_rank", "NULL"),
+        lifecycle = sql_col(&obs_cols, "lifecycle", "NULL"), waiting = sql_col(&obs_cols, "waiting", "NULL"), waiting_kind = sql_col(&obs_cols, "waiting_kind", "NULL"), outcome = sql_col(&obs_cols, "outcome", "NULL"), pending_architecture_review = sql_col(&obs_cols, "pending_architecture_review", "NULL"), open_architecture_review_id = sql_col(&obs_cols, "open_architecture_review_id", "NULL"), superseded_by_id = sql_col(&obs_cols, "superseded_by_id", "NULL"),
         contract_state = json_col(&obs_cols, "intent_contract", "$.contract_state"), tier_hint = json_col(&obs_cols, "intent_contract", "$.tier_hint"),
         objective = json_col(&obs_cols, "intent_contract", "$.objective"), itype = json_col(&obs_cols, "intent_contract", "$.type"), acceptance = json_col(&obs_cols, "intent_contract", "$.acceptance"),
         in_scope = json_col(&obs_cols, "intent_contract", "$.in_scope"), out_of_scope = json_col(&obs_cols, "intent_contract", "$.out_of_scope"), known_solution = json_col(&obs_cols, "intent_contract", "$.known_solution"),
@@ -1259,7 +1331,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
     );
     let mut stmt = conn.prepare(&obs_sql)?;
     let obs_iter = stmt.query_map([], |r| {
-        let evidence_raw: Option<String> = r.get(20).ok().flatten();
+        let evidence_raw: Option<String> = r.get(27).ok().flatten();
         Ok(ObsRow {
             display_id: r.get(0)?,
             status: r.get(1)?,
@@ -1270,21 +1342,28 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             source: r.get(6).ok().flatten(),
             task_id: r.get(7).ok().flatten(),
             priority_rank: r.get(8).ok().flatten(),
-            contract_state: r.get(9).ok().flatten(),
-            tier_hint: r.get(10).ok().flatten(),
-            intent_objective: r.get(11).ok().flatten(),
-            intent_type: r.get(12).ok().flatten(),
-            intent_acceptance: json_string_array(r.get::<_, String>(13).ok().as_deref()),
-            intent_in_scope: json_string_array(r.get::<_, String>(14).ok().as_deref()),
-            intent_out_of_scope: json_string_array(r.get::<_, String>(15).ok().as_deref()),
-            intent_known_solution: r.get(16).ok().flatten(),
-            locked_by: r.get(17).ok().flatten(),
-            locked_at: r.get(18).ok().flatten(),
-            lock_reason: r.get(19).ok().flatten(),
+            lifecycle: r.get(9).ok().flatten(),
+            waiting: r.get(10).ok().flatten(),
+            waiting_kind: r.get(11).ok().flatten(),
+            outcome: r.get(12).ok().flatten(),
+            pending_architecture_review: r.get(13).ok().flatten(),
+            open_architecture_review_id: r.get(14).ok().flatten(),
+            superseded_by_id: r.get(15).ok().flatten(),
+            contract_state: r.get(16).ok().flatten(),
+            tier_hint: r.get(17).ok().flatten(),
+            intent_objective: r.get(18).ok().flatten(),
+            intent_type: r.get(19).ok().flatten(),
+            intent_acceptance: json_string_array(r.get::<_, String>(20).ok().as_deref()),
+            intent_in_scope: json_string_array(r.get::<_, String>(21).ok().as_deref()),
+            intent_out_of_scope: json_string_array(r.get::<_, String>(22).ok().as_deref()),
+            intent_known_solution: r.get(23).ok().flatten(),
+            locked_by: r.get(24).ok().flatten(),
+            locked_at: r.get(25).ok().flatten(),
+            lock_reason: r.get(26).ok().flatten(),
             evidence_pointers: evidence_pointers(evidence_raw.as_deref()),
-            resolution_pointer: r.get(21).ok().flatten(),
+            resolution_pointer: r.get(28).ok().flatten(),
             recent_events: Vec::new(),
-            investigation_failure_reason: r.get(22).ok().flatten(),
+            investigation_failure_reason: r.get(29).ok().flatten(),
         })
     })?;
     for r in obs_iter.flatten() {
@@ -1319,10 +1398,14 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             "NULL".to_string()
         };
         let sql = format!(
-            "SELECT display_id, task_id, status, {runner_expr}, {held_expr}, {retry_expr}, {attempts_expr}, \
+            "SELECT display_id, task_id, status, {lifecycle}, {outcome}, {linked_observation_ids}, {produced_task_id}, {runner_expr}, {held_expr}, {retry_expr}, {attempts_expr}, \
              {verdict}, {base_sha}, {head_sha}, {log_path}, {transcript_path}, {started_at}, {completed_at}, {duration_ms}, \
              {critical_count}, {major_count}, {minor_count}, {findings_count_expr} \
              FROM external_reviews WHERE status IN ('pending','running','tooling_held')",
+            lifecycle = sql_col(&cols, "lifecycle", "NULL"),
+            outcome = sql_col(&cols, "outcome", "NULL"),
+            linked_observation_ids = sql_col(&cols, "linked_observation_ids", "NULL"),
+            produced_task_id = sql_col(&cols, "produced_task_id", "NULL"),
             verdict = sql_col(&cols, "verdict", "NULL"),
             base_sha = sql_col(&cols, "base_sha", "NULL"),
             head_sha = sql_col(&cols, "head_sha", "NULL"),
@@ -1341,22 +1424,26 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
                 display_id: r.get(0)?,
                 task_id: r.get(1)?,
                 status: r.get(2)?,
-                runner: r.get(3)?,
-                held_reason: r.get(4).ok().flatten(),
-                next_retry_at: r.get(5).ok().flatten(),
-                attempts: r.get(6)?,
-                verdict: r.get(7).ok().flatten(),
-                base_sha: r.get(8).ok().flatten(),
-                head_sha: r.get(9).ok().flatten(),
-                log_path: r.get(10).ok().flatten(),
-                transcript_path: r.get(11).ok().flatten(),
-                started_at: r.get(12).ok().flatten(),
-                completed_at: r.get(13).ok().flatten(),
-                duration_ms: r.get(14).ok().flatten(),
-                critical_count: r.get(15).ok().flatten(),
-                major_count: r.get(16).ok().flatten(),
-                minor_count: r.get(17).ok().flatten(),
-                findings_count: r.get(18).ok().flatten(),
+                lifecycle: r.get(3).ok().flatten(),
+                outcome: r.get(4).ok().flatten(),
+                linked_observation_ids: json_string_array(r.get::<_, String>(5).ok().as_deref()),
+                produced_task_id: r.get(6).ok().flatten(),
+                runner: r.get(7)?,
+                held_reason: r.get(8).ok().flatten(),
+                next_retry_at: r.get(9).ok().flatten(),
+                attempts: r.get(10)?,
+                verdict: r.get(11).ok().flatten(),
+                base_sha: r.get(12).ok().flatten(),
+                head_sha: r.get(13).ok().flatten(),
+                log_path: r.get(14).ok().flatten(),
+                transcript_path: r.get(15).ok().flatten(),
+                started_at: r.get(16).ok().flatten(),
+                completed_at: r.get(17).ok().flatten(),
+                duration_ms: r.get(18).ok().flatten(),
+                critical_count: r.get(19).ok().flatten(),
+                major_count: r.get(20).ok().flatten(),
+                minor_count: r.get(21).ok().flatten(),
+                findings_count: r.get(22).ok().flatten(),
             })
         })?;
         for r in review_iter.flatten() {
@@ -1517,7 +1604,7 @@ fn evidence_pointers(raw: Option<&str>) -> Vec<ArtifactPointer> {
 fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
     let cols = table_columns(conn, "intake")?;
     let sql = format!(
-        "SELECT display_id, status, {summary}, {body}, {updated_at}, {source_task}, {source_agent}, {risk_flags}, {cluster_key}, {decision}, {missing_info_question}, {routed_to_observation}, {routed_to_arch_review}, {duplicate_of}, {evidence}, {captured_at}, {recon_round}, {decision_metadata} FROM intake",
+        "SELECT display_id, status, {summary}, {body}, {updated_at}, {source_task}, {source_agent}, {risk_flags}, {cluster_key}, {decision}, {missing_info_question}, {routed_to_observation}, {routed_to_arch_review}, {duplicate_of}, {evidence}, {captured_at}, {recon_round}, {decision_metadata}, {lifecycle}, {waiting_kind}, {outcome}, {duplicate_of_id}, {produced_observation_id}, {produced_architecture_review_id}, {produced_task_id}, {produced_artifact_kind}, {produced_artifact_id} FROM intake",
         summary = sql_col(&cols, "summary", "''"), body = sql_col(&cols, "body", "NULL"),
         updated_at = if cols.iter().any(|c| c == "updated_at") { quote_ident("updated_at") } else { sql_col(&cols, "captured_at", "''") },
         source_task = sql_col(&cols, "source_task", "NULL"), source_agent = sql_col(&cols, "source_agent", "NULL"), risk_flags = sql_col(&cols, "risk_flags", "NULL"), cluster_key = sql_col(&cols, "cluster_key", "NULL"),
@@ -1525,6 +1612,15 @@ fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
         captured_at = sql_col(&cols, "captured_at", "NULL"),
         recon_round = sql_col(&cols, "recon_round", "NULL"),
         decision_metadata = sql_col(&cols, "decision_metadata", "NULL"),
+        lifecycle = sql_col(&cols, "lifecycle", "NULL"),
+        waiting_kind = sql_col(&cols, "waiting_kind", "NULL"),
+        outcome = sql_col(&cols, "outcome", "NULL"),
+        duplicate_of_id = sql_col(&cols, "duplicate_of_id", "NULL"),
+        produced_observation_id = sql_col(&cols, "produced_observation_id", "NULL"),
+        produced_architecture_review_id = sql_col(&cols, "produced_architecture_review_id", "NULL"),
+        produced_task_id = sql_col(&cols, "produced_task_id", "NULL"),
+        produced_artifact_kind = sql_col(&cols, "produced_artifact_kind", "NULL"),
+        produced_artifact_id = sql_col(&cols, "produced_artifact_id", "NULL"),
     );
     let mut stmt = conn.prepare(&sql)?;
     let iter = stmt.query_map([], |r| {
@@ -1543,6 +1639,9 @@ fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
             display_id: r.get(0)?,
             status: status.clone(),
             summary: r.get(2)?,
+            lifecycle: r.get(18).ok().flatten(),
+            waiting_kind: r.get(19).ok().flatten(),
+            outcome: r.get(20).ok().flatten(),
             body: r.get(3).ok().flatten(),
             updated_at: r.get(4)?,
             source_task: r.get(5).ok().flatten(),
@@ -1557,6 +1656,12 @@ fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
             routed_to_observation: r.get(11).ok().flatten(),
             routed_to_arch_review: r.get(12).ok().flatten(),
             duplicate_of: r.get(13).ok().flatten(),
+            duplicate_of_id: r.get(21).ok().flatten(),
+            produced_observation_id: r.get(22).ok().flatten(),
+            produced_architecture_review_id: r.get(23).ok().flatten(),
+            produced_task_id: r.get(24).ok().flatten(),
+            produced_artifact_kind: r.get(25).ok().flatten(),
+            produced_artifact_id: r.get(26).ok().flatten(),
             evidence_pointer: r.get(14).ok().flatten(),
             recent_events: Vec::new(),
             captured_at: r.get(15).ok().flatten(),
@@ -3291,18 +3396,15 @@ mod tests {
         let daemon = super::super::daemon::Liveness::Live { pid: 4242 };
         let model = store_flow_model(&rows, &health, &daemon, &ExternalReviewState::default());
 
-        assert_eq!(model.intake.draft, 2);
+        assert_eq!(model.intake.new, 2);
         assert_eq!(model.intake.triaging, 1);
-        assert_eq!(model.intake.needs_info, 1);
-        assert_eq!(model.intake.routed, 1);
-        assert_eq!(model.intake.dropped, 1);
+        assert_eq!(model.intake.waiting, 1);
+        assert_eq!(model.intake.closed, 2);
 
-        assert_eq!(model.observations.open, 1);
-        assert_eq!(model.observations.investigating, 1);
+        assert_eq!(model.observations.candidate, 1);
+        assert_eq!(model.observations.in_progress, 1);
         assert_eq!(model.observations.ready, 1);
-        assert_eq!(model.observations.resolved, 1);
-        assert_eq!(model.observations.wont_fix, 1);
-        assert_eq!(model.observations.investigation_failed, 1);
+        assert_eq!(model.observations.closed, 3);
 
         assert_eq!(model.tasks.active, 3);
         assert_eq!(model.tasks.held, 2);
@@ -3344,7 +3446,7 @@ mod tests {
             &super::super::daemon::Liveness::Dead,
             &ExternalReviewState::default(),
         );
-        assert_eq!(model.observations.open, 7);
+        assert_eq!(model.observations.candidate, 7);
     }
 
     #[test]
