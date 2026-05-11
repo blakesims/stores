@@ -462,6 +462,14 @@ fn map_claude_stream_event(line: &str) -> Vec<serde_json::Value> {
                     "cache_read_tokens": usage.get("cache_read_input_tokens"),
                 }));
             }
+            if let Some(error) = v.get("error") {
+                events.push(serde_json::json!({
+                    "type": "error",
+                    "subtype": error.get("subtype"),
+                    "message": error.get("message").or_else(|| error.get("type")).or_else(|| error.get("subtype")),
+                    "error": error,
+                }));
+            }
             events.push(serde_json::json!({
                 "type": "final_output",
                 "payload": v.get("structured_output").or_else(|| v.get("result")).cloned().unwrap_or(serde_json::Value::Null),
@@ -1065,6 +1073,28 @@ mod tests {
         );
         assert_eq!(events[0]["type"], "tool_end");
         assert_eq!(events[0]["ok"], true);
+    }
+
+    #[test]
+    fn maps_claude_result_error_before_final_output() {
+        let events = map_claude_stream_event(
+            r#"{"type":"result","error":{"subtype":"error_max_structured_output_retries","message":"schema retries exhausted"},"result":"fallback text","usage":{"input_tokens":10,"output_tokens":2}}"#,
+        );
+        assert!(events.iter().any(|e| e["type"] == "usage"));
+        let error_pos = events
+            .iter()
+            .position(|e| e["type"] == "error")
+            .expect("result.error should emit a semantic error event");
+        let final_pos = events
+            .iter()
+            .position(|e| e["type"] == "final_output")
+            .expect("result should still emit final_output for compatibility");
+        assert!(error_pos < final_pos);
+        assert_eq!(
+            events[error_pos]["subtype"],
+            "error_max_structured_output_retries"
+        );
+        assert_eq!(events[final_pos]["payload"], "fallback text");
     }
 
     #[test]

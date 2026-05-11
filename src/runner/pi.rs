@@ -141,6 +141,14 @@ fn text_from_pi_content(content: &serde_json::Value) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// Map JSONL events forwarded verbatim by `agents/sidecar/pi_runner.mjs` via
+/// `session.subscribe(...)`, plus the stores-owned `final_output` tool event.
+///
+/// The Pi SDK event names pinned here are the ones observed/consumed by the
+/// installed `pi-subagents` extension's foreground runner: `tool_execution_start`,
+/// `tool_execution_end`, `tool_result_end`, and `message_end`. Keep accepting
+/// both camelCase and snake_case tool id/name fields because SDK/plugin event
+/// payloads have used both spellings across integrations.
 fn map_pi_event(line: &str) -> Vec<serde_json::Value> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
         return Vec::new();
@@ -600,6 +608,9 @@ mod tests {
 
     #[test]
     fn maps_pi_tool_and_assistant_events() {
+        // Shape mirrors Pi SDK events forwarded by `session.subscribe` in the
+        // installed pi-subagents foreground runner (`toolName`, `toolCallId`,
+        // `args`, and `message` are the current event field names there).
         let events = map_pi_event(
             r#"{"type":"tool_execution_start","toolName":"bash","toolCallId":"t1","args":{"command":"echo hi"}}"#,
         );
