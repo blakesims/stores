@@ -464,6 +464,12 @@ fn obs_outcome(status: &str, resolution_kind: Option<&str>) -> Option<ObsOutcome
 
 /// Parses legacy resolution references. Precedence is kind first, then text: addressed_by_task
 /// accepts T###, addressed_by_observation accepts L###, addressed_by_commit treats other text as sha.
+///
+/// Migration note for T148 P3: legacy `addressed_by_observation` prose is ambiguous. Only
+/// `resolution_kind='superseded'` is authoritative supersede semantics; old
+/// `addressed_by_observation` rows with an `L###` resolution default conservatively to
+/// `closed_as_duplicate` / duplicate_of_id unless a migration caller supplies the explicit
+/// ADR 0002 `superseded_by_id` column.
 pub fn parse_resolution_reference(
     resolution_kind: Option<&str>,
     resolution: Option<&str>,
