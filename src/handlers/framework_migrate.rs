@@ -1160,42 +1160,338 @@ mod adr0002_backfill_idempotent {
 mod adr0002_backfill_matches_projection {
     use super::*;
     use rusqlite::Connection;
+    use serde_json::json;
 
     #[test]
     fn passes() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE substrate_migrations (applied_at TEXT, binary_version TEXT, table_name TEXT, column_name TEXT, ddl_applied TEXT);\
-             CREATE TABLE intake (id INTEGER PRIMARY KEY AUTOINCREMENT, display_id TEXT, status TEXT, decision TEXT, routed_to_observation TEXT);",
+             CREATE TABLE intake (id INTEGER PRIMARY KEY AUTOINCREMENT, display_id TEXT, status TEXT, decision TEXT, routed_to_observation TEXT, routed_to_arch_review TEXT, duplicate_of TEXT);\
+             CREATE TABLE observations (id INTEGER PRIMARY KEY AUTOINCREMENT, display_id TEXT, status TEXT, intent_contract TEXT, pending_architecture_review INTEGER, resolution_kind TEXT, resolution TEXT, merge_target_id TEXT, resolved_by TEXT, task_id TEXT);\
+             CREATE TABLE architecture_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, display_id TEXT, status TEXT, verdict TEXT, source_observation TEXT, cascade_decisions TEXT, updated_at TEXT);",
         ).unwrap();
-        conn.execute("INSERT INTO intake (display_id,status,decision,routed_to_observation) VALUES ('I902','routed','normal_observation','L902')", []).unwrap();
-        apply_framework_drift(&conn).unwrap();
-        let got: (String, Option<String>) = conn
-            .query_row(
-                "SELECT lifecycle,produced_observation_id FROM intake WHERE display_id='I902'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        let p = crate::flow::adr0002_projection::project_intake(
-            &crate::flow::adr0002_projection::IntakeRowInput {
-                display_id: "I902",
-                status: "routed",
-                decision: Some("normal_observation"),
-                routed_to_observation: Some("L902"),
-                routed_to_arch_review: None,
-                produced_task_id: None,
-                produced_artifact_kind: Some("observation"),
-                produced_artifact_id: Some("L902"),
-                duplicate_of: None,
-            },
-        );
-        assert_eq!(
-            got,
+        let intake = [
+            ("I901", "draft", None, None, None, None),
+            ("I902", "triaging", None, None, None, None),
+            ("I903", "needs_info", Some("needs_info"), None, None, None),
             (
-                p.lifecycle.as_str().to_string(),
-                p.references.produced_observation_id
-            )
+                "I904",
+                "routed",
+                Some("duplicate"),
+                None,
+                None,
+                Some("I901"),
+            ),
+            ("I905", "routed", Some("fast_track"), None, None, None),
+            (
+                "I906",
+                "routed",
+                Some("normal_observation"),
+                Some("L906"),
+                None,
+                None,
+            ),
+            (
+                "I907",
+                "routed",
+                Some("arch_review_candidate"),
+                Some("L907"),
+                Some("A907"),
+                None,
+            ),
+            ("I908", "dropped", Some("reject_noise"), None, None, None),
+        ];
+        for (id, status, decision, obs, arch, dup) in intake {
+            conn.execute("INSERT INTO intake (display_id,status,decision,routed_to_observation,routed_to_arch_review,duplicate_of) VALUES (?1,?2,?3,?4,?5,?6)", rusqlite::params![id,status,decision,obs,arch,dup]).unwrap();
+        }
+        let observations = [
+            (
+                "L901",
+                "open",
+                Some("draft"),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "L902",
+                "needs_investigation",
+                Some("ready"),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "L903",
+                "investigating",
+                None,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "L904",
+                "investigated",
+                Some("ready"),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "L905",
+                "investigation_failed",
+                Some("draft"),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "L906",
+                "confirmed",
+                Some("ready"),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "L907",
+                "ready",
+                Some("ready"),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "L908",
+                "needs_info",
+                Some("draft"),
+                1,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+            (
+                "L909",
+                "in_progress",
+                Some("ready"),
+                0,
+                None,
+                None,
+                None,
+                None,
+                Some("T909"),
+            ),
+            (
+                "L910",
+                "resolved",
+                Some("ready"),
+                0,
+                Some("addressed_by_task"),
+                Some("T910"),
+                None,
+                None,
+                None,
+            ),
+            (
+                "L911",
+                "resolved",
+                Some("ready"),
+                0,
+                Some("addressed_by_commit"),
+                Some("abc123"),
+                None,
+                None,
+                None,
+            ),
+            (
+                "L912",
+                "resolved",
+                Some("ready"),
+                0,
+                Some("superseded"),
+                Some("L999"),
+                None,
+                None,
+                None,
+            ),
+        ];
+        for (id, status, contract, pending, rk, res, merge, resolved_by, task) in observations {
+            let ic = contract.map(|c| json!({"contract_state": c}).to_string());
+            conn.execute("INSERT INTO observations (display_id,status,intent_contract,pending_architecture_review,resolution_kind,resolution,merge_target_id,resolved_by,task_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", rusqlite::params![id,status,ic,pending,rk,res,merge,resolved_by,task]).unwrap();
+        }
+        let arch = [
+            ("A901", "pending", None, Some("L908"), None),
+            ("A902", "in_review", None, Some("L902"), None),
+            (
+                "A903",
+                "awaiting_human_ratification",
+                None,
+                Some("L903"),
+                None,
+            ),
+            (
+                "A904",
+                "verdict_issued",
+                Some("allow_local_fix"),
+                Some("L904"),
+                None,
+            ),
+            (
+                "A905",
+                "verdict_issued",
+                Some("create_primitive_task"),
+                Some("L905"),
+                Some("T905"),
+            ),
+            ("A906", "withdrawn", None, Some("L906"), None),
+            ("A907", "superseded", None, Some("L907"), None),
+        ];
+        for (id, status, verdict, source, task) in arch {
+            let cascade =
+                task.map(|t| json!([{"decision":"create_followup","target":t}]).to_string());
+            conn.execute("INSERT INTO architecture_reviews (display_id,status,verdict,source_observation,cascade_decisions,updated_at) VALUES (?1,?2,?3,?4,?5,'now')", rusqlite::params![id,status,verdict,source,cascade]).unwrap();
+        }
+
+        apply_framework_drift(&conn).unwrap();
+        let mut checked = 0;
+        for (id, status, decision, obs, arch, dup) in intake {
+            let (kind, artifact) = if let Some(v) = obs {
+                (Some("observation"), Some(v))
+            } else if let Some(v) = arch {
+                (Some("architecture_review"), Some(v))
+            } else {
+                (None, None)
+            };
+            let p = crate::flow::adr0002_projection::project_intake(
+                &crate::flow::adr0002_projection::IntakeRowInput {
+                    display_id: id,
+                    status,
+                    decision,
+                    routed_to_observation: obs,
+                    routed_to_arch_review: arch,
+                    produced_task_id: None,
+                    produced_artifact_kind: kind,
+                    produced_artifact_id: artifact,
+                    duplicate_of: dup,
+                },
+            );
+            let got: (String, Option<String>, Option<String>) = conn.query_row("SELECT lifecycle,outcome,produced_observation_id FROM intake WHERE display_id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+            assert_eq!(
+                got,
+                (
+                    p.lifecycle.as_str().into(),
+                    p.outcome.map(|o| o.as_str().into()),
+                    p.references.produced_observation_id
+                ),
+                "{id}"
+            );
+            checked += 1;
+        }
+        for (id, status, contract, pending, rk, res, merge, resolved_by, task) in observations {
+            let contract_state = match contract {
+                Some("draft") => Some("draft"),
+                Some("ready") => Some("approved"),
+                _ => Some("none"),
+            };
+            let open = match id {
+                "L902" => Some("A902"),
+                "L903" => Some("A903"),
+                "L908" => Some("A901"),
+                _ => None,
+            };
+            let superseded = if rk == Some("superseded") { res } else { None };
+            let p = crate::flow::adr0002_projection::project_observation(
+                &crate::flow::adr0002_projection::ObsRowInput {
+                    display_id: id,
+                    status,
+                    contract_state,
+                    pending_architecture_review: Some(pending != 0),
+                    clearable_by_ruling: None,
+                    open_architecture_review_id: open,
+                    resolution_kind: rk,
+                    resolution: res,
+                    merge_target_id: merge,
+                    resolved_by,
+                    task_id: task,
+                    addressed_by_commit_sha: None,
+                    superseded_by_id: superseded,
+                },
+                None,
+            );
+            let got: (String, String, Option<String>) = conn
+                .query_row(
+                    "SELECT lifecycle,contract_state,outcome FROM observations WHERE display_id=?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                got,
+                (
+                    p.lifecycle.as_str().into(),
+                    p.contract_state.as_str().into(),
+                    p.outcome.map(|o| o.as_str().into())
+                ),
+                "{id}"
+            );
+            checked += 1;
+        }
+        for (id, status, verdict, source, task) in arch {
+            let linked = source.map(|s| vec![s]).unwrap_or_default();
+            let p = crate::flow::adr0002_projection::project_arch_review(
+                &crate::flow::adr0002_projection::ArchReviewRowInput {
+                    display_id: id,
+                    status,
+                    verdict,
+                    source_observation: source,
+                    source_intake: None,
+                    linked_observation_ids: linked,
+                    supersedes: None,
+                    merge_target_id: None,
+                    produced_task_id: task,
+                    superseded_by_id: None,
+                    updated_at: Some("now"),
+                },
+            );
+            let got: (String, Option<String>, Option<String>) = conn.query_row("SELECT lifecycle,outcome,produced_task_id FROM architecture_reviews WHERE display_id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+            assert_eq!(
+                got,
+                (
+                    p.lifecycle.as_str().into(),
+                    p.outcome.map(|o| o.as_str().into()),
+                    p.references.produced_task_id
+                ),
+                "{id}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 20,
+            "checked {checked} rows against projection oracle"
         );
     }
 }
