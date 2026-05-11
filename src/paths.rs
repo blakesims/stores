@@ -119,8 +119,14 @@ pub fn resolve_stores_root(flag: Option<&str>) -> Result<PathBuf> {
             raw
         );
     }
+    if !path.is_dir() {
+        bail!(
+            "--stores-root target '{}' is not a directory; pass the directory containing .stores/",
+            path.display()
+        );
+    }
     let stores = path.join(".stores");
-    if !stores.exists() {
+    if !stores.is_dir() {
         bail!(
             "--stores-root target '{}' is missing a .stores/ directory; run `stores init` there first",
             path.display()
@@ -526,6 +532,19 @@ mod tests {
             msg.contains("--stores-root"),
             "error must mention flag: {msg}"
         );
+    }
+
+    #[test]
+    fn resolve_stores_root_errors_when_dot_stores_is_file() {
+        let _guard = cwd_lock().lock().unwrap();
+        let tmp = tempfile::tempdir().expect("tempdir failed");
+        std::fs::write(tmp.path().join(".stores"), "not a dir").unwrap();
+
+        let err = resolve_stores_root(Some(tmp.path().to_str().unwrap()))
+            .expect_err("must error when .stores is not a directory");
+        let msg = err.to_string();
+        assert!(msg.contains(".stores/"), "error must mention .stores/: {msg}");
+        assert!(msg.contains("--stores-root"), "error must mention flag: {msg}");
     }
 
     #[test]

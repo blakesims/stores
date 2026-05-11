@@ -74,9 +74,9 @@ fn decide_route(
     root_flag: Option<&str>,
     root_env_present: bool,
 ) -> Result<RouteChoice> {
-    let meta_non_empty = meta_flag.is_some_and(|s| !s.is_empty()) || meta_env_present;
-    let root_non_empty = root_flag.is_some_and(|s| !s.is_empty()) || root_env_present;
-    if meta_non_empty && root_non_empty {
+    let meta_source_present = meta_flag.is_some() || meta_env_present;
+    let root_source_present = root_flag.is_some() || root_env_present;
+    if meta_source_present && root_source_present {
         anyhow::bail!(
             "--meta and --stores-root are mutually exclusive: --meta files at the META substrate, --stores-root operates on a substratum store. Pick one."
         );
@@ -424,6 +424,12 @@ mod tests {
     #[test]
     fn decide_route_errors_when_meta_and_stores_root_conflict() {
         let err = decide_route(Some("/meta"), false, Some("/root"), false).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+
+        let err = decide_route(Some(""), false, Some(""), false).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+
+        let err = decide_route(Some("/meta"), false, Some(""), false).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
 
         let err = decide_route(None, true, None, true).unwrap_err();
