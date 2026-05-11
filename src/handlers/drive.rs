@@ -829,6 +829,7 @@ trait RoleRunner {
         brief: &str,
         schema: Option<&str>,
         workspace_path: Option<&str>,
+        invocation: Option<&crate::runner::RunnerInvocationContext>,
     ) -> Result<RunnerOutput>;
 }
 
@@ -848,9 +849,16 @@ impl RoleRunner for BorrowedRoleRunner<'_> {
         brief: &str,
         schema: Option<&str>,
         workspace_path: Option<&str>,
+        invocation: Option<&crate::runner::RunnerInvocationContext>,
     ) -> Result<RunnerOutput> {
-        self.runner
-            .spawn(role, system_prompt, brief, schema, workspace_path)
+        self.runner.spawn_with_invocation(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            invocation,
+        )
     }
 }
 
@@ -870,9 +878,16 @@ impl RoleRunner for FixedRoleRunner {
         brief: &str,
         schema: Option<&str>,
         workspace_path: Option<&str>,
+        invocation: Option<&crate::runner::RunnerInvocationContext>,
     ) -> Result<RunnerOutput> {
-        self.runner
-            .spawn(role, system_prompt, brief, schema, workspace_path)
+        self.runner.spawn_with_invocation(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            invocation,
+        )
     }
 }
 
@@ -945,11 +960,152 @@ impl RoleRunner for ConfigRoleRunner {
         brief: &str,
         schema: Option<&str>,
         workspace_path: Option<&str>,
+        invocation: Option<&crate::runner::RunnerInvocationContext>,
     ) -> Result<RunnerOutput> {
         let choice = self.choice_for(role)?;
         let runner = self.build_choice(&choice)?;
-        runner.spawn(role, system_prompt, brief, schema, workspace_path)
+        runner.spawn_with_invocation(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            invocation,
+        )
     }
+}
+
+fn runner_runs_dir(workspace_path: &str) -> std::path::PathBuf {
+    std::env::var_os("STORES_RUNS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(workspace_path)
+                .join(".stores")
+                .join("runs")
+        })
+}
+
+fn prepare_runner_invocation(
+    display_id: &str,
+    phase: i64,
+    cycle: i64,
+    role: &str,
+    runner: &str,
+    workspace_path: &str,
+) -> Result<crate::runner::RunnerInvocationContext> {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let runs_dir = runner_runs_dir(workspace_path);
+    std::fs::create_dir_all(&runs_dir).with_context(|| {
+        format!(
+            "creating runs dir for live runner invocation: {}",
+            runs_dir.display()
+        )
+    })?;
+    let flat_transcript_path = runs_dir.join(format!("{session_id}.jsonl"));
+    let stderr_log_path = runs_dir.join(format!("{session_id}.stderr.log"));
+    let current_path = runs_dir.join(format!("current-{display_id}-{role}.json"));
+    let now = crate::handlers::row::now_iso8601();
+    let payload = serde_json::json!({
+        "display_id": display_id,
+        "phase": phase,
+        "cycle": cycle,
+        "role": role,
+        "runner": runner,
+        "session_id": session_id,
+        "status": "running",
+        "started_at": now,
+        "updated_at": now,
+        "transcript_path": flat_transcript_path,
+        "stderr_log_path": stderr_log_path,
+    });
+    std::fs::write(&current_path, serde_json::to_vec_pretty(&payload)?).with_context(|| {
+        format!(
+            "writing live runner invocation marker: {}",
+            current_path.display()
+        )
+    })?;
+    Ok(crate::runner::RunnerInvocationContext {
+        session_id,
+        flat_transcript_path,
+        stderr_log_path,
+    })
+}
+
+fn fail_runner_invocation(
+    display_id: &str,
+    phase: i64,
+    cycle: i64,
+    role: &str,
+    runner: &str,
+    workspace_path: &str,
+    invocation: &crate::runner::RunnerInvocationContext,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let runs_dir = runner_runs_dir(workspace_path);
+    let current_path = runs_dir.join(format!("current-{display_id}-{role}.json"));
+    let now = crate::handlers::row::now_iso8601();
+    let payload = serde_json::json!({
+        "display_id": display_id,
+        "phase": phase,
+        "cycle": cycle,
+        "role": role,
+        "runner": runner,
+        "session_id": invocation.session_id,
+        "status": "failed",
+        "updated_at": now,
+        "transcript_path": invocation.flat_transcript_path,
+        "stderr_log_path": invocation.stderr_log_path,
+        "error": error.to_string(),
+    });
+    std::fs::write(&current_path, serde_json::to_vec_pretty(&payload)?).with_context(|| {
+        format!(
+            "writing live runner invocation marker: {}",
+            current_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn finish_runner_invocation(
+    display_id: &str,
+    phase: i64,
+    cycle: i64,
+    role: &str,
+    runner: &str,
+    workspace_path: &str,
+    out: &RunnerOutput,
+) -> Result<()> {
+    let runs_dir = runner_runs_dir(workspace_path);
+    let current_path = runs_dir.join(format!("current-{display_id}-{role}.json"));
+    let now = crate::handlers::row::now_iso8601();
+    let status = if out.exit_code == 0 && out.payload_error.is_none() {
+        "completed"
+    } else {
+        "failed"
+    };
+    let payload = serde_json::json!({
+        "display_id": display_id,
+        "phase": phase,
+        "cycle": cycle,
+        "role": role,
+        "runner": runner,
+        "session_id": out.session_id,
+        "status": status,
+        "started_at": out.telemetry.started_at,
+        "updated_at": now,
+        "ended_at": out.telemetry.ended_at,
+        "exit_code": out.exit_code,
+        "transcript_path": out.telemetry.transcript_path,
+        "stderr_log_path": out.telemetry.stderr_log_path,
+        "payload_error": out.payload_error,
+    });
+    std::fs::write(&current_path, serde_json::to_vec_pretty(&payload)?).with_context(|| {
+        format!(
+            "writing live runner invocation marker: {}",
+            current_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn build_role_runner(args: &DriveArgs) -> Result<Box<dyn RoleRunner>> {
@@ -1519,6 +1675,14 @@ fn drive_loop_with_role_runner(
         );
         let _ = std::io::stderr().flush();
         let _hb = HeartbeatPump::start(display_id, db_path()?)?;
+        let invocation = prepare_runner_invocation(
+            display_id,
+            phase_for_log,
+            cycle_for_log,
+            agent_role,
+            &runner_name,
+            workspace_path,
+        )?;
         let spawn_start = std::time::Instant::now();
         let run_out = match role_runner.spawn_for_role(
             &agent_name_normalized,
@@ -1526,9 +1690,20 @@ fn drive_loop_with_role_runner(
             &brief_markdown,
             schema_text,
             Some(workspace_path),
+            Some(&invocation),
         ) {
             Ok(out) => out,
             Err(spawn_err) => {
+                let _ = fail_runner_invocation(
+                    display_id,
+                    phase_for_log,
+                    cycle_for_log,
+                    agent_role,
+                    &runner_name,
+                    workspace_path,
+                    &invocation,
+                    &spawn_err,
+                );
                 // Spawn/launch failure: record attempted-invocation telemetry before
                 // routing to fire_mark_drive_failed. Every attempted spawn has an
                 // agent_runs row (pi ruling, MAJOR 1).
@@ -1592,6 +1767,15 @@ fn drive_loop_with_role_runner(
                 bail!("spawn failure for role '{agent_role}' via runner '{runner_name}': {spawn_err:#}");
             }
         };
+        finish_runner_invocation(
+            display_id,
+            phase_for_log,
+            cycle_for_log,
+            agent_role,
+            &runner_name,
+            workspace_path,
+            &run_out,
+        )?;
         db::insert_agent_run(
             conn,
             display_id,

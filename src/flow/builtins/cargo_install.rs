@@ -71,8 +71,8 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
     let install = liveness::run_streaming_with_liveness(
         &mut cmd,
         &LivenessThresholds::from_env(),
-        |_| {},
-        |_| {},
+        |_| Ok(()),
+        |_| Ok(()),
     )
     .with_context(|| format!("spawning cargo install for {}", display_id))?;
 

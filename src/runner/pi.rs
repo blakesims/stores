@@ -16,7 +16,7 @@ use std::process::Command;
 use std::rc::Rc;
 
 use super::liveness::{self, LivenessClass, LivenessThresholds};
-use super::{AgentRunTelemetry, Runner, RunnerOutput};
+use super::{AgentRunTelemetry, Runner, RunnerInvocationContext, RunnerOutput};
 
 pub struct PiRunner {
     node_bin: PathBuf,
@@ -67,17 +67,20 @@ fn transcript_path(cwd: &Path, session_id: &str) -> PathBuf {
     runs_dir.join(format!("{session_id}.jsonl"))
 }
 
-fn open_live_transcript(
-    cwd: &Path,
-    session_id: &str,
-) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
-    let path = transcript_path(cwd, session_id);
+fn stderr_path(cwd: &Path, session_id: &str) -> PathBuf {
+    let runs_dir = std::env::var_os("STORES_RUNS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cwd.join(".stores").join("runs"));
+    runs_dir.join(format!("{session_id}.stderr.log"))
+}
+
+fn open_live_file(path: PathBuf, label: &str) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("transcript path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent).with_context(|| {
         format!(
-            "pi transcript write failed: could not create runs dir {} (no /tmp fallback)",
+            "pi {label} write failed: could not create runs dir {} (no /tmp fallback)",
             parent.display()
         )
     })?;
@@ -86,19 +89,37 @@ fn open_live_transcript(
         .truncate(true)
         .write(true)
         .open(&path)
-        .with_context(|| {
-            format!(
-                "pi transcript write failed: could not open {}",
-                path.display()
-            )
-        })?;
+        .with_context(|| format!("pi {label} write failed: could not open {}", path.display()))?;
     Ok((path, Rc::new(RefCell::new(file))))
 }
 
-fn append_live_line(file: &Rc<RefCell<File>>, line: &str) {
+fn open_live_transcript(
+    cwd: &Path,
+    session_id: &str,
+    invocation: Option<&RunnerInvocationContext>,
+) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
+    let path = invocation
+        .map(|i| i.flat_transcript_path.clone())
+        .unwrap_or_else(|| transcript_path(cwd, session_id));
+    open_live_file(path, "transcript")
+}
+
+fn open_live_stderr(
+    cwd: &Path,
+    session_id: &str,
+    invocation: Option<&RunnerInvocationContext>,
+) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
+    let path = invocation
+        .map(|i| i.stderr_log_path.clone())
+        .unwrap_or_else(|| stderr_path(cwd, session_id));
+    open_live_file(path, "stderr")
+}
+
+fn append_live_line(file: &Rc<RefCell<File>>, line: &str) -> anyhow::Result<()> {
     let mut file = file.borrow_mut();
-    let _ = writeln!(file, "{line}");
-    let _ = file.flush();
+    writeln!(file, "{line}")?;
+    file.flush()?;
+    Ok(())
 }
 
 /// Write the JSONL transcript to `<runs_dir>/<session_id>.jsonl`.
@@ -206,20 +227,19 @@ fn validate_payload(schema: &str, payload: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-impl Runner for PiRunner {
-    fn name(&self) -> &str {
-        "pi"
-    }
-
-    fn spawn(
+impl PiRunner {
+    fn spawn_inner(
         &self,
         role: &str,
         system_prompt: &str,
         brief: &str,
         schema: Option<&str>,
         workspace_path: Option<&str>,
+        invocation: Option<&RunnerInvocationContext>,
     ) -> Result<RunnerOutput> {
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = invocation
+            .map(|i| i.session_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let cwd = resolve_cwd(workspace_path)?;
         let tmp = tempfile::Builder::new().prefix("stores-pi-").tempdir()?;
         let system_path = tmp.path().join("system.md");
@@ -248,15 +268,19 @@ impl Runner for PiRunner {
         if let Some(p) = &schema_path {
             cmd.arg("--schema").arg(p);
         }
-        let (live_transcript_path, live_transcript) = open_live_transcript(&cwd, &session_id)
-            .context("pi transcript write failed; not launching runner")?;
+        let (live_transcript_path, live_transcript) =
+            open_live_transcript(&cwd, &session_id, invocation)
+                .context("pi transcript write failed; not launching runner")?;
+        let (stderr_log_path, live_stderr) = open_live_stderr(&cwd, &session_id, invocation)
+            .context("pi stderr log write failed; not launching runner")?;
         let started_at = crate::handlers::row::now_iso8601();
         let stdout_transcript = Rc::clone(&live_transcript);
+        let stderr_log = Rc::clone(&live_stderr);
         let output = liveness::run_streaming_with_liveness(
             &mut cmd,
             &LivenessThresholds::from_env(),
             move |line| append_live_line(&stdout_transcript, line),
-            |_| {},
+            move |line| append_live_line(&stderr_log, line),
         )
         .context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
         let ended_at = crate::handlers::row::now_iso8601();
@@ -284,7 +308,7 @@ impl Runner for PiRunner {
             tokens_out,
             prompt_cache_hits,
             transcript_path,
-            stderr_log_path: None,
+            stderr_log_path: Some(stderr_log_path.to_string_lossy().to_string()),
         };
 
         if matches!(
@@ -351,6 +375,42 @@ impl Runner for PiRunner {
     }
 }
 
+impl Runner for PiRunner {
+    fn name(&self) -> &str {
+        "pi"
+    }
+
+    fn spawn(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Result<RunnerOutput> {
+        self.spawn_inner(role, system_prompt, brief, schema, workspace_path, None)
+    }
+
+    fn spawn_with_invocation(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+        invocation: Option<&RunnerInvocationContext>,
+    ) -> Result<RunnerOutput> {
+        self.spawn_inner(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            invocation,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +459,49 @@ mod tests {
             .unwrap();
         assert_eq!(out.structured_output_source, Some("pi-tool"));
         assert_eq!(out.structured_output.unwrap()["summary"], "ok");
+    }
+
+    #[test]
+    fn spawn_with_invocation_uses_discoverable_live_paths_and_stderr() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let runs = tempfile::tempdir().unwrap();
+        let transcript = runs.path().join("known-session.jsonl");
+        let stderr_log = runs.path().join("known-session.stderr.log");
+        let invocation = RunnerInvocationContext {
+            session_id: "known-session".to_string(),
+            flat_transcript_path: transcript.clone(),
+            stderr_log_path: stderr_log.clone(),
+        };
+        let (_d, helper) = shim("#!/bin/sh\necho live-one\necho live-err >&2\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"ok\"}}'\n");
+        let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
+        let schema = r#"{"type":"object","required":["role","summary"],"properties":{"role":{"const":"executor"},"summary":{"type":"string"}}}"#;
+        let out = runner
+            .spawn_with_invocation(
+                "executor",
+                "sys",
+                "brief",
+                Some(schema),
+                Some(env!("CARGO_MANIFEST_DIR")),
+                Some(&invocation),
+            )
+            .unwrap();
+        assert_eq!(out.session_id.as_deref(), Some("known-session"));
+        assert_eq!(
+            out.telemetry.transcript_path.as_deref(),
+            Some(transcript.to_str().unwrap())
+        );
+        assert_eq!(
+            out.telemetry.stderr_log_path.as_deref(),
+            Some(stderr_log.to_str().unwrap())
+        );
+        assert!(fs::read_to_string(&transcript)
+            .unwrap()
+            .contains("live-one"));
+        assert!(fs::read_to_string(&stderr_log)
+            .unwrap()
+            .contains("live-err"));
     }
 
     #[test]

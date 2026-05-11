@@ -35,6 +35,7 @@
 /// 3. Add a match arm to `select` in this module.
 /// 4. Gate behind a Cargo feature if the runner has heavy dependencies.
 use anyhow::{bail, Result};
+use std::path::PathBuf;
 
 pub mod codex;
 pub mod liveness;
@@ -62,6 +63,18 @@ pub mod pi;
 
 #[cfg(feature = "runner-pi")]
 pub use pi::PiRunner;
+
+/// Pre-spawn live-discoverability context allocated by the drive layer.
+///
+/// Runners should honor this when present instead of minting their own session id
+/// and transcript paths, so operators can discover live output while `spawn` is
+/// still blocked on the child process.
+#[derive(Debug, Clone)]
+pub struct RunnerInvocationContext {
+    pub session_id: String,
+    pub flat_transcript_path: PathBuf,
+    pub stderr_log_path: PathBuf,
+}
 
 /// Per-agent invocation telemetry emitted by a runner at source.
 #[derive(Debug, Clone, Default)]
@@ -224,6 +237,22 @@ pub trait Runner: Send {
         schema: Option<&str>,
         workspace_path: Option<&str>,
     ) -> Result<RunnerOutput>;
+
+    /// Spawn with an optional preallocated live invocation context.
+    ///
+    /// The default preserves existing runner behavior for implementations that
+    /// do not yet support live discoverability.
+    fn spawn_with_invocation(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+        _invocation: Option<&RunnerInvocationContext>,
+    ) -> Result<RunnerOutput> {
+        self.spawn(role, system_prompt, brief, schema, workspace_path)
+    }
 }
 
 /// Returns a comma-separated list of always-available runners (no feature gate).

@@ -166,8 +166,8 @@ fn killed_payload_error(c: &LivenessClass) -> Option<String> {
 pub fn run_streaming_with_liveness(
     cmd: &mut Command,
     t: &LivenessThresholds,
-    mut on_stdout_line: impl FnMut(&str),
-    mut on_stderr_line: impl FnMut(&str),
+    mut on_stdout_line: impl FnMut(&str) -> anyhow::Result<()>,
+    mut on_stderr_line: impl FnMut(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<StreamingOutput> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("failed to spawn streaming child")?;
@@ -206,6 +206,7 @@ pub fn run_streaming_with_liveness(
     let mut stderr = String::new();
     let mut eof_count = 0usize;
     let mut killed_for = None;
+    let mut sink_error: Option<anyhow::Error> = None;
 
     loop {
         let idle = last_output_at.elapsed().as_secs() as i64;
@@ -222,15 +223,23 @@ pub fn run_streaming_with_liveness(
             Ok(Stream::Stdout(line)) => {
                 stdout.push_str(&line);
                 stdout.push('\n');
+                if let Err(e) = on_stdout_line(&line) {
+                    let _ = child.kill();
+                    sink_error = Some(e.context("runner stdout live sink failed"));
+                    break;
+                }
                 touch_heartbeat_file_from_env();
-                on_stdout_line(&line);
                 last_output_at = Instant::now();
             }
             Ok(Stream::Stderr(line)) => {
                 stderr.push_str(&line);
                 stderr.push('\n');
+                if let Err(e) = on_stderr_line(&line) {
+                    let _ = child.kill();
+                    sink_error = Some(e.context("runner stderr live sink failed"));
+                    break;
+                }
                 touch_heartbeat_file_from_env();
-                on_stderr_line(&line);
                 last_output_at = Instant::now();
             }
             Ok(Stream::Eof) => {
@@ -245,19 +254,25 @@ pub fn run_streaming_with_liveness(
     }
 
     let status = child.wait().context("failed to wait on streaming child")?;
-    while eof_count < 2 {
+    while sink_error.is_none() && eof_count < 2 {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Stream::Stdout(line)) => {
                 stdout.push_str(&line);
                 stdout.push('\n');
+                if let Err(e) = on_stdout_line(&line) {
+                    sink_error = Some(e.context("runner stdout live sink failed"));
+                    break;
+                }
                 touch_heartbeat_file_from_env();
-                on_stdout_line(&line);
             }
             Ok(Stream::Stderr(line)) => {
                 stderr.push_str(&line);
                 stderr.push('\n');
+                if let Err(e) = on_stderr_line(&line) {
+                    sink_error = Some(e.context("runner stderr live sink failed"));
+                    break;
+                }
                 touch_heartbeat_file_from_env();
-                on_stderr_line(&line);
             }
             Ok(Stream::Eof) => {
                 eof_count += 1;
@@ -267,6 +282,9 @@ pub fn run_streaming_with_liveness(
     }
     let _ = out_handle.join();
     let _ = err_handle.join();
+    if let Some(e) = sink_error {
+        return Err(e);
+    }
     let exit_code = if killed_for.is_some() {
         -1
     } else {
@@ -404,8 +422,8 @@ mod tests {
                 no_output_secs: 5,
                 wall_clock_max_secs: 30,
             },
-            |_| {},
-            |_| {},
+            |_| Ok(()),
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(out.exit_code, 0);
@@ -435,8 +453,9 @@ mod tests {
                 if line == "first" {
                     first_stdout_at = Some(started.elapsed());
                 }
+                Ok(())
             },
-            |_| {},
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(out.exit_code, 0);
@@ -451,6 +470,26 @@ mod tests {
     }
 
     #[test]
+    fn streaming_callback_error_surfaces() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("echo first; sleep 5");
+        let err = run_streaming_with_liveness(
+            &mut cmd,
+            &LivenessThresholds {
+                no_output_secs: 10,
+                wall_clock_max_secs: 30,
+            },
+            |_| anyhow::bail!("sink exploded"),
+            |_| Ok(()),
+        )
+        .expect_err("sink failure must fail runner infrastructure");
+        assert!(
+            err.to_string().contains("runner stdout live sink failed"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
     fn cargo_no_output_pattern_killed_within_threshold() {
         let started = Instant::now();
         let mut cmd = Command::new("/bin/sh");
@@ -461,8 +500,8 @@ mod tests {
                 no_output_secs: 1,
                 wall_clock_max_secs: 30,
             },
-            |_| {},
-            |_| {},
+            |_| Ok(()),
+            |_| Ok(()),
         )
         .unwrap();
         assert!(
@@ -488,8 +527,8 @@ mod tests {
                 no_output_secs: 30,
                 wall_clock_max_secs: 1,
             },
-            |_| {},
-            |_| {},
+            |_| Ok(()),
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(out.exit_code, 0);

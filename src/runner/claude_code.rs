@@ -54,7 +54,7 @@ use std::process::Command;
 use std::rc::Rc;
 
 use super::liveness::{self, LivenessThresholds};
-use super::{AgentRunTelemetry, Runner, RunnerOutput};
+use super::{AgentRunTelemetry, Runner, RunnerInvocationContext, RunnerOutput};
 
 use super::sap::{extract_all_json_objects, pick_best_sap_candidate};
 
@@ -305,17 +305,21 @@ fn transcript_path(cwd: &Path, session_id: &str) -> PathBuf {
     runs_dir.join(format!("{session_id}.jsonl"))
 }
 
-fn open_live_transcript(
-    cwd: &Path,
-    session_id: &str,
-) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
-    let path = transcript_path(cwd, session_id);
+fn stderr_path(cwd: &Path, session_id: &str) -> PathBuf {
+    let runs_dir = match std::env::var_os("STORES_RUNS_DIR") {
+        Some(p) => PathBuf::from(p),
+        None => cwd.join(".stores").join("runs"),
+    };
+    runs_dir.join(format!("{session_id}.stderr.log"))
+}
+
+fn open_live_file(path: PathBuf, label: &str) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("transcript path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent).with_context(|| {
         format!(
-            "transcript write failed: could not create runs dir {} (no /tmp fallback)",
+            "{label} write failed: could not create runs dir {} (no /tmp fallback)",
             parent.display()
         )
     })?;
@@ -324,14 +328,37 @@ fn open_live_transcript(
         .truncate(true)
         .write(true)
         .open(&path)
-        .with_context(|| format!("transcript write failed: could not open {}", path.display()))?;
+        .with_context(|| format!("{label} write failed: could not open {}", path.display()))?;
     Ok((path, Rc::new(RefCell::new(file))))
 }
 
-fn append_live_line(file: &Rc<RefCell<File>>, line: &str) {
+fn open_live_transcript(
+    cwd: &Path,
+    session_id: &str,
+    invocation: Option<&RunnerInvocationContext>,
+) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
+    let path = invocation
+        .map(|i| i.flat_transcript_path.clone())
+        .unwrap_or_else(|| transcript_path(cwd, session_id));
+    open_live_file(path, "transcript")
+}
+
+fn open_live_stderr(
+    cwd: &Path,
+    session_id: &str,
+    invocation: Option<&RunnerInvocationContext>,
+) -> anyhow::Result<(PathBuf, Rc<RefCell<File>>)> {
+    let path = invocation
+        .map(|i| i.stderr_log_path.clone())
+        .unwrap_or_else(|| stderr_path(cwd, session_id));
+    open_live_file(path, "stderr")
+}
+
+fn append_live_line(file: &Rc<RefCell<File>>, line: &str) -> anyhow::Result<()> {
     let mut file = file.borrow_mut();
-    let _ = writeln!(file, "{line}");
-    let _ = file.flush();
+    writeln!(file, "{line}")?;
+    file.flush()?;
+    Ok(())
 }
 
 /// Write the stream-json transcript to `<runs_dir>/<session_id>.jsonl`.
@@ -438,21 +465,20 @@ pub fn extract_telemetry_from_stream_json(
     (model_id, tokens_in, tokens_out, prompt_cache_hits)
 }
 
-impl Runner for ClaudeCodeRunner {
-    fn name(&self) -> &str {
-        "claude-code"
-    }
-
-    fn spawn(
+impl ClaudeCodeRunner {
+    fn spawn_inner(
         &self,
         role: &str,
         system_prompt: &str,
         brief: &str,
         schema: Option<&str>,
         workspace_path: Option<&str>,
+        invocation: Option<&RunnerInvocationContext>,
     ) -> Result<RunnerOutput> {
         // Mint UUID and canonicalise cwd on entry.
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = invocation
+            .map(|i| i.session_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         // Canonicalize once at spawn entry; the SDK silently mints a fresh session
         // if cwd differs across resume calls (see lines 33-38).
         let cwd = match workspace_path {
@@ -509,16 +535,20 @@ impl Runner for ClaudeCodeRunner {
             }
         }
 
-        let (live_transcript_path, live_transcript) = open_live_transcript(&cwd, &session_id)
-            .context("transcript write failed; not launching `claude`")?;
+        let (live_transcript_path, live_transcript) =
+            open_live_transcript(&cwd, &session_id, invocation)
+                .context("transcript write failed; not launching `claude`")?;
+        let (stderr_log_path, live_stderr) = open_live_stderr(&cwd, &session_id, invocation)
+            .context("stderr log write failed; not launching `claude`")?;
         let started_at = crate::handlers::row::now_iso8601();
         cmd.arg(brief);
         let stdout_transcript = Rc::clone(&live_transcript);
+        let stderr_log = Rc::clone(&live_stderr);
         let output = liveness::run_streaming_with_liveness(
             &mut cmd,
             &LivenessThresholds::from_env(),
             move |line| append_live_line(&stdout_transcript, line),
-            |_| {},
+            move |line| append_live_line(&stderr_log, line),
         )
         .context("failed to launch `claude`; ensure it is installed and on PATH")?;
         let ended_at = crate::handlers::row::now_iso8601();
@@ -627,10 +657,46 @@ impl Runner for ClaudeCodeRunner {
                 tokens_out,
                 prompt_cache_hits,
                 transcript_path,
-                stderr_log_path: None,
+                stderr_log_path: Some(stderr_log_path.to_string_lossy().to_string()),
             },
             payload_error,
         })
+    }
+}
+
+impl Runner for ClaudeCodeRunner {
+    fn name(&self) -> &str {
+        "claude-code"
+    }
+
+    fn spawn(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Result<RunnerOutput> {
+        self.spawn_inner(role, system_prompt, brief, schema, workspace_path, None)
+    }
+
+    fn spawn_with_invocation(
+        &self,
+        role: &str,
+        system_prompt: &str,
+        brief: &str,
+        schema: Option<&str>,
+        workspace_path: Option<&str>,
+        invocation: Option<&RunnerInvocationContext>,
+    ) -> Result<RunnerOutput> {
+        self.spawn_inner(
+            role,
+            system_prompt,
+            brief,
+            schema,
+            workspace_path,
+            invocation,
+        )
     }
 }
 
