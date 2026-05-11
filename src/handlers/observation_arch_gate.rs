@@ -362,6 +362,17 @@ fn read_ruling(tx: &Transaction, display_id: &str) -> Result<Option<RulingRow>> 
 }
 
 #[cfg(test)]
+mod apply_verdict_effects {
+    use super::*;
+
+    #[test]
+    fn rejects_unknown_outcome() {
+        let err = RulingOutcome::parse("not_a_real_outcome").unwrap_err();
+        assert!(err.to_string().contains("not_a_real_outcome"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
@@ -584,12 +595,6 @@ mod tests {
             json!({"updated_at":"2026-05-07T09:00:01Z"}),
         );
         enforce_u1_architecture_gate(&tx, "L001", &merged.clone(), &mut merged, &mut diff).unwrap();
-    }
-
-    #[test]
-    fn apply_verdict_effects_rejects_unknown_outcome() {
-        let err = RulingOutcome::parse("not_a_real_outcome").unwrap_err();
-        assert!(err.to_string().contains("not_a_real_outcome"));
     }
 
     #[test]

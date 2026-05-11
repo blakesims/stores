@@ -55,6 +55,10 @@ fn supersede_cmd() -> Command {
     Command::new("supersede").arg(Arg::new("display_id").required(true))
 }
 
+fn withdraw_cmd() -> Command {
+    Command::new("withdraw").arg(Arg::new("display_id").required(true))
+}
+
 fn insert_review(conn: &Connection, id: &str, verdict: Option<&str>, extra: &str) {
     conn.execute(
         &format!("INSERT INTO architecture_reviews (display_id,status,lifecycle,created_at,updated_at,created_by,updated_by,kind,summary,linked_observation_ids,verdict,rationale{extra}) VALUES (?1,'in_review','reviewing','now','now','ai_with_human','ai_with_human','interpret','s',?2,?3,'why')"),
@@ -290,11 +294,23 @@ fn superseded_redirects_to_superseding_review() {
 
 #[test]
 fn withdrawn_clears_linked_observations() {
-    let (_arch, conn) = setup();
-    conn.execute("UPDATE observations SET pending_architecture_review=1, open_architecture_review_id='A001' WHERE display_id IN ('L010','L011','L012')", []).unwrap();
-    conn.execute("UPDATE observations SET pending_architecture_review=0, open_architecture_review_id=NULL WHERE display_id IN ('L010','L011','L012')", []).unwrap();
+    let (arch, conn) = setup();
+    insert_review(&conn, "A001", None, "");
+    conn.execute("UPDATE observations SET waiting=1, waiting_kind='architecture_review', pending_architecture_review=1, open_architecture_review_id='A001' WHERE display_id IN ('L010','L011','L012')", []).unwrap();
+    let m = withdraw_cmd().get_matches_from(["withdraw", "A001"]);
+    architecture_reviews::run_withdraw(&arch, &conn, &m, Actor::AiWithHuman.into()).unwrap();
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM architecture_reviews WHERE display_id='A001'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "withdrawn");
     for id in ["L010", "L011", "L012"] {
         let r = obs_tuple(&conn, id);
+        assert_eq!(r.1, 0);
+        assert!(r.2.is_none());
         assert_eq!(r.4, 0);
         assert!(r.5.is_none());
     }

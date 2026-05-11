@@ -58,6 +58,21 @@ pub fn run_supersede(
     Ok(())
 }
 
+pub fn run_withdraw(
+    schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    invoker: InvokerCtx,
+) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("architecture_reviews withdraw: begin tx")?;
+    withdraw_in_tx(&tx, schema, matches, invoker)?;
+    tx.commit()
+        .context("architecture_reviews withdraw: commit tx")?;
+    Ok(())
+}
+
 fn issue_verdict_in_tx(
     tx: &Transaction,
     schema: &Schema,
@@ -329,6 +344,25 @@ fn supersede_in_tx(
     }
     println!("Superseded {display_id}");
     Ok(())
+}
+
+fn withdraw_in_tx(
+    tx: &Transaction,
+    schema: &Schema,
+    matches: &ArgMatches,
+    invoker: InvokerCtx,
+) -> Result<()> {
+    require_actor(invoker, Actor::AiWithHuman, "withdraw")?;
+    let display_id = display_id(matches);
+    super::transition::run_in_tx(tx, schema, matches, invoker, "withdraw")?;
+    let (_, row) = read_row(schema, tx, display_id)?;
+    super::observation_arch_gate::apply_verdict_effects(
+        tx,
+        display_id,
+        &row,
+        invoker.actor,
+        super::observation_arch_gate::RulingOutcome::Withdrawn,
+    )
 }
 
 fn mark_superseded_if_present(
