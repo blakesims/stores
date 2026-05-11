@@ -504,12 +504,30 @@ fn live_runner_lines(
         .updated_at
         .as_deref()
         .and_then(|u| format_age_from_rfc3339(u, now).map(|age| format!(" updated={age}")));
+    let semantic = crate::cli::runs::read_current_status(stores_dir, current)
+        .ok()
+        .flatten();
+    let semantic_age = semantic
+        .as_ref()
+        .and_then(|s| s.last_event_at.as_deref())
+        .and_then(|u| format_age_from_rfc3339(u, now).map(|age| format!(" last_event={age}")));
+    let activity = semantic
+        .as_ref()
+        .and_then(|s| s.current_activity.as_deref())
+        .map(|a| format!(" activity={a}"));
+    let event_type = semantic
+        .as_ref()
+        .and_then(|s| s.last_event_type.as_deref())
+        .map(|t| format!(" event={t}"));
     let mut lines = vec![format!(
-        "Live runner: role={} runner={} status={}{}",
+        "Live runner: role={} runner={} status={}{}{}{}{}",
         marker.role,
         runner,
         status,
-        updated.unwrap_or_default()
+        updated.unwrap_or_default(),
+        semantic_age.unwrap_or_default(),
+        activity.unwrap_or_default(),
+        event_type.unwrap_or_default()
     )];
     if let Some(path) = &marker.transcript_path {
         lines.push(format!(
@@ -735,6 +753,16 @@ mod tests {
         let runs_dir = stores_dir.join("runs");
         std::fs::create_dir_all(&runs_dir).unwrap();
         let marker_path = runs_dir.join("current-T123-executor.json");
+        std::fs::create_dir_all(runs_dir.join("abc")).unwrap();
+        std::fs::write(
+            runs_dir.join("abc/status.json"),
+            r#"{
+  "last_event_at": "2026-05-11T00:01:00Z",
+  "last_event_type": "tool_start",
+  "current_activity": "tool:bash"
+}"#,
+        )
+        .unwrap();
         let current = crate::cli::runs::CurrentRun {
             marker_path,
             marker: crate::cli::runs::CurrentRunMarker {
@@ -758,7 +786,7 @@ mod tests {
 
         assert_eq!(
             lines[0],
-            "Live runner: role=executor runner=pi status=running updated=1m ago"
+            "Live runner: role=executor runner=pi status=running updated=1m ago last_event=5s ago activity=tool:bash event=tool_start"
         );
         assert_eq!(
             lines[1],

@@ -50,6 +50,13 @@ pub struct CurrentRunMarker {
     pub updated_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CurrentRunStatus {
+    pub last_event_at: Option<String>,
+    pub last_event_type: Option<String>,
+    pub current_activity: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CurrentRun {
     pub marker_path: PathBuf,
@@ -172,6 +179,17 @@ fn print_current_run(stores_dir: &Path, current: &CurrentRun) {
             resolve_marker_path(stores_dir, &current.marker_path, path).display()
         );
     }
+    if let Ok(Some(status)) = read_current_status(stores_dir, current) {
+        if let Some(last_event_at) = status.last_event_at {
+            println!("last_event_at\t{last_event_at}");
+        }
+        if let Some(last_event_type) = status.last_event_type {
+            println!("last_event_type\t{last_event_type}");
+        }
+        if let Some(current_activity) = status.current_activity {
+            println!("current_activity\t{current_activity}");
+        }
+    }
 }
 
 pub fn find_current_run(
@@ -234,6 +252,34 @@ fn read_current_marker(path: &Path) -> Result<CurrentRun> {
         marker_path: path.to_path_buf(),
         marker,
     })
+}
+
+pub fn current_status_path(stores_dir: &Path, current: &CurrentRun) -> Option<PathBuf> {
+    let session_id = current.marker.session_id.as_deref()?;
+    let transcript_path = current.marker.transcript_path.as_ref()?;
+    let resolved_transcript =
+        resolve_marker_path(stores_dir, &current.marker_path, transcript_path);
+    Some(crate::runner::status_path_for_transcript(
+        &resolved_transcript,
+        session_id,
+    ))
+}
+
+pub fn read_current_status(
+    stores_dir: &Path,
+    current: &CurrentRun,
+) -> Result<Option<CurrentRunStatus>> {
+    let Some(path) = current_status_path(stores_dir, current) else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read live runner status {}", path.display()))?;
+    let status: CurrentRunStatus = serde_json::from_str(&body)
+        .with_context(|| format!("failed to parse live runner status {}", path.display()))?;
+    Ok(Some(status))
 }
 
 fn live_stores_dir_for_task(stores_dir: &Path, display_id: &str) -> Result<PathBuf> {
@@ -585,6 +631,43 @@ mod tests {
         assert_eq!(current.marker.status.as_deref(), Some("running"));
         let body = fs::read_to_string(current.marker.transcript_path.as_ref().unwrap()).unwrap();
         assert_eq!(body, "first live line\n");
+    }
+
+    #[test]
+    fn current_status_reads_session_status_next_to_transcript() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        let transcript = stores.join("runs/live-session.jsonl");
+        let status_path = stores.join("runs/live-session/status.json");
+        fs::create_dir_all(status_path.parent().unwrap()).unwrap();
+        fs::write(&transcript, "line\n").unwrap();
+        fs::write(
+            &status_path,
+            r#"{
+  "last_event_at": "2026-05-11T02:06:00Z",
+  "last_event_type": "retry",
+  "current_activity": "api_retry"
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "session_id": "live-session",
+                "status": "running",
+                "transcript_path": transcript,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let current = find_current_run(&stores, "T999", Some("executor")).unwrap();
+        assert_eq!(current_status_path(&stores, &current).unwrap(), status_path);
+        let status = read_current_status(&stores, &current).unwrap().unwrap();
+        assert_eq!(status.last_event_type.as_deref(), Some("retry"));
+        assert_eq!(status.current_activity.as_deref(), Some("api_retry"));
     }
 
     #[test]
