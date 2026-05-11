@@ -461,6 +461,10 @@ fn insert_architecture_review_row(tx: &Transaction, fields: &ArchReviewFields) -
             Value::String(cluster_key.clone()),
         );
     }
+    entry.insert(
+        "linked_observation_ids".to_string(),
+        Value::Array(vec![Value::String(fields.source_observation.clone())]),
+    );
 
     super::add::add_row_in_tx(tx, &schema, entry, Actor::Framework)
 }

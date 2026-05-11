@@ -119,10 +119,22 @@ fn issue_verdict_in_tx(
         None,
         &merged,
     )?;
+    super::transition::inject_upstream_primary_tuple(
+        schema,
+        transition,
+        "issue-verdict",
+        current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
     validate::validate(
         schema,
         &merged,
-        Op::Transition("issue-verdict".to_string(), diff.clone()),
+        Op::Transition(
+            "issue-verdict".to_string(),
+            super::transition::strip_framework_overlay_from_validation_diff(schema, &diff),
+        ),
         invoker,
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
@@ -207,10 +219,22 @@ fn ratify_amend_in_tx(
         None,
         &merged,
     )?;
+    super::transition::inject_upstream_primary_tuple(
+        schema,
+        transition,
+        "ratify-amend",
+        current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
+    )?;
     validate::validate(
         schema,
         &merged,
-        Op::Transition("ratify-amend".to_string(), diff.clone()),
+        Op::Transition(
+            "ratify-amend".to_string(),
+            super::transition::strip_framework_overlay_from_validation_diff(schema, &diff),
+        ),
         invoker,
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
@@ -265,13 +289,23 @@ fn mark_superseded_if_present(
     if current_status == "superseded" {
         return Ok(());
     }
-    let diff = EntryMap::new();
+    let mut diff = EntryMap::new();
+    let mut merged = existing.clone();
     let transition = select_transition(
         &schema.lifecycle.transitions,
         current_status,
         "supersede",
         None,
-        &existing,
+        &merged,
+    )?;
+    super::transition::inject_upstream_primary_tuple(
+        schema,
+        transition,
+        "supersede",
+        current_status,
+        &transition.to,
+        &mut diff,
+        &mut merged,
     )?;
     let invoker = InvokerCtx {
         actor,
@@ -279,8 +313,11 @@ fn mark_superseded_if_present(
     };
     validate::validate(
         schema,
-        &existing,
-        Op::Transition("supersede".to_string(), diff.clone()),
+        &merged,
+        Op::Transition(
+            "supersede".to_string(),
+            super::transition::strip_framework_overlay_from_validation_diff(schema, &diff),
+        ),
         invoker,
     )
     .map_err(|errs| anyhow::anyhow!("validation failed:\n{}", validate::pretty_print(&errs)))?;
@@ -294,7 +331,7 @@ fn mark_superseded_if_present(
         &transition.to,
         "supersede",
         &diff,
-        &existing,
+        &merged,
         actor,
         pref.as_deref(),
         phash.as_deref(),

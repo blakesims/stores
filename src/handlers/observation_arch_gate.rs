@@ -175,7 +175,7 @@ pub(crate) fn apply_merge_with_cluster_verdict(
     let now = now_iso8601();
     let actor_s = actor.to_string();
     tx.execute(
-        "UPDATE observations SET updated_at=?1, updated_by=?2, status='resolved', pending_architecture_review=0, resolved_at=?1, resolved_by=?3, merge_target_id=?4, resolution_kind='merged_with_cluster' WHERE display_id=?5",
+        "UPDATE observations SET updated_at=?1, updated_by=?2, status='resolved', lifecycle='closed', waiting=0, waiting_kind=NULL, outcome='merged_with_cluster', pending_architecture_review=0, resolved_at=?1, resolved_by=?3, merge_target_id=?4, resolution_kind='merged_with_cluster' WHERE display_id=?5",
         rusqlite::params![now, actor_s, ruling_id, target, source],
     )
     .context("merge_with_cluster: update source observation")?;

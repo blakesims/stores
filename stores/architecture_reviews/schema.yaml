@@ -6,17 +6,18 @@ lifecycle:
   states: [pending, in_review, awaiting_human_ratification, verdict_issued, withdrawn, superseded]
   initial_state: pending
   transitions:
-    - {from: pending, to: in_review, verb: claim-review, actor: ai_with_human}
-    - {from: pending, to: withdrawn, verb: withdraw, actor: ai_with_human}
-    - {from: in_review, to: withdrawn, verb: withdraw, actor: ai_with_human}
-    - {from: awaiting_human_ratification, to: withdrawn, verb: withdraw, actor: ai_with_human}
-    - {from: in_review, to: verdict_issued, verb: issue-verdict, actor: ai_with_human, guard: "kind == 'interpret'"}
-    - {from: in_review, to: awaiting_human_ratification, verb: issue-verdict, actor: ai_with_human, guard: "kind == 'amend'"}
-    - {from: awaiting_human_ratification, to: verdict_issued, verb: ratify-amend, actor: human}
-    - {from: pending, to: superseded, verb: supersede, actor: ai_with_human}
-    - {from: in_review, to: superseded, verb: supersede, actor: ai_with_human}
-    - {from: awaiting_human_ratification, to: superseded, verb: supersede, actor: ai_with_human}
-    - {from: verdict_issued, to: superseded, verb: supersede, actor: ai_with_human}
+    - {from: pending, to: in_review, verb: claim-review, actor: ai_with_human, lifecycle: reviewing, legacy_status: in_review}
+    - {from: pending, to: withdrawn, verb: withdraw, actor: ai_with_human, lifecycle: closed, outcome: withdrawn, legacy_status: withdrawn}
+    - {from: in_review, to: withdrawn, verb: withdraw, actor: ai_with_human, lifecycle: closed, outcome: withdrawn, legacy_status: withdrawn}
+    - {from: awaiting_human_ratification, to: withdrawn, verb: withdraw, actor: ai_with_human, lifecycle: closed, outcome: withdrawn, legacy_status: withdrawn}
+    - {from: in_review, to: verdict_issued, verb: issue-verdict, actor: ai_with_human, guard: "kind == 'interpret'", lifecycle: closed, legacy_status: verdict_issued}
+    - {from: in_review, to: awaiting_human_ratification, verb: issue-verdict, actor: ai_with_human, guard: "kind == 'amend'", lifecycle: waiting, legacy_status: awaiting_human_ratification}
+    - {from: awaiting_human_ratification, to: verdict_issued, verb: ratify-amend, actor: human, lifecycle: closed, legacy_status: verdict_issued}
+    - {from: pending, to: superseded, verb: supersede, actor: ai_with_human, lifecycle: closed, outcome: superseded, legacy_status: superseded}
+    - {from: in_review, to: superseded, verb: supersede, actor: ai_with_human, lifecycle: closed, outcome: superseded, legacy_status: superseded}
+    - {from: awaiting_human_ratification, to: superseded, verb: supersede, actor: ai_with_human, lifecycle: closed, outcome: superseded, legacy_status: superseded}
+    - {from: verdict_issued, to: superseded, verb: supersede, actor: ai_with_human, lifecycle: closed, outcome: superseded, legacy_status: superseded}
+
 
 fields:
   # --- ADR 0002 primary model (status/verdict remain compatibility-only legacy projections). ---
