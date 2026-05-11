@@ -36,7 +36,7 @@
 /// - Runner non-zero exit: if a valid agent envelope was captured, submit it; otherwise block.
 /// - `blocked` terminal state: exits 0 with a human-readable hint.
 use anyhow::{bail, Context as _, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::Value;
 use std::io::Write;
@@ -589,6 +589,11 @@ pub fn run_drive(schema: &Schema, args: DriveArgs) -> Result<()> {
     // Resolve the task id.
     let display_id = resolve_task_id(schema, &conn, &args)?;
 
+    // Refuse duplicate manual/same-worktree drive owners before overwriting
+    // drive_pid. Auto-drive-spawned children are allowed when the existing owner
+    // is this process; stale uncorroborated markers do not count as live.
+    enforce_singleton_drive_owner(&conn, &display_id)?;
+
     // Record manual drive ownership immediately so `stores watch` can distinguish
     // "planner is running" from "planning row has not been started". Auto-drive
     // also writes these fields from its subscriber path; this direct write covers
@@ -611,6 +616,153 @@ fn record_drive_owner(conn: &Connection, display_id: &str) -> Result<()> {
         rusqlite::params![pid, now, display_id],
     )?;
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveDriveOwner {
+    display_id: String,
+    reason: String,
+}
+
+fn enforce_singleton_drive_owner(conn: &Connection, display_id: &str) -> Result<()> {
+    let Some(target) = task_drive_identity(conn, display_id)? else {
+        return Ok(());
+    };
+    if let Some(owner) = live_owner_for_task(conn, target.row_id, &target.display_id)? {
+        bail!(
+            "refusing to start duplicate drive for {}: live owner exists ({})",
+            target.display_id,
+            owner.reason
+        );
+    }
+    let Some(workspace_path) = target.workspace_path.filter(|p| !p.trim().is_empty()) else {
+        return Ok(());
+    };
+    for other in tasks_sharing_workspace(conn, target.row_id, &workspace_path)? {
+        if let Some(owner) = live_owner_for_task(conn, other.row_id, &other.display_id)? {
+            bail!(
+                "refusing to start drive for {} in workspace {}: task {} already has a live owner ({})",
+                target.display_id,
+                workspace_path,
+                owner.display_id,
+                owner.reason
+            );
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct TaskDriveIdentity {
+    row_id: i64,
+    display_id: String,
+    workspace_path: Option<String>,
+}
+
+fn task_drive_identity(conn: &Connection, display_id: &str) -> Result<Option<TaskDriveIdentity>> {
+    conn.query_row(
+        "SELECT id, display_id, workspace_path FROM tasks WHERE display_id=?1",
+        rusqlite::params![display_id],
+        |r| {
+            Ok(TaskDriveIdentity {
+                row_id: r.get(0)?,
+                display_id: r.get(1)?,
+                workspace_path: r.get(2).ok().flatten(),
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn tasks_sharing_workspace(
+    conn: &Connection,
+    target_row_id: i64,
+    workspace_path: &str,
+) -> Result<Vec<TaskDriveIdentity>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, display_id, workspace_path FROM tasks \
+         WHERE id != ?1 AND workspace_path = ?2 \
+           AND status NOT IN ('complete','accepted','rejected','closed_out_of_band','abandoned','schema_migrated','cargo_installed')",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![target_row_id, workspace_path], |r| {
+        Ok(TaskDriveIdentity {
+            row_id: r.get(0)?,
+            display_id: r.get(1)?,
+            workspace_path: r.get(2).ok().flatten(),
+        })
+    })?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+fn live_owner_for_task(
+    conn: &Connection,
+    row_id: i64,
+    display_id: &str,
+) -> Result<Option<LiveDriveOwner>> {
+    let current_pid = std::process::id() as i64;
+    let drive_pid: Option<i64> = conn
+        .query_row(
+            "SELECT drive_pid FROM tasks WHERE id=?1",
+            rusqlite::params![row_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map(|v| v.flatten())?;
+    if let Some(pid) = drive_pid {
+        if pid != current_pid && pid_is_live(pid) {
+            return Ok(Some(LiveDriveOwner {
+                display_id: display_id.to_string(),
+                reason: format!("live_drive_pid:{pid}"),
+            }));
+        }
+    }
+    if let Some(pid) = live_dispatch_lock_pid(conn, row_id, current_pid)? {
+        return Ok(Some(LiveDriveOwner {
+            display_id: display_id.to_string(),
+            reason: format!("live_dispatch_lock_pid:{pid}"),
+        }));
+    }
+    let now = crate::handlers::row::now_iso8601();
+    if crate::flow::engine_runner::has_fresh_running_current_run_marker(conn, row_id, &now)? {
+        return Ok(Some(LiveDriveOwner {
+            display_id: display_id.to_string(),
+            reason: "fresh_running_current_run_marker".to_string(),
+        }));
+    }
+    Ok(None)
+}
+
+fn live_dispatch_lock_pid(conn: &Connection, row_id: i64, current_pid: i64) -> Result<Option<i64>> {
+    if !dispatch_locks_table_exists(conn)? {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(pid, 0) FROM dispatch_locks \
+         WHERE store='tasks' AND row_id=?1 AND finished_at IS NULL",
+    )?;
+    let pids = stmt.query_map(rusqlite::params![row_id], |r| r.get::<_, i64>(0))?;
+    for pid in pids.filter_map(|r| r.ok()) {
+        if pid > 0 && pid != current_pid && pid_is_live(pid) {
+            return Ok(Some(pid));
+        }
+    }
+    Ok(None)
+}
+
+fn dispatch_locks_table_exists(conn: &Connection) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='dispatch_locks'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn pid_is_live(pid: i64) -> bool {
+    i32::try_from(pid)
+        .ok()
+        .is_some_and(crate::handlers::agents_run::pid_is_alive)
 }
 
 // ---------------------------------------------------------------------------
@@ -2667,6 +2819,173 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn manual_drive_refuses_same_task_live_drive_pid() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        insert_task(
+            &conn,
+            &schema,
+            "T999",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep owner");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE display_id='T999'",
+            rusqlite::params![child.id() as i64],
+        )
+        .unwrap();
+        let err = enforce_singleton_drive_owner(&conn, "T999")
+            .expect_err("live drive_pid must refuse duplicate manual drive");
+        let _ = child.kill();
+        let _ = child.wait();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to start duplicate drive")
+                && msg.contains("live_drive_pid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn manual_drive_refuses_same_task_live_dispatch_lock() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        insert_task(
+            &conn,
+            &schema,
+            "T999",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        let row_id: i64 = conn
+            .query_row("SELECT id FROM tasks WHERE display_id='T999'", [], |r| r.get(0))
+            .unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn lock owner");
+        conn.execute(
+            "INSERT INTO dispatch_locks (store,row_id,display_id,agent_name,claimed_at,claimed_by,finished_at,pid) \
+             VALUES ('tasks',?1,'T999','auto-drive','2026-01-01T00:00:00Z','test',NULL,?2)",
+            rusqlite::params![row_id, child.id() as i64],
+        )
+        .unwrap();
+        let err = enforce_singleton_drive_owner(&conn, "T999")
+            .expect_err("live dispatch lock must refuse duplicate manual drive");
+        let _ = child.kill();
+        let _ = child.wait();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("live_dispatch_lock_pid"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn manual_drive_refuses_other_live_task_in_same_workspace() {
+        let schema = tasks_schema();
+        let (_dir, conn) = open_db(&schema);
+        insert_task(
+            &conn,
+            &schema,
+            "T998",
+            "executing",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        insert_task(
+            &conn,
+            &schema,
+            "T999",
+            "planning",
+            "2026-01-01T00:00:01Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep owner");
+        conn.execute(
+            "UPDATE tasks SET drive_pid=?1 WHERE display_id='T998'",
+            rusqlite::params![child.id() as i64],
+        )
+        .unwrap();
+        let err = enforce_singleton_drive_owner(&conn, "T999")
+            .expect_err("same-workspace live owner must refuse duplicate manual drive");
+        let _ = child.kill();
+        let _ = child.wait();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already has a live owner") && msg.contains("T998"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn manual_drive_ignores_stale_uncorroborated_running_marker() {
+        let schema = tasks_schema();
+        let (dir, conn) = open_db(&schema);
+        let workspace = dir.path().join("workspace");
+        let runs = workspace.join(".stores/runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        insert_task(
+            &conn,
+            &schema,
+            "T999",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            1,
+            1,
+            None,
+            None,
+        );
+        conn.execute(
+            "UPDATE tasks SET workspace_path=?1 WHERE display_id='T999'",
+            rusqlite::params![workspace.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        let status_path = runs.join("stale-status.json");
+        std::fs::write(
+            &status_path,
+            r#"{"last_event_at":"2020-01-01T00:00:00Z","last_event_type":"heartbeat","current_activity":"tool:bash"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            runs.join("current-T999-executor.json"),
+            serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "runner": "pi",
+                "status": "running",
+                "status_path": status_path,
+                "updated_at": "2020-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        enforce_singleton_drive_owner(&conn, "T999")
+            .expect("stale uncorroborated marker must not permanently block manual drive");
     }
 
     fn make_run_output(stdout: &str, exit_code: i32) -> RunnerOutput {
