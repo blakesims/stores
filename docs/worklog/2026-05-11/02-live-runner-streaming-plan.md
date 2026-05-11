@@ -235,12 +235,18 @@ Use normalized `last_event_at`, not just PID, as the primary live signal.
   - Pi and Claude honor preallocated invocation paths.
   - Added live stderr logs: `<session_id>.stderr.log`.
   - Sink write failures now propagate and kill the child instead of being silently ignored.
+- `fd9bc6e runner: expose current live run logs`
+  - Added `stores runs current <task> [--role ...]` using the filesystem marker.
+  - Added `stores runs tail <task> --raw` for the live flat stdout transcript.
+  - Added `stores runs tail <task> --stderr` for the sibling stderr log.
+  - Current `tail` is a one-shot dump of current file contents, not a blocking/following `tail -f`.
 
 ### Review status
 
 - First implementation review found missing discoverability, missing stderr live logs, and silent sink write failures.
 - Follow-up review of `bec81d9` was **PASS** for the coherent phase.
-- The implemented discoverability is filesystem-marker based, not the full planned `runner_invocations` DB/CLI layer.
+- Review of `fd9bc6e` was **PASS** for the recommended minimal CLI chunk.
+- The implemented discoverability is filesystem-marker based, not the full planned `runner_invocations` DB layer.
 
 ## Implementation slices
 
@@ -297,33 +303,45 @@ Goal: operator can find the current live log without spelunking `/proc`.
 Current state:
 
 - Minimal filesystem discoverability exists via `current-<task>-<role>.json` marker.
+- `stores runs current <task> [--role ...]` reads the marker and reports current transcript/stderr paths.
+- `stores runs tail <task> --raw` dumps the current live stdout transcript contents.
+- `stores runs tail <task> --stderr` dumps the current live stderr log contents.
 - No DB-backed `runner_invocations` table/query layer yet.
-- No `stores runs current` command yet.
 - `tasks status` does not yet render live transcript/stderr paths or last event age.
 
-Next worker should choose one of two paths:
+Remaining choices:
 
-1. **Minimal CLI path:** implement `stores runs current <task>` by reading current marker files, plus optional `stores runs tail <task> --raw` for the flat transcript.
-2. **DB path:** implement `runner_invocations` and status integration, then build CLI on top.
+1. **Stay marker/filesystem based:** improve `runs tail` into a following/blocking tail and/or bridge marker info into `tasks status`.
+2. **DB path:** implement `runner_invocations` and status integration, then build richer CLI on top.
 
-Recommended next step: minimal CLI path first, because the marker already exists and gives immediate operator value.
+Recommended next step: bridge marker info into `tasks status` or implement normalized `events.jsonl` / `status.json`; do not redo the minimal `runs current/tail` CLI.
 
 Validation:
 
 - Start a shim runner and assert `stores runs current <task>` resolves before child exits.
 - Assert `tasks status` reports live path, last event age, runner, role, and PID when known once status integration exists.
 
-### Slice 4 — `stores runs tail`
+### Slice 4 — `stores runs tail` — status: minimal raw/stderr viewer complete via `fd9bc6e`
 
 Goal: human-readable live viewer.
 
-- Implement latest/current invocation lookup.
-- Follow `events.jsonl` until completion by default; add `--raw` for raw stdout.
-- Render normalized events concisely.
+Completed:
+
+- Implemented latest/current marker lookup.
+- Added one-shot raw stdout dump via `stores runs tail <task> --raw`.
+- Added one-shot stderr dump via `stores runs tail <task> --stderr`.
+
+Deferred:
+
+- Following/blocking behavior (`tail -f` style) is not implemented yet.
+- Normalized `events.jsonl` rendering is not implemented yet.
+- Semantic event rendering depends on Slice 2.
 
 Validation:
 
-- CLI smoke test against a temp runs dir and fixture event stream.
+- Worker ran `cargo test -q current_ -- --nocapture`.
+- Reviewer re-ran `cargo test -q current_ -- --nocapture`; passed.
+- Reviewer noted no blocker; only low notes about one-shot tail semantics and possible future CLI argument tests.
 
 ### Slice 5 — Codex JSON compatibility
 
@@ -373,19 +391,18 @@ Goal: optional live dashboard like `pi-subagents`.
 
 ## Open questions for review
 
-1. Should the next step stay marker/filesystem based (`stores runs current/tail`) or move immediately to DB-backed `runner_invocations`?
+1. Should the next step stay marker/filesystem based for `tasks status`, or move immediately to DB-backed `runner_invocations`?
 2. What retention/cleanup policy should apply to `current-*.json`, `*.stderr.log`, and future per-session live directories?
-3. Should `tasks status` read marker files directly as an interim bridge, or wait for DB-backed invocation metadata?
+3. Should `runs tail` grow follow/blocking behavior before normalized semantic events exist?
 
 ## Recommended next worker brief
 
-Do **not** redo Slice 1. Start from the accepted `bec81d9` phase.
+Do **not** redo Slice 1 or the minimal `runs current/tail` CLI. Start from accepted `fd9bc6e`.
 
-Recommended next coherent chunk:
+Recommended next coherent chunks; pick one:
 
-- Implement `stores runs current <task>` using the existing `current-<task>-<role>.json` marker.
-- Implement `stores runs tail <task> --raw` against the live flat transcript path from the marker.
-- Optionally show stderr path and a `--stderr` mode.
-- Add tests with a long-running shim proving `current` resolves before child exit and `tail --raw` can read appended content.
+1. **Status bridge:** teach `stores tasks status <task>` to read current marker files and show live transcript/stderr paths, runner, role, status, and updated age.
+2. **Semantic events:** implement Slice 2 for Pi and Claude Code: normalized `events.jsonl`, `status.json`, retry/tool/text/usage event mapping, and tests.
+3. **Follow mode:** make `stores runs tail <task> --raw --follow` follow appended bytes until marker status becomes completed/failed.
 
-After that, decide whether to build normalized `events.jsonl` / `status.json` (Slice 2) or DB-backed `runner_invocations` + `tasks status` (Slice 3).
+The highest operator-value next chunk is probably **Status bridge**, because it makes the live log discoverable from the command operators already run.
