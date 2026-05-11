@@ -35,8 +35,14 @@ fn walk_field<'a>(field: &'a Field, parent_path: &[String], out: &mut Vec<LeafAr
             // Leaf
             let mut path = parent_path.to_vec();
             path.push(field.name.clone());
+            let cli_name = if path == ["intent_contract".to_string(), "contract_state".to_string()]
+            {
+                "intent-contract-contract-state".to_string()
+            } else {
+                to_kebab(&field.name)
+            };
             out.push(LeafArg {
-                cli_name: to_kebab(&field.name),
+                cli_name,
                 path,
                 field,
             });
