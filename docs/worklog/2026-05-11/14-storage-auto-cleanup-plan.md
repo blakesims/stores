@@ -233,3 +233,25 @@ The oracle critique led to these changes before implementation:
 - replaced per-worktree `.cargo/config.toml` as the preferred target-sharing mechanism;
 - defined transcript GC/backlink semantics;
 - kept dirty generated residue as a classification problem, not an automatic deletion assumption.
+
+## Implementation Status
+
+Shipped in the storage-cleanup sequence:
+
+- `stores tasks cleanup-worktrees --dry-run` audits terminal task worktree storage, classifies safe target cleanup candidates, reports DB/WAL context, and separates target deletion from whole-worktree removal.
+- `stores tasks cleanup-worktrees --execute --targets-only` deletes only eligible terminal `<workspace_path>/target` directories after live-safety rechecks.
+- `stores tasks cleanup-worktrees --execute --remove-clean` removes only clean, merged, terminal non-abandoned worktrees with ordinary `git worktree remove` and no `--force`.
+- `builtin:cleanup-worktree` is wired for post-land/terminal task cleanup so new terminal rows shed target artifacts automatically and clean worktrees are removed when safe.
+- `cleanup.cargo_target_dir` config support injects a shared `CARGO_TARGET_DIR` into drive, integration pre-land checks, and cargo-install children without writing dirty per-worktree `.cargo/config.toml` files; symlinked worktree `.stores/config.yaml` paths resolve relative to the real shared config.
+- `stores runs gc` defaults to dry-run and enforces the plan caps: 20G max, 10G warning, 1G per-file warning. Execute mode tombstones selected transcript/log files while preserving DB backlinks and `stores runs show` readability.
+- Race hardening landed for both cleanup paths: task cleanup reloads row state before mutation; runs GC rechecks current-marker protection and refuses files whose size changed after planning.
+- Part 6 guardrails now cover command help coherence, GC cap defaults/giant transcript detection, live process skips for worktree target cleanup, active/main workspace exclusion, current marker protection, DB/backlink tombstones, clean-vs-dirty worktree removal, and shared `CARGO_TARGET_DIR` propagation.
+
+Validation performed across the sequence included focused `cargo test cleanup_worktrees`, `cargo test cleanup_worktree`, `cargo test cargo_target_dir`, `cargo test runs_gc`, `cargo test runs_cli`, command help tests, `cargo check --quiet`, and real dry-runs for `tasks cleanup-worktrees` and `runs gc`.
+
+Remaining limitations:
+
+- Whole-worktree removal still intentionally skips dirty terminal worktrees; these are source-only after target cleanup and need later disposition/classification.
+- Abandoned whole-worktree removal remains policy-held; target cleanup is automatic when safe, but removal requires a future explicit age/disposition policy.
+- `stores runs gc --execute` tombstones rather than compresses; compression/archive policy can be added later if full transcript retention is needed.
+- The current large-footprint incident still requires an operator to run the execute commands after reviewing dry-run output.

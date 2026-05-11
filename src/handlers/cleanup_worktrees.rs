@@ -870,6 +870,43 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn classify_process_under_workspace_is_skipped() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&main).unwrap();
+        fs::create_dir_all(wt.join("target")).unwrap();
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("cd \"$1\" && sleep 30")
+            .arg("sh")
+            .arg(&wt)
+            .spawn()
+            .unwrap();
+
+        let mut observed = None;
+        for _ in 0..20 {
+            match classify_row_for_target_cleanup(&row("T001", "integrated", &wt), &main) {
+                CleanupClassification::LiveProcessUnderWorkspace(pid) => {
+                    observed = Some(pid);
+                    break;
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            observed.is_some(),
+            "a process with cwd under workspace must block target cleanup"
+        );
+    }
+
     #[test]
     fn execute_reloads_row_before_deleting_target() {
         let tmp = tempdir().unwrap();

@@ -1652,6 +1652,15 @@ mod tests {
     }
 
     #[test]
+    fn runs_gc_default_policy_matches_storage_plan_caps() {
+        let opts = RunsGcOpts::default();
+        assert_eq!(opts.max_bytes, 20 * 1024 * 1024 * 1024);
+        assert_eq!(opts.warn_bytes, 10 * 1024 * 1024 * 1024);
+        assert_eq!(opts.per_file_warn_bytes, 1024 * 1024 * 1024);
+        assert!(!opts.execute, "runs gc must default to dry-run mode");
+    }
+
+    #[test]
     fn runs_gc_reports_largest_and_selects_reclaim_to_cap() {
         let tmp = fixture();
         let stores = tmp.path().join(".stores");
@@ -1811,6 +1820,27 @@ mod tests {
         assert!(err.to_string().contains("size changed since planning"));
         let body = fs::read_to_string(&transcript).unwrap();
         assert!(!body.contains("stores_runs_gc_tombstone"));
+    }
+
+    #[test]
+    fn runs_gc_plan_exposes_giant_transcripts_for_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stores = tmp.path().join(".stores");
+        fs::create_dir_all(stores.join("runs")).unwrap();
+        fs::write(stores.join("runs/huge.jsonl"), vec![b'x'; 2048]).unwrap();
+        let opts = RunsGcOpts {
+            per_file_warn_bytes: 1024,
+            largest: 5,
+            ..RunsGcOpts::default()
+        };
+
+        let plan = build_runs_gc_plan(&stores, &opts).unwrap();
+        assert!(
+            plan.files
+                .iter()
+                .any(|f| f.path.ends_with("huge.jsonl") && f.size > opts.per_file_warn_bytes),
+            "plan must retain enough file-size detail for per-file warning output"
+        );
     }
 
     #[test]
