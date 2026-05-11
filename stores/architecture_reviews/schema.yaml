@@ -19,23 +19,49 @@ lifecycle:
     - {from: verdict_issued, to: superseded, verb: supersede, actor: ai_with_human}
 
 fields:
+  # --- ADR 0002 primary model (status/verdict remain compatibility-only legacy projections). ---
+  - name: lifecycle
+    type: enum
+    enum_values: [pending, reviewing, waiting, closed]
+    required: false
+    default: pending
+    actor: framework
+    description: "ADR 0002 architecture-review lifecycle primary column; legacy status is compatibility-only projection."
+
+  - name: outcome
+    type: enum
+    enum_values: [local_fix_allowed, contract_reframe_required, merged_with_cluster, primitive_task_created, primitive_task_required, human_decision_required, doctrine_update_proposed, withdrawn, superseded]
+    required: false
+    actor: framework
+    description: "ADR 0002 architecture-review outcome primary column; legacy verdict is compatibility-only projection."
+
+  - name: linked_observation_ids
+    type:
+      list: text
+    required: false
+    default: []
+    actor: framework
+    description: "ADR 0002 cardinality: all L### observations covered by this architecture review."
+
   - name: kind
     type: enum
     enum_values: [interpret, amend]
     required: true
     description: "Architecture review kind: interpret existing doctrine or amend doctrine/primitive contracts."
 
+  # ADR 0002 alias: source_observation IS source_observation_id; singular origin, while linked_observation_ids carries full coverage.
   - name: source_observation
     type: text
     required: false
     pattern: "^L[0-9]{3,}$"
-    description: "Soft-FK to observations.display_id (L###) that raised the architecture question."
+    description: "Soft-FK to observations.display_id (L###) that raised the architecture question; ADR 0002 source_observation_id."
 
+  # ADR 0002 alias: source_intake IS source_intake_id.
   - name: source_intake
     type: text
     required: false
     pattern: "^I[0-9]{3,}$"
-    description: "Soft-FK to intake.display_id (I###) that routed to this ruling."
+    description: "Soft-FK to intake.display_id (I###) that routed to this ruling; ADR 0002 source_intake_id."
 
   - name: cluster_key
     type: text
@@ -57,7 +83,7 @@ fields:
     type: enum
     enum_values: [allow_local_fix, reframe_contract, merge_with_cluster, create_primitive_task, block_pending_fixes, propose_doctrine_update, request_human_arch_decision]
     required: false
-    description: "Typed verdict outcome issued by the architecture review."
+    description: "Typed verdict outcome issued by the architecture review; compatibility-only legacy projection for ADR 0002 outcome."
 
   - name: verdict_issued_at
     type: timestamp
@@ -85,17 +111,32 @@ fields:
       - {name: decision, type: enum, enum_values: [keep, update, supersede, withdraw, create_followup], required: true}
       - {name: rationale, type: text, required: false}
 
+  # ADR 0002 alias: supersedes IS supersedes_id (this review's predecessor).
   - name: supersedes
     type: text
     required: false
     pattern: "^A[0-9]{3,}$"
-    description: "Soft-FK to the prior architecture_reviews.display_id superseded by this ruling."
+    description: "Soft-FK to the prior architecture_reviews.display_id superseded by this ruling; ADR 0002 supersedes_id."
 
+  - name: superseded_by_id
+    type: text
+    required: false
+    pattern: "^A[0-9]{3,}$"
+    actor: framework
+    description: "ADR 0002 typed reference: A### that supersedes this review; read counterpart of supersedes."
+
+  # ADR 0002 alias: merge_target_id retains current semantics for merged_with_cluster verdicts.
   - name: merge_target_id
     type: text
     required: false
     pattern: "^L[0-9]{3,}$"
-    description: "Observation display id targeted by merge_with_cluster verdicts."
+    description: "Observation display id targeted by merge_with_cluster verdicts; ADR 0002 merge target reference."
+
+  - name: produced_task_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: T### task produced by primitive task outcomes."
 
   - name: doctrine_refs
     type:

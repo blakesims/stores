@@ -157,6 +157,42 @@ lifecycle:
       actor: framework
 
 fields:
+  # --- ADR 0002 primary model (status remains compatibility-only legacy projection). ---
+  - name: lifecycle
+    type: enum
+    enum_values: [candidate, ready, in_progress, closed]
+    required: false
+    default: candidate
+    actor: framework
+    description: "ADR 0002 observation lifecycle primary column; legacy status is compatibility-only projection."
+
+  - name: contract_state
+    type: enum
+    enum_values: [none, draft, approved]
+    required: false
+    actor: framework
+    description: "ADR 0002 primary contract state; source-of-truth nested field is intent_contract.contract_state; nested ready aliases to primary approved."
+
+  - name: waiting
+    type: bool
+    required: false
+    actor: framework
+    description: "ADR 0002 waiting/gate overlay flag; not an observation lifecycle state."
+
+  - name: waiting_kind
+    type: enum
+    enum_values: [info_needed, architecture_review, human_ratification, linked_task_blocked, external_dependency]
+    required: false
+    actor: framework
+    description: "ADR 0002 observation waiting/gate overlay kind."
+
+  - name: outcome
+    type: enum
+    enum_values: [addressed_by_task, addressed_by_commit, closed_as_duplicate, closed_wont_fix, merged_with_cluster, superseded]
+    required: false
+    actor: framework
+    description: "ADR 0002 observation outcome primary column."
+
   # --- Core identity ---
   - name: summary
     type: text
@@ -315,11 +351,18 @@ fields:
     default: false
     description: "True when a routed architecture_reviews A### ruling must clear this observation before U1 ratification."
 
+  # ADR 0002 alias note: clearable_by_ruling co-exists with open_architecture_review_id; clearable narrows authorization, open broadcasts the gate.
   - name: clearable_by_ruling
     type: text
     required: false
     pattern: "^A[0-9]{3,}$"
-    description: "Soft-FK to architecture_reviews.display_id (A###) whose verdict can clear pending_architecture_review."
+    description: "Soft-FK to architecture_reviews.display_id (A###) whose verdict can clear pending_architecture_review; ADR 0002 clearable authorization counterpart."
+
+  - name: open_architecture_review_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: open A### gating this observation; distinct from clearable_by_ruling authorization."
 
   - name: resolved_by
     type: text
@@ -341,15 +384,34 @@ fields:
 
   - name: resolution_kind
     type: enum
-    enum_values: [addressed_by_task, addressed_by_observation, addressed_by_commit, auto_resolved, merged_with_cluster]
+    enum_values: [addressed_by_task, addressed_by_observation, addressed_by_commit, auto_resolved, merged_with_cluster, superseded]
     required: false
-    description: "Typed resolution category; merged_with_cluster is reserved for architecture-review merge redirects."
+    description: "Typed resolution category; merged_with_cluster is reserved for architecture-review merge redirects; superseded maps to ADR 0002 superseded outcome."
 
   # --- Cross-store reference (soft-FK, plain text per D4) ---
+  # ADR 0002 alias: task_id IS linked_task_id.
   - name: task_id
     type: text
     required: false
-    description: "Display id of the linked task (e.g. T123); soft-FK, no referential guard (T010)"
+    description: "Display id of the linked task (e.g. T123); ADR 0002 linked_task_id; soft-FK, no referential guard (T010)."
+
+  - name: addressed_by_task_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: T### task that addressed this observation."
+
+  - name: addressed_by_commit_sha
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: commit sha when outcome=addressed_by_commit."
+
+  - name: superseded_by_id
+    type: text
+    required: false
+    actor: framework
+    description: "ADR 0002 typed reference: L### or A### that supersedes this observation."
 
   # --- Auto-file cascade dedup metadata (framework-written) ---
   - name: summary_signature
