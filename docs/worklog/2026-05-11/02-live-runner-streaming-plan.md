@@ -429,13 +429,64 @@ Goal: optional live dashboard like `pi-subagents`.
 
 ## Recommended next worker brief
 
-Do **not** redo Slice 1, the minimal `runs current/tail` CLI, the status bridge, or semantic event writing. Start from accepted `37ac92d`.
+Do **not** redo Slice 1, the minimal `runs current/tail` CLI, the status bridge, or semantic event writing. Start from accepted `2f884b2`.
 
-Recommended next coherent chunks; pick one:
+### Next chunk: TUI detail live activity sliding window
 
-1. **Semantic status bridge — implemented in `bbeedd5`, pending review:** `stores tasks status <task>` and `stores runs current <task>` read `<session_id>/status.json` and show last semantic event age/current activity in addition to marker update age.
-2. **Semantic tail:** teach `stores runs tail <task>` to render normalized `<session_id>/events.jsonl` by default, with `--raw` / `--stderr` remaining as escape hatches.
-3. **Follow mode:** make `stores runs tail <task> --raw --follow` follow appended bytes until marker status becomes completed/failed.
-4. **DB-backed invocations:** replace/augment marker lookup with `runner_invocations` once the filesystem path has proven useful.
+User-facing outcome: in `stores watch · detail · Task <id>`, show what the active runner is doing without a second terminal. The desired view is a compact sliding window of configurable/default 5 meaningful activity lines from the currently active runner.
 
-Semantic status bridge has passed review through `2f884b2`. The next highest operator-value chunk is probably **Semantic tail**, because semantic event files and status summaries are now both present and status-path discovery is explicit.
+Sketch:
+
+```text
+Progress
+  planner running
+  phase: — / 6
+  cycle: 1
+
+Live runner
+  planner · claude-code:opus · running · last event 1s ago · tool_start
+
+Live activity · last 5
+  12s ago  assistant   Reading the ADR and existing projection oracle…
+  10s ago  tool_start  Read docs/adr/0002-inlet-triage-and-observation-routing.md
+  8s ago   tool_end    Read ok
+  3s ago   tool_start  Bash grep -R "adr0002_projection" src tests
+  1s ago   assistant   The first phase should introduce primary fields before migrating readers…
+
+Blockers / held reasons
+  —
+```
+
+Important UX decision: **heartbeats should not pollute the sliding activity window**. Heartbeats are useful for liveness and may appear in the summary line (`last event 1s ago · heartbeat`) only when no more meaningful event exists, but the `Live activity · last N` list should prefer meaningful agent activity:
+
+- include: assistant/text/thinking/output snippets, tool_start, tool_end, retry/rate-limit, usage if no richer event nearby, final_output, error
+- suppress by default from activity list: heartbeat-only events
+- if the window would otherwise be empty, render one liveness fallback such as `1s ago heartbeat` or `runner alive; no semantic activity yet`
+
+Scope hardened by oracle:
+
+1. Add a live-run summary model in `src/tui/data.rs`, e.g. `LiveRunSummary` and `LiveRunEventSummary`, and add `Option<LiveRunSummary>` to `TaskRow`.
+2. Populate it during TUI data refresh using `TaskRow.display_id` + `workspace_path` and existing marker/status helpers from `src/cli/runs.rs` where practical. Avoid filesystem reads directly in `src/tui/detail.rs`; keep detail rendering mostly pure.
+3. Add a bounded semantic event reader:
+   - read only last N bytes (suggest 16–32 KiB) and last configurable/default 5 meaningful JSONL records;
+   - parse normalized semantic events from `events.jsonl`;
+   - tolerate missing files, stale workspace, malformed individual lines, and unknown event types;
+   - never fail watch data load because live-run files are absent/bad.
+4. Render a `Live runner` + `Live activity` section in `src/tui/detail.rs`, preferably after `Progress` and before `Blockers / held reasons`.
+5. Minimum event rendering:
+   - assistant/text/thinking/output: first line truncated to about 100 chars or available width;
+   - tool_start/tool_end: tool name plus path/ok/summary when available;
+   - retry/rate-limit;
+   - usage, final_output, error;
+   - unknown: `event: <type>`.
+6. Do not implement follow mode, DB `runner_invocations`, Codex JSON, or raw transcript rendering in TUI in this slice.
+
+Tests to add:
+
+- no marker / missing workspace => no `Live runner` section and no error;
+- marker + status.json => section shows role/runner/status and last semantic event age/type/current activity;
+- events.jsonl with >5 meaningful events plus heartbeat noise => renders only the last 5 meaningful events and suppresses heartbeat noise;
+- malformed event line is ignored/tolerated;
+- long assistant/tool text is truncated.
+
+After this passes worker→reviewer, later possible chunks are: semantic `stores runs tail` rendering, `--follow`, DB-backed `runner_invocations`, and optional Claude partial-message config for richer token-level deltas.
