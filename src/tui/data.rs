@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use rusqlite::Connection;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom};
@@ -850,6 +851,7 @@ impl Row {
 
 const LIVE_ACTIVITY_LIMIT: usize = 5;
 const LIVE_EVENTS_READ_BYTES: u64 = 32 * 1024;
+const LIVE_MARKER_STATUS_READ_BYTES: u64 = 8 * 1024;
 const LIVE_TEXT_LIMIT: usize = 100;
 
 fn load_live_run_summary(display_id: &str, workspace_path: Option<&str>) -> Option<LiveRunSummary> {
@@ -870,12 +872,15 @@ fn load_live_run_summary(display_id: &str, workspace_path: Option<&str>) -> Opti
         if !name.starts_with(&prefix) || !name.ends_with(".json") {
             continue;
         }
-        let Ok(body) = std::fs::read_to_string(&path) else {
+        let Some(marker) = read_small_json::<crate::cli::runs::CurrentRunMarker>(
+            &path,
+            LIVE_MARKER_STATUS_READ_BYTES,
+        ) else {
             continue;
         };
-        let Ok(marker) = serde_json::from_str::<crate::cli::runs::CurrentRunMarker>(&body) else {
+        if marker.status.as_deref() != Some("running") {
             continue;
-        };
+        }
         candidates.push(crate::cli::runs::CurrentRun {
             marker_path: path,
             marker,
@@ -887,9 +892,14 @@ fn load_live_run_summary(display_id: &str, workspace_path: Option<&str>) -> Opti
         au.cmp(bu).then_with(|| a.marker.role.cmp(&b.marker.role))
     });
     let current = candidates.pop()?;
-    let status = crate::cli::runs::read_current_status(&stores_dir, &current)
-        .ok()
-        .flatten();
+    let status = crate::cli::runs::current_status_path(&stores_dir, &current)
+        .as_deref()
+        .and_then(|path| {
+            read_small_json::<crate::cli::runs::CurrentRunStatus>(
+                path,
+                LIVE_MARKER_STATUS_READ_BYTES,
+            )
+        });
     let events_path = current
         .marker
         .events_path
@@ -978,8 +988,9 @@ fn summarize_live_event(v: &Value) -> Option<LiveRunEventSummary> {
         ),
         "tool_start" => {
             let name = string_field(v, "name").unwrap_or_else(|| "tool".to_string());
+            let path = string_field(v, "path").unwrap_or_default();
             let args = string_field(v, "args_preview").unwrap_or_default();
-            ("tool_start".to_string(), join_nonempty(&[name, args]))
+            ("tool_start".to_string(), join_nonempty(&[name, path, args]))
         }
         "tool_end" => {
             let ok = v
@@ -1032,6 +1043,17 @@ fn summarize_live_event(v: &Value) -> Option<LiveRunEventSummary> {
         label,
         text: truncate_chars(&one_line(&text), LIVE_TEXT_LIMIT),
     })
+}
+
+fn read_small_json<T: DeserializeOwned>(path: &Path, max_bytes: u64) -> Option<T> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len > max_bytes {
+        return None;
+    }
+    let mut body = String::new();
+    file.read_to_string(&mut body).ok()?;
+    serde_json::from_str(&body).ok()
 }
 
 fn string_field(v: &Value, key: &str) -> Option<String> {
@@ -2879,6 +2901,94 @@ mod tests {
         );
         assert_eq!(live.events[0].text, "message 1");
         assert_eq!(live.events[4].text, "message 5");
+    }
+
+    #[test]
+    fn completed_live_marker_is_not_rendered_as_active_runner() {
+        let conn = cockpit_conn();
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("wt");
+        let runs = workspace.join(".stores/runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::write(
+            runs.join("current-T778-planner.json"),
+            serde_json::json!({
+                "display_id":"T778",
+                "role":"planner",
+                "runner":"claude-code:opus",
+                "status":"completed",
+                "session_id":"sess",
+                "updated_at":"2026-05-11T00:00:00Z",
+                "transcript_path": runs.join("sess.jsonl")
+            })
+            .to_string(),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,updated_at,linked_observations,workspace_path) VALUES ('T778','planning','task','2026-05-01','[]',?1)",
+            [workspace.to_string_lossy().to_string()],
+        ).unwrap();
+
+        let rows = load_rows(&conn).unwrap();
+        let task = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Task(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            task.live_run.is_none(),
+            "completed marker must not render as active Live runner"
+        );
+    }
+
+    #[test]
+    fn oversized_live_marker_is_ignored_without_error() {
+        let conn = cockpit_conn();
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("wt");
+        let runs = workspace.join(".stores/runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::write(
+            runs.join("current-T779-planner.json"),
+            "{".to_string() + &"x".repeat((LIVE_MARKER_STATUS_READ_BYTES as usize) + 1),
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,updated_at,linked_observations,workspace_path) VALUES ('T779','planning','task','2026-05-01','[]',?1)",
+            [workspace.to_string_lossy().to_string()],
+        ).unwrap();
+
+        let rows = load_rows(&conn).unwrap();
+        let task = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Task(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert!(task.live_run.is_none());
+    }
+
+    #[test]
+    fn live_tool_start_summary_includes_path_and_args() {
+        let summary = summarize_live_event(&serde_json::json!({
+            "type": "tool_start",
+            "ts": "2026-05-11T00:00:00Z",
+            "name": "Read",
+            "path": "docs/adr/0002.md",
+            "args_preview": "limit=120"
+        }))
+        .unwrap();
+        assert_eq!(summary.label, "tool_start");
+        assert!(summary.text.contains("Read"), "{}", summary.text);
+        assert!(
+            summary.text.contains("docs/adr/0002.md"),
+            "{}",
+            summary.text
+        );
+        assert!(summary.text.contains("limit=120"), "{}", summary.text);
     }
 
     #[test]
