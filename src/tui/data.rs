@@ -1451,6 +1451,38 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         }
     }
 
+    if table_exists(conn, "architecture_reviews")? {
+        let cols = table_columns(conn, "architecture_reviews")?;
+        let sql = format!(
+            "SELECT display_id, status, {lifecycle}, {outcome}, {linked_observation_ids}, {produced_task_id}, {source_observation}, {verdict} \
+             FROM architecture_reviews \
+             WHERE status IN ('pending','in_review','awaiting_human_ratification','verdict_issued')",
+            lifecycle = sql_col(&cols, "lifecycle", "NULL"),
+            outcome = sql_col(&cols, "outcome", "NULL"),
+            linked_observation_ids = sql_col(&cols, "linked_observation_ids", "NULL"),
+            produced_task_id = sql_col(&cols, "produced_task_id", "NULL"),
+            source_observation = sql_col(&cols, "source_observation", "NULL"),
+            verdict = sql_col(&cols, "verdict", "NULL"),
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let arch_iter = stmt.query_map([], |r| {
+            Ok(ReviewRow {
+                display_id: r.get(0)?,
+                task_id: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                status: r.get(1)?,
+                lifecycle: r.get(2).ok().flatten(),
+                outcome: r.get(3).ok().flatten(),
+                linked_observation_ids: json_string_array(r.get::<_, String>(4).ok().as_deref()),
+                produced_task_id: r.get(5).ok().flatten(),
+                verdict: r.get(7).ok().flatten(),
+                ..Default::default()
+            })
+        })?;
+        for r in arch_iter.flatten() {
+            rows.push(Row::Review(r));
+        }
+    }
+
     if table_exists(conn, "intake")? {
         load_intake_rows(conn, &mut rows)?;
     }
@@ -3591,6 +3623,55 @@ mod tests {
         assert_eq!(review.major_count, Some(2));
         assert_eq!(review.minor_count, Some(3));
         assert_eq!(review.findings_count, Some(4));
+    }
+
+    #[test]
+    fn architecture_review_rows_round_trip_adr0002_fields() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE tasks (
+                display_id TEXT, status TEXT, title TEXT, claimed_by TEXT, updated_at TEXT,
+                tier_hint TEXT, linked_observations TEXT, blocked_reason TEXT,
+                lifecycle TEXT, active_step TEXT, integration_step TEXT, blocked INTEGER, blocker_kind TEXT,
+                current_phase INTEGER, current_cycle INTEGER, plan TEXT, plan_source TEXT,
+                contract TEXT, plan_review_log TEXT, cycles TEXT, wrap_log TEXT,
+                branch TEXT, workspace_path TEXT
+            );
+            CREATE TABLE observations (
+                display_id TEXT, status TEXT, priority TEXT, summary TEXT, updated_at TEXT,
+                body TEXT, source TEXT, task_id TEXT, priority_rank INTEGER, intent_contract TEXT,
+                locked_by TEXT, locked_at TEXT, lock_reason TEXT, evidence TEXT, resolution TEXT,
+                investigation_failure_reason TEXT
+            );
+            CREATE TABLE architecture_reviews (
+                display_id TEXT, status TEXT, lifecycle TEXT, outcome TEXT,
+                source_observation TEXT, linked_observation_ids TEXT, produced_task_id TEXT, verdict TEXT
+            );
+            INSERT INTO architecture_reviews (
+                display_id, status, lifecycle, outcome, source_observation,
+                linked_observation_ids, produced_task_id, verdict
+            ) VALUES (
+                'A001', 'verdict_issued', 'closed', 'primitive_task_created', 'L010',
+                '["L010","L011","L012"]', 'T777', 'create_primitive_task'
+            );
+            "#,
+        )
+        .unwrap();
+        let rows = load_rows(&conn).unwrap();
+        let review = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Review(r) if r.display_id == "A001" => Some(r),
+                _ => None,
+            })
+            .expect("architecture review row loaded");
+        assert_eq!(review.task_id, "L010");
+        assert_eq!(review.lifecycle.as_deref(), Some("closed"));
+        assert_eq!(review.outcome.as_deref(), Some("primitive_task_created"));
+        assert_eq!(review.linked_observation_ids, vec!["L010", "L011", "L012"]);
+        assert_eq!(review.produced_task_id.as_deref(), Some("T777"));
+        assert_eq!(review.verdict.as_deref(), Some("create_primitive_task"));
     }
 
     #[test]
