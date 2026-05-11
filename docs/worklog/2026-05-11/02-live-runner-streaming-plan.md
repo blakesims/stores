@@ -259,6 +259,15 @@ Use normalized `last_event_at`, not just PID, as the primary live signal.
   - Makes status readers honor explicit `status_path` / `events_path` fields in the marker.
   - Preserves fallback derivation for older markers.
   - Reviewed PASS for the semantic status bridge refinement.
+- `ab3c82c tui: show live runner activity window`
+  - Adds `TaskRow.live_run` summary loaded in `src/tui/data.rs`.
+  - Renders `Live runner` and `Live activity · last 5` in task detail.
+  - Uses semantic `events.jsonl`, suppresses heartbeat noise when meaningful events exist, and keeps filesystem reads out of `detail.rs`.
+- `2abff2f tui: harden live runner activity window`
+  - Suppresses completed/failed markers from the active live-run section.
+  - Includes tool path in `tool_start` activity rows.
+  - Bounds marker/status JSON reads and adds focused regression tests.
+  - Reviewed PASS.
 
 ### Review status
 
@@ -429,9 +438,9 @@ Goal: optional live dashboard like `pi-subagents`.
 
 ## Recommended next worker brief
 
-Do **not** redo Slice 1, the minimal `runs current/tail` CLI, the status bridge, or semantic event writing. Start from accepted `2f884b2`.
+Do **not** redo Slice 1, the minimal `runs current/tail` CLI, the status bridge, semantic event writing, or the TUI live activity window. The TUI live activity window has passed review through `2abff2f`.
 
-### Next chunk: TUI detail live activity sliding window
+### Completed chunk: TUI detail live activity sliding window
 
 User-facing outcome: in `stores watch · detail · Task <id>`, show what the active runner is doing without a second terminal. The desired view is a compact sliding window of configurable/default 5 meaningful activity lines from the currently active runner.
 
@@ -489,4 +498,6 @@ Tests to add:
 - malformed event line is ignored/tolerated;
 - long assistant/tool text is truncated.
 
-After this passes worker→reviewer, later possible chunks are: semantic `stores runs tail` rendering, `--follow`, DB-backed `runner_invocations`, and optional Claude partial-message config for richer token-level deltas.
+Status: implemented and reviewed PASS via `ab3c82c` + `2abff2f`.
+
+Later possible chunks are: semantic `stores runs tail` rendering, `--follow`, DB-backed `runner_invocations`, `stores watch` configuration for live window size, and optional Claude partial-message config for richer token-level deltas.
