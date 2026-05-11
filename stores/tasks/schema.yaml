@@ -249,7 +249,7 @@ lifecycle:
     # PASS-non-last: bump current_phase, reset current_cycle, return to executing
     - {from: code_review, to: executing, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "current_phase < plan.phases.length", lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
     # PASS-last: complete
-    - {from: code_review, to: complete, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "current_phase >= plan.phases.length", lifecycle: integration, active_step: wrapping, integration_step: none, blocked: false, legacy_status: complete}
+    - {from: code_review, to: complete, verb: submit-review, actor: ai_autonomous, requires_gate: PASS, guard: "current_phase >= plan.phases.length", lifecycle: active, active_step: wrapping, integration_step: none, blocked: false, legacy_status: complete}
     # REVISE: bump current_cycle (post-increment guard <= 4 means cycles 2/3/4 OK)
     - {from: code_review, to: executing, verb: submit-review, actor: ai_autonomous, requires_gate: REVISE, guard: "current_cycle <= 4", lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
     # REVISE-fallback: 4th-revise routes to blocked (no guard; selected when REVISE→executing's guard fails)
@@ -324,7 +324,7 @@ lifecycle:
     - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human, lifecycle: integration, active_step: none, integration_step: queued, blocked: false, legacy_status: integration_queued}
 
     # complete → in_review (framework on-entry follow-on)
-    - {from: complete, to: in_review, verb: request_review, actor: framework, lifecycle: integration, active_step: wrapping, integration_step: none, blocked: false, legacy_status: in_review}
+    - {from: complete, to: in_review, verb: request_review, actor: framework, lifecycle: active, active_step: wrapping, integration_step: none, blocked: false, legacy_status: in_review}
     # External review revision route for T2/T3 rows. T1 remains lightweight by
     # default: skip-plan T1 rows do not require an external_review PASS unless a
     # later phase explicitly opts them into that lane.
