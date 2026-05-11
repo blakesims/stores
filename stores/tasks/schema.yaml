@@ -324,7 +324,7 @@ lifecycle:
     - {from: integration_blocked, to: integration_queued, verb: retry-integration, actor: ai_with_human, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: integration_queued}
 
     # complete → in_review (framework on-entry follow-on)
-    - {from: complete, to: in_review, verb: request_review, actor: framework, lifecycle: active, active_step: none, integration_step: none, blocked: false, legacy_status: in_review}
+    - {from: complete, to: in_review, verb: request_review, actor: framework, lifecycle: active, active_step: wrapping, integration_step: none, blocked: false, legacy_status: in_review}
     # External review revision route for T2/T3 rows. T1 remains lightweight by
     # default: skip-plan T1 rows do not require an external_review PASS unless a
     # later phase explicitly opts them into that lane.
@@ -336,7 +336,7 @@ lifecycle:
     - {from: blocked, to: executing, verb: submit-external-review, actor: framework, requires_gate: REVISE, lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
 
     # in_review acceptance records a durable policy decision; framework release-to-integration performs lane entry.
-    - {from: in_review, to: accepted, verb: accept, actor: human, lifecycle: active, active_step: none, integration_step: none, blocked: false, legacy_status: accepted}
+    - {from: in_review, to: accepted, verb: accept, actor: human, lifecycle: active, active_step: wrapping, integration_step: none, blocked: false, legacy_status: accepted}
     - {from: complete, to: integration_queued, verb: release-to-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: integration_queued}
     - {from: in_review, to: integration_queued, verb: release-to-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: integration_queued}
     - {from: accepted, to: integration_queued, verb: release-to-integration, actor: framework, lifecycle: integration, active_step: none, integration_step: none, blocked: false, legacy_status: integration_queued}
@@ -400,7 +400,8 @@ workflow:
     blocked: []
     complete:
       - transition_to: in_review
-    in_review: []
+    in_review:
+      - dispatch_agent: wrap
     accepted: []
     integration_queued: []
     integrating: []
