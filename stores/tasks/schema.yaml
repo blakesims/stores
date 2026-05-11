@@ -329,6 +329,11 @@ lifecycle:
     # default: skip-plan T1 rows do not require an external_review PASS unless a
     # later phase explicitly opts them into that lane.
     - {from: in_review, to: executing, verb: submit-external-review, actor: framework, requires_gate: REVISE, lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
+    # Narrow ER reconciliation path: if an in-flight external review returns
+    # after the task drifted to blocked due to runner/watchdog failure, a
+    # current-head REVISE can re-enter execution. Code-side guards restrict
+    # this to drive/watchdog blocked_reason values.
+    - {from: blocked, to: executing, verb: submit-external-review, actor: framework, requires_gate: REVISE, lifecycle: active, active_step: coding, integration_step: none, blocked: false, legacy_status: executing}
 
     # in_review acceptance records a durable policy decision; framework release-to-integration performs lane entry.
     - {from: in_review, to: accepted, verb: accept, actor: human, lifecycle: active, active_step: wrapping, integration_step: none, blocked: false, legacy_status: accepted}
