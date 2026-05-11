@@ -11,7 +11,7 @@ use super::row::now_iso8601;
 #[derive(Debug, Clone)]
 struct RulingRow {
     display_id: String,
-    status: String,
+    lifecycle: String,
     kind: String,
     verdict: String,
     verdict_issued_at: String,
@@ -109,11 +109,11 @@ pub(crate) fn enforce_u1_architecture_gate(
         )
     })?;
 
-    if ruling.status != "verdict_issued" {
+    if ruling.lifecycle != "closed" {
         bail!(
-            "pending_architecture_review=true blocks U1 ratification: architecture review {} is status={}, expected verdict_issued",
+            "pending_architecture_review=true blocks U1 ratification: architecture review {} is lifecycle={}, expected closed",
             ruling.display_id,
-            ruling.status
+            ruling.lifecycle
         );
     }
     if ruling.source_observation.as_deref() != Some(observation_id) {
@@ -342,13 +342,13 @@ fn read_ruling(tx: &Transaction, display_id: &str) -> Result<Option<RulingRow>> 
     let table = quote_ident("architecture_reviews");
     tx.query_row(
         &format!(
-            "SELECT display_id,status,kind,COALESCE(verdict,''),COALESCE(verdict_issued_at,''),source_observation,merge_target_id FROM {table} WHERE display_id=?1"
+            "SELECT display_id,COALESCE(lifecycle,''),kind,COALESCE(verdict,''),COALESCE(verdict_issued_at,''),source_observation,merge_target_id FROM {table} WHERE display_id=?1"
         ),
         [display_id],
         |r| {
             Ok(RulingRow {
                 display_id: r.get(0)?,
-                status: r.get(1)?,
+                lifecycle: r.get(1)?,
                 kind: r.get(2)?,
                 verdict: r.get(3)?,
                 verdict_issued_at: r.get(4)?,
@@ -419,9 +419,15 @@ mod tests {
         verdict: &str,
         issued: &str,
     ) {
+        let lifecycle = match status {
+            "verdict_issued" | "withdrawn" | "superseded" => "closed",
+            "awaiting_human_ratification" => "waiting",
+            "in_review" => "reviewing",
+            _ => "pending",
+        };
         conn.execute(
-            "INSERT INTO architecture_reviews (display_id,status,created_at,updated_at,created_by,updated_by,kind,summary,source_observation,verdict,verdict_issued_at) VALUES (?1,?2,'now','now','ai_with_human','ai_with_human',?3,'s','L001',?4,?5)",
-            rusqlite::params![id,status,kind,verdict,issued],
+            "INSERT INTO architecture_reviews (display_id,status,lifecycle,created_at,updated_at,created_by,updated_by,kind,summary,source_observation,verdict,verdict_issued_at) VALUES (?1,?2,?3,'now','now','ai_with_human','ai_with_human',?4,'s','L001',?5,?6)",
+            rusqlite::params![id,status,lifecycle,kind,verdict,issued],
         ).unwrap();
     }
 
@@ -516,7 +522,7 @@ mod tests {
         );
         tx.commit().unwrap();
 
-        conn.execute("UPDATE architecture_reviews SET status='verdict_issued', verdict_issued_at='2026-05-07T09:00:00Z' WHERE display_id='A001'", []).unwrap();
+        conn.execute("UPDATE architecture_reviews SET status='verdict_issued', lifecycle='closed', verdict_issued_at='2026-05-07T09:00:00Z' WHERE display_id='A001'", []).unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         let mut merged = pending_entry(Some("A001"));
         let mut diff = EntryMap::new();
@@ -547,7 +553,7 @@ mod tests {
         );
         tx.commit().unwrap();
 
-        conn.execute("UPDATE architecture_reviews SET status='verdict_issued', ratified_by='human', ratified_at='2026-05-07T09:00:00Z', verdict_issued_at='2026-05-07T09:00:00Z' WHERE display_id='A002'", []).unwrap();
+        conn.execute("UPDATE architecture_reviews SET status='verdict_issued', lifecycle='closed', ratified_by='human', ratified_at='2026-05-07T09:00:00Z', verdict_issued_at='2026-05-07T09:00:00Z' WHERE display_id='A002'", []).unwrap();
         let tx = conn.unchecked_transaction().unwrap();
         let mut merged = pending_entry(Some("A002"));
         let mut diff = EntryMap::new();
@@ -601,7 +607,7 @@ mod tests {
     fn merge_verdict_resolves_source_and_blocks_later_u1_by_status() {
         let conn = setup();
         conn.execute(
-            "INSERT INTO architecture_reviews (display_id,status,created_at,updated_at,created_by,updated_by,kind,summary,source_observation,linked_observation_ids) VALUES ('A004','in_review','now','now','ai_with_human','ai_with_human','interpret','s','L001',?1)",
+            "INSERT INTO architecture_reviews (display_id,status,lifecycle,created_at,updated_at,created_by,updated_by,kind,summary,source_observation,linked_observation_ids) VALUES ('A004','in_review','reviewing','now','now','ai_with_human','ai_with_human','interpret','s','L001',?1)",
             [json!(["L001"]).to_string()],
         ).unwrap();
         let arch = crate::schema::Schema::from_yaml(include_str!(
