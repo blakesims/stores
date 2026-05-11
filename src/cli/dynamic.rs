@@ -375,6 +375,30 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .help("Agent role")
                                 .required(true),
                         ),
+                )
+                .subcommand(
+                    Command::new("current")
+                        .about("Show the current live runner marker for a task")
+                        .arg(Arg::new("display_id").help("Task display ID").required(true))
+                        .arg(Arg::new("role").long("role").help("Agent role")),
+                )
+                .subcommand(
+                    Command::new("tail")
+                        .about("Print the current live runner log for a task")
+                        .arg(Arg::new("display_id").help("Task display ID").required(true))
+                        .arg(Arg::new("role").long("role").help("Agent role"))
+                        .arg(
+                            Arg::new("raw")
+                                .long("raw")
+                                .help("Print the live raw stdout transcript")
+                                .action(clap::ArgAction::SetTrue),
+                        )
+                        .arg(
+                            Arg::new("stderr")
+                                .long("stderr")
+                                .help("Print the live stderr log")
+                                .action(clap::ArgAction::SetTrue),
+                        ),
                 ),
         )
         // Watch subcommand — ratatui TUI (T028); --legacy falls back to ANSI POC

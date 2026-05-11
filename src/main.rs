@@ -189,6 +189,16 @@ fn main() -> Result<()> {
                     cycle: ssub.get_one::<i64>("cycle").copied(),
                     role: ssub.get_one::<String>("role").unwrap().clone(),
                 },
+                Some(("current", csub)) => RunsCmd::Current {
+                    display_id: csub.get_one::<String>("display_id").unwrap().clone(),
+                    role: csub.get_one::<String>("role").cloned(),
+                },
+                Some(("tail", tsub)) => RunsCmd::Tail {
+                    display_id: tsub.get_one::<String>("display_id").unwrap().clone(),
+                    role: tsub.get_one::<String>("role").cloned(),
+                    raw: *tsub.get_one::<bool>("raw").unwrap_or(&false),
+                    stderr: *tsub.get_one::<bool>("stderr").unwrap_or(&false),
+                },
                 _ => {
                     let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
                     if let Some(runs_cmd) = cmd2.find_subcommand_mut("runs") {

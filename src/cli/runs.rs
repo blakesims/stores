@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Deserialize;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,13 +15,45 @@ pub struct RunTranscript {
 }
 
 pub enum RunsCmd {
-    List { display_id: String },
+    List {
+        display_id: String,
+    },
     Show {
         display_id: String,
         phase: i64,
         cycle: Option<i64>,
         role: String,
     },
+    Current {
+        display_id: String,
+        role: Option<String>,
+    },
+    Tail {
+        display_id: String,
+        role: Option<String>,
+        raw: bool,
+        stderr: bool,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CurrentRunMarker {
+    pub display_id: String,
+    pub phase: Option<i64>,
+    pub cycle: Option<i64>,
+    pub role: String,
+    pub runner: Option<String>,
+    pub session_id: Option<String>,
+    pub status: Option<String>,
+    pub transcript_path: Option<PathBuf>,
+    pub stderr_log_path: Option<PathBuf>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CurrentRun {
+    pub marker_path: PathBuf,
+    pub marker: CurrentRunMarker,
 }
 
 pub fn run(cmd: RunsCmd) -> Result<()> {
@@ -58,7 +92,192 @@ pub fn run(cmd: RunsCmd) -> Result<()> {
             println!("{body}");
             Ok(())
         }
+        RunsCmd::Current { display_id, role } => {
+            let stores_dir = crate::paths::stores_dir()?;
+            let current = find_current_run(&stores_dir, &display_id, role.as_deref())?;
+            print_current_run(&stores_dir, &current);
+            Ok(())
+        }
+        RunsCmd::Tail {
+            display_id,
+            role,
+            raw,
+            stderr,
+        } => {
+            if !raw && !stderr {
+                bail!("runs tail currently requires --raw or --stderr");
+            }
+            if raw && stderr {
+                bail!("runs tail accepts only one of --raw or --stderr");
+            }
+            let stores_dir = crate::paths::stores_dir()?;
+            let current = find_current_run(&stores_dir, &display_id, role.as_deref())?;
+            let path = if stderr {
+                current
+                    .marker
+                    .stderr_log_path
+                    .as_ref()
+                    .context("current run marker does not include stderr_log_path")?
+            } else {
+                current
+                    .marker
+                    .transcript_path
+                    .as_ref()
+                    .context("current run marker does not include transcript_path")?
+            };
+            let read_path = resolve_marker_path(&stores_dir, &current.marker_path, path);
+            let body = fs::read_to_string(&read_path).with_context(|| {
+                format!(
+                    "failed to read live run log {} (resolved to {})",
+                    path.display(),
+                    read_path.display()
+                )
+            })?;
+            print!("{body}");
+            io::stdout().flush().ok();
+            Ok(())
+        }
     }
+}
+
+fn print_current_run(stores_dir: &Path, current: &CurrentRun) {
+    let m = &current.marker;
+    println!("display_id\t{}", m.display_id);
+    println!("role\t{}", m.role);
+    if let Some(phase) = m.phase {
+        println!("phase\t{phase}");
+    }
+    if let Some(cycle) = m.cycle {
+        println!("cycle\t{cycle}");
+    }
+    if let Some(runner) = &m.runner {
+        println!("runner\t{runner}");
+    }
+    if let Some(status) = &m.status {
+        println!("status\t{status}");
+    }
+    if let Some(updated_at) = &m.updated_at {
+        println!("updated_at\t{updated_at}");
+    }
+    println!("marker_path\t{}", current.marker_path.display());
+    if let Some(path) = &m.transcript_path {
+        println!(
+            "transcript_path\t{}",
+            resolve_marker_path(stores_dir, &current.marker_path, path).display()
+        );
+    }
+    if let Some(path) = &m.stderr_log_path {
+        println!(
+            "stderr_log_path\t{}",
+            resolve_marker_path(stores_dir, &current.marker_path, path).display()
+        );
+    }
+}
+
+pub fn find_current_run(
+    stores_dir: &Path,
+    display_id: &str,
+    role: Option<&str>,
+) -> Result<CurrentRun> {
+    let live_stores_dir = live_stores_dir_for_task(stores_dir, display_id)?;
+    let runs_dir = live_stores_dir.join("runs");
+    let mut candidates = Vec::new();
+
+    if let Some(role) = role {
+        let marker_path = runs_dir.join(format!("current-{display_id}-{role}.json"));
+        if !marker_path.exists() {
+            bail!(
+                "no current live run marker found for {display_id} role {role}: {}",
+                marker_path.display()
+            );
+        }
+        candidates.push(read_current_marker(&marker_path)?);
+    } else {
+        let entries = fs::read_dir(&runs_dir)
+            .with_context(|| format!("failed to read runs dir {}", runs_dir.display()))?;
+        let prefix = format!("current-{display_id}-");
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("reading entry in {}", runs_dir.display()))?;
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.starts_with(&prefix) && name.ends_with(".json") {
+                candidates.push(read_current_marker(&path)?);
+            }
+        }
+        if candidates.is_empty() {
+            bail!(
+                "no current live run markers found for {display_id} in {}",
+                runs_dir.display()
+            );
+        }
+        candidates.sort_by(|a, b| {
+            let au = a.marker.updated_at.as_deref().unwrap_or("");
+            let bu = b.marker.updated_at.as_deref().unwrap_or("");
+            au.cmp(bu).then_with(|| a.marker.role.cmp(&b.marker.role))
+        });
+    }
+
+    candidates
+        .pop()
+        .context("no current live run marker candidate selected")
+}
+
+fn read_current_marker(path: &Path) -> Result<CurrentRun> {
+    let body = fs::read_to_string(path)
+        .with_context(|| format!("failed to read live run marker {}", path.display()))?;
+    let marker: CurrentRunMarker = serde_json::from_str(&body)
+        .with_context(|| format!("failed to parse live run marker {}", path.display()))?;
+    Ok(CurrentRun {
+        marker_path: path.to_path_buf(),
+        marker,
+    })
+}
+
+fn live_stores_dir_for_task(stores_dir: &Path, display_id: &str) -> Result<PathBuf> {
+    let db_path = stores_dir.join("db.sqlite");
+    let conn = Connection::open(&db_path)
+        .with_context(|| format!("failed to open substrate DB {}", db_path.display()))?;
+    let has_workspace_path: bool = conn
+        .prepare("PRAGMA table_info(tasks)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .any(|name| name == "workspace_path");
+    let workspace: Option<String> = if has_workspace_path {
+        conn.query_row(
+            "SELECT workspace_path FROM tasks WHERE display_id = ?1",
+            [display_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("lookup task workspace_path")?
+    } else {
+        None
+    };
+    if let Some(workspace) = workspace.filter(|w| !w.trim().is_empty()) {
+        return Ok(PathBuf::from(workspace).join(".stores"));
+    }
+    Ok(stores_dir.to_path_buf())
+}
+
+fn resolve_marker_path(stores_dir: &Path, marker_path: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Some(marker_stores_dir) = marker_path
+        .parent()
+        .and_then(|runs| runs.parent())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()) == Some(".stores"))
+    {
+        if let Ok(stripped) = path.strip_prefix(".stores") {
+            return marker_stores_dir.join(stripped);
+        }
+        return marker_stores_dir.join(path);
+    }
+    resolve_transcript_path(stores_dir, path)
 }
 
 pub fn list_for_task(stores_dir: &Path, display_id: &str) -> Result<Vec<RunTranscript>> {
@@ -81,8 +300,7 @@ pub fn list_for_task(stores_dir: &Path, display_id: &str) -> Result<Vec<RunTrans
     if !tasks_exists {
         anyhow::bail!("tasks store not installed; cannot query runs");
     }
-    crate::db::ensure_runs_view_if_tasks_exists(&conn)
-        .context("apply runs view DDL")?;
+    crate::db::ensure_runs_view_if_tasks_exists(&conn).context("apply runs view DDL")?;
 
     // Query the runs VIEW — the substrate's official query surface for
     // (display_id, phase, cycle, role, transcript_path) tuples.  JSON decoding
@@ -156,8 +374,7 @@ pub fn find_transcript(
     if !tasks_exists {
         anyhow::bail!("tasks store not installed; cannot query runs");
     }
-    crate::db::ensure_runs_view_if_tasks_exists(&conn)
-        .context("apply runs view DDL")?;
+    crate::db::ensure_runs_view_if_tasks_exists(&conn).context("apply runs view DDL")?;
 
     // MAJOR 1 (T072 r4): when --cycle is absent, default to the LATEST cycle
     // for the given phase+role (highest cycle number — deterministic DESC
@@ -177,9 +394,7 @@ pub fn find_transcript(
             )
             .context("count matching runs rows (exact cycle)")?;
         if count == 0 {
-            bail!(
-                "missing transcript for {display_id} phase {phase} role {role} cycle {cyc}"
-            );
+            bail!("missing transcript for {display_id} phase {phase} role {role} cycle {cyc}");
         }
         conn.query_row(
             "SELECT phase, cycle, role, transcript_path \
@@ -193,21 +408,18 @@ pub fn find_transcript(
         // Latest-cycle path: ORDER BY cycle DESC LIMIT 1.
         // Returns the highest cycle number — deterministic when multiple cycles
         // exist for the same phase+role (e.g. executor retry cycles).
-        let result = conn
-            .query_row(
-                "SELECT phase, cycle, role, transcript_path \
+        let result = conn.query_row(
+            "SELECT phase, cycle, role, transcript_path \
                  FROM runs \
                  WHERE display_id = ?1 AND phase = ?2 AND role = ?3 \
                  ORDER BY cycle DESC LIMIT 1",
-                params![display_id, phase, role],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            );
+            params![display_id, phase, role],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        );
         match result {
             Ok(row) => row,
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                bail!(
-                    "missing transcript for {display_id} phase {phase} role {role}"
-                );
+                bail!("missing transcript for {display_id} phase {phase} role {role}");
             }
             Err(e) => return Err(e).context("fetch latest runs row"),
         }
@@ -231,7 +443,6 @@ pub fn find_transcript(
         path,
     })
 }
-
 
 fn resolve_transcript_path(stores_dir: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -297,7 +508,14 @@ mod tests {
         let rows = list_for_task(&tmp.path().join(".stores"), "T999").unwrap();
         let keys: Vec<_> = rows
             .iter()
-            .map(|r| (r.phase, r.cycle, r.role.as_str(), r.path.to_string_lossy().to_string()))
+            .map(|r| {
+                (
+                    r.phase,
+                    r.cycle,
+                    r.role.as_str(),
+                    r.path.to_string_lossy().to_string(),
+                )
+            })
             .collect();
         assert_eq!(
             keys,
@@ -327,15 +545,79 @@ mod tests {
     #[test]
     fn show_finds_existing_transcript_backlink() {
         let tmp = fixture();
-        let row = find_transcript(
-            &tmp.path().join(".stores"),
-            "T999",
-            2,
-            Some(1),
-            "executor",
+        let row =
+            find_transcript(&tmp.path().join(".stores"), "T999", 2, Some(1), "executor").unwrap();
+        assert_eq!(
+            row.path,
+            PathBuf::from(".stores/runs/executor-session.jsonl")
+        );
+    }
+
+    #[test]
+    fn current_resolves_marker_before_agent_run_completion() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        let transcript = stores.join("runs/live-session.jsonl");
+        let stderr = stores.join("runs/live-session.stderr.log");
+        fs::write(&transcript, "first live line\n").unwrap();
+        fs::write(&stderr, "stderr live line\n").unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "phase": 7,
+                "cycle": 2,
+                "role": "executor",
+                "runner": "pi",
+                "session_id": "live-session",
+                "status": "running",
+                "updated_at": "2026-05-11T02:05:47Z",
+                "transcript_path": transcript,
+                "stderr_log_path": stderr,
+            }))
+            .unwrap(),
         )
         .unwrap();
-        assert_eq!(row.path, PathBuf::from(".stores/runs/executor-session.jsonl"));
+
+        let current = find_current_run(&stores, "T999", Some("executor")).unwrap();
+        assert_eq!(current.marker.display_id, "T999");
+        assert_eq!(current.marker.role, "executor");
+        assert_eq!(current.marker.status.as_deref(), Some("running"));
+        let body = fs::read_to_string(current.marker.transcript_path.as_ref().unwrap()).unwrap();
+        assert_eq!(body, "first live line\n");
+    }
+
+    #[test]
+    fn current_without_role_picks_latest_updated_marker() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        fs::write(
+            stores.join("runs/current-T999-planner.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "planner",
+                "status": "running",
+                "updated_at": "2026-05-11T02:00:00Z",
+                "transcript_path": stores.join("runs/planner.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "status": "running",
+                "updated_at": "2026-05-11T02:05:47Z",
+                "transcript_path": stores.join("runs/executor.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let current = find_current_run(&stores, "T999", None).unwrap();
+        assert_eq!(current.marker.role, "executor");
     }
 
     #[test]
@@ -353,9 +635,9 @@ mod tests {
         let tmp = fixture();
         fs::remove_file(tmp.path().join(".stores/runs/review-session.jsonl")).unwrap();
         let err = list_for_task(&tmp.path().join(".stores"), "T999").unwrap_err();
-        assert!(err.to_string().contains(
-            "missing transcript for T999 phase 2 cycle 1 role code-reviewer"
-        ));
+        assert!(err
+            .to_string()
+            .contains("missing transcript for T999 phase 2 cycle 1 role code-reviewer"));
     }
 
     // ---- T072 r2: runs VIEW tests ----
@@ -420,15 +702,44 @@ mod tests {
             )
             .unwrap();
         let rows: Vec<(String, i64, i64, String, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
 
         assert_eq!(rows.len(), 3, "expected 3 rows (2 executor + 1 reviewer)");
-        assert_eq!(rows[0], ("T001".into(), 1, 1, "code-reviewer".into(), ".stores/runs/rv1.jsonl".into()));
-        assert_eq!(rows[1], ("T001".into(), 1, 1, "executor".into(),      ".stores/runs/ex1.jsonl".into()));
-        assert_eq!(rows[2], ("T001".into(), 2, 1, "executor".into(),      ".stores/runs/ex2.jsonl".into()));
+        assert_eq!(
+            rows[0],
+            (
+                "T001".into(),
+                1,
+                1,
+                "code-reviewer".into(),
+                ".stores/runs/rv1.jsonl".into()
+            )
+        );
+        assert_eq!(
+            rows[1],
+            (
+                "T001".into(),
+                1,
+                1,
+                "executor".into(),
+                ".stores/runs/ex1.jsonl".into()
+            )
+        );
+        assert_eq!(
+            rows[2],
+            (
+                "T001".into(),
+                2,
+                1,
+                "executor".into(),
+                ".stores/runs/ex2.jsonl".into()
+            )
+        );
     }
 
     /// Empty cycles array produces zero rows without error.
@@ -469,7 +780,7 @@ mod tests {
             &tmp.path().join(".stores"),
             "T999",
             2,
-            None,   // no --cycle: should default to latest (cycle=2)
+            None, // no --cycle: should default to latest (cycle=2)
             "executor",
         )
         .unwrap();
@@ -477,7 +788,10 @@ mod tests {
             row.cycle, 2,
             "show without --cycle must return the highest cycle (latest)"
         );
-        assert_eq!(row.path, PathBuf::from(".stores/runs/executor-session.jsonl"));
+        assert_eq!(
+            row.path,
+            PathBuf::from(".stores/runs/executor-session.jsonl")
+        );
     }
 
     /// When --cycle is provided, `find_transcript` returns that exact cycle.
@@ -489,12 +803,18 @@ mod tests {
             &tmp.path().join(".stores"),
             "T999",
             2,
-            Some(1),    // explicit --cycle=1
+            Some(1), // explicit --cycle=1
             "executor",
         )
         .unwrap();
-        assert_eq!(row.cycle, 1, "explicit --cycle must return that exact cycle");
-        assert_eq!(row.path, PathBuf::from(".stores/runs/executor-session.jsonl"));
+        assert_eq!(
+            row.cycle, 1,
+            "explicit --cycle must return that exact cycle"
+        );
+        assert_eq!(
+            row.path,
+            PathBuf::from(".stores/runs/executor-session.jsonl")
+        );
     }
 
     // ---- T072 r4: MAJOR 2 — tasks-absent clean error ----
@@ -544,7 +864,8 @@ mod tests {
         )
         .unwrap();
         conn.execute_batch(RUNS_VIEW_DDL).unwrap();
-        conn.execute_batch(RUNS_VIEW_DDL)
-            .expect("applying RUNS_VIEW_DDL a second time must be a no-op (CREATE VIEW IF NOT EXISTS)");
+        conn.execute_batch(RUNS_VIEW_DDL).expect(
+            "applying RUNS_VIEW_DDL a second time must be a no-op (CREATE VIEW IF NOT EXISTS)",
+        );
     }
 }
