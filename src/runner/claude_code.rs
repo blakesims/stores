@@ -54,7 +54,9 @@ use std::process::Command;
 use std::rc::Rc;
 
 use super::liveness::{self, LivenessThresholds};
-use super::{AgentRunTelemetry, Runner, RunnerInvocationContext, RunnerOutput};
+use super::{
+    AgentRunTelemetry, Runner, RunnerInvocationContext, RunnerLiveEventSink, RunnerOutput,
+};
 
 use super::sap::{extract_all_json_objects, pick_best_sap_candidate};
 
@@ -361,6 +363,115 @@ fn append_live_line(file: &Rc<RefCell<File>>, line: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
+fn text_from_claude_content(content: &serde_json::Value) -> Vec<String> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| {
+            (part.get("type").and_then(|v| v.as_str()) == Some("text"))
+                .then(|| {
+                    part.get("text")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .flatten()
+        })
+        .collect()
+}
+
+fn map_claude_stream_event(line: &str) -> Vec<serde_json::Value> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    match v.get("type").and_then(|x| x.as_str()) {
+        Some("system") if v.get("subtype").and_then(|x| x.as_str()) == Some("api_retry") => {
+            events.push(serde_json::json!({
+                "type": "retry",
+                "attempt": v.get("attempt"),
+                "max_retries": v.get("max_retries"),
+                "delay_ms": v.get("retry_delay_ms"),
+                "reason": v.get("error").or_else(|| v.get("message")),
+            }));
+        }
+        Some("assistant") => {
+            if let Some(message) = v.get("message") {
+                for text in message
+                    .get("content")
+                    .into_iter()
+                    .flat_map(text_from_claude_content)
+                {
+                    events.push(serde_json::json!({"type":"assistant_text", "text": text}));
+                }
+                if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
+                    for part in content {
+                        if part.get("type").and_then(|x| x.as_str()) == Some("tool_use") {
+                            events.push(serde_json::json!({
+                                "type":"tool_start",
+                                "id": part.get("id"),
+                                "name": part.get("name").and_then(|x| x.as_str()).unwrap_or("tool"),
+                                "args_preview": part.get("input").map(|input| input.to_string()),
+                            }));
+                        }
+                    }
+                }
+                if let Some(usage) = message.get("usage") {
+                    events.push(serde_json::json!({
+                        "type": "usage",
+                        "input_tokens": usage.get("input_tokens"),
+                        "output_tokens": usage.get("output_tokens"),
+                        "cache_read_tokens": usage.get("cache_read_input_tokens"),
+                    }));
+                }
+            }
+        }
+        Some("user") => {
+            if let Some(content) = v
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                for part in content {
+                    if part.get("type").and_then(|x| x.as_str()) == Some("tool_result") {
+                        events.push(serde_json::json!({
+                            "type":"tool_end",
+                            "id": part.get("tool_use_id"),
+                            "ok": !part.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false),
+                        }));
+                    }
+                }
+            }
+        }
+        Some("stream_event") => {
+            let delta = v.get("event").and_then(|e| e.get("delta"));
+            if delta.and_then(|d| d.get("type")).and_then(|x| x.as_str()) == Some("text_delta") {
+                if let Some(text) = delta.and_then(|d| d.get("text")).and_then(|x| x.as_str()) {
+                    events.push(
+                        serde_json::json!({"type":"assistant_text", "text": text, "partial": true}),
+                    );
+                }
+            }
+        }
+        Some("result") => {
+            if let Some(usage) = v.get("usage") {
+                events.push(serde_json::json!({
+                    "type": "usage",
+                    "input_tokens": usage.get("input_tokens"),
+                    "output_tokens": usage.get("output_tokens"),
+                    "cache_read_tokens": usage.get("cache_read_input_tokens"),
+                }));
+            }
+            events.push(serde_json::json!({
+                "type": "final_output",
+                "payload": v.get("structured_output").or_else(|| v.get("result")).cloned().unwrap_or(serde_json::Value::Null),
+            }));
+        }
+        _ => {}
+    }
+    events
+}
+
 /// Write the stream-json transcript to `<runs_dir>/<session_id>.jsonl`.
 ///
 /// `runs_dir` defaults to `<cwd>/.stores/runs` but is overridden by
@@ -540,15 +651,31 @@ impl ClaudeCodeRunner {
                 .context("transcript write failed; not launching `claude`")?;
         let (stderr_log_path, live_stderr) = open_live_stderr(&cwd, &session_id, invocation)
             .context("stderr log write failed; not launching `claude`")?;
+        let event_sink = invocation.map(RunnerLiveEventSink::open).transpose()?;
         let started_at = crate::handlers::row::now_iso8601();
         cmd.arg(brief);
         let stdout_transcript = Rc::clone(&live_transcript);
         let stderr_log = Rc::clone(&live_stderr);
+        let stdout_events = event_sink.clone();
+        let stderr_events = event_sink.clone();
         let output = liveness::run_streaming_with_liveness(
             &mut cmd,
             &LivenessThresholds::from_env(),
-            move |line| append_live_line(&stdout_transcript, line),
-            move |line| append_live_line(&stderr_log, line),
+            move |line| {
+                append_live_line(&stdout_transcript, line)?;
+                if let Some(sink) = &stdout_events {
+                    sink.borrow_mut()
+                        .record_stdout_line(line, map_claude_stream_event(line))?;
+                }
+                Ok(())
+            },
+            move |line| {
+                append_live_line(&stderr_log, line)?;
+                if let Some(sink) = &stderr_events {
+                    sink.borrow_mut().record_stderr_line(line)?;
+                }
+                Ok(())
+            },
         )
         .context("failed to launch `claude`; ensure it is installed and on PATH")?;
         let ended_at = crate::handlers::row::now_iso8601();
@@ -915,6 +1042,29 @@ mod tests {
             msg.contains("planner"),
             "expected 'planner' in final_message, got: {msg}"
         );
+    }
+
+    #[test]
+    fn maps_claude_tool_retry_usage_and_text_events() {
+        let events = map_claude_stream_event(
+            r#"{"type":"system","subtype":"api_retry","attempt":2,"max_retries":5,"retry_delay_ms":1000,"error":"rate_limit"}"#,
+        );
+        assert_eq!(events[0]["type"], "retry");
+
+        let events = map_claude_stream_event(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"},{"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"echo hi"}}],"usage":{"input_tokens":3,"output_tokens":4,"cache_read_input_tokens":2}}}"#,
+        );
+        assert!(events.iter().any(|e| e["type"] == "assistant_text"));
+        assert!(events
+            .iter()
+            .any(|e| e["type"] == "tool_start" && e["name"] == "bash"));
+        assert!(events.iter().any(|e| e["type"] == "usage"));
+
+        let events = map_claude_stream_event(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":false}]}}"#,
+        );
+        assert_eq!(events[0]["type"], "tool_end");
+        assert_eq!(events[0]["ok"], true);
     }
 
     #[test]

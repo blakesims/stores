@@ -34,8 +34,13 @@
 /// 2. Implement `Runner` for your struct.
 /// 3. Add a match arm to `select` in this module.
 /// 4. Gate behind a Cargo feature if the runner has heavy dependencies.
-use anyhow::{bail, Result};
-use std::path::PathBuf;
+use anyhow::{bail, Context, Result};
+use serde_json::json;
+use std::cell::RefCell;
+use std::fs::File;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 pub mod codex;
 pub mod liveness;
@@ -74,6 +79,120 @@ pub struct RunnerInvocationContext {
     pub session_id: String,
     pub flat_transcript_path: PathBuf,
     pub stderr_log_path: PathBuf,
+    pub events_path: PathBuf,
+    pub status_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct RunnerLiveEventSink {
+    events_file: Rc<RefCell<File>>,
+    status_path: PathBuf,
+    current_activity: Option<String>,
+    last_event_type: Option<String>,
+}
+
+impl RunnerLiveEventSink {
+    pub fn open(invocation: &RunnerInvocationContext) -> Result<Rc<RefCell<Self>>> {
+        let parent = invocation.events_path.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "events path has no parent: {}",
+                invocation.events_path.display()
+            )
+        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating live events dir: {}", parent.display()))?;
+        let events_file = File::create(&invocation.events_path).with_context(|| {
+            format!(
+                "creating live events file: {}",
+                invocation.events_path.display()
+            )
+        })?;
+        let sink = Self {
+            events_file: Rc::new(RefCell::new(events_file)),
+            status_path: invocation.status_path.clone(),
+            current_activity: None,
+            last_event_type: None,
+        };
+        let rc = Rc::new(RefCell::new(sink));
+        rc.borrow_mut().write_status("started")?;
+        Ok(rc)
+    }
+
+    pub fn record_stdout_line(&mut self, line: &str, mapped: Vec<serde_json::Value>) -> Result<()> {
+        self.record_event(json!({"type":"heartbeat","stream":"stdout"}))?;
+        for event in mapped {
+            self.record_event(event)?;
+        }
+        if line.trim().is_empty() {
+            self.write_status("heartbeat")?;
+        }
+        Ok(())
+    }
+
+    pub fn record_stderr_line(&mut self, _line: &str) -> Result<()> {
+        self.record_event(json!({"type":"heartbeat","stream":"stderr"}))
+    }
+
+    fn record_event(&mut self, mut event: serde_json::Value) -> Result<()> {
+        let now = crate::handlers::row::now_iso8601();
+        let event_type = event
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("event")
+            .to_string();
+        if let serde_json::Value::Object(ref mut map) = event {
+            map.entry("ts".to_string())
+                .or_insert_with(|| serde_json::Value::String(now.clone()));
+        }
+        match event_type.as_str() {
+            "assistant_text" => self.current_activity = Some("assistant_text".to_string()),
+            "tool_start" => {
+                let name = event.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                self.current_activity = Some(format!("tool:{name}"));
+            }
+            "tool_end" => self.current_activity = None,
+            "retry" => self.current_activity = Some("api_retry".to_string()),
+            _ => {}
+        }
+        self.last_event_type = Some(event_type.clone());
+        {
+            let mut file = self.events_file.borrow_mut();
+            writeln!(file, "{}", serde_json::to_string(&event)?)?;
+            file.flush()?;
+        }
+        self.write_status(&event_type)
+    }
+
+    fn write_status(&self, event_type: &str) -> Result<()> {
+        if let Some(parent) = self.status_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating live status dir: {}", parent.display()))?;
+        }
+        let now = crate::handlers::row::now_iso8601();
+        let status = json!({
+            "last_event_at": now,
+            "last_event_type": event_type,
+            "current_activity": self.current_activity,
+        });
+        std::fs::write(&self.status_path, serde_json::to_vec_pretty(&status)?)
+            .with_context(|| format!("writing live runner status: {}", self.status_path.display()))
+    }
+}
+
+pub fn events_path_for_transcript(transcript_path: &Path, session_id: &str) -> PathBuf {
+    transcript_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(session_id)
+        .join("events.jsonl")
+}
+
+pub fn status_path_for_transcript(transcript_path: &Path, session_id: &str) -> PathBuf {
+    transcript_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(session_id)
+        .join("status.json")
 }
 
 /// Per-agent invocation telemetry emitted by a runner at source.

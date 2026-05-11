@@ -16,7 +16,9 @@ use std::process::Command;
 use std::rc::Rc;
 
 use super::liveness::{self, LivenessClass, LivenessThresholds};
-use super::{AgentRunTelemetry, Runner, RunnerInvocationContext, RunnerOutput};
+use super::{
+    AgentRunTelemetry, Runner, RunnerInvocationContext, RunnerLiveEventSink, RunnerOutput,
+};
 
 pub struct PiRunner {
     node_bin: PathBuf,
@@ -120,6 +122,76 @@ fn append_live_line(file: &Rc<RefCell<File>>, line: &str) -> anyhow::Result<()> 
     writeln!(file, "{line}")?;
     file.flush()?;
     Ok(())
+}
+
+fn text_from_pi_content(content: &serde_json::Value) -> Option<String> {
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    let parts = content.as_array()?;
+    let text = parts
+        .iter()
+        .filter_map(|part| {
+            part.get("text")
+                .and_then(|v| v.as_str())
+                .or_else(|| part.get("content").and_then(|v| v.as_str()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn map_pi_event(line: &str) -> Vec<serde_json::Value> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    match v.get("type").and_then(|x| x.as_str()) {
+        Some("tool_execution_start") => events.push(serde_json::json!({
+            "type": "tool_start",
+            "id": v.get("toolCallId").or_else(|| v.get("tool_call_id")).cloned(),
+            "name": v.get("toolName").or_else(|| v.get("tool_name")).and_then(|x| x.as_str()).unwrap_or("tool"),
+            "args_preview": v.get("args").map(|args| args.to_string()),
+        })),
+        Some("tool_execution_end") | Some("tool_result_end") => events.push(serde_json::json!({
+            "type": "tool_end",
+            "id": v.get("toolCallId").or_else(|| v.get("tool_call_id")).cloned(),
+            "name": v.get("toolName").or_else(|| v.get("tool_name")).and_then(|x| x.as_str()),
+            "ok": !v.get("isError").or_else(|| v.get("is_error")).and_then(|x| x.as_bool()).unwrap_or(false),
+        })),
+        Some("message_end") => {
+            if let Some(message) = v.get("message") {
+                if message.get("role").and_then(|x| x.as_str()) == Some("assistant") {
+                    if let Some(text) = message.get("content").and_then(text_from_pi_content) {
+                        events.push(serde_json::json!({"type":"assistant_text", "text": text}));
+                    }
+                }
+                if let Some(usage) = message.get("usage") {
+                    events.push(serde_json::json!({
+                        "type": "usage",
+                        "input_tokens": usage.get("input_tokens").or_else(|| usage.get("input")),
+                        "output_tokens": usage.get("output_tokens").or_else(|| usage.get("output")),
+                        "cache_read_tokens": usage.get("cache_read_input_tokens").or_else(|| usage.get("cacheRead")),
+                    }));
+                }
+            }
+        }
+        Some("final_output") => events.push(serde_json::json!({
+            "type": "final_output",
+            "payload": v.get("payload").cloned().unwrap_or(serde_json::Value::Null),
+        })),
+        _ => {
+            if let Some(usage) = v.get("usage") {
+                events.push(serde_json::json!({
+                    "type": "usage",
+                    "input_tokens": usage.get("input_tokens"),
+                    "output_tokens": usage.get("output_tokens"),
+                    "cache_read_tokens": usage.get("cache_read_input_tokens"),
+                }));
+            }
+        }
+    }
+    events
 }
 
 /// Write the JSONL transcript to `<runs_dir>/<session_id>.jsonl`.
@@ -273,14 +345,29 @@ impl PiRunner {
                 .context("pi transcript write failed; not launching runner")?;
         let (stderr_log_path, live_stderr) = open_live_stderr(&cwd, &session_id, invocation)
             .context("pi stderr log write failed; not launching runner")?;
+        let event_sink = invocation.map(RunnerLiveEventSink::open).transpose()?;
         let started_at = crate::handlers::row::now_iso8601();
         let stdout_transcript = Rc::clone(&live_transcript);
         let stderr_log = Rc::clone(&live_stderr);
+        let stdout_events = event_sink.clone();
+        let stderr_events = event_sink.clone();
         let output = liveness::run_streaming_with_liveness(
             &mut cmd,
             &LivenessThresholds::from_env(),
-            move |line| append_live_line(&stdout_transcript, line),
-            move |line| append_live_line(&stderr_log, line),
+            move |line| {
+                append_live_line(&stdout_transcript, line)?;
+                if let Some(sink) = &stdout_events {
+                    sink.borrow_mut().record_stdout_line(line, map_pi_event(line))?;
+                }
+                Ok(())
+            },
+            move |line| {
+                append_live_line(&stderr_log, line)?;
+                if let Some(sink) = &stderr_events {
+                    sink.borrow_mut().record_stderr_line(line)?;
+                }
+                Ok(())
+            },
         )
         .context("failed to launch pi helper; ensure node and @mariozechner/pi-coding-agent are available")?;
         let ended_at = crate::handlers::row::now_iso8601();
@@ -473,6 +560,8 @@ mod tests {
             session_id: "known-session".to_string(),
             flat_transcript_path: transcript.clone(),
             stderr_log_path: stderr_log.clone(),
+            events_path: runs.path().join("known-session/events.jsonl"),
+            status_path: runs.path().join("known-session/status.json"),
         };
         let (_d, helper) = shim("#!/bin/sh\necho live-one\necho live-err >&2\necho '{\"type\":\"final_output\",\"payload\":{\"role\":\"executor\",\"summary\":\"ok\"}}'\n");
         let runner = PiRunner::with_bin_and_helper(PathBuf::from("/bin/sh"), helper);
@@ -502,6 +591,26 @@ mod tests {
         assert!(fs::read_to_string(&stderr_log)
             .unwrap()
             .contains("live-err"));
+        let events = fs::read_to_string(&invocation.events_path).unwrap();
+        assert!(events.contains("\"type\":\"heartbeat\""), "{events}");
+        assert!(events.contains("\"type\":\"final_output\""), "{events}");
+        let status = fs::read_to_string(&invocation.status_path).unwrap();
+        assert!(status.contains("last_event_at"), "{status}");
+    }
+
+    #[test]
+    fn maps_pi_tool_and_assistant_events() {
+        let events = map_pi_event(
+            r#"{"type":"tool_execution_start","toolName":"bash","toolCallId":"t1","args":{"command":"echo hi"}}"#,
+        );
+        assert_eq!(events[0]["type"], "tool_start");
+        assert_eq!(events[0]["name"], "bash");
+
+        let events = map_pi_event(
+            r#"{"type":"message_end","message":{"role":"assistant","content":[{"text":"hello"}],"usage":{"input_tokens":1,"output_tokens":2}}}"#,
+        );
+        assert!(events.iter().any(|e| e["type"] == "assistant_text"));
+        assert!(events.iter().any(|e| e["type"] == "usage"));
     }
 
     #[test]

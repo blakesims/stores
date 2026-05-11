@@ -1003,6 +1003,8 @@ fn prepare_runner_invocation(
     })?;
     let flat_transcript_path = runs_dir.join(format!("{session_id}.jsonl"));
     let stderr_log_path = runs_dir.join(format!("{session_id}.stderr.log"));
+    let events_path = crate::runner::events_path_for_transcript(&flat_transcript_path, &session_id);
+    let status_path = crate::runner::status_path_for_transcript(&flat_transcript_path, &session_id);
     let current_path = runs_dir.join(format!("current-{display_id}-{role}.json"));
     let now = crate::handlers::row::now_iso8601();
     let payload = serde_json::json!({
@@ -1017,6 +1019,8 @@ fn prepare_runner_invocation(
         "updated_at": now,
         "transcript_path": flat_transcript_path,
         "stderr_log_path": stderr_log_path,
+        "events_path": events_path,
+        "status_path": status_path,
     });
     std::fs::write(&current_path, serde_json::to_vec_pretty(&payload)?).with_context(|| {
         format!(
@@ -1028,6 +1032,8 @@ fn prepare_runner_invocation(
         session_id,
         flat_transcript_path,
         stderr_log_path,
+        events_path,
+        status_path,
     })
 }
 
@@ -1055,6 +1061,8 @@ fn fail_runner_invocation(
         "updated_at": now,
         "transcript_path": invocation.flat_transcript_path,
         "stderr_log_path": invocation.stderr_log_path,
+        "events_path": invocation.events_path,
+        "status_path": invocation.status_path,
         "error": error.to_string(),
     });
     std::fs::write(&current_path, serde_json::to_vec_pretty(&payload)?).with_context(|| {
@@ -1097,6 +1105,8 @@ fn finish_runner_invocation(
         "exit_code": out.exit_code,
         "transcript_path": out.telemetry.transcript_path,
         "stderr_log_path": out.telemetry.stderr_log_path,
+        "events_path": out.telemetry.transcript_path.as_deref().zip(out.session_id.as_deref()).map(|(p, s)| crate::runner::events_path_for_transcript(std::path::Path::new(p), s)),
+        "status_path": out.telemetry.transcript_path.as_deref().zip(out.session_id.as_deref()).map(|(p, s)| crate::runner::status_path_for_transcript(std::path::Path::new(p), s)),
         "payload_error": out.payload_error,
     });
     std::fs::write(&current_path, serde_json::to_vec_pretty(&payload)?).with_context(|| {
