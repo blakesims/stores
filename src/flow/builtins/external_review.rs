@@ -483,7 +483,9 @@ pub fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
              WHERE status='tooling_held' AND next_retry_at IS NOT NULL AND next_retry_at <= ?1",
         )?;
         let rows = stmt
-            .query_map(params![now], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .query_map(params![now], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         rows
     };
@@ -512,9 +514,7 @@ pub fn promote_elapsed_tooling_held(conn: &Connection) -> Result<()> {
                 None,
                 Some(REVIEW_AGENT_NAME),
             )?;
-            eprintln!(
-                "[external-review] {did}: tooling_held → pending (retry window elapsed)"
-            );
+            eprintln!("[external-review] {did}: tooling_held → pending (retry window elapsed)");
         }
         // rows_affected == 0: row was not in tooling_held (raced or already
         // promoted); no history insert needed.
@@ -595,7 +595,10 @@ fn record_stale_base_tooling_held(
     } else {
         conflict.conflict_files.join(", ")
     };
-    let log_ref = format!("external_review://{}/stale_base_requires_rebase", row.display_id);
+    let log_ref = format!(
+        "external_review://{}/stale_base_requires_rebase",
+        row.display_id
+    );
     let findings = serde_json::json!({
         "verdict": "TOOLING_FAILURE",
         "held_reason": reason,
@@ -699,6 +702,9 @@ fn fire_task_external_review_revise(
         .to_string();
     if current_status == "blocked" {
         ensure_blocked_er_reconcile_allowed(conn, task_id, &existing)?;
+    } else if task_external_review_revise_already_applied(&tx, row_id, task_id, &current_status)? {
+        tx.commit()?;
+        return Ok(());
     }
     let current_cycle = existing
         .get("current_cycle")
@@ -794,10 +800,31 @@ fn ensure_blocked_er_reconcile_allowed(
     Ok(())
 }
 
+fn task_external_review_revise_already_applied(
+    tx: &rusqlite::Transaction<'_>,
+    row_id: i64,
+    task_id: &str,
+    current_status: &str,
+) -> Result<bool> {
+    let n: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM transition_history \
+         WHERE store='tasks' AND row_id=?1 AND display_id=?2 \
+           AND verb='submit-external-review' AND policy_ref='REVISE' \
+           AND actor_note=?3 AND to_status=?4",
+        params![row_id, task_id, REVIEW_AGENT_NAME, current_status],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn is_drive_watchdog_blocked_reason(reason: &str) -> bool {
-    reason.starts_with("drive_failed")
-        || reason.contains("watchdog")
-        || reason.contains("drive failed")
+    if reason == "drive_failed" || reason.starts_with("drive_failed:") {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(reason)
+        .ok()
+        .and_then(|v| v.get("kind").and_then(Value::as_str).map(str::to_string))
+        .is_some_and(|kind| kind == "drive_failed")
 }
 
 fn resolve_task_head(existing: &EntryMap) -> Result<String> {
@@ -883,14 +910,41 @@ mod blocked_reconcile_tests {
 
     fn git_repo() -> (tempfile::TempDir, String) {
         let dir = tempfile::tempdir().unwrap();
-        Command::new("git").args(["init"]).current_dir(dir.path()).output().unwrap();
-        Command::new("git").args(["config", "user.email", "test@example.com"]).current_dir(dir.path()).output().unwrap();
-        Command::new("git").args(["config", "user.name", "Test"]).current_dir(dir.path()).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         std::fs::write(dir.path().join("f"), "x").unwrap();
-        Command::new("git").args(["add", "f"]).current_dir(dir.path()).output().unwrap();
-        Command::new("git").args(["commit", "-m", "init"]).current_dir(dir.path()).output().unwrap();
-        let out = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(dir.path()).output().unwrap();
-        (dir, String::from_utf8(out.stdout).unwrap().trim().to_string())
+        Command::new("git")
+            .args(["add", "f"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        (
+            dir,
+            String::from_utf8(out.stdout).unwrap().trim().to_string(),
+        )
     }
 
     fn conn_with_review(task_id: &str, head: &str) -> Connection {
@@ -900,20 +954,90 @@ mod blocked_reconcile_tests {
         conn
     }
 
+    fn conn_with_transition_history() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::codegen::ddl::SUBSTRATE_DDL)
+            .unwrap();
+        conn
+    }
+
     fn task_row(workspace: &std::path::Path, reason: &str) -> EntryMap {
         let mut row = EntryMap::new();
-        row.insert("workspace_path".to_string(), Value::String(workspace.display().to_string()));
-        row.insert("blocked_reason".to_string(), Value::String(reason.to_string()));
+        row.insert(
+            "workspace_path".to_string(),
+            Value::String(workspace.display().to_string()),
+        );
+        row.insert(
+            "blocked_reason".to_string(),
+            Value::String(reason.to_string()),
+        );
         row
     }
 
     #[test]
-    fn blocked_drive_failed_terminal_revise_reconciles_idempotently() {
+    fn blocked_drive_failed_terminal_revise_reconcile_allows_structured_reasons() {
         let (dir, head) = git_repo();
-        let conn = conn_with_review("T001", &head);
-        let row = task_row(dir.path(), "drive_failed: runner exited");
-        ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap();
-        ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap();
+        for reason in [
+            "drive_failed",
+            "drive_failed:silent_zombie_pid_dead",
+            r#"{"kind":"drive_failed","detail":"watchdog"}"#,
+        ] {
+            let conn = conn_with_review("T001", &head);
+            let row = task_row(dir.path(), reason);
+            ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap();
+        }
+    }
+
+    #[test]
+    fn blocked_reconcile_rejects_unstructured_drive_or_watchdog_text() {
+        let (dir, head) = git_repo();
+        for reason in [
+            "watchdog noticed a human blocker",
+            "drive failed after user decision needed",
+            "drive_failedness is not a structured reason",
+        ] {
+            let conn = conn_with_review("T001", &head);
+            let row = task_row(dir.path(), reason);
+            let err = ensure_blocked_er_reconcile_allowed(&conn, "T001", &row).unwrap_err();
+            assert!(err.to_string().contains("not drive/watchdog"));
+        }
+    }
+
+    #[test]
+    fn blocked_pass_reconcile_is_out_of_scope_per_tasks_schema() {
+        let schema = crate::flow::builtins::load_tasks_schema().unwrap();
+        let row = EntryMap::new();
+        let err = select_transition(
+            &schema.lifecycle.transitions,
+            "blocked",
+            "submit-external-review",
+            Some("PASS"),
+            &row,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no transition"));
+    }
+
+    #[test]
+    fn already_applied_external_review_revise_is_detected_for_idempotent_skip() {
+        let conn = conn_with_transition_history();
+        let tx = conn.unchecked_transaction().unwrap();
+        crate::db::insert_transition_history(
+            &tx,
+            "tasks",
+            7,
+            "T001",
+            "blocked",
+            "executing",
+            "submit-external-review",
+            "framework",
+            Some("REVISE"),
+            Some("policy-hash"),
+            Some(REVIEW_AGENT_NAME),
+        )
+        .unwrap();
+        assert!(task_external_review_revise_already_applied(&tx, 7, "T001", "executing").unwrap());
+        assert!(!task_external_review_revise_already_applied(&tx, 7, "T001", "in_review").unwrap());
     }
 
     #[test]
