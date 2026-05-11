@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
+
+const MAX_BACKFILL_TRANSCRIPT_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct BackfillCounts {
@@ -75,15 +78,12 @@ pub fn backfill_pi_agent_run_telemetry(conn: &Connection) -> Result<BackfillCoun
             counts.skipped += 1;
             continue;
         }
+        if !row_needs_backfill(&row) {
+            counts.skipped += 1;
+            continue;
+        }
         let path = PathBuf::from(&row.transcript_path);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(_) => {
-                counts.parse_failed += 1;
-                continue;
-            }
-        };
-        let extracted = match extract_transcript_telemetry(&text) {
+        let extracted = match extract_transcript_telemetry_from_path(&path) {
             Ok(t) => t,
             Err(_) => {
                 counts.parse_failed += 1;
@@ -143,6 +143,25 @@ fn load_pi_rows(conn: &Connection) -> Result<Vec<AgentRunRow>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+fn row_needs_backfill(row: &AgentRunRow) -> bool {
+    row.effective_model_id.is_none()
+        || row.provider_id.is_none()
+        || row.api_id.is_none()
+        || row.session_id.is_none()
+        || row.workspace_path.is_none()
+        || row.tokens_in.is_none()
+        || row.tokens_out.is_none()
+        || row.prompt_cache_hits.is_none()
+        || row.cache_read_tokens.is_none()
+        || row.cache_write_tokens.is_none()
+        || row.cost_total.is_none()
+        || row.configured_harness_id.is_none()
+        || row.configured_model_id.is_none()
+        || row.configured_thinking_effort.is_none()
+        || row.effective_thinking_effort.is_none()
+        || row.thinking_effort_source.is_none()
 }
 
 fn update_row(
@@ -246,95 +265,142 @@ fn update_row(
     Ok(true)
 }
 
-fn extract_transcript_telemetry(text: &str) -> Result<TranscriptTelemetry> {
+fn extract_transcript_telemetry_from_path(path: &Path) -> Result<TranscriptTelemetry> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("open transcript {}", path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
     let mut out = TranscriptTelemetry::default();
-    for (idx, line) in text.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    let mut line = String::new();
+    let mut line_no = 0usize;
+    let mut bytes_read = 0u64;
+    loop {
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .with_context(|| format!("read transcript {}", path.display()))?;
+        if n == 0 {
+            break;
         }
-        let v: serde_json::Value = serde_json::from_str(trimmed)
-            .with_context(|| format!("parse transcript JSONL line {}", idx + 1))?;
-        if v.get("type").and_then(|x| x.as_str()) == Some("stores_config") {
-            out.configured_model_id = out.configured_model_id.or_else(|| {
-                v.get("configured_model")
-                    .and_then(|x| x.as_str())
-                    .map(str::to_string)
-            });
-            out.configured_thinking_effort = out.configured_thinking_effort.or_else(|| {
-                v.get("configured_thinking")
-                    .and_then(|x| x.as_str())
-                    .map(str::to_string)
-            });
-            out.effective_thinking_effort = out.effective_thinking_effort.or_else(|| {
-                v.get("effective_thinking")
-                    .and_then(|x| x.as_str())
-                    .filter(|s| !s.is_empty() && *s != "unknown")
-                    .map(str::to_string)
-            });
-            out.thinking_effort_source = out.thinking_effort_source.or_else(|| {
-                v.get("thinking_source")
-                    .and_then(|x| x.as_str())
-                    .filter(|s| !s.is_empty() && *s != "unknown")
-                    .map(str::to_string)
-            });
-        }
-        let message = v.get("message");
-        out.effective_model_id = out.effective_model_id.or_else(|| {
-            message
-                .and_then(|m| m.get("model"))
-                .or_else(|| v.get("model"))
-                .and_then(value_string)
-        });
-        out.provider_id = out.provider_id.or_else(|| {
-            message
-                .and_then(|m| m.get("provider"))
-                .or_else(|| v.get("provider"))
-                .and_then(value_string)
-        });
-        out.api_id = out.api_id.or_else(|| {
-            message
-                .and_then(|m| m.get("api"))
-                .or_else(|| v.get("api"))
-                .and_then(value_string)
-        });
-        if let Some(u) = message
-            .and_then(|m| m.get("usage"))
-            .or_else(|| v.get("usage"))
-        {
-            out.tokens_in = out
-                .tokens_in
-                .or_else(|| usage_i64(u, &["input_tokens", "input", "prompt_tokens"]));
-            out.tokens_out = out
-                .tokens_out
-                .or_else(|| usage_i64(u, &["output_tokens", "output", "completion_tokens"]));
-            out.cache_read_tokens = out.cache_read_tokens.or_else(|| {
-                usage_i64(
-                    u,
-                    &[
-                        "prompt_cache_hits",
-                        "cache_read_input_tokens",
-                        "cacheRead",
-                        "cache_read_tokens",
-                    ],
-                )
-            });
-            out.cache_write_tokens = out.cache_write_tokens.or_else(|| {
-                usage_i64(
-                    u,
-                    &[
-                        "cache_creation_input_tokens",
-                        "cache_write_input_tokens",
-                        "cache_write_tokens",
-                    ],
-                )
-            });
-            out.cost_total = out
-                .cost_total
-                .or_else(|| usage_f64(u, &["cost_total", "cost"]));
+        bytes_read = bytes_read.saturating_add(n as u64);
+        line_no += 1;
+        absorb_transcript_line(&mut out, &line, line_no)?;
+        if transcript_telemetry_complete(&out) || bytes_read >= MAX_BACKFILL_TRANSCRIPT_BYTES {
+            break;
         }
     }
     Ok(out)
+}
+
+#[allow(dead_code)]
+fn extract_transcript_telemetry(text: &str) -> Result<TranscriptTelemetry> {
+    let mut out = TranscriptTelemetry::default();
+    for (idx, line) in text.lines().enumerate() {
+        absorb_transcript_line(&mut out, line, idx + 1)?;
+    }
+    Ok(out)
+}
+
+fn transcript_telemetry_complete(out: &TranscriptTelemetry) -> bool {
+    out.effective_model_id.is_some()
+        && out.provider_id.is_some()
+        && out.api_id.is_some()
+        && out.tokens_in.is_some()
+        && out.tokens_out.is_some()
+        && out.cache_read_tokens.is_some()
+        && out.cache_write_tokens.is_some()
+        && out.cost_total.is_some()
+}
+
+fn absorb_transcript_line(
+    out: &mut TranscriptTelemetry,
+    line: &str,
+    line_no: usize,
+) -> Result<()> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed)
+        .with_context(|| format!("parse transcript JSONL line {}", line_no))?;
+    if v.get("type").and_then(|x| x.as_str()) == Some("stores_config") {
+        out.configured_model_id = out.configured_model_id.clone().or_else(|| {
+            v.get("configured_model")
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+        });
+        out.configured_thinking_effort = out.configured_thinking_effort.clone().or_else(|| {
+            v.get("configured_thinking")
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+        });
+        out.effective_thinking_effort = out.effective_thinking_effort.clone().or_else(|| {
+            v.get("effective_thinking")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty() && *s != "unknown")
+                .map(str::to_string)
+        });
+        out.thinking_effort_source = out.thinking_effort_source.clone().or_else(|| {
+            v.get("thinking_source")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty() && *s != "unknown")
+                .map(str::to_string)
+        });
+    }
+    let message = v.get("message");
+    out.effective_model_id = out.effective_model_id.clone().or_else(|| {
+        message
+            .and_then(|m| m.get("model"))
+            .or_else(|| v.get("model"))
+            .and_then(value_string)
+    });
+    out.provider_id = out.provider_id.clone().or_else(|| {
+        message
+            .and_then(|m| m.get("provider"))
+            .or_else(|| v.get("provider"))
+            .and_then(value_string)
+    });
+    out.api_id = out.api_id.clone().or_else(|| {
+        message
+            .and_then(|m| m.get("api"))
+            .or_else(|| v.get("api"))
+            .and_then(value_string)
+    });
+    if let Some(u) = message
+        .and_then(|m| m.get("usage"))
+        .or_else(|| v.get("usage"))
+    {
+        out.tokens_in = out
+            .tokens_in
+            .or_else(|| usage_i64(u, &["input_tokens", "input", "prompt_tokens"]));
+        out.tokens_out = out
+            .tokens_out
+            .or_else(|| usage_i64(u, &["output_tokens", "output", "completion_tokens"]));
+        out.cache_read_tokens = out.cache_read_tokens.or_else(|| {
+            usage_i64(
+                u,
+                &[
+                    "prompt_cache_hits",
+                    "cache_read_input_tokens",
+                    "cacheRead",
+                    "cache_read_tokens",
+                ],
+            )
+        });
+        out.cache_write_tokens = out.cache_write_tokens.or_else(|| {
+            usage_i64(
+                u,
+                &[
+                    "cache_creation_input_tokens",
+                    "cache_write_input_tokens",
+                    "cache_write_tokens",
+                ],
+            )
+        });
+        out.cost_total = out
+            .cost_total
+            .or_else(|| usage_f64(u, &["cost_total", "cost"]));
+    }
+    Ok(())
 }
 
 fn usage_i64(usage: &serde_json::Value, keys: &[&str]) -> Option<i64> {
@@ -487,6 +553,24 @@ mod tests {
         assert_eq!(second.updated, 0);
         assert_eq!(second.skipped, 1);
         assert_eq!(second.parse_failed, 0);
+    }
+
+    #[test]
+    fn stops_after_complete_telemetry_without_reading_trailing_noise() {
+        let tmp = TempDir::new().unwrap();
+        let transcript = tmp.path().join("complete-then-noise.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"assistant","message":{"model":"gpt-5.5","provider":{"id":"openai-codex"},"api":{"id":"openai-codex-responses"},"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":2,"cost_total":0.125}}}
+not json
+"#,
+        )
+        .unwrap();
+        let extracted = extract_transcript_telemetry_from_path(&transcript).unwrap();
+        assert_eq!(extracted.effective_model_id.as_deref(), Some("gpt-5.5"));
+        assert_eq!(extracted.provider_id.as_deref(), Some("openai-codex"));
+        assert_eq!(extracted.api_id.as_deref(), Some("openai-codex-responses"));
+        assert_eq!(extracted.cost_total, Some(0.125));
     }
 
     #[test]
