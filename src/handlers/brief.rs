@@ -256,13 +256,30 @@ pub(crate) fn build_external_review_overlay(
         return Ok(overlay);
     }
 
-    let mut stmt = match conn.prepare(
+    let current_head = match resolve_entry_head(entry) {
+        Ok(Some(head)) => head,
+        _ => {
+            overlay.insert(
+                "external_review_backpressure".to_string(),
+                serde_json::Value::Null,
+            );
+            return Ok(overlay);
+        }
+    };
+    let superseded_filter = if external_reviews_has_column(conn, "superseded_by")? {
+        "AND COALESCE(superseded_by, '') = ''"
+    } else {
+        ""
+    };
+    let sql = format!(
         "SELECT display_id, runner, verdict, attempt, head_sha, base_sha, findings, \
                 critical_count, major_count, minor_count \
          FROM external_reviews \
-         WHERE task_id = ?1 AND verdict = 'REVISE' \
-         ORDER BY id DESC LIMIT 1",
-    ) {
+         WHERE task_id = ?1 AND status = 'revise' AND verdict = 'REVISE' \
+           AND COALESCE(head_sha, '') = ?2 {superseded_filter} \
+         ORDER BY attempt DESC, id DESC LIMIT 1"
+    );
+    let mut stmt = match conn.prepare(&sql) {
         Ok(s) => s,
         Err(_) => {
             overlay.insert(
@@ -273,7 +290,7 @@ pub(crate) fn build_external_review_overlay(
         }
     };
 
-    let row = stmt.query_row(rusqlite::params![task_display_id], |r| {
+    let row = stmt.query_row(rusqlite::params![task_display_id, current_head], |r| {
         let display_id: String = r.get(0)?;
         let runner: Option<String> = r.get(1).ok();
         let verdict: Option<String> = r.get(2).ok();
@@ -303,6 +320,46 @@ pub(crate) fn build_external_review_overlay(
         row.unwrap_or(serde_json::Value::Null),
     );
     Ok(overlay)
+}
+
+fn external_reviews_has_column(conn: &Connection, name: &str) -> Result<bool> {
+    let mut stmt = match conn.prepare("PRAGMA table_info(external_reviews)") {
+        Ok(stmt) => stmt,
+        Err(_) => return Ok(false),
+    };
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let col: String = row.get(1)?;
+        if col == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn resolve_entry_head(entry: &crate::validate::EntryMap) -> Result<Option<String>> {
+    if let Some(head) = entry
+        .get("branch_head_sha")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(Some(head.to_string()));
+    }
+    let Some(workspace) = entry
+        .get("workspace_path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(workspace)
+        .output()?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_string()))
 }
 
 pub fn run(
@@ -1234,7 +1291,8 @@ fields:
                 critical_count INTEGER,
                 major_count INTEGER,
                 minor_count INTEGER,
-                findings TEXT
+                findings TEXT,
+                superseded_by TEXT
             );
             "#,
         )
@@ -1242,8 +1300,15 @@ fields:
     }
 
     fn entry_with_display_id(display_id: &str) -> crate::validate::EntryMap {
+        entry_with_display_id_and_head(display_id, "")
+    }
+
+    fn entry_with_display_id_and_head(display_id: &str, head: &str) -> crate::validate::EntryMap {
         let mut m = std::collections::BTreeMap::new();
         m.insert("display_id".to_string(), serde_json::json!(display_id));
+        if !head.is_empty() {
+            m.insert("branch_head_sha".to_string(), serde_json::json!(head));
+        }
         m
     }
 
@@ -1262,7 +1327,7 @@ fields:
     }
 
     #[test]
-    fn build_external_review_overlay_returns_latest_revise_row() {
+    fn build_external_review_overlay_returns_current_head_revise_row() {
         let schema = four_role_schema();
         let (_dir, conn) = open_db_with_schema(&schema);
         create_external_reviews_table(&conn);
@@ -1291,7 +1356,7 @@ fields:
         )
         .unwrap();
 
-        let entry = entry_with_display_id("T107");
+        let entry = entry_with_display_id_and_head("T107", "ccc333");
         let overlay = build_external_review_overlay(&conn, &entry).unwrap();
         let v = overlay.get("external_review_backpressure").unwrap();
         assert_eq!(v["display_id"], serde_json::json!("ER003"));
@@ -1305,6 +1370,43 @@ fields:
             serde_json::json!("NEWEST_REVISE_FINDINGS_KEEP_CLUSTER_KEYS_IN_ONE_REGISTRY")
         );
         assert_eq!(v["major_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn build_external_review_overlay_ignores_stale_and_superseded_revise_rows() {
+        let schema = four_role_schema();
+        let (_dir, conn) = open_db_with_schema(&schema);
+        create_external_reviews_table(&conn);
+
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, status, task_id, attempt, runner, \
+             head_sha, base_sha, verdict, critical_count, major_count, minor_count, findings) \
+             VALUES ('ER010','revise','T108',1,'codex','oldhead','base000','REVISE',0,1,0,'STALE_REVISE')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, status, task_id, attempt, runner, \
+             head_sha, base_sha, verdict, critical_count, major_count, minor_count, findings, superseded_by) \
+             VALUES ('ER011','revise','T108',2,'codex','currenthead','base000','REVISE',0,1,0,'SUPERSEDED_REVISE','ER012')",
+            [],
+        )
+        .unwrap();
+
+        let entry = entry_with_display_id_and_head("T108", "currenthead");
+        let overlay = build_external_review_overlay(&conn, &entry).unwrap();
+        assert!(overlay["external_review_backpressure"].is_null());
+
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, status, task_id, attempt, runner, \
+             head_sha, base_sha, verdict, critical_count, major_count, minor_count, findings) \
+             VALUES ('ER012','revise','T108',3,'codex','currenthead','base000','REVISE',0,1,0,'CURRENT_REVISE')",
+            [],
+        )
+        .unwrap();
+        let overlay = build_external_review_overlay(&conn, &entry).unwrap();
+        assert_eq!(overlay["external_review_backpressure"]["display_id"], serde_json::json!("ER012"));
+        assert_eq!(overlay["external_review_backpressure"]["findings"], serde_json::json!("CURRENT_REVISE"));
     }
 
     #[test]

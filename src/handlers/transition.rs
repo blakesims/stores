@@ -646,19 +646,57 @@ fn enforce_external_review_accept_precheck(
         anyhow::bail!("external review PASS required for {display_id}: no external_reviews table");
     }
 
+    let current_head = resolve_accept_head(existing)?;
     let held_expr = if external_review_has_column(tx, "held_reason")? {
         "COALESCE(held_reason,'')"
     } else {
         "''"
     };
-    let sql = format!(
+    let superseded_filter = if external_review_has_column(tx, "superseded_by")? {
+        "AND COALESCE(superseded_by,'') = ''"
+    } else {
+        ""
+    };
+    let sql_current = format!(
         "SELECT display_id, COALESCE(status,''), COALESCE(verdict,''), COALESCE(head_sha,''), {held_expr} \
          FROM external_reviews \
-         WHERE task_id=?1 AND COALESCE(status,'') != 'superseded' \
+         WHERE task_id=?1 {superseded_filter} AND COALESCE(head_sha,'') = ?2 \
+         ORDER BY attempt DESC, id DESC LIMIT 1"
+    );
+    let current = tx
+        .query_row(&sql_current, rusqlite::params![display_id, current_head], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .optional()?;
+
+    if let Some((review_id, status, verdict, _head_sha, held_reason)) = current {
+        if verdict == "TOOLING_FAILURE" || status == "tooling_held" {
+            anyhow::bail!(
+                "external review PASS required for {display_id}: current-head attempt {review_id} is TOOLING_FAILURE/held; retry or inspect held external review attempt {review_id} ({held_reason})"
+            );
+        }
+        if status == "passed" && verdict == "PASS" {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "external review PASS required for {display_id}: current-head external review attempt {review_id} has status={status} verdict={verdict}"
+        );
+    }
+
+    let sql_latest = format!(
+        "SELECT display_id, COALESCE(status,''), COALESCE(verdict,''), COALESCE(head_sha,''), {held_expr} \
+         FROM external_reviews \
+         WHERE task_id=?1 {superseded_filter} \
          ORDER BY attempt DESC, id DESC LIMIT 1"
     );
     let latest = tx
-        .query_row(&sql, [display_id], |row| {
+        .query_row(&sql_latest, [display_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -675,23 +713,12 @@ fn enforce_external_review_accept_precheck(
 
     if verdict == "TOOLING_FAILURE" || status == "tooling_held" {
         anyhow::bail!(
-            "external review PASS required for {display_id}: attempt {review_id} is TOOLING_FAILURE/held; retry or inspect held external review attempt {review_id} ({held_reason})"
+            "external review PASS required for {display_id}: no current-head review exists; latest non-superseded attempt {review_id} is TOOLING_FAILURE/held for head {head_sha}, current head is {current_head} ({held_reason})"
         );
     }
-    if !(status == "passed" && verdict == "PASS") {
-        anyhow::bail!(
-            "external review PASS required for {display_id}: latest external review attempt {review_id} has status={status} verdict={verdict}"
-        );
-    }
-
-    let current_head = resolve_accept_head(existing)?;
-    if head_sha != current_head {
-        anyhow::bail!(
-            "stale external review head for {display_id}: attempt {review_id} reviewed head {head_sha}, current head is {current_head}"
-        );
-    }
-
-    Ok(())
+    anyhow::bail!(
+        "stale external review head for {display_id}: latest non-superseded attempt {review_id} has status={status} verdict={verdict} reviewed head {head_sha}, current head is {current_head}"
+    );
 }
 
 fn external_review_has_column(tx: &Transaction, name: &str) -> Result<bool> {
@@ -1527,6 +1554,115 @@ fields:
         let ddl = crate::codegen::ddl::ddl_for(&schema);
         conn.execute_batch(&ddl).unwrap();
         (schema, conn)
+    }
+
+    fn init_git_repo_at_head(head_marker: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file.txt"), head_marker).unwrap();
+        std::process::Command::new("git").args(["init", "-q"]).current_dir(dir.path()).status().unwrap();
+        std::process::Command::new("git").args(["config", "user.email", "test@example.com"]).current_dir(dir.path()).status().unwrap();
+        std::process::Command::new("git").args(["config", "user.name", "Test"]).current_dir(dir.path()).status().unwrap();
+        std::process::Command::new("git").args(["add", "file.txt"]).current_dir(dir.path()).status().unwrap();
+        std::process::Command::new("git").args(["commit", "-q", "-m", "init"]).current_dir(dir.path()).status().unwrap();
+        let out = std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(dir.path()).output().unwrap();
+        (dir, String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn accept_precheck_entry(workspace: &std::path::Path) -> crate::validate::EntryMap {
+        let mut entry = crate::validate::EntryMap::new();
+        entry.insert("display_id".into(), serde_json::json!("T900"));
+        entry.insert("tier_hint".into(), serde_json::json!("T2"));
+        entry.insert(
+            "workspace_path".into(),
+            serde_json::json!(workspace.to_string_lossy().to_string()),
+        );
+        entry
+    }
+
+    fn create_external_reviews_for_accept(conn: &Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE external_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_id TEXT,
+                task_id TEXT,
+                attempt INTEGER,
+                status TEXT,
+                verdict TEXT,
+                head_sha TEXT,
+                held_reason TEXT,
+                superseded_by TEXT
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn accept_precheck_rejects_stale_pass_head() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_external_reviews_for_accept(&conn);
+        let (repo, current_head) = init_git_repo_at_head("current");
+        let stale_head = "0000000000000000000000000000000000000000";
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, task_id, attempt, status, verdict, head_sha) \
+             VALUES ('ER900', 'T900', 1, 'passed', 'PASS', ?1)",
+            [stale_head],
+        )
+        .unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let entry = accept_precheck_entry(repo.path());
+        let err = enforce_external_review_accept_precheck(&tx, "T900", &entry).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("stale external review head"), "{msg}");
+        assert!(msg.contains(&current_head), "{msg}");
+    }
+
+    #[test]
+    fn accept_precheck_accepts_current_pass_despite_old_stale_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_external_reviews_for_accept(&conn);
+        let (repo, current_head) = init_git_repo_at_head("current");
+        let stale_head = "0000000000000000000000000000000000000000";
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, task_id, attempt, status, verdict, head_sha, held_reason) \
+             VALUES ('ER901', 'T900', 1, 'tooling_held', 'TOOLING_FAILURE', ?1, 'stale_base_requires_rebase')",
+            [stale_head],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, task_id, attempt, status, verdict, head_sha) \
+             VALUES ('ER902', 'T900', 2, 'revise', 'REVISE', ?1)",
+            [stale_head],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, task_id, attempt, status, verdict, head_sha) \
+             VALUES ('ER903', 'T900', 3, 'passed', 'PASS', ?1)",
+            [&current_head],
+        )
+        .unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let entry = accept_precheck_entry(repo.path());
+        enforce_external_review_accept_precheck(&tx, "T900", &entry).unwrap();
+    }
+
+    #[test]
+    fn accept_precheck_blocks_current_tooling_held() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_external_reviews_for_accept(&conn);
+        let (repo, current_head) = init_git_repo_at_head("current");
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, task_id, attempt, status, verdict, head_sha, held_reason) \
+             VALUES ('ER904', 'T900', 1, 'tooling_held', 'TOOLING_FAILURE', ?1, 'stale_base_requires_rebase')",
+            [&current_head],
+        )
+        .unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let entry = accept_precheck_entry(repo.path());
+        let err = enforce_external_review_accept_precheck(&tx, "T900", &entry).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("current-head attempt ER904 is TOOLING_FAILURE/held"), "{msg}");
     }
 
     fn insert_open_row(schema: &Schema, conn: &Connection) {

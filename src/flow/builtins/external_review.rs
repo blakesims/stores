@@ -576,7 +576,21 @@ fn record_terminal(
         row.task_id, row.display_id, runner, status, gate
     );
     if gate == "REVISE" {
-        fire_task_external_review_revise(ctx.conn, &row.task_id, ctx.policies_hash)?;
+        let review_head = ctx
+            .conn
+            .query_row(
+                "SELECT COALESCE(head_sha,'') FROM external_reviews WHERE display_id=?1",
+                params![row.display_id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+        fire_task_external_review_revise(
+            ctx.conn,
+            &row.task_id,
+            &row.display_id,
+            &review_head,
+            ctx.policies_hash,
+        )?;
     }
     Ok(())
 }
@@ -690,6 +704,8 @@ fn insert_review_transition(
 fn fire_task_external_review_revise(
     conn: &Connection,
     task_id: &str,
+    review_id: &str,
+    review_head: &str,
     policies_hash: &str,
 ) -> Result<()> {
     let schema = crate::flow::builtins::load_tasks_schema()?;
@@ -700,11 +716,13 @@ fn fire_task_external_review_revise(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    if current_status == "blocked" {
-        ensure_blocked_er_reconcile_allowed(conn, task_id, &existing)?;
-    } else if task_external_review_revise_already_applied(&tx, row_id, task_id, &current_status)? {
+    let review_note = format!("external_review:{review_id}:{review_head}");
+    if task_external_review_revise_already_applied(&tx, row_id, task_id, &review_note)? {
         tx.commit()?;
         return Ok(());
+    }
+    if current_status == "blocked" {
+        ensure_blocked_er_reconcile_allowed(conn, task_id, &existing)?;
     }
     let current_cycle = existing
         .get("current_cycle")
@@ -756,7 +774,7 @@ fn fire_task_external_review_revise(
         Actor::Framework,
         Some("REVISE"),
         phash_opt,
-        Some(REVIEW_AGENT_NAME),
+        Some(&review_note),
     )?;
     tx.commit()?;
     Ok(())
@@ -804,14 +822,14 @@ fn task_external_review_revise_already_applied(
     tx: &rusqlite::Transaction<'_>,
     row_id: i64,
     task_id: &str,
-    current_status: &str,
+    review_note: &str,
 ) -> Result<bool> {
     let n: i64 = tx.query_row(
         "SELECT COUNT(*) FROM transition_history \
          WHERE store='tasks' AND row_id=?1 AND display_id=?2 \
            AND verb='submit-external-review' AND policy_ref='REVISE' \
-           AND actor_note=?3 AND to_status=?4",
-        params![row_id, task_id, REVIEW_AGENT_NAME, current_status],
+           AND actor_note=?3",
+        params![row_id, task_id, review_note],
         |r| r.get(0),
     )?;
     Ok(n > 0)
@@ -1042,11 +1060,11 @@ mod blocked_reconcile_tests {
             "framework",
             Some("REVISE"),
             Some("policy-hash"),
-            Some(REVIEW_AGENT_NAME),
+            Some("external_review:ER001:head1"),
         )
         .unwrap();
-        assert!(task_external_review_revise_already_applied(&tx, 7, "T001", "executing").unwrap());
-        assert!(!task_external_review_revise_already_applied(&tx, 7, "T001", "in_review").unwrap());
+        assert!(task_external_review_revise_already_applied(&tx, 7, "T001", "external_review:ER001:head1").unwrap());
+        assert!(!task_external_review_revise_already_applied(&tx, 7, "T001", "external_review:ER002:head1").unwrap());
     }
 
     #[test]

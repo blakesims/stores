@@ -129,6 +129,9 @@ fn next_from_primary(task: &TaskState) -> &'static str {
     if task.blocked.unwrap_or(false) || task.blocker_kind.as_deref().unwrap_or("none") != "none" {
         return "-";
     }
+    if task.status == "in_review" {
+        return "-";
+    }
     match (
         task.lifecycle.as_deref().unwrap_or(""),
         task.active_step.as_deref().unwrap_or("none"),
@@ -893,6 +896,29 @@ mod tests {
         let conn = db::open(&db_file).unwrap();
         conn.execute_batch(TEST_DDL).unwrap();
         (dir, conn)
+    }
+
+    #[test]
+    fn in_review_with_wrapping_primary_step_is_clean_wait_not_wrap_next() {
+        let task = TaskState {
+            display_id: "T900".to_string(),
+            status: "in_review".to_string(),
+            current_phase: Some(1),
+            total_phases: Some(1),
+            current_cycle: Some(1),
+            blocked_reason: None,
+            lifecycle: Some("active".to_string()),
+            active_step: Some("wrapping".to_string()),
+            integration_step: Some("none".to_string()),
+            blocked: Some(false),
+            blocker_kind: None,
+            post_integration_step: Some("none".to_string()),
+            human_acceptance_policy: Some("optional".to_string()),
+            task_review_policy: Some("none".to_string()),
+        };
+        let line = format_task_line(&task);
+        assert!(line.contains("next=-"), "{line}");
+        assert!(!line.contains("next=wrap"), "{line}");
     }
 
     fn insert_task(
