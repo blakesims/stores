@@ -236,7 +236,8 @@ pub fn resolve_codex_config(config_path: &Path) -> CodexCfg {
 ///   1. Existing `CARGO_TARGET_DIR` environment variable, so tests/operators can
 ///      force isolation without editing repo config.
 ///   2. `cleanup.cargo_target_dir` from `.stores/config.yaml`, resolved relative
-///      to the config file's parent (`.stores/`) when not absolute.
+///      to the real/canonical config file's parent (`.stores/`) when not absolute,
+///      so symlinked worktree configs still point at one shared target dir.
 ///   3. `None` — callers leave Cargo's default per-workspace target behavior.
 pub fn resolve_cargo_target_dir(config_path: &Path) -> Option<PathBuf> {
     if let Some(env) = std::env::var_os("CARGO_TARGET_DIR") {
@@ -253,7 +254,12 @@ pub fn resolve_cargo_target_dir(config_path: &Path) -> Option<PathBuf> {
     if configured.is_absolute() {
         Some(configured)
     } else {
-        let base = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let canonical_config_path = config_path
+            .canonicalize()
+            .unwrap_or_else(|_| config_path.to_path_buf());
+        let base = canonical_config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
         Some(base.join(configured))
     }
 }
@@ -480,6 +486,32 @@ mod tests {
         let resolved = resolve_cargo_target_dir(&path);
         std::env::remove_var("CARGO_TARGET_DIR");
         assert_eq!(resolved.as_deref(), Some(override_dir.as_path()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlinked_config_resolves_cargo_target_relative_to_real_config_parent() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("CARGO_TARGET_DIR");
+        let tmp = tempfile::tempdir().unwrap();
+        let main_stores = tmp.path().join("main/.stores");
+        let worktree_stores = tmp.path().join("worktree/.stores");
+        std::fs::create_dir_all(&main_stores).unwrap();
+        std::fs::create_dir_all(&worktree_stores).unwrap();
+        let real_config = main_stores.join("config.yaml");
+        std::fs::write(
+            &real_config,
+            "cleanup:\n  cargo_target_dir: ../.cargo-target/stores\n",
+        )
+        .unwrap();
+        let linked_config = worktree_stores.join("config.yaml");
+        std::os::unix::fs::symlink(&real_config, &linked_config).unwrap();
+
+        assert_eq!(
+            resolve_cargo_target_dir(&linked_config).unwrap(),
+            main_stores.join("../.cargo-target/stores"),
+            "relative cleanup.cargo_target_dir must be anchored at the real shared config, not at each worktree's symlinked .stores/"
+        );
     }
 
     #[test]

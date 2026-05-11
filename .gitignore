@@ -1,5 +1,6 @@
 /target/
 /.stores/
+/.cargo-target/
 /logs/
 
 # stores drive runtime renders auto-promoted active task state under the

@@ -347,8 +347,11 @@ deployment_specialist: user-escalation
 #   cargo_target_dir: ../.cargo-target/stores
 #                     # Optional shared Cargo target dir injected as
 #                     # CARGO_TARGET_DIR for drive runners and integration
-#                     # cargo/pre-land subprocesses. Existing CARGO_TARGET_DIR
-#                     # env wins so tests/operators can isolate builds.
+#                     # cargo/pre-land subprocesses. Relative paths resolve
+#                     # against the real config file's .stores/ directory, so
+#                     # symlinked worktree configs still share one target dir.
+#                     # Existing CARGO_TARGET_DIR env wins so tests/operators
+#                     # can isolate builds.
 #
 # review:
 #   runner: codex      # codex, pi, or claude-code. Default: codex.
