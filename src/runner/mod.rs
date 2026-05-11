@@ -207,6 +207,22 @@ pub struct AgentRunTelemetry {
     pub prompt_cache_hits: Option<i64>,
     pub transcript_path: Option<String>,
     pub stderr_log_path: Option<String>,
+    pub configured_harness_id: Option<String>,
+    pub configured_model_id: Option<String>,
+    pub configured_thinking_effort: Option<String>,
+    pub effective_model_id: Option<String>,
+    pub effective_thinking_effort: Option<String>,
+    pub thinking_effort_source: Option<String>,
+    pub provider_id: Option<String>,
+    pub api_id: Option<String>,
+    pub session_id: Option<String>,
+    pub workspace_path: Option<String>,
+    pub runner_exit_kind: Option<String>,
+    pub payload_valid: Option<bool>,
+    pub payload_error: Option<String>,
+    pub cache_read_tokens: Option<i64>,
+    pub cache_write_tokens: Option<i64>,
+    pub cost_total: Option<f64>,
 }
 
 impl AgentRunTelemetry {

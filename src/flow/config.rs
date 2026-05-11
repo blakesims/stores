@@ -44,11 +44,52 @@ pub struct DriveCfg {
     pub roles: BTreeMap<String, DriveRoleCfg>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DriveRoleCfg {
     pub runner: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for DriveRoleCfg {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawDriveRoleCfg {
+            #[serde(default)]
+            runner: Option<String>,
+            #[serde(default)]
+            harness: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default)]
+            thinking: Option<String>,
+        }
+
+        let raw = RawDriveRoleCfg::deserialize(deserializer)?;
+        let runner = match (raw.runner, raw.harness) {
+            (Some(runner), Some(harness)) if runner != harness => {
+                return Err(serde::de::Error::custom(format!(
+                    "drive role config has conflicting runner ('{runner}') and harness ('{harness}') values"
+                )));
+            }
+            (Some(runner), _) => runner,
+            (_, Some(harness)) => harness,
+            (None, None) => {
+                return Err(serde::de::Error::missing_field("runner or harness"));
+            }
+        };
+
+        Ok(Self {
+            runner,
+            model: raw.model,
+            thinking: raw.thinking,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -284,7 +325,7 @@ mod tests {
         let path = tmp.path().join("config.yaml");
         std::fs::write(
             &path,
-            "drive:\n  default_runner: pi\n  roles:\n    planner:\n      runner: claude-code\n      model: opus\n    code_reviewer:\n      runner: pi\n",
+            "drive:\n  default_runner: pi\n  roles:\n    planner:\n      runner: claude-code\n      model: opus\n      thinking: high\n    code_reviewer:\n      runner: pi\n",
         )
         .unwrap();
         let cfg = load(&path).unwrap().unwrap();
@@ -292,7 +333,53 @@ mod tests {
         assert_eq!(drive.default_runner.as_deref(), Some("pi"));
         assert_eq!(drive.roles["planner"].runner, "claude-code");
         assert_eq!(drive.roles["planner"].model.as_deref(), Some("opus"));
+        assert_eq!(drive.roles["planner"].thinking.as_deref(), Some("high"));
         assert_eq!(drive.roles["code_reviewer"].runner, "pi");
+    }
+
+    #[test]
+    fn parses_drive_role_harness_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "drive:\n  roles:\n    plan_reviewer:\n      harness: pi\n      model: gpt-5.5\n      thinking: medium\n",
+        )
+        .unwrap();
+        let cfg = load(&path).unwrap().unwrap();
+        let role = &cfg.drive.unwrap().roles["plan_reviewer"];
+        assert_eq!(role.runner, "pi");
+        assert_eq!(role.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(role.thinking.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn drive_role_runner_and_harness_may_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "drive:\n  roles:\n    executor:\n      runner: pi\n      harness: pi\n",
+        )
+        .unwrap();
+        let cfg = load(&path).unwrap().unwrap();
+        assert_eq!(cfg.drive.unwrap().roles["executor"].runner, "pi");
+    }
+
+    #[test]
+    fn drive_role_runner_harness_conflict_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "drive:\n  roles:\n    executor:\n      runner: pi\n      harness: claude-code\n",
+        )
+        .unwrap();
+        let err = load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("conflicting runner ('pi') and harness ('claude-code')"),
+            "got: {err}"
+        );
     }
 
     #[test]

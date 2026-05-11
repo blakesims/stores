@@ -32,8 +32,10 @@ const cwd = arg('cwd');
 const systemPath = arg('system');
 const briefPath = arg('brief');
 const schemaPath = arg('schema');
+const configuredModel = arg('model');
+const configuredThinking = arg('thinking');
 if (!role || !cwd || !systemPath || !briefPath) {
-  console.error('usage: pi_runner.mjs --role ROLE --cwd CWD --system FILE --brief FILE [--schema FILE]');
+  console.error('usage: pi_runner.mjs --role ROLE --cwd CWD --system FILE --brief FILE [--schema FILE] [--model MODEL] [--thinking EFFORT]');
   process.exit(2);
 }
 
@@ -60,6 +62,18 @@ const finalOutputTool = defineTool({
 
 const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
 const agentDir = fs.mkdtempSync('/tmp/stores-pi-agent-');
+if (configuredModel || configuredThinking) {
+  process.stdout.write(`${JSON.stringify({
+    type: 'stores_config',
+    configured_model: configuredModel,
+    configured_thinking: configuredThinking,
+    effective_model: 'unknown',
+    effective_thinking: 'unknown',
+    model_source: 'unknown',
+    thinking_source: 'unknown',
+    note: 'Pi SDK per-session model/thinking override was not applied; no safe settings API is wired in this sidecar yet.'
+  })}\n`);
+}
 const loader = new DefaultResourceLoader({
   cwd,
   agentDir,

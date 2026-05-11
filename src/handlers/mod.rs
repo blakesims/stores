@@ -1,5 +1,6 @@
 pub mod activate;
 pub mod add;
+pub mod agent_run_telemetry_backfill;
 pub mod agents_backfill;
 pub mod agents_run;
 pub mod agents_stop;
@@ -25,8 +26,8 @@ pub(crate) mod observations_source;
 pub mod overrides;
 pub mod reconcile_accepted;
 pub mod recover_stale_base;
-pub mod resource_locks;
 pub mod render;
+pub mod resource_locks;
 pub mod row;
 pub mod schema_show;
 pub mod show;
@@ -37,9 +38,7 @@ pub mod upstream_overlay;
 pub mod update;
 
 // T140 P3: re-export the derived operator_disposition surface for P4/P5/P6.
-pub use disposition::{
-    operator_disposition, BranchStateSource, Disposition, PlanStartBucket,
-};
+pub use disposition::{operator_disposition, BranchStateSource, Disposition, PlanStartBucket};
 
 /// Canonical predicate for whether a task row is "blocked".
 ///

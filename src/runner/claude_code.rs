@@ -793,6 +793,7 @@ impl ClaudeCodeRunner {
                 prompt_cache_hits,
                 transcript_path,
                 stderr_log_path: Some(stderr_log_path.to_string_lossy().to_string()),
+                ..AgentRunTelemetry::default()
             },
             payload_error,
         })
