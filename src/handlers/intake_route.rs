@@ -144,9 +144,18 @@ pub(crate) fn inject_pre_validation_fields(
                 )?;
 
                 mirror_string(diff, merged, "routed_to_observation", &obs_id);
+            }
+
+            if let Some(obs_id) = merged
+                .get("routed_to_observation")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            {
                 mirror_string(diff, merged, "produced_observation_id", &obs_id);
-                mirror_string(diff, merged, "produced_artifact_kind", "observation");
-                mirror_string(diff, merged, "produced_artifact_id", &obs_id);
+                if is_absent(merged, "produced_task_id") {
+                    mirror_string(diff, merged, "produced_artifact_kind", "observation");
+                    mirror_string(diff, merged, "produced_artifact_id", &obs_id);
+                }
             }
         }
 

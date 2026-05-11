@@ -125,3 +125,46 @@ fn fast_track_writes_outcome_and_artifact_causal_trail() {
     assert_eq!(row.4, "observation");
     assert_eq!(row.5, row.3);
 }
+
+#[test]
+fn fast_track_with_supplied_observation_writes_artifact_causal_trail() {
+    let (schema, conn) = setup();
+    insert_draft(&conn, "I002");
+    let claim = cmd(&schema, "claim-triage").get_matches_from(["claim-triage", "I002"]);
+    transition::run(&schema, &conn, &claim, Actor::AiAutonomous.into(), "claim-triage").unwrap();
+
+    let decision_json = json!({
+        "decision": "fast_track",
+        "confidence": "high",
+        "rationale": "pre-minted observation supplied by caller",
+        "tier_hint": "T1",
+        "risk_flags": ["docs_only"]
+    })
+    .to_string();
+    let route = cmd(&schema, "route").get_matches_from([
+        "route",
+        "I002",
+        "--decision",
+        "fast_track",
+        "--routed-to-observation",
+        "L777",
+        "--gatekeeper-decision-json",
+        &decision_json,
+    ]);
+    transition::run(&schema, &conn, &route, Actor::AiAutonomous.into(), "route").unwrap();
+
+    let row: (String, String, String, String, String, String, String) = conn
+        .query_row(
+            "SELECT status,lifecycle,outcome,routed_to_observation,produced_observation_id,produced_artifact_kind,produced_artifact_id FROM intake WHERE display_id='I002'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, "routed");
+    assert_eq!(row.1, "closed");
+    assert_eq!(row.2, "fast_tracked");
+    assert_eq!(row.3, "L777");
+    assert_eq!(row.4, "L777");
+    assert_eq!(row.5, "observation");
+    assert_eq!(row.6, "L777");
+}
