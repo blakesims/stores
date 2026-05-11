@@ -702,11 +702,27 @@ fn format_task_line(
     t: &super::data::TaskRow,
     external_review: &ExternalReviewState,
 ) -> Vec<Span<'static>> {
-    let runner = t
+    let live_runner = t.live_run.as_ref().and_then(|live| {
+        let role = live.role.trim();
+        if role.is_empty() {
+            return None;
+        }
+        let runner = live
+            .runner
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("unknown");
+        Some(format!("{role}({runner})"))
+    });
+    let claimed_runner = t
         .claimed_by
         .as_deref()
         .filter(|s| !s.is_empty())
-        .unwrap_or("none");
+        .map(str::to_string);
+    let runner = live_runner
+        .or(claimed_runner)
+        .unwrap_or_else(|| "none".to_string());
     let age = age_label(super::data::parse_epoch(&t.updated_at));
     vec![
         Span::raw("  "),
@@ -1134,6 +1150,30 @@ mod tests {
             &ExternalReviewState::default(),
         ));
         assert!(unknown.contains("blocked:unknown"));
+    }
+
+    #[test]
+    fn task_line_prefers_live_runner_over_empty_claimed_by() {
+        let row = Row::Task(TaskRow {
+            display_id: "T149".to_string(),
+            status: "planning".to_string(),
+            title: "live planner".to_string(),
+            updated_at: "2026-05-11T08:18:19Z".to_string(),
+            live_run: Some(crate::tui::data::LiveRunSummary {
+                role: "planner".to_string(),
+                runner: Some("claude-code:opus".to_string()),
+                status: Some("running".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let text = line_text(format_row_line(
+            &row,
+            false,
+            &ExternalReviewState::default(),
+        ));
+        assert!(text.contains("runner:planner(claude-code:opus)"), "{text}");
+        assert!(!text.contains("runner:none"), "{text}");
     }
 
     #[test]

@@ -2047,8 +2047,22 @@ pub fn task_integration_step(t: &TaskRow) -> &str {
     legacy_integration_step(&t.status)
 }
 
+pub fn task_has_live_running_agent(t: &TaskRow) -> bool {
+    t.live_run
+        .as_ref()
+        .and_then(|live| live.status.as_deref())
+        .map(|status| status == "running")
+        .unwrap_or(false)
+}
+
 pub fn task_is_blocked(t: &TaskRow) -> bool {
     if task_is_terminal_with_compat(t) {
+        return false;
+    }
+    // `blocked`/`blocker_kind=capacity` can be a scheduler-side overlay while a
+    // planner/executor child is already live. The watch cockpit is an operator
+    // surface: a task with a running agent is active work, not HELD-TRIAGE.
+    if task_has_live_running_agent(t) {
         return false;
     }
     t.blocked.unwrap_or_else(|| {
@@ -2619,6 +2633,39 @@ mod tests {
         assert_eq!(bucket(&buckets, Section::TasksQueued), vec![0usize]);
         assert!(bucket(&buckets, Section::TasksActionableCurrentWork).is_empty());
         assert_eq!(section_for(&rows[0]), Some(Section::TasksQueued));
+    }
+
+    #[test]
+    fn live_running_agent_overrides_capacity_blocker_in_watch_classification() {
+        let row = Row::Task(TaskRow {
+            display_id: "T-live-capacity".to_string(),
+            status: "planning".to_string(),
+            title: "planner is already running".to_string(),
+            lifecycle: Some("active".to_string()),
+            active_step: Some("planning".to_string()),
+            integration_step: Some("none".to_string()),
+            blocked: Some(true),
+            blocker_kind: Some("capacity".to_string()),
+            updated_at: NOW.to_string(),
+            live_run: Some(LiveRunSummary {
+                role: "planner".to_string(),
+                runner: Some("claude-code:opus".to_string()),
+                status: Some("running".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let rows = vec![row];
+        let buckets = classify_with_options_at(&rows, WatchClassifyOptions::default(), NOW);
+        assert_eq!(
+            bucket(&buckets, Section::TasksActionableCurrentWork),
+            vec![0usize]
+        );
+        assert!(bucket(&buckets, Section::TasksNeedsTriage).is_empty());
+        match &rows[0] {
+            Row::Task(t) => assert!(!task_is_blocked(t)),
+            _ => unreachable!(),
+        }
     }
 
     #[test]
