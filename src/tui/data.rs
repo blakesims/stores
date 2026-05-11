@@ -455,7 +455,12 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
             Row::Obs(o) => apply_obs_to_model(o, 1, &mut model),
             Row::CollapsedObs(c) => apply_obs_to_model(&c.representative, c.count, &mut model),
             Row::Intake(i) => {
-                if i.waiting_kind.as_deref() == Some("human_info") {
+                if i.lifecycle.as_deref() == Some("waiting")
+                    || matches!(
+                        i.waiting_kind.as_deref(),
+                        Some("evidence_needed" | "external_input" | "triage_capacity")
+                    )
+                {
                     model.held += 1;
                 }
                 if is_priority_text(i.priority.as_deref().unwrap_or("")) || !i.risk_flags.is_empty()
@@ -1323,7 +1328,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         priority = sql_col(&obs_cols, "priority", "''"), summary = sql_col(&obs_cols, "summary", "''"), updated_at = sql_col(&obs_cols, "updated_at", "''"),
         body = sql_col(&obs_cols, "body", "NULL"), source = sql_col(&obs_cols, "source", "NULL"), task_id = sql_col(&obs_cols, "task_id", "NULL"), priority_rank = sql_col(&obs_cols, "priority_rank", "NULL"),
         lifecycle = sql_col(&obs_cols, "lifecycle", "NULL"), waiting = sql_col(&obs_cols, "waiting", "NULL"), waiting_kind = sql_col(&obs_cols, "waiting_kind", "NULL"), outcome = sql_col(&obs_cols, "outcome", "NULL"), pending_architecture_review = sql_col(&obs_cols, "pending_architecture_review", "NULL"), open_architecture_review_id = sql_col(&obs_cols, "open_architecture_review_id", "NULL"), superseded_by_id = sql_col(&obs_cols, "superseded_by_id", "NULL"),
-        contract_state = json_col(&obs_cols, "intent_contract", "$.contract_state"), tier_hint = json_col(&obs_cols, "intent_contract", "$.tier_hint"),
+        contract_state = if obs_cols.iter().any(|c| c == "contract_state") { format!("COALESCE(contract_state, {})", json_col(&obs_cols, "intent_contract", "$.contract_state")) } else { json_col(&obs_cols, "intent_contract", "$.contract_state") }, tier_hint = json_col(&obs_cols, "intent_contract", "$.tier_hint"),
         objective = json_col(&obs_cols, "intent_contract", "$.objective"), itype = json_col(&obs_cols, "intent_contract", "$.type"), acceptance = json_col(&obs_cols, "intent_contract", "$.acceptance"),
         in_scope = json_col(&obs_cols, "intent_contract", "$.in_scope"), out_of_scope = json_col(&obs_cols, "intent_contract", "$.out_of_scope"), known_solution = json_col(&obs_cols, "intent_contract", "$.known_solution"),
         locked_by = sql_col(&obs_cols, "locked_by", "NULL"), locked_at = sql_col(&obs_cols, "locked_at", "NULL"), lock_reason = sql_col(&obs_cols, "lock_reason", "NULL"),
@@ -3292,6 +3297,39 @@ mod tests {
             section_for(&Row::Intake(intake.clone())),
             Some(Section::IntakeHeld)
         );
+    }
+
+    #[test]
+    fn intake_waiting_kind_evidence_needed_counts_as_held() {
+        let rows = vec![Row::Intake(IntakeRow {
+            display_id: "I002".into(),
+            status: "needs_info".into(),
+            summary: "needs evidence".into(),
+            lifecycle: Some("waiting".into()),
+            waiting_kind: Some("evidence_needed".into()),
+            ..Default::default()
+        })];
+        let model = cockpit_model(&rows, ExternalReviewState::default());
+        assert_eq!(model.held, 1);
+    }
+
+    #[test]
+    fn observation_load_prefers_primary_contract_state_column() {
+        let conn = cockpit_conn();
+        conn.execute_batch(
+            "ALTER TABLE observations ADD COLUMN contract_state TEXT;
+             INSERT INTO observations (display_id,status,priority,summary,updated_at,intent_contract,contract_state) \
+             VALUES ('L777','confirmed','normal','obs','2026-05-01', '{\"contract_state\":\"ready\"}', 'approved');"
+        ).unwrap();
+        let rows = load_rows(&conn).unwrap();
+        let obs = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Obs(o) if o.display_id == "L777" => Some(o),
+                _ => None,
+            })
+            .expect("observation row loaded");
+        assert_eq!(obs.contract_state.as_deref(), Some("approved"));
     }
 
     #[test]
