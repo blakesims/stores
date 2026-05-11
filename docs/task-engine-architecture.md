@@ -297,18 +297,28 @@ Do not rewrite the task schema first. Prove the model through a deterministic re
 
 Suggested implementation chain:
 
-1. **Task lifecycle read model / watch projection — shipped in T144**
-   - `tasks.lifecycle` / `active_step` / `integration_step` / blocker overlay are maintained from ADR 0001's model; `stores watch` reads the projection.
-   - v1 intentionally collapses integration sub-steps: `integration_step='merging'` is populated for the whole `status='integrating'` span, and `integration_step='none'` outside it. `refreshing`, `task_review`, `testing`, `deploying`, and `verifying` are intentionally not populated until later slices add their subscribers.
+1. **Task lifecycle read model / watch projection — shipped in T144/T146 P1**
+   - `tasks.lifecycle` / `active_step` / `integration_step` / blocker overlay are maintained as ADR 0001's primary model; operator consumers read these columns directly.
 
-2. **Integration resource locks — shipped in T144**
-   - `main_branch` capacity-1 mutation is protected by the ResourceLock primitive in `src/handlers/resource_locks.rs`; see ADR 0001 and `docs/primitives.md`.
-   - The v1 lock window is the merge window inside `status='integrating'`: acquire immediately before checkout/merge, release after `mark_integrated` or via guard on merge/push failure.
+2. **Queued lifecycle activation/capacity/dependency semantics — shipped in T146 P2**
+   - `queued` is a real lifecycle state. Activation, capacity, and dependencies determine when a queued row can become active; blocked is an overlay, not a lifecycle.
 
-3. **Task reviewer + freshness policy — shipped in T144**
-   - External-review base/head freshness is persisted and enforced by `builtin:integrate`; ADR 0001 remains the target model for broader `task_reviewer` naming.
+3. **Integration resource locks — shipped in T146 P3**
+   - Refresh/review/test work can run without `main_branch`. The ResourceLock is held only for truth mutation on main and is released by guard on every failure path.
 
-4. **Later slices**
+4. **Durable freshness inputs — shipped in T146 P4**
+   - Review base, test base, branch head, and affected scope are persisted; missing or stale/overlapping inputs force refresh plus required task-review/testing reruns before merge.
+
+5. **Human acceptance and task-review policy split — shipped in T146 P5**
+   - Human acceptance policy and task-review policy are durable, separate gate/policy concepts. Required human acceptance cannot be bypassed by automation; delegated-by-policy requires a human-ratified policy.
+
+6. **Repo-specific post-integration subscriber state — shipped in T146 P6**
+   - Stores-specific states such as cargo/schema/deploy live in `post_integration_step`, not the generic lifecycle.
+
+7. **Consumer port — shipped in T146 P7**
+   - watch/status/list/brief/TUI consume lifecycle, step, blocker, and policy columns directly. `status` remains a compatibility-only legacy projection.
+
+8. **Later slices**
    - First-class automation jobs.
    - `main_health` / `last_green_main`.
    - Typed test failures / flake registry.

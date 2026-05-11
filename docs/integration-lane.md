@@ -1,6 +1,6 @@
 # Integration lane
 
-**Status:** Current architecture contract (T138).
+**Status:** Current architecture contract (T146 / ADR 0001 complete).
 **Owner:** substrate (engine-controller + Pi).
 **Companion:** `docs/agents-yaml-example.yaml`, `docs/architecture-coherence.md` § *Client adapter boundary*.
 
@@ -16,37 +16,29 @@ of the queueing business.
 
 ## Lifecycle
 
-A row that was just accepted flows through the lane in five visible
-states:
+A row that was just accepted enters `lifecycle='integration'` and advances by `integration_step`:
 
 ```
-accepted
-   │
-   │  enqueue-integration  (framework, on-entry)
+integration/queued
+   │ refresh without main_branch lock
    ▼
-integration_queued
-   │
-   │  start-integration  (framework, builtin:integrate, capacity-1)
+integration/refreshing
+   │ task review / tests without main_branch lock
    ▼
-integrating
+integration/task_review → integration/testing
+   │ acquire main_branch ResourceLock only for truth mutation
+   ▼
+integration/merging
    │
-   ├──► integrated  (framework, mark_integrated, on success)
-   │
-   └──► integration_blocked  (framework, mark_integration_blocked, typed outcome)
-                │
-                │  retry-integration  (ai_with_human, U4)
-                ▼
-        integration_queued
+   ├──► done/none with post_integration_step for repo-specific subscribers
+   └──► integration/none blocked=true blocker_kind=<typed outcome>
 ```
 
-- `integration_queued` — enqueued, awaiting the singleton slot.
-- `integrating` — currently holding the singleton slot; refresh + checks
-  + merge are running.
-- `integrated` — main now contains the candidate; subscribers may chain
-  off this edge.
-- `integration_blocked` — the attempt failed with a typed
-  `integration_blocked_reason`; awaits human-grounded
-  `retry-integration`.
+- `integration_step='queued'` — enqueued, awaiting capacity.
+- `refreshing`, `task_review`, and `testing` — slow freshness/gate work; these steps do not hold `main_branch`.
+- `merging` — the only step that holds the `main_branch` ResourceLock.
+- `deploying` / `verifying` — optional post-merge integration substeps before generic `done`.
+- `blocked=true` with `blocker_kind` records recoverable failures without inventing blocked lifecycle states.
 
 The retry edge re-traverses `integration_queued → integrating → integrated`
 so post-integrated subscribers fire on the recovery path. There is no
@@ -54,8 +46,7 @@ so post-integrated subscribers fire on the recovery path. There is no
 
 ## Capacity-1
 
-At most one row holds `status='integrating'` substrate-wide. This is
-schema-enforced, not advisory:
+At most one row may perform `integration_step='merging'` substrate-wide. Legacy compatibility may still project this as `status='integrating'`; the primary capacity semantics are lifecycle/step based. This is schema-enforced, not advisory:
 
 ```sql
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_integration_singleton
@@ -230,7 +221,7 @@ reachable from current main 8bd21b6; fresh external review required`.
 
 ## main_branch ResourceLock
 
-`builtin:integrate` acquires the DB-backed `main_branch` ResourceLock immediately before checking out and mutating `main`, using `handlers::resource_locks` with `Actor::Framework`; see `docs/primitives.md` for the primitive contract and `src/handlers/resource_locks.rs` for the helper surface. In v1, that lock window sits wholly inside `status='integrating'`, whose overlay is `lifecycle='integration'` and `integration_step='merging'` for the entire integrating span; the e2e probe observes the lock present during that integrating/merging window and absent before `integration_queued` and after `integrated`. The lock is released after merge/push and `mark_integrated` complete; every error or early-return path in the merge/push window is covered by a guard `Drop`, so failed merge/push attempts release the lock too.
+`builtin:integrate` acquires the DB-backed `main_branch` ResourceLock immediately before checking out and mutating `main`, using `handlers::resource_locks` with `Actor::Framework`; see `docs/primitives.md` for the primitive contract and `src/handlers/resource_locks.rs` for the helper surface. Refresh, task review, and testing run before that lock window. The lock window sits wholly inside `lifecycle='integration'` and `integration_step='merging'`; probes observe the lock absent during queued/refresh/review/test work and present only during merge mutation. The lock is released after merge/push and `mark_integrated` complete; every error or early-return path in the merge/push window is covered by a guard `Drop`, so failed merge/push attempts release the lock too.
 
 If acquisition finds an unexpired owner, the attempt records `outcome='merge_failure'` with `pre_land_check_summary='merge_failure: main_branch lock held by <owner>; will retry'`, then routes to `integration_blocked`. Phase 3's lifecycle-overlay table maps that `merge_failure:` prefix to `blocker_kind='main_red'`, leaving the row visible as `lifecycle='integration'`, `integration_step='none'`, and `blocked=true`.
 

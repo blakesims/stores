@@ -35,6 +35,10 @@ fields:
     enum_values: [T1, T2, T3]
     required: false
     description: "Triage tier (T1|T2|T3); inheritable from linked_observations when unanimous, else required explicitly"
+  # ADR 0001: the reserved status column is compatibility-only. Task-engine
+  # semantics are stored in lifecycle/active_step/integration_step/blocked/
+  # blocker_kind/post_integration_step and status is retained only as a legacy
+  # projection for older readers.
   # T140 P1: per-row activation gate. The "ignition primitive" for the engine —
   # combustion-class subscribers (drive dispatch, integration lane) gate on
   # activation='active'; safety/reconcile subscribers stay ungated. Default
@@ -54,9 +58,9 @@ fields:
     actor: ai_with_human
     default: 'inactive'
     description: "Per-row activation gate (active|inactive, default inactive). Combustion-class subscribers gate on this in P2; P1 ships the column and the activate/deactivate verbs only."
-  # T144 P1: lifecycle overlay maintained by the framework engine. These
-  # columns denormalize task-engine lanes for watch/status consumers while
-  # preserving the historical status field as the transition source of truth.
+  # T144/T146: primary task-engine tuple maintained by the framework engine.
+  # Consumers must read these columns directly; the historical status field is
+  # compatibility-only and is not the semantic source of truth.
   - name: lifecycle
     type: enum
     enum_values: [queued, active, integration, done]

@@ -296,7 +296,7 @@ fn engine_lane_renders_stalled_runner_state() {
     conn.execute(
         "INSERT INTO dispatch_locks (display_id,agent_name,claimed_by,claimed_at,heartbeat_at,finished_at,attempts) \
          VALUES ('T102','auto-drive','engine-1',?1,?2,NULL,1)",
-        rusqlite::params![(now - 600).to_string(), (now - 600).to_string()],
+        rusqlite::params![(now - 599).to_string(), (now - 600).to_string()],
     )
     .unwrap();
     let mut app = build_app(&conn);

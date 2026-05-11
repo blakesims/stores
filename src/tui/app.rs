@@ -7,8 +7,9 @@ use std::path::PathBuf;
 
 use super::daemon::Liveness;
 use super::data::{
-    classify_with_options, is_terminal_task_status, store_lane_for_row, EngineDetail,
-    ExternalReviewState, Row, Section, StoreLane, SystemHealth, WatchClassifyOptions,
+    classify_with_options, store_lane_for_row, task_is_terminal_primary,
+    task_is_terminal_with_compat, EngineDetail, ExternalReviewState, Row, Section, StoreLane,
+    SystemHealth, WatchClassifyOptions,
 };
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
@@ -218,8 +219,23 @@ impl App {
         self.system_health = super::data::load_system_health(conn)?;
         self.engine_detail = super::data::load_engine_detail(conn)?;
         self.sections = classify_with_options(&self.rows, self.watch_classify_options());
-        let (rows, sections) =
+        let raw_rows = self.rows.clone();
+        let (mut rows, sections) =
             super::data::dedup_observation_summaries_by_section(&self.rows, &self.sections);
+        let mut present: std::collections::HashSet<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Task(t) => Some(t.display_id.clone()),
+                _ => None,
+            })
+            .collect();
+        for row in raw_rows {
+            if let Row::Task(t) = &row {
+                if task_is_terminal_with_compat(t) && present.insert(t.display_id.clone()) {
+                    rows.push(row);
+                }
+            }
+        }
         self.rows = rows;
         self.sections = sections;
         self.apply_sort();
@@ -240,7 +256,7 @@ impl App {
             .rows
             .iter()
             .filter(|r| match r {
-                Row::Task(t) => !is_terminal_task_status(&t.status),
+                Row::Task(t) => !task_is_terminal_primary(t),
                 _ => false,
             })
             .count();
@@ -522,7 +538,10 @@ fn local_clock_string() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::data::{classify, store_lane_for_row, IntakeRow, ObsRow, ReviewRow, TaskRow};
+    use super::super::data::{
+        classify, is_terminal_task_status, store_lane_for_row, IntakeRow, ObsRow, ReviewRow,
+        TaskRow,
+    };
     use super::*;
     use rusqlite::Connection;
 

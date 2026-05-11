@@ -350,7 +350,7 @@ fn tui_watch_live_realistic_snapshot_and_budget() {
     );
     assert!(!got.contains("L281 open priority:normal deploy-blocked"));
     for required in [
-        "ACTIVE WORK",
+        "ACTIVE",
         "RATIFY-U1",
         "AWAITING HUMAN ACCEPTANCE",
         "HELD-INTAKE",

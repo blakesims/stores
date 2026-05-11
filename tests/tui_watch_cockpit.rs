@@ -247,8 +247,8 @@ fn cockpit_adr_0001_review_steps_render_under_active_work() {
     let lines: Vec<&str> = painted.lines().collect();
     let active_line = lines
         .iter()
-        .position(|line| line.contains("ACTIVE WORK"))
-        .expect("render_frame must show ACTIVE WORK header");
+        .position(|line| line.contains("ACTIVE"))
+        .expect("render_frame must show ACTIVE header");
     let next_section_line = lines
         .iter()
         .enumerate()
@@ -265,9 +265,12 @@ fn cockpit_adr_0001_review_steps_render_under_active_work() {
         lines[active_line + 1..next_section_line]
             .iter()
             .any(|line| line.contains("T102") && line.contains("code_review")),
-        "render_frame must place T102 under ACTIVE WORK before next section:\n{painted}"
+        "render_frame must place T102 under ACTIVE before next section:\n{painted}"
     );
-    if let Some(held_line) = lines.iter().position(|line| line.contains("HELD-AI-REVIEW")) {
+    if let Some(held_line) = lines
+        .iter()
+        .position(|line| line.contains("HELD-AI-REVIEW"))
+    {
         let next_after_held = lines
             .iter()
             .enumerate()

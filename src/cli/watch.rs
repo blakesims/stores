@@ -16,14 +16,11 @@
 //!  - No interactive features (filter, sort, drill-in).
 
 use anyhow::{bail, Result};
-use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
-use serde_json::json;
 use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::handlers::disposition::{operator_disposition, GitBranchStateSource, PlanStartBucket};
 use crate::paths::db_path;
 
 const ANSI_CLEAR_HOME: &str = "\x1b[2J\x1b[H";
@@ -156,7 +153,8 @@ fn render_frame(
     let mut task_indices: Vec<usize> = sections
         .iter()
         .flat_map(|(sec, idxs)| match sec {
-            crate::tui::data::Section::TasksActionableCurrentWork
+            crate::tui::data::Section::TasksQueued
+            | crate::tui::data::Section::TasksActionableCurrentWork
             | crate::tui::data::Section::TasksAcceptU3
             | crate::tui::data::Section::TasksIntegration
             | crate::tui::data::Section::TasksIntegratedAwaitingPostLand
@@ -171,7 +169,7 @@ fn render_frame(
         })
         .collect();
     task_indices.sort_by_key(|&i| match &rows[i] {
-        crate::tui::data::Row::Task(t) => (task_status_rank(&t.status), t.display_id.clone()),
+        crate::tui::data::Row::Task(t) => (task_status_rank(t), t.display_id.clone()),
         _ => (u8::MAX, String::new()),
     });
     out.push_str(&format!(
@@ -332,49 +330,29 @@ const GLYPH_NEEDS_OPERATOR: char = '?';
 const GLYPH_BLOCKED: char = '⏸';
 const GLYPH_HISTORICAL: char = ' ';
 
-fn watch_today() -> DateTime<Utc> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    DateTime::<Utc>::from_timestamp(secs, 0).unwrap_or_else(|| {
-        DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is a valid DateTime")
-    })
-}
-
 /// Compute the ignition-readiness glyph + operator-disposition label for a
 /// single watch row. Single source of truth — the `Disposition` enum lives
 /// in `handlers::disposition`; the glyph comes from
 /// `Disposition::plan_start_bucket` and the label comes from
 /// `Disposition::display_label`.
 fn task_disposition_glyph_and_label(t: &crate::tui::data::TaskRow) -> (char, &'static str) {
-    let mut row_json = json!({
-        "display_id": t.display_id,
-        "status": t.status,
-        "activation": t.activation.clone().unwrap_or_else(|| "inactive".to_string()),
-        "human_acceptance_policy": t.human_acceptance_policy.clone().unwrap_or_else(|| "optional".to_string()),
-        "task_review_policy": t.task_review_policy.clone().unwrap_or_else(|| "none".to_string()),
-        "branch": t.branch.clone().unwrap_or_default(),
-        "linked_observations": t.linked_observations,
-    });
-    if let Some(by) = &t.acceptance_decided_by {
-        row_json["acceptance_decided_by"] = json!(by);
+    if crate::tui::data::task_is_blocked(t) {
+        return (GLYPH_BLOCKED, "Blocked (recoverable)");
     }
-    if let Some(at) = &t.accepted_at {
-        row_json["accepted_at"] = json!(at);
+    match crate::tui::data::task_lifecycle(t) {
+        "active" => match crate::tui::data::task_active_step(t) {
+            "coding" | "coding_review" => (GLYPH_WOULD_RUN, "Active engine work"),
+            "wrapping" => (GLYPH_NEEDS_OPERATOR, "Awaiting human acceptance"),
+            _ if t.activation.as_deref() == Some("active") => {
+                (GLYPH_WOULD_RUN, "Engine actionable (active)")
+            }
+            _ => (GLYPH_INACTIVE, "Engine actionable (inactive)"),
+        },
+        "queued" => (GLYPH_INACTIVE, "Engine queued"),
+        "integration" => (GLYPH_WOULD_RUN, "Awaiting integration"),
+        "done" => (GLYPH_HISTORICAL, "Terminal success"),
+        _ => (GLYPH_NEEDS_OPERATOR, "Needs operator review"),
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let branch_state = GitBranchStateSource::new(cwd, "main");
-    let disp = operator_disposition(&row_json, watch_today(), &branch_state);
-    let glyph = match disp.plan_start_bucket() {
-        PlanStartBucket::WouldRun => GLYPH_WOULD_RUN,
-        PlanStartBucket::Inactive => GLYPH_INACTIVE,
-        PlanStartBucket::NeedsOperator => GLYPH_NEEDS_OPERATOR,
-        PlanStartBucket::Blocked => GLYPH_BLOCKED,
-        PlanStartBucket::Historical => GLYPH_HISTORICAL,
-    };
-    (glyph, disp.display_label())
 }
 
 #[derive(Debug)]
@@ -447,10 +425,17 @@ fn render_tui_task_line(t: &crate::tui::data::TaskRow) -> String {
     let step_suffix = crate::tui::data::visible_step(t)
         .map(|step| format!(" {ANSI_DIM}· {step}{ANSI_RESET}"))
         .unwrap_or_default();
+    let primary_label = format!(
+        "{}:{}:{} ({})",
+        crate::tui::data::task_lifecycle(t),
+        crate::tui::data::task_active_step(t),
+        crate::tui::data::task_integration_step(t),
+        t.status
+    );
     let status_str = format!(
         "{}{}{}{}",
-        task_status_color(&t.status),
-        t.status,
+        task_status_color(t),
+        primary_label,
         ANSI_RESET,
         step_suffix
     );
@@ -532,7 +517,7 @@ fn render_task_line(t: &TaskRow) -> String {
 #[cfg(test)]
 #[allow(dead_code)]
 fn format_task_status(t: &TaskRow) -> String {
-    let bare_color = task_status_color(&t.status);
+    let bare_color = legacy_task_status_color(&t.status);
     let wrap = |s: &str| format!("{bare_color}{s}{ANSI_RESET}");
     match t.status.as_str() {
         "plan_review" => wrap("reviewing plan"),
@@ -683,23 +668,33 @@ fn render_obs_line(o: &ObsRow) -> String {
     )
 }
 
-fn task_status_rank(s: &str) -> u8 {
-    match s {
-        "executing" | "code_review" => 0,
-        "ready" => 1,
-        "planning" | "plan_review" => 2,
-        "in_review" => 3,
-        "integration_queued" | "integrating" => 3,
-        "integrated" => 3,
-        "integration_blocked" => 4,
-        "blocked" => 4,
-        "rejected" => 5,
-        "complete" => 9,
+fn task_status_rank(t: &crate::tui::data::TaskRow) -> u8 {
+    if crate::tui::data::task_is_blocked(t) {
+        return 4;
+    }
+    match crate::tui::data::task_lifecycle(t) {
+        "active" => 0,
+        "queued" => 1,
+        "integration" => 3,
+        "done" => 9,
         _ => 6,
     }
 }
 
-fn task_status_color(s: &str) -> &'static str {
+fn task_status_color(t: &crate::tui::data::TaskRow) -> &'static str {
+    if crate::tui::data::task_is_blocked(t) {
+        return ANSI_RED;
+    }
+    match crate::tui::data::task_lifecycle(t) {
+        "active" | "integration" => ANSI_GREEN,
+        "queued" => ANSI_YELLOW,
+        "done" => ANSI_DIM,
+        _ => ANSI_RESET,
+    }
+}
+
+#[cfg(test)]
+fn legacy_task_status_color(s: &str) -> &'static str {
     match s {
         "executing" | "code_review" => ANSI_GREEN,
         "integration_queued" | "integrating" => ANSI_GREEN,

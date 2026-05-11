@@ -58,7 +58,8 @@ fn bucket(buckets: &[(Section, Vec<usize>)], section: Section) -> Vec<usize> {
 fn tui_watch_classification_section_labels_are_contract_taxonomy_and_unique() {
     let labels: Vec<&str> = Section::ALL.iter().map(|s| s.label()).collect();
     let expected = vec![
-        "ACTIVE WORK",
+        "QUEUED",
+        "ACTIVE",
         "RATIFY-U1",
         "AWAITING HUMAN ACCEPTANCE",
         "INTEGRATION",
@@ -70,7 +71,7 @@ fn tui_watch_classification_section_labels_are_contract_taxonomy_and_unique() {
         "HELD-INTAKE",
         "HELD-AI-REVIEW",
         "HELD-ZOMBIE",
-        "TERMINAL",
+        "DONE",
         "PRIORITY",
         "OBSERVATIONS",
         "INTAKE-OPEN",

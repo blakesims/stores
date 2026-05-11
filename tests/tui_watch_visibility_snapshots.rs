@@ -23,7 +23,17 @@ fn task(
         current_phase: Some(phase),
         current_cycle: Some(cycle),
         total_phases: Some(total),
-        lifecycle: Some("active".to_string()),
+        lifecycle: Some(
+            match status {
+                "accepted" | "complete" | "cargo_installed" | "schema_migrated" | "rejected"
+                | "abandoned" | "closed_out_of_band" => "done",
+                "integration_queued" | "integrating" | "integrated" | "integration_blocked" => {
+                    "integration"
+                }
+                _ => "active",
+            }
+            .to_string(),
+        ),
         active_step: Some(
             match status {
                 "code_review" => "coding_review",
@@ -35,7 +45,19 @@ fn task(
             .to_string(),
         ),
         integration_step: Some("none".to_string()),
-        blocked: Some(reason.is_some()),
+        blocked: Some(
+            reason.is_some()
+                && !matches!(
+                    status,
+                    "accepted"
+                        | "complete"
+                        | "cargo_installed"
+                        | "schema_migrated"
+                        | "rejected"
+                        | "abandoned"
+                        | "closed_out_of_band"
+                ),
+        ),
         blocker_kind: None,
         ..Default::default()
     })

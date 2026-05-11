@@ -75,6 +75,7 @@ fn section_all_order_and_store_lane_dispatch_are_unchanged() {
     assert_eq!(
         Section::ALL,
         [
+            Section::TasksQueued,
             Section::TasksActionableCurrentWork,
             Section::ObsRatifiable,
             Section::TasksAcceptU3,
@@ -192,7 +193,7 @@ fn top_level_cockpit_paints_heartbeat_lanes_and_external_placeholder() {
         "missing tasks breakdown 'held 1 · review 1':\n{painted}"
     );
     // Default focus is the Tasks lane → focused table renders task sections.
-    for needle in ["ACTIVE WORK", "HELD-BLOCKED"] {
+    for needle in ["ACTIVE", "HELD-BLOCKED"] {
         assert!(
             painted.contains(needle),
             "missing focused-table section {needle:?} in:\n{painted}"
