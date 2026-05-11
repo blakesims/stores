@@ -806,6 +806,14 @@ fn parse_epoch(s: &str) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
+fn dead_pid_still_within_heartbeat_grace(heartbeat_at: Option<&str>) -> bool {
+    let Some(heartbeat_epoch) = heartbeat_at.and_then(parse_epoch) else {
+        return false;
+    };
+    let idle_secs = now_epoch().saturating_sub(heartbeat_epoch);
+    idle_secs < LivenessThresholds::from_env().no_output_secs
+}
+
 pub(crate) fn stale_exe_log_line(display_id: &str, pid: i64) -> String {
     format!(
         "[auto-drive-watchdog] {display_id}: drive_pid={pid} stale_binary_inode \
@@ -980,6 +988,15 @@ pub fn sweep_drive_watchdog(
                     );
                 }
             }
+            continue;
+        }
+        if dead_pid_still_within_heartbeat_grace(heartbeat_at.as_deref()) {
+            eprintln!(
+                "[auto-drive-watchdog] {}: drive_pid={} is gone but heartbeat is recent; \
+                 deferring silent-zombie classification",
+                display_id, pid
+            );
+            handled.insert(display_id.clone());
             continue;
         }
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
@@ -2152,6 +2169,39 @@ mod tests {
     ///
     /// MUST FAIL on current main: sweep_drive_watchdog skips locks with
     /// `finished_at IS NOT NULL` AND skips rows with `drive_pid <= 0`.
+    #[test]
+    fn watchdog_dead_drive_pid_with_recent_heartbeat_is_deferred() {
+        let _g = crate::flow::builtins::tests::lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("STORES_RUNNER_NO_OUTPUT_SECS");
+        let conn = fresh_db_with_obs();
+        let row_id = insert_task_full(&conn, "T732", "code_review", Some(dead_pid()));
+        let now = now_iso8601();
+        conn.execute(
+            "INSERT INTO dispatch_locks \
+             (store, row_id, display_id, agent_name, transition_id, claimed_at, heartbeat_at, claimed_by) \
+             VALUES ('tasks', ?1, 'T732', 'auto-drive', 1, ?2, ?2, 'test-claimer')",
+            rusqlite::params![row_id, now],
+        )
+        .unwrap();
+
+        let agents = AgentsYaml::default_empty();
+        let cfg = std::path::PathBuf::from("/tmp/no-config.yaml");
+        let acted = sweep_drive_watchdog(&conn, &agents, &cfg, "", "").unwrap();
+
+        let (status, reason): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, blocked_reason FROM tasks WHERE display_id='T732'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(acted, 0);
+        assert_eq!(status, "code_review");
+        assert_eq!(reason, None);
+    }
+
     #[test]
     fn watchdog_silent_zombie_pid_not_yet_recorded() {
         let _g = crate::flow::builtins::tests::lock()
