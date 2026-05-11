@@ -203,7 +203,7 @@ fn issue_verdict_in_tx(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
     {
-        mark_superseded_if_present(tx, schema, supersedes, invoker.actor)?;
+        mark_superseded_if_present(tx, schema, supersedes, invoker.actor, Some(display_id))?;
     }
 
     let outcome = merged
@@ -332,7 +332,7 @@ fn supersede_in_tx(
 ) -> Result<()> {
     require_actor(invoker, Actor::AiWithHuman, "supersede")?;
     let display_id = display_id(matches);
-    mark_superseded_if_present(tx, schema, display_id, invoker.actor)?;
+    mark_superseded_if_present(tx, schema, display_id, invoker.actor, None)?;
     if let Ok((_, row)) = read_row(schema, tx, display_id) {
         super::observation_arch_gate::apply_verdict_effects(
             tx,
@@ -370,6 +370,7 @@ fn mark_superseded_if_present(
     schema: &Schema,
     display_id: &str,
     actor: Actor,
+    superseded_by: Option<&str>,
 ) -> Result<()> {
     let (row_id, existing) = match read_row(schema, tx, display_id) {
         Ok(row) => row,
@@ -426,7 +427,14 @@ fn mark_superseded_if_present(
         pref.as_deref(),
         phash.as_deref(),
         None,
-    )
+    )?;
+    if let Some(successor) = superseded_by {
+        tx.execute(
+            "UPDATE architecture_reviews SET superseded_by_id=?1 WHERE display_id=?2",
+            rusqlite::params![successor, display_id],
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_cascade_decisions(value: Option<&Value>) -> Result<()> {
@@ -771,6 +779,10 @@ mod tests {
         assert_eq!(
             old.get("status").and_then(|v| v.as_str()),
             Some("superseded")
+        );
+        assert_eq!(
+            old.get("superseded_by_id").and_then(|v| v.as_str()),
+            Some("A002")
         );
         assert_eq!(
             new.get("status").and_then(|v| v.as_str()),

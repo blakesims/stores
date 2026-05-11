@@ -16,6 +16,7 @@ struct RulingRow {
     verdict: String,
     verdict_issued_at: String,
     source_observation: Option<String>,
+    linked_observation_ids: Vec<String>,
     merge_target_id: Option<String>,
 }
 
@@ -116,7 +117,12 @@ pub(crate) fn enforce_u1_architecture_gate(
             ruling.lifecycle
         );
     }
-    if ruling.source_observation.as_deref() != Some(observation_id) {
+    let targets_observation = ruling.source_observation.as_deref() == Some(observation_id)
+        || ruling
+            .linked_observation_ids
+            .iter()
+            .any(|linked| linked == observation_id);
+    if !targets_observation {
         bail!(
             "pending_architecture_review=true blocks U1 ratification: architecture review {} does not target observation {}",
             ruling.display_id,
@@ -342,10 +348,11 @@ fn read_ruling(tx: &Transaction, display_id: &str) -> Result<Option<RulingRow>> 
     let table = quote_ident("architecture_reviews");
     tx.query_row(
         &format!(
-            "SELECT display_id,COALESCE(lifecycle,''),kind,COALESCE(verdict,''),COALESCE(verdict_issued_at,''),source_observation,merge_target_id FROM {table} WHERE display_id=?1"
+            "SELECT display_id,COALESCE(lifecycle,''),kind,COALESCE(verdict,''),COALESCE(verdict_issued_at,''),source_observation,COALESCE(linked_observation_ids,'[]'),merge_target_id FROM {table} WHERE display_id=?1"
         ),
         [display_id],
         |r| {
+            let linked_json: String = r.get(6)?;
             Ok(RulingRow {
                 display_id: r.get(0)?,
                 lifecycle: r.get(1)?,
@@ -353,7 +360,8 @@ fn read_ruling(tx: &Transaction, display_id: &str) -> Result<Option<RulingRow>> 
                 verdict: r.get(3)?,
                 verdict_issued_at: r.get(4)?,
                 source_observation: r.get(5)?,
-                merge_target_id: r.get(6)?,
+                linked_observation_ids: serde_json::from_str::<Vec<String>>(&linked_json).unwrap_or_default(),
+                merge_target_id: r.get(7)?,
             })
         },
     )
@@ -500,6 +508,24 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("pending_architecture_review"));
         assert!(err.to_string().contains("architecture review"));
+    }
+
+    #[test]
+    fn linked_observation_can_clear_u1_even_when_not_source_observation() {
+        let conn = setup();
+        conn.execute(
+            "INSERT INTO observations (display_id,status,created_at,updated_at,created_by,updated_by,summary,source,priority,captured_at,captured_week,pending_architecture_review,intent_contract) VALUES ('L002','confirmed','now','now','human','human','s2','dev','normal','2026-05-07','w19-d4',1,?1)",
+            [json!({"contract_state":"ready","updated_at":"2026-05-07T10:00:00Z"}).to_string()],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO architecture_reviews (display_id,status,lifecycle,created_at,updated_at,created_by,updated_by,kind,summary,source_observation,linked_observation_ids,verdict,verdict_issued_at) VALUES ('A010','verdict_issued','closed','now','now','ai_with_human','ai_with_human','interpret','s','L001',?1,'allow_local_fix','2026-05-07T09:00:00Z')",
+            [json!(["L001", "L002"]).to_string()],
+        ).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut merged = pending_entry(Some("A010"));
+        let mut diff = EntryMap::new();
+        enforce_u1_architecture_gate(&tx, "L002", &merged.clone(), &mut merged, &mut diff).unwrap();
+        assert_eq!(diff.get("pending_architecture_review"), Some(&Value::Bool(false)));
     }
 
     #[test]
