@@ -239,16 +239,37 @@ pub fn find_current_run(
                 runs_dir.display()
             );
         }
-        candidates.sort_by(|a, b| {
-            let au = a.marker.updated_at.as_deref().unwrap_or("");
-            let bu = b.marker.updated_at.as_deref().unwrap_or("");
-            au.cmp(bu).then_with(|| a.marker.role.cmp(&b.marker.role))
-        });
+        candidates.sort_by(|a, b| compare_current_run_candidates(stores_dir, a, b));
     }
 
     candidates
         .pop()
         .context("no current live run marker candidate selected")
+}
+
+fn compare_current_run_candidates(
+    stores_dir: &Path,
+    a: &CurrentRun,
+    b: &CurrentRun,
+) -> std::cmp::Ordering {
+    current_run_selection_key(stores_dir, a)
+        .cmp(&current_run_selection_key(stores_dir, b))
+        .then_with(|| a.marker.role.cmp(&b.marker.role))
+}
+
+fn current_run_selection_key(stores_dir: &Path, current: &CurrentRun) -> (u8, String, String) {
+    let running_rank = if current.marker.status.as_deref() == Some("running") {
+        1
+    } else {
+        0
+    };
+    let semantic_freshness = read_current_status(stores_dir, current)
+        .ok()
+        .flatten()
+        .and_then(|status| status.last_event_at)
+        .unwrap_or_default();
+    let marker_freshness = current.marker.updated_at.clone().unwrap_or_default();
+    (running_rank, semantic_freshness, marker_freshness)
 }
 
 fn read_current_marker(path: &Path) -> Result<CurrentRun> {
@@ -762,6 +783,88 @@ mod tests {
 
         let current = find_current_run(&stores, "T999", None).unwrap();
         assert_eq!(current.marker.role, "executor");
+    }
+
+    #[test]
+    fn current_without_role_prefers_running_marker_with_fresher_semantic_status() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        let executor_status = stores.join("runs/executor-session/status.json");
+        fs::create_dir_all(executor_status.parent().unwrap()).unwrap();
+        fs::write(
+            &executor_status,
+            r#"{
+  "last_event_at": "2026-05-11T04:40:33Z",
+  "last_event_type": "heartbeat",
+  "current_activity": "tool:bash"
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-planner.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "planner",
+                "status": "completed",
+                "updated_at": "2026-05-11T04:45:00Z",
+                "transcript_path": stores.join("runs/planner.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "session_id": "executor-session",
+                "status": "running",
+                "updated_at": "2026-05-11T04:30:09Z",
+                "transcript_path": stores.join("runs/executor-session.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let current = find_current_run(&stores, "T999", None).unwrap();
+        assert_eq!(current.marker.role, "executor");
+        let status = read_current_status(&stores, &current).unwrap().unwrap();
+        assert_eq!(status.last_event_at.as_deref(), Some("2026-05-11T04:40:33Z"));
+    }
+
+    #[test]
+    fn current_without_role_tolerates_missing_semantic_status() {
+        let tmp = fixture();
+        let stores = tmp.path().join(".stores");
+        fs::write(
+            stores.join("runs/current-T999-planner.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "planner",
+                "status": "completed",
+                "updated_at": "2026-05-11T04:45:00Z",
+                "transcript_path": stores.join("runs/planner.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            stores.join("runs/current-T999-executor.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "display_id": "T999",
+                "role": "executor",
+                "session_id": "missing-status-session",
+                "status": "running",
+                "updated_at": "2026-05-11T04:30:09Z",
+                "transcript_path": stores.join("runs/executor.jsonl"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let current = find_current_run(&stores, "T999", None).unwrap();
+        assert_eq!(current.marker.role, "executor");
+        assert!(read_current_status(&stores, &current).unwrap().is_none());
     }
 
     #[test]
