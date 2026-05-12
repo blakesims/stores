@@ -43,11 +43,13 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub mod codex;
+pub mod fake;
 pub mod liveness;
 pub mod mock;
 pub mod sap;
 
 pub use codex::CodexRunner;
+pub use fake::FakeRunner;
 
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -420,6 +422,7 @@ fn available_runners() -> String {
     [
         Some("mock"),
         Some("codex"),
+        Some("fake"),
         #[cfg(feature = "runner-claude-code")]
         Some("claude-code"),
         #[cfg(feature = "runner-pi")]
@@ -446,6 +449,7 @@ pub fn select(name: &str) -> Result<Box<dyn Runner>> {
     match name {
         "mock" => Ok(Box::new(mock::MockRunner::new(vec![]))),
         "codex" => Ok(Box::new(codex::CodexRunner::new())),
+        "fake" => Ok(Box::new(fake::FakeRunner::new())),
         "claude-code" => {
             #[cfg(feature = "runner-claude-code")]
             {
@@ -494,6 +498,12 @@ mod tests {
     fn select_codex() {
         let runner = select("codex").expect("codex runner should always be available");
         assert_eq!(runner.name(), "codex");
+    }
+
+    #[test]
+    fn select_fake() {
+        let runner = select("fake").expect("fake runner should always be available");
+        assert_eq!(runner.name(), "fake");
     }
 
     #[test]

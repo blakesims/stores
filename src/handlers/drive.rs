@@ -3424,6 +3424,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn drive_loop_with_fake_runner_reaches_in_review_and_records_fake_telemetry() {
+        let schema = tasks_schema();
+        let (dir, conn) = open_db(&schema);
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".stores")).unwrap();
+        insert_task(
+            &conn,
+            &schema,
+            "TFAKE",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+        conn.execute(
+            "UPDATE tasks SET workspace_path=?1 WHERE display_id='TFAKE'",
+            rusqlite::params![workspace.to_string_lossy().to_string()],
+        )
+        .unwrap();
+
+        let fake_bin = dir.path().join("fake-agent.sh");
+        std::fs::write(
+            &fake_bin,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+role="${STORES_FAKE_ROLE}"
+case "$role" in
+  planner) payload='{"role":"planner","summary":"fake plan","phases":[{"name":"Fake phase","objective":"Exercise fake runner","tasks":[],"acceptance_criteria":[],"files":[],"dependencies":[]}],"decision_matrix":[]}' ;;
+  plan-reviewer) payload='{"role":"plan-reviewer","gate":"READY","summary":"fake plan review","open_questions":[]}' ;;
+  executor) payload='{"role":"executor","summary":"fake execute","commit":null,"files_changed":[]}' ;;
+  code-reviewer) payload='{"role":"code-reviewer","gate":"PASS","summary":"fake review","details":"fake","counts":{"critical":0,"major":0,"minor":0}}' ;;
+  wrap) payload='{"role":"wrap","executive_summary":"fake wrap","deviations":[],"residual_risks":[],"recommended_sanity_checks":[]}' ;;
+  *) echo "unknown role $role" >&2; exit 2 ;;
+esac
+printf '%s\n' '{"type":"system","model":"fake-random-v1"}'
+printf '{"type":"result","structured_output":%s,"result":"fake"}\n' "$payload"
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_bin, perms).unwrap();
+        }
+
+        let runner = crate::runner::FakeRunner::with_bin(fake_bin);
+        drive_loop(&schema, &conn, "TFAKE", &runner, 20)
+            .expect("fake runner happy path should drive to in_review after wrap");
+
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id='TFAKE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "in_review");
+        let fake_runs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_runs WHERE display_id='TFAKE' AND harness_id='fake' AND provider_id='stores-fake' AND payload_valid=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fake_runs, 5, "planner, plan-reviewer, executor, code-reviewer, wrap should all record fake telemetry");
+        assert!(workspace.join(".stores").join("runs").exists());
+    }
+
     /// MINOR 2b: transcript_path consistency under retry — when `compute_submit_execute`
     /// is called twice with the same session_id (simulating a drive-loop retry),
     /// production appends a second cycle entry (no dedup). This test asserts that

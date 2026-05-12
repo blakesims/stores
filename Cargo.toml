@@ -7,6 +7,10 @@ edition = "2021"
 name = "stores"
 path = "src/main.rs"
 
+[[bin]]
+name = "stores-fake-agent"
+path = "src/bin/stores-fake-agent.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive", "string"] }
 serde = { version = "1", features = ["derive"] }
