@@ -336,6 +336,63 @@ fn parse_json_or_null(input: &str) -> Value {
     serde_json::from_str(input).unwrap_or(Value::Null)
 }
 
+fn latest_wrap_brief_text(conn: &Connection, task_id: &str) -> Result<Option<String>> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_runs'",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT brief_text FROM agent_runs \
+         WHERE display_id=?1 AND role='wrap' AND COALESCE(brief_text, '') <> '' \
+         ORDER BY id DESC LIMIT 1",
+        [task_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn materialize_fake_external_review_brief_artifact(
+    conn: &Connection,
+    bundle: &ReviewInputBundle,
+) -> std::result::Result<PathBuf, ToolingError> {
+    let brief_text = latest_wrap_brief_text(conn, &bundle.task_id)
+        .map_err(|e| {
+            ToolingError::new(format!(
+                "TOOLING_FAILURE: cannot read wrap brief artifact: {e}"
+            ))
+        })?
+        .ok_or_else(|| {
+            ToolingError::new(format!(
+                "TOOLING_FAILURE: fake external review missing wrap brief artifact for {}",
+                bundle.task_id
+            ))
+        })?;
+    let brief_path = bundle
+        .workspace_path
+        .join(".stores")
+        .join("runs")
+        .join(format!("{}-wrap-brief.md", bundle.task_id));
+    if let Some(parent) = brief_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ToolingError::new(format!(
+                "TOOLING_FAILURE: cannot create fake review brief dir: {e}"
+            ))
+        })?;
+    }
+    std::fs::write(&brief_path, brief_text).map_err(|e| {
+        ToolingError::new(format!(
+            "TOOLING_FAILURE: cannot write fake review brief {}: {e}",
+            brief_path.display()
+        ))
+    })?;
+    Ok(brief_path)
+}
+
 fn resolve_sha(repo: &Path, rev: &str, label: &str) -> std::result::Result<String, ToolingError> {
     git_output(repo, &["rev-parse", "--verify", rev])
         .map(|s| s.trim().to_string())
@@ -746,27 +803,10 @@ pub fn run_external_review_attempt_with_config(
             "STORES_FAKE_ATTEMPT".to_string(),
             review_display_id.to_string(),
         ));
-        let brief_path = bundle
-            .workspace_path
-            .join(".stores")
-            .join("runs")
-            .join(format!("{review_display_id}-external-review-brief.md"));
-        if let Some(parent) = brief_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ToolingError::new(format!(
-                    "TOOLING_FAILURE: cannot create fake review brief dir: {e}"
-                ))
-            })?;
-        }
-        std::fs::write(&brief_path, &prompt).map_err(|e| {
-            ToolingError::new(format!(
-                "TOOLING_FAILURE: cannot write fake review brief {}: {e}",
-                brief_path.display()
-            ))
-        })?;
+        let wrap_brief_path = materialize_fake_external_review_brief_artifact(conn, &bundle)?;
         runner_env.push((
             "STORES_FAKE_REVIEW_BRIEF_PATH".to_string(),
-            brief_path.to_string_lossy().to_string(),
+            wrap_brief_path.to_string_lossy().to_string(),
         ));
     }
     let out = runner
@@ -1060,6 +1100,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE tasks (display_id TEXT PRIMARY KEY, contract TEXT, plan TEXT, cycles TEXT, wrap_log TEXT, workspace_path TEXT, branch TEXT);
+             CREATE TABLE agent_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, display_id TEXT, role TEXT, brief_text TEXT);
              CREATE TABLE external_reviews (display_id TEXT, task_id TEXT, attempt INTEGER, verdict TEXT, critical_count INTEGER, major_count INTEGER, minor_count INTEGER, findings TEXT, runner TEXT, model_id TEXT, model_metadata TEXT, transcript_path TEXT, log_path TEXT, status TEXT, base_sha TEXT, head_sha TEXT, started_at TEXT, completed_at TEXT, duration_ms INTEGER);",
         )
         .unwrap();
@@ -1070,6 +1111,11 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO external_reviews (display_id, task_id, attempt) VALUES ('ERLLM', 'TLLM', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_runs (display_id, role, brief_text) VALUES ('TLLM', 'wrap', 'wrap handoff brief')",
             [],
         )
         .unwrap();
@@ -1105,6 +1151,79 @@ mod tests {
         assert_eq!(runner, "fake");
         assert!(metadata.contains("stores-fake"), "{metadata}");
         assert!(metadata.contains("codex"), "{metadata}");
+
+        match old_llm {
+            Some(v) => std::env::set_var("STORES_LLM_OFF", v),
+            None => std::env::remove_var("STORES_LLM_OFF"),
+        }
+        match old_fake_bin {
+            Some(v) => std::env::set_var("STORES_FAKE_AGENT_BIN", v),
+            None => std::env::remove_var("STORES_FAKE_AGENT_BIN"),
+        }
+    }
+
+    #[test]
+    fn fake_external_review_fails_without_wrap_brief_artifact() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let old_llm = std::env::var_os("STORES_LLM_OFF");
+        let old_fake_bin = std::env::var_os("STORES_FAKE_AGENT_BIN");
+        std::env::set_var("STORES_LLM_OFF", "1");
+        std::env::set_var("STORES_FAKE_AGENT_BIN", built_fake_agent_bin());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "fake@example.test"]);
+        run_git(&repo, &["config", "user.name", "Fake Test"]);
+        std::fs::write(repo.join("file.txt"), "one\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(&config_path, "fake_runner:\n  delay_ms: 0\n").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (display_id TEXT PRIMARY KEY, contract TEXT, plan TEXT, cycles TEXT, wrap_log TEXT, workspace_path TEXT, branch TEXT);
+             CREATE TABLE agent_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, display_id TEXT, role TEXT, brief_text TEXT);
+             CREATE TABLE external_reviews (display_id TEXT, task_id TEXT, attempt INTEGER, verdict TEXT, critical_count INTEGER, major_count INTEGER, minor_count INTEGER, findings TEXT, runner TEXT, model_id TEXT, model_metadata TEXT, transcript_path TEXT, log_path TEXT, status TEXT, base_sha TEXT, head_sha TEXT, started_at TEXT, completed_at TEXT, duration_ms INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO tasks (display_id, contract, plan, cycles, wrap_log, workspace_path, branch) VALUES ('TNOART', '{"done_when":"done"}', '{"phases":[]}', '[]', '[]', ?1, NULL)"#,
+            [repo.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, task_id, attempt) VALUES ('ERNOART', 'TNOART', 1)",
+            [],
+        )
+        .unwrap();
+
+        let err = run_external_review_attempt_with_config(
+            &conn,
+            "ERNOART",
+            "TNOART",
+            &ReviewCfg {
+                runner: "codex".to_string(),
+                model: Some("gpt-real".to_string()),
+                ..ReviewCfg::default()
+            },
+            &CodexCfg::default(),
+            &config_path,
+            Some(&repo),
+            Some("main"),
+            Some("HEAD"),
+        )
+        .unwrap_err();
+        assert_eq!(err.verdict, ExternalReviewVerdict::ToolingFailure);
+        assert!(
+            err.message
+                .contains("TOOLING_FAILURE: fake external review missing wrap brief artifact"),
+            "{err:?}"
+        );
 
         match old_llm {
             Some(v) => std::env::set_var("STORES_LLM_OFF", v),
