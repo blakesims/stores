@@ -23,15 +23,23 @@ fn run() -> Result<()> {
         .unwrap_or(5000);
     let seed = std::env::var("STORES_FAKE_SEED").unwrap_or_else(|_| "0".to_string());
     let scenario = std::env::var("STORES_FAKE_SCENARIO").unwrap_or_else(|_| "all-pass".to_string());
+    let canonical_scenario = stores::runner::fake::canonical_fake_scenario(&scenario);
+    let model_id = stores::runner::fake::fake_model_id_for_scenario(&canonical_scenario);
     if matches!(
-        scenario.as_str(),
+        canonical_scenario.as_str(),
         "long-delay-heartbeat" | "stall-no-heartbeat" | "sigterm-ignoring-stall"
     ) && std::env::var_os("STORES_FAKE_DELAY_MS").is_none()
     {
         delay_ms = 2_000;
     }
     let decision = stores::runner::fake::decide_fake_outcome(
-        &scenario, &seed, &task_id, &role, &phase, &cycle, &attempt,
+        &canonical_scenario,
+        &seed,
+        &task_id,
+        &role,
+        &phase,
+        &cycle,
+        &attempt,
     );
 
     emit(json!({
@@ -45,16 +53,17 @@ fn run() -> Result<()> {
         "attempt": attempt,
         "scenario": decision.scenario,
         "seed": seed,
-        "model": "fake-random-v1",
+        "model": &model_id,
         "provider": "stores-fake",
         "api": "stores-fake-agent-v1"
     }))?;
+
+    emit(stores::runner::fake::fake_decision_event(&decision))?;
 
     if matches!(
         decision.outcome,
         "STALL_NO_HEARTBEAT" | "SIGTERM_IGNORE_STALL"
     ) {
-        emit(stores::runner::fake::fake_decision_event(&decision))?;
         controlled_stall(decision.outcome == "SIGTERM_IGNORE_STALL", delay_ms)?;
         return Ok(());
     }
@@ -62,7 +71,7 @@ fn run() -> Result<()> {
     emit(json!({
         "type": "assistant",
         "message": {
-            "model": "fake-random-v1",
+            "model": &model_id,
             "usage": {
                 "input_tokens": 0,
                 "output_tokens": 0,
@@ -77,7 +86,6 @@ fn run() -> Result<()> {
     }))?;
 
     heartbeat_delay(delay_ms)?;
-    emit(stores::runner::fake::fake_decision_event(&decision))?;
 
     match decision.outcome {
         "NONZERO_EXIT" => {
@@ -90,7 +98,7 @@ fn run() -> Result<()> {
                 "subtype": "success",
                 "is_error": false,
                 "duration_ms": delay_ms,
-                "model": "fake-random-v1",
+                "model": &model_id,
                 "provider": "stores-fake",
                 "api": "stores-fake-agent-v1",
                 "result": "class=payload intentionally invalid output"
@@ -104,7 +112,7 @@ fn run() -> Result<()> {
                 "subtype": "success",
                 "is_error": false,
                 "duration_ms": delay_ms,
-                "model": "fake-random-v1",
+                "model": &model_id,
                 "provider": "stores-fake",
                 "api": "stores-fake-agent-v1",
                 "result": format!("messy fake prose before JSON\n```json\n{}\n```\ntrailing prose", payload)
@@ -120,7 +128,7 @@ fn run() -> Result<()> {
                 "duration_ms": delay_ms,
                 "duration_api_ms": 0,
                 "num_turns": 1,
-                "model": "fake-random-v1",
+                "model": &model_id,
                 "provider": "stores-fake",
                 "api": "stores-fake-agent-v1",
                 "usage": {

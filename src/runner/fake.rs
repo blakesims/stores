@@ -12,7 +12,6 @@ use super::{
     AgentRunTelemetry, Runner, RunnerInvocationContext, RunnerLiveEventSink, RunnerOutput,
 };
 
-const FAKE_MODEL_ID: &str = "fake-random-v1";
 const FAKE_PROVIDER_ID: &str = "stores-fake";
 const FAKE_API_ID: &str = "stores-fake-agent-v1";
 const DEFAULT_SCENARIO: &str = "all-pass";
@@ -137,8 +136,10 @@ impl FakeRunner {
         let stdout = output.stdout;
         let stderr = output.stderr;
         let exit_code = output.exit_code;
-        let (structured_output, final_message, outcome_class, decision_outcome) =
+        let (structured_output, final_message, outcome_class, decision_outcome, decision_scenario) =
             extract_fake_structured_output(&stdout);
+        let fake_model_id =
+            fake_model_id_for_scenario(decision_scenario.as_deref().unwrap_or(DEFAULT_SCENARIO));
         let legacy_payload_ok = matches!(outcome_class.as_deref(), Some("legacy"));
         let payload_valid = exit_code == 0 && (structured_output.is_some() || legacy_payload_ok);
         let payload_error = output.payload_error.clone().or_else(|| {
@@ -173,7 +174,7 @@ impl FakeRunner {
             session_id: Some(invocation_owned.session_id),
             structured_output_source: if payload_valid { Some("fake") } else { None },
             telemetry: AgentRunTelemetry {
-                model_id: Some(FAKE_MODEL_ID.to_string()),
+                model_id: Some(fake_model_id.clone()),
                 harness_id: Some("fake".to_string()),
                 started_at: Some(started_at),
                 ended_at: Some(ended_at),
@@ -195,7 +196,7 @@ impl FakeRunner {
                 configured_harness_id: configured_harness,
                 configured_model_id: configured_model,
                 configured_thinking_effort: configured_thinking,
-                effective_model_id: Some(FAKE_MODEL_ID.to_string()),
+                effective_model_id: Some(fake_model_id),
                 effective_thinking_effort: Some("none".to_string()),
                 thinking_effort_source: Some("fake".to_string()),
                 provider_id: Some(FAKE_PROVIDER_ID.to_string()),
@@ -356,11 +357,13 @@ fn extract_fake_structured_output(
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 ) {
     let mut structured = None;
     let mut final_message = None;
     let mut outcome_class = None;
     let mut decision_outcome = None;
+    let mut decision_scenario = None;
     for line in stdout.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
@@ -374,6 +377,10 @@ fn extract_fake_structured_output(
                 .get("outcome")
                 .and_then(|r| r.as_str())
                 .map(|s| s.to_string());
+            decision_scenario = v
+                .get("scenario")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string());
         }
         if v.get("type").and_then(|t| t.as_str()) == Some("result") {
             if let Some(value) = v.get("structured_output") {
@@ -385,7 +392,31 @@ fn extract_fake_structured_output(
                 .map(|s| s.to_string());
         }
     }
-    (structured, final_message, outcome_class, decision_outcome)
+    (
+        structured,
+        final_message,
+        outcome_class,
+        decision_outcome,
+        decision_scenario,
+    )
+}
+
+pub fn canonical_fake_scenario(scenario: &str) -> String {
+    let trimmed = scenario.trim();
+    let configured = if trimmed.is_empty() {
+        DEFAULT_SCENARIO
+    } else {
+        trimmed
+    };
+    match configured {
+        "plan-review-reject-once" => "plan-reviewer-reject-once".to_string(),
+        "review-revise-once" => "code-review-revise-once".to_string(),
+        other => other.to_string(),
+    }
+}
+
+pub fn fake_model_id_for_scenario(scenario: &str) -> String {
+    format!("fake-scripted:{}-v1", canonical_fake_scenario(scenario))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -447,14 +478,14 @@ pub fn decide_fake_outcome(
     let normalized_role = role.replace('_', "-");
     let (outcome, outcome_class) = match scenario.as_str() {
         "all-pass" => ("PASS", "semantic"),
-        "plan-review-reject-once" | "plan-reviewer-reject-once" => {
+        "plan-reviewer-reject-once" => {
             if normalized_role == "plan-reviewer" && first {
                 ("NEEDS_WORK", "semantic")
             } else {
                 ("PASS", "semantic")
             }
         }
-        "review-revise-once" | "code-review-revise-once" => {
+        "code-review-revise-once" => {
             if normalized_role == "code-reviewer" && first {
                 ("REVISE", "semantic")
             } else {
@@ -503,13 +534,8 @@ fn scenario_env_override(configured: &str) -> String {
     std::env::var("STORES_FAKE_SCENARIO")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            if configured.trim().is_empty() {
-                DEFAULT_SCENARIO.to_string()
-            } else {
-                configured.to_string()
-            }
-        })
+        .map(|s| canonical_fake_scenario(&s))
+        .unwrap_or_else(|| canonical_fake_scenario(configured))
 }
 
 fn fake_policy_hash(scenario: &str, seed: &str) -> String {
@@ -759,6 +785,61 @@ mod tests {
         assert_eq!(a.outcome, "REVISE");
         assert_eq!(a.outcome_class, "semantic");
         assert!(a.policy_hash.starts_with("sha256:"));
+
+        let alias = decide_fake_outcome(
+            "review-revise-once",
+            "seed-a",
+            "TDET",
+            "code-reviewer",
+            "1",
+            "1",
+            "1",
+        );
+        assert_eq!(alias.scenario, "code-review-revise-once");
+        assert_eq!(
+            fake_model_id_for_scenario(&alias.scenario),
+            "fake-scripted:code-review-revise-once-v1"
+        );
+    }
+
+    fn fake_decision_line_for_attempt(attempt: &str) -> String {
+        let output = std::process::Command::new(built_fake_agent_bin())
+            .env("STORES_FAKE_SCENARIO", "review-revise-once")
+            .env("STORES_FAKE_SEED", "seed-process")
+            .env("STORES_FAKE_TASK_ID", "TPROC")
+            .env("STORES_FAKE_ROLE", "code-reviewer")
+            .env("STORES_FAKE_PHASE", "1")
+            .env("STORES_FAKE_CYCLE", attempt)
+            .env("STORES_FAKE_ATTEMPT", attempt)
+            .env("STORES_FAKE_DELAY_MS", "0")
+            .output()
+            .expect("run stores-fake-agent subprocess");
+        assert!(output.status.success(), "status={:?}", output.status);
+        let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+        stdout
+            .lines()
+            .find(|line| line.contains("\"type\":\"fake_decision\""))
+            .expect("fake_decision line")
+            .to_string()
+    }
+
+    #[test]
+    fn fake_agent_subprocess_decision_lines_are_deterministic_and_attempt_sensitive() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let first_a = fake_decision_line_for_attempt("1");
+        let first_b = fake_decision_line_for_attempt("1");
+        assert_eq!(first_a.as_bytes(), first_b.as_bytes());
+        assert!(first_a.contains("\"scenario\":\"code-review-revise-once\""));
+        assert!(first_a.contains("\"outcome\":\"REVISE\""));
+
+        let second_a = fake_decision_line_for_attempt("2");
+        let second_b = fake_decision_line_for_attempt("2");
+        assert_eq!(second_a.as_bytes(), second_b.as_bytes());
+        assert!(second_a.contains("\"scenario\":\"code-review-revise-once\""));
+        assert!(second_a.contains("\"outcome\":\"PASS\""));
+        assert_ne!(first_a, second_a);
     }
 
     #[test]
@@ -833,6 +914,11 @@ mod tests {
             );
             assert_eq!(
                 out.telemetry.payload_valid, payload_valid,
+                "scenario {scenario}"
+            );
+            assert_eq!(
+                out.telemetry.model_id.as_deref(),
+                Some(fake_model_id_for_scenario(scenario).as_str()),
                 "scenario {scenario}"
             );
             if let Some((field, expected)) = semantic_field {

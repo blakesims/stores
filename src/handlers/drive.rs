@@ -794,6 +794,26 @@ fn auto_drive_handoff_matches(display_id: &str, agent_name: &str) -> bool {
             == Some(display_id)
 }
 
+fn close_auto_drive_lock_failed(
+    conn: &Connection,
+    display_id: &str,
+    last_status: &str,
+) -> Result<()> {
+    if !dispatch_locks_table_exists(conn)? {
+        return Ok(());
+    }
+    let now = crate::handlers::row::now_iso8601();
+    conn.execute(
+        "UPDATE dispatch_locks SET last_status = ?1, finished_at = ?2, \
+                                  claimed_at = ?2, attempts = attempts + 1, \
+                                  terminal_reason = 'error', next_retry_at = NULL \
+         WHERE store = 'tasks' AND display_id = ?3 AND agent_name = 'auto-drive' \
+           AND finished_at IS NULL",
+        rusqlite::params![last_status, now, display_id],
+    )?;
+    Ok(())
+}
+
 fn dispatch_locks_table_exists(conn: &Connection) -> Result<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='dispatch_locks'",
@@ -2213,6 +2233,16 @@ fn drive_loop_with_role_runner(
             let blocked_reason = classify_runner_payload_error(&run_out, payload_err);
             match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
                 Ok(()) => {
+                    if let Err(e) = close_auto_drive_lock_failed(
+                        conn,
+                        display_id,
+                        "error:runner_payload_validation_failed",
+                    ) {
+                        eprintln!(
+                            "[{display_id}] close_auto_drive_lock_failed failed (non-fatal): {e}"
+                        );
+                        let _ = std::io::stderr().flush();
+                    }
                     bail!(
                         "runner payload validation failed (exit={}): {payload_err}; transitioned to blocked",
                         run_out.exit_code
@@ -2270,6 +2300,13 @@ fn drive_loop_with_role_runner(
                             eprintln!(
                                 "[{display_id}] mark_drive_failed fired (blocked_reason={blocked_reason})"
                             );
+                            if let Err(e) = close_auto_drive_lock_failed(
+                                conn,
+                                display_id,
+                                "error:runner_nonzero_exit",
+                            ) {
+                                eprintln!("[{display_id}] close_auto_drive_lock_failed failed (non-fatal): {e}");
+                            }
                             let _ = std::io::stderr().flush();
                             bail!(
                                 "runner non-zero exit (code {}); transitioned to blocked",
@@ -2318,6 +2355,14 @@ fn drive_loop_with_role_runner(
                     let blocked_reason = classify_runner_payload_error(&run_out, &payload_err);
                     match fire_mark_drive_failed(conn, display_id, &blocked_reason, "", None) {
                         Ok(()) => {
+                            if let Err(e) = close_auto_drive_lock_failed(
+                                conn,
+                                display_id,
+                                "error:runner_payload_validation_failed",
+                            ) {
+                                eprintln!("[{display_id}] close_auto_drive_lock_failed failed (non-fatal): {e}");
+                                let _ = std::io::stderr().flush();
+                            }
                             bail!(
                                 "runner payload validation failed (exit={}): {payload_err}; transitioned to blocked",
                                 run_out.exit_code
@@ -3718,6 +3763,13 @@ mod tests {
             let schema = tasks_schema();
             let (dir, conn) = open_db(&schema);
             fake_planning_task(&schema, &conn, &dir, "TSTL");
+            let (row_id, _) = crate::handlers::row::read_row(&schema, &conn, "TSTL").unwrap();
+            conn.execute(
+                "INSERT INTO dispatch_locks (store,row_id,display_id,agent_name,claimed_at,claimed_by,finished_at,pid,last_status) \
+                 VALUES ('tasks',?1,'TSTL','auto-drive','2026-01-01T00:00:00Z','test',NULL,?2,'in_flight')",
+                rusqlite::params![row_id, std::process::id() as i64],
+            )
+            .unwrap();
             let runner =
                 crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
 
@@ -3728,6 +3780,40 @@ mod tests {
             restore_env_var("STORES_RUNNER_NO_OUTPUT_SECS", old_timeout);
             assert!(err.to_string().contains("timed out"), "{err}");
             assert_eq!(task_status(&conn, "TSTL"), "blocked");
+            let (from_status, to_status, verb): (String, String, String) = conn
+                .query_row(
+                    "SELECT from_status, to_status, verb FROM transition_history \
+                     WHERE display_id='TSTL' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (from_status.as_str(), to_status.as_str(), verb.as_str()),
+                ("planning", "blocked", "mark_drive_failed")
+            );
+            let (exit_code, exit_kind): (i64, String) = conn
+                .query_row(
+                    "SELECT exit_code, runner_exit_kind FROM agent_runs \
+                     WHERE display_id='TSTL' AND role='planner' ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(exit_code, -1);
+            assert_eq!(exit_kind, "liveness_stalled_no_output");
+            let live_locks: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM dispatch_locks \
+                     WHERE store='tasks' AND display_id='TSTL' AND agent_name='auto-drive' AND finished_at IS NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                live_locks, 0,
+                "watchdog failure must not leave a live auto-drive lock"
+            );
         });
     }
 

@@ -654,7 +654,7 @@ pub fn effective_review_config(config_path: &Path, review: &ReviewCfg) -> Review
     if crate::flow::config::fake_external_review_enabled(config_path) {
         let mut fake = review.clone();
         fake.runner = "fake".to_string();
-        fake.model = Some("fake-random-v1".to_string());
+        fake.model = Some(crate::runner::fake::fake_model_id_for_scenario("all-pass"));
         fake
     } else {
         review.clone()
