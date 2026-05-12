@@ -1,0 +1,695 @@
+use anyhow::{bail, Context, Result};
+use rusqlite::{params, Connection};
+use serde::Deserialize;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::codegen::ddl::ddl_for;
+use crate::flow::builtins::DispatchCtx;
+use crate::flow::{AgentEntry, AgentsYaml, RetryPolicy};
+use crate::handlers::drive::drive_loop;
+use crate::schema::Schema;
+
+#[derive(Debug, Clone)]
+pub struct TestRunOpts {
+    pub case_name: Option<String>,
+    pub case_file: Option<PathBuf>,
+    pub delay_ms: Option<u64>,
+    pub watch: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TestManifest {
+    pub cases: BTreeMap<String, TestCase>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestCase {
+    #[serde(default = "default_tier")]
+    pub tier: String,
+    #[serde(default)]
+    pub delay_ms: Option<u64>,
+    #[serde(default = "default_executor_mode")]
+    pub executor_mode: String,
+    #[serde(default)]
+    pub stages: BTreeMap<String, StageScript>,
+    #[serde(default)]
+    pub expect: CaseExpect,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct StageScript {
+    #[serde(default)]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub attempts: Vec<AttemptScript>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AttemptScript {
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CaseExpect {
+    #[serde(default = "default_expect_task_status")]
+    pub task_status: String,
+    #[serde(default = "default_expect_lifecycle")]
+    pub lifecycle: String,
+    #[serde(default = "default_expect_external_review_status")]
+    pub external_review_status: String,
+    #[serde(default)]
+    pub external_review: Option<String>,
+    #[serde(default = "default_true")]
+    pub no_real_llm: bool,
+}
+
+impl Default for CaseExpect {
+    fn default() -> Self {
+        Self {
+            task_status: default_expect_task_status(),
+            lifecycle: default_expect_lifecycle(),
+            external_review_status: default_expect_external_review_status(),
+            external_review: None,
+            no_real_llm: true,
+        }
+    }
+}
+
+fn default_tier() -> String {
+    "T3".to_string()
+}
+fn default_executor_mode() -> String {
+    "marker_file".to_string()
+}
+fn default_expect_task_status() -> String {
+    "integrated".to_string()
+}
+fn default_expect_lifecycle() -> String {
+    "done".to_string()
+}
+fn default_expect_external_review_status() -> String {
+    "passed".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+
+const PRESET_HAPPY: &str = r#"
+cases:
+  happy-path:
+    tier: T3
+    executor_mode: marker_file
+    stages:
+      planner: { outcome: PASS }
+      plan_reviewer: { outcome: PASS }
+      executor: { outcome: PASS }
+      code_reviewer: { outcome: PASS }
+      wrap: { outcome: PASS }
+      external_review: { outcome: PASS }
+    expect:
+      task_status: integrated
+      lifecycle: done
+      external_review_status: passed
+      no_real_llm: true
+"#;
+
+const PRESET_FAILED_ER: &str = r#"
+cases:
+  t3-failed-er:
+    tier: T3
+    executor_mode: marker_file
+    stages:
+      planner: { outcome: PASS }
+      plan_reviewer: { outcome: PASS }
+      executor: { outcome: PASS }
+      code_reviewer: { outcome: PASS }
+      wrap: { outcome: PASS }
+      external_review:
+        attempts:
+          - outcome: TOOLING_FAILURE
+    expect:
+      task_status: in_review
+      lifecycle: active
+      external_review_status: tooling_held
+      no_real_llm: true
+"#;
+
+pub fn run(opts: TestRunOpts) -> Result<()> {
+    let (case_name, case, case_file_for_fake) = load_case(&opts)?;
+    validate_case_shape(&case)?;
+    let delay_ms = opts.delay_ms.or(case.delay_ms).unwrap_or(5000);
+    preflight_fake_mode()?;
+
+    let mut env_restore = EnvRestore::capture(&[
+        "STORES_LLM_OFF",
+        "STORES_FAKE_AGENT_BIN",
+        "STORES_FAKE_SCENARIO",
+        "STORES_FAKE_DELAY_MS",
+        "STORES_FAKE_EXECUTOR_MODE",
+        "STORES_FAKE_CASE_FILE",
+        "STORES_FAKE_CASE_NAME",
+        "STORES_ALLOW_FAKE_REVIEW_ACCEPT",
+    ]);
+    env_restore.set("STORES_LLM_OFF", "1");
+    env_restore.set("STORES_FAKE_DELAY_MS", delay_ms.to_string());
+    env_restore.set("STORES_FAKE_EXECUTOR_MODE", &case.executor_mode);
+    env_restore.set("STORES_ALLOW_FAKE_REVIEW_ACCEPT", "1");
+    env_restore.set("STORES_FAKE_CASE_NAME", &case_name);
+    if let Some(path) = &case_file_for_fake {
+        env_restore.set("STORES_FAKE_CASE_FILE", path.to_string_lossy().to_string());
+    } else {
+        env_restore.set("STORES_FAKE_SCENARIO", preset_scenario(&case_name));
+    }
+    if let Ok(bin) = fake_agent_bin() {
+        env_restore.set("STORES_FAKE_AGENT_BIN", bin.to_string_lossy().to_string());
+    }
+
+    println!(
+        "stores-test case={case_name} tier={} llm_off=1 delay_ms={delay_ms} executor_mode={}",
+        case.tier, case.executor_mode
+    );
+
+    let h = Harness::new(&case_name)?;
+    let _cwd_restore = CwdRestore::pushd(h._tmp.path())?;
+    if opts.watch {
+        h.progress("created synthetic repo/db")?;
+    }
+
+    let runner = crate::runner::FakeRunner::with_bin(fake_agent_bin()?);
+    drive_loop(&h.tasks_schema, &h.conn, &h.task_id, &runner, 40)
+        .with_context(|| format!("drive loop failed for {}", h.task_id))?;
+    if opts.watch {
+        h.progress("after drive")?;
+    }
+
+    h.ensure_in_review_or_expected_failure()?;
+    h.run_external_review()?;
+    if opts.watch {
+        h.progress("after external-review")?;
+    }
+
+    let er_status = h.external_review_status()?;
+    if er_status == "passed" {
+        h.accept_and_integrate()?;
+        if opts.watch {
+            h.progress("after integration")?;
+        }
+    }
+
+    h.assert_expectations(&case.expect)?;
+    if case.expect.no_real_llm {
+        h.assert_no_real_llm()?;
+    }
+    h.summary()?;
+    drop(env_restore);
+    Ok(())
+}
+
+fn load_case(opts: &TestRunOpts) -> Result<(String, TestCase, Option<PathBuf>)> {
+    if let Some(path) = &opts.case_file {
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let manifest: TestManifest =
+            serde_yaml::from_str(&raw).context("parsing test case YAML")?;
+        let name = opts
+            .case_name
+            .clone()
+            .or_else(|| manifest.cases.keys().next().cloned())
+            .context("case file must contain at least one case")?;
+        let case = manifest
+            .cases
+            .get(&name)
+            .with_context(|| format!("case '{name}' not found"))?
+            .clone();
+        return Ok((name, case, Some(path.clone())));
+    }
+    let name = opts
+        .case_name
+        .clone()
+        .unwrap_or_else(|| "happy-path".to_string());
+    let raw = match name.as_str() {
+        "happy-path" => PRESET_HAPPY,
+        "t3-failed-er" | "t3-er-fail" => PRESET_FAILED_ER,
+        other => bail!("unknown stores test preset '{other}' (use --case-file for custom YAML)"),
+    };
+    let manifest: TestManifest = serde_yaml::from_str(raw).unwrap();
+    let key = if name == "t3-er-fail" {
+        "t3-failed-er"
+    } else {
+        &name
+    };
+    let case = manifest.cases.get(key).unwrap().clone();
+    let file = std::env::temp_dir().join(format!("stores-test-{key}-case.yaml"));
+    std::fs::write(&file, raw)?;
+    Ok((key.to_string(), case, Some(file)))
+}
+
+fn preset_scenario(name: &str) -> &'static str {
+    match name {
+        "t3-failed-er" | "t3-er-fail" => "external-review-tooling-failure",
+        _ => "all-pass",
+    }
+}
+
+fn validate_case_shape(case: &TestCase) -> Result<()> {
+    for (role, stage) in &case.stages {
+        if stage.outcome.is_none() && stage.attempts.is_empty() {
+            bail!("stage '{role}' must define outcome or attempts");
+        }
+        for attempt in &stage.attempts {
+            if attempt.outcome.trim().is_empty() {
+                bail!("stage '{role}' has an empty attempt outcome");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preflight_fake_mode() -> Result<()> {
+    std::env::set_var("STORES_LLM_OFF", "1");
+    let current = std::env::current_exe().context("resolve current stores binary")?;
+    sentinel(&current, "current stores binary")?;
+    if let Ok(private) = crate::paths::daemon_binary_path() {
+        if private.exists() && sentinel(&private, "private daemon reexec binary").is_err() {
+            if let Some(parent) = private.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&current, &private).with_context(|| {
+                format!(
+                    "refreshing stale private daemon binary {}",
+                    private.display()
+                )
+            })?;
+            sentinel(&private, "private daemon reexec binary")?;
+        } else if private.exists() {
+            // sentinel already printed ok
+        } else if let Some(parent) = private.parent() {
+            std::fs::create_dir_all(parent)?;
+            std::fs::copy(&current, &private).with_context(|| {
+                format!("installing private daemon binary {}", private.display())
+            })?;
+            sentinel(&private, "private daemon reexec binary")?;
+        }
+    }
+    let fake = fake_agent_bin()?;
+    if !fake.exists() {
+        bail!("stores-fake-agent not found at {}", fake.display());
+    }
+    Ok(())
+}
+
+fn sentinel(bin: &Path, label: &str) -> Result<()> {
+    let out = Command::new(bin)
+        .arg("__llm-off-sentinel")
+        .env("STORES_LLM_OFF", "1")
+        .output()
+        .with_context(|| format!("running sentinel for {label}: {}", bin.display()))?;
+    if !out.status.success()
+        || !String::from_utf8_lossy(&out.stdout).contains("stores-llm-off-sentinel=ok")
+    {
+        bail!(
+            "fake-mode sentinel failed for {label}: status={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    println!("preflight {label}=ok path={}", bin.display());
+    Ok(())
+}
+
+fn fake_agent_bin() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("STORES_FAKE_AGENT_BIN") {
+        return Ok(PathBuf::from(p));
+    }
+    let cur = std::env::current_exe()?;
+    if let Some(parent) = cur.parent() {
+        let sibling = parent.join("stores-fake-agent");
+        if sibling.exists() {
+            return Ok(sibling);
+        }
+    }
+    Ok(PathBuf::from("stores-fake-agent"))
+}
+
+struct Harness {
+    _tmp: tempfile::TempDir,
+    conn: Connection,
+    tasks_schema: Schema,
+    task_id: String,
+    repo: PathBuf,
+    workspace: PathBuf,
+    config_path: PathBuf,
+    codex_sentinel: PathBuf,
+}
+
+impl Harness {
+    fn new(case_name: &str) -> Result<Self> {
+        let tmp = tempfile::tempdir().context("create stores test tempdir")?;
+        let stores_dir = tmp.path().join(".stores");
+        std::fs::create_dir_all(stores_dir.join("runs"))?;
+        let tasks_schema = bundled_schema("tasks")?;
+        let external_reviews_schema = bundled_schema("external_reviews")?;
+        let conn = Connection::open(stores_dir.join("db.sqlite"))?;
+        conn.execute_batch(&ddl_for(&tasks_schema))?;
+        conn.execute_batch(&ddl_for(&external_reviews_schema))?;
+        crate::db::ensure_runs_view_if_tasks_exists(&conn)?;
+        crate::handlers::framework_migrate::ensure_integration_singleton_index(&conn)?;
+
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo)?;
+        git_ok(&repo, &["init", "-b", "main"])?;
+        git_ok(&repo, &["config", "user.email", "fake@example.test"])?;
+        git_ok(&repo, &["config", "user.name", "Fake Test"])?;
+        std::fs::write(repo.join("README.md"), "stores test base\n")?;
+        git_ok(&repo, &["add", "README.md"])?;
+        git_ok(&repo, &["commit", "-m", "base"])?;
+
+        let task_id = format!("TTEST{}", std::process::id());
+        let branch = format!("stores-test/{}-{}", sanitize(case_name), std::process::id());
+        let workspace = tmp.path().join("worktree");
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                workspace.to_str().unwrap(),
+            ],
+        )?;
+        std::fs::create_dir_all(workspace.join(".stores").join("runs"))?;
+        insert_task(&conn, &task_id, workspace.to_str().unwrap(), &branch)?;
+
+        let codex_sentinel = tmp.path().join("codex-was-invoked");
+        let codex_cmd = tmp.path().join("codex-sentinel.sh");
+        std::fs::write(
+            &codex_cmd,
+            format!(
+                "#!/usr/bin/env bash\ntouch {}\nexit 99\n",
+                codex_sentinel.display()
+            ),
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&codex_cmd)?.permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&codex_cmd, p)?;
+        }
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(&config_path, format!("review:\n  runner: codex\n  timeout_secs: 5\ncodex:\n  command: {}\n  args: []\nfake_runner:\n  delay_ms: 0\n  scenario: all-pass\n  executor_mode: marker_file\n  fake_external_review: true\n", codex_cmd.display()))?;
+        Ok(Self {
+            _tmp: tmp,
+            conn,
+            tasks_schema,
+            task_id,
+            repo,
+            workspace,
+            config_path,
+            codex_sentinel,
+        })
+    }
+
+    fn progress(&self, label: &str) -> Result<()> {
+        let (status, lifecycle): (String, Option<String>) = self.conn.query_row(
+            "SELECT status,lifecycle FROM tasks WHERE display_id=?1",
+            [&self.task_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let er: Option<(String, String)> = self.conn.query_row(
+            "SELECT display_id,status FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1", [&self.task_id], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+        let runs: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_runs WHERE display_id=?1",
+                [&self.task_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        println!(
+            "progress {label}: task={} status={} lifecycle={:?} er={:?} agent_runs={}",
+            self.task_id, status, lifecycle, er, runs
+        );
+        Ok(())
+    }
+
+    fn ensure_in_review_or_expected_failure(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn run_external_review(&self) -> Result<()> {
+        self.conn.execute("INSERT INTO external_reviews (display_id,status,task_id,attempt,adapter,created_at,updated_at,created_by,updated_by) VALUES ('ERTEST','pending',?1,1,'external_review','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','stores-test','stores-test')", [&self.task_id])?;
+        let agents = AgentsYaml {
+            agents: vec![],
+            deployment_specialist: None,
+        };
+        crate::flow::builtins::external_review::run(
+            &json!({"display_id":"ERTEST"}),
+            &DispatchCtx {
+                conn: &self.conn,
+                agents: &agents,
+                config_path: &self.config_path,
+                policies_hash: "",
+            },
+        )?;
+        Ok(())
+    }
+
+    fn external_review_status(&self) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT status FROM external_reviews WHERE display_id='ERTEST'",
+                [],
+                |r| r.get(0),
+            )
+            .context("read external review status")
+    }
+
+    fn accept_and_integrate(&self) -> Result<()> {
+        let cmd =
+            clap::Command::new("accept").arg(clap::Arg::new("display_id").required(true).index(1));
+        let m = cmd.get_matches_from(["accept", self.task_id.as_str()]);
+        crate::handlers::transition::run(
+            &self.tasks_schema,
+            &self.conn,
+            &m,
+            crate::schema::actor::Actor::Human.into(),
+            "accept",
+        )?;
+        let cmd = clap::Command::new("release-to-integration")
+            .arg(clap::Arg::new("display_id").required(true).index(1));
+        let m = cmd.get_matches_from(["release-to-integration", self.task_id.as_str()]);
+        crate::handlers::transition::run(
+            &self.tasks_schema,
+            &self.conn,
+            &m,
+            crate::schema::actor::Actor::Framework.into(),
+            "release-to-integration",
+        )?;
+        let mut args = serde_yaml::Mapping::new();
+        args.insert(
+            serde_yaml::Value::String("pre_land_check".into()),
+            serde_yaml::Value::String("true".into()),
+        );
+        args.insert(
+            serde_yaml::Value::String("allow_push".into()),
+            serde_yaml::Value::Bool(false),
+        );
+        let agents = AgentsYaml {
+            agents: vec![AgentEntry {
+                name: "integrate".into(),
+                subscribes_to: vec![],
+                command: "builtin:integrate".into(),
+                claim_window_secs: 300,
+                retry_policy: RetryPolicy::default(),
+                command_args: Some(args),
+            }],
+            deployment_specialist: None,
+        };
+        crate::flow::builtins::integrate::run(
+            &json!({"display_id": self.task_id, "branch": self.branch()?, "workspace_path": self.workspace.to_string_lossy()}),
+            &DispatchCtx {
+                conn: &self.conn,
+                agents: &agents,
+                config_path: &self.config_path,
+                policies_hash: "",
+            },
+        )?;
+        Ok(())
+    }
+
+    fn branch(&self) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT branch FROM tasks WHERE display_id=?1",
+                [&self.task_id],
+                |r| r.get(0),
+            )
+            .context("read task branch")
+    }
+
+    fn assert_expectations(&self, expect: &CaseExpect) -> Result<()> {
+        let (status, lifecycle): (String, Option<String>) = self.conn.query_row(
+            "SELECT status,lifecycle FROM tasks WHERE display_id=?1",
+            [&self.task_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if status != expect.task_status {
+            bail!("expected task_status={} got {}", expect.task_status, status);
+        }
+        if lifecycle.as_deref().unwrap_or("") != expect.lifecycle {
+            bail!(
+                "expected lifecycle={} got {:?}",
+                expect.lifecycle,
+                lifecycle
+            );
+        }
+        let er = self.external_review_status()?;
+        let want_er = expect
+            .external_review
+            .as_deref()
+            .unwrap_or(&expect.external_review_status);
+        if er != want_er {
+            bail!("expected external_review_status={} got {}", want_er, er);
+        }
+        Ok(())
+    }
+
+    fn assert_no_real_llm(&self) -> Result<()> {
+        if self.codex_sentinel.exists() {
+            bail!("real codex sentinel was invoked");
+        }
+        let non_fake: i64 = self.conn.query_row("SELECT COUNT(*) FROM agent_runs WHERE display_id=?1 AND COALESCE(harness_id,'') != 'fake'", [&self.task_id], |r| r.get(0))?;
+        if non_fake != 0 {
+            bail!("expected zero non-fake agent_runs, got {non_fake}");
+        }
+        Ok(())
+    }
+
+    fn summary(&self) -> Result<()> {
+        self.progress("final")?;
+        let main_tree = git_out(&self.repo, &["ls-tree", "-r", "--name-only", "main"])?;
+        println!(
+            "summary task={} marker_on_main={}",
+            self.task_id,
+            String::from_utf8_lossy(&main_tree.stdout).contains("fake-runner-markers/")
+        );
+        Ok(())
+    }
+}
+
+fn bundled_schema(name: &str) -> Result<Schema> {
+    let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, y)| *y)
+        .with_context(|| format!("bundled schema {name}"))?;
+    Schema::from_yaml(yaml)
+}
+
+fn insert_task(conn: &Connection, task_id: &str, workspace: &str, branch: &str) -> Result<()> {
+    let contract = json!({
+        "done_when": "fake harness reaches expectation",
+        "scope_in": "fake harness only",
+        "scope_out": "production work"
+    });
+    let plan = json!({"objective":"stores-test seed","phases":[{"name":"Fake execution","objective":"Exercise fake harness","tasks":[],"acceptance_criteria":[],"files":[],"dependencies":[]}]});
+    conn.execute("INSERT INTO tasks (display_id,status,title,slug,tier_hint,created_at,updated_at,created_by,updated_by,contract,plan,plan_review_log,cycles,wrap_log,current_phase,current_cycle,workspace_path,branch,activation,lifecycle,active_step) VALUES (?1,'planning','stores test synthetic','stores-test','T3','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','stores-test','stores-test',?2,?3,'[]','[]',NULL,0,0,?4,?5,'active','active','planning')", params![task_id, contract.to_string(), plan.to_string(), workspace, branch])?;
+    Ok(())
+}
+
+fn git_ok(repo: &Path, args: &[&str]) -> Result<()> {
+    let out = git_out(repo, args)?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(())
+}
+fn git_out(repo: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .context("run git")
+}
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+struct CwdRestore(PathBuf);
+impl CwdRestore {
+    fn pushd(path: &Path) -> Result<Self> {
+        let old = std::env::current_dir().context("read current dir")?;
+        std::env::set_current_dir(path).with_context(|| format!("chdir {}", path.display()))?;
+        Ok(Self(old))
+    }
+}
+impl Drop for CwdRestore {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+struct EnvRestore(Vec<(String, Option<std::ffi::OsString>)>);
+impl EnvRestore {
+    fn capture(keys: &[&str]) -> Self {
+        Self(
+            keys.iter()
+                .map(|k| (k.to_string(), std::env::var_os(k)))
+                .collect(),
+        )
+    }
+    fn set(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+        std::env::set_var(key, value);
+    }
+}
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (k, v) in self.0.drain(..) {
+            match v {
+                Some(x) => std::env::set_var(k, x),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_yaml_case_with_attempts() {
+        let raw = r#"cases:
+  custom:
+    stages:
+      code_reviewer:
+        attempts:
+          - outcome: REVISE
+          - outcome: PASS
+    expect:
+      task_status: in_review
+      lifecycle: active
+      external_review_status: tooling_held
+"#;
+        let m: TestManifest = serde_yaml::from_str(raw).unwrap();
+        let c = m.cases.get("custom").unwrap();
+        assert_eq!(c.stages["code_reviewer"].attempts[0].outcome, "REVISE");
+        assert_eq!(c.expect.task_status, "in_review");
+    }
+}

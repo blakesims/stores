@@ -1,14 +1,15 @@
 pub mod agents;
-pub mod engine;
 pub mod auth;
 pub mod dispatch;
 pub mod dynamic;
+pub mod engine;
 pub mod init;
 pub mod metrics;
-pub mod runs;
 pub mod runner_stats;
+pub mod runs;
 pub mod setup;
 pub mod skills;
+pub mod test;
 pub mod topology;
 pub mod watch;
 

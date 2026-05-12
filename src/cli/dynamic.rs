@@ -216,6 +216,45 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .help("Install skills and agents to ~/.claude/ instead of ./.claude/"),
                 ),
         )
+        // Test subcommand — no-LLM fake-runner operator harness
+        .subcommand(
+            Command::new("test")
+                .about("Run daemon-visible no-LLM fake-runner harness cases")
+                .subcommand(
+                    Command::new("run")
+                        .about("Run one fake harness case")
+                        .arg(Arg::new("case").help("Named preset/case (default: happy-path)").required(false))
+                        .arg(
+                            Arg::new("case-file")
+                                .long("case-file")
+                                .value_hint(ValueHint::FilePath)
+                                .help("YAML case manifest to execute"),
+                        )
+                        .arg(
+                            Arg::new("delay-ms")
+                                .long("delay-ms")
+                                .value_parser(clap::value_parser!(u64))
+                                .help("Fake runner delay in milliseconds"),
+                        )
+                        .arg(
+                            Arg::new("watch")
+                                .long("watch")
+                                .action(ArgAction::SetTrue)
+                                .help("Print progress checkpoints while the case moves"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("suite")
+                        .about("Run a named fake harness suite (currently aliases dogfood-smoke/battlescars to happy-path + t3-failed-er)")
+                        .arg(Arg::new("suite").required(true))
+                        .arg(
+                            Arg::new("delay-ms")
+                                .long("delay-ms")
+                                .value_parser(clap::value_parser!(u64)),
+                        )
+                        .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)),
+                ),
+        )
         // Skills subcommand
         .subcommand(
             Command::new("skills")

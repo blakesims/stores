@@ -183,6 +183,40 @@ fn main() -> Result<()> {
             let global = *sub.get_one::<bool>("global").unwrap_or(&false);
             cli::setup::run(global)?;
         }
+        Some(("test", sub)) => match sub.subcommand() {
+            Some(("run", rsub)) => {
+                cli::test::run(cli::test::TestRunOpts {
+                    case_name: rsub.get_one::<String>("case").cloned(),
+                    case_file: rsub
+                        .get_one::<String>("case-file")
+                        .map(std::path::PathBuf::from),
+                    delay_ms: rsub.get_one::<u64>("delay-ms").copied(),
+                    watch: *rsub.get_one::<bool>("watch").unwrap_or(&false),
+                })?;
+            }
+            Some(("suite", ssub)) => {
+                let suite = ssub.get_one::<String>("suite").unwrap().as_str();
+                let cases: &[&str] = match suite {
+                    "dogfood-smoke" | "battlescars" => &["happy-path", "t3-failed-er"],
+                    other => anyhow::bail!("unknown stores test suite '{other}'"),
+                };
+                for case in cases {
+                    cli::test::run(cli::test::TestRunOpts {
+                        case_name: Some((*case).to_string()),
+                        case_file: None,
+                        delay_ms: ssub.get_one::<u64>("delay-ms").copied(),
+                        watch: *ssub.get_one::<bool>("watch").unwrap_or(&false),
+                    })?;
+                }
+            }
+            _ => {
+                let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
+                if let Some(test_cmd) = cmd2.find_subcommand_mut("test") {
+                    test_cmd.print_help()?;
+                    println!();
+                }
+            }
+        },
         Some(("auth", sub)) => {
             use cli::auth::{run as auth_run, AuthCmd};
             let cmd = match sub.subcommand() {

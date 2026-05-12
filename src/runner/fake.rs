@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
@@ -476,6 +477,23 @@ pub fn decide_fake_outcome(
     );
     let first = ordinal(attempt).or_else(|| ordinal(cycle)).unwrap_or(1) <= 1;
     let normalized_role = role.replace('_', "-");
+    if let Some((outcome, outcome_class)) = scripted_case_outcome(&normalized_role, attempt, cycle)
+    {
+        return FakeDecision {
+            scenario,
+            seed: seed.to_string(),
+            task_id: task_id.to_string(),
+            role: role.to_string(),
+            phase: phase.to_string(),
+            cycle: cycle.to_string(),
+            attempt: attempt.to_string(),
+            policy_hash,
+            roll,
+            threshold: 10_000,
+            outcome,
+            outcome_class,
+        };
+    }
     let (outcome, outcome_class) = match scenario.as_str() {
         "all-pass" => ("PASS", "semantic"),
         "plan-reviewer-reject-once" => {
@@ -536,6 +554,80 @@ fn scenario_env_override(configured: &str) -> String {
         .filter(|s| !s.trim().is_empty())
         .map(|s| canonical_fake_scenario(&s))
         .unwrap_or_else(|| canonical_fake_scenario(configured))
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptManifest {
+    cases: std::collections::BTreeMap<String, ScriptCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptCase {
+    #[serde(default)]
+    stages: std::collections::BTreeMap<String, ScriptStage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptStage {
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default)]
+    attempts: Vec<ScriptAttempt>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptAttempt {
+    outcome: String,
+}
+
+fn scripted_case_outcome(
+    role: &str,
+    attempt: &str,
+    cycle: &str,
+) -> Option<(&'static str, &'static str)> {
+    let path = std::env::var("STORES_FAKE_CASE_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let manifest: ScriptManifest = serde_yaml::from_str(&raw).ok()?;
+    let case_name = std::env::var("STORES_FAKE_CASE_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| manifest.cases.keys().next().cloned())?;
+    let case = manifest.cases.get(&case_name)?;
+    let stage_key = role.replace('-', "_");
+    let stage = case
+        .stages
+        .get(role)
+        .or_else(|| case.stages.get(&stage_key))?;
+    let idx = ordinal(attempt)
+        .or_else(|| ordinal(cycle))
+        .unwrap_or(1)
+        .max(1) as usize
+        - 1;
+    let outcome = stage
+        .attempts
+        .get(idx)
+        .map(|a| a.outcome.as_str())
+        .or_else(|| stage.outcome.as_deref())?;
+    normalize_scripted_outcome(outcome)
+}
+
+fn normalize_scripted_outcome(outcome: &str) -> Option<(&'static str, &'static str)> {
+    match outcome.trim().to_ascii_uppercase().as_str() {
+        "PASS" | "READY" => Some(("PASS", "semantic")),
+        "NEEDS_WORK" | "NEEDS-WORK" => Some(("NEEDS_WORK", "semantic")),
+        "REVISE" => Some(("REVISE", "semantic")),
+        "TOOLING_FAILURE" | "TOOLING-FAILURE" | "TOOLING_HELD" => {
+            Some(("TOOLING_FAILURE", "tooling"))
+        }
+        "PAYLOAD_INVALID_EXIT_0" | "PAYLOAD_INVALID" => Some(("PAYLOAD_INVALID_EXIT_0", "payload")),
+        "NONZERO_EXIT" | "NONZERO" => Some(("NONZERO_EXIT", "infra")),
+        "STALL_NO_HEARTBEAT" => Some(("STALL_NO_HEARTBEAT", "liveness")),
+        "SIGTERM_IGNORE_STALL" => Some(("SIGTERM_IGNORE_STALL", "signal")),
+        "MESSY_LEGACY_OUTPUT" => Some(("MESSY_LEGACY_OUTPUT", "legacy")),
+        _ => None,
+    }
 }
 
 fn fake_policy_hash(scenario: &str, seed: &str) -> String {
@@ -799,6 +891,36 @@ mod tests {
         assert_eq!(
             fake_model_id_for_scenario(&alias.scenario),
             "fake-scripted:code-review-revise-once-v1"
+        );
+    }
+
+    #[test]
+    fn scripted_case_file_overrides_per_role_attempt_outcome() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let _case_file = EnvRestore::unset("STORES_FAKE_CASE_FILE");
+        let _case_name = EnvRestore::unset("STORES_FAKE_CASE_NAME");
+        let _scenario = EnvRestore::unset("STORES_FAKE_SCENARIO");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("case.yaml");
+        std::fs::write(
+            &path,
+            "cases:\n  custom:\n    stages:\n      code_reviewer:\n        attempts:\n          - outcome: REVISE\n          - outcome: PASS\n      external_review:\n        outcome: TOOLING_FAILURE\n",
+        )
+        .unwrap();
+        std::env::set_var("STORES_FAKE_CASE_FILE", &path);
+        std::env::set_var("STORES_FAKE_CASE_NAME", "custom");
+        std::env::set_var("STORES_FAKE_SCENARIO", "all-pass");
+
+        let first = decide_fake_outcome("all-pass", "seed", "T1", "code-reviewer", "1", "1", "1");
+        let second = decide_fake_outcome("all-pass", "seed", "T1", "code-reviewer", "1", "2", "2");
+        let er = decide_fake_outcome("all-pass", "seed", "T1", "external-review", "1", "1", "1");
+        assert_eq!(first.outcome, "REVISE");
+        assert_eq!(second.outcome, "PASS");
+        assert_eq!(
+            (er.outcome, er.outcome_class),
+            ("TOOLING_FAILURE", "tooling")
         );
     }
 
