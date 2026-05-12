@@ -14,6 +14,8 @@ This combines the two earlier proposals:
 
 Implementation should happen outside the substrate as direct code phases, each completed by a worker agent and reviewed. Keep **4 phases**; compressing to 3 would overload either external-review/telemetry or failure-scenario work.
 
+Worker/reviewer test discipline: all cargo test commands should use at least `-- --test-threads=8` unless a specific test documents why it must serialize. If a test mutates process-wide env, guard it with the existing env lock rather than lowering the whole run to one thread.
+
 ## Guiding decisions
 
 ### Architecture
@@ -60,7 +62,7 @@ Shipping requirement: add an explicit `[[bin]]` entry for `stores-fake-agent` in
 
 ### Artifact ownership
 
-The drive layer already allocates `RunnerInvocationContext`. Fake mode must honor those exact paths:
+The drive layer already allocates `RunnerInvocationContext`. Fake mode must honor those exact paths, either by having the child write them directly or by streaming child stdout/stderr through `FakeRunner` into those paths:
 
 - `session_id`
 - flat transcript path
@@ -192,6 +194,7 @@ Defer unless cheap:
   - unit/fixture test validates each fake role payload against the existing parser/schema path
   - integration-style test drives a minimal task with `runner=fake` and reaches at least wrap/complete without LLM calls
   - binary-resolution test covers `STORES_FAKE_AGENT_BIN` and installed sibling resolution where practical
+  - tests that render synthetic task projections must isolate output to a temp workspace or clean/move generated projections afterward so main is not left with untracked `tasks/<state>/TFAKE-*` files
 
 ### Scope out
 
