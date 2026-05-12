@@ -2045,6 +2045,13 @@ fn drive_loop_with_role_runner(
             &runner_name,
             workspace_path,
         )?;
+        let mut invocation_env = runner_extra_env.clone();
+        invocation_env.extend([
+            ("STORES_FAKE_TASK_ID".to_string(), display_id.to_string()),
+            ("STORES_FAKE_PHASE".to_string(), phase_for_log.to_string()),
+            ("STORES_FAKE_CYCLE".to_string(), cycle_for_log.to_string()),
+            ("STORES_FAKE_ATTEMPT".to_string(), "1".to_string()),
+        ]);
         let spawn_start = std::time::Instant::now();
         let run_out = match role_runner.spawn_for_role(
             &agent_name_normalized,
@@ -2053,7 +2060,7 @@ fn drive_loop_with_role_runner(
             schema_text,
             Some(workspace_path),
             Some(&invocation),
-            &runner_extra_env,
+            &invocation_env,
         ) {
             Ok(out) => out,
             Err(spawn_err) => {

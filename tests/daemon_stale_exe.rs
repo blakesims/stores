@@ -278,10 +278,15 @@ fn stale_then_reexec_happy_path_records_preserved_argv() {
     assert_eq!(attempt_lines.len(), 1, "stderr:\n{stderr}");
     assert!(
         attempt_lines[0].contains(&format!(
-            "daemon binary stale; reexecing into {} (was version {})",
+            "daemon binary stale; reexecing into {} (launch_path={}",
             launch_path.display(),
-            env!("CARGO_PKG_VERSION")
+            launch_path.display()
         )),
+        "line: {}",
+        attempt_lines[0]
+    );
+    assert!(
+        attempt_lines[0].contains(" build_identity=version="),
         "line: {}",
         attempt_lines[0]
     );

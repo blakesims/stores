@@ -12,6 +12,10 @@ fn main() {
 
 fn run() -> Result<()> {
     let role = std::env::var("STORES_FAKE_ROLE").unwrap_or_else(|_| "executor".to_string());
+    let task_id = std::env::var("STORES_FAKE_TASK_ID").unwrap_or_else(|_| "unknown".into());
+    let phase = std::env::var("STORES_FAKE_PHASE").unwrap_or_else(|_| "unknown".into());
+    let cycle = std::env::var("STORES_FAKE_CYCLE").unwrap_or_else(|_| "unknown".into());
+    let attempt = std::env::var("STORES_FAKE_ATTEMPT").unwrap_or_else(|_| "unknown".into());
     let session_id = std::env::var("STORES_FAKE_SESSION_ID").unwrap_or_else(|_| "unknown".into());
     let delay_ms = std::env::var("STORES_FAKE_DELAY_MS")
         .ok()
@@ -25,7 +29,11 @@ fn run() -> Result<()> {
         "type": "system",
         "subtype": "stores_fake_start",
         "session_id": session_id,
+        "task_id": task_id,
         "role": role,
+        "phase": phase,
+        "cycle": cycle,
+        "attempt": attempt,
         "model": "fake-random-v1",
         "provider": "stores-fake",
         "api": "stores-fake-agent-v1"
@@ -53,6 +61,10 @@ fn run() -> Result<()> {
     emit(json!({
         "type": "fake_decision",
         "role": role,
+        "task_id": task_id,
+        "phase": phase,
+        "cycle": cycle,
+        "attempt": attempt,
         "scenario": scenario,
         "seed": seed,
         "policy_hash": policy_hash,

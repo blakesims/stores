@@ -737,6 +737,15 @@ pub fn run_external_review_attempt_with_config(
         if let Some(model) = &review.model {
             runner_env.push(("STORES_FAKE_CONFIGURED_MODEL_ID".to_string(), model.clone()));
         }
+        runner_env.push(("STORES_FAKE_TASK_ID".to_string(), task_id.to_string()));
+        runner_env.push((
+            "STORES_FAKE_PHASE".to_string(),
+            "external-review".to_string(),
+        ));
+        runner_env.push((
+            "STORES_FAKE_ATTEMPT".to_string(),
+            review_display_id.to_string(),
+        ));
     }
     let out = runner
         .spawn_with_invocation_and_env(
@@ -966,6 +975,122 @@ mod tests {
         match old {
             Some(v) => std::env::set_var("STORES_LLM_OFF", v),
             None => std::env::remove_var("STORES_LLM_OFF"),
+        }
+    }
+
+    fn built_fake_agent_bin() -> std::path::PathBuf {
+        if let Some(path) = option_env!("CARGO_BIN_EXE_stores-fake-agent") {
+            return std::path::PathBuf::from(path);
+        }
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        if path.file_name().and_then(|s| s.to_str()) == Some("deps") {
+            path.pop();
+        }
+        path.push("stores-fake-agent");
+        path
+    }
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn llm_off_external_review_invokes_fake_not_codex() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let old_llm = std::env::var_os("STORES_LLM_OFF");
+        let old_fake_bin = std::env::var_os("STORES_FAKE_AGENT_BIN");
+        std::env::set_var("STORES_LLM_OFF", "1");
+        std::env::set_var("STORES_FAKE_AGENT_BIN", built_fake_agent_bin());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "fake@example.test"]);
+        run_git(&repo, &["config", "user.name", "Fake Test"]);
+        std::fs::write(repo.join("file.txt"), "one\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(&config_path, "fake_runner:\n  delay_ms: 0\n").unwrap();
+        let codex_log = tmp.path().join("codex.log");
+        let codex = CodexCfg {
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!("echo invoked >> {}; exit 42", codex_log.display()),
+            ],
+        };
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (display_id TEXT PRIMARY KEY, contract TEXT, plan TEXT, cycles TEXT, wrap_log TEXT, workspace_path TEXT, branch TEXT);
+             CREATE TABLE external_reviews (display_id TEXT, task_id TEXT, attempt INTEGER, verdict TEXT, critical_count INTEGER, major_count INTEGER, minor_count INTEGER, findings TEXT, runner TEXT, model_id TEXT, model_metadata TEXT, transcript_path TEXT, log_path TEXT, status TEXT, base_sha TEXT, head_sha TEXT, started_at TEXT, completed_at TEXT, duration_ms INTEGER);",
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO tasks (display_id, contract, plan, cycles, wrap_log, workspace_path, branch) VALUES ('TLLM', '{"done_when":"done"}', '{"phases":[]}', '[]', '[]', ?1, NULL)"#,
+            [repo.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, task_id, attempt) VALUES ('ERLLM', 'TLLM', 1)",
+            [],
+        )
+        .unwrap();
+
+        let parsed = run_external_review_attempt_with_config(
+            &conn,
+            "ERLLM",
+            "TLLM",
+            &ReviewCfg {
+                runner: "codex".to_string(),
+                model: Some("gpt-real".to_string()),
+                ..ReviewCfg::default()
+            },
+            &codex,
+            &config_path,
+            Some(&repo),
+            Some("main"),
+            Some("HEAD"),
+        )
+        .unwrap();
+        assert_eq!(parsed.verdict, ExternalReviewVerdict::Pass);
+        assert!(
+            !codex_log.exists(),
+            "STORES_LLM_OFF external review must not invoke configured codex command"
+        );
+        let (runner, metadata): (String, String) = conn
+            .query_row(
+                "SELECT runner, model_metadata FROM external_reviews WHERE display_id='ERLLM'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(runner, "fake");
+        assert!(metadata.contains("stores-fake"), "{metadata}");
+        assert!(metadata.contains("codex"), "{metadata}");
+
+        match old_llm {
+            Some(v) => std::env::set_var("STORES_LLM_OFF", v),
+            None => std::env::remove_var("STORES_LLM_OFF"),
+        }
+        match old_fake_bin {
+            Some(v) => std::env::set_var("STORES_FAKE_AGENT_BIN", v),
+            None => std::env::remove_var("STORES_FAKE_AGENT_BIN"),
         }
     }
 
