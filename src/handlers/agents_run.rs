@@ -3440,7 +3440,19 @@ mod tests {
         let _env_guard = crate::runner::test_support::ENV_LOCK
             .lock()
             .expect("runner env lock poisoned");
-        let old = std::env::var_os("STORES_LLM_OFF");
+        struct EnvRestore(&'static str, Option<std::ffi::OsString>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                match self.1.take() {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+        let _restore_llm_off = EnvRestore(
+            "STORES_LLM_OFF",
+            std::env::var_os("STORES_LLM_OFF"),
+        );
         std::env::set_var("STORES_LLM_OFF", "1");
         let tmp = tempfile::tempdir().unwrap();
         let stale = executable_script(
@@ -3457,10 +3469,6 @@ mod tests {
             "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then echo 'Schema-driven store framework'; exit 0; fi\nif [ \"$1\" = \"__llm-off-sentinel\" ]; then echo 'stores-llm-off-sentinel=ok'; exit 0; fi\nexit 64\n",
         );
         validate_stale_reexec_candidate(&fresh).expect("sentinel-capable candidate passes");
-        match old {
-            Some(v) => std::env::set_var("STORES_LLM_OFF", v),
-            None => std::env::remove_var("STORES_LLM_OFF"),
-        }
     }
 
     fn fresh_engine_runner_db() -> Connection {

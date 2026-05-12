@@ -3932,6 +3932,34 @@ mod tests {
                 .contains("fake-runner-markers/TFAKE"),
             "main must contain fake marker commit after integration"
         );
+        let mut fake_roles = std::collections::BTreeMap::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT role, COUNT(*) FROM agent_runs \
+                 WHERE display_id='TFAKE' AND harness_id='fake' AND provider_id='stores-fake' AND payload_valid=1 \
+                 GROUP BY role ORDER BY role",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap();
+        for row in rows {
+            let (role, count) = row.unwrap();
+            fake_roles.insert(role, count);
+        }
+        let expected_fake_roles = std::collections::BTreeMap::from([
+            ("code_reviewer".to_string(), 1),
+            ("executor".to_string(), 1),
+            ("plan_reviewer".to_string(), 1),
+            ("planner".to_string(), 1),
+            ("wrap".to_string(), 1),
+        ]);
+        assert_eq!(
+            fake_roles, expected_fake_roles,
+            "combined waterfall must record exactly the expected fake agent roles"
+        );
+        let fake_runs: i64 = fake_roles.values().sum();
+        assert_eq!(fake_runs, 5, "combined waterfall should have five fake agent runs");
         let non_fake_runs: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM agent_runs WHERE display_id='TFAKE' AND COALESCE(harness_id,'') != 'fake'",
