@@ -15,6 +15,9 @@ use super::{
 const FAKE_MODEL_ID: &str = "fake-random-v1";
 const FAKE_PROVIDER_ID: &str = "stores-fake";
 const FAKE_API_ID: &str = "stores-fake-agent-v1";
+const ENV_CONFIGURED_HARNESS: &str = "STORES_FAKE_CONFIGURED_HARNESS_ID";
+const ENV_CONFIGURED_MODEL: &str = "STORES_FAKE_CONFIGURED_MODEL_ID";
+const ENV_CONFIGURED_THINKING: &str = "STORES_FAKE_CONFIGURED_THINKING_EFFORT";
 
 #[derive(Debug, Clone, Default)]
 pub struct FakeRunner {
@@ -70,6 +73,10 @@ impl FakeRunner {
             Some(i) => i.clone(),
             None => default_invocation(&cwd, &session_id)?,
         };
+
+        let configured_harness = env_value(extra_env, ENV_CONFIGURED_HARNESS);
+        let configured_model = env_value(extra_env, ENV_CONFIGURED_MODEL);
+        let configured_thinking = env_value(extra_env, ENV_CONFIGURED_THINKING);
 
         let bin = self.resolve_bin()?;
         let mut cmd = Command::new(&bin);
@@ -165,6 +172,9 @@ impl FakeRunner {
                         .to_string_lossy()
                         .to_string(),
                 ),
+                configured_harness_id: configured_harness,
+                configured_model_id: configured_model,
+                configured_thinking_effort: configured_thinking,
                 effective_model_id: Some(FAKE_MODEL_ID.to_string()),
                 effective_thinking_effort: Some("none".to_string()),
                 thinking_effort_source: Some("fake".to_string()),
@@ -295,6 +305,15 @@ fn append_line(file: &Rc<RefCell<File>>, line: &str) -> Result<()> {
     Ok(())
 }
 
+fn env_value(extra_env: &[(String, String)], key: &str) -> Option<String> {
+    extra_env
+        .iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.is_empty())
+}
+
 fn map_fake_stream_event(line: &str) -> Vec<Value> {
     let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
         return vec![];
@@ -303,6 +322,7 @@ fn map_fake_stream_event(line: &str) -> Vec<Value> {
         // RunnerLiveEventSink records a generic stdout heartbeat for every line;
         // do not add a second mapped heartbeat for fake heartbeat lines.
         Some("fake_heartbeat") => vec![],
+        Some("fake_decision") => vec![v],
         Some("assistant") => vec![json!({"type":"assistant_text","source":"stores-fake"})],
         Some("result") => vec![json!({"type":"final_output","source":"stores-fake"})],
         _ => vec![json!({"type":"event","source":"stores-fake"})],
@@ -371,6 +391,15 @@ pub fn fake_payload_for_role(role: &str) -> Result<Value> {
             "residual_risks": ["Fake PASS does not imply the task is shippable."],
             "recommended_sanity_checks": ["Run a real review before accepting production work."]
         })),
+        "external-review" | "external_review" => Ok(json!({
+            "verdict": "PASS",
+            "critical_count": 0,
+            "major_count": 0,
+            "minor_count": 0,
+            "counts": {"critical": 0, "major": 0, "minor": 0},
+            "findings": [],
+            "summary": "FAKE external review PASS; this is not real review evidence."
+        })),
         other => bail!("stores-fake-agent does not know role '{other}'"),
     }
 }
@@ -392,6 +421,8 @@ mod tests {
             let payload = fake_payload_for_role(role).unwrap();
             assert_eq!(payload.get("role").and_then(|v| v.as_str()), Some(expected));
         }
+        let er = fake_payload_for_role("external-review").unwrap();
+        assert_eq!(er.get("verdict").and_then(|v| v.as_str()), Some("PASS"));
     }
 
     #[test]

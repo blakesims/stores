@@ -986,6 +986,10 @@ fn build_runner(args: &DriveArgs) -> Result<Box<dyn Runner>> {
         return Ok(Box::new(MockRunner::new(outputs)));
     }
 
+    if crate::flow::config::llm_off_enabled() {
+        return crate::runner::select("fake");
+    }
+
     // --claude-code (feature-gated). `--testing` forces the haiku model for
     // every spawn, equivalent to `--claude-code-model=haiku`.
     #[cfg(feature = "runner-claude-code")]
@@ -1063,10 +1067,16 @@ impl RoleRunner for BorrowedRoleRunner<'_> {
 
 struct FixedRoleRunner {
     runner: Box<dyn Runner>,
+    requested: Option<RoleRunnerChoice>,
 }
 
 impl RoleRunner for FixedRoleRunner {
     fn name_for_role(&self, _role: &str) -> Result<String> {
+        if crate::flow::config::llm_off_enabled() && self.runner.name() == "fake" {
+            if let Some(requested) = &self.requested {
+                return Ok(format!("fake(requested={})", requested.label()));
+            }
+        }
         Ok(self.runner.name().to_string())
     }
 
@@ -1080,6 +1090,12 @@ impl RoleRunner for FixedRoleRunner {
         invocation: Option<&crate::runner::RunnerInvocationContext>,
         extra_env: &[(String, String)],
     ) -> Result<RunnerOutput> {
+        let mut merged_env = extra_env.to_vec();
+        if self.runner.name() == "fake" {
+            if let Some(requested) = &self.requested {
+                requested.append_fake_configured_env(&mut merged_env);
+            }
+        }
         self.runner.spawn_with_invocation_and_env(
             role,
             system_prompt,
@@ -1087,7 +1103,7 @@ impl RoleRunner for FixedRoleRunner {
             schema,
             workspace_path,
             invocation,
-            extra_env,
+            &merged_env,
         )
     }
 }
@@ -1097,6 +1113,31 @@ struct RoleRunnerChoice {
     runner: String,
     model: Option<String>,
     thinking: Option<String>,
+}
+
+impl RoleRunnerChoice {
+    fn label(&self) -> String {
+        match &self.model {
+            Some(model) => format!("{}:{model}", self.runner),
+            None => self.runner.clone(),
+        }
+    }
+
+    fn append_fake_configured_env(&self, env: &mut Vec<(String, String)>) {
+        env.push((
+            "STORES_FAKE_CONFIGURED_HARNESS_ID".to_string(),
+            self.runner.clone(),
+        ));
+        if let Some(model) = &self.model {
+            env.push(("STORES_FAKE_CONFIGURED_MODEL_ID".to_string(), model.clone()));
+        }
+        if let Some(thinking) = &self.thinking {
+            env.push((
+                "STORES_FAKE_CONFIGURED_THINKING_EFFORT".to_string(),
+                thinking.clone(),
+            ));
+        }
+    }
 }
 
 struct ConfigRoleRunner {
@@ -1120,6 +1161,9 @@ impl ConfigRoleRunner {
     }
 
     fn build_choice(&self, choice: &RoleRunnerChoice) -> Result<Box<dyn Runner>> {
+        if crate::flow::config::llm_off_enabled() {
+            return crate::runner::select("fake");
+        }
         match choice.runner.as_str() {
             "claude-code" => {
                 #[cfg(feature = "runner-claude-code")]
@@ -1158,10 +1202,10 @@ impl ConfigRoleRunner {
 impl RoleRunner for ConfigRoleRunner {
     fn name_for_role(&self, role: &str) -> Result<String> {
         let choice = self.choice_for(role)?;
-        Ok(match choice.model {
-            Some(model) => format!("{}:{model}", choice.runner),
-            _ => choice.runner,
-        })
+        if crate::flow::config::llm_off_enabled() {
+            return Ok(format!("fake(requested={})", choice.label()));
+        }
+        Ok(choice.label())
     }
 
     fn spawn_for_role(
@@ -1176,6 +1220,10 @@ impl RoleRunner for ConfigRoleRunner {
     ) -> Result<RunnerOutput> {
         let choice = self.choice_for(role)?;
         let runner = self.build_choice(&choice)?;
+        let mut merged_env = extra_env.to_vec();
+        if runner.name() == "fake" {
+            choice.append_fake_configured_env(&mut merged_env);
+        }
         runner.spawn_with_invocation_and_env(
             role,
             system_prompt,
@@ -1183,7 +1231,7 @@ impl RoleRunner for ConfigRoleRunner {
             schema,
             workspace_path,
             invocation,
-            extra_env,
+            &merged_env,
         )
     }
 }
@@ -1378,6 +1426,33 @@ fn fail_finished_runner_invocation_payload(
     )
 }
 
+fn requested_cli_runner_choice(args: &DriveArgs) -> Option<RoleRunnerChoice> {
+    if !crate::flow::config::llm_off_enabled() {
+        return None;
+    }
+    #[cfg(feature = "runner-claude-code")]
+    {
+        if args.claude_code {
+            return Some(RoleRunnerChoice {
+                runner: "claude-code".to_string(),
+                model: args.claude_code_model.clone(),
+                thinking: None,
+            });
+        }
+    }
+    #[cfg(feature = "runner-pi")]
+    {
+        if args.pi {
+            return Some(RoleRunnerChoice {
+                runner: "pi".to_string(),
+                model: None,
+                thinking: None,
+            });
+        }
+    }
+    None
+}
+
 fn build_role_runner(args: &DriveArgs) -> Result<Box<dyn RoleRunner>> {
     if args.mock_fixture.is_some()
         || {
@@ -1401,14 +1476,22 @@ fn build_role_runner(args: &DriveArgs) -> Result<Box<dyn RoleRunner>> {
             }
         }
     {
+        let requested = requested_cli_runner_choice(args);
         return Ok(Box::new(FixedRoleRunner {
             runner: build_runner(args)?,
+            requested,
         }));
     }
 
     let config_path = crate::flow::config::default_config_path()?;
     let cfg = crate::flow::config::load(&config_path)?.unwrap_or_default();
     let Some(drive) = cfg.drive else {
+        if crate::flow::config::llm_off_enabled() {
+            return Ok(Box::new(FixedRoleRunner {
+                runner: crate::runner::select("fake")?,
+                requested: None,
+            }));
+        }
         bail!(
             "no runner selected; pass --claude-code/--pi or configure drive.default_runner in {}",
             config_path.display()
@@ -1688,7 +1771,11 @@ fn drive_loop_with_role_runner(
     let mut auto_drive_lock_closed = false;
     let runner_extra_env = crate::flow::config::default_config_path()
         .ok()
-        .map(|p| crate::flow::config::cargo_target_env(&p))
+        .map(|p| {
+            let mut env = crate::flow::config::cargo_target_env(&p);
+            env.extend(crate::flow::config::fake_runner_env(&p));
+            env
+        })
         .unwrap_or_default();
 
     loop {
@@ -3966,6 +4053,53 @@ mod tests {
             rr.choice_for("planner").unwrap().thinking.as_deref(),
             Some("high")
         );
+    }
+
+    #[test]
+    fn config_role_runner_llm_off_reports_fake_and_preserves_requested_env() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let old = std::env::var_os("STORES_LLM_OFF");
+        std::env::set_var("STORES_LLM_OFF", "1");
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert(
+            "planner".to_string(),
+            RoleRunnerChoice {
+                runner: "pi".to_string(),
+                model: Some("gpt-5.5".to_string()),
+                thinking: Some("medium".to_string()),
+            },
+        );
+        let rr = ConfigRoleRunner {
+            default_runner: Some("claude-code".to_string()),
+            roles,
+        };
+        assert_eq!(
+            rr.name_for_role("planner").unwrap(),
+            "fake(requested=pi:gpt-5.5)"
+        );
+        let choice = rr.choice_for("planner").unwrap();
+        let runner = rr.build_choice(&choice).unwrap();
+        assert_eq!(runner.name(), "fake");
+        let mut env = vec![];
+        choice.append_fake_configured_env(&mut env);
+        assert!(env.contains(&(
+            "STORES_FAKE_CONFIGURED_HARNESS_ID".to_string(),
+            "pi".to_string()
+        )));
+        assert!(env.contains(&(
+            "STORES_FAKE_CONFIGURED_MODEL_ID".to_string(),
+            "gpt-5.5".to_string()
+        )));
+        assert!(env.contains(&(
+            "STORES_FAKE_CONFIGURED_THINKING_EFFORT".to_string(),
+            "medium".to_string()
+        )));
+        match old {
+            Some(v) => std::env::set_var("STORES_LLM_OFF", v),
+            None => std::env::remove_var("STORES_LLM_OFF"),
+        }
     }
 
     #[test]

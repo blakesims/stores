@@ -158,7 +158,11 @@ pub fn prepare_external_review_git(
     }
 
     let current_main = resolve_sha(&workspace_path, "main", "base")?;
-    let subject_rev = task.branch.as_deref().filter(|s| !s.is_empty()).unwrap_or("HEAD");
+    let subject_rev = task
+        .branch
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("HEAD");
     let branch_base = git_output(&workspace_path, &["merge-base", subject_rev, "main"])
         .map_err(|e| ToolingError::new(format!("TOOLING_FAILURE: cannot resolve merge-base: {e}")))?
         .trim()
@@ -646,6 +650,17 @@ pub fn mark_attempt_tooling_failure_ready(
     Ok(())
 }
 
+pub fn effective_review_config(config_path: &Path, review: &ReviewCfg) -> ReviewCfg {
+    if crate::flow::config::fake_external_review_enabled(config_path) {
+        let mut fake = review.clone();
+        fake.runner = "fake".to_string();
+        fake.model = Some("fake-random-v1".to_string());
+        fake
+    } else {
+        review.clone()
+    }
+}
+
 pub fn build_review_runner(review: &ReviewCfg, codex: &CodexCfg) -> Result<Box<dyn Runner>> {
     match review.runner.as_str() {
         "codex" => Ok(Box::new(crate::runner::CodexRunner::with_config(
@@ -654,9 +669,11 @@ pub fn build_review_runner(review: &ReviewCfg, codex: &CodexCfg) -> Result<Box<d
             review.model.clone(),
             review.timeout_secs,
         ))),
-        "pi" | "claude-code" => crate::runner::select(&review.runner),
+        "pi" | "claude-code" | "fake" => crate::runner::select(&review.runner),
         other => {
-            anyhow::bail!("unknown review.runner '{other}'; expected codex, pi, or claude-code")
+            anyhow::bail!(
+                "unknown review.runner '{other}'; expected codex, pi, claude-code, or fake"
+            )
         }
     }
 }
@@ -672,6 +689,33 @@ pub fn run_external_review_attempt(
     base_override: Option<&str>,
     head_override: Option<&str>,
 ) -> std::result::Result<ParsedReviewOutput, ToolingError> {
+    let config_path = crate::flow::config::default_config_path()
+        .unwrap_or_else(|_| std::path::PathBuf::from(".stores/config.yaml"));
+    run_external_review_attempt_with_config(
+        conn,
+        review_display_id,
+        task_id,
+        review,
+        codex,
+        &config_path,
+        workspace_override,
+        base_override,
+        head_override,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_external_review_attempt_with_config(
+    conn: &Connection,
+    review_display_id: &str,
+    task_id: &str,
+    review: &ReviewCfg,
+    codex: &CodexCfg,
+    config_path: &Path,
+    workspace_override: Option<&Path>,
+    base_override: Option<&str>,
+    head_override: Option<&str>,
+) -> std::result::Result<ParsedReviewOutput, ToolingError> {
     let bundle = load_review_input_bundle(
         conn,
         task_id,
@@ -680,16 +724,29 @@ pub fn run_external_review_attempt(
         head_override,
     )?;
     let prompt = render_codex_prompt(&bundle);
-    let runner =
-        build_review_runner(review, codex).map_err(|e| ToolingError::new(e.to_string()))?;
+    let effective_review = effective_review_config(config_path, review);
+    let runner = build_review_runner(&effective_review, codex)
+        .map_err(|e| ToolingError::new(e.to_string()))?;
     let started = Instant::now();
+    let mut runner_env = crate::flow::config::fake_runner_env(config_path);
+    if effective_review.runner == "fake" {
+        runner_env.push((
+            "STORES_FAKE_CONFIGURED_HARNESS_ID".to_string(),
+            review.runner.clone(),
+        ));
+        if let Some(model) = &review.model {
+            runner_env.push(("STORES_FAKE_CONFIGURED_MODEL_ID".to_string(), model.clone()));
+        }
+    }
     let out = runner
-        .spawn(
+        .spawn_with_invocation_and_env(
             "external-review",
             "",
             &prompt,
             Some(EXTERNAL_REVIEW_OUTPUT_SCHEMA),
             Some(&bundle.workspace_path.to_string_lossy()),
+            None,
+            &runner_env,
         )
         .map_err(|e| ToolingError::new(format!("TOOLING_FAILURE: review runner failed: {e:#}")))?;
     let duration_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
@@ -715,7 +772,7 @@ pub fn run_external_review_attempt(
             conn,
             review_display_id,
             &bundle,
-            review,
+            &effective_review,
             codex,
             &out,
             &tooling_failure_parsed,
@@ -745,7 +802,7 @@ pub fn run_external_review_attempt(
         conn,
         review_display_id,
         &bundle,
-        review,
+        &effective_review,
         codex,
         &out,
         &parsed,
@@ -791,6 +848,10 @@ fn persist_review_runner_result(
         "runner": review.runner,
         "configured_model": review.model,
         "harness_id": out.telemetry.harness_id,
+        "provider_id": out.telemetry.provider_id,
+        "api_id": out.telemetry.api_id,
+        "configured_harness_id": out.telemetry.configured_harness_id,
+        "configured_model_id": out.telemetry.configured_model_id,
         "session_id": out.session_id,
         "structured_output_source": out.structured_output_source,
         "exit_code": out.exit_code,
@@ -878,6 +939,35 @@ fn persist_review_runner_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn llm_off_effective_review_config_selects_fake() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let old = std::env::var_os("STORES_LLM_OFF");
+        std::env::set_var("STORES_LLM_OFF", "1");
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "review:\n  runner: codex\nfake_runner:\n  fake_external_review: true\n",
+        )
+        .unwrap();
+        let review = ReviewCfg {
+            runner: "codex".to_string(),
+            model: Some("gpt-x".to_string()),
+            ..ReviewCfg::default()
+        };
+        let effective = effective_review_config(&config_path, &review);
+        assert_eq!(effective.runner, "fake");
+        let runner = build_review_runner(&effective, &CodexCfg::default()).unwrap();
+        assert_eq!(runner.name(), "fake");
+        match old {
+            Some(v) => std::env::set_var("STORES_LLM_OFF", v),
+            None => std::env::remove_var("STORES_LLM_OFF"),
+        }
+    }
 
     #[test]
     fn codex_output_starting_with_revise_word_parses_revise() {
@@ -1015,8 +1105,9 @@ mod tests {
 
     #[test]
     fn codex_embedded_finding_marker_does_not_infer_revise() {
-        let err = parse_codex_review_output("Review summary mentions [P2] inline, not as a finding.\n")
-            .expect_err("finding marker fallback is line-leading only");
+        let err =
+            parse_codex_review_output("Review summary mentions [P2] inline, not as a finding.\n")
+                .expect_err("finding marker fallback is line-leading only");
         assert_eq!(err.to_string(), "parse-fallback-needed");
     }
 

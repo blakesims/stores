@@ -4,8 +4,8 @@ use std::os::unix::fs::PermissionsExt;
 use stores::flow::config::{CodexCfg, ReviewCfg};
 use stores::handlers::external_reviews::{
     load_review_input_bundle, mark_attempt_tooling_failure_ready, parse_codex_review_output,
-    render_codex_prompt, run_external_review_attempt, tooling_failure_ready_json,
-    ExternalReviewVerdict,
+    render_codex_prompt, run_external_review_attempt, run_external_review_attempt_with_config,
+    tooling_failure_ready_json, ExternalReviewVerdict,
 };
 use tempfile::TempDir;
 
@@ -86,6 +86,11 @@ fn codex_shim(script: &str) -> (TempDir, std::path::PathBuf) {
     (dir, path)
 }
 
+fn env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 fn temp_git_repo() -> (TempDir, String, String) {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-b", "main"]);
@@ -145,6 +150,119 @@ fn missing_git_base_returns_tooling_failure_ready_error() {
         .unwrap();
     assert_eq!(verdict, "TOOLING_FAILURE");
     assert!(findings.contains("TOOLING_FAILURE"));
+}
+
+#[test]
+fn llm_off_external_review_uses_fake_runner_not_codex_command() {
+    let _guard = env_lock().lock().unwrap();
+    let old_off = std::env::var_os("STORES_LLM_OFF");
+    let old_bin = std::env::var_os("STORES_FAKE_AGENT_BIN");
+    let old_delay = std::env::var_os("STORES_FAKE_DELAY_MS");
+    std::env::set_var("STORES_LLM_OFF", "1");
+    std::env::set_var(
+        "STORES_FAKE_AGENT_BIN",
+        env!("CARGO_BIN_EXE_stores-fake-agent"),
+    );
+    std::env::set_var("STORES_FAKE_DELAY_MS", "0");
+
+    let (repo, base, head) = temp_git_repo();
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE tasks (
+            display_id TEXT PRIMARY KEY,
+            contract TEXT,
+            plan TEXT,
+            cycles TEXT,
+            wrap_log TEXT,
+            workspace_path TEXT,
+            branch TEXT
+        );
+        CREATE TABLE external_reviews (
+            display_id TEXT PRIMARY KEY,
+            task_id TEXT,
+            attempt INTEGER,
+            adapter TEXT,
+            runner TEXT,
+            model_id TEXT,
+            model_metadata TEXT,
+            base_sha TEXT,
+            head_sha TEXT,
+            verdict TEXT,
+            critical_count INTEGER,
+            major_count INTEGER,
+            minor_count INTEGER,
+            transcript_path TEXT,
+            findings TEXT
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO tasks (display_id, contract, plan, cycles, wrap_log, workspace_path, branch)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        (
+            "T083",
+            r#"{"done_when":"review me"}"#,
+            r#"{"phases":[{"name":"Phase"}]}"#,
+            "[]",
+            r#"[{"executive_summary":"wrapped"}]"#,
+            repo.path().to_str().unwrap(),
+            "feature/external-review",
+        ),
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO external_reviews (display_id, task_id, attempt) VALUES ('ER901', 'T083', 1)",
+        [],
+    )
+    .unwrap();
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let config_path = config_dir.path().join("config.yaml");
+    std::fs::write(&config_path, "fake_runner:\n  fake_external_review: true\n").unwrap();
+    let review = ReviewCfg {
+        runner: "codex".to_string(),
+        ..ReviewCfg::default()
+    };
+    let codex = CodexCfg {
+        command: "/definitely/not/codex".to_string(),
+        args: Vec::new(),
+    };
+    let parsed = run_external_review_attempt_with_config(
+        &conn,
+        "ER901",
+        "T083",
+        &review,
+        &codex,
+        &config_path,
+        None,
+        Some(&base),
+        Some(&head),
+    )
+    .unwrap();
+    assert_eq!(parsed.verdict, ExternalReviewVerdict::Pass);
+    let (runner, verdict, metadata): (String, String, String) = conn
+        .query_row(
+            "SELECT runner, verdict, model_metadata FROM external_reviews WHERE display_id='ER901'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(runner, "fake");
+    assert_eq!(verdict, "PASS");
+    assert!(metadata.contains("stores-fake"));
+
+    match old_off {
+        Some(v) => std::env::set_var("STORES_LLM_OFF", v),
+        None => std::env::remove_var("STORES_LLM_OFF"),
+    }
+    match old_bin {
+        Some(v) => std::env::set_var("STORES_FAKE_AGENT_BIN", v),
+        None => std::env::remove_var("STORES_FAKE_AGENT_BIN"),
+    }
+    match old_delay {
+        Some(v) => std::env::set_var("STORES_FAKE_DELAY_MS", v),
+        None => std::env::remove_var("STORES_FAKE_DELAY_MS"),
+    }
 }
 
 #[test]

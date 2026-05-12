@@ -17,6 +17,9 @@ fn run() -> Result<()> {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(5000);
+    let seed = std::env::var("STORES_FAKE_SEED").unwrap_or_else(|_| "0".to_string());
+    let scenario = std::env::var("STORES_FAKE_SCENARIO").unwrap_or_else(|_| "all-pass".to_string());
+    let policy_hash = format!("phase2:{scenario}:{delay_ms}:{seed}");
 
     emit(json!({
         "type": "system",
@@ -46,6 +49,17 @@ fn run() -> Result<()> {
     }))?;
 
     heartbeat_delay(delay_ms)?;
+
+    emit(json!({
+        "type": "fake_decision",
+        "role": role,
+        "scenario": scenario,
+        "seed": seed,
+        "policy_hash": policy_hash,
+        "roll": 0.0,
+        "threshold": 1.0,
+        "outcome": "PASS"
+    }))?;
 
     let payload = stores::runner::fake::fake_payload_for_role(&role)
         .with_context(|| format!("building fake payload for role {role}"))?;

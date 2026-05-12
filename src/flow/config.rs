@@ -23,6 +23,8 @@ pub struct StoresConfig {
     #[serde(default)]
     pub cleanup: Option<CleanupCfg>,
     #[serde(default)]
+    pub fake_runner: Option<FakeRunnerCfg>,
+    #[serde(default)]
     pub integration_steps: BTreeMap<String, IntegrationStepCfg>,
 }
 
@@ -131,6 +133,18 @@ pub struct CodexCfg {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FakeRunnerCfg {
+    #[serde(default)]
+    pub delay_ms: Option<u64>,
+    #[serde(default)]
+    pub seed: Option<String>,
+    #[serde(default)]
+    pub scenario: Option<String>,
+    #[serde(default)]
+    pub fake_external_review: Option<bool>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct IntegrationStepCfg {
     pub agent: String,
@@ -228,6 +242,47 @@ pub fn resolve_codex_config(config_path: &Path) -> CodexCfg {
         return cfg.codex.unwrap_or_default();
     }
     CodexCfg::default()
+}
+
+pub fn resolve_fake_runner_config(config_path: &Path) -> FakeRunnerCfg {
+    if let Ok(Some(cfg)) = load(config_path) {
+        return cfg.fake_runner.unwrap_or_default();
+    }
+    FakeRunnerCfg::default()
+}
+
+pub fn llm_off_enabled() -> bool {
+    match std::env::var("STORES_LLM_OFF") {
+        Ok(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            !normalized.is_empty() && !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        }
+        Err(_) => false,
+    }
+}
+
+pub fn fake_external_review_enabled(config_path: &Path) -> bool {
+    if !llm_off_enabled() {
+        return false;
+    }
+    resolve_fake_runner_config(config_path)
+        .fake_external_review
+        .unwrap_or(true)
+}
+
+pub fn fake_runner_env(config_path: &Path) -> Vec<(String, String)> {
+    let cfg = resolve_fake_runner_config(config_path);
+    let mut env = Vec::new();
+    if let Some(delay_ms) = cfg.delay_ms {
+        env.push(("STORES_FAKE_DELAY_MS".to_string(), delay_ms.to_string()));
+    }
+    if let Some(seed) = cfg.seed.filter(|s| !s.is_empty()) {
+        env.push(("STORES_FAKE_SEED".to_string(), seed));
+    }
+    if let Some(scenario) = cfg.scenario.filter(|s| !s.is_empty()) {
+        env.push(("STORES_FAKE_SCENARIO".to_string(), scenario));
+    }
+    env
 }
 
 /// Resolve the shared Cargo target directory for child commands.
@@ -370,6 +425,36 @@ mod tests {
         let cfg = load(&path).unwrap().unwrap();
         assert!(cfg.drive.is_none());
         assert_eq!(resolve_drive_max_parallel(&path), 1);
+    }
+
+    #[test]
+    fn parses_fake_runner_config_and_boolean_env() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "fake_runner:\n  delay_ms: 0\n  seed: fixed\n  scenario: all-pass\n  fake_external_review: false\n",
+        )
+        .unwrap();
+        let cfg = resolve_fake_runner_config(&path);
+        assert_eq!(cfg.delay_ms, Some(0));
+        assert_eq!(cfg.seed.as_deref(), Some("fixed"));
+        assert_eq!(cfg.scenario.as_deref(), Some("all-pass"));
+        assert_eq!(cfg.fake_external_review, Some(false));
+        let old = std::env::var_os("STORES_LLM_OFF");
+        for enabled in ["1", "true", "yes", "anything"] {
+            std::env::set_var("STORES_LLM_OFF", enabled);
+            assert!(llm_off_enabled(), "{enabled} should enable LLM_OFF");
+        }
+        for disabled in ["", "0", "false", "no", "off"] {
+            std::env::set_var("STORES_LLM_OFF", disabled);
+            assert!(!llm_off_enabled(), "{disabled:?} should disable LLM_OFF");
+        }
+        match old {
+            Some(v) => std::env::set_var("STORES_LLM_OFF", v),
+            None => std::env::remove_var("STORES_LLM_OFF"),
+        }
     }
 
     #[test]

@@ -555,6 +555,69 @@ pub(crate) fn read_policy_env() -> (Option<String>, Option<String>) {
     (pref, phash)
 }
 
+fn fake_review_accept_allowed() -> bool {
+    match std::env::var("STORES_ALLOW_FAKE_REVIEW_ACCEPT") {
+        Ok(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            !normalized.is_empty() && !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        }
+        Err(_) => false,
+    }
+}
+
+fn external_review_columns_conn(conn: &Connection) -> Result<std::collections::BTreeSet<String>> {
+    let mut stmt = conn.prepare("PRAGMA table_info(external_reviews)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    rows.collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn latest_required_review_is_fake(conn: &Connection, task_id: &str) -> Result<bool> {
+    let has_external_reviews: bool = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='external_reviews'",
+        [],
+        |r| Ok(r.get::<_, i64>(0)? > 0),
+    )?;
+    if !has_external_reviews {
+        return Ok(false);
+    }
+    let cols = external_review_columns_conn(conn)?;
+    let runner_expr = if cols.contains("runner") { "COALESCE(runner,'')" } else { "''" };
+    let metadata_expr = if cols.contains("model_metadata") { "COALESCE(model_metadata,'')" } else { "''" };
+    let sql = format!(
+        "SELECT {runner_expr}, {metadata_expr} FROM external_reviews \
+         WHERE task_id=?1 AND verdict IS NOT NULL ORDER BY attempt DESC, id DESC LIMIT 1"
+    );
+    let row: Option<(String, String)> = conn
+        .query_row(&sql, rusqlite::params![task_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    Ok(row.is_some_and(|(runner, metadata)| {
+        runner == "fake" || metadata.contains("stores-fake") || metadata.contains("\"runner\":\"fake\"")
+    }))
+}
+
+fn guard_fake_review_acceptance(
+    schema: &Schema,
+    conn: &Connection,
+    matches: &ArgMatches,
+    verb: &str,
+) -> Result<()> {
+    if schema.name != "tasks" || verb != "accept" || fake_review_accept_allowed() {
+        return Ok(());
+    }
+    let display_id = matches
+        .get_one::<String>("display_id")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    if latest_required_review_is_fake(conn, display_id)? {
+        anyhow::bail!(
+            "refusing to accept {display_id}: latest required external review was produced by stores-fake. \
+             Re-run a real review or set STORES_ALLOW_FAKE_REVIEW_ACCEPT=1 for explicit test-mode acceptance."
+        );
+    }
+    Ok(())
+}
+
 /// Entry point for direct CLI use: opens its own transaction and delegates to `run_in_tx`.
 pub fn run(
     schema: &Schema,
@@ -563,6 +626,7 @@ pub fn run(
     invoker: InvokerCtx,
     verb: &str,
 ) -> Result<()> {
+    guard_fake_review_acceptance(schema, conn, matches, verb)?;
     let tx = conn
         .unchecked_transaction()
         .context("transition: begin tx")?;
@@ -2212,11 +2276,27 @@ fields:
                 verdict TEXT,
                 head_sha TEXT,
                 held_reason TEXT,
-                superseded_by TEXT
+                superseded_by TEXT,
+                runner TEXT,
+                model_metadata TEXT
             );
             "#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn fake_review_acceptance_guard_detects_latest_fake_review() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_external_reviews_for_accept(&conn);
+        conn.execute(
+            "INSERT INTO external_reviews (display_id, task_id, attempt, status, verdict, runner, model_metadata) \
+             VALUES ('ER999', 'T999', 1, 'passed', 'PASS', 'fake', '{\"provider_id\":\"stores-fake\"}')",
+            [],
+        )
+        .unwrap();
+        assert!(latest_required_review_is_fake(&conn, "T999").unwrap());
+        assert!(!latest_required_review_is_fake(&conn, "T998").unwrap());
     }
 
     #[test]

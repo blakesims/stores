@@ -27,8 +27,9 @@ pub enum DispatchOutcome {
 }
 use crate::flow::config::{resolve_codex_config, resolve_review_config};
 use crate::handlers::external_reviews::{
-    prepare_external_review_git, run_external_review_attempt, ExternalReviewGitPreparation,
-    ExternalReviewRebaseConflict, ExternalReviewVerdict, ParsedReviewOutput, ToolingError,
+    prepare_external_review_git, run_external_review_attempt_with_config,
+    ExternalReviewGitPreparation, ExternalReviewRebaseConflict, ExternalReviewVerdict,
+    ParsedReviewOutput, ToolingError,
 };
 use crate::handlers::row::now_iso8601;
 use crate::handlers::transition::execute_transition_write;
@@ -166,20 +167,27 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> Result<DispatchOutcome> {
     // ── End atomic CAS gate ──────────────────────────────────────────────────
 
     let review_cfg = resolve_review_config(ctx.config_path);
+    let effective_review_cfg =
+        crate::handlers::external_reviews::effective_review_config(ctx.config_path, &review_cfg);
     let codex_cfg = resolve_codex_config(ctx.config_path);
     eprintln!(
         "[external-review] task_id={} review_attempt_id={} attempt={} runner={} status=running held_reason=none liveness=live retry=none",
-        review_row.task_id, review_row.display_id, review_row.attempt, review_cfg.runner
+        review_row.task_id, review_row.display_id, review_row.attempt, effective_review_cfg.runner
     );
 
     let preflight = match prepare_external_review_git(ctx.conn, &review_row.task_id) {
         Ok(ExternalReviewGitPreparation::Ready(preflight)) => preflight,
         Ok(ExternalReviewGitPreparation::Conflict(conflict)) => {
-            record_stale_base_tooling_held(ctx.conn, &review_row, &review_cfg.runner, &conflict)?;
+            record_stale_base_tooling_held(
+                ctx.conn,
+                &review_row,
+                &effective_review_cfg.runner,
+                &conflict,
+            )?;
             return Ok(DispatchOutcome::Dispatched);
         }
         Err(err) => {
-            record_tooling_held(ctx.conn, &review_row, &review_cfg.runner, &err)?;
+            record_tooling_held(ctx.conn, &review_row, &effective_review_cfg.runner, &err)?;
             return Ok(DispatchOutcome::Dispatched);
         }
     };
@@ -191,18 +199,19 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> Result<DispatchOutcome> {
         );
     }
 
-    match run_external_review_attempt(
+    match run_external_review_attempt_with_config(
         ctx.conn,
         &review_row.display_id,
         &review_row.task_id,
         &review_cfg,
         &codex_cfg,
+        ctx.config_path,
         Some(&preflight.workspace_path),
         Some(&preflight.base_sha),
         Some(&preflight.head_sha),
     ) {
-        Ok(parsed) => record_terminal(ctx, &review_row, &review_cfg.runner, parsed)?,
-        Err(err) => record_tooling_held(ctx.conn, &review_row, &review_cfg.runner, &err)?,
+        Ok(parsed) => record_terminal(ctx, &review_row, &effective_review_cfg.runner, parsed)?,
+        Err(err) => record_tooling_held(ctx.conn, &review_row, &effective_review_cfg.runner, &err)?,
     }
 
     Ok(DispatchOutcome::Dispatched)
