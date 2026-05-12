@@ -1016,7 +1016,12 @@ mod tests {
                 None,
                 Some(tmp.path().to_str().unwrap()),
                 None,
-                &[("STORES_FAKE_TASK_ID".into(), "TMARK".into())],
+                &[
+                    ("STORES_FAKE_TASK_ID".into(), "TMARK".into()),
+                    ("STORES_FAKE_PHASE".into(), "2".into()),
+                    ("STORES_FAKE_CYCLE".into(), "3".into()),
+                    ("STORES_FAKE_ATTEMPT".into(), "4".into()),
+                ],
             )
             .unwrap();
         let payload = out.structured_output.unwrap();
@@ -1024,7 +1029,7 @@ mod tests {
         assert_eq!(changed.len(), 1);
         assert_eq!(
             changed[0].as_str().unwrap(),
-            "fake-runner-markers/TMARK-punknown-cunknown-aunknown.txt"
+            "fake-runner-markers/TMARK-p2-c3-a4.txt"
         );
         let commit = payload["commit"].as_str().unwrap();
         assert_ne!(commit, start);

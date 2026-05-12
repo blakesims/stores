@@ -1019,7 +1019,8 @@ fn is_gc_candidate_extension(path: &Path) -> bool {
     (name.ends_with(".jsonl")
         || name.ends_with(".stderr.log")
         || name.ends_with(".log")
-        || name.ends_with(".txt"))
+        || name.ends_with(".txt")
+        || name.ends_with("-wrap-brief.md"))
         && !name.starts_with("current-")
 }
 
@@ -1841,6 +1842,30 @@ mod tests {
                 .any(|f| f.path.ends_with("huge.jsonl") && f.size > opts.per_file_warn_bytes),
             "plan must retain enough file-size detail for per-file warning output"
         );
+    }
+
+    #[test]
+    fn runs_gc_collects_fake_external_review_wrap_briefs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stores = tmp.path().join(".stores");
+        fs::create_dir_all(stores.join("runs")).unwrap();
+        fs::write(stores.join("runs/T999-wrap-brief.md"), "brief").unwrap();
+        fs::write(stores.join("runs/ordinary-note.md"), "not a run artifact").unwrap();
+
+        let opts = RunsGcOpts {
+            max_bytes: 0,
+            largest: 10,
+            ..RunsGcOpts::default()
+        };
+        let plan = build_runs_gc_plan(&stores, &opts).unwrap();
+        assert!(plan
+            .files
+            .iter()
+            .any(|f| f.rel_path == ".stores/runs/T999-wrap-brief.md"));
+        assert!(!plan
+            .files
+            .iter()
+            .any(|f| f.rel_path == ".stores/runs/ordinary-note.md"));
     }
 
     #[test]
