@@ -210,8 +210,11 @@ pub fn run(opts: TestRunOpts) -> Result<()> {
 
 fn load_case(opts: &TestRunOpts) -> Result<(String, TestCase, Option<PathBuf>)> {
     if let Some(path) = &opts.case_file {
-        let raw =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let case_path = path
+            .canonicalize()
+            .with_context(|| format!("resolving {}", path.display()))?;
+        let raw = std::fs::read_to_string(&case_path)
+            .with_context(|| format!("reading {}", case_path.display()))?;
         let manifest: TestManifest =
             serde_yaml::from_str(&raw).context("parsing test case YAML")?;
         let name = opts
@@ -224,7 +227,7 @@ fn load_case(opts: &TestRunOpts) -> Result<(String, TestCase, Option<PathBuf>)> 
             .get(&name)
             .with_context(|| format!("case '{name}' not found"))?
             .clone();
-        return Ok((name, case, Some(path.clone())));
+        return Ok((name, case, Some(case_path)));
     }
     let name = opts
         .case_name
@@ -269,7 +272,6 @@ fn validate_case_shape(case: &TestCase) -> Result<()> {
 }
 
 fn preflight_fake_mode() -> Result<()> {
-    std::env::set_var("STORES_LLM_OFF", "1");
     let current = std::env::current_exe().context("resolve current stores binary")?;
     sentinel(&current, "current stores binary")?;
     if let Ok(private) = crate::paths::daemon_binary_path() {
@@ -691,5 +693,42 @@ mod tests {
         let c = m.cases.get("custom").unwrap();
         assert_eq!(c.stages["code_reviewer"].attempts[0].outcome, "REVISE");
         assert_eq!(c.expect.task_status, "in_review");
+    }
+
+    #[test]
+    fn case_file_path_is_canonicalized_for_child_runner_cwd_changes() {
+        let _cwd_guard = crate::paths::test_cwd_lock()
+            .lock()
+            .expect("cwd lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("case.yaml");
+        std::fs::write(
+            &path,
+            "cases:\n  custom:\n    stages:\n      external_review:\n        outcome: TOOLING_FAILURE\n    expect:\n      task_status: in_review\n      lifecycle: active\n      external_review_status: tooling_held\n",
+        )
+        .unwrap();
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let opts = TestRunOpts {
+            case_name: Some("custom".to_string()),
+            case_file: Some(PathBuf::from("case.yaml")),
+            delay_ms: None,
+            watch: false,
+        };
+        let (_name, _case, fake_path) = load_case(&opts).unwrap();
+        std::env::set_current_dir(old).unwrap();
+        assert!(fake_path.unwrap().is_absolute());
+    }
+
+    #[test]
+    fn env_restore_restores_llm_off_under_runner_env_lock() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let old = std::env::var_os("STORES_LLM_OFF");
+        let mut restore = EnvRestore::capture(&["STORES_LLM_OFF"]);
+        restore.set("STORES_LLM_OFF", "1");
+        drop(restore);
+        assert_eq!(std::env::var_os("STORES_LLM_OFF"), old);
     }
 }
