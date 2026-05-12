@@ -272,7 +272,7 @@ fn validate_case_shape(case: &TestCase) -> Result<()> {
 }
 
 fn preflight_fake_mode() -> Result<()> {
-    let current = std::env::current_exe().context("resolve current stores binary")?;
+    let current = stores_bin_for_preflight().context("resolve current stores binary")?;
     sentinel(&current, "current stores binary")?;
     if let Ok(private) = crate::paths::daemon_binary_path() {
         if private.exists() && sentinel(&private, "private daemon reexec binary").is_err() {
@@ -301,6 +301,14 @@ fn preflight_fake_mode() -> Result<()> {
         bail!("stores-fake-agent not found at {}", fake.display());
     }
     Ok(())
+}
+
+fn stores_bin_for_preflight() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os("STORES_TEST_STORES_BIN") {
+        return Ok(PathBuf::from(path));
+    }
+    std::env::current_exe().context("resolve current stores binary")
 }
 
 fn sentinel(bin: &Path, label: &str) -> Result<()> {
@@ -730,5 +738,147 @@ mod tests {
         restore.set("STORES_LLM_OFF", "1");
         drop(restore);
         assert_eq!(std::env::var_os("STORES_LLM_OFF"), old);
+    }
+
+    #[test]
+    fn stores_test_run_happy_path_reaches_integrated_done() {
+        with_harness_env(|| {
+            run(TestRunOpts {
+                case_name: Some("happy-path".to_string()),
+                case_file: None,
+                delay_ms: Some(0),
+                watch: false,
+            })
+            .expect("happy-path harness run should reach integrated/done");
+        });
+    }
+
+    #[test]
+    fn stores_test_run_failed_external_review_holds_in_review() {
+        with_harness_env(|| {
+            run(TestRunOpts {
+                case_name: Some("t3-failed-er".to_string()),
+                case_file: None,
+                delay_ms: Some(0),
+                watch: false,
+            })
+            .expect("failed external-review harness run should match held expectation");
+        });
+    }
+
+    #[test]
+    fn stores_test_run_case_file_executes_configured_expectations() {
+        with_harness_env(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("case.yaml");
+            std::fs::write(
+                &path,
+                r#"cases:
+  yaml-happy:
+    tier: T3
+    delay_ms: 0
+    executor_mode: marker_file
+    stages:
+      planner: { outcome: PASS }
+      plan_reviewer: { outcome: PASS }
+      executor: { outcome: PASS }
+      code_reviewer: { outcome: PASS }
+      wrap: { outcome: PASS }
+      external_review: { outcome: PASS }
+    expect:
+      task_status: integrated
+      lifecycle: done
+      external_review_status: passed
+      no_real_llm: true
+"#,
+            )
+            .unwrap();
+            run(TestRunOpts {
+                case_name: Some("yaml-happy".to_string()),
+                case_file: Some(path),
+                delay_ms: Some(0),
+                watch: false,
+            })
+            .expect("YAML case-file harness run should execute configured expectations");
+        });
+    }
+
+    fn with_harness_env<T>(f: impl FnOnce() -> T) -> T {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let _cwd_guard = crate::paths::test_cwd_lock()
+            .lock()
+            .expect("cwd lock poisoned");
+        let tasks_status_before = git_tasks_status();
+        let tmp = tempfile::tempdir().expect("test tempdir");
+        let fake_bin = stores_fake_agent_bin_for_unit_tests();
+        let stores_bin = stores_bin_for_unit_tests();
+        let daemon_bin = tmp.path().join("private-daemon").join("stores");
+        let mut restore = EnvRestore::capture(&[
+            "STORES_LLM_OFF",
+            "STORES_FAKE_AGENT_BIN",
+            "STORES_FAKE_SCENARIO",
+            "STORES_FAKE_DELAY_MS",
+            "STORES_FAKE_EXECUTOR_MODE",
+            "STORES_FAKE_CASE_FILE",
+            "STORES_FAKE_CASE_NAME",
+            "STORES_ALLOW_FAKE_REVIEW_ACCEPT",
+            "STORES_DAEMON_BIN_PATH",
+            "STORES_TEST_STORES_BIN",
+        ]);
+        restore.set("STORES_FAKE_AGENT_BIN", fake_bin);
+        restore.set("STORES_TEST_STORES_BIN", stores_bin);
+        restore.set("STORES_DAEMON_BIN_PATH", daemon_bin);
+        let out = f();
+        drop(restore);
+        assert_eq!(
+            git_tasks_status(),
+            tasks_status_before,
+            "stores test harness must not dirty repo task projections"
+        );
+        out
+    }
+
+    fn stores_fake_agent_bin_for_unit_tests() -> PathBuf {
+        if let Some(path) = option_env!("CARGO_BIN_EXE_stores-fake-agent") {
+            return PathBuf::from(path);
+        }
+        target_debug_bin("stores-fake-agent")
+    }
+
+    fn stores_bin_for_unit_tests() -> PathBuf {
+        if let Some(path) = option_env!("CARGO_BIN_EXE_stores") {
+            return PathBuf::from(path);
+        }
+        target_debug_bin("stores")
+    }
+
+    fn target_debug_bin(name: &str) -> PathBuf {
+        let mut path = std::env::current_exe().expect("unit test current_exe");
+        path.pop();
+        if path.file_name().and_then(|n| n.to_str()) == Some("deps") {
+            path.pop();
+        }
+        path.push(name);
+        assert!(
+            path.exists(),
+            "expected built {name} binary at {}; run `cargo test --bins --tests` or `cargo build --bin stores --bin stores-fake-agent` before this test",
+            path.display()
+        );
+        path
+    }
+
+    fn git_tasks_status() -> String {
+        let out = Command::new("git")
+            .args(["status", "--short", "--", "tasks"])
+            .output()
+            .expect("git status -- tasks");
+        assert!(
+            out.status.success(),
+            "git status failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
     }
 }
