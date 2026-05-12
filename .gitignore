@@ -2,6 +2,7 @@
 /.stores/
 /.cargo-target/
 /logs/
+/tmp/
 
 # stores drive runtime renders auto-promoted active task state under the
 # review worktree; keep harness-generated task renders out of review diffs.

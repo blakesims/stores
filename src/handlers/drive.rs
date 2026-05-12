@@ -3424,8 +3424,32 @@ mod tests {
         );
     }
 
+    fn stores_fake_agent_bin_for_unit_tests() -> std::path::PathBuf {
+        if let Some(path) = option_env!("CARGO_BIN_EXE_stores-fake-agent") {
+            return std::path::PathBuf::from(path);
+        }
+        let mut path = std::env::current_exe().expect("unit test current_exe");
+        path.pop(); // deps/
+        if path.file_name().and_then(|n| n.to_str()) == Some("deps") {
+            path.pop();
+        }
+        path.push("stores-fake-agent");
+        assert!(
+            path.exists(),
+            "expected built stores-fake-agent binary at {}; run cargo test so Cargo builds bin targets",
+            path.display()
+        );
+        path
+    }
+
     #[test]
     fn drive_loop_with_fake_runner_reaches_in_review_and_records_fake_telemetry() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let old_delay = std::env::var_os("STORES_FAKE_DELAY_MS");
+        std::env::set_var("STORES_FAKE_DELAY_MS", "0");
+
         let schema = tasks_schema();
         let (dir, conn) = open_db(&schema);
         let workspace = dir.path().join("workspace");
@@ -3447,36 +3471,14 @@ mod tests {
         )
         .unwrap();
 
-        let fake_bin = dir.path().join("fake-agent.sh");
-        std::fs::write(
-            &fake_bin,
-            r#"#!/usr/bin/env bash
-set -euo pipefail
-role="${STORES_FAKE_ROLE}"
-case "$role" in
-  planner) payload='{"role":"planner","summary":"fake plan","phases":[{"name":"Fake phase","objective":"Exercise fake runner","tasks":[],"acceptance_criteria":[],"files":[],"dependencies":[]}],"decision_matrix":[]}' ;;
-  plan-reviewer) payload='{"role":"plan-reviewer","gate":"READY","summary":"fake plan review","open_questions":[]}' ;;
-  executor) payload='{"role":"executor","summary":"fake execute","commit":null,"files_changed":[]}' ;;
-  code-reviewer) payload='{"role":"code-reviewer","gate":"PASS","summary":"fake review","details":"fake","counts":{"critical":0,"major":0,"minor":0}}' ;;
-  wrap) payload='{"role":"wrap","executive_summary":"fake wrap","deviations":[],"residual_risks":[],"recommended_sanity_checks":[]}' ;;
-  *) echo "unknown role $role" >&2; exit 2 ;;
-esac
-printf '%s\n' '{"type":"system","model":"fake-random-v1"}'
-printf '{"type":"result","structured_output":%s,"result":"fake"}\n' "$payload"
-"#,
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&fake_bin).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&fake_bin, perms).unwrap();
-        }
+        let runner = crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
+        let result = drive_loop(&schema, &conn, "TFAKE", &runner, 20);
 
-        let runner = crate::runner::FakeRunner::with_bin(fake_bin);
-        drive_loop(&schema, &conn, "TFAKE", &runner, 20)
-            .expect("fake runner happy path should drive to in_review after wrap");
+        match old_delay {
+            Some(v) => std::env::set_var("STORES_FAKE_DELAY_MS", v),
+            None => std::env::remove_var("STORES_FAKE_DELAY_MS"),
+        }
+        result.expect("fake runner happy path should drive to in_review after wrap");
 
         let status: String = conn
             .query_row(
@@ -5038,6 +5040,43 @@ printf '{"type":"result","structured_output":%s,"result":"fake"}\n' "$payload"
             source, "sdk",
             "source must be sdk when structured_output is present"
         );
+    }
+
+    #[test]
+    fn fake_payloads_round_trip_through_agent_envelope_parser() {
+        let cases = [
+            ("planner", "planner"),
+            ("plan-reviewer", "plan-reviewer"),
+            ("executor", "executor"),
+            ("code-reviewer", "code-reviewer"),
+            ("wrap", "wrap"),
+        ];
+        for (role, expected_role) in cases {
+            let tmp = tempdir().unwrap();
+            let payload = crate::runner::fake::fake_payload_for_role(role).unwrap();
+            let out = RunnerOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                final_message: Some("not json".to_string()),
+                structured_output: Some(payload),
+                session_id: Some(format!("fake-{role}")),
+                structured_output_source: Some("fake"),
+                payload_error: None,
+                telemetry: crate::runner::AgentRunTelemetry::with_mock_defaults(tmp.path()),
+            };
+            let (env, source) = parse_envelope(&out, expected_role)
+                .unwrap_or_else(|err| panic!("fake payload for {role} should parse: {err:#}"));
+            assert_eq!(source, "sdk");
+            match (expected_role, env) {
+                ("planner", AgentEnvelope::Planner { .. })
+                | ("plan-reviewer", AgentEnvelope::PlanReviewer { .. })
+                | ("executor", AgentEnvelope::Executor { .. })
+                | ("code-reviewer", AgentEnvelope::CodeReviewer { .. })
+                | ("wrap", AgentEnvelope::Wrap { .. }) => {}
+                (other, env) => panic!("expected {other} envelope, got {env:?}"),
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------

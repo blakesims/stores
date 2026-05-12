@@ -26,8 +26,7 @@ impl FakeRunner {
         Self { bin: None }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_bin(path: PathBuf) -> Self {
+    pub fn with_bin(path: PathBuf) -> Self {
         Self { bin: Some(path) }
     }
 
@@ -41,11 +40,8 @@ impl FakeRunner {
             }
         }
         if let Ok(current_exe) = std::env::current_exe() {
-            if let Some(dir) = current_exe.parent() {
-                let sibling = dir.join("stores-fake-agent");
-                if sibling.exists() {
-                    return Ok(sibling);
-                }
+            if let Some(sibling) = sibling_fake_agent(&current_exe) {
+                return Ok(sibling);
             }
         }
         Ok(PathBuf::from("stores-fake-agent"))
@@ -78,6 +74,9 @@ impl FakeRunner {
         let bin = self.resolve_bin()?;
         let mut cmd = Command::new(&bin);
         cmd.current_dir(&cwd);
+        // Caller-provided env is applied first. The runner-owned context below
+        // intentionally wins for STORES_FAKE_* identity/path keys so a caller
+        // cannot accidentally desynchronize the child from RunnerInvocationContext.
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
@@ -145,7 +144,7 @@ impl FakeRunner {
             final_message,
             structured_output,
             session_id: Some(invocation_owned.session_id),
-            structured_output_source: if payload_valid { Some("sdk") } else { None },
+            structured_output_source: if payload_valid { Some("fake") } else { None },
             telemetry: AgentRunTelemetry {
                 model_id: Some(FAKE_MODEL_ID.to_string()),
                 harness_id: Some("fake".to_string()),
@@ -252,6 +251,11 @@ impl Runner for FakeRunner {
     }
 }
 
+fn sibling_fake_agent(current_exe: &Path) -> Option<PathBuf> {
+    let sibling = current_exe.parent()?.join("stores-fake-agent");
+    sibling.exists().then_some(sibling)
+}
+
 fn default_invocation(cwd: &Path, session_id: &str) -> Result<RunnerInvocationContext> {
     let runs_dir = std::env::var_os("STORES_RUNS_DIR")
         .map(PathBuf::from)
@@ -296,7 +300,9 @@ fn map_fake_stream_event(line: &str) -> Vec<Value> {
         return vec![];
     };
     match v.get("type").and_then(|t| t.as_str()) {
-        Some("fake_heartbeat") => vec![json!({"type":"heartbeat","source":"stores-fake"})],
+        // RunnerLiveEventSink records a generic stdout heartbeat for every line;
+        // do not add a second mapped heartbeat for fake heartbeat lines.
+        Some("fake_heartbeat") => vec![],
         Some("assistant") => vec![json!({"type":"assistant_text","source":"stores-fake"})],
         Some("result") => vec![json!({"type":"final_output","source":"stores-fake"})],
         _ => vec![json!({"type":"event","source":"stores-fake"})],
@@ -386,6 +392,19 @@ mod tests {
             let payload = fake_payload_for_role(role).unwrap();
             assert_eq!(payload.get("role").and_then(|v| v.as_str()), Some(expected));
         }
+    }
+
+    #[test]
+    fn sibling_fake_agent_resolution_uses_current_exe_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("stores");
+        let sibling = tmp.path().join("stores-fake-agent");
+        std::fs::write(&current, "").unwrap();
+        std::fs::write(&sibling, "").unwrap();
+        assert_eq!(
+            sibling_fake_agent(&current).as_deref(),
+            Some(sibling.as_path())
+        );
     }
 
     #[test]

@@ -76,11 +76,17 @@ fn heartbeat_delay(delay_ms: u64) -> Result<()> {
     if delay_ms == 0 {
         return Ok(());
     }
+    let interval_ms = std::env::var("STORES_FAKE_HEARTBEAT_INTERVAL_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(1000);
     let start = Instant::now();
     let total = Duration::from_millis(delay_ms);
+    let interval = Duration::from_millis(interval_ms);
     while start.elapsed() < total {
         let remaining = total.saturating_sub(start.elapsed());
-        std::thread::sleep(std::cmp::min(remaining, Duration::from_millis(1000)));
+        std::thread::sleep(std::cmp::min(remaining, interval));
         emit(json!({
             "type": "fake_heartbeat",
             "elapsed_ms": start.elapsed().as_millis() as u64,
