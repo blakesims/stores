@@ -20,7 +20,7 @@ fields:
   - {name: task_id, type: text, required: true, description: "tasks.display_id under external review."}
   - {name: attempt, type: integer, required: true, actor: framework, description: "Monotonic external-review attempt per task."}
   - {name: adapter, type: enum, enum_values: [external_review], required: false, description: "Adapter lane that owns this record."}
-  - {name: runner, type: enum, enum_values: [codex, pi, claude-code, manual-codex, manual], required: false, description: "Configured review runner."}
+  - {name: runner, type: enum, enum_values: [codex, pi, claude-code, fake, manual-codex, manual], required: false, description: "Configured review runner."}
   - {name: model_id, type: text, required: false, description: "Runner model identifier when available."}
   - {name: model_metadata, type: json, required: false, description: "Runner/model metadata not captured by scalar fields."}
   - {name: base_sha, type: text, required: false, description: "Review diff base SHA captured at runner spawn time, after any stale-branch rebase preflight."}

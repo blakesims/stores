@@ -1786,3 +1786,180 @@ fn recover_stale_base_schema_invariant_test() {
         "schema must have tooling_held→superseded transition via supersede verb"
     );
 }
+
+fn fake_cfg_for_fake_runner(dir: &Path, scenario: &str) -> PathBuf {
+    let p = dir.join(format!("fake-config-{}.yaml", uuid_like()));
+    std::fs::write(
+        &p,
+        format!(
+            "review:\n  runner: fake\n  max_parallel: 1\n  timeout_secs: 5\nfake_runner:\n  delay_ms: 0\n  scenario: {scenario}\n"
+        ),
+    )
+    .unwrap();
+    p
+}
+
+fn external_fake_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+fn stores_fake_agent_bin_for_external_tests() -> PathBuf {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_stores-fake-agent") {
+        return PathBuf::from(path);
+    }
+    let mut path = std::env::current_exe().expect("current_exe");
+    path.pop();
+    if path.file_name().and_then(|n| n.to_str()) == Some("deps") {
+        path.pop();
+    }
+    path.push("stores-fake-agent");
+    assert!(
+        path.exists(),
+        "missing stores-fake-agent at {}",
+        path.display()
+    );
+    path
+}
+
+fn with_fake_agent_on_path<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+    let _guard = external_fake_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let bin_dir = dir.join("fake-bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let shim = bin_dir.join("stores-fake-agent");
+    std::fs::copy(stores_fake_agent_bin_for_external_tests(), &shim).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let old_path = std::env::var_os("PATH");
+    let mut paths = vec![bin_dir];
+    if let Some(old) = old_path.clone() {
+        paths.extend(std::env::split_paths(&old));
+    }
+    std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+    let out = f();
+    match old_path {
+        Some(v) => std::env::set_var("PATH", v),
+        None => std::env::remove_var("PATH"),
+    }
+    out
+}
+
+#[test]
+fn external_review_fake_revise_once_then_pass_substrate_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_fake_agent_on_path(tmp.path(), || {
+        let conn = Connection::open_in_memory().unwrap();
+        let schema = install_db(&conn);
+        let ws = git_workspace();
+        insert_task(&conn, ws.path(), "T3", "in_review");
+        insert_pending_review_for_task(&conn, "ER001", "T900", 1);
+        let cfg = fake_cfg_for_fake_runner(tmp.path(), "external-review-revise-once");
+        let a = agents();
+
+        external_review::run(
+            &json!({"display_id":"ER001"}),
+            &DispatchCtx {
+                conn: &conn,
+                agents: &a,
+                config_path: &cfg,
+                policies_hash: "",
+            },
+        )
+        .unwrap();
+        let (status1, verdict1): (String, String) = conn
+            .query_row(
+                "SELECT status, verdict FROM external_reviews WHERE display_id='ER001'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((status1.as_str(), verdict1.as_str()), ("revise", "REVISE"));
+        let (_id, entry) = row::read_row(&schema, &conn, "T900").unwrap();
+        assert_eq!(
+            entry.get("status").and_then(|v| v.as_str()),
+            Some("executing")
+        );
+
+        conn.execute(
+            "UPDATE tasks SET status='in_review', updated_at='2026-05-07T00:00:01Z' WHERE display_id='T900'",
+            [],
+        )
+        .unwrap();
+        insert_pending_review_for_task(&conn, "ER002", "T900", 2);
+        external_review::run(
+            &json!({"display_id":"ER002"}),
+            &DispatchCtx {
+                conn: &conn,
+                agents: &a,
+                config_path: &cfg,
+                policies_hash: "",
+            },
+        )
+        .unwrap();
+
+        let verdicts: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT verdict FROM external_reviews WHERE task_id='T900' ORDER BY attempt")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(verdicts, vec!["REVISE".to_string(), "PASS".to_string()]);
+        let passed_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM external_reviews WHERE task_id='T900' AND status='passed' AND verdict='PASS'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(passed_rows, 1);
+    });
+}
+
+#[test]
+fn external_review_fake_tooling_failure_becomes_tooling_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_fake_agent_on_path(tmp.path(), || {
+        let conn = Connection::open_in_memory().unwrap();
+        install_db(&conn);
+        let ws = git_workspace();
+        insert_task(&conn, ws.path(), "T3", "in_review");
+        insert_pending_review_for_task(&conn, "ER003", "T900", 1);
+        let cfg = fake_cfg_for_fake_runner(tmp.path(), "external-review-tooling-failure");
+        let a = agents();
+
+        external_review::run(
+            &json!({"display_id":"ER003"}),
+            &DispatchCtx {
+                conn: &conn,
+                agents: &a,
+                config_path: &cfg,
+                policies_hash: "",
+            },
+        )
+        .unwrap();
+
+        let (status, verdict, held_reason): (String, String, String) = conn
+            .query_row(
+                "SELECT status, verdict, held_reason FROM external_reviews WHERE display_id='ER003'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), verdict.as_str()),
+            ("tooling_held", "TOOLING_FAILURE")
+        );
+        assert!(
+            held_reason.contains("runner returned TOOLING_FAILURE"),
+            "{held_reason}"
+        );
+        let rows = external_review::visible_status_rows(&conn)
+            .unwrap()
+            .join("\n");
+        assert!(rows.contains("ER003") && rows.contains("held"), "{rows}");
+    });
+}

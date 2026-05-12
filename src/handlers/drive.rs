@@ -1732,6 +1732,15 @@ fn check_depends_on_guard(schema: &Schema, conn: &Connection, display_id: &str) 
     );
 }
 
+fn runner_attempt_ordinal(conn: &Connection, display_id: &str, role: &str) -> Result<i64> {
+    let prior: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM agent_runs WHERE display_id=?1 AND role=?2",
+        rusqlite::params![display_id, role],
+        |r| r.get(0),
+    )?;
+    Ok(prior + 1)
+}
+
 /// Core loop.  Extracted so tests can drive it directly without going through
 /// clap or `run_drive`.
 ///
@@ -2045,12 +2054,16 @@ fn drive_loop_with_role_runner(
             &runner_name,
             workspace_path,
         )?;
+        let attempt_for_log = runner_attempt_ordinal(conn, display_id, agent_role)?;
         let mut invocation_env = runner_extra_env.clone();
         invocation_env.extend([
             ("STORES_FAKE_TASK_ID".to_string(), display_id.to_string()),
             ("STORES_FAKE_PHASE".to_string(), phase_for_log.to_string()),
             ("STORES_FAKE_CYCLE".to_string(), cycle_for_log.to_string()),
-            ("STORES_FAKE_ATTEMPT".to_string(), "1".to_string()),
+            (
+                "STORES_FAKE_ATTEMPT".to_string(),
+                attempt_for_log.to_string(),
+            ),
         ]);
         let spawn_start = std::time::Instant::now();
         let run_out = match role_runner.spawn_for_role(
@@ -3536,22 +3549,34 @@ mod tests {
         path
     }
 
-    #[test]
-    fn drive_loop_with_fake_runner_reaches_in_review_and_records_fake_telemetry() {
+    fn restore_env_var(key: &str, old: Option<std::ffi::OsString>) {
+        match old {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    fn with_fake_scenario<T>(scenario: &str, f: impl FnOnce() -> T) -> T {
         let _env_guard = crate::runner::test_support::ENV_LOCK
             .lock()
             .expect("runner env lock poisoned");
         let old_delay = std::env::var_os("STORES_FAKE_DELAY_MS");
+        let old_scenario = std::env::var_os("STORES_FAKE_SCENARIO");
         std::env::set_var("STORES_FAKE_DELAY_MS", "0");
+        std::env::set_var("STORES_FAKE_SCENARIO", scenario);
+        let out = f();
+        restore_env_var("STORES_FAKE_SCENARIO", old_scenario);
+        restore_env_var("STORES_FAKE_DELAY_MS", old_delay);
+        out
+    }
 
-        let schema = tasks_schema();
-        let (dir, conn) = open_db(&schema);
-        let workspace = dir.path().join("workspace");
+    fn fake_planning_task(schema: &Schema, conn: &Connection, dir: &tempfile::TempDir, id: &str) {
+        let workspace = dir.path().join(format!("workspace-{id}"));
         std::fs::create_dir_all(workspace.join(".stores")).unwrap();
         insert_task(
-            &conn,
-            &schema,
-            "TFAKE",
+            conn,
+            schema,
+            id,
             "planning",
             "2026-01-01T00:00:00Z",
             0,
@@ -3560,37 +3585,150 @@ mod tests {
             None,
         );
         conn.execute(
-            "UPDATE tasks SET workspace_path=?1 WHERE display_id='TFAKE'",
-            rusqlite::params![workspace.to_string_lossy().to_string()],
+            &format!(
+                "UPDATE {} SET workspace_path=?1 WHERE display_id=?2",
+                quote_ident(&schema.name)
+            ),
+            rusqlite::params![workspace.to_string_lossy().to_string(), id],
         )
         .unwrap();
+    }
 
-        let runner = crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
-        let result = drive_loop(&schema, &conn, "TFAKE", &runner, 20);
+    fn task_status(conn: &Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT status FROM tasks WHERE display_id=?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
 
-        match old_delay {
-            Some(v) => std::env::set_var("STORES_FAKE_DELAY_MS", v),
-            None => std::env::remove_var("STORES_FAKE_DELAY_MS"),
-        }
-        result.expect("fake runner happy path should drive to in_review after wrap");
+    fn agent_run_count(conn: &Connection, id: &str, role: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM agent_runs WHERE display_id=?1 AND role=?2",
+            rusqlite::params![id, role],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
 
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM tasks WHERE display_id='TFAKE'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(status, "in_review");
-        let fake_runs: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM agent_runs WHERE display_id='TFAKE' AND harness_id='fake' AND provider_id='stores-fake' AND payload_valid=1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(fake_runs, 5, "planner, plan-reviewer, executor, code-reviewer, wrap should all record fake telemetry");
-        assert!(workspace.join(".stores").join("runs").exists());
+    #[test]
+    fn drive_loop_with_fake_runner_reaches_in_review_and_records_fake_telemetry() {
+        with_fake_scenario("all-pass", || {
+            let schema = tasks_schema();
+            let (dir, conn) = open_db(&schema);
+            fake_planning_task(&schema, &conn, &dir, "TFAKE");
+            let workspace = dir.path().join("workspace-TFAKE");
+
+            let runner =
+                crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
+            drive_loop(&schema, &conn, "TFAKE", &runner, 20)
+                .expect("fake runner happy path should drive to in_review after wrap");
+
+            assert_eq!(task_status(&conn, "TFAKE"), "in_review");
+            let fake_runs: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_runs WHERE display_id='TFAKE' AND harness_id='fake' AND provider_id='stores-fake' AND payload_valid=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(fake_runs, 5, "planner, plan-reviewer, executor, code-reviewer, wrap should all record fake telemetry");
+            assert!(workspace.join(".stores").join("runs").exists());
+        });
+    }
+
+    #[test]
+    fn drive_loop_fake_plan_review_reject_once_then_passes() {
+        with_fake_scenario("plan-reviewer-reject-once", || {
+            let schema = tasks_schema();
+            let (dir, conn) = open_db(&schema);
+            fake_planning_task(&schema, &conn, &dir, "TPR1");
+            let runner =
+                crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
+
+            drive_loop(&schema, &conn, "TPR1", &runner, 30)
+                .expect("plan-review reject-once should converge through actual drive flow");
+
+            assert_eq!(task_status(&conn, "TPR1"), "in_review");
+            assert_eq!(agent_run_count(&conn, "TPR1", "plan_reviewer"), 2);
+            assert_eq!(agent_run_count(&conn, "TPR1", "planner"), 2);
+        });
+    }
+
+    #[test]
+    fn drive_loop_fake_code_review_revise_once_then_passes() {
+        with_fake_scenario("code-review-revise-once", || {
+            let schema = tasks_schema();
+            let (dir, conn) = open_db(&schema);
+            fake_planning_task(&schema, &conn, &dir, "TCR1");
+            let runner =
+                crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
+
+            drive_loop(&schema, &conn, "TCR1", &runner, 30)
+                .expect("code-review revise-once should converge through actual drive flow");
+
+            assert_eq!(task_status(&conn, "TCR1"), "in_review");
+            assert_eq!(agent_run_count(&conn, "TCR1", "code_reviewer"), 2);
+            assert_eq!(agent_run_count(&conn, "TCR1", "executor"), 2);
+        });
+    }
+
+    #[test]
+    fn drive_loop_fake_payload_invalid_blocks_task() {
+        with_fake_scenario("payload-invalid-exit-0", || {
+            let schema = tasks_schema();
+            let (dir, conn) = open_db(&schema);
+            fake_planning_task(&schema, &conn, &dir, "TPAY");
+            let runner =
+                crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
+
+            let err = drive_loop(&schema, &conn, "TPAY", &runner, 5)
+                .expect_err("payload-invalid fake output should fail drive");
+
+            assert!(err.to_string().contains("payload"), "{err}");
+            assert_eq!(task_status(&conn, "TPAY"), "blocked");
+        });
+    }
+
+    #[test]
+    fn drive_loop_fake_nonzero_exit_blocks_task() {
+        with_fake_scenario("nonzero-exit", || {
+            let schema = tasks_schema();
+            let (dir, conn) = open_db(&schema);
+            fake_planning_task(&schema, &conn, &dir, "TNZ");
+            let runner =
+                crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
+
+            let err = drive_loop(&schema, &conn, "TNZ", &runner, 5)
+                .expect_err("nonzero fake output should fail drive");
+
+            assert!(err.to_string().contains("non-zero exit"), "{err}");
+            assert_eq!(task_status(&conn, "TNZ"), "blocked");
+        });
+    }
+
+    #[test]
+    fn drive_loop_fake_liveness_stall_blocks_task() {
+        with_fake_scenario("stall-no-heartbeat", || {
+            let old_timeout = std::env::var_os("STORES_RUNNER_NO_OUTPUT_SECS");
+            let old_fake_delay = std::env::var_os("STORES_FAKE_DELAY_MS");
+            std::env::set_var("STORES_RUNNER_NO_OUTPUT_SECS", "1");
+            std::env::set_var("STORES_FAKE_DELAY_MS", "2000");
+            let schema = tasks_schema();
+            let (dir, conn) = open_db(&schema);
+            fake_planning_task(&schema, &conn, &dir, "TSTL");
+            let runner =
+                crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
+
+            let err = drive_loop(&schema, &conn, "TSTL", &runner, 5)
+                .expect_err("stall fake output should fail drive");
+
+            restore_env_var("STORES_FAKE_DELAY_MS", old_fake_delay);
+            restore_env_var("STORES_RUNNER_NO_OUTPUT_SECS", old_timeout);
+            assert!(err.to_string().contains("timed out"), "{err}");
+            assert_eq!(task_status(&conn, "TSTL"), "blocked");
+        });
     }
 
     /// MINOR 2b: transcript_path consistency under retry — when `compute_submit_execute`

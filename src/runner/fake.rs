@@ -443,7 +443,7 @@ pub fn decide_fake_outcome(
         attempt,
         &policy_hash,
     );
-    let first = ordinal(cycle).unwrap_or_else(|| ordinal(attempt).unwrap_or(1)) <= 1;
+    let first = ordinal(attempt).or_else(|| ordinal(cycle)).unwrap_or(1) <= 1;
     let normalized_role = role.replace('_', "-");
     let (outcome, outcome_class) = match scenario.as_str() {
         "all-pass" => ("PASS", "semantic"),
