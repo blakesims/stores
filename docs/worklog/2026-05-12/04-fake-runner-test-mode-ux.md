@@ -131,53 +131,69 @@ That command should:
 - leave all transcripts/runs inspectable;
 - never invoke Claude, Codex, Pi, or `node pi_runner.mjs` unless an explicit real-runner opt-back-in test says so.
 
-A useful case manifest shape:
+A useful case manifest shape starts with named presets, but must also support fully configurable YAML cases where an operator chooses per-stage outputs/outcomes without code changes:
 
 ```yaml
 cases:
   happy-path:
     tier: T3
-    scenario: all-pass
+    delay_ms: 5000
     executor_mode: marker_file
+    stages:
+      planner:
+        outcome: PASS
+      plan_reviewer:
+        outcome: PASS
+      executor:
+        outcome: PASS
+      code_reviewer:
+        outcome: PASS
+      wrap:
+        outcome: PASS
+      external_review:
+        outcome: PASS
     expect:
-      task_status: in_review
+      task_status: integrated
+      lifecycle: done
       external_review: passed
+      no_real_llm: true
 
-  plan-reject-once:
+  fabricated-extreme-case:
     tier: T3
-    scenario: plan-reviewer-reject-once
-    expect:
-      plan_review_first: NEEDS_WORK
-      final_task_status: in_review
-
-  code-review-revise-once:
-    tier: T3
-    scenario: code-review-revise-once
-    expect:
-      code_review_first: REVISE
-      final_cycle: 2
-      final_task_status: in_review
-
-  er-tooling-failure:
-    tier: T3
-    scenario: external-review-tooling-failure
+    delay_ms: 5000
+    executor_mode: marker_file
+    stages:
+      planner:
+        attempts:
+          - outcome: PASS
+      plan_reviewer:
+        attempts:
+          - outcome: NEEDS_WORK
+          - outcome: PASS
+      executor:
+        attempts:
+          - outcome: PASS
+      code_reviewer:
+        attempts:
+          - outcome: REVISE
+          - outcome: REVISE
+          - outcome: PASS
+      wrap:
+        outcome: PASS
+      external_review:
+        attempts:
+          - outcome: TOOLING_FAILURE
     expect:
       external_review_status: tooling_held
+      no_real_llm: true
+```
 
-  payload-invalid:
-    tier: T3
-    scenario: payload-invalid-exit-0
-    expect:
-      task_status: blocked
-      runner_exit_kind: payload_invalid
+Required operator entrypoints:
 
-  no-heartbeat-stall:
-    tier: T3
-    scenario: stall-no-heartbeat
-    expect:
-      task_status: blocked
-      runner_exit_kind: liveness_stalled_no_output
-      dispatch_locks_released: true
+```bash
+stores test run happy-path --delay-ms 5000 --watch
+stores test run --case-file path/to/case.yaml --watch
+stores test suite battlescars --delay-ms 5000 --watch
 ```
 
 ## Battlescar repro cases from recent notes

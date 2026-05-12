@@ -114,3 +114,5 @@ Use this section as the local TDD todo list. Add an unchecked item when a fake-m
 - [x] Focused Stage 1 harness test reaches `integrated` with fake planner/plan-reviewer/executor(marker commit)/code-reviewer/wrap, fake external-review PASS, explicit fake-review accept marker, integration landing, and no real codex sentinel invocation: `cargo test fake_happy_path_waterfall_reaches_integrated_without_real_llm_invocations -- --test-threads=8`.
 - [ ] `stores test run happy-path --delay-ms 5000 --watch` exits 0 and asserts task reaches `integrated` with no real LLM subprocesses.
 - [ ] `stores test run t3-failed-er --delay-ms 5000 --watch` exits 0 and asserts the expected fake external-review held/failure state.
+- [ ] Configurable YAML test cases exist: an operator can define per-stage fake outputs/outcomes (planner, plan-reviewer, executor, code-reviewer, wrap, external-review, accept/integration expectations) to fabricate extreme cases without code changes.
+- [ ] `stores test run --case-file <path> --watch` executes a YAML-defined case through the daemon-visible fake harness and asserts the configured expected state.
