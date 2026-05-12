@@ -336,7 +336,7 @@ mod tests {
     /// Serialize tests that mutate process env (`STORES_NTFY_URL`) against
     /// notifier tests that also rely on that process-global env var.
     fn env_lock() -> &'static std::sync::Mutex<()> {
-        crate::paths::test_notifier_lock()
+        &crate::runner::test_support::ENV_LOCK
     }
 
     #[test]

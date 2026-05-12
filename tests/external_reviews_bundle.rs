@@ -308,6 +308,10 @@ fn codex_output_parser_fallback_fixture_covers_codex_prose_cases() {
 #[test]
 #[cfg(unix)]
 fn codex_shim_invocation_persists_runner_metadata() {
+    let _guard = env_lock().lock().unwrap();
+    let old_off = std::env::var_os("STORES_LLM_OFF");
+    std::env::remove_var("STORES_LLM_OFF");
+
     let (repo, base, head) = temp_git_repo();
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -427,5 +431,9 @@ fn codex_shim_invocation_persists_runner_metadata() {
     match old_runs {
         Some(v) => std::env::set_var("STORES_RUNS_DIR", v),
         None => std::env::remove_var("STORES_RUNS_DIR"),
+    }
+    match old_off {
+        Some(v) => std::env::set_var("STORES_LLM_OFF", v),
+        None => std::env::remove_var("STORES_LLM_OFF"),
     }
 }
