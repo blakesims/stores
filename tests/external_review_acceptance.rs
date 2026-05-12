@@ -147,6 +147,15 @@ fn insert_pending_review_for_task(conn: &Connection, review_id: &str, task_id: &
     .unwrap();
 }
 
+fn insert_wrap_brief_artifact(conn: &Connection, task_id: &str) {
+    conn.execute(
+        "INSERT INTO agent_runs (display_id,phase,cycle,role,model_id,harness_id,started_at,ended_at,exit_code,transcript_path,brief_text)
+         VALUES (?1,1,1,'wrap','test-model','test-harness','2026-05-07T00:00:00Z','2026-05-07T00:00:01Z',0,'.stores/runs/test-wrap.jsonl','persisted wrap handoff brief')",
+        [task_id],
+    )
+    .unwrap();
+}
+
 fn run_review(conn: &Connection, cfg: &Path, review_id: &str) {
     let a = agents();
     external_review::run(
@@ -1853,6 +1862,7 @@ fn external_review_fake_revise_once_then_pass_substrate_path() {
         let schema = install_db(&conn);
         let ws = git_workspace();
         insert_task(&conn, ws.path(), "T3", "in_review");
+        insert_wrap_brief_artifact(&conn, "T900");
         insert_pending_review_for_task(&conn, "ER001", "T900", 1);
         let cfg = fake_cfg_for_fake_runner(tmp.path(), "external-review-revise-once");
         let a = agents();
@@ -1927,6 +1937,7 @@ fn external_review_fake_tooling_failure_becomes_tooling_held() {
         install_db(&conn);
         let ws = git_workspace();
         insert_task(&conn, ws.path(), "T3", "in_review");
+        insert_wrap_brief_artifact(&conn, "T900");
         insert_pending_review_for_task(&conn, "ER003", "T900", 1);
         let cfg = fake_cfg_for_fake_runner(tmp.path(), "external-review-tooling-failure");
         let a = agents();

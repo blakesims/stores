@@ -193,6 +193,12 @@ fn llm_off_external_review_uses_fake_runner_not_codex_command() {
             minor_count INTEGER,
             transcript_path TEXT,
             findings TEXT
+        );
+        CREATE TABLE agent_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            display_id TEXT,
+            role TEXT,
+            brief_text TEXT
         );",
     )
     .unwrap();
@@ -208,6 +214,11 @@ fn llm_off_external_review_uses_fake_runner_not_codex_command() {
             repo.path().to_str().unwrap(),
             "feature/external-review",
         ),
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_runs (display_id, role, brief_text) VALUES ('T083', 'wrap', 'persisted wrap handoff brief')",
+        [],
     )
     .unwrap();
     conn.execute(
