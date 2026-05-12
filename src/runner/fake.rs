@@ -954,6 +954,119 @@ mod tests {
         );
     }
 
+    fn init_git_repo(path: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(path)
+            .status()
+            .unwrap();
+        std::fs::write(path.join("README.md"), "base\n").unwrap();
+        std::fs::write(path.join(".gitignore"), ".stores/\nfixture.patch\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "README.md", ".gitignore"])
+            .current_dir(path)
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ])
+            .current_dir(path)
+            .status()
+            .unwrap();
+    }
+
+    fn git_out(path: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn marker_file_executor_mode_commits_and_reports_changed_file_with_git_metadata() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let _mode = EnvRestore::set("STORES_FAKE_EXECUTOR_MODE", "marker_file");
+        let _delay = EnvRestore::set("STORES_FAKE_DELAY_MS", "0");
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        let start = git_out(tmp.path(), &["rev-parse", "HEAD"]);
+        let out = FakeRunner::with_bin(built_fake_agent_bin())
+            .spawn_with_invocation_and_env(
+                "executor",
+                "",
+                "",
+                None,
+                Some(tmp.path().to_str().unwrap()),
+                None,
+                &[("STORES_FAKE_TASK_ID".into(), "TMARK".into())],
+            )
+            .unwrap();
+        let payload = out.structured_output.unwrap();
+        let changed = payload["files_changed"].as_array().unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(
+            changed[0].as_str().unwrap(),
+            "fake-runner-markers/TMARK-punknown-cunknown-aunknown.txt"
+        );
+        let commit = payload["commit"].as_str().unwrap();
+        assert_ne!(commit, start);
+        assert!(out.stdout.contains("\"git_start_sha\""));
+        assert!(out.stdout.contains("\"git_end_sha\""));
+        let msg = git_out(tmp.path(), &["log", "-1", "--pretty=%B"]);
+        assert!(msg.contains("Provenance: stores-fake-agent executor_mode=marker_file"));
+        assert!(git_out(tmp.path(), &["status", "--short"]).is_empty());
+    }
+
+    #[test]
+    fn scripted_patch_executor_mode_applies_fixture_patch_to_owned_marker_path() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let _mode = EnvRestore::set("STORES_FAKE_EXECUTOR_MODE", "scripted_patch");
+        let _delay = EnvRestore::set("STORES_FAKE_DELAY_MS", "0");
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        let patch = tmp.path().join("fixture.patch");
+        std::fs::write(
+            &patch,
+            "diff --git a/fake-runner-markers/scripted.txt b/fake-runner-markers/scripted.txt\nnew file mode 100644\nindex 0000000..616ad14\n--- /dev/null\n+++ b/fake-runner-markers/scripted.txt\n@@ -0,0 +1 @@\n+scripted fixture\n",
+        )
+        .unwrap();
+        let _patch_env = EnvRestore::set("STORES_FAKE_SCRIPTED_PATCH", patch.to_str().unwrap());
+        let out = FakeRunner::with_bin(built_fake_agent_bin())
+            .spawn("executor", "", "", None, Some(tmp.path().to_str().unwrap()))
+            .unwrap();
+        let payload = out.structured_output.unwrap();
+        assert_eq!(
+            payload["files_changed"].as_array().unwrap()[0].as_str(),
+            Some("fake-runner-markers/scripted.txt")
+        );
+        assert!(payload["commit"].as_str().unwrap().len() >= 7);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("fake-runner-markers/scripted.txt")).unwrap(),
+            "scripted fixture\n"
+        );
+        assert!(git_out(tmp.path(), &["status", "--short"]).is_empty());
+    }
+
     #[test]
     fn fake_runner_liveness_and_signal_stalls_hit_watchdog_path() {
         let _env_guard = crate::runner::test_support::ENV_LOCK

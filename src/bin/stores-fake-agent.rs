@@ -1,6 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -41,6 +43,10 @@ fn run() -> Result<()> {
         &cycle,
         &attempt,
     );
+    let workspace = std::env::var_os("STORES_FAKE_WORKSPACE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?);
+    let git_start_sha = git_head(&workspace).ok();
 
     emit(json!({
         "type": "system",
@@ -55,7 +61,8 @@ fn run() -> Result<()> {
         "seed": seed,
         "model": &model_id,
         "provider": "stores-fake",
-        "api": "stores-fake-agent-v1"
+        "api": "stores-fake-agent-v1",
+        "git_start_sha": git_start_sha
     }))?;
 
     emit(stores::runner::fake::fake_decision_event(&decision))?;
@@ -119,8 +126,17 @@ fn run() -> Result<()> {
             }))?;
         }
         _ => {
-            let payload = scripted_payload_for_role(&role, decision.outcome)
-                .with_context(|| format!("building fake payload for role {role}"))?;
+            let payload = scripted_payload_for_role(
+                &role,
+                decision.outcome,
+                &workspace,
+                &task_id,
+                &phase,
+                &cycle,
+                &attempt,
+            )
+            .with_context(|| format!("building fake payload for role {role}"))?;
+            let git_end_sha = git_head(&workspace).ok();
             emit(json!({
                 "type": "result",
                 "subtype": "success",
@@ -131,6 +147,8 @@ fn run() -> Result<()> {
                 "model": &model_id,
                 "provider": "stores-fake",
                 "api": "stores-fake-agent-v1",
+                "git_start_sha": git_start_sha,
+                "git_end_sha": git_end_sha,
                 "usage": {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -146,9 +164,23 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn scripted_payload_for_role(role: &str, outcome: &str) -> Result<serde_json::Value> {
+fn scripted_payload_for_role(
+    role: &str,
+    outcome: &str,
+    workspace: &Path,
+    task_id: &str,
+    phase: &str,
+    cycle: &str,
+    attempt: &str,
+) -> Result<serde_json::Value> {
     let mut payload = stores::runner::fake::fake_payload_for_role(role)?;
     let normalized_role = role.replace('_', "-");
+    if normalized_role == "executor" {
+        apply_executor_mode(&mut payload, workspace, task_id, phase, cycle, attempt)?;
+    }
+    if normalized_role == "external-review" {
+        verify_external_review_brief()?;
+    }
     match (normalized_role.as_str(), outcome) {
         ("plan-reviewer", "NEEDS_WORK") => {
             payload["gate"] = json!("NEEDS_WORK");
@@ -173,6 +205,148 @@ fn scripted_payload_for_role(role: &str, outcome: &str) -> Result<serde_json::Va
         _ => {}
     }
     Ok(payload)
+}
+
+fn apply_executor_mode(
+    payload: &mut serde_json::Value,
+    workspace: &Path,
+    task_id: &str,
+    phase: &str,
+    cycle: &str,
+    attempt: &str,
+) -> Result<()> {
+    let mode = std::env::var("STORES_FAKE_EXECUTOR_MODE").unwrap_or_else(|_| "no_op".to_string());
+    match mode.as_str() {
+        "" | "no_op" => Ok(()),
+        "marker_file" => {
+            let rel = format!("fake-runner-markers/{task_id}-p{phase}-c{cycle}-a{attempt}.txt");
+            let abs = workspace.join(&rel);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating marker parent {}", parent.display()))?;
+            }
+            std::fs::write(
+                &abs,
+                format!(
+                    "stores-fake-agent marker\ntask_id={task_id}\nphase={phase}\ncycle={cycle}\nattempt={attempt}\n"
+                ),
+            )
+            .with_context(|| format!("writing marker {}", abs.display()))?;
+            git(&["add", &rel], workspace)?;
+            let commit = commit_fake(workspace, task_id, "marker_file")?;
+            payload["summary"] =
+                json!("FAKE executor wrote and committed a deterministic marker file.");
+            payload["commit"] = json!(commit);
+            payload["files_changed"] = json!([rel]);
+            Ok(())
+        }
+        "scripted_patch" => {
+            let patch = std::env::var("STORES_FAKE_SCRIPTED_PATCH")
+                .context("STORES_FAKE_SCRIPTED_PATCH is required for scripted_patch mode")?;
+            git(&["apply", &patch], workspace)?;
+            let files = git_changed_files(workspace)?;
+            if files.is_empty() {
+                bail!("scripted_patch mode applied no changes");
+            }
+            for file in &files {
+                git(&["add", file], workspace)?;
+            }
+            let commit = commit_fake(workspace, task_id, "scripted_patch")?;
+            payload["summary"] =
+                json!("FAKE executor applied and committed a scripted patch fixture.");
+            payload["commit"] = json!(commit);
+            payload["files_changed"] = json!(files);
+            Ok(())
+        }
+        other => bail!("unknown STORES_FAKE_EXECUTOR_MODE '{other}'"),
+    }
+}
+
+fn verify_external_review_brief() -> Result<()> {
+    let Some(path) = std::env::var_os("STORES_FAKE_REVIEW_BRIEF_PATH").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let meta = std::fs::metadata(&path)
+        .with_context(|| format!("fake external review brief missing: {}", path.display()))?;
+    if !meta.is_file() {
+        bail!(
+            "fake external review brief is not a file: {}",
+            path.display()
+        );
+    }
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading fake external review brief: {}", path.display()))?;
+    if body.trim().is_empty() {
+        bail!("fake external review brief is empty: {}", path.display());
+    }
+    Ok(())
+}
+
+fn git_head(workspace: &Path) -> Result<String> {
+    Ok(git_output(&["rev-parse", "HEAD"], workspace)?
+        .trim()
+        .to_string())
+}
+
+fn git_changed_files(workspace: &Path) -> Result<Vec<String>> {
+    let out = git_output(
+        &["ls-files", "--others", "--modified", "--exclude-standard"],
+        workspace,
+    )?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn commit_fake(workspace: &Path, task_id: &str, mode: &str) -> Result<String> {
+    git(
+        &[
+            "-c",
+            "user.name=stores-fake-agent",
+            "-c",
+            "user.email=stores-fake-agent@example.invalid",
+            "commit",
+            "-m",
+            &format!("FAKE executor {task_id}: {mode}\n\nProvenance: stores-fake-agent executor_mode={mode}"),
+        ],
+        workspace,
+    )?;
+    git_head(workspace)
+}
+
+fn git(args: &[&str], workspace: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .with_context(|| format!("spawning git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn git_output(args: &[&str], workspace: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .with_context(|| format!("spawning git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn controlled_stall(ignore_sigterm: bool, delay_ms: u64) -> Result<()> {

@@ -143,6 +143,10 @@ pub struct FakeRunnerCfg {
     pub scenario: Option<String>,
     #[serde(default)]
     pub fake_external_review: Option<bool>,
+    #[serde(default)]
+    pub executor_mode: Option<String>,
+    #[serde(default)]
+    pub scripted_patch: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -293,6 +297,24 @@ pub fn fake_runner_env(config_path: &Path) -> Vec<(String, String)> {
         .or_else(|| cfg.scenario.filter(|s| !s.is_empty()))
     {
         env.push(("STORES_FAKE_SCENARIO".to_string(), scenario));
+    }
+    if let Some(mode) = std::env::var("STORES_FAKE_EXECUTOR_MODE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| cfg.executor_mode.filter(|s| !s.is_empty()))
+    {
+        env.push(("STORES_FAKE_EXECUTOR_MODE".to_string(), mode));
+    }
+    if let Some(path) = std::env::var("STORES_FAKE_SCRIPTED_PATCH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            cfg.scripted_patch
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_string_lossy().to_string())
+        })
+    {
+        env.push(("STORES_FAKE_SCRIPTED_PATCH".to_string(), path));
     }
     env
 }
@@ -446,7 +468,7 @@ mod tests {
         let path = tmp.path().join("config.yaml");
         std::fs::write(
             &path,
-            "fake_runner:\n  delay_ms: 0\n  seed: fixed\n  scenario: all-pass\n  fake_external_review: false\n",
+            "fake_runner:\n  delay_ms: 0\n  seed: fixed\n  scenario: all-pass\n  fake_external_review: false\n  executor_mode: marker_file\n  scripted_patch: fixtures/fake.patch\n",
         )
         .unwrap();
         let cfg = resolve_fake_runner_config(&path);
@@ -454,6 +476,20 @@ mod tests {
         assert_eq!(cfg.seed.as_deref(), Some("fixed"));
         assert_eq!(cfg.scenario.as_deref(), Some("all-pass"));
         assert_eq!(cfg.fake_external_review, Some(false));
+        assert_eq!(cfg.executor_mode.as_deref(), Some("marker_file"));
+        assert_eq!(
+            cfg.scripted_patch.as_deref(),
+            Some(std::path::Path::new("fixtures/fake.patch"))
+        );
+        let env = fake_runner_env(&path);
+        assert!(env.contains(&(
+            "STORES_FAKE_EXECUTOR_MODE".to_string(),
+            "marker_file".to_string()
+        )));
+        assert!(env.contains(&(
+            "STORES_FAKE_SCRIPTED_PATCH".to_string(),
+            "fixtures/fake.patch".to_string()
+        )));
         let old = std::env::var_os("STORES_LLM_OFF");
         for enabled in ["1", "true", "yes", "anything"] {
             std::env::set_var("STORES_LLM_OFF", enabled);

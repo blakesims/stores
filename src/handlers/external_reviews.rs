@@ -746,6 +746,28 @@ pub fn run_external_review_attempt_with_config(
             "STORES_FAKE_ATTEMPT".to_string(),
             review_display_id.to_string(),
         ));
+        let brief_path = bundle
+            .workspace_path
+            .join(".stores")
+            .join("runs")
+            .join(format!("{review_display_id}-external-review-brief.md"));
+        if let Some(parent) = brief_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                ToolingError::new(format!(
+                    "TOOLING_FAILURE: cannot create fake review brief dir: {e}"
+                ))
+            })?;
+        }
+        std::fs::write(&brief_path, &prompt).map_err(|e| {
+            ToolingError::new(format!(
+                "TOOLING_FAILURE: cannot write fake review brief {}: {e}",
+                brief_path.display()
+            ))
+        })?;
+        runner_env.push((
+            "STORES_FAKE_REVIEW_BRIEF_PATH".to_string(),
+            brief_path.to_string_lossy().to_string(),
+        ));
     }
     let out = runner
         .spawn_with_invocation_and_env(

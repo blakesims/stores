@@ -31,6 +31,7 @@ use stores::flow::policies_yaml::PoliciesYaml;
 use stores::flow::{AgentEntry, AgentsYaml, RetryPolicy};
 use stores::handlers::agents_run::{poll_once_with_guard, FsBinaryIdentityProvider};
 use stores::handlers::framework_migrate::ensure_integration_singleton_index;
+use stores::runner::{FakeRunner, Runner};
 use stores::schema::Schema;
 
 // ─── shared fixture helpers ───────────────────────────────────────────────
@@ -44,6 +45,10 @@ fn git(repo: &Path, args: &[&str]) -> std::process::Output {
     let mut full: Vec<&str> = vec!["-C", repo.to_str().unwrap()];
     full.extend_from_slice(args);
     Command::new("git").args(&full).output().unwrap()
+}
+
+fn fake_agent_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_stores-fake-agent"))
 }
 
 fn rev_parse(repo: &Path, rev: &str) -> String {
@@ -376,6 +381,61 @@ fn serialized_two_candidate_landing_via_daemon_poll() {
         "AC5.4: B (T101) base_main_sha must equal A (T100) landed_main_sha — \
          B must be validated against the main head produced by A"
     );
+}
+
+#[test]
+fn fake_marker_executor_commit_integrates_through_lane_smoke() {
+    let conn = fresh_db();
+    let (_tmp, repo) = init_two_commit_repo();
+    assert!(git(&repo, &["checkout", "-b", "feat/fake-marker"]).status.success());
+
+    let out = FakeRunner::with_bin(fake_agent_bin())
+        .spawn_with_invocation_and_env(
+            "executor",
+            "",
+            "",
+            None,
+            Some(repo.to_str().unwrap()),
+            None,
+            &[
+                ("STORES_FAKE_DELAY_MS".to_string(), "0".to_string()),
+                ("STORES_FAKE_EXECUTOR_MODE".to_string(), "marker_file".to_string()),
+                ("STORES_FAKE_TASK_ID".to_string(), "TFMARK".to_string()),
+                ("STORES_FAKE_PHASE".to_string(), "1".to_string()),
+                ("STORES_FAKE_CYCLE".to_string(), "1".to_string()),
+                ("STORES_FAKE_ATTEMPT".to_string(), "1".to_string()),
+            ],
+        )
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(
+        out.structured_output
+            .as_ref()
+            .and_then(|v| v.get("files_changed"))
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str()),
+        Some("fake-runner-markers/TFMARK-p1-c1-a1.txt")
+    );
+    let head_sha = rev_parse(&repo, "HEAD");
+    let base_sha = rev_parse(&repo, "main");
+    assert!(git(&repo, &["checkout", "main"]).status.success());
+
+    seed_queued_task(&conn, "TFMARK", "feat/fake-marker", repo.to_str().unwrap());
+    insert_passed_er(&conn, "ER-FMARK", "TFMARK", 1, &base_sha, &head_sha);
+    let agents = integrate_only_agents("true", false, "origin");
+    drive_daemon_until(&conn, &agents, 10, |_| {}, |c| {
+        task_status(c, "TFMARK") == "integrated"
+    });
+
+    assert_eq!(task_status(&conn, "TFMARK"), "integrated");
+    assert_eq!(
+        rev_parse(&repo, "main"),
+        attempts_field(&conn, "TFMARK", "last", "landed_main_sha").unwrap()
+    );
+    assert!(repo
+        .join("fake-runner-markers/TFMARK-p1-c1-a1.txt")
+        .exists());
 }
 
 // ─── Task 5.3 — stale ER head supersedes and blocks ──────────────────────
