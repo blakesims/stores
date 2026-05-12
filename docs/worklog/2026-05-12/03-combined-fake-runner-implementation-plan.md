@@ -30,7 +30,7 @@ Stores runner selection
   -> existing drive/external-review lifecycle continues unchanged
 ```
 
-Do **not** globally shadow `claude`, `node`, `pi_runner.mjs`, or `codex` as the primary mechanism. Adapter-level shims can be later parser tests, not the main dogfood architecture.
+Do **not** globally shadow `claude`, `node`, `pi_runner.mjs`, or `codex` as the primary mechanism. Adapter-level shims can be later parser tests, not the main dogfood architecture. `FakeRunner` constructs its own command and argument contract for `stores-fake-agent`; it does not mimic Claude/Pi/Codex CLI arg conventions except in optional adapter-specific tests.
 
 `FakeRunner` must pass env to child commands with command-local env, not process-global mutation, except for reading `STORES_LLM_OFF` and config. This avoids daemon/test concurrency flakes.
 
@@ -44,6 +44,8 @@ STORES_LLM_OFF=1
 
 When set, drive roles and external review default to fake. This should mean **no LLM calls by default**. Later config may opt specific lanes back to real, but the default no-LLM guarantee must be mechanically testable.
 
+Boolean parsing convention: enabled means any non-empty value except `0`, `false`, `no`, or `off` (case-insensitive). Unset or empty is disabled. Read this at runner construction / external-review dispatch time, not only daemon startup, so a long-running daemon can be toggled without restart. The consequence is per-cycle behavior: a task may contain real-run and fake-run cycles if the env changes mid-task; provenance must make that mixture visible. Subscriber-fired drives and in-process dispatchers must consult the same runner-construction path.
+
 ### Binary resolution
 
 `FakeRunner` should resolve `stores-fake-agent` robustly:
@@ -52,7 +54,9 @@ When set, drive roles and external review default to fake. This should mean **no
 2. Sibling of `std::env::current_exe()` for installed/private daemon layouts.
 3. PATH fallback only for development.
 
-Tests must not depend on global PATH shadowing.
+Tests must not depend on global PATH shadowing. Per-test scoped `PATH=...` or explicit `STORES_FAKE_AGENT_BIN=...` is fine for sentinel/negative tests; global shell shadowing is not.
+
+Shipping requirement: add an explicit `[[bin]]` entry for `stores-fake-agent` in `Cargo.toml` (or otherwise prove `cargo install --path ...` installs it beside `stores`). Phase 1 is not done until an installed/private-daemon layout can resolve the fake binary without manual copying.
 
 ### Artifact ownership
 
@@ -111,7 +115,7 @@ Fake PASS must be loud. Fake external-review PASS should be visibly fake in:
 - telemetry
 - status/runs output where feasible
 
-Acceptance/integration tests may use fake PASS for test rows, but operator-facing output must not imply real Codex/Pi/Claude review occurred. A later hardening option is an explicit `--allow-fake-review` or test-mode marker before accepting fake-reviewed production rows; do not force that into the MVP unless it is trivial.
+Acceptance/integration tests may use fake PASS for test rows, but operator-facing output must not imply real Codex/Pi/Claude review occurred. Phase 2 should add a minimal acceptance safety gate: rows whose latest required review/external review is fake cannot be accepted as production-reviewed unless an explicit allow flag or test-mode marker is present.
 
 ### Reproducibility before randomness
 
@@ -126,11 +130,11 @@ Scripted deterministic scenarios come before random soak. Every fake decision sh
 - attempt number
 - policy hash
 
-Each decision should be logged as a transcript/live event with seed, roll, threshold, and outcome.
+Each decision should be logged as a transcript/live event with seed, roll, threshold, and outcome. `policy_hash` means a stable hash of the fake policy inputs that affected the decision: fake_runner config block, scenario id/script, role defaults, delay/jitter settings, and fake-agent version.
 
 ### Scope control
 
-Do not block the MVP on broad telemetry hardening. Required now:
+Do not block the MVP on broad telemetry hardening. Current code already has optional `configured_harness_id`, `configured_model_id`, `configured_thinking_effort`, `effective_model_id`, `provider_id`, `api_id`, `runner_exit_kind`, and `payload_valid` fields on `AgentRunTelemetry`; Phase 2 should assert them for fake runs rather than add new schema unless implementation discovers a write-path gap. Required now:
 
 - fake provenance in telemetry/transcript
 - configured/effective runner/model distinction where fields already exist
@@ -154,10 +158,11 @@ Defer unless cheap:
 
 - Add `src/runner/fake.rs` implementing `Runner`.
 - Add `src/bin/stores-fake-agent.rs` or equivalent binary target.
+- Add/verify `Cargo.toml` binary shipping so `cargo install --path ...` installs `stores-fake-agent` beside `stores`.
 - Add `runner::select("fake")`.
 - Implement robust fake-agent binary resolution.
 - `FakeRunner` launches `stores-fake-agent` with command-local env and the preallocated invocation paths.
-- Support fixed delay with heartbeat, default 5 seconds.
+- Support fixed delay with heartbeat, default 5 seconds; allow `delay_ms=0` for fast unit/integration tests.
 - Generate schema-valid structured outputs for normal drive roles:
   - planner
   - plan-reviewer
@@ -169,20 +174,24 @@ Defer unless cheap:
   - live events JSONL
   - status JSON
   - stderr log if present
-- Fill required `AgentRunTelemetry` fields:
+- Fill `AgentRunTelemetry` with the full fake-run set (required insert fields plus provenance):
+  - `model_id=fake-random-v1` or `fake-scripted:<scenario>-v1` when scenario is known
   - `harness_id=fake`
-  - `model_id=fake-random-v1` or `fake-scripted-v1`
   - `started_at`, `ended_at`
   - `transcript_path`, `stderr_log_path`
+  - `configured_harness_id`, `configured_model_id`, `configured_thinking_effort` when the caller provides requested config
+  - `effective_model_id=fake-*`, `effective_thinking_effort=none`, `thinking_effort_source=fake`
+  - `provider_id=stores-fake`, `api_id=stores-fake-agent-v1`
   - `session_id`, `workspace_path`
   - `runner_exit_kind=ok`
-  - `payload_valid=true`
-  - provider/api fake labels
+  - `payload_valid=true`, `payload_error=null`
+  - token/cache/cost fields zero or null consistently
 - Include loud fake labeling in transcript/events and telemetry.
 - Validate fake output against the same parser/schema path used by real runner output. If sharing `AgentEnvelope` types requires a large refactor, use current schema/parser tests first and defer type extraction.
 - Tests:
   - unit/fixture test validates each fake role payload against the existing parser/schema path
   - integration-style test drives a minimal task with `runner=fake` and reaches at least wrap/complete without LLM calls
+  - binary-resolution test covers `STORES_FAKE_AGENT_BIN` and installed sibling resolution where practical
 
 ### Scope out
 
@@ -208,7 +217,7 @@ A worker can run a task drive with explicit `runner=fake`; it creates real run a
 - Capture requested runner/model/thinking before overriding to fake.
 - Force drive roles to `FakeRunner` under `STORES_LLM_OFF`.
 - Locate and cover the actual external-review dispatch path, not only drive runner selection.
-- Force external-review runner to fake under `STORES_LLM_OFF`.
+- Force external-review runner to fake under `STORES_LLM_OFF`. External review must call `FakeRunner`/`stores-fake-agent` through the Stores runner contract, not try to mimic Codex's `codex exec ...` CLI shape. The acceptance criterion is no Codex/Pi/Claude subprocess for review under `STORES_LLM_OFF`.
 - Add minimal `fake_runner` config support:
   - `delay_ms`
   - `seed`
@@ -229,6 +238,7 @@ A worker can run a task drive with explicit `runner=fake`; it creates real run a
   - runner/status clearly says fake where feasible
   - transcripts and telemetry clearly say fake
   - no fake run can be mistaken for real Codex/Pi/Claude output
+- Add fake-review acceptance safety: `tasks accept` (or equivalent acceptance precheck) refuses rows whose latest required review/external review is fake unless an explicit allow flag or test-mode marker is present. If the exact gate is more complex than expected, Phase 2 must at least make fake-reviewed production acceptance fail loud and document the remaining edge.
 - Add no-real-LLM negative test:
   - under `STORES_LLM_OFF=1`, use sentinel binaries, command logging, or equivalent to assert no `claude`, `codex`, `node pi_runner.mjs`, or Pi runner process is invoked
 - Tests:
@@ -242,11 +252,11 @@ A worker can run a task drive with explicit `runner=fake`; it creates real run a
 - Crash/timeout/payload-invalid simulation.
 - Marker commits.
 - Real external-review opt-back-in, unless trivial.
-- Accept/integrate hard gate for fake-reviewed production rows.
+- Full production policy beyond the minimal fake-review acceptance safety gate.
 
 ### Done when
 
-Setting `STORES_LLM_OFF=1` makes a normal dogfood run token-free across drive and external review, with fake provenance visible in artifacts and telemetry, and a test proves no real LLM subprocess was launched.
+Setting `STORES_LLM_OFF=1` makes a normal dogfood run token-free across drive and external review, with fake provenance visible in artifacts and telemetry, a test proves no real LLM subprocess was launched, and fake-reviewed rows cannot be accepted as if they had real review without an explicit allow/test marker.
 
 ## Phase 3 — Scripted scenarios and failure taxonomy
 
@@ -254,7 +264,7 @@ Setting `STORES_LLM_OFF=1` makes a normal dogfood run token-free across drive an
 
 ### Scope in
 
-- Add scenario/script support before random soak.
+- Add scenario/script support before random soak, with a small named registry addressable by config/env (for example `fake_runner.scenario` or `STORES_FAKE_SCENARIO=code-review-revise-once`). Avoid copy-pasted ad hoc test-only scenario logic.
 - Script outcomes by role and attempt/cycle, e.g.:
   - all-pass
   - plan-reviewer rejects once then passes
@@ -265,13 +275,17 @@ Setting `STORES_LLM_OFF=1` makes a normal dogfood run token-free across drive an
   - nonzero runner exit
   - long delay with heartbeat
   - long delay without heartbeat / controlled stall
+  - SIGTERM-ignoring stall that requires watchdog/SIGKILL where safe to test
+  - messy prose/legacy-output scenario that exercises SAP or last-line parsing rather than only clean structured output
 - Distinguish outcome classes in `RunnerOutput` and telemetry:
   - semantic failure: valid payload, review gate/ER verdict says REVISE/NEEDS_WORK
   - tooling-held: valid external-review TOOLING_FAILURE
   - payload failure: exit 0 but invalid/missing structured output
   - infra failure: nonzero exit/crash
   - liveness failure: no heartbeat/stall long enough for watchdog path
+  - signal behavior: cooperative SIGTERM exit and SIGTERM-ignore/SIGKILL-required modes where safe
 - Ensure fake decisions are replayable and logged.
+- Add determinism test: run the same scenario twice with the same seed/context and diff the fake decision-event streams.
 - Tests for each failure class hitting the intended substrate path.
 
 ### Scope out
@@ -305,8 +319,11 @@ fake_runner:
   - reports changed files in executor payload
 - `scripted_patch` mode:
   - applies a configured patch or fixture for targeted integration tests
+  - fixture patches must target stable marker/test paths or be generated against current HEAD; do not rely on fragile source hunks unless the test owns the fixture repo
 - Capture start/end git SHAs in transcript/fake metadata; use existing DB fields if available, otherwise do not force schema churn in this phase unless needed.
 - Add optional real external-review opt-back-in for targeted runs, while preserving `STORES_LLM_OFF=1` default as all-fake/no-token.
+- Fake external review should still `stat()`/read the expected wrap/review brief path where available and fail if absent, so double-fake mode exercises the wrap-to-review contract.
+- Confirm fake transcripts are subject to the same run-artifact GC as real transcripts; add a keep/retention note only if existing GC would destroy needed forensic replay artifacts too aggressively.
 - Add envelope/fidelity guardrails:
   - fake payloads use shared Rust types where practical, or schema fixtures if type refactor would sprawl
   - tests validate fake outputs against current agent schemas and `AgentEnvelope` parsing
@@ -330,7 +347,7 @@ Fake runs can create real commits and push accepted test tasks through integrati
 2. Whether to refactor `AgentEnvelope` out of `drive.rs` before Phase 1 or defer and validate via schemas first. Default: schema validation first, type refactor in Phase 4 if Phase 1 would sprawl.
 3. Whether real external-review opt-back-in belongs in Phase 2 or Phase 4. Default: Phase 4 unless trivial.
 4. Whether fake provenance needs first-class DB columns immediately. Default: no; use existing telemetry fields plus transcript/events metadata first.
-5. Whether fake-reviewed production rows should require an explicit accept/integrate allow flag. Default: not MVP; allow for test rows while making provenance loud.
+5. Exact spelling of the explicit fake-review acceptance allow flag/test marker. Default: decide in Phase 2 while implementing the minimal safety gate.
 
 ## Why this plan is intentionally four phases
 
