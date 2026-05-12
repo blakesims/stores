@@ -390,8 +390,25 @@ What landed:
 
 Learning for later phases: `STORES_LLM_OFF` is a process-global test hazard. Any test in any binary that mutates or assumes it must take that binary's env lock and restore/unset the variable. The Phase 2 parallel failure was not product logic; it was `llm_off_external_review_uses_fake_runner_not_codex_command` racing with `codex_shim_invocation_persists_runner_metadata` under `--test-threads=8`. Phase 3 scenario tests must be designed with this in mind.
 
+### Phase 3 — shipped after combined review
+
+Implemented and reviewed as PASS in commits `3586fa0`, `b66a81f`, and `2a6f339`.
+
+What landed:
+
+- Named deterministic scenarios with canonical aliases and env/config selection.
+- Scenario-derived model IDs: `fake-scripted:<canonical-scenario>-v1`.
+- Replayable `fake_decision` events emitted before delay/stall, including canonical scenario, seed, context, policy hash, roll/threshold/outcome, and outcome class.
+- Attempt-sensitive once scenarios now use real per-role attempt ordinals from persisted `agent_runs`, not static phase/cycle values.
+- Substrate-path tests cover plan-review reject/pass, code-review REVISE/pass, external-review REVISE/pass, external-review TOOLING_FAILURE held, payload-invalid blocked, nonzero blocked, and liveness stall blocked.
+- Liveness substrate test asserts the task blocks, failed agent run is recorded, and auto-drive dispatch locks are released.
+- Process-level determinism test spawns the fake agent and byte-compares `fake_decision` lines for attempt 1 REVISE and attempt 2 PASS.
+- Synthetic task projection pollution is ignored for the test IDs introduced by Phase 3.
+
+Learning for Phase 4: substrate-level tests are required for fake-runner claims. Direct `FakeRunner` tests are useful for parser/taxonomy checks, but lifecycle claims need drive/external-review tests that observe task state, agent run rows, and locks. Keep scenario names canonical in emitted telemetry even when aliases are accepted for operator convenience.
+
 ## Follow-ups
 
-- Use this note as the worker handoff basis for Phase 3.
+- Use this note as the worker handoff basis for Phase 4.
 - Each phase should be implemented by a worker and then reviewed before the next phase starts.
 - Keep broad telemetry/schema hardening out of future phases unless directly required for fake provenance correctness.
