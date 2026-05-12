@@ -361,8 +361,37 @@ Three phases would either combine selection/external-review with all failure mod
 3. Can fake mode exercise failure/recovery paths deterministically?
 4. Can fake mode pressure git/integration and avoid drifting from real contracts?
 
+## Progress / learnings
+
+### Phase 1 — shipped
+
+Implemented and reviewed as PASS in commits `49b9fc3`, `979395b`, and `a2eac1d`.
+
+Notable learnings carried forward:
+
+- Drive-loop tests must exercise the real `stores-fake-agent` binary, not an inline shim, or the fake runner and fake binary can drift independently.
+- Fake provenance should use `structured_output_source="fake"`, not `sdk`.
+- Generated projection artifacts from fake task tests need explicit ignore/isolation (`/tasks/{active,planning}/TFAKE*/`, `/tmp/`) so main stays clean after repeated test runs.
+- Tests should run with `-- --test-threads=8`; tests that mutate env must lock rather than forcing serial test runs.
+
+### Phase 2 — shipped, external-review env-race fixed
+
+Implemented and reviewed as PASS in commits `dce5879`, `b16e3b1`, and `956b6d9`.
+
+What landed:
+
+- `STORES_LLM_OFF` boolean parsing and runner-construction-time override.
+- Drive roles and external-review dispatch select `fake` under LLM_OFF.
+- Minimal `fake_runner` config: `delay_ms`, `seed`, `scenario`, `fake_external_review`.
+- Requested runner/model/thinking provenance flows through `STORES_FAKE_CONFIGURED_*` without changing the `Runner` trait.
+- Fake decision events include role/task/phase/cycle/attempt/seed/scenario/policy hash/roll/threshold/outcome.
+- Fake external-review PASS uses the normal external-review persistence path and records fake provenance.
+- Fake-reviewed rows are refused by the acceptance transition unless the explicit allow/test marker is present.
+
+Learning for later phases: `STORES_LLM_OFF` is a process-global test hazard. Any test in any binary that mutates or assumes it must take that binary's env lock and restore/unset the variable. The Phase 2 parallel failure was not product logic; it was `llm_off_external_review_uses_fake_runner_not_codex_command` racing with `codex_shim_invocation_persists_runner_metadata` under `--test-threads=8`. Phase 3 scenario tests must be designed with this in mind.
+
 ## Follow-ups
 
-- Use this note as the worker handoff basis for Phase 1.
+- Use this note as the worker handoff basis for Phase 3.
 - Each phase should be implemented by a worker and then reviewed before the next phase starts.
-- Keep broad telemetry/schema hardening out of Phase 1 unless directly required for fake provenance correctness.
+- Keep broad telemetry/schema hardening out of future phases unless directly required for fake provenance correctness.
