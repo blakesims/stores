@@ -407,8 +407,24 @@ What landed:
 
 Learning for Phase 4: substrate-level tests are required for fake-runner claims. Direct `FakeRunner` tests are useful for parser/taxonomy checks, but lifecycle claims need drive/external-review tests that observe task state, agent run rows, and locks. Keep scenario names canonical in emitted telemetry even when aliases are accepted for operator convenience.
 
+### Phase 4 — shipped after review/revise
+
+Implemented and reviewed as PASS in commits `eca11be`, `365b9a8`, and `d1c01cd`.
+
+What landed:
+
+- Fake executor modes: `no_op`, `marker_file`, and `scripted_patch`.
+- `marker_file` writes deterministic files, commits with fake provenance, and reports changed files.
+- `scripted_patch` applies a configured test-owned patch, stages changed files, and commits with fake provenance.
+- Fake transcript/result metadata includes start/end git SHAs.
+- Fake external review now requires a persisted wrap brief artifact from `agent_runs.brief_text`, materializes that artifact for the fake runner to stat/read, and fails loudly when missing.
+- Normal fake external-review tests seed the wrap artifact so they exercise the fake runner; a missing-artifact regression remains separate.
+- Fake payload fidelity is guarded by `AgentEnvelope` parser round-trip tests.
+- Marker-commit integration-lane smoke exercises accepted fake work through the integration lane.
+
+Learning: fake fidelity checks must pressure the real contract, not self-created artifacts. The Phase 4 fake external-review guard originally read a freshly created prompt file; review caught that this did not prove wrap-to-review handoff fidelity. The final shape requires persisted wrap output first, then materializes it for runner-side stat/read.
+
 ## Follow-ups
 
-- Use this note as the worker handoff basis for Phase 4.
-- Each phase should be implemented by a worker and then reviewed before the next phase starts.
-- Keep broad telemetry/schema hardening out of future phases unless directly required for fake provenance correctness.
+- Phase 1–4 are implemented and reviewed; use this note as the completion record for the fake-runner no-LLM dogfood implementation.
+- Keep broad telemetry/schema hardening out of future follow-up work unless directly required for fake provenance correctness.
