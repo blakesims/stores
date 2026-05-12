@@ -273,13 +273,25 @@ pub fn fake_external_review_enabled(config_path: &Path) -> bool {
 pub fn fake_runner_env(config_path: &Path) -> Vec<(String, String)> {
     let cfg = resolve_fake_runner_config(config_path);
     let mut env = Vec::new();
-    if let Some(delay_ms) = cfg.delay_ms {
-        env.push(("STORES_FAKE_DELAY_MS".to_string(), delay_ms.to_string()));
+    if let Some(delay_ms) = std::env::var("STORES_FAKE_DELAY_MS")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| cfg.delay_ms.map(|v| v.to_string()))
+    {
+        env.push(("STORES_FAKE_DELAY_MS".to_string(), delay_ms));
     }
-    if let Some(seed) = cfg.seed.filter(|s| !s.is_empty()) {
+    if let Some(seed) = std::env::var("STORES_FAKE_SEED")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| cfg.seed.filter(|s| !s.is_empty()))
+    {
         env.push(("STORES_FAKE_SEED".to_string(), seed));
     }
-    if let Some(scenario) = cfg.scenario.filter(|s| !s.is_empty()) {
+    if let Some(scenario) = std::env::var("STORES_FAKE_SCENARIO")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| cfg.scenario.filter(|s| !s.is_empty()))
+    {
         env.push(("STORES_FAKE_SCENARIO".to_string(), scenario));
     }
     env

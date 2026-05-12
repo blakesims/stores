@@ -15,6 +15,7 @@ use super::{
 const FAKE_MODEL_ID: &str = "fake-random-v1";
 const FAKE_PROVIDER_ID: &str = "stores-fake";
 const FAKE_API_ID: &str = "stores-fake-agent-v1";
+const DEFAULT_SCENARIO: &str = "all-pass";
 const ENV_CONFIGURED_HARNESS: &str = "STORES_FAKE_CONFIGURED_HARNESS_ID";
 const ENV_CONFIGURED_MODEL: &str = "STORES_FAKE_CONFIGURED_MODEL_ID";
 const ENV_CONFIGURED_THINKING: &str = "STORES_FAKE_CONFIGURED_THINKING_EFFORT";
@@ -136,12 +137,31 @@ impl FakeRunner {
         let stdout = output.stdout;
         let stderr = output.stderr;
         let exit_code = output.exit_code;
-        let (structured_output, final_message) = extract_fake_structured_output(&stdout);
-        let payload_valid = exit_code == 0 && structured_output.is_some();
-        let payload_error = if exit_code == 0 && structured_output.is_none() {
-            Some("fake runner produced no result.structured_output".to_string())
+        let (structured_output, final_message, outcome_class, decision_outcome) =
+            extract_fake_structured_output(&stdout);
+        let legacy_payload_ok = matches!(outcome_class.as_deref(), Some("legacy"));
+        let payload_valid = exit_code == 0 && (structured_output.is_some() || legacy_payload_ok);
+        let payload_error = output.payload_error.clone().or_else(|| {
+            if exit_code == 0 && !payload_valid {
+                Some(
+                    "class=payload fake runner produced invalid/missing structured output"
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        });
+        let runner_exit_kind = if output.killed_for.is_some() {
+            match decision_outcome.as_deref() {
+                Some("SIGTERM_IGNORE_STALL") => "signal_sigkill_required",
+                _ => "liveness_stalled_no_output",
+            }
+        } else if exit_code == 0 && payload_error.is_some() {
+            "payload_invalid"
+        } else if exit_code == 0 {
+            "ok"
         } else {
-            None
+            "infra_nonzero"
         };
 
         Ok(RunnerOutput {
@@ -182,7 +202,7 @@ impl FakeRunner {
                 api_id: Some(FAKE_API_ID.to_string()),
                 session_id: Some(session_id),
                 workspace_path: Some(cwd.to_string_lossy().to_string()),
-                runner_exit_kind: Some(if exit_code == 0 { "ok" } else { "nonzero" }.to_string()),
+                runner_exit_kind: Some(runner_exit_kind.to_string()),
                 payload_valid: Some(payload_valid),
                 payload_error: payload_error.clone(),
                 cache_read_tokens: Some(0),
@@ -329,13 +349,32 @@ fn map_fake_stream_event(line: &str) -> Vec<Value> {
     }
 }
 
-fn extract_fake_structured_output(stdout: &str) -> (Option<Value>, Option<String>) {
+fn extract_fake_structured_output(
+    stdout: &str,
+) -> (
+    Option<Value>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
     let mut structured = None;
     let mut final_message = None;
+    let mut outcome_class = None;
+    let mut decision_outcome = None;
     for line in stdout.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
+        if v.get("type").and_then(|t| t.as_str()) == Some("fake_decision") {
+            outcome_class = v
+                .get("class")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string());
+            decision_outcome = v
+                .get("outcome")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string());
+        }
         if v.get("type").and_then(|t| t.as_str()) == Some("result") {
             if let Some(value) = v.get("structured_output") {
                 structured = Some(value.clone());
@@ -346,7 +385,190 @@ fn extract_fake_structured_output(stdout: &str) -> (Option<Value>, Option<String
                 .map(|s| s.to_string());
         }
     }
-    (structured, final_message)
+    (structured, final_message, outcome_class, decision_outcome)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeDecision {
+    pub scenario: String,
+    pub seed: String,
+    pub task_id: String,
+    pub role: String,
+    pub phase: String,
+    pub cycle: String,
+    pub attempt: String,
+    pub policy_hash: String,
+    pub roll: u64,
+    pub threshold: u64,
+    pub outcome: &'static str,
+    pub outcome_class: &'static str,
+}
+
+pub fn fake_decision_event(decision: &FakeDecision) -> Value {
+    json!({
+        "type": "fake_decision",
+        "task_id": decision.task_id,
+        "role": decision.role,
+        "phase": decision.phase,
+        "cycle": decision.cycle,
+        "attempt": decision.attempt,
+        "scenario": decision.scenario,
+        "seed": decision.seed,
+        "policy_hash": decision.policy_hash,
+        "roll": decision.roll,
+        "threshold": decision.threshold,
+        "outcome": decision.outcome,
+        "class": decision.outcome_class
+    })
+}
+
+pub fn decide_fake_outcome(
+    scenario: &str,
+    seed: &str,
+    task_id: &str,
+    role: &str,
+    phase: &str,
+    cycle: &str,
+    attempt: &str,
+) -> FakeDecision {
+    let scenario = scenario_env_override(scenario);
+    let policy_hash = fake_policy_hash(&scenario, seed);
+    let roll = deterministic_roll(
+        &scenario,
+        seed,
+        task_id,
+        role,
+        phase,
+        cycle,
+        attempt,
+        &policy_hash,
+    );
+    let first = ordinal(cycle).unwrap_or_else(|| ordinal(attempt).unwrap_or(1)) <= 1;
+    let normalized_role = role.replace('_', "-");
+    let (outcome, outcome_class) = match scenario.as_str() {
+        "all-pass" => ("PASS", "semantic"),
+        "plan-review-reject-once" | "plan-reviewer-reject-once" => {
+            if normalized_role == "plan-reviewer" && first {
+                ("NEEDS_WORK", "semantic")
+            } else {
+                ("PASS", "semantic")
+            }
+        }
+        "review-revise-once" | "code-review-revise-once" => {
+            if normalized_role == "code-reviewer" && first {
+                ("REVISE", "semantic")
+            } else {
+                ("PASS", "semantic")
+            }
+        }
+        "external-review-revise-once" => {
+            if normalized_role == "external-review" && first {
+                ("REVISE", "semantic")
+            } else {
+                ("PASS", "semantic")
+            }
+        }
+        "external-review-tooling-failure" => {
+            if normalized_role == "external-review" {
+                ("TOOLING_FAILURE", "tooling")
+            } else {
+                ("PASS", "semantic")
+            }
+        }
+        "payload-invalid-exit-0" => ("PAYLOAD_INVALID_EXIT_0", "payload"),
+        "nonzero-exit" => ("NONZERO_EXIT", "infra"),
+        "long-delay-heartbeat" => ("PASS", "liveness"),
+        "stall-no-heartbeat" => ("STALL_NO_HEARTBEAT", "liveness"),
+        "sigterm-ignoring-stall" => ("SIGTERM_IGNORE_STALL", "signal"),
+        "messy-prose-legacy-output" => ("MESSY_LEGACY_OUTPUT", "legacy"),
+        _ => ("PASS", "semantic"),
+    };
+    FakeDecision {
+        scenario,
+        seed: seed.to_string(),
+        task_id: task_id.to_string(),
+        role: role.to_string(),
+        phase: phase.to_string(),
+        cycle: cycle.to_string(),
+        attempt: attempt.to_string(),
+        policy_hash,
+        roll,
+        threshold: 10_000,
+        outcome,
+        outcome_class,
+    }
+}
+
+fn scenario_env_override(configured: &str) -> String {
+    std::env::var("STORES_FAKE_SCENARIO")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            if configured.trim().is_empty() {
+                DEFAULT_SCENARIO.to_string()
+            } else {
+                configured.to_string()
+            }
+        })
+}
+
+fn fake_policy_hash(scenario: &str, seed: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"stores-fake-agent-v1\0");
+    hasher.update(scenario.as_bytes());
+    hasher.update(b"\0seed=");
+    hasher.update(seed.as_bytes());
+    hasher.update(b"\0delay=");
+    hasher.update(
+        std::env::var("STORES_FAKE_DELAY_MS")
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    hasher.update(b"\0heartbeat=");
+    hasher.update(
+        std::env::var("STORES_FAKE_HEARTBEAT_INTERVAL_MS")
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let digest = hasher.finalize();
+    format!("sha256:{:x}", digest)
+}
+
+fn deterministic_roll(
+    scenario: &str,
+    seed: &str,
+    task_id: &str,
+    role: &str,
+    phase: &str,
+    cycle: &str,
+    attempt: &str,
+    policy_hash: &str,
+) -> u64 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in [
+        scenario,
+        seed,
+        task_id,
+        role,
+        phase,
+        cycle,
+        attempt,
+        policy_hash,
+    ] {
+        hasher.update(part.as_bytes());
+        hasher.update(b"\0");
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(bytes) % 10_000
+}
+
+fn ordinal(value: &str) -> Option<i64> {
+    let digits: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits.parse::<i64>().ok()
 }
 
 pub fn fake_payload_for_role(role: &str) -> Result<Value> {
@@ -408,6 +630,47 @@ pub fn fake_payload_for_role(role: &str) -> Result<Value> {
 mod tests {
     use super::*;
 
+    fn built_fake_agent_bin() -> std::path::PathBuf {
+        if let Some(path) = option_env!("CARGO_BIN_EXE_stores-fake-agent") {
+            return std::path::PathBuf::from(path);
+        }
+        let mut path = std::env::current_exe().unwrap();
+        path.pop();
+        if path.file_name().and_then(|s| s.to_str()) == Some("deps") {
+            path.pop();
+        }
+        path.push("stores-fake-agent");
+        path
+    }
+
+    struct EnvRestore {
+        key: &'static str,
+        old: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let old = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.old.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn fake_payloads_have_expected_roles() {
         let cases = [
@@ -440,6 +703,10 @@ mod tests {
 
     #[test]
     fn fake_runner_binary_override_works() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let _scenario = EnvRestore::unset("STORES_FAKE_SCENARIO");
         let tmp = tempfile::tempdir().unwrap();
         let shim = tmp.path().join("fake-agent.sh");
         std::fs::write(
@@ -462,5 +729,171 @@ mod tests {
         assert_eq!(out.structured_output.as_ref().unwrap()["role"], "executor");
         assert_eq!(out.telemetry.harness_id.as_deref(), Some("fake"));
         assert_eq!(out.telemetry.provider_id.as_deref(), Some("stores-fake"));
+    }
+
+    #[test]
+    fn scripted_decisions_are_deterministic_for_same_context() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let _scenario = EnvRestore::unset("STORES_FAKE_SCENARIO");
+        let a = decide_fake_outcome(
+            "code-review-revise-once",
+            "seed-a",
+            "TDET",
+            "code-reviewer",
+            "1",
+            "1",
+            "1",
+        );
+        let b = decide_fake_outcome(
+            "code-review-revise-once",
+            "seed-a",
+            "TDET",
+            "code-reviewer",
+            "1",
+            "1",
+            "1",
+        );
+        assert_eq!(fake_decision_event(&a), fake_decision_event(&b));
+        assert_eq!(a.outcome, "REVISE");
+        assert_eq!(a.outcome_class, "semantic");
+        assert!(a.policy_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn fake_runner_classifies_scripted_failure_classes() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let bin = built_fake_agent_bin();
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_str().unwrap();
+
+        let cases = [
+            (
+                "payload-invalid-exit-0",
+                "executor",
+                0,
+                Some("payload_invalid"),
+                Some(false),
+                None,
+            ),
+            (
+                "nonzero-exit",
+                "executor",
+                42,
+                Some("infra_nonzero"),
+                Some(false),
+                None,
+            ),
+            (
+                "plan-reviewer-reject-once",
+                "plan-reviewer",
+                0,
+                Some("ok"),
+                Some(true),
+                Some(("gate", "NEEDS_WORK")),
+            ),
+            (
+                "code-review-revise-once",
+                "code-reviewer",
+                0,
+                Some("ok"),
+                Some(true),
+                Some(("gate", "REVISE")),
+            ),
+            (
+                "external-review-revise-once",
+                "external-review",
+                0,
+                Some("ok"),
+                Some(true),
+                Some(("verdict", "REVISE")),
+            ),
+            (
+                "external-review-tooling-failure",
+                "external-review",
+                0,
+                Some("ok"),
+                Some(true),
+                Some(("verdict", "TOOLING_FAILURE")),
+            ),
+        ];
+        for (scenario, role, exit_code, exit_kind, payload_valid, semantic_field) in cases {
+            let _scenario = EnvRestore::set("STORES_FAKE_SCENARIO", scenario);
+            let out = FakeRunner::with_bin(bin.clone())
+                .spawn(role, "", "", None, Some(workspace))
+                .unwrap();
+            assert_eq!(out.exit_code, exit_code, "scenario {scenario}");
+            assert_eq!(
+                out.telemetry.runner_exit_kind.as_deref(),
+                exit_kind,
+                "scenario {scenario}"
+            );
+            assert_eq!(
+                out.telemetry.payload_valid, payload_valid,
+                "scenario {scenario}"
+            );
+            if let Some((field, expected)) = semantic_field {
+                assert_eq!(
+                    out.structured_output
+                        .as_ref()
+                        .and_then(|v| v.get(field))
+                        .and_then(|v| v.as_str()),
+                    Some(expected),
+                    "scenario {scenario}"
+                );
+            }
+            assert!(
+                out.stdout.contains("\"type\":\"fake_decision\""),
+                "scenario {scenario}"
+            );
+        }
+
+        let _scenario = EnvRestore::set("STORES_FAKE_SCENARIO", "messy-prose-legacy-output");
+        let out = FakeRunner::with_bin(bin)
+            .spawn("executor", "", "", None, Some(workspace))
+            .unwrap();
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.telemetry.runner_exit_kind.as_deref(), Some("ok"));
+        assert_eq!(out.telemetry.payload_valid, Some(true));
+        assert!(out.structured_output.is_none());
+        assert!(
+            out.final_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("```json"),
+            "messy legacy output should leave SAP-parsable prose in final_message"
+        );
+    }
+
+    #[test]
+    fn fake_runner_liveness_and_signal_stalls_hit_watchdog_path() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let _delay = EnvRestore::set("STORES_FAKE_DELAY_MS", "5000");
+        let _no_output = EnvRestore::set("STORES_RUNNER_NO_OUTPUT_SECS", "0");
+        let _wall = EnvRestore::set("STORES_RUNNER_WALL_CLOCK_MAX_SECS", "30");
+        let tmp = tempfile::tempdir().unwrap();
+        for (scenario, kind) in [
+            ("stall-no-heartbeat", "liveness_stalled_no_output"),
+            ("sigterm-ignoring-stall", "signal_sigkill_required"),
+        ] {
+            let _scenario = EnvRestore::set("STORES_FAKE_SCENARIO", scenario);
+            let out = FakeRunner::with_bin(built_fake_agent_bin())
+                .spawn("executor", "", "", None, Some(tmp.path().to_str().unwrap()))
+                .unwrap();
+            assert_eq!(out.exit_code, -1, "scenario {scenario}");
+            assert_eq!(out.telemetry.runner_exit_kind.as_deref(), Some(kind));
+            assert!(
+                out.payload_error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("timed out"),
+                "scenario {scenario}"
+            );
+        }
     }
 }
