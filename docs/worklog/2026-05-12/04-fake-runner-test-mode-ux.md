@@ -188,13 +188,15 @@ cases:
       no_real_llm: true
 ```
 
-Required operator entrypoints:
+Required operator entrypoints use the real current repo DB and real daemon path. Synthetic temp-DB mode may exist for regression tests, but it is not the operator UX Blake asked for:
 
 ```bash
-stores test run happy-path --delay-ms 5000 --watch
-stores test run --case-file path/to/case.yaml --watch
-stores test suite battlescars --delay-ms 5000 --watch
+stores test run happy-path --live --delay-ms 5000 --watch
+stores test run --live --case-file path/to/case.yaml --watch
+stores test suite battlescars --live --delay-ms 5000 --watch
 ```
+
+`--live` means: write real rows to the current `.stores/db.sqlite`, let the real daemon/scaffold/auto-drive/external-review/integration path move them, and make them visible in normal `stores watch` / `stores tasks status`. The only fake component is LLM execution.
 
 ## Battlescar repro cases from recent notes
 

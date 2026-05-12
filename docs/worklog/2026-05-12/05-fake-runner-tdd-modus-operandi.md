@@ -22,21 +22,25 @@ If Stage 1 surfaces a non-blocking Stage 2 bug, append it to the Stage 2 candida
 
 **Goal:** make `STORES_LLM_OFF=1` / `runner=fake` a trustworthy operator test harness.
 
-A happy-path fake run must go all the way through the real substrate to **`integrated`**:
+A happy-path fake run must go all the way through the **real project substrate database and real daemon path** to **`integrated`**. The only mocked component is LLM execution:
 
 ```text
-task created
-→ scaffold/worktree
+real observation/intake or real test task row in current .stores/db.sqlite
+→ real daemon sees it
+→ real scaffold/worktree path
+→ real auto-drive dispatch lock / process management
 → planner fake
 → plan-reviewer fake
 → executor fake with marker commit
 → code-reviewer fake
 → wrap fake
-→ external-review fake
+→ real external-review row, runner fake
 → fake-review acceptance explicitly allowed for test mode
-→ integration lane
+→ real integration lane
 → integrated
 ```
+
+Synthetic temp-DB harnesses are useful unit/integration tests, but they do **not** satisfy Stage 1 operator UX. Blake must be able to run the command in this repo and watch the row move in normal `stores watch` / `stores tasks status`.
 
 **Rule:** if the failure is caused by fake-runner/test-mode infrastructure, fix it directly outside the substrate workflow.
 
@@ -53,13 +57,13 @@ Stage 1 includes:
 - fake marker executor can create real commits;
 - watch/status/runs accurately show fake-run state and fake provenance;
 - test runs leave repo/DB state understandable;
-- concrete operator UX: `stores test run <case>` and `stores test suite <suite>`.
+- concrete operator UX: `stores test run <case> --live --watch` and `stores test suite <suite> --live --watch`, where `--live` means current repo DB + real daemon path, not a temp synthetic DB.
 
 ### Stage 1 → Stage 2 transition criteria
 
 Do not enter Stage 2 until all are true:
 
-1. Happy-path waterfall reaches `integrated` on **three consecutive clean runs**.
+1. Live happy-path waterfall (`stores test run happy-path --live --watch`) reaches `integrated` on **three consecutive clean runs** in the current repo DB and is visible in normal `stores watch`.
 2. A CI/test sentinel asserts **zero real LLM subprocess invocations** across fake scenarios, including the daemon post-reexec path.
 3. All currently open Stage 1 issue-list items are checked.
 
@@ -102,7 +106,7 @@ Workflow:
 
 We are currently in **Stage 1**.
 
-The next milestone is one clean, repeatable happy-path fake test that reaches `integrated` without real LLM calls.
+The next milestone is one clean, repeatable **live** happy-path fake test that writes to the real current `.stores/db.sqlite`, is picked up by the real daemon path, is visible in normal `stores watch`, and reaches `integrated` without real LLM calls.
 
 ## Running Stage 1 issue list
 
@@ -112,7 +116,7 @@ Use this section as the local TDD todo list. Add an unchecked item when a fake-m
 - [ ] Live DB CHECK constraint rejects fake external review: fake ER dispatch runs, but persistence fails with `CHECK constraint failed: runner IN ('codex', 'pi', 'claude-code')`. Fix shape: ship a migration/schema repair that rebuilds the affected SQLite table constraint to include `fake` as a valid runner; do not rely only on YAML drift.
 - [ ] `stall-no-heartbeat` user-visible classification is wrong: task blocks as `payload_invalid` / `runner_payload_error` instead of a clear liveness/watchdog failure.
 - [x] Focused Stage 1 harness test reaches `integrated` with fake planner/plan-reviewer/executor(marker commit)/code-reviewer/wrap, fake external-review PASS, explicit fake-review accept marker, integration landing, and no real codex sentinel invocation: `cargo test fake_happy_path_waterfall_reaches_integrated_without_real_llm_invocations -- --test-threads=8`.
-- [ ] `stores test run happy-path --delay-ms 5000 --watch` exits 0 and asserts task reaches `integrated` with no real LLM subprocesses.
-- [ ] `stores test run t3-failed-er --delay-ms 5000 --watch` exits 0 and asserts the expected fake external-review held/failure state.
-- [ ] Configurable YAML test cases exist: an operator can define per-stage fake outputs/outcomes (planner, plan-reviewer, executor, code-reviewer, wrap, external-review, accept/integration expectations) to fabricate extreme cases without code changes.
-- [ ] `stores test run --case-file <path> --watch` executes a YAML-defined case through the daemon-visible fake harness and asserts the configured expected state.
+- [ ] `stores test run happy-path --live --delay-ms 5000 --watch` writes to the current repo DB, uses the real daemon path, is visible in normal `stores watch`, exits 0, and asserts task reaches `integrated` with no real LLM subprocesses.
+- [ ] `stores test run t3-failed-er --live --delay-ms 5000 --watch` writes to the current repo DB, uses the real daemon path, exits 0, and asserts the expected fake external-review held/failure state.
+- [ ] Configurable YAML test cases exist for live mode: an operator can define per-stage fake outputs/outcomes (planner, plan-reviewer, executor, code-reviewer, wrap, external-review, accept/integration expectations) to fabricate extreme cases without code changes.
+- [ ] `stores test run --live --case-file <path> --watch` executes a YAML-defined case through the real DB + real daemon fake harness and asserts the configured expected state.
