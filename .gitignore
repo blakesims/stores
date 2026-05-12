@@ -10,6 +10,8 @@
 /tasks/planning/T*-auto-promoted-l*/
 /tasks/active/TFAKE*/
 /tasks/planning/TFAKE*/
+/tasks/active/T*-fake-runner-*/
+/tasks/planning/T*-fake-runner-*/
 /tasks/active/TPR1*/
 /tasks/planning/TPR1*/
 /tasks/active/TCR1*/
