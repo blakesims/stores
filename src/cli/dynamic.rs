@@ -241,6 +241,12 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .long("watch")
                                 .action(ArgAction::SetTrue)
                                 .help("Print progress checkpoints while the case moves"),
+                        )
+                        .arg(
+                            Arg::new("live")
+                                .long("live")
+                                .action(ArgAction::SetTrue)
+                                .help("Use the current repo .stores/db.sqlite and real agents daemon path"),
                         ),
                 )
                 .subcommand(
@@ -252,7 +258,8 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .long("delay-ms")
                                 .value_parser(clap::value_parser!(u64)),
                         )
-                        .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)),
+                        .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue))
+                        .arg(Arg::new("live").long("live").action(ArgAction::SetTrue)),
                 ),
         )
         // Skills subcommand

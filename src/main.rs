@@ -192,6 +192,7 @@ fn main() -> Result<()> {
                         .map(std::path::PathBuf::from),
                     delay_ms: rsub.get_one::<u64>("delay-ms").copied(),
                     watch: *rsub.get_one::<bool>("watch").unwrap_or(&false),
+                    live: *rsub.get_one::<bool>("live").unwrap_or(&false),
                 })?;
             }
             Some(("suite", ssub)) => {
@@ -206,6 +207,7 @@ fn main() -> Result<()> {
                         case_file: None,
                         delay_ms: ssub.get_one::<u64>("delay-ms").copied(),
                         watch: *ssub.get_one::<bool>("watch").unwrap_or(&false),
+                        live: *ssub.get_one::<bool>("live").unwrap_or(&false),
                     })?;
                 }
             }

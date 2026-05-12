@@ -18,6 +18,7 @@ pub struct TestRunOpts {
     pub case_file: Option<PathBuf>,
     pub delay_ms: Option<u64>,
     pub watch: bool,
+    pub live: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -168,9 +169,14 @@ pub fn run(opts: TestRunOpts) -> Result<()> {
     }
 
     println!(
-        "stores-test case={case_name} tier={} llm_off=1 delay_ms={delay_ms} executor_mode={}",
-        case.tier, case.executor_mode
+        "stores-test case={case_name} tier={} live={} llm_off=1 delay_ms={delay_ms} executor_mode={}",
+        case.tier, opts.live, case.executor_mode
     );
+
+    if opts.live {
+        let h = LiveHarness::new(&case_name)?;
+        return h.run(&case, &case.expect, opts.watch);
+    }
 
     let h = Harness::new(&case_name)?;
     let _cwd_restore = CwdRestore::pushd(h._tmp.path())?;
@@ -275,32 +281,30 @@ fn preflight_fake_mode() -> Result<()> {
     let current = stores_bin_for_preflight().context("resolve current stores binary")?;
     sentinel(&current, "current stores binary")?;
     if let Ok(private) = crate::paths::daemon_binary_path() {
-        if private.exists() && sentinel(&private, "private daemon reexec binary").is_err() {
+        let needs_refresh =
+            !private.exists() || !same_file_bytes(&current, &private).unwrap_or(false);
+        if needs_refresh {
             if let Some(parent) = private.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::copy(&current, &private).with_context(|| {
                 format!(
-                    "refreshing stale private daemon binary {}",
+                    "installing current stores binary for private daemon reexec {}",
                     private.display()
                 )
             })?;
-            sentinel(&private, "private daemon reexec binary")?;
-        } else if private.exists() {
-            // sentinel already printed ok
-        } else if let Some(parent) = private.parent() {
-            std::fs::create_dir_all(parent)?;
-            std::fs::copy(&current, &private).with_context(|| {
-                format!("installing private daemon binary {}", private.display())
-            })?;
-            sentinel(&private, "private daemon reexec binary")?;
         }
+        sentinel(&private, "private daemon reexec binary")?;
     }
     let fake = fake_agent_bin()?;
     if !fake.exists() {
         bail!("stores-fake-agent not found at {}", fake.display());
     }
     Ok(())
+}
+
+fn same_file_bytes(left: &Path, right: &Path) -> Result<bool> {
+    Ok(std::fs::read(left)? == std::fs::read(right)?)
 }
 
 fn stores_bin_for_preflight() -> Result<PathBuf> {
@@ -342,6 +346,278 @@ fn fake_agent_bin() -> Result<PathBuf> {
         }
     }
     Ok(PathBuf::from("stores-fake-agent"))
+}
+
+struct LiveHarness {
+    case_name: String,
+    task_id: String,
+    db_path: PathBuf,
+    root: PathBuf,
+}
+
+impl LiveHarness {
+    fn new(case_name: &str) -> Result<Self> {
+        let root = std::env::current_dir().context("resolve live repo root")?;
+        let db_path = crate::paths::db_path()?;
+        if !db_path.exists() {
+            bail!(
+                "live mode requires current repo .stores/db.sqlite at {}",
+                db_path.display()
+            );
+        }
+        let task_id = create_live_task(case_name)?;
+        Ok(Self {
+            case_name: case_name.to_string(),
+            task_id,
+            db_path,
+            root,
+        })
+    }
+
+    fn run(&self, _case: &TestCase, expect: &CaseExpect, watch: bool) -> Result<()> {
+        println!(
+            "live task={} status_cmd=`stores tasks status {}` watch_cmd=`stores watch --all`",
+            self.task_id, self.task_id
+        );
+        if watch {
+            self.progress("created")?;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+        let mut released = false;
+        let mut last = String::new();
+        loop {
+            self.run_daemon_once()?;
+            let snap = self.snapshot()?;
+            let line = format!(
+                "task={} status={} lifecycle={} active_step={} er={:?}",
+                self.task_id,
+                snap.status,
+                snap.lifecycle.clone().unwrap_or_default(),
+                snap.active_step.clone().unwrap_or_default(),
+                snap.er
+            );
+            if watch || line != last {
+                println!("progress live: {line}");
+                last = line;
+            }
+            if !released
+                && expect.task_status == "integrated"
+                && snap.status == "in_review"
+                && snap.er_status() == Some("passed")
+            {
+                self.release_to_integration()?;
+                released = true;
+                println!(
+                    "progress live: task={} released-to-integration",
+                    self.task_id
+                );
+                continue;
+            }
+            if self.matches_expect(expect, &snap) {
+                self.assert_no_real_llm()?;
+                println!(
+                    "summary live task={} status={} lifecycle={} er={:?} no_real_llm=ok",
+                    self.task_id,
+                    snap.status,
+                    snap.lifecycle.unwrap_or_default(),
+                    snap.er
+                );
+                return Ok(());
+            }
+            if matches!(
+                snap.status.as_str(),
+                "blocked" | "deploy_blocked" | "rejected" | "integration_blocked"
+            ) && expect.task_status != snap.status
+            {
+                bail!(
+                    "live task {} reached unexpected terminal/blocked state: {:?}",
+                    self.task_id,
+                    snap
+                );
+            }
+            if std::time::Instant::now() > deadline {
+                bail!(
+                    "timed out waiting for live case {} task {} to reach expectations",
+                    self.case_name,
+                    self.task_id
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    fn conn(&self) -> Result<Connection> {
+        let mut last_err = None;
+        for _ in 0..20 {
+            match crate::db::open(&self.db_path) {
+                Ok(conn) => return Ok(conn),
+                Err(err) if err.to_string().contains("database is locked") => {
+                    last_err = Some(err);
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("database open failed")))
+    }
+
+    fn run_daemon_once(&self) -> Result<()> {
+        let out = Command::new(stores_bin_for_preflight()?)
+            .args(["agents", "run", "--once", "--poll-interval", "0.2"])
+            .current_dir(&self.root)
+            .env("STORES_LLM_OFF", "1")
+            .env("STORES_PRIVATE_DAEMON_REEXEC", "1")
+            .env("LIBSQLITE3_SYS_USE_PKG_CONFIG", "1")
+            .output()
+            .context("running live daemon once")?;
+        if !out.status.success() {
+            bail!(
+                "stores agents run --once failed: status={} stderr={} stdout={}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<LiveSnapshot> {
+        let conn = self.conn()?;
+        let (status, lifecycle, active_step): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status,lifecycle,active_step FROM tasks WHERE display_id=?1",
+                [&self.task_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+        let er: Option<(String, String, Option<String>, Option<String>)> = conn.query_row(
+            "SELECT display_id,status,verdict,runner FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1",
+            [&self.task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        ).ok();
+        Ok(LiveSnapshot {
+            status,
+            lifecycle,
+            active_step,
+            er,
+        })
+    }
+
+    fn progress(&self, label: &str) -> Result<()> {
+        let snap = self.snapshot()?;
+        println!(
+            "progress live {label}: task={} status={} lifecycle={:?} active_step={:?} er={:?}",
+            self.task_id, snap.status, snap.lifecycle, snap.active_step, snap.er
+        );
+        Ok(())
+    }
+
+    fn release_to_integration(&self) -> Result<()> {
+        let conn = self.conn()?;
+        let agents =
+            crate::flow::agents_yaml::load_from_path(&self.root.join(".stores/agents.yaml"))?;
+        crate::flow::builtins::release_to_integration::run(
+            &json!({"display_id": self.task_id, "status":"in_review", "lifecycle":"active", "active_step":"wrapping", "human_acceptance_policy":"delegated_by_policy", "task_review_policy":"authoritative"}),
+            &DispatchCtx {
+                conn: &conn,
+                agents: &agents,
+                config_path: &self.root.join(".stores/config.yaml"),
+                policies_hash: "stores-test-live",
+            },
+        )?;
+        Ok(())
+    }
+
+    fn matches_expect(&self, expect: &CaseExpect, snap: &LiveSnapshot) -> bool {
+        let want_er = expect
+            .external_review
+            .as_deref()
+            .unwrap_or(&expect.external_review_status);
+        snap.status == expect.task_status
+            && snap.lifecycle.as_deref().unwrap_or("") == expect.lifecycle
+            && snap.er_status() == Some(want_er)
+    }
+
+    fn assert_no_real_llm(&self) -> Result<()> {
+        let conn = self.conn()?;
+        let non_fake: i64 = conn.query_row("SELECT COUNT(*) FROM agent_runs WHERE display_id=?1 AND COALESCE(harness_id,'') != 'fake'", [&self.task_id], |r| r.get(0)).unwrap_or(0);
+        if non_fake != 0 {
+            bail!(
+                "expected zero non-fake agent_runs for {}, got {non_fake}",
+                self.task_id
+            );
+        }
+        let real_er: i64 = conn.query_row("SELECT COUNT(*) FROM external_reviews WHERE task_id=?1 AND COALESCE(runner,'') IN ('codex','pi','claude-code')", [&self.task_id], |r| r.get(0)).unwrap_or(0);
+        if real_er != 0 {
+            bail!(
+                "expected zero real-runner external_reviews for {}, got {real_er}",
+                self.task_id
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct LiveSnapshot {
+    status: String,
+    lifecycle: Option<String>,
+    active_step: Option<String>,
+    er: Option<(String, String, Option<String>, Option<String>)>,
+}
+impl LiveSnapshot {
+    fn er_status(&self) -> Option<&str> {
+        self.er.as_ref().map(|(_, s, _, _)| s.as_str())
+    }
+}
+
+fn create_live_task(case_name: &str) -> Result<String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let slug = format!("stores-test-live-{}-{ts}", sanitize(case_name));
+    let out = Command::new(stores_bin_for_preflight()?)
+        .args([
+            "tasks",
+            "add",
+            "--invoker",
+            "ai_with_human",
+            "--activate",
+            "--title",
+            &format!("stores test live {case_name}"),
+            "--slug",
+            &slug,
+            "--tier-hint",
+            "T3",
+            "--human-acceptance-policy",
+            "delegated_by_policy",
+            "--task-review-policy",
+            "authoritative",
+            "--done-when",
+            "live fake harness reaches expected state",
+            "--scope-in",
+            "stores test live fake runner rows only",
+            "--scope-out",
+            "product behavior changes",
+        ])
+        .env("STORES_LLM_OFF", "1")
+        .output()
+        .context("creating live stores test task")?;
+    if !out.status.success() {
+        bail!(
+            "stores tasks add failed: status={} stderr={} stdout={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let id = stdout
+        .split_whitespace()
+        .find(|t| t.starts_with('T'))
+        .context("tasks add did not print task id")?
+        .to_string();
+    Ok(id)
 }
 
 struct Harness {
@@ -722,6 +998,7 @@ mod tests {
             case_file: Some(PathBuf::from("case.yaml")),
             delay_ms: None,
             watch: false,
+            live: false,
         };
         let (_name, _case, fake_path) = load_case(&opts).unwrap();
         std::env::set_current_dir(old).unwrap();
@@ -741,6 +1018,39 @@ mod tests {
     }
 
     #[test]
+    fn live_mode_expectation_match_requires_task_lifecycle_and_er_status() {
+        let h = LiveHarness {
+            case_name: "unit".to_string(),
+            task_id: "TUNIT".to_string(),
+            db_path: PathBuf::from("/tmp/no-db"),
+            root: PathBuf::from("/tmp"),
+        };
+        let expect = CaseExpect::default();
+        let good = LiveSnapshot {
+            status: "integrated".to_string(),
+            lifecycle: Some("done".to_string()),
+            active_step: None,
+            er: Some((
+                "ERUNIT".to_string(),
+                "passed".to_string(),
+                Some("PASS".to_string()),
+                Some("fake".to_string()),
+            )),
+        };
+        assert!(h.matches_expect(&expect, &good));
+        let bad_er = LiveSnapshot {
+            er: Some((
+                "ERUNIT".to_string(),
+                "running".to_string(),
+                None,
+                Some("fake".to_string()),
+            )),
+            ..good
+        };
+        assert!(!h.matches_expect(&expect, &bad_er));
+    }
+
+    #[test]
     fn stores_test_run_happy_path_reaches_integrated_done() {
         with_harness_env(|| {
             run(TestRunOpts {
@@ -748,6 +1058,7 @@ mod tests {
                 case_file: None,
                 delay_ms: Some(0),
                 watch: false,
+                live: false,
             })
             .expect("happy-path harness run should reach integrated/done");
         });
@@ -761,6 +1072,7 @@ mod tests {
                 case_file: None,
                 delay_ms: Some(0),
                 watch: false,
+                live: false,
             })
             .expect("failed external-review harness run should match held expectation");
         });
@@ -798,6 +1110,7 @@ mod tests {
                 case_file: Some(path),
                 delay_ms: Some(0),
                 watch: false,
+                live: false,
             })
             .expect("YAML case-file harness run should execute configured expectations");
         });
