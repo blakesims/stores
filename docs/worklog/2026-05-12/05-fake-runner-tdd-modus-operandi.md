@@ -5,15 +5,24 @@
 
 ## Summary
 
-We are now using fake-runner work in two TDD stages. Stage 1 tests and hardens the testing system itself. Stage 2 uses that hardened system to reproduce and fix real engine bugs.
+We are using fake-runner work in two TDD stages. Stage 1 hardens the testing system itself. Stage 2 uses that hardened system to reproduce and fix real engine bugs.
 
 All agents/workers/reviewers on this thread must follow this distinction.
+
+## Boundary rule
+
+The boundary is not "fake-runner code" vs "engine code." Some engine code is part of harness fidelity.
+
+- **Stage 1:** harness-fidelity failures, even when the fix is in engine code. Example: daemon reexec bypasses `STORES_LLM_OFF` and launches real Claude.
+- **Stage 2:** engine-correctness failures surfaced through a working harness. Example: a deterministic fake scenario reproduces a real stale-submit or watchdog bug after the harness is already trusted.
+
+If Stage 1 surfaces a non-blocking Stage 2 bug, append it to the Stage 2 candidate list and stop. Do not derail harness bring-up into open-ended engine debugging.
 
 ## Stage 1 — TDD the testing system
 
 **Goal:** make `STORES_LLM_OFF=1` / `runner=fake` a trustworthy operator test harness.
 
-A happy-path fake run must go all the way through the real substrate:
+A happy-path fake run must go all the way through the real substrate to **`integrated`**:
 
 ```text
 task created
@@ -24,42 +33,57 @@ task created
 → code-reviewer fake
 → wrap fake
 → external-review fake
-→ accept/integration where applicable
-→ expected terminal state
+→ fake-review acceptance explicitly allowed for test mode
+→ integration lane
+→ integrated
 ```
 
 **Rule:** if the failure is caused by fake-runner/test-mode infrastructure, fix it directly outside the substrate workflow.
 
 Do not file substrate observations for Stage 1 harness failures. Do not dogfood the dogfood harness while the harness itself is broken. Use direct code edits plus executor/reviewer loops. The pass condition is literal: the failing fake-mode test now passes.
 
+**Sunset clause:** this direct-edit escape is temporary. When all current Stage 1 issues are checked and the transition criteria below pass, default work returns to substrate-driven flow for non-harness work.
+
 Stage 1 includes:
 
 - no real Claude/Codex/Pi calls under `STORES_LLM_OFF=1`;
-- private daemon reexec path respects fake mode;
+- private daemon reexec path respects fake mode and is covered by post-reexec sentinel tests;
 - live DB migrations support fake metadata such as `external_reviews.runner='fake'`;
 - fake external review persists successfully;
 - fake marker executor can create real commits;
-- watch/status/runs surfaces clearly show fake provenance;
+- watch/status/runs accurately show fake-run state and fake provenance;
 - test runs leave repo/DB state understandable;
-- eventual operator UX: `stores test ...` cases/suites.
+- concrete operator UX: `stores test run <case>` and `stores test suite <suite>`.
+
+### Stage 1 → Stage 2 transition criteria
+
+Do not enter Stage 2 until all are true:
+
+1. Happy-path waterfall reaches `integrated` on **three consecutive clean runs**.
+2. A CI/test sentinel asserts **zero real LLM subprocess invocations** across fake scenarios, including the daemon post-reexec path.
+3. All currently open Stage 1 issue-list items are checked.
+
+### Test hygiene rule
+
+All tests that mutate `STORES_LLM_OFF` or fake-runner env vars must use `crate::runner::test_support::ENV_LOCK` and restore the original value on exit.
 
 ## Stage 2 — TDD the real engine issues
 
-Only enter Stage 2 once Stage 1 is reliable.
+Only enter Stage 2 once Stage 1 meets the transition criteria.
 
 **Goal:** use deterministic fake scenarios to reproduce and fix real engine battlescars.
 
-Examples:
+Examples / candidate list:
 
 - silent zombie / watchdog failure;
-- stale daemon/private binary behavior;
+- stale daemon/private binary behavior unrelated to fake-mode fidelity;
 - duplicate dispatch;
 - stale submit;
 - external-review convergence stalls;
 - stale-base / stale external-review freshness;
 - fake-reviewed acceptance safety;
 - lock cleanup;
-- watch/status truth;
+- watch/status truth for real stuck-task states reproduced via fake;
 - resume from blocked role;
 - auto-drive disabled staying disabled.
 
@@ -78,13 +102,14 @@ Workflow:
 
 We are currently in **Stage 1**.
 
-The next milestone is one clean, repeatable happy-path fake test that reaches the expected terminal state without real LLM calls.
+The next milestone is one clean, repeatable happy-path fake test that reaches `integrated` without real LLM calls.
 
-## Running issue list
+## Running Stage 1 issue list
 
 Use this section as the local TDD todo list. Add an unchecked item when a fake-mode test fails. Check it only when the same test passes after the fix.
 
-- [ ] Stale private daemon binary can bypass fake mode: `STORES_LLM_OFF=1 stores agents run --once` reexeced into `~/.local/share/stores/bin/stores` and launched a real Claude planner before the private binary was updated.
-- [ ] Live DB CHECK constraint rejects fake external review: fake ER dispatch runs, but persistence fails with `CHECK constraint failed: runner IN ('codex', 'pi', 'claude-code')`.
+- [ ] Stale private daemon binary can bypass fake mode: `STORES_LLM_OFF=1 stores agents run --once` reexeced into `~/.local/share/stores/bin/stores` and launched a real Claude planner before the private binary was updated. Fix must include sentinel coverage for the post-reexec process, not only the initial CLI process.
+- [ ] Live DB CHECK constraint rejects fake external review: fake ER dispatch runs, but persistence fails with `CHECK constraint failed: runner IN ('codex', 'pi', 'claude-code')`. Fix shape: ship a migration/schema repair that rebuilds the affected SQLite table constraint to include `fake` as a valid runner; do not rely only on YAML drift.
 - [ ] `stall-no-heartbeat` user-visible classification is wrong: task blocks as `payload_invalid` / `runner_payload_error` instead of a clear liveness/watchdog failure.
-- [ ] No first-class `stores test` UX for named cases/suites such as `happy-path`, `T1`, `T2`, `T3`, `T3 with failed ER`, and battlescar scenarios.
+- [ ] `stores test run happy-path --delay-ms 5000 --watch` exits 0 and asserts task reaches `integrated` with no real LLM subprocesses.
+- [ ] `stores test run t3-failed-er --delay-ms 5000 --watch` exits 0 and asserts the expected fake external-review held/failure state.
