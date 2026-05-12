@@ -3684,6 +3684,265 @@ mod tests {
     }
 
     #[test]
+    fn fake_happy_path_waterfall_reaches_integrated_without_real_llm_invocations() {
+        fn git(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap()
+        }
+        fn assert_git(repo: &std::path::Path, args: &[&str]) {
+            let out = git(repo, args);
+            assert!(
+                out.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                for (key, old) in self.0.drain(..) {
+                    match old {
+                        Some(v) => std::env::set_var(key, v),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        fn transition_cmd(verb: &'static str) -> clap::Command {
+            clap::Command::new(verb).arg(clap::Arg::new("display_id").required(true).index(1))
+        }
+
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let _restore = EnvRestore(
+            [
+                "STORES_LLM_OFF",
+                "STORES_FAKE_AGENT_BIN",
+                "STORES_FAKE_SCENARIO",
+                "STORES_FAKE_DELAY_MS",
+                "STORES_FAKE_EXECUTOR_MODE",
+                "STORES_ALLOW_FAKE_REVIEW_ACCEPT",
+            ]
+            .into_iter()
+            .map(|k| (k, std::env::var_os(k)))
+            .collect(),
+        );
+        std::env::set_var("STORES_LLM_OFF", "1");
+        std::env::set_var(
+            "STORES_FAKE_AGENT_BIN",
+            stores_fake_agent_bin_for_unit_tests(),
+        );
+        std::env::set_var("STORES_FAKE_SCENARIO", "all-pass");
+        std::env::set_var("STORES_FAKE_DELAY_MS", "0");
+        std::env::set_var("STORES_FAKE_EXECUTOR_MODE", "marker_file");
+        std::env::set_var("STORES_ALLOW_FAKE_REVIEW_ACCEPT", "1");
+
+        let schema = tasks_schema();
+        let (dir, conn) = open_db(&schema);
+        let external_reviews_yaml = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("stores/external_reviews/schema.yaml"),
+        )
+        .expect("external_reviews schema.yaml");
+        let external_reviews_schema = Schema::from_yaml(&external_reviews_yaml).unwrap();
+        conn.execute_batch(&ddl_for(&external_reviews_schema))
+            .unwrap();
+        db::ensure_runs_view_if_tasks_exists(&conn).unwrap();
+        crate::handlers::framework_migrate::ensure_integration_singleton_index(&conn).unwrap();
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert_git(&repo, &["init", "-b", "main"]);
+        assert_git(&repo, &["config", "user.email", "fake@example.test"]);
+        assert_git(&repo, &["config", "user.name", "Fake Test"]);
+        std::fs::write(repo.join("README.md"), "base\n").unwrap();
+        assert_git(&repo, &["add", "README.md"]);
+        assert_git(&repo, &["commit", "-m", "base"]);
+        let workspace = dir.path().join("wt-TFAKE");
+        let workspace_arg = workspace.to_string_lossy().to_string();
+        assert_git(
+            &repo,
+            &["worktree", "add", "-b", "feat/tfake", &workspace_arg],
+        );
+        std::fs::create_dir_all(workspace.join(".stores")).unwrap();
+
+        insert_task(
+            &conn,
+            &schema,
+            "TFAKE",
+            "planning",
+            "2026-01-01T00:00:00Z",
+            0,
+            0,
+            None,
+            None,
+        );
+        conn.execute(
+            "UPDATE tasks SET workspace_path=?1, branch='feat/tfake', activation='active' WHERE display_id='TFAKE'",
+            rusqlite::params![workspace_arg],
+        )
+        .unwrap();
+
+        let runner = crate::runner::FakeRunner::with_bin(stores_fake_agent_bin_for_unit_tests());
+        drive_loop(&schema, &conn, "TFAKE", &runner, 20)
+            .expect("fake drive waterfall should reach in_review");
+        assert_eq!(task_status(&conn, "TFAKE"), "in_review");
+        assert!(
+            workspace.join("fake-runner-markers").exists(),
+            "marker executor should create committed marker directory"
+        );
+        let marker_commit =
+            String::from_utf8(git(&workspace, &["log", "-1", "--pretty=%B"]).stdout).unwrap();
+        assert!(marker_commit.contains("Provenance: stores-fake-agent executor_mode=marker_file"));
+
+        conn.execute(
+            "INSERT INTO external_reviews (display_id,status,task_id,attempt,adapter,created_at,updated_at,created_by,updated_by) \
+             VALUES ('ERFAKE','pending','TFAKE',1,'external_review','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','test','test')",
+            [],
+        )
+        .unwrap();
+        let codex_sentinel = dir.path().join("codex-was-invoked");
+        let codex_cmd = dir.path().join("codex-sentinel.sh");
+        std::fs::write(
+            &codex_cmd,
+            format!(
+                "#!/usr/bin/env bash\ntouch {}\nexit 99\n",
+                codex_sentinel.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&codex_cmd).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&codex_cmd, perms).unwrap();
+        }
+        let cfg_path = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg_path,
+            format!(
+                "review:\n  runner: codex\n  timeout_secs: 5\ncodex:\n  command: {}\n  args: []\nfake_runner:\n  delay_ms: 0\n  scenario: all-pass\n  executor_mode: marker_file\n  fake_external_review: true\n",
+                codex_cmd.display()
+            ),
+        )
+        .unwrap();
+        let er_agents = crate::flow::AgentsYaml {
+            agents: vec![],
+            deployment_specialist: None,
+        };
+        let er_outcome = crate::flow::builtins::external_review::run(
+            &serde_json::json!({"display_id":"ERFAKE"}),
+            &crate::flow::builtins::DispatchCtx {
+                conn: &conn,
+                agents: &er_agents,
+                config_path: &cfg_path,
+                policies_hash: "",
+            },
+        )
+        .expect("fake external review should pass and persist");
+        assert_eq!(
+            er_outcome,
+            crate::flow::builtins::external_review::DispatchOutcome::Dispatched
+        );
+        assert!(
+            !codex_sentinel.exists(),
+            "real codex sentinel must not be invoked"
+        );
+        let (er_runner, er_status): (String, String) = conn
+            .query_row(
+                "SELECT runner,status FROM external_reviews WHERE display_id='ERFAKE'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((er_runner.as_str(), er_status.as_str()), ("fake", "passed"));
+
+        let accept_matches = transition_cmd("accept").get_matches_from(["accept", "TFAKE"]);
+        crate::handlers::transition::run(
+            &schema,
+            &conn,
+            &accept_matches,
+            crate::schema::actor::Actor::Human.into(),
+            "accept",
+        )
+        .expect("explicit fake-review test marker should allow accept");
+        let release_matches = transition_cmd("release-to-integration")
+            .get_matches_from(["release-to-integration", "TFAKE"]);
+        crate::handlers::transition::run(
+            &schema,
+            &conn,
+            &release_matches,
+            crate::schema::actor::Actor::Framework.into(),
+            "release-to-integration",
+        )
+        .expect("framework release-to-integration should enqueue lane");
+
+        let mut integrate_args = serde_yaml::Mapping::new();
+        integrate_args.insert(
+            serde_yaml::Value::String("pre_land_check".into()),
+            serde_yaml::Value::String("true".into()),
+        );
+        integrate_args.insert(
+            serde_yaml::Value::String("allow_push".into()),
+            serde_yaml::Value::Bool(false),
+        );
+        let agents = crate::flow::AgentsYaml {
+            agents: vec![crate::flow::AgentEntry {
+                name: "integrate".to_string(),
+                subscribes_to: vec![],
+                command: "builtin:integrate".to_string(),
+                claim_window_secs: 300,
+                retry_policy: crate::flow::RetryPolicy::default(),
+                command_args: Some(integrate_args),
+            }],
+            deployment_specialist: None,
+        };
+        let row = serde_json::json!({"display_id":"TFAKE","branch":"feat/tfake","workspace_path": workspace.to_string_lossy()});
+        crate::flow::builtins::integrate::run(
+            &row,
+            &crate::flow::builtins::DispatchCtx {
+                conn: &conn,
+                agents: &agents,
+                config_path: &cfg_path,
+                policies_hash: "",
+            },
+        )
+        .expect("integration lane should land marker commit");
+
+        let (status, lifecycle): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status,lifecycle FROM tasks WHERE display_id='TFAKE'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (status.as_str(), lifecycle.as_deref()),
+            ("integrated", Some("done"))
+        );
+        let main_tree_has_marker = git(&repo, &["ls-tree", "-r", "--name-only", "main"]);
+        assert!(
+            String::from_utf8_lossy(&main_tree_has_marker.stdout)
+                .contains("fake-runner-markers/TFAKE"),
+            "main must contain fake marker commit after integration"
+        );
+        let non_fake_runs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_runs WHERE display_id='TFAKE' AND COALESCE(harness_id,'') != 'fake'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(non_fake_runs, 0, "all waterfall agent runs must be fake");
+    }
+
+    #[test]
     fn drive_loop_fake_plan_review_reject_once_then_passes() {
         with_fake_scenario("plan-reviewer-reject-once", || {
             let schema = tasks_schema();
