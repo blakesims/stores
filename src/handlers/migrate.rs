@@ -17,11 +17,16 @@ pub struct MigrateReport {
     /// True when the T107 cluster_key CHECK rebuild ran (i.e. the
     /// observations table was rebuilt to add the registry CHECK constraint).
     pub cluster_key_rebuilt: bool,
+    /// True when the external_reviews.runner CHECK constraint was rebuilt to
+    /// admit the fake test-mode runner.
+    pub external_reviews_runner_rebuilt: bool,
 }
 
 impl MigrateReport {
     pub fn is_no_op(&self) -> bool {
-        self.applied_columns.is_empty() && !self.cluster_key_rebuilt
+        self.applied_columns.is_empty()
+            && !self.cluster_key_rebuilt
+            && !self.external_reviews_runner_rebuilt
     }
 }
 
@@ -141,12 +146,18 @@ fn apply_with_inner(
         orphaned: plan.orphaned.len(),
         type_mismatches: plan.type_mismatches.len(),
         cluster_key_rebuilt: false,
+        external_reviews_runner_rebuilt: false,
     };
 
     let needs_source_rebuild = observations_source_id_type_mismatch(&plan);
     let needs_cluster_rebuild = observations_cluster_key_check_missing(conn)?;
+    let needs_external_runner_rebuild = external_reviews_runner_fake_check_missing(conn)?;
 
-    if plan.additive.is_empty() && !needs_source_rebuild && !needs_cluster_rebuild {
+    if plan.additive.is_empty()
+        && !needs_source_rebuild
+        && !needs_cluster_rebuild
+        && !needs_external_runner_rebuild
+    {
         return Ok(report);
     }
 
@@ -176,6 +187,13 @@ fn apply_with_inner(
             schemas,
             manifest,
             &additive_col_names,
+        )?)
+    } else {
+        None
+    };
+    let external_runner_rebuild_sql_body = if needs_external_runner_rebuild {
+        Some(rebuild_external_reviews_with_fake_runner_check_sql(
+            conn, schemas, manifest,
         )?)
     } else {
         None
@@ -219,6 +237,9 @@ fn apply_with_inner(
     if let Some(ref cluster_body) = cluster_rebuild_sql_body {
         batch_lines.push(cluster_body.clone());
     }
+    if let Some(ref external_body) = external_runner_rebuild_sql_body {
+        batch_lines.push(external_body.clone());
+    }
     if !batch_lines.is_empty() {
         tx.execute_batch(&batch_lines.join("\n"))
             .context("failed to apply migrations (transaction will roll back)")?;
@@ -228,6 +249,9 @@ fn apply_with_inner(
     if needs_cluster_rebuild {
         cluster_key_backfill(&tx)?;
         report.cluster_key_rebuilt = true;
+    }
+    if needs_external_runner_rebuild {
+        report.external_reviews_runner_rebuilt = true;
     }
 
     // Step 3: Default-backfill inside the same TX (T052 P1). ALTER TABLE ADD
@@ -536,6 +560,88 @@ fn rebuild_observations_with_cluster_check_sql(
 /// NULL, call `classify_summary` and set cluster_key to the single matching
 /// registry key. Ambiguous/unrelated rows remain NULL. Runs inside the outer
 /// migration transaction so it's atomic with the rebuild.
+fn external_reviews_runner_fake_check_missing(conn: &Connection) -> Result<bool> {
+    let sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'external_reviews' AND type = 'table'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .context("read sqlite_master for external_reviews")?;
+    let Some(create_sql) = sql else {
+        return Ok(false);
+    };
+    Ok(create_sql.contains("runner IN") && !create_sql.contains("'fake'"))
+}
+
+fn rebuild_external_reviews_with_fake_runner_check_sql(
+    conn: &Connection,
+    schemas: &HashMap<String, Schema>,
+    manifest: &Manifest,
+) -> Result<String> {
+    let schema = schemas.get("external_reviews").ok_or_else(|| {
+        anyhow!("external_reviews schema not loaded for runner CHECK rebuild")
+    })?;
+    let table = manifest
+        .stores
+        .iter()
+        .find(|s| s.name == "external_reviews")
+        .map(|s| s.table_name.as_str())
+        .unwrap_or("external_reviews");
+    let tmp_table = format!("{table}__fake_runner_check");
+    let create_tmp = ddl_for(schema).replace(
+        &format!("CREATE TABLE IF NOT EXISTS {}", quote_ident(table)),
+        &format!("CREATE TABLE {}", quote_ident(&tmp_table)),
+    );
+    let live_cols = read_table_info(conn, table)?;
+    let expected = expected_columns(schema);
+    let common: Vec<String> = expected
+        .into_iter()
+        .filter(|c| live_cols.contains_key(&c.name))
+        .map(|c| c.name)
+        .collect();
+    let insert_cols = common
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let select_cols = common
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "DROP TABLE IF EXISTS {tmp};\n{create_tmp}\nINSERT INTO {tmp} ({insert_cols}) SELECT {select_cols} FROM {table_q};\nDROP TABLE {table_q};\nALTER TABLE {tmp} RENAME TO {table_q};",
+        tmp = quote_ident(&tmp_table),
+        table_q = quote_ident(table),
+    ))
+}
+
+pub fn repair_external_reviews_runner_fake_check(conn: &Connection) -> Result<bool> {
+    if !external_reviews_runner_fake_check_missing(conn)? {
+        return Ok(false);
+    }
+    let schema = Schema::from_yaml(include_str!("../../stores/external_reviews/schema.yaml"))?;
+    let mut schemas = HashMap::new();
+    schemas.insert("external_reviews".to_string(), schema);
+    let manifest = Manifest {
+        stores: vec![crate::manifest::InstalledStore {
+            name: "external_reviews".to_string(),
+            schema_path: std::path::PathBuf::from("bundled:external_reviews"),
+            installed_at: String::new(),
+            table_name: "external_reviews".to_string(),
+            scope: crate::schema::StoreScope::Worktree,
+        }],
+    };
+    let body = rebuild_external_reviews_with_fake_runner_check_sql(conn, &schemas, &manifest)?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(&body)
+        .context("rebuild external_reviews.runner CHECK to include fake")?;
+    tx.commit()?;
+    Ok(true)
+}
+
 fn cluster_key_backfill(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT display_id, summary FROM observations WHERE cluster_key IS NULL",
@@ -679,8 +785,9 @@ pub fn run_migrate(apply: bool) -> Result<()> {
     }
 
     let needs_source_rebuild = observations_source_id_type_mismatch(&plan);
+    let needs_external_runner_rebuild = external_reviews_runner_fake_check_missing(&conn)?;
 
-    if plan.additive.is_empty() && !needs_source_rebuild {
+    if plan.additive.is_empty() && !needs_source_rebuild && !needs_external_runner_rebuild {
         if apply {
             let created = crate::handlers::architecture_reviews_backfill::run_backfill(&conn)?;
             if created > 0 {
@@ -690,8 +797,8 @@ pub fn run_migrate(apply: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Print the dry-run view of pending additive DDL.
-    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len() + 1);
+    // Print the dry-run view of pending additive/rebuild DDL.
+    let mut sql_lines: Vec<String> = Vec::with_capacity(plan.additive.len() + 2);
     for (store, col) in &plan.additive {
         sql_lines.push(format!(
             "ALTER TABLE {} ADD COLUMN {};",
@@ -704,6 +811,9 @@ pub fn run_migrate(apply: bool) -> Result<()> {
     }
     if needs_source_rebuild {
         sql_lines.push("-- rebuild observations.source_id INTEGER → TEXT".to_string());
+    }
+    if needs_external_runner_rebuild {
+        sql_lines.push("-- rebuild external_reviews.runner CHECK to include fake".to_string());
     }
 
     for line in &sql_lines {
@@ -789,6 +899,7 @@ mod tests {
     const OBSERVATIONS_YAML: &str = include_str!("../../stores/observations/schema.yaml");
     const GATE_YAML: &str = include_str!("../../stores/gate/schema.yaml");
     const TASKS_YAML: &str = include_str!("../../stores/tasks/schema.yaml");
+    const EXTERNAL_REVIEWS_YAML: &str = include_str!("../../stores/external_reviews/schema.yaml");
 
     fn load_bundled() -> (HashMap<String, Schema>, Manifest) {
         let mut schemas = HashMap::new();
@@ -815,6 +926,22 @@ mod tests {
         for s in schemas.values() {
             conn.execute_batch(&ddl_for(s)).unwrap();
         }
+    }
+
+    fn load_external_reviews_only() -> (HashMap<String, Schema>, Manifest) {
+        let schema = Schema::from_yaml(EXTERNAL_REVIEWS_YAML).expect("parse external_reviews");
+        let mut schemas = HashMap::new();
+        schemas.insert("external_reviews".to_string(), schema);
+        let manifest = Manifest {
+            stores: vec![InstalledStore {
+                name: "external_reviews".to_string(),
+                schema_path: PathBuf::from("bundled:external_reviews"),
+                installed_at: "2026-05-12T00:00:00Z".into(),
+                table_name: "external_reviews".to_string(),
+                scope: StoreScope::Worktree,
+            }],
+        };
+        (schemas, manifest)
     }
 
     #[test]
@@ -1813,5 +1940,58 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ck, None, "invalid pre-existing cluster_key must be reset to NULL");
+    }
+
+    #[test]
+    fn fake_runner_check_rebuild_allows_fake_external_review_runner() {
+        let (schemas, manifest) = load_external_reviews_only();
+        let mut conn = Connection::open_in_memory().unwrap();
+        let er_schema = schemas.get("external_reviews").unwrap();
+        let legacy = ddl_for(er_schema).replace(
+            "'codex', 'pi', 'claude-code', 'fake', 'manual-codex', 'manual'",
+            "'codex', 'pi', 'claude-code'",
+        );
+        conn.execute_batch(&legacy).unwrap();
+        conn.execute(
+            "INSERT INTO external_reviews \
+             (display_id, status, created_at, updated_at, created_by, updated_by, task_id, attempt, runner) \
+             VALUES ('ER001','pending','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','framework','framework','T001',1,'codex')",
+            [],
+        )
+        .unwrap();
+        assert!(external_reviews_runner_fake_check_missing(&conn).unwrap());
+
+        let report = apply_with(&mut conn, &schemas, &manifest).expect("apply_with ok");
+        assert!(report.external_reviews_runner_rebuilt);
+        assert!(!external_reviews_runner_fake_check_missing(&conn).unwrap());
+        conn.execute(
+            "INSERT INTO external_reviews \
+             (display_id, status, created_at, updated_at, created_by, updated_by, task_id, attempt, runner) \
+             VALUES ('ER002','passed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','framework','framework','T001',2,'fake')",
+            [],
+        )
+        .expect("rebuilt CHECK must admit runner=fake");
+    }
+
+    #[test]
+    fn boot_repair_rebuilds_fake_runner_check_without_manifest() {
+        let (schemas, _manifest) = load_external_reviews_only();
+        let conn = Connection::open_in_memory().unwrap();
+        let er_schema = schemas.get("external_reviews").unwrap();
+        let legacy = ddl_for(er_schema).replace(
+            "'codex', 'pi', 'claude-code', 'fake', 'manual-codex', 'manual'",
+            "'codex', 'pi', 'claude-code'",
+        );
+        conn.execute_batch(&legacy).unwrap();
+
+        assert!(repair_external_reviews_runner_fake_check(&conn).unwrap());
+        conn.execute(
+            "INSERT INTO external_reviews \
+             (display_id, status, created_at, updated_at, created_by, updated_by, task_id, attempt, runner) \
+             VALUES ('ER003','passed','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','framework','framework','T001',1,'fake')",
+            [],
+        )
+        .expect("boot repair CHECK must admit runner=fake");
+        assert!(!repair_external_reviews_runner_fake_check(&conn).unwrap());
     }
 }

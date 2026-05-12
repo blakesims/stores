@@ -834,6 +834,13 @@ const STALE_REEXEC_VALIDATION_TIMEOUT: Duration = Duration::from_millis(1500);
 const STALE_REEXEC_OUTPUT_LIMIT: usize = 512;
 
 #[derive(Debug)]
+struct ValidationOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_status: Option<String>,
+}
+
+#[derive(Debug)]
 struct CandidateValidationFailure {
     path: PathBuf,
     size: Option<u64>,
@@ -863,13 +870,14 @@ pub(crate) fn validate_stores_binary_candidate(path: &Path) -> Result<()> {
 }
 
 #[allow(clippy::result_large_err)]
-fn validate_stale_reexec_candidate(
+fn run_validation_command(
     path: &Path,
-) -> std::result::Result<(), CandidateValidationFailure> {
+    args: &[&str],
+) -> std::result::Result<ValidationOutput, CandidateValidationFailure> {
     let size = std::fs::metadata(path).map(|m| m.len()).ok();
-    let command = format!("{} --help", path.display());
+    let command = format!("{} {}", path.display(), args.join(" "));
     let mut cmd = std::process::Command::new(path);
-    cmd.arg("--help")
+    cmd.args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     #[cfg(unix)]
@@ -908,9 +916,7 @@ fn validate_stale_reexec_candidate(
                         stdout: String::new(),
                         stderr: String::new(),
                     })?;
-                let stdout = bounded_output(&output.stdout);
-                let stderr = bounded_output(&output.stderr);
-                let exit_status_str = Some(
+                let exit_status = Some(
                     output
                         .status
                         .code()
@@ -922,36 +928,17 @@ fn validate_stale_reexec_candidate(
                         path: path.to_path_buf(),
                         size,
                         command,
-                        exit_status: exit_status_str,
+                        exit_status,
                         reason: format!("non-success exit status: {}", output.status),
-                        stdout,
-                        stderr,
+                        stdout: bounded_output(&output.stdout),
+                        stderr: bounded_output(&output.stderr),
                     });
                 }
-                if output.stdout.is_empty() {
-                    return Err(CandidateValidationFailure {
-                        path: path.to_path_buf(),
-                        size,
-                        command,
-                        exit_status: exit_status_str,
-                        reason: "empty stdout from --help".to_string(),
-                        stdout,
-                        stderr,
-                    });
-                }
-                let stdout_text = String::from_utf8_lossy(&output.stdout).to_lowercase();
-                if !stdout_text.contains("schema-driven store framework") {
-                    return Err(CandidateValidationFailure {
-                        path: path.to_path_buf(),
-                        size,
-                        command,
-                        exit_status: exit_status_str,
-                        reason: "missing stores marker in --help stdout".to_string(),
-                        stdout,
-                        stderr,
-                    });
-                }
-                return Ok(());
+                return Ok(ValidationOutput {
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    exit_status,
+                });
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
@@ -992,6 +979,60 @@ fn validate_stale_reexec_candidate(
             }
         }
     }
+}
+
+fn candidate_failure_from_output(
+    path: &Path,
+    command: String,
+    output: &ValidationOutput,
+    reason: &str,
+) -> CandidateValidationFailure {
+    CandidateValidationFailure {
+        path: path.to_path_buf(),
+        size: std::fs::metadata(path).map(|m| m.len()).ok(),
+        command,
+        exit_status: output.exit_status.clone(),
+        reason: reason.to_string(),
+        stdout: bounded_output(&output.stdout),
+        stderr: bounded_output(&output.stderr),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_stale_reexec_candidate(
+    path: &Path,
+) -> std::result::Result<(), CandidateValidationFailure> {
+    let help = run_validation_command(path, &["--help"])?;
+    if help.stdout.is_empty() {
+        return Err(candidate_failure_from_output(
+            path,
+            format!("{} --help", path.display()),
+            &help,
+            "empty stdout from --help",
+        ));
+    }
+    let stdout_text = String::from_utf8_lossy(&help.stdout).to_lowercase();
+    if !stdout_text.contains("schema-driven store framework") {
+        return Err(candidate_failure_from_output(
+            path,
+            format!("{} --help", path.display()),
+            &help,
+            "missing stores marker in --help stdout",
+        ));
+    }
+    if crate::flow::config::llm_off_enabled() {
+        let sentinel = run_validation_command(path, &["__llm-off-sentinel"])?;
+        let sentinel_text = String::from_utf8_lossy(&sentinel.stdout);
+        if !sentinel_text.contains("stores-llm-off-sentinel=ok") {
+            return Err(candidate_failure_from_output(
+                path,
+                format!("{} __llm-off-sentinel", path.display()),
+                &sentinel,
+                "missing llm-off sentinel stdout",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn candidate_validation_error_message(f: &CandidateValidationFailure) -> String {
@@ -3379,6 +3420,47 @@ mod tests {
         // Pointing at a non-existent file is fine: notify_with_path falls
         // through to the env var (also unset in tests) → stderr-only.
         std::path::PathBuf::from("/tmp/stores-test-nonexistent-config.yaml")
+    }
+
+    fn executable_script(dir: &tempfile::TempDir, body: &str) -> PathBuf {
+        let path = dir.path().join("stores");
+        std::fs::write(&path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn llm_off_candidate_validation_requires_post_reexec_sentinel() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let old = std::env::var_os("STORES_LLM_OFF");
+        std::env::set_var("STORES_LLM_OFF", "1");
+        let tmp = tempfile::tempdir().unwrap();
+        let stale = executable_script(
+            &tmp,
+            "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then echo 'Schema-driven store framework'; exit 0; fi\necho stale-private-binary\nexit 0\n",
+        );
+        let err = validate_stale_reexec_candidate(&stale).unwrap_err();
+        assert!(
+            err.reason.contains("missing llm-off sentinel"),
+            "unexpected validation failure: {err:?}"
+        );
+        let fresh = executable_script(
+            &tmp,
+            "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then echo 'Schema-driven store framework'; exit 0; fi\nif [ \"$1\" = \"__llm-off-sentinel\" ]; then echo 'stores-llm-off-sentinel=ok'; exit 0; fi\nexit 64\n",
+        );
+        validate_stale_reexec_candidate(&fresh).expect("sentinel-capable candidate passes");
+        match old {
+            Some(v) => std::env::set_var("STORES_LLM_OFF", v),
+            None => std::env::remove_var("STORES_LLM_OFF"),
+        }
     }
 
     fn fresh_engine_runner_db() -> Connection {

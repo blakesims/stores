@@ -158,6 +158,9 @@ fn main() -> Result<()> {
     let matches = cmd.get_matches();
 
     match matches.subcommand() {
+        Some(("__llm-off-sentinel", _)) => {
+            println!("stores-llm-off-sentinel=ok");
+        }
         Some(("init", _)) => {
             cli::init::run()?;
         }

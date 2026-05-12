@@ -170,6 +170,11 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                      constant-time compare.",
                 ),
         )
+        .subcommand(
+            Command::new("__llm-off-sentinel")
+                .hide(true)
+                .about("Internal fake-mode binary capability sentinel"),
+        )
         // Init subcommand
         .subcommand(
             Command::new("init").about("Initialize .stores/ in the current directory"),

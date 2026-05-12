@@ -82,6 +82,8 @@ pub fn open(path: &Path) -> Result<Connection> {
         .is_some();
     if !disabled {
         apply_framework_drift(&conn).context("auto-apply framework DDL drift on boot")?;
+        crate::handlers::migrate::repair_external_reviews_runner_fake_check(&conn)
+            .context("auto-repair external_reviews.runner CHECK for fake runner")?;
     }
     Ok(conn)
 }
