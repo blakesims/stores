@@ -365,6 +365,8 @@ impl LiveHarness {
                 db_path.display()
             );
         }
+        let backup_path = backup_live_db(&db_path)?;
+        println!("live db backup={}", backup_path.display());
         let task_id = create_live_task(case_name)?;
         Ok(Self {
             case_name: case_name.to_string(),
@@ -405,18 +407,34 @@ impl LiveHarness {
                 && snap.status == "in_review"
                 && snap.er_status() == Some("passed")
             {
-                self.release_to_integration()?;
+                self.accept_for_integration()?;
                 released = true;
                 println!(
-                    "progress live: task={} released-to-integration",
+                    "progress live: task={} accepted-for-daemon-integration",
                     self.task_id
                 );
                 continue;
             }
             if self.matches_expect(expect, &snap) {
                 self.assert_no_real_llm()?;
+                if expect.task_status != "integrated" {
+                    self.isolate_live_case()?;
+                    let stable = self.snapshot()?;
+                    if !self.matches_expect(expect, &stable) {
+                        bail!(
+                            "live case {} changed during isolation: before={:?} after={:?}",
+                            self.case_name,
+                            snap,
+                            stable
+                        );
+                    }
+                    println!(
+                        "progress live: task={} isolated activation=inactive",
+                        self.task_id
+                    );
+                }
                 println!(
-                    "summary live task={} status={} lifecycle={} er={:?} no_real_llm=ok",
+                    "summary live task={} status={} lifecycle={} er={:?} no_real_llm=ok marker_files_on_main_are_intentional_fake_runner_proof",
                     self.task_id,
                     snap.status,
                     snap.lifecycle.unwrap_or_default(),
@@ -462,23 +480,40 @@ impl LiveHarness {
     }
 
     fn run_daemon_once(&self) -> Result<()> {
-        let out = Command::new(stores_bin_for_preflight()?)
-            .args(["agents", "run", "--once", "--poll-interval", "0.2"])
-            .current_dir(&self.root)
-            .env("STORES_LLM_OFF", "1")
-            .env("STORES_PRIVATE_DAEMON_REEXEC", "1")
-            .env("LIBSQLITE3_SYS_USE_PKG_CONFIG", "1")
-            .output()
-            .context("running live daemon once")?;
-        if !out.status.success() {
-            bail!(
-                "stores agents run --once failed: status={} stderr={} stdout={}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr),
-                String::from_utf8_lossy(&out.stdout)
-            );
+        let mut last = None;
+        for _ in 0..20 {
+            let out = Command::new(stores_bin_for_preflight()?)
+                .args(["agents", "run", "--once", "--poll-interval", "0.2"])
+                .current_dir(&self.root)
+                .env("STORES_LLM_OFF", "1")
+                .env("STORES_PRIVATE_DAEMON_REEXEC", "1")
+                .env("LIBSQLITE3_SYS_USE_PKG_CONFIG", "1")
+                .output()
+                .context("running live daemon once")?;
+            if out.status.success() {
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let locked = |s: &str| s.contains("database") && s.contains("locked");
+            if !locked(&stderr) && !locked(&stdout) {
+                bail!(
+                    "stores agents run --once failed: status={} stderr={} stdout={}",
+                    out.status,
+                    stderr,
+                    stdout
+                );
+            }
+            last = Some((out.status, stderr, stdout));
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
-        Ok(())
+        let (status, stderr, stdout) = last.expect("daemon retry recorded last failure");
+        bail!(
+            "stores agents run --once failed after lock retries: status={} stderr={} stdout={}",
+            status,
+            stderr,
+            stdout
+        )
     }
 
     fn snapshot(&self) -> Result<LiveSnapshot> {
@@ -511,19 +546,57 @@ impl LiveHarness {
         Ok(())
     }
 
-    fn release_to_integration(&self) -> Result<()> {
-        let conn = self.conn()?;
-        let agents =
-            crate::flow::agents_yaml::load_from_path(&self.root.join(".stores/agents.yaml"))?;
-        crate::flow::builtins::release_to_integration::run(
-            &json!({"display_id": self.task_id, "status":"in_review", "lifecycle":"active", "active_step":"wrapping", "human_acceptance_policy":"delegated_by_policy", "task_review_policy":"authoritative"}),
-            &DispatchCtx {
-                conn: &conn,
-                agents: &agents,
-                config_path: &self.root.join(".stores/config.yaml"),
-                policies_hash: "stores-test-live",
-            },
+    fn accept_for_integration(&self) -> Result<()> {
+        run_live_stores_cmd(
+            &self.root,
+            ["tasks", "accept", &self.task_id, "--invoker", "human"],
+            "stores tasks accept",
         )?;
+        run_live_stores_cmd(
+            &self.root,
+            ["tasks", "enqueue-integration", &self.task_id],
+            "stores tasks enqueue-integration",
+        )?;
+        Ok(())
+    }
+
+    fn isolate_live_case(&self) -> Result<()> {
+        self.freeze_latest_tooling_held_review_retry()?;
+        let out = Command::new(stores_bin_for_preflight()?)
+            .args([
+                "tasks",
+                "deactivate",
+                &self.task_id,
+                "--reason",
+                "stores test live case reached expected held state",
+                "--invoker",
+                "ai_with_human",
+            ])
+            .current_dir(&self.root)
+            .env("STORES_LLM_OFF", "1")
+            .output()
+            .context("deactivating held live test task")?;
+        if !out.status.success() {
+            bail!(
+                "stores tasks deactivate failed: status={} stderr={} stdout={}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+        Ok(())
+    }
+
+    fn freeze_latest_tooling_held_review_retry(&self) -> Result<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE external_reviews \
+             SET next_retry_at='9999-12-31T23:59:59Z', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+             WHERE id = (SELECT id FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1) \
+               AND status='tooling_held'",
+            [&self.task_id],
+        )
+        .with_context(|| format!("freezing latest tooling-held review retry for {}", self.task_id))?;
         Ok(())
     }
 
@@ -557,6 +630,25 @@ impl LiveHarness {
     }
 }
 
+fn run_live_stores_cmd<const N: usize>(root: &Path, args: [&str; N], label: &str) -> Result<()> {
+    let out = Command::new(stores_bin_for_preflight()?)
+        .args(args)
+        .current_dir(root)
+        .env("STORES_LLM_OFF", "1")
+        .env("STORES_ALLOW_FAKE_REVIEW_ACCEPT", "1")
+        .output()
+        .with_context(|| label.to_string())?;
+    if !out.status.success() {
+        bail!(
+            "{label} failed: status={} stderr={} stdout={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct LiveSnapshot {
     status: String,
@@ -568,6 +660,31 @@ impl LiveSnapshot {
     fn er_status(&self) -> Option<&str> {
         self.er.as_ref().map(|(_, s, _, _)| s.as_str())
     }
+}
+
+fn backup_live_db(db_path: &Path) -> Result<PathBuf> {
+    let stores_dir = db_path
+        .parent()
+        .with_context(|| format!("db path has no parent: {}", db_path.display()))?;
+    let backup_dir = stores_dir.join("backups");
+    std::fs::create_dir_all(&backup_dir)
+        .with_context(|| format!("creating backup dir {}", backup_dir.display()))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let backup_path = backup_dir.join(format!(
+        "db.sqlite.{}.{:09}.bak",
+        now.as_secs(),
+        now.subsec_nanos()
+    ));
+    std::fs::copy(db_path, &backup_path).with_context(|| {
+        format!(
+            "backing up live db {} to {}",
+            db_path.display(),
+            backup_path.display()
+        )
+    })?;
+    Ok(backup_path)
 }
 
 fn create_live_task(case_name: &str) -> Result<String> {
@@ -1015,6 +1132,64 @@ mod tests {
         restore.set("STORES_LLM_OFF", "1");
         drop(restore);
         assert_eq!(std::env::var_os("STORES_LLM_OFF"), old);
+    }
+
+    #[test]
+    fn live_db_backup_helper_copies_db_before_live_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let stores_dir = dir.path().join(".stores");
+        std::fs::create_dir_all(&stores_dir).unwrap();
+        let db_path = stores_dir.join("db.sqlite");
+        std::fs::write(&db_path, b"before-create").unwrap();
+
+        let backup = backup_live_db(&db_path).unwrap();
+        std::fs::write(&db_path, b"after-create").unwrap();
+
+        assert_eq!(backup.parent().unwrap(), stores_dir.join("backups"));
+        assert!(backup
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("db.sqlite."));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"before-create");
+        assert_eq!(std::fs::read(&db_path).unwrap(), b"after-create");
+    }
+
+    #[test]
+    fn live_case_isolation_freezes_tooling_retry_without_changing_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE external_reviews (id INTEGER PRIMARY KEY, display_id TEXT, status TEXT, task_id TEXT, next_retry_at TEXT, updated_at TEXT);\n\
+             INSERT INTO external_reviews (display_id,status,task_id,next_retry_at,updated_at) VALUES ('ERUNIT','tooling_held','TUNIT','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(conn);
+        let h = LiveHarness {
+            case_name: "unit".to_string(),
+            task_id: "TUNIT".to_string(),
+            db_path,
+            root: dir.path().to_path_buf(),
+        };
+
+        h.freeze_latest_tooling_held_review_retry().unwrap();
+
+        let conn = h.conn().unwrap();
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT status,next_retry_at FROM external_reviews WHERE display_id='ERUNIT'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "tooling_held".to_string(),
+                "9999-12-31T23:59:59Z".to_string()
+            )
+        );
     }
 
     #[test]

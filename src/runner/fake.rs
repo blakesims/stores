@@ -608,6 +608,7 @@ fn scripted_case_outcome(
     let outcome = stage
         .attempts
         .get(idx)
+        .or_else(|| stage.attempts.last())
         .map(|a| a.outcome.as_str())
         .or_else(|| stage.outcome.as_deref())?;
     normalize_scripted_outcome(outcome)
@@ -906,7 +907,7 @@ mod tests {
         let path = dir.path().join("case.yaml");
         std::fs::write(
             &path,
-            "cases:\n  custom:\n    stages:\n      code_reviewer:\n        attempts:\n          - outcome: REVISE\n          - outcome: PASS\n      external_review:\n        outcome: TOOLING_FAILURE\n",
+            "cases:\n  custom:\n    stages:\n      code_reviewer:\n        attempts:\n          - outcome: REVISE\n          - outcome: PASS\n      external_review:\n        attempts:\n          - outcome: TOOLING_FAILURE\n",
         )
         .unwrap();
         std::env::set_var("STORES_FAKE_CASE_FILE", &path);
@@ -915,7 +916,15 @@ mod tests {
 
         let first = decide_fake_outcome("all-pass", "seed", "T1", "code-reviewer", "1", "1", "1");
         let second = decide_fake_outcome("all-pass", "seed", "T1", "code-reviewer", "1", "2", "2");
-        let er = decide_fake_outcome("all-pass", "seed", "T1", "external-review", "1", "1", "1");
+        let er = decide_fake_outcome(
+            "all-pass",
+            "seed",
+            "T1",
+            "external-review",
+            "1",
+            "1",
+            "ER452",
+        );
         assert_eq!(first.outcome, "REVISE");
         assert_eq!(second.outcome, "PASS");
         assert_eq!(

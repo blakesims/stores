@@ -305,6 +305,18 @@ pub fn fake_runner_env(config_path: &Path) -> Vec<(String, String)> {
     {
         env.push(("STORES_FAKE_EXECUTOR_MODE".to_string(), mode));
     }
+    if let Some(case_file) = std::env::var("STORES_FAKE_CASE_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        env.push(("STORES_FAKE_CASE_FILE".to_string(), case_file));
+    }
+    if let Some(case_name) = std::env::var("STORES_FAKE_CASE_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        env.push(("STORES_FAKE_CASE_NAME".to_string(), case_name));
+    }
     if let Some(path) = std::env::var("STORES_FAKE_SCRIPTED_PATCH")
         .ok()
         .filter(|s| !s.is_empty())
@@ -481,15 +493,35 @@ mod tests {
             cfg.scripted_patch.as_deref(),
             Some(std::path::Path::new("fixtures/fake.patch"))
         );
+        let old_case_file = std::env::var_os("STORES_FAKE_CASE_FILE");
+        let old_case_name = std::env::var_os("STORES_FAKE_CASE_NAME");
+        std::env::set_var("STORES_FAKE_CASE_FILE", "/tmp/stores-test-case.yaml");
+        std::env::set_var("STORES_FAKE_CASE_NAME", "t3-failed-er");
         let env = fake_runner_env(&path);
         assert!(env.contains(&(
             "STORES_FAKE_EXECUTOR_MODE".to_string(),
             "marker_file".to_string()
         )));
         assert!(env.contains(&(
+            "STORES_FAKE_CASE_FILE".to_string(),
+            "/tmp/stores-test-case.yaml".to_string()
+        )));
+        assert!(env.contains(&(
+            "STORES_FAKE_CASE_NAME".to_string(),
+            "t3-failed-er".to_string()
+        )));
+        assert!(env.contains(&(
             "STORES_FAKE_SCRIPTED_PATCH".to_string(),
             "fixtures/fake.patch".to_string()
         )));
+        match old_case_file {
+            Some(v) => std::env::set_var("STORES_FAKE_CASE_FILE", v),
+            None => std::env::remove_var("STORES_FAKE_CASE_FILE"),
+        }
+        match old_case_name {
+            Some(v) => std::env::set_var("STORES_FAKE_CASE_NAME", v),
+            None => std::env::remove_var("STORES_FAKE_CASE_NAME"),
+        }
         let old = std::env::var_os("STORES_LLM_OFF");
         for enabled in ["1", "true", "yes", "anything"] {
             std::env::set_var("STORES_LLM_OFF", enabled);
