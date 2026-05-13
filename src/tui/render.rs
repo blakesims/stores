@@ -13,13 +13,13 @@ use super::data::{
     cockpit_model, recent_exhaust, store_flow_model, ExternalReviewState, Row, Section,
     StoreFlowModel, StoreLane,
 };
-use super::semantics::task_presentation;
+use super::semantics::{engine_presentation, task_presentation, PresentationSeverity};
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
-/// inside a bordered block ⇒ 4 lines: top border + 2 body rows + bottom
+/// inside a bordered block ⇒ 5 lines: top border + 3 body rows + bottom
 /// border). Exposed so integration tests can derive the focused-table
 /// region's vertical span without re-encoding the literal.
-pub const TOP_STRIP_HEIGHT: u16 = 4;
+pub const TOP_STRIP_HEIGHT: u16 = 5;
 
 /// Height (in rows) of the bottom chrome painted below the focused-table
 /// region: recent-exhaust strip (1) + hint line (1) + status bar (1) = 3.
@@ -272,7 +272,7 @@ fn draw_store_card(
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Span::styled(format!(" {} ", lane.label()), title_style));
-    let (primary, breakdown) = lane_card_lines(lane, model);
+    let lines = lane_card_lines(lane, model);
     let primary_style = if focused {
         Style::default()
             .fg(Color::White)
@@ -281,9 +281,13 @@ fn draw_store_card(
         Style::default().fg(Color::Gray)
     };
     let body = Paragraph::new(vec![
-        Line::from(Span::styled(primary, primary_style)),
+        Line::from(Span::styled(lines[0].clone(), primary_style)),
         Line::from(Span::styled(
-            breakdown,
+            lines[1].clone(),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            lines[2].clone(),
             Style::default().fg(Color::DarkGray),
         )),
     ])
@@ -291,62 +295,68 @@ fn draw_store_card(
     f.render_widget(body, area);
 }
 
-fn lane_card_lines(lane: StoreLane, model: &StoreFlowModel) -> (String, String) {
+fn lane_card_lines(lane: StoreLane, model: &StoreFlowModel) -> [String; 3] {
     match lane {
         StoreLane::Intake => {
             let i = &model.intake;
-            let open = i.new + i.triaging + i.waiting;
-            (
-                format!("open: {open}"),
-                format!(
-                    "new {} · triaging {} · waiting {} · closed {}",
-                    i.new, i.triaging, i.waiting, i.closed
-                ),
-            )
+            [
+                format!("◌ new {}   ◆ triage {}", i.new, i.triaging),
+                format!("◇ info {}  ✓ routed {}", i.waiting, i.closed),
+                "△ wait 0  ▲ fault 0".to_string(),
+            ]
         }
         StoreLane::Observations => {
             let o = &model.observations;
-            let open = o.candidate + o.ready + o.in_progress;
-            (
-                format!("open: {open}"),
-                format!(
-                    "candidate {} · ready {} · in_progress {} · closed {}",
-                    o.candidate, o.ready, o.in_progress, o.closed
-                ),
-            )
+            [
+                format!("◌ candidate {}  ◆ investigate {}", o.candidate, o.in_progress),
+                format!("◇ contract {}   ✓ closed {}", o.ready, o.closed),
+                format!("△ wait {}       ▲ fault 0", o.waiting_kinds.values().sum::<usize>()),
+            ]
         }
         StoreLane::Tasks => {
             let t = &model.tasks;
-            let review = t.plan_review + t.code_review + t.in_review;
-            (
-                format!("active: {}", t.active),
-                format!("held {} · review {}", t.held, review),
-            )
+            [
+                format!("◌ queued {}  ◆ work {}", t.queued, t.work),
+                format!("◇ gate {}    ✓ done {}", t.gate, t.recently_terminal),
+                format!("△ wait {}    ▲ fail {}", t.wait, t.fail),
+            ]
         }
         StoreLane::ExternalReviews => {
             let r = &model.external_reviews;
-            (
-                format!("running: {}", r.running),
-                format!(
-                    "pending {} · revise {} · held {}",
-                    r.pending, r.revise, r.tooling_held
-                ),
-            )
+            [
+                format!("◌ pending {}  ◆ running {}", r.pending, r.running),
+                format!("◇ revise {}   ✓ passed {}", r.revise, r.passed),
+                format!("△ wait {}     ▲ tool-fault {}", r.wait, r.tooling_held),
+            ]
         }
         StoreLane::EngineHealth => {
             let e = &model.engine;
-            let primary = if e.daemon_live {
-                "daemon LIVE".to_string()
+            let health = super::data::SystemHealth {
+                unfinished_dispatch_locks: e.unfinished_locks,
+                oldest_claimed_at_epoch: e.oldest_lock_age_secs,
+            };
+            let daemon = if e.daemon_live {
+                super::daemon::Liveness::Live { pid: 0 }
             } else {
-                "daemon DEAD ⚠".to_string()
+                super::daemon::Liveness::Dead
             };
-            let age = match e.oldest_lock_age_secs {
-                Some(secs) if secs >= 3600 => format!("oldest {}h", secs / 3600),
-                Some(secs) if secs >= 60 => format!("oldest {}m", secs / 60),
-                Some(_) => "oldest <1m".to_string(),
-                None => "oldest —".to_string(),
+            let state = engine_presentation(&health, &daemon);
+            let clear = usize::from(state.label == "clear" || state.label == "manual");
+            let (wait_label, wait_count) = if state.label == "manual" {
+                ("manual", String::new())
+            } else {
+                ("wait", " 0".to_string())
             };
-            (primary, format!("locks {} · {}", e.unfinished_locks, age))
+            let (fault_label, fault_count) = if state.severity == PresentationSeverity::Fault {
+                (state.label.as_str(), String::new())
+            } else {
+                ("fault", " 0".to_string())
+            };
+            [
+                "◌ dispatch 0  ◆ runners 0".to_string(),
+                format!("◇ locks {}    ✓ clear {}", e.unfinished_locks, clear),
+                format!("△ {wait_label}{wait_count}  ▲ {fault_label}{fault_count}"),
+            ]
         }
     }
 }
@@ -1065,6 +1075,66 @@ mod tests {
             painted.push('\n');
         }
         painted
+    }
+
+    #[test]
+    fn lane_cards_use_shared_flow_glyph_slots_and_task_wait_fail_split() {
+        let mut model = StoreFlowModel::default();
+        model.intake.new = 1;
+        model.intake.triaging = 2;
+        model.intake.waiting = 3;
+        model.intake.closed = 4;
+        model.observations.candidate = 5;
+        model.observations.in_progress = 6;
+        model.observations.ready = 7;
+        model.observations.closed = 8;
+        model.tasks.queued = 9;
+        model.tasks.work = 10;
+        model.tasks.gate = 11;
+        model.tasks.wait = 12;
+        model.tasks.fail = 13;
+        model.tasks.recently_terminal = 14;
+        model.external_reviews.pending = 15;
+        model.external_reviews.running = 16;
+        model.external_reviews.revise = 17;
+        model.external_reviews.passed = 18;
+        model.external_reviews.tooling_held = 19;
+        model.engine.daemon_live = false;
+
+        let lanes = [
+            StoreLane::Intake,
+            StoreLane::Observations,
+            StoreLane::Tasks,
+            StoreLane::ExternalReviews,
+            StoreLane::EngineHealth,
+        ];
+        for lane in lanes {
+            let text = lane_card_lines(lane, &model).join("\n");
+            for glyph in ["◌", "◆", "◇", "✓", "△", "▲"] {
+                assert!(text.contains(glyph), "{lane:?} missing {glyph}: {text}");
+            }
+            assert!(!text.contains("held"), "{lane:?} leaked held headline: {text}");
+        }
+
+        let tasks = lane_card_lines(StoreLane::Tasks, &model).join("\n");
+        assert!(tasks.contains("△ wait 12"), "{tasks}");
+        assert!(tasks.contains("▲ fail 13"), "{tasks}");
+    }
+
+    #[test]
+    fn engine_card_distinguishes_manual_from_daemon_down_fault() {
+        let mut manual = StoreFlowModel::default();
+        manual.engine.daemon_live = false;
+        let manual_text = lane_card_lines(StoreLane::EngineHealth, &manual).join("\n");
+        assert!(manual_text.contains("△ manual"), "{manual_text}");
+        assert!(manual_text.contains("▲ fault 0"), "{manual_text}");
+
+        let mut fault = StoreFlowModel::default();
+        fault.engine.daemon_live = false;
+        fault.engine.unfinished_locks = 2;
+        let fault_text = lane_card_lines(StoreLane::EngineHealth, &fault).join("\n");
+        assert!(fault_text.contains("◇ locks 2"), "{fault_text}");
+        assert!(fault_text.contains("▲ daemon down"), "{fault_text}");
     }
 
     fn task_row(status: &str, reason: Option<&str>) -> Row {

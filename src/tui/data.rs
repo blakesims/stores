@@ -532,11 +532,11 @@ pub struct ObsFlow {
 /// Per-status counts the cockpit renders for the tasks lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TasksFlow {
-    pub active: usize,
-    pub held: usize,
-    pub plan_review: usize,
-    pub code_review: usize,
-    pub in_review: usize,
+    pub queued: usize,
+    pub work: usize,
+    pub gate: usize,
+    pub wait: usize,
+    pub fail: usize,
     pub recently_terminal: usize,
 }
 
@@ -547,6 +547,7 @@ pub struct ReviewsFlow {
     pub running: usize,
     pub passed: usize,
     pub revise: usize,
+    pub wait: usize,
     pub tooling_held: usize,
 }
 
@@ -690,14 +691,21 @@ fn apply_task_to_flow(t: &TaskRow, flow: &mut TasksFlow) {
         return;
     }
     if task_is_blocked(t) {
-        flow.held += 1;
+        match super::semantics::task_presentation(t).severity {
+            super::semantics::PresentationSeverity::Wait => flow.wait += 1,
+            super::semantics::PresentationSeverity::Gate => flow.gate += 1,
+            super::semantics::PresentationSeverity::Fault => flow.fail += 1,
+            _ => flow.fail += 1,
+        }
         return;
     }
     match (task_lifecycle(t), task_active_step(t)) {
-        ("active", "planning_review") => flow.plan_review += 1,
-        ("active", "coding_review") => flow.code_review += 1,
-        ("active", "wrapping") => flow.in_review += 1,
-        ("active", _) | ("queued", _) | ("integration", _) => flow.active += 1,
+        ("queued", _) => flow.queued += 1,
+        ("active", "planning_review")
+        | ("active", "coding_review")
+        | ("active", "wrapping")
+        | ("integration", _) => flow.gate += 1,
+        ("active", _) => flow.work += 1,
         _ => {}
     }
 }
@@ -3476,11 +3484,11 @@ mod tests {
         assert_eq!(model.observations.ready, 1);
         assert_eq!(model.observations.closed, 3);
 
-        assert_eq!(model.tasks.active, 3);
-        assert_eq!(model.tasks.held, 2);
-        assert_eq!(model.tasks.plan_review, 1);
-        assert_eq!(model.tasks.code_review, 1);
-        assert_eq!(model.tasks.in_review, 1);
+        assert_eq!(model.tasks.queued, 0);
+        assert_eq!(model.tasks.work, 3);
+        assert_eq!(model.tasks.gate, 3);
+        assert_eq!(model.tasks.wait, 0);
+        assert_eq!(model.tasks.fail, 2);
         assert_eq!(model.tasks.recently_terminal, 3);
 
         assert_eq!(model.external_reviews.pending, 1);
