@@ -772,7 +772,7 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
     }
     let cursor = app.current_flat();
     if app.focused_store == StoreLane::Tasks {
-        append_task_projection_items(app, &window, cursor, &mut items);
+        append_task_projection_items(app, &flat, window, cursor, &mut items);
     } else {
         let mut last_section: Option<usize> = None;
         for (i, fr) in window.iter().enumerate() {
@@ -818,11 +818,13 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
 
 fn append_task_projection_items(
     app: &App,
+    full: &[FlatRow],
     window: &[FlatRow],
     cursor: Option<usize>,
     items: &mut Vec<ListItem<'static>>,
 ) {
-    for slot in task_projection_display_order(window, app) {
+    for slot in task_projection_display_order(full, app) {
+        let total = task_projection_group_count(full, app, slot);
         let rows: Vec<(usize, &FlatRow, WatchProjection)> = window
             .iter()
             .enumerate()
@@ -838,7 +840,7 @@ fn append_task_projection_items(
             continue;
         }
         items.push(ListItem::new(Line::from(Span::styled(
-            format!("▾ {} ({})", task_projection_group_label(slot), rows.len()),
+            format!("▾ {} ({})", task_projection_group_label(slot), total),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -856,7 +858,7 @@ fn append_task_projection_items(
     }
 }
 
-fn task_projection_display_order(window: &[FlatRow], app: &App) -> Vec<WatchSlotId> {
+fn task_projection_display_order(full: &[FlatRow], app: &App) -> Vec<WatchSlotId> {
     const ORDER: [WatchSlotId; 6] = [
         WatchSlotId::Front,
         WatchSlotId::Work,
@@ -867,13 +869,17 @@ fn task_projection_display_order(window: &[FlatRow], app: &App) -> Vec<WatchSlot
     ];
     ORDER
         .into_iter()
-        .filter(|slot| {
-            window.iter().any(|fr| match &app.rows[fr.abs] {
-                Row::Task(t) => task_watch_projection(t).slot == *slot,
-                _ => false,
-            })
-        })
+        .filter(|slot| task_projection_group_count(full, app, *slot) > 0)
         .collect()
+}
+
+fn task_projection_group_count(full: &[FlatRow], app: &App, slot: WatchSlotId) -> usize {
+    full.iter()
+        .filter(|fr| match &app.rows[fr.abs] {
+            Row::Task(t) => task_watch_projection(t).slot == slot,
+            _ => false,
+        })
+        .count()
 }
 
 fn task_projection_group_label(slot: WatchSlotId) -> &'static str {
@@ -2446,6 +2452,51 @@ mod tests {
         let pos_gate = painted.find("GATE (3)").unwrap();
         let pos_failed = painted.find("FAILED (1)").unwrap();
         assert!(pos_gate < pos_failed);
+    }
+
+    #[test]
+    fn task_projection_headers_count_full_filtered_rows_not_visible_window() {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = (0..8)
+            .map(|i| {
+                Row::Task(TaskRow {
+                    display_id: format!("T90{i}"),
+                    status: "executing".to_string(),
+                    title: format!("viewport hidden work {i}"),
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("coding".to_string()),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        app.sections = classify(&app.rows);
+        app.apply_sort();
+        app.viewport_height = 3;
+        app.scroll_offset = 2;
+        app.selection = crate::tui::app::Selection { section: 0, row: 2 };
+
+        let flat = app.flat_rows();
+        assert_eq!(flat.len(), 8, "fixture full focused task row set");
+        assert_eq!(visible_window(&app, &flat).len(), 3, "fixture viewport slice");
+
+        let backend = TestBackend::new(120, 12);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|f| draw_focused_table(f, &app, f.area()))
+            .expect("draw focused table");
+        let painted = buffer_to_string(terminal.backend().buffer());
+
+        assert!(
+            painted.contains("WORKING (8)"),
+            "projection header must count the full focused task set, not the viewport:\n{painted}"
+        );
+        assert!(!painted.contains("WORKING (3)"), "{painted}");
+        for id in ["T902", "T903", "T904"] {
+            assert!(painted.contains(id), "visible row {id} missing:\n{painted}");
+        }
+        for id in ["T900", "T901", "T905", "T906", "T907"] {
+            assert!(!painted.contains(id), "hidden row {id} rendered:\n{painted}");
+        }
     }
 
     #[test]
