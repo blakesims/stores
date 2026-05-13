@@ -1064,6 +1064,495 @@ fn observation_link(row: &ObsRow) -> Option<String> {
         })
 }
 
+pub fn intake_watch_projection(row: &IntakeRow) -> WatchProjection {
+    let presentation = intake_presentation(row);
+    let slot = watch_slot_id(presentation.severity);
+    WatchProjection {
+        slot,
+        slot_label: intake_watch_slot_label(slot),
+        glyph: presentation.glyph,
+        row_stage: intake_watch_stage(&presentation.label),
+        row_signal: presentation.signal,
+        next_action: Some(intake_watch_next_action(&presentation.label)),
+        attention: watch_attention(slot),
+    }
+}
+
+pub fn intake_watch_slot_label(slot: WatchSlotId) -> &'static str {
+    match slot {
+        WatchSlotId::Front => "new",
+        WatchSlotId::Work => "triage",
+        WatchSlotId::Gate => "gate",
+        WatchSlotId::Exit => "routed",
+        WatchSlotId::Wait => "waiting",
+        WatchSlotId::Fault => "failed",
+    }
+}
+
+fn intake_watch_stage(label: &str) -> &'static str {
+    match label {
+        "new" => "new",
+        "triage" => "triage",
+        "needs-info" => "info",
+        "routed" => "routed",
+        "arch-review" => "arch",
+        "duplicate" => "duplicate",
+        "dropped" => "dropped",
+        _ => "inspect",
+    }
+}
+
+fn intake_watch_next_action(label: &str) -> &'static str {
+    match label {
+        "new" => "triage",
+        "triage" => "route",
+        "needs-info" => "info",
+        "routed" => "done",
+        "arch-review" => "arch",
+        "duplicate" => "duplicate",
+        "dropped" => "done",
+        _ => "inspect",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntakeFunnelCheckpoint {
+    Capture,
+    Triage,
+    Route,
+    Fallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntakeFunnelGlyph {
+    Captured,
+    Triaging,
+    Routed,
+    Architecture,
+    Duplicate,
+    Dropped,
+    Waiting,
+    Fault,
+    Unreached,
+    Unknown,
+}
+
+impl IntakeFunnelGlyph {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Captured => "◌",
+            Self::Triaging => "●",
+            Self::Routed => "✓",
+            Self::Architecture => "◈",
+            Self::Duplicate => "■",
+            Self::Dropped => "×",
+            Self::Waiting => "△",
+            Self::Fault => "▲",
+            Self::Unreached => "·",
+            Self::Unknown => "?",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntakeFunnelSource {
+    RowExists,
+    Lifecycle,
+    Status,
+    WaitingKind,
+    HeldReason,
+    Decision,
+    Outcome,
+    RoutedObservation,
+    RoutedArchitectureReview,
+    ProducedArtifact,
+    DuplicateOf,
+    MissingEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntakeFunnelCell {
+    pub checkpoint: IntakeFunnelCheckpoint,
+    pub glyph: IntakeFunnelGlyph,
+    pub count: Option<i64>,
+    pub color_role: MapColor,
+    pub active: bool,
+    pub source: IntakeFunnelSource,
+    pub confidence: MapConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntakeFunnelProjection {
+    pub capture: IntakeFunnelCell,
+    pub triage: IntakeFunnelCell,
+    pub route: Option<IntakeFunnelCell>,
+    pub decision: Option<String>,
+    pub route_target: Option<String>,
+    pub confidence: MapConfidence,
+}
+
+pub fn intake_funnel_projection(row: &IntakeRow) -> IntakeFunnelProjection {
+    let capture = intake_capture_cell(row);
+    let triage = intake_triage_cell(row);
+    let route = intake_route_cell(row);
+    let confidence = cells_confidence(
+        std::iter::once(capture.confidence)
+            .chain(std::iter::once(triage.confidence))
+            .chain(route.as_ref().map(|cell| cell.confidence)),
+    );
+    IntakeFunnelProjection {
+        capture,
+        triage,
+        route,
+        decision: Some(intake_decision_label(row)),
+        route_target: intake_route_target(row),
+        confidence,
+    }
+}
+
+fn intake_capture_cell(row: &IntakeRow) -> IntakeFunnelCell {
+    let lifecycle = intake_lifecycle(row);
+    let active = matches!(lifecycle, "new" | "draft");
+    intake_cell(
+        IntakeFunnelCheckpoint::Capture,
+        IntakeFunnelGlyph::Captured,
+        None,
+        if active {
+            MapColor::ActiveWork
+        } else {
+            MapColor::Inactive
+        },
+        active,
+        if row.lifecycle.is_some() {
+            IntakeFunnelSource::Lifecycle
+        } else {
+            IntakeFunnelSource::RowExists
+        },
+        MapConfidence::Exact,
+    )
+}
+
+fn intake_triage_cell(row: &IntakeRow) -> IntakeFunnelCell {
+    let lifecycle = intake_lifecycle(row);
+    if intake_is_waiting(row) {
+        return intake_cell(
+            IntakeFunnelCheckpoint::Triage,
+            IntakeFunnelGlyph::Waiting,
+            None,
+            MapColor::Waiting,
+            false,
+            if row
+                .waiting_kind
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            {
+                IntakeFunnelSource::WaitingKind
+            } else if row.status == "needs_info" {
+                IntakeFunnelSource::Status
+            } else {
+                IntakeFunnelSource::HeldReason
+            },
+            MapConfidence::Exact,
+        );
+    }
+    if lifecycle == "triaging" {
+        return intake_cell(
+            IntakeFunnelCheckpoint::Triage,
+            IntakeFunnelGlyph::Triaging,
+            None,
+            MapColor::ActiveWork,
+            true,
+            IntakeFunnelSource::Lifecycle,
+            MapConfidence::Exact,
+        );
+    }
+    if intake_has_route_or_decision(row) || lifecycle == "closed" {
+        return intake_cell(
+            IntakeFunnelCheckpoint::Triage,
+            IntakeFunnelGlyph::Triaging,
+            None,
+            MapColor::Inactive,
+            false,
+            if row
+                .decision
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            {
+                IntakeFunnelSource::Decision
+            } else {
+                IntakeFunnelSource::Lifecycle
+            },
+            MapConfidence::Implied,
+        );
+    }
+    intake_cell(
+        IntakeFunnelCheckpoint::Triage,
+        IntakeFunnelGlyph::Unreached,
+        None,
+        MapColor::Inactive,
+        false,
+        IntakeFunnelSource::MissingEvidence,
+        MapConfidence::Exact,
+    )
+}
+
+fn intake_route_cell(row: &IntakeRow) -> Option<IntakeFunnelCell> {
+    if let Some(source) = intake_duplicate_source(row) {
+        return Some(intake_cell(
+            IntakeFunnelCheckpoint::Route,
+            IntakeFunnelGlyph::Duplicate,
+            None,
+            MapColor::Passed,
+            false,
+            source,
+            MapConfidence::Exact,
+        ));
+    }
+    if let Some(source) = intake_arch_route_source(row) {
+        return Some(intake_cell(
+            IntakeFunnelCheckpoint::Route,
+            IntakeFunnelGlyph::Architecture,
+            None,
+            MapColor::ActiveGate,
+            false,
+            source,
+            MapConfidence::Exact,
+        ));
+    }
+    if let Some(source) = intake_routed_source(row) {
+        return Some(intake_cell(
+            IntakeFunnelCheckpoint::Route,
+            IntakeFunnelGlyph::Routed,
+            None,
+            MapColor::Passed,
+            false,
+            source,
+            MapConfidence::Exact,
+        ));
+    }
+    if intake_is_dropped(row) {
+        return Some(intake_cell(
+            IntakeFunnelCheckpoint::Route,
+            IntakeFunnelGlyph::Dropped,
+            None,
+            MapColor::Failed,
+            false,
+            intake_terminal_source(row),
+            MapConfidence::Exact,
+        ));
+    }
+    if intake_lifecycle(row) == "closed" {
+        return Some(intake_cell(
+            IntakeFunnelCheckpoint::Route,
+            IntakeFunnelGlyph::Unknown,
+            None,
+            MapColor::Unknown,
+            false,
+            IntakeFunnelSource::MissingEvidence,
+            MapConfidence::Unknown,
+        ));
+    }
+    Some(intake_cell(
+        IntakeFunnelCheckpoint::Route,
+        IntakeFunnelGlyph::Unreached,
+        None,
+        MapColor::Inactive,
+        false,
+        IntakeFunnelSource::MissingEvidence,
+        MapConfidence::Exact,
+    ))
+}
+
+fn intake_cell(
+    checkpoint: IntakeFunnelCheckpoint,
+    glyph: IntakeFunnelGlyph,
+    count: Option<i64>,
+    color_role: MapColor,
+    active: bool,
+    source: IntakeFunnelSource,
+    confidence: MapConfidence,
+) -> IntakeFunnelCell {
+    IntakeFunnelCell {
+        checkpoint,
+        glyph,
+        count: count.filter(|c| *c > 1),
+        color_role,
+        active,
+        source,
+        confidence,
+    }
+}
+
+pub fn intake_lifecycle(row: &IntakeRow) -> &str {
+    row.lifecycle.as_deref().unwrap_or(row.status.as_str())
+}
+
+fn intake_is_waiting(row: &IntakeRow) -> bool {
+    matches!(intake_lifecycle(row), "waiting" | "needs_info")
+        || row.status == "needs_info"
+        || row
+            .waiting_kind
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        || row
+            .held_reason
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn intake_has_route_or_decision(row: &IntakeRow) -> bool {
+    row.decision
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || intake_route_target(row).is_some()
+        || row.outcome.as_deref().is_some_and(|s| !s.trim().is_empty())
+}
+
+fn intake_route_target(row: &IntakeRow) -> Option<String> {
+    row.routed_to_observation
+        .as_deref()
+        .or(row.produced_observation_id.as_deref())
+        .or(row.produced_task_id.as_deref())
+        .or(row.routed_to_arch_review.as_deref())
+        .or(row.produced_architecture_review_id.as_deref())
+        .or(row.duplicate_of.as_deref())
+        .or(row.duplicate_of_id.as_deref())
+        .or(row.produced_artifact_id.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn intake_routed_source(row: &IntakeRow) -> Option<IntakeFunnelSource> {
+    if row
+        .routed_to_observation
+        .as_deref()
+        .or(row.produced_observation_id.as_deref())
+        .is_some_and(|s| !s.trim().is_empty())
+        || row
+            .produced_task_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Some(IntakeFunnelSource::RoutedObservation);
+    }
+    if row
+        .produced_artifact_kind
+        .as_deref()
+        .is_some_and(|s| matches!(s, "observation" | "task"))
+        && row
+            .produced_artifact_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Some(IntakeFunnelSource::ProducedArtifact);
+    }
+    if matches!(
+        row.outcome.as_deref(),
+        Some("routed_to_observation" | "routed")
+    ) || matches!(
+        row.decision.as_deref(),
+        Some("observation" | "task" | "routed")
+    ) {
+        return Some(IntakeFunnelSource::Outcome);
+    }
+    None
+}
+
+fn intake_arch_route_source(row: &IntakeRow) -> Option<IntakeFunnelSource> {
+    if row
+        .routed_to_arch_review
+        .as_deref()
+        .or(row.produced_architecture_review_id.as_deref())
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Some(IntakeFunnelSource::RoutedArchitectureReview);
+    }
+    if row
+        .produced_artifact_kind
+        .as_deref()
+        .is_some_and(|s| s == "architecture_review")
+        && row
+            .produced_artifact_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Some(IntakeFunnelSource::ProducedArtifact);
+    }
+    if matches!(
+        row.outcome.as_deref(),
+        Some("escalated_to_architecture_review" | "architecture_review")
+    ) || matches!(
+        row.decision.as_deref(),
+        Some("arch_review_candidate" | "architecture_review" | "arch")
+    ) {
+        return Some(IntakeFunnelSource::Outcome);
+    }
+    None
+}
+
+fn intake_duplicate_source(row: &IntakeRow) -> Option<IntakeFunnelSource> {
+    if row
+        .duplicate_of
+        .as_deref()
+        .or(row.duplicate_of_id.as_deref())
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Some(IntakeFunnelSource::DuplicateOf);
+    }
+    if matches!(
+        row.outcome.as_deref().or(row.decision.as_deref()),
+        Some("marked_duplicate" | "duplicate")
+    ) {
+        return Some(IntakeFunnelSource::Outcome);
+    }
+    None
+}
+
+fn intake_is_dropped(row: &IntakeRow) -> bool {
+    matches!(
+        row.outcome.as_deref().or(row.decision.as_deref()),
+        Some("dropped_as_noise" | "dropped" | "noise")
+    ) || row.status == "dropped"
+}
+
+fn intake_terminal_source(row: &IntakeRow) -> IntakeFunnelSource {
+    if row.outcome.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+        IntakeFunnelSource::Outcome
+    } else if row
+        .decision
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        IntakeFunnelSource::Decision
+    } else {
+        IntakeFunnelSource::Status
+    }
+}
+
+fn intake_decision_label(row: &IntakeRow) -> String {
+    if intake_duplicate_source(row).is_some() {
+        "duplicate".to_string()
+    } else if intake_arch_route_source(row).is_some() {
+        "arch".to_string()
+    } else if intake_routed_source(row).is_some() {
+        "routed".to_string()
+    } else if intake_is_dropped(row) {
+        "dropped".to_string()
+    } else if intake_is_waiting(row) {
+        "info".to_string()
+    } else if intake_lifecycle(row) == "triaging" {
+        "triage".to_string()
+    } else {
+        row.decision
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("triage")
+            .replace('_', "-")
+    }
+}
+
 fn task_watch_stage(label: &str) -> &'static str {
     match label {
         "done" => "done",
@@ -2395,6 +2884,136 @@ mod tests {
             .label,
             "duplicate"
         );
+    }
+
+    #[test]
+    fn intake_funnel_projection_covers_dense_funnel_states() {
+        let cases = [
+            (
+                "new",
+                IntakeRow {
+                    lifecycle: Some("new".to_string()),
+                    ..Default::default()
+                },
+                (
+                    IntakeFunnelGlyph::Captured,
+                    IntakeFunnelGlyph::Unreached,
+                    IntakeFunnelGlyph::Unreached,
+                ),
+                "triage",
+                None,
+            ),
+            (
+                "triaging",
+                IntakeRow {
+                    lifecycle: Some("triaging".to_string()),
+                    ..Default::default()
+                },
+                (
+                    IntakeFunnelGlyph::Captured,
+                    IntakeFunnelGlyph::Triaging,
+                    IntakeFunnelGlyph::Unreached,
+                ),
+                "triage",
+                None,
+            ),
+            (
+                "waiting",
+                IntakeRow {
+                    lifecycle: Some("waiting".to_string()),
+                    waiting_kind: Some("needs_info".to_string()),
+                    ..Default::default()
+                },
+                (
+                    IntakeFunnelGlyph::Captured,
+                    IntakeFunnelGlyph::Waiting,
+                    IntakeFunnelGlyph::Unreached,
+                ),
+                "info",
+                None,
+            ),
+            (
+                "routed observation",
+                IntakeRow {
+                    lifecycle: Some("closed".to_string()),
+                    produced_observation_id: Some("L048".to_string()),
+                    ..Default::default()
+                },
+                (
+                    IntakeFunnelGlyph::Captured,
+                    IntakeFunnelGlyph::Triaging,
+                    IntakeFunnelGlyph::Routed,
+                ),
+                "routed",
+                Some("L048"),
+            ),
+            (
+                "arch route",
+                IntakeRow {
+                    lifecycle: Some("closed".to_string()),
+                    produced_architecture_review_id: Some("A003".to_string()),
+                    ..Default::default()
+                },
+                (
+                    IntakeFunnelGlyph::Captured,
+                    IntakeFunnelGlyph::Triaging,
+                    IntakeFunnelGlyph::Architecture,
+                ),
+                "arch",
+                Some("A003"),
+            ),
+            (
+                "duplicate",
+                IntakeRow {
+                    lifecycle: Some("closed".to_string()),
+                    duplicate_of_id: Some("L041".to_string()),
+                    ..Default::default()
+                },
+                (
+                    IntakeFunnelGlyph::Captured,
+                    IntakeFunnelGlyph::Triaging,
+                    IntakeFunnelGlyph::Duplicate,
+                ),
+                "duplicate",
+                Some("L041"),
+            ),
+            (
+                "dropped",
+                IntakeRow {
+                    lifecycle: Some("closed".to_string()),
+                    outcome: Some("dropped_as_noise".to_string()),
+                    ..Default::default()
+                },
+                (
+                    IntakeFunnelGlyph::Captured,
+                    IntakeFunnelGlyph::Triaging,
+                    IntakeFunnelGlyph::Dropped,
+                ),
+                "dropped",
+                None,
+            ),
+        ];
+        for (name, row, expected, decision, target) in cases {
+            let projection = intake_funnel_projection(&row);
+            let actual = (
+                projection.capture.glyph,
+                projection.triage.glyph,
+                projection.route.as_ref().unwrap().glyph,
+            );
+            assert_eq!(actual, expected, "{name}");
+            assert_eq!(projection.decision.as_deref(), Some(decision), "{name}");
+            assert_eq!(projection.route_target.as_deref(), target, "{name}");
+        }
+
+        let unknown = intake_funnel_projection(&IntakeRow {
+            lifecycle: Some("closed".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            unknown.route.as_ref().unwrap().glyph,
+            IntakeFunnelGlyph::Unknown
+        );
+        assert_eq!(unknown.confidence, MapConfidence::Unknown);
     }
 
     #[test]

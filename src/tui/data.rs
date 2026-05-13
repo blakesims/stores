@@ -1831,10 +1831,10 @@ fn evidence_pointers(raw: Option<&str>) -> Vec<ArtifactPointer> {
 fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
     let cols = table_columns(conn, "intake")?;
     let sql = format!(
-        "SELECT display_id, status, {summary}, {body}, {updated_at}, {source_task}, {source_agent}, {risk_flags}, {cluster_key}, {decision}, {missing_info_question}, {routed_to_observation}, {routed_to_arch_review}, {duplicate_of}, {evidence}, {captured_at}, {recon_round}, {decision_metadata}, {lifecycle}, {waiting_kind}, {outcome}, {duplicate_of_id}, {produced_observation_id}, {produced_architecture_review_id}, {produced_task_id}, {produced_artifact_kind}, {produced_artifact_id} FROM intake",
+        "SELECT display_id, status, {summary}, {body}, {updated_at}, {source_task}, {source_agent}, {priority}, {risk_flags}, {cluster_key}, {decision}, {missing_info_question}, {routed_to_observation}, {routed_to_arch_review}, {duplicate_of}, {evidence}, {captured_at}, {recon_round}, {decision_metadata}, {lifecycle}, {waiting_kind}, {outcome}, {duplicate_of_id}, {produced_observation_id}, {produced_architecture_review_id}, {produced_task_id}, {produced_artifact_kind}, {produced_artifact_id} FROM intake",
         summary = sql_col(&cols, "summary", "''"), body = sql_col(&cols, "body", "NULL"),
         updated_at = if cols.iter().any(|c| c == "updated_at") { quote_ident("updated_at") } else { sql_col(&cols, "captured_at", "''") },
-        source_task = sql_col(&cols, "source_task", "NULL"), source_agent = sql_col(&cols, "source_agent", "NULL"), risk_flags = sql_col(&cols, "risk_flags", "NULL"), cluster_key = sql_col(&cols, "cluster_key", "NULL"),
+        source_task = sql_col(&cols, "source_task", "NULL"), source_agent = sql_col(&cols, "source_agent", "NULL"), priority = sql_col(&cols, "priority", "NULL"), risk_flags = sql_col(&cols, "risk_flags", "NULL"), cluster_key = sql_col(&cols, "cluster_key", "NULL"),
         decision = sql_col(&cols, "decision", "NULL"), missing_info_question = sql_col(&cols, "missing_info_question", "NULL"), routed_to_observation = sql_col(&cols, "routed_to_observation", "NULL"), routed_to_arch_review = sql_col(&cols, "routed_to_arch_review", "NULL"), duplicate_of = sql_col(&cols, "duplicate_of", "NULL"), evidence = sql_col(&cols, "evidence", "NULL"),
         captured_at = sql_col(&cols, "captured_at", "NULL"),
         recon_round = sql_col(&cols, "recon_round", "NULL"),
@@ -1852,47 +1852,47 @@ fn load_intake_rows(conn: &Connection, rows: &mut Vec<Row>) -> Result<()> {
     let mut stmt = conn.prepare(&sql)?;
     let iter = stmt.query_map([], |r| {
         let status: String = r.get(1)?;
-        let decision: Option<String> = r.get(9).ok().flatten();
-        let missing: Option<String> = r.get(10).ok().flatten();
+        let decision: Option<String> = r.get(10).ok().flatten();
+        let missing: Option<String> = r.get(11).ok().flatten();
         let held_reason = if status == "needs_info" {
             missing.clone()
         } else {
             None
         };
-        let decision_metadata_raw: Option<String> = r.get(17).ok().flatten();
+        let decision_metadata_raw: Option<String> = r.get(18).ok().flatten();
         let (decision_rationale, decision_confidence, decision_tier_hint) =
             decision_metadata_summary(decision_metadata_raw.as_deref());
         Ok(IntakeRow {
             display_id: r.get(0)?,
             status: status.clone(),
             summary: r.get(2)?,
-            lifecycle: r.get(18).ok().flatten(),
-            waiting_kind: r.get(19).ok().flatten(),
-            outcome: r.get(20).ok().flatten(),
+            lifecycle: r.get(19).ok().flatten(),
+            waiting_kind: r.get(20).ok().flatten(),
+            outcome: r.get(21).ok().flatten(),
             body: r.get(3).ok().flatten(),
             updated_at: r.get(4)?,
             source_task: r.get(5).ok().flatten(),
             source_agent: r.get(6).ok().flatten(),
-            priority: None,
-            risk_flags: json_string_array(r.get::<_, String>(7).ok().as_deref()),
-            cluster_key: r.get(8).ok().flatten(),
+            priority: r.get(7).ok().flatten(),
+            risk_flags: json_string_array(r.get::<_, String>(8).ok().as_deref()),
+            cluster_key: r.get(9).ok().flatten(),
             decision: decision.clone(),
             missing_info_question: missing,
             held_reason,
             next_action: Some(intake_next_action(&status, decision.as_deref()).to_string()),
-            routed_to_observation: r.get(11).ok().flatten(),
-            routed_to_arch_review: r.get(12).ok().flatten(),
-            duplicate_of: r.get(13).ok().flatten(),
-            duplicate_of_id: r.get(21).ok().flatten(),
-            produced_observation_id: r.get(22).ok().flatten(),
-            produced_architecture_review_id: r.get(23).ok().flatten(),
-            produced_task_id: r.get(24).ok().flatten(),
-            produced_artifact_kind: r.get(25).ok().flatten(),
-            produced_artifact_id: r.get(26).ok().flatten(),
-            evidence_pointer: r.get(14).ok().flatten(),
+            routed_to_observation: r.get(12).ok().flatten(),
+            routed_to_arch_review: r.get(13).ok().flatten(),
+            duplicate_of: r.get(14).ok().flatten(),
+            duplicate_of_id: r.get(22).ok().flatten(),
+            produced_observation_id: r.get(23).ok().flatten(),
+            produced_architecture_review_id: r.get(24).ok().flatten(),
+            produced_task_id: r.get(25).ok().flatten(),
+            produced_artifact_kind: r.get(26).ok().flatten(),
+            produced_artifact_id: r.get(27).ok().flatten(),
+            evidence_pointer: r.get(15).ok().flatten(),
             recent_events: Vec::new(),
-            captured_at: r.get(15).ok().flatten(),
-            recon_round: r.get(16).ok().flatten(),
+            captured_at: r.get(16).ok().flatten(),
+            recon_round: r.get(17).ok().flatten(),
             decision_rationale,
             decision_confidence,
             decision_tier_hint,
@@ -2521,7 +2521,7 @@ fn section_for(row: &Row) -> Option<Section> {
         Row::CollapsedObs(c) => Some(c.section),
         Row::Review(_) => Some(Section::ExternalReviewLane),
         Row::Intake(i) => match intake_lifecycle(i) {
-            "closed" => None,
+            "closed" => Some(Section::IntakeRouted),
             "waiting" => Some(Section::IntakeHeld),
             _ if is_priority_text(i.priority.as_deref().unwrap_or(""))
                 || !i.risk_flags.is_empty() =>
@@ -3566,11 +3566,11 @@ mod tests {
             r#"
             CREATE TABLE intake (
                 display_id TEXT, status TEXT, summary TEXT, body TEXT, captured_at TEXT,
-                source_task TEXT, source_agent TEXT, risk_flags TEXT, cluster_key TEXT, decision TEXT,
+                source_task TEXT, source_agent TEXT, priority TEXT, risk_flags TEXT, cluster_key TEXT, decision TEXT,
                 missing_info_question TEXT, routed_to_observation TEXT, routed_to_arch_review TEXT, duplicate_of TEXT, evidence TEXT
             );
-            INSERT INTO intake (display_id,status,summary,body,captured_at,source_task,source_agent,risk_flags,cluster_key,missing_info_question,evidence)
-            VALUES ('I001','needs_info','needs more','story','2026-05-01','T001','executor','["touches_lifecycle"]','watch','what is missing?','path:line');
+            INSERT INTO intake (display_id,status,summary,body,captured_at,source_task,source_agent,priority,risk_flags,cluster_key,missing_info_question,evidence)
+            VALUES ('I001','needs_info','needs more','story','2026-05-01','T001','executor','high','["touches_lifecycle"]','watch','what is missing?','path:line');
             "#,
         ).unwrap();
 
@@ -3586,6 +3586,7 @@ mod tests {
         assert_eq!(intake.summary, "needs more");
         assert_eq!(intake.status, "needs_info");
         assert_eq!(intake.source_task.as_deref(), Some("T001"));
+        assert_eq!(intake.priority.as_deref(), Some("high"));
         assert_eq!(intake.risk_flags, vec!["touches_lifecycle"]);
         assert_eq!(intake.held_reason.as_deref(), Some("what is missing?"));
         assert_eq!(

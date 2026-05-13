@@ -13,7 +13,9 @@ use super::data::{
 };
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
-use super::semantics::{observation_watch_projection, task_watch_projection, WatchSlotId};
+use super::semantics::{
+    intake_watch_projection, observation_watch_projection, task_watch_projection, WatchSlotId,
+};
 use super::sidecar::SidecarScope;
 use super::sort::{sort_indices, Sort};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -382,6 +384,13 @@ impl App {
                 };
                 (watch_slot_order(slot), fr.section, fr.row)
             }),
+            StoreLane::Intake => rows.sort_by_key(|fr| {
+                let slot = match &self.rows[fr.abs] {
+                    Row::Intake(i) => intake_watch_projection(i).slot,
+                    _ => WatchSlotId::Exit,
+                };
+                (watch_slot_order(slot), fr.section, fr.row)
+            }),
             _ => {}
         }
     }
@@ -663,7 +672,13 @@ mod tests {
         })
     }
 
-    fn task_with_steps(id: &str, lifecycle: &str, active_step: &str, blocked: bool, blocker_kind: Option<&str>) -> Row {
+    fn task_with_steps(
+        id: &str,
+        lifecycle: &str,
+        active_step: &str,
+        blocked: bool,
+        blocker_kind: Option<&str>,
+    ) -> Row {
         Row::Task(TaskRow {
             display_id: id.to_string(),
             status: id.to_string(),
@@ -689,7 +704,13 @@ mod tests {
         })
     }
 
-    fn obs_with_projection(id: &str, status: &str, lifecycle: Option<&str>, contract_state: Option<&str>, waiting_kind: Option<&str>) -> Row {
+    fn obs_with_projection(
+        id: &str,
+        status: &str,
+        lifecycle: Option<&str>,
+        contract_state: Option<&str>,
+        waiting_kind: Option<&str>,
+    ) -> Row {
         Row::Obs(ObsRow {
             display_id: id.to_string(),
             status: status.to_string(),
@@ -707,6 +728,17 @@ mod tests {
         Row::Intake(IntakeRow {
             display_id: id.to_string(),
             status: "draft".to_string(),
+            summary: id.to_string(),
+            updated_at: "2026-05-05".to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn intake_with_projection(id: &str, lifecycle: &str, status: &str) -> Row {
+        Row::Intake(IntakeRow {
+            display_id: id.to_string(),
+            lifecycle: Some(lifecycle.to_string()),
+            status: status.to_string(),
             summary: id.to_string(),
             updated_at: "2026-05-05".to_string(),
             ..Default::default()
@@ -894,9 +926,21 @@ mod tests {
     fn observation_flat_rows_follow_projection_display_order_for_navigation() {
         let mut app = App::new(TuiOpts::default());
         app.rows = vec![
-            obs_with_projection("L-contract", "open", Some("candidate"), Some("draft"), Some("human_ratification")),
+            obs_with_projection(
+                "L-contract",
+                "open",
+                Some("candidate"),
+                Some("draft"),
+                Some("human_ratification"),
+            ),
             obs_with_projection("L-candidate", "open", Some("candidate"), None, None),
-            obs_with_projection("L-wait", "needs_info", Some("candidate"), None, Some("info_needed")),
+            obs_with_projection(
+                "L-wait",
+                "needs_info",
+                Some("candidate"),
+                None,
+                Some("info_needed"),
+            ),
         ];
         app.sections = classify(&app.rows);
         app.focused_store = StoreLane::Observations;
@@ -907,6 +951,26 @@ mod tests {
             .map(|fr| app.rows[fr.abs].display_id())
             .collect();
         assert_eq!(ids, vec!["L-candidate", "L-contract", "L-wait"]);
+    }
+
+    #[test]
+    fn intake_flat_rows_follow_projection_display_order_for_navigation() {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![
+            intake_with_projection("I-routed", "closed", "routed"),
+            intake_with_projection("I-new", "new", "draft"),
+            intake_with_projection("I-wait", "waiting", "needs_info"),
+            intake_with_projection("I-triage", "triaging", "triaging"),
+        ];
+        app.sections = classify(&app.rows);
+        app.focused_store = StoreLane::Intake;
+
+        let ids: Vec<&str> = app
+            .flat_rows()
+            .iter()
+            .map(|fr| app.rows[fr.abs].display_id())
+            .collect();
+        assert_eq!(ids, vec!["I-new", "I-triage", "I-wait", "I-routed"]);
     }
 
     #[test]

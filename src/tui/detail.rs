@@ -8,7 +8,8 @@ use super::data::{
     RecentEvent, ReviewRow, Row, TaskCycleEntry, TaskRow,
 };
 use super::semantics::{
-    observation_flow_projection, task_map_projection, MapCell, MapConfidence, MapGlyph, MapSource,
+    intake_funnel_projection, observation_flow_projection, task_map_projection, IntakeFunnelCell,
+    IntakeFunnelGlyph, IntakeFunnelSource, MapCell, MapConfidence, MapGlyph, MapSource,
     ObservationCheckpoint, ObservationFlowCell, ObservationFlowSource, ObservationGlyph,
     TaskMapProjection,
 };
@@ -624,7 +625,58 @@ fn observation_active_marker(cell: &ObservationFlowCell) -> &'static str {
     }
 }
 
+fn intake_cell_label(cell: &IntakeFunnelCell) -> String {
+    let mut label = intake_glyph_label(cell.glyph).to_string();
+    label.push(' ');
+    label.push_str(cell.glyph.symbol());
+    if let Some(count) = cell.count {
+        label.push_str(&format!(" count {count}"));
+    }
+    label
+}
+
+fn intake_glyph_label(glyph: IntakeFunnelGlyph) -> &'static str {
+    match glyph {
+        IntakeFunnelGlyph::Captured => "captured",
+        IntakeFunnelGlyph::Triaging => "triage",
+        IntakeFunnelGlyph::Routed => "routed",
+        IntakeFunnelGlyph::Architecture => "architecture",
+        IntakeFunnelGlyph::Duplicate => "duplicate",
+        IntakeFunnelGlyph::Dropped => "dropped",
+        IntakeFunnelGlyph::Waiting => "waiting",
+        IntakeFunnelGlyph::Fault => "fault",
+        IntakeFunnelGlyph::Unreached => "unreached",
+        IntakeFunnelGlyph::Unknown => "unknown",
+    }
+}
+
+fn intake_source_label(source: &IntakeFunnelSource) -> &'static str {
+    match source {
+        IntakeFunnelSource::RowExists => "row_exists",
+        IntakeFunnelSource::Lifecycle => "lifecycle",
+        IntakeFunnelSource::Status => "status",
+        IntakeFunnelSource::WaitingKind => "waiting_kind",
+        IntakeFunnelSource::HeldReason => "held_reason",
+        IntakeFunnelSource::Decision => "decision",
+        IntakeFunnelSource::Outcome => "outcome",
+        IntakeFunnelSource::RoutedObservation => "routed_observation",
+        IntakeFunnelSource::RoutedArchitectureReview => "routed_architecture_review",
+        IntakeFunnelSource::ProducedArtifact => "produced_artifact",
+        IntakeFunnelSource::DuplicateOf => "duplicate_of",
+        IntakeFunnelSource::MissingEvidence => "missing_evidence",
+    }
+}
+
+fn intake_active_marker(cell: &IntakeFunnelCell) -> &'static str {
+    if cell.active {
+        " active"
+    } else {
+        ""
+    }
+}
+
 fn intake_lines(i: &IntakeRow) -> Vec<String> {
+    let projection = intake_funnel_projection(i);
     let mut lines = vec![
         format!("Intake detail · {}", i.display_id),
         String::new(),
@@ -636,6 +688,48 @@ fn intake_lines(i: &IntakeRow) -> Vec<String> {
         format!("  priority: {}", present_opt(i.priority.as_deref())),
         format!("  risk: {}", list_or_dash(&i.risk_flags)),
         format!("  cluster: {}", present_opt(i.cluster_key.as_deref())),
+        String::new(),
+        "Intake funnel".to_string(),
+        format!(
+            "  capture: {} source={} confidence={}{}",
+            intake_cell_label(&projection.capture),
+            intake_source_label(&projection.capture.source),
+            map_confidence_label(projection.capture.confidence),
+            intake_active_marker(&projection.capture),
+        ),
+        format!(
+            "  triage: {} source={} confidence={}{}",
+            intake_cell_label(&projection.triage),
+            intake_source_label(&projection.triage.source),
+            map_confidence_label(projection.triage.confidence),
+            intake_active_marker(&projection.triage),
+        ),
+        format!(
+            "  route: {}",
+            projection
+                .route
+                .as_ref()
+                .map(|cell| format!(
+                    "{} source={} confidence={}{}",
+                    intake_cell_label(cell),
+                    intake_source_label(&cell.source),
+                    map_confidence_label(cell.confidence),
+                    intake_active_marker(cell)
+                ))
+                .unwrap_or_else(|| "—".to_string())
+        ),
+        format!(
+            "  decision: {}",
+            present_opt(projection.decision.as_deref())
+        ),
+        format!(
+            "  route_target: {}",
+            present_opt(projection.route_target.as_deref())
+        ),
+        format!(
+            "  projection_confidence: {}",
+            map_confidence_label(projection.confidence)
+        ),
         String::new(),
         "ADR 0002 state".to_string(),
         format!("  lifecycle: {}", present_opt(i.lifecycle.as_deref())),
@@ -1217,6 +1311,16 @@ mod tests {
             text.contains("needs more reconnaissance evidence"),
             "missing rationale: {text}"
         );
+        for needle in [
+            "Intake funnel",
+            "capture: captured ◌ source=row_exists confidence=exact",
+            "triage: waiting △ source=status confidence=exact",
+            "route: unreached · source=missing_evidence confidence=exact",
+            "decision: info",
+            "projection_confidence: exact",
+        ] {
+            assert!(text.contains(needle), "missing {needle}: {text}");
+        }
     }
 
     #[test]

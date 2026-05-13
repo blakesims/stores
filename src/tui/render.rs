@@ -15,11 +15,12 @@ use super::data::{
 };
 use super::semantics::{
     engine_presentation, external_review_presentation, external_review_runner_label,
-    intake_presentation, observation_flow_projection, observation_presentation,
+    intake_funnel_projection, intake_presentation, intake_watch_projection,
+    intake_watch_slot_label, observation_flow_projection, observation_presentation,
     observation_watch_projection, observation_watch_slot_label, task_map_projection,
-    task_presentation, task_watch_projection, task_watch_slot_label, MapCell, MapColor,
-    ObservationFlowCell, ObservationFlowProjection, PresentationSeverity, TaskMapProjection,
-    WatchProjection, WatchSlotId,
+    task_presentation, task_watch_projection, task_watch_slot_label, IntakeFunnelCell,
+    IntakeFunnelProjection, MapCell, MapColor, ObservationFlowCell, ObservationFlowProjection,
+    PresentationSeverity, TaskMapProjection, WatchProjection, WatchSlotId,
 };
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
@@ -843,6 +844,12 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
         append_observation_projection_items(
             app, &flat, window, cursor, area.width, flow_width, &mut items,
         );
+    } else if app.focused_store == StoreLane::Intake {
+        let flow_width = intake_table_flow_width(window, app);
+        items.push(ListItem::new(intake_table_header(area.width, flow_width)));
+        append_intake_projection_items(
+            app, &flat, window, cursor, area.width, flow_width, &mut items,
+        );
     } else {
         let mut last_section: Option<usize> = None;
         for (i, fr) in window.iter().enumerate() {
@@ -1041,6 +1048,79 @@ fn observation_projection_group_count(full: &[FlatRow], app: &App, slot: WatchSl
                 })
         })
         .sum()
+}
+
+fn append_intake_projection_items(
+    app: &App,
+    full: &[FlatRow],
+    window: &[FlatRow],
+    cursor: Option<usize>,
+    area_width: u16,
+    flow_width: usize,
+    items: &mut Vec<ListItem<'static>>,
+) {
+    for slot in intake_projection_display_order(full, app) {
+        let total = intake_projection_group_count(full, app, slot);
+        let rows: Vec<(usize, &FlatRow, WatchProjection)> = window
+            .iter()
+            .enumerate()
+            .filter_map(|(i, fr)| match &app.rows[fr.abs] {
+                Row::Intake(row) => {
+                    let projection = intake_watch_projection(row);
+                    (projection.slot == slot).then_some((i, fr, projection))
+                }
+                _ => None,
+            })
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!(
+                "▾ {} ({})",
+                intake_watch_slot_label(slot).to_ascii_uppercase(),
+                total
+            ),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))));
+        for (i, fr, projection) in rows {
+            let absolute_idx = app.scroll_offset + i;
+            let selected = cursor == Some(absolute_idx);
+            items.push(ListItem::new(format_row_line_for_intake_projection(
+                &app.rows[fr.abs],
+                selected,
+                &projection,
+                area_width,
+                flow_width,
+            )));
+        }
+    }
+}
+
+fn intake_projection_display_order(full: &[FlatRow], app: &App) -> Vec<WatchSlotId> {
+    const ORDER: [WatchSlotId; 6] = [
+        WatchSlotId::Front,
+        WatchSlotId::Work,
+        WatchSlotId::Gate,
+        WatchSlotId::Wait,
+        WatchSlotId::Fault,
+        WatchSlotId::Exit,
+    ];
+    ORDER
+        .into_iter()
+        .filter(|slot| intake_projection_group_count(full, app, *slot) > 0)
+        .collect()
+}
+
+fn intake_projection_group_count(full: &[FlatRow], app: &App, slot: WatchSlotId) -> usize {
+    full.iter()
+        .filter(|fr| match &app.rows[fr.abs] {
+            Row::Intake(row) => intake_watch_projection(row).slot == slot,
+            _ => false,
+        })
+        .count()
 }
 
 /// Engine-health panel: daemon liveness, dispatch-lock counts, oldest-lock
@@ -1350,6 +1430,26 @@ fn format_row_line_for_observation_projection(
     styled_row_line(base, selected)
 }
 
+fn format_row_line_for_intake_projection(
+    row: &Row,
+    selected: bool,
+    _projection: &WatchProjection,
+    area_width: u16,
+    flow_width: usize,
+) -> Line<'static> {
+    let base = match row {
+        Row::Intake(i) => format_intake_table_line(i, area_width, flow_width),
+        _ => match row {
+            Row::Task(t) => format_task_line(t, &ExternalReviewState::default()),
+            Row::Obs(o) => format_obs_line(o, None),
+            Row::CollapsedObs(c) => format_obs_line(&c.representative, Some(c)),
+            Row::Review(r) => format_review_line(r),
+            Row::Intake(_) => unreachable!(),
+        },
+    };
+    styled_row_line(base, selected)
+}
+
 fn styled_row_line(mut spans: Vec<Span<'static>>, selected: bool) -> Line<'static> {
     if selected {
         for s in spans.iter_mut() {
@@ -1377,6 +1477,16 @@ const OBS_LINK_WIDTH: usize = 6;
 const OBS_CNT_WIDTH: usize = 4;
 const OBS_TABLE_GAPS: usize = 8;
 const OBS_TABLE_PREFIX_WIDTH: usize = 2;
+
+const INTAKE_ID_WIDTH: usize = 6;
+const INTAKE_FLOW_MIN_WIDTH: usize = 5;
+const INTAKE_DECISION_WIDTH: usize = 10;
+const INTAKE_AGE_WIDTH: usize = 5;
+const INTAKE_PRI_WIDTH: usize = 6;
+const INTAKE_SRC_WIDTH: usize = 8;
+const INTAKE_ROUTE_WIDTH: usize = 8;
+const INTAKE_TABLE_GAPS: usize = 7;
+const INTAKE_TABLE_PREFIX_WIDTH: usize = 2;
 
 fn observation_table_flow_width(window: &[FlatRow], app: &App) -> usize {
     window
@@ -1510,6 +1620,194 @@ fn format_observation_table_line(
     spans.push(Span::raw(" "));
     spans.push(Span::raw(format!("{:>cnt_w$}", cnt, cnt_w = OBS_CNT_WIDTH)));
     spans
+}
+
+fn intake_table_flow_width(window: &[FlatRow], app: &App) -> usize {
+    window
+        .iter()
+        .filter_map(|fr| match &app.rows[fr.abs] {
+            Row::Intake(i) => Some(
+                intake_flow_text(&intake_funnel_projection(i))
+                    .chars()
+                    .count(),
+            ),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(INTAKE_FLOW_MIN_WIDTH)
+        .max(INTAKE_FLOW_MIN_WIDTH)
+}
+
+fn intake_table_summary_width(area_width: u16, flow_width: usize) -> usize {
+    let fixed = INTAKE_TABLE_PREFIX_WIDTH
+        + INTAKE_ID_WIDTH
+        + flow_width
+        + INTAKE_DECISION_WIDTH
+        + INTAKE_AGE_WIDTH
+        + INTAKE_PRI_WIDTH
+        + INTAKE_SRC_WIDTH
+        + INTAKE_ROUTE_WIDTH
+        + INTAKE_TABLE_GAPS;
+    (area_width as usize).saturating_sub(fixed).max(12)
+}
+
+fn intake_table_header(area_width: u16, flow_width: usize) -> Line<'static> {
+    let summary_width = intake_table_summary_width(area_width, flow_width);
+    Line::from(vec![Span::styled(
+        format!(
+            "  {:<id_w$} {:<summary_w$} {:<flow_w$} {:<decision_w$} {:>age_w$} {:<pri_w$} {:<src_w$} {:<route_w$}",
+            "ID",
+            "SUMMARY",
+            "FLOW",
+            "DECISION",
+            "AGE",
+            "PRI",
+            "SRC",
+            "ROUTE",
+            id_w = INTAKE_ID_WIDTH,
+            summary_w = summary_width,
+            flow_w = flow_width,
+            decision_w = INTAKE_DECISION_WIDTH,
+            age_w = INTAKE_AGE_WIDTH,
+            pri_w = INTAKE_PRI_WIDTH,
+            src_w = INTAKE_SRC_WIDTH,
+            route_w = INTAKE_ROUTE_WIDTH,
+        ),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )])
+}
+
+fn format_intake_table_line(
+    i: &super::data::IntakeRow,
+    area_width: u16,
+    flow_width: usize,
+) -> Vec<Span<'static>> {
+    let projection = intake_funnel_projection(i);
+    let summary_width = intake_table_summary_width(area_width, flow_width);
+    let age_source = i
+        .captured_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&i.updated_at);
+    let age = compact_age_label(super::data::parse_epoch(age_source));
+    let decision = projection.decision.clone().unwrap_or_default();
+    let priority = i.priority.as_deref().unwrap_or("");
+    let source = i.source_agent.as_deref().unwrap_or("");
+    let route = projection.route_target.clone().unwrap_or_default();
+    let summary = truncate(&i.summary, summary_width);
+
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<id_w$}", i.display_id, id_w = INTAKE_ID_WIDTH),
+            Style::default().fg(Color::Green),
+        ),
+        Span::raw(" "),
+        Span::raw(format!(
+            "{:<summary_w$}",
+            summary,
+            summary_w = summary_width
+        )),
+        Span::raw(" "),
+    ];
+    spans.extend(intake_flow_spans(&projection, flow_width));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<decision_w$}",
+        truncate(&decision, INTAKE_DECISION_WIDTH),
+        decision_w = INTAKE_DECISION_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:>age_w$}",
+        age,
+        age_w = INTAKE_AGE_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<pri_w$}",
+        truncate(priority, INTAKE_PRI_WIDTH),
+        pri_w = INTAKE_PRI_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<src_w$}",
+        truncate(source, INTAKE_SRC_WIDTH),
+        src_w = INTAKE_SRC_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<route_w$}",
+        truncate(&route, INTAKE_ROUTE_WIDTH),
+        route_w = INTAKE_ROUTE_WIDTH
+    )));
+    spans
+}
+
+fn intake_flow_text(projection: &IntakeFunnelProjection) -> String {
+    intake_flow_tokens(projection)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn intake_flow_spans(projection: &IntakeFunnelProjection, width: usize) -> Vec<Span<'static>> {
+    let tokens = intake_flow_tokens(projection);
+    let rendered: usize = tokens.iter().map(|(text, _)| text.chars().count()).sum();
+    let mut spans: Vec<Span<'static>> = tokens
+        .into_iter()
+        .map(|(text, style)| Span::styled(text, style))
+        .collect();
+    if rendered < width {
+        spans.push(Span::raw(" ".repeat(width - rendered)));
+    }
+    spans
+}
+
+fn intake_flow_tokens(projection: &IntakeFunnelProjection) -> Vec<(String, Style)> {
+    let mut cells = vec![&projection.capture, &projection.triage];
+    if let Some(route) = projection.route.as_ref() {
+        cells.push(route);
+    }
+    cells
+        .into_iter()
+        .enumerate()
+        .flat_map(|(idx, cell)| {
+            let mut out = Vec::new();
+            if idx > 0 {
+                out.push((" ".to_string(), Style::default()));
+            }
+            out.push((intake_cell_text(cell), intake_cell_style(cell)));
+            out
+        })
+        .collect()
+}
+
+fn intake_cell_text(cell: &IntakeFunnelCell) -> String {
+    match cell.count {
+        Some(count) => format!("{}{}", cell.glyph.symbol(), superscript_number(count)),
+        None => cell.glyph.symbol().to_string(),
+    }
+}
+
+fn intake_cell_style(cell: &IntakeFunnelCell) -> Style {
+    let style = match cell.color_role {
+        MapColor::Inactive => Style::default().fg(WATCH_OVERLAY0),
+        MapColor::ActiveWork => Style::default().fg(Color::Cyan),
+        MapColor::ActiveGate => Style::default().fg(WATCH_YELLOW),
+        MapColor::Passed => Style::default().fg(WATCH_GREEN),
+        MapColor::Failed => Style::default().fg(WATCH_RED),
+        MapColor::Waiting => Style::default().fg(WATCH_PEACH),
+        MapColor::Unknown => Style::default().fg(WATCH_OVERLAY2),
+    };
+    if cell.active {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn observation_flow_text(projection: &ObservationFlowProjection) -> String {
@@ -2765,6 +3063,132 @@ mod tests {
             assert!(
                 !painted.contains(prose_bag),
                 "task rows must keep raw/debug prose out of focused table ({prose_bag}):\n{painted}"
+            );
+        }
+    }
+
+    #[test]
+    fn intake_focused_table_renders_dense_funnel_columns_without_prose_bags() {
+        let mut app = App::new(TuiOpts::default());
+        app.focused_store = StoreLane::Intake;
+        app.rows = vec![
+            Row::Intake(IntakeRow {
+                display_id: "I018".to_string(),
+                status: "draft".to_string(),
+                lifecycle: Some("new".to_string()),
+                summary: "fake runner crash surfaced by T036".to_string(),
+                priority: Some("high".to_string()),
+                source_agent: Some("exec".to_string()),
+                updated_at: "2026-05-05".to_string(),
+                ..Default::default()
+            }),
+            Row::Intake(IntakeRow {
+                display_id: "I019".to_string(),
+                status: "needs_info".to_string(),
+                lifecycle: Some("waiting".to_string()),
+                waiting_kind: Some("needs_info".to_string()),
+                summary: "needs operator clarification".to_string(),
+                priority: Some("med".to_string()),
+                source_agent: Some("planner".to_string()),
+                updated_at: "2026-05-05".to_string(),
+                ..Default::default()
+            }),
+            Row::Intake(IntakeRow {
+                display_id: "I020".to_string(),
+                status: "routed".to_string(),
+                lifecycle: Some("closed".to_string()),
+                duplicate_of_id: Some("L041".to_string()),
+                summary: "duplicate of L041".to_string(),
+                priority: Some("low".to_string()),
+                source_agent: Some("scout".to_string()),
+                updated_at: "2026-05-05".to_string(),
+                ..Default::default()
+            }),
+            Row::Intake(IntakeRow {
+                display_id: "I021".to_string(),
+                status: "routed".to_string(),
+                lifecycle: Some("closed".to_string()),
+                produced_observation_id: Some("L048".to_string()),
+                summary: "routed to observation".to_string(),
+                priority: Some("high".to_string()),
+                source_agent: Some("exec".to_string()),
+                updated_at: "2026-05-05".to_string(),
+                ..Default::default()
+            }),
+            Row::Intake(IntakeRow {
+                display_id: "I022".to_string(),
+                status: "routed".to_string(),
+                lifecycle: Some("closed".to_string()),
+                produced_architecture_review_id: Some("A003".to_string()),
+                summary: "escalated to architecture review".to_string(),
+                priority: Some("high".to_string()),
+                source_agent: Some("gate".to_string()),
+                updated_at: "2026-05-05".to_string(),
+                ..Default::default()
+            }),
+            Row::Intake(IntakeRow {
+                display_id: "I023".to_string(),
+                status: "dropped".to_string(),
+                lifecycle: Some("closed".to_string()),
+                outcome: Some("dropped_as_noise".to_string()),
+                summary: "dropped as noise".to_string(),
+                source_agent: Some("scout".to_string()),
+                updated_at: "2026-05-05".to_string(),
+                ..Default::default()
+            }),
+        ];
+        app.sections = classify(&app.rows);
+        app.apply_sort();
+        app.viewport_height = 20;
+
+        let backend = TestBackend::new(150, 24);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|f| draw_focused_table(f, &app, f.area()))
+            .expect("draw focused table");
+        let painted = buffer_to_string(terminal.backend().buffer());
+        let lines: Vec<&str> = painted.lines().collect();
+        let header = lines
+            .iter()
+            .find(|line| line.contains("ID") && line.contains("SUMMARY") && line.contains("FLOW"))
+            .expect("header line");
+        let new = lines
+            .iter()
+            .find(|line| line.contains("I018"))
+            .unwrap_or_else(|| panic!("missing I018:\n{painted}"));
+        let wait = lines
+            .iter()
+            .find(|line| line.contains("I019"))
+            .unwrap_or_else(|| panic!("missing I019:\n{painted}"));
+        let duplicate = lines
+            .iter()
+            .find(|line| line.contains("I020"))
+            .unwrap_or_else(|| panic!("missing I020:\n{painted}"));
+        let arch = lines
+            .iter()
+            .find(|line| line.contains("I022"))
+            .unwrap_or_else(|| panic!("missing I022:\n{painted}"));
+
+        let char_pos = |line: &str, needle: &str| -> Option<usize> {
+            line.find(needle).map(|byte| line[..byte].chars().count())
+        };
+        assert_eq!(char_pos(header, "ID"), char_pos(new, "I018"), "{painted}");
+        assert_eq!(
+            char_pos(header, "SUMMARY"),
+            char_pos(new, "fake runner"),
+            "{painted}"
+        );
+        assert_eq!(char_pos(header, "FLOW"), char_pos(new, "◌"), "{painted}");
+        assert_eq!(char_pos(header, "FLOW"), char_pos(wait, "◌"), "{painted}");
+        assert!(painted.contains("◌ · ·"), "{painted}");
+        assert!(painted.contains("◌ △ ·"), "{painted}");
+        assert!(painted.contains("● ■"), "{painted}");
+        assert!(duplicate.contains("duplicate"), "{painted}");
+        assert!(arch.contains("A003"), "{painted}");
+        for prose_bag in ["priority:", "source:", "cluster:", "next:"] {
+            assert!(
+                !painted.contains(prose_bag),
+                "intake focused rows must keep prose bags out ({prose_bag}):\n{painted}"
             );
         }
     }
