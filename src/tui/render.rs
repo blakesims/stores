@@ -300,33 +300,33 @@ fn lane_card_lines(lane: StoreLane, model: &StoreFlowModel) -> [String; 3] {
         StoreLane::Intake => {
             let i = &model.intake;
             [
-                format!("◌ new {}   ◆ triage {}", i.new, i.triaging),
-                format!("◇ info {}  ✓ routed {}", i.waiting, i.closed),
-                "△ wait 0  ▲ fault 0".to_string(),
+                format!("◌new{} ◆tri{}", i.new, i.triaging),
+                format!("◇ask{} ✓out{}", i.waiting, i.closed),
+                "△w0 ▲err0".to_string(),
             ]
         }
         StoreLane::Observations => {
             let o = &model.observations;
             [
-                format!("◌ candidate {}  ◆ investigate {}", o.candidate, o.in_progress),
-                format!("◇ contract {}   ✓ closed {}", o.ready, o.closed),
-                format!("△ wait {}       ▲ fault 0", o.waiting_kinds.values().sum::<usize>()),
+                format!("◌cand{} ◆inv{}", o.candidate, o.in_progress),
+                format!("◇ctr{} ✓dn{}", o.ready, o.closed),
+                format!("△w{} ▲err0", o.waiting_kinds.values().sum::<usize>()),
             ]
         }
         StoreLane::Tasks => {
             let t = &model.tasks;
             [
-                format!("◌ queued {}  ◆ work {}", t.queued, t.work),
-                format!("◇ gate {}    ✓ done {}", t.gate, t.recently_terminal),
-                format!("△ wait {}    ▲ fail {}", t.wait, t.fail),
+                format!("◌q{} ◆wrk{}", t.queued, t.work),
+                format!("◇g{} ✓dn{}", t.gate, t.recently_terminal),
+                format!("△w{} ▲f{}", t.wait, t.fail),
             ]
         }
         StoreLane::ExternalReviews => {
             let r = &model.external_reviews;
             [
-                format!("◌ pending {}  ◆ running {}", r.pending, r.running),
-                format!("◇ revise {}   ✓ passed {}", r.revise, r.passed),
-                format!("△ wait {}     ▲ tool-fault {}", r.wait, r.tooling_held),
+                format!("◌pend{} ◆run{}", r.pending, r.running),
+                format!("◇rev{} ✓pass{}", r.revise, r.passed),
+                format!("△w{} ▲tool{}", r.wait, r.tooling_held),
             ]
         }
         StoreLane::EngineHealth => {
@@ -345,17 +345,22 @@ fn lane_card_lines(lane: StoreLane, model: &StoreFlowModel) -> [String; 3] {
             let (wait_label, wait_count) = if state.label == "manual" {
                 ("manual", String::new())
             } else {
-                ("wait", " 0".to_string())
+                ("w", "0".to_string())
             };
             let (fault_label, fault_count) = if state.severity == PresentationSeverity::Fault {
-                (state.label.as_str(), String::new())
+                let label = if state.label == "daemon down" {
+                    "daemon"
+                } else {
+                    state.label.as_str()
+                };
+                (label, String::new())
             } else {
-                ("fault", " 0".to_string())
+                ("err", "0".to_string())
             };
             [
-                "◌ dispatch 0  ◆ runners 0".to_string(),
-                format!("◇ locks {}    ✓ clear {}", e.unfinished_locks, clear),
-                format!("△ {wait_label}{wait_count}  ▲ {fault_label}{fault_count}"),
+                "◌disp0 ◆run0".to_string(),
+                format!("◇lock{} ✓clr{}", e.unfinished_locks, clear),
+                format!("△{wait_label}{wait_count} ▲{fault_label}{fault_count}"),
             ]
         }
     }
@@ -1113,12 +1118,21 @@ mod tests {
             for glyph in ["◌", "◆", "◇", "✓", "△", "▲"] {
                 assert!(text.contains(glyph), "{lane:?} missing {glyph}: {text}");
             }
-            assert!(!text.contains("held"), "{lane:?} leaked held headline: {text}");
+            for line in lane_card_lines(lane, &model) {
+                assert!(
+                    line.chars().count() <= 14,
+                    "{lane:?} line too wide for an 80-col card inner width: {line:?}"
+                );
+            }
+            assert!(
+                !text.contains("held"),
+                "{lane:?} leaked held headline: {text}"
+            );
         }
 
         let tasks = lane_card_lines(StoreLane::Tasks, &model).join("\n");
-        assert!(tasks.contains("△ wait 12"), "{tasks}");
-        assert!(tasks.contains("▲ fail 13"), "{tasks}");
+        assert!(tasks.contains("△w12"), "{tasks}");
+        assert!(tasks.contains("▲f13"), "{tasks}");
     }
 
     #[test]
@@ -1126,15 +1140,15 @@ mod tests {
         let mut manual = StoreFlowModel::default();
         manual.engine.daemon_live = false;
         let manual_text = lane_card_lines(StoreLane::EngineHealth, &manual).join("\n");
-        assert!(manual_text.contains("△ manual"), "{manual_text}");
-        assert!(manual_text.contains("▲ fault 0"), "{manual_text}");
+        assert!(manual_text.contains("△manual"), "{manual_text}");
+        assert!(manual_text.contains("▲err0"), "{manual_text}");
 
         let mut fault = StoreFlowModel::default();
         fault.engine.daemon_live = false;
         fault.engine.unfinished_locks = 2;
         let fault_text = lane_card_lines(StoreLane::EngineHealth, &fault).join("\n");
-        assert!(fault_text.contains("◇ locks 2"), "{fault_text}");
-        assert!(fault_text.contains("▲ daemon down"), "{fault_text}");
+        assert!(fault_text.contains("◇lock2"), "{fault_text}");
+        assert!(fault_text.contains("▲daemon"), "{fault_text}");
     }
 
     fn task_row(status: &str, reason: Option<&str>) -> Row {

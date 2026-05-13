@@ -264,8 +264,8 @@ fn cockpit_adr_0001_review_steps_render_under_active_work() {
     assert!(
         lines[active_line + 1..next_section_line]
             .iter()
-            .any(|line| line.contains("T102") && line.contains("code_review")),
-        "render_frame must place T102 under ACTIVE before next section:\n{painted}"
+            .any(|line| line.contains("T102") && line.contains("code-gate")),
+        "render_frame must place T102 under ACTIVE with semantic code-gate label before next section:\n{painted}"
     );
     if let Some(held_line) = lines
         .iter()
@@ -286,7 +286,7 @@ fn cockpit_adr_0001_review_steps_render_under_active_work() {
         assert!(
             !lines[held_line + 1..next_after_held]
                 .iter()
-                .any(|line| line.contains("T102") && line.contains("code_review")),
+                .any(|line| line.contains("T102") && line.contains("code-gate")),
             "render_frame must not place T102 under HELD-AI-REVIEW:\n{painted}"
         );
     }
@@ -299,7 +299,11 @@ fn cockpit_top_strip_paints_all_five_lane_labels_with_counts() {
 
     let buf = paint(&mut app);
     let painted = buffer_to_string(&buf);
-    let top: String = painted.lines().take(4).collect::<Vec<_>>().join("\n");
+    let top: String = painted
+        .lines()
+        .take(TOP_STRIP_HEIGHT as usize)
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // (i) All five lane labels present.
     for label in [
@@ -315,31 +319,28 @@ fn cockpit_top_strip_paints_all_five_lane_labels_with_counts() {
         );
     }
 
-    // (i) Per-lane primary counts derived from the seeded fixture.
-    // Intake: 1 draft → "open: 1".
-    assert!(
-        top.contains("open: 1"),
-        "top region missing 'open: 1' (intake/obs primary):\n{top}"
-    );
-    // Tasks: 1 executing + 1 ready → "active: 2".
-    assert!(
-        top.contains("active: 2"),
-        "top region missing 'active: 2' (tasks primary):\n{top}"
-    );
-    // External reviews: 1 running → "running: 1".
-    assert!(
-        top.contains("running: 1"),
-        "top region missing 'running: 1' (external-reviews primary):\n{top}"
-    );
-    // Engine: dead daemon + dangling lock.
-    assert!(
-        top.contains("daemon DEAD"),
-        "top region missing 'daemon DEAD' (engine primary):\n{top}"
-    );
-    assert!(
-        top.contains("locks 1"),
-        "top region missing 'locks 1' (engine breakdown):\n{top}"
-    );
+    // (i) Shared-flow top cards expose canonical glyph slots with fixture counts.
+    for expected in [
+        "◌new1",   // intake draft
+        "◆tri0",   // intake triage
+        "◌cand1",  // observation open
+        "◆inv0",   // observation investigation
+        "◌q0",     // no primary-lifecycle queued task
+        "◆wrk2",   // ready + executing legacy active work
+        "◇g0",     // no task review/integration gate
+        "✓dn1",    // one terminal task
+        "△w0",     // no task wait
+        "▲f0",     // no task failure
+        "◆run1",   // external review running
+        "▲tool0",  // no external review tool fault
+        "◇lock1",  // one dangling dispatch lock
+        "▲daemon", // deterministic dead daemon
+    ] {
+        assert!(
+            top.contains(expected),
+            "top region missing shared-flow slot {expected:?}:\n{top}\n\nfull paint:\n{painted}"
+        );
+    }
 }
 
 #[test]
