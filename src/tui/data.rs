@@ -172,6 +172,148 @@ pub struct LiveRunSummary {
     pub events: Vec<LiveRunEventSummary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanReviewGate {
+    Ready,
+    NeedsWork,
+    NotReady,
+    Unknown(String),
+}
+
+impl Default for PlanReviewGate {
+    fn default() -> Self {
+        Self::Unknown(String::new())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PlanReviewGate {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <Value as serde::Deserialize>::deserialize(deserializer)?;
+        let gate = match value {
+            Value::String(s) => s,
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        Ok(match gate.as_str() {
+            "READY" => Self::Ready,
+            "NEEDS_WORK" => Self::NeedsWork,
+            "NOT_READY" => Self::NotReady,
+            other => Self::Unknown(other.to_string()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CycleReviewGate {
+    Pass,
+    Revise,
+    Fail,
+    Unknown(String),
+}
+
+impl<'de> serde::Deserialize<'de> for CycleReviewGate {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <Value as serde::Deserialize>::deserialize(deserializer)?;
+        let gate = match value {
+            Value::String(s) => s,
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        Ok(match gate.as_str() {
+            "PASS" => Self::Pass,
+            "REVISE" => Self::Revise,
+            "FAIL" => Self::Fail,
+            other => Self::Unknown(other.to_string()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct TaskPlanReviewEntry {
+    #[serde(default)]
+    pub gate: PlanReviewGate,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default, alias = "timestamp")]
+    pub at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct TaskCycleActorRaw {
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default, alias = "timestamp")]
+    at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct TaskCycleReviewRaw {
+    #[serde(default)]
+    gate: Option<CycleReviewGate>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default, alias = "timestamp")]
+    at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct TaskCycleEntryRaw {
+    #[serde(default)]
+    phase: i64,
+    #[serde(default)]
+    cycle: i64,
+    #[serde(default)]
+    executor: Option<TaskCycleActorRaw>,
+    #[serde(default)]
+    review: Option<TaskCycleReviewRaw>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskCycleEntry {
+    pub phase: i64,
+    pub cycle: i64,
+    pub executor_summary: Option<String>,
+    pub executor_at: Option<String>,
+    pub review_gate: Option<CycleReviewGate>,
+    pub review_summary: Option<String>,
+    pub review_at: Option<String>,
+}
+
+impl From<TaskCycleEntryRaw> for TaskCycleEntry {
+    fn from(raw: TaskCycleEntryRaw) -> Self {
+        Self {
+            phase: raw.phase,
+            cycle: raw.cycle,
+            executor_summary: raw
+                .executor
+                .as_ref()
+                .and_then(|executor| executor.summary.clone()),
+            executor_at: raw.executor.and_then(|executor| executor.at),
+            review_gate: raw.review.as_ref().and_then(|review| review.gate.clone()),
+            review_summary: raw
+                .review
+                .as_ref()
+                .and_then(|review| review.summary.clone()),
+            review_at: raw.review.and_then(|review| review.at),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TaskCycleEntry {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        TaskCycleEntryRaw::deserialize(deserializer).map(Self::from)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TaskRow {
     pub display_id: String,
@@ -198,6 +340,8 @@ pub struct TaskRow {
     pub contract_scope_out: Option<String>,
     pub plan_review_summaries: Vec<String>,
     pub cycle_summaries: Vec<String>,
+    pub plan_review_entries: Vec<TaskPlanReviewEntry>,
+    pub cycle_entries: Vec<TaskCycleEntry>,
     pub wrap_summaries: Vec<String>,
     pub branch: Option<String>,
     pub workspace_path: Option<String>,
@@ -1299,6 +1443,8 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         let integration_attempts_raw: Option<String> = r.get(33).ok().flatten();
         let row_id: i64 = r.get(34)?;
         let display_id: String = r.get(0)?;
+        let plan_review_log_raw: Option<String> = r.get(21).ok();
+        let cycles_raw: Option<String> = r.get(22).ok();
         let (integration_attempts_count, last_integration_outcome) =
             integration_attempts_summary(integration_attempts_raw.as_deref());
         Ok(TaskRow {
@@ -1324,11 +1470,10 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             contract_done_when: r.get(18).ok().flatten(),
             contract_scope_in: r.get(19).ok().flatten(),
             contract_scope_out: r.get(20).ok().flatten(),
-            plan_review_summaries: json_summary_list(
-                r.get::<_, String>(21).ok().as_deref(),
-                "summary",
-            ),
-            cycle_summaries: cycle_summary_list(r.get::<_, String>(22).ok().as_deref()),
+            plan_review_summaries: json_summary_list(plan_review_log_raw.as_deref(), "summary"),
+            cycle_summaries: cycle_summary_list(cycles_raw.as_deref()),
+            plan_review_entries: plan_review_entries(plan_review_log_raw.as_deref()),
+            cycle_entries: cycle_entries(cycles_raw.as_deref()),
             wrap_summaries: json_summary_list(
                 r.get::<_, String>(23).ok().as_deref(),
                 "executive_summary",
@@ -1612,6 +1757,16 @@ fn cycle_summary_list(raw: Option<&str>) -> Vec<String> {
             out
         })
         .collect()
+}
+
+fn plan_review_entries(raw: Option<&str>) -> Vec<TaskPlanReviewEntry> {
+    raw.and_then(|s| serde_json::from_str::<Vec<TaskPlanReviewEntry>>(s).ok())
+        .unwrap_or_default()
+}
+
+fn cycle_entries(raw: Option<&str>) -> Vec<TaskCycleEntry> {
+    raw.and_then(|s| serde_json::from_str::<Vec<TaskCycleEntry>>(s).ok())
+        .unwrap_or_default()
 }
 
 fn decision_metadata_summary(
@@ -3297,6 +3452,111 @@ mod tests {
         assert_eq!(task.branch.as_deref(), Some("feat/T003"));
         assert_eq!(task.workspace_path.as_deref(), Some("/tmp/T003"));
         assert!(task.artifact_pointers.is_empty());
+    }
+
+    #[test]
+    fn task_structured_plan_reviews_and_cycles_round_trip() {
+        let conn = cockpit_conn();
+        let plan_review_log = r#"[
+            {"gate":"NEEDS_WORK","summary":"tighten scope","at":"2026-05-01T00:00:00Z"},
+            {"gate":"READY","summary":"approved","at":"2026-05-01T01:00:00Z"},
+            {"gate":"SURPRISE","summary":"future gate","timestamp":"2026-05-01T02:00:00Z"}
+        ]"#;
+        let cycles = r#"[
+            {"phase":1,"cycle":1,"executor":{"summary":"built phase one","at":"2026-05-01T03:00:00Z"},"review":{"gate":"REVISE","summary":"needs fix","at":"2026-05-01T04:00:00Z"}},
+            {"phase":1,"cycle":2,"executor":{"summary":"fixed phase one"},"review":{"gate":"PASS","summary":"passed"}},
+            {"phase":2,"cycle":1,"executor":{"summary":"built phase two"},"review":null}
+        ]"#;
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,updated_at,linked_observations,plan_review_log,cycles) VALUES ('T-map','executing','task','2026-05-01','[]',?1,?2)",
+            (plan_review_log, cycles),
+        ).unwrap();
+
+        let rows = load_rows(&conn).unwrap();
+        let task = rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Task(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(task.plan_review_entries.len(), 3);
+        assert_eq!(task.plan_review_entries[0].gate, PlanReviewGate::NeedsWork);
+        assert_eq!(task.plan_review_entries[1].gate, PlanReviewGate::Ready);
+        assert_eq!(
+            task.plan_review_entries[2].gate,
+            PlanReviewGate::Unknown("SURPRISE".to_string())
+        );
+        assert_eq!(
+            task.plan_review_entries[2].at.as_deref(),
+            Some("2026-05-01T02:00:00Z")
+        );
+        assert_eq!(
+            task.plan_review_summaries,
+            vec!["tighten scope", "approved", "future gate"]
+        );
+
+        assert_eq!(task.cycle_entries.len(), 3);
+        assert_eq!(task.cycle_entries[0].phase, 1);
+        assert_eq!(task.cycle_entries[0].cycle, 1);
+        assert_eq!(
+            task.cycle_entries[0].review_gate,
+            Some(CycleReviewGate::Revise)
+        );
+        assert_eq!(
+            task.cycle_entries[1].review_gate,
+            Some(CycleReviewGate::Pass)
+        );
+        assert_eq!(task.cycle_entries[2].review_gate, None);
+        assert_eq!(
+            task.cycle_entries[2].executor_summary.as_deref(),
+            Some("built phase two")
+        );
+        assert!(task
+            .cycle_summaries
+            .contains(&"executor: built phase one".to_string()));
+        assert!(task.cycle_summaries.contains(&"review: passed".to_string()));
+    }
+
+    #[test]
+    fn task_structured_evidence_degrades_on_missing_or_malformed_json() {
+        let conn = cockpit_conn();
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,updated_at,linked_observations,plan_review_log,cycles) VALUES ('T-bad','executing','bad','2026-05-01','[]','not-json','{')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,status,title,updated_at,linked_observations,plan_review_log,cycles) VALUES ('T-missing','executing','missing','2026-05-01','[]',?1,?2)",
+            (r#"[{"summary":"no gate"}]"#, r#"[{"executor":{"summary":"no phase or cycle"},"review":{"gate":"ODD"}}]"#),
+        ).unwrap();
+
+        let rows = load_rows(&conn).unwrap();
+        let tasks: Vec<&TaskRow> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Task(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+
+        let bad = tasks.iter().find(|t| t.display_id == "T-bad").unwrap();
+        assert!(bad.plan_review_entries.is_empty());
+        assert!(bad.cycle_entries.is_empty());
+
+        let missing = tasks.iter().find(|t| t.display_id == "T-missing").unwrap();
+        assert_eq!(missing.plan_review_entries.len(), 1);
+        assert_eq!(
+            missing.plan_review_entries[0].gate,
+            PlanReviewGate::Unknown(String::new())
+        );
+        assert_eq!(missing.cycle_entries.len(), 1);
+        assert_eq!(missing.cycle_entries[0].phase, 0);
+        assert_eq!(missing.cycle_entries[0].cycle, 0);
+        assert_eq!(
+            missing.cycle_entries[0].review_gate,
+            Some(CycleReviewGate::Unknown("ODD".to_string()))
+        );
     }
 
     #[test]
