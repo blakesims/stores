@@ -10,9 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::app::{App, FlatRow, Mode};
 use super::data::{
-    blocked_reason_class, cockpit_model, recent_exhaust, store_flow_model, ExternalReviewState,
-    Row, Section, StoreFlowModel, StoreLane,
+    cockpit_model, recent_exhaust, store_flow_model, ExternalReviewState, Row, Section,
+    StoreFlowModel, StoreLane,
 };
+use super::semantics::task_presentation;
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
 /// inside a bordered block ⇒ 4 lines: top border + 2 body rows + bottom
@@ -531,14 +532,7 @@ fn draw_recent_exhaust(f: &mut Frame, app: &App, area: Rect) {
         let parts: Vec<String> = exhaust
             .iter()
             .filter_map(|row| match row {
-                Row::Task(t) => Some(format!(
-                    "{} {} lifecycle={} active_step={} integration_step={}",
-                    t.display_id,
-                    t.status,
-                    super::data::task_lifecycle(t),
-                    super::data::task_active_step(t),
-                    super::data::task_integration_step(t)
-                )),
+                Row::Task(t) => Some(format!("{} {}", t.display_id, task_status_label(t))),
                 _ => None,
             })
             .collect();
@@ -727,11 +721,9 @@ fn format_task_line(
         .as_deref()
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-    let runner = live_runner
-        .or(claimed_runner)
-        .unwrap_or_else(|| "none".to_string());
+    let runner = live_runner.or(claimed_runner);
     let age = age_label(super::data::parse_epoch(&t.updated_at));
-    vec![
+    let mut spans = vec![
         Span::raw("  "),
         Span::styled(
             format!("{:<6}", t.display_id),
@@ -743,10 +735,13 @@ fn format_task_line(
         ),
         Span::raw(" "),
         Span::raw(task_progress_text(t, external_review)),
-        Span::raw(format!("runner:{runner} ")),
-        Span::raw(format!("{age} ")),
-        Span::raw(truncate(&task_snippet(t), 60)),
-    ]
+    ];
+    if let Some(runner) = runner {
+        spans.push(Span::raw(format!("runner:{runner} ")));
+    }
+    spans.push(Span::raw(format!("{age} ")));
+    spans.push(Span::raw(truncate(&task_snippet(t), 60)));
+    spans
 }
 
 fn format_obs_line(
@@ -912,53 +907,22 @@ fn format_review_line(r: &super::data::ReviewRow) -> Vec<Span<'static>> {
 }
 
 fn task_status_label(t: &super::data::TaskRow) -> String {
-    if t.status == "rejected" {
-        return format!(
-            "terminal-unless-amended lifecycle={} active_step={} integration_step={}",
-            super::data::task_lifecycle(t),
-            super::data::task_active_step(t),
-            super::data::task_integration_step(t)
-        );
-    }
-    if super::data::task_is_terminal_primary(t) {
-        return format!(
-            "recovered/done lifecycle={} active_step={} integration_step={}",
-            super::data::task_lifecycle(t),
-            super::data::task_active_step(t),
-            super::data::task_integration_step(t)
-        );
-    }
-    if super::data::task_is_blocked(t) {
-        let kind = t
-            .blocker_kind
-            .as_deref()
-            .filter(|s| !s.is_empty() && *s != "none")
-            .or(t.blocked_reason_class.as_deref())
-            .unwrap_or_else(|| blocked_reason_class(t.blocked_reason.as_deref()));
-        return format!("blocked:{kind}");
-    }
-    let primary = format!(
-        "lifecycle={} active_step={} integration_step={}",
-        super::data::task_lifecycle(t),
-        super::data::task_active_step(t),
-        super::data::task_integration_step(t)
-    );
-    if t.status == "legacy_unknown" {
-        primary
-    } else {
-        format!("{} {primary}", t.status)
+    let presentation = task_presentation(t);
+    match presentation.signal {
+        Some(signal) => format!("{} {} {}", presentation.glyph, presentation.label, signal),
+        None => format!("{} {}", presentation.glyph, presentation.label),
     }
 }
 
 fn task_progress_text(t: &super::data::TaskRow, external_review: &ExternalReviewState) -> String {
     let progress = super::progress::task_progress(t, external_review);
-    if progress.text == t.status {
-        format!(
-            "{}:{}:{} ",
-            super::data::task_lifecycle(t),
-            super::data::task_active_step(t),
-            super::data::task_integration_step(t)
-        )
+    if progress.text == t.status
+        || progress.text.contains("lifecycle=")
+        || progress.text.contains("active_step=")
+        || progress.text.contains("integration_step=")
+        || progress.text.contains("active:none:none")
+    {
+        String::new()
     } else {
         format!("{} ", progress.text)
     }
@@ -1138,29 +1102,103 @@ mod tests {
             false,
             &ExternalReviewState::default(),
         ));
-        assert!(closed.contains("recovered/done"));
-        assert!(!closed.contains("in flight"));
-
-        let rejected = line_text(format_row_line(
-            &task_row("rejected", None),
-            false,
-            &ExternalReviewState::default(),
-        ));
-        assert!(rejected.contains("terminal-unless-amended"));
-        assert!(!rejected.contains("in flight"));
+        assert!(closed.contains("■ done"), "{closed}");
+        assert!(!closed.contains("lifecycle="), "{closed}");
+        assert!(!closed.contains("active_step="), "{closed}");
+        assert!(!closed.contains("integration_step="), "{closed}");
 
         let blocked = line_text(format_row_line(
             &task_row("blocked", Some("rate limit 429")),
             false,
             &ExternalReviewState::default(),
         ));
-        assert!(blocked.contains("blocked:rate_limit"));
+        assert!(blocked.contains("△ rate-limited"), "{blocked}");
+        assert!(!blocked.contains("runner:none"), "{blocked}");
+
         let unknown = line_text(format_row_line(
             &task_row("blocked", Some("opaque")),
             false,
             &ExternalReviewState::default(),
         ));
-        assert!(unknown.contains("blocked:unknown"));
+        assert!(unknown.contains("▲ unknown-blocked"), "{unknown}");
+    }
+
+    #[test]
+    fn task_rows_render_semantic_task_stages_and_blockers() {
+        let cases = [
+            (
+                TaskRow {
+                    display_id: "T201".to_string(),
+                    status: "blocked".to_string(),
+                    title: "runner failed".to_string(),
+                    blocked: Some(true),
+                    blocker_kind: Some("runner".to_string()),
+                    blocked_reason: Some(r#"{"exit_code":42,"kind":"runner_crash"}"#.to_string()),
+                    ..Default::default()
+                },
+                ["▲ runner-failed exit 42", ""],
+            ),
+            (
+                TaskRow {
+                    display_id: "T202".to_string(),
+                    status: "planning".to_string(),
+                    title: "capacity wait".to_string(),
+                    blocked: Some(true),
+                    blocker_kind: Some("capacity".to_string()),
+                    ..Default::default()
+                },
+                ["△ waiting-capacity", ""],
+            ),
+            (
+                TaskRow {
+                    display_id: "T203".to_string(),
+                    status: "plan_review".to_string(),
+                    title: "plan gate".to_string(),
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("planning_review".to_string()),
+                    ..Default::default()
+                },
+                ["◇ plan-gate", ""],
+            ),
+            (
+                TaskRow {
+                    display_id: "T204".to_string(),
+                    status: "executing".to_string(),
+                    title: "exec".to_string(),
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("coding".to_string()),
+                    workspace_path: Some("/tmp/t204".to_string()),
+                    ..Default::default()
+                },
+                ["▣ exec", ""],
+            ),
+            (
+                TaskRow {
+                    display_id: "T205".to_string(),
+                    status: "in_review".to_string(),
+                    title: "accept".to_string(),
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("wrapping".to_string()),
+                    workspace_path: Some("/tmp/t205".to_string()),
+                    ..Default::default()
+                },
+                ["▰ accept", ""],
+            ),
+        ];
+
+        for (task, expected) in cases {
+            let text = line_text(format_row_line(
+                &Row::Task(task),
+                false,
+                &ExternalReviewState::default(),
+            ));
+            assert!(text.contains(expected[0]), "{text}");
+            assert!(!text.contains("active:none:none"), "{text}");
+            assert!(!text.contains("runner:none"), "{text}");
+            assert!(!text.contains("lifecycle="), "{text}");
+            assert!(!text.contains("active_step="), "{text}");
+            assert!(!text.contains("integration_step="), "{text}");
+        }
     }
 
     #[test]
@@ -1732,7 +1770,7 @@ mod tests {
             "exhaust strip must include terminal task id T200; got: {exhaust_line}"
         );
         assert!(
-            exhaust_line.contains("accepted"),
+            exhaust_line.contains("■ done"),
             "exhaust strip must show terminal status; got: {exhaust_line}"
         );
         // Focused-table region (between top strip y=4 and exhaust y=h-3).

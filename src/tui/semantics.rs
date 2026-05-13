@@ -89,6 +89,12 @@ fn blocked_task_presentation(task: &TaskRow) -> Presentation {
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != "none")
+        .or_else(|| {
+            task.blocked_reason_class
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "none")
+        })
         .unwrap_or("blocked");
     let (glyph, label, severity) = match kind {
         "capacity" => (
