@@ -507,10 +507,22 @@ impl LiveHarness {
         );
 
         let er = self.wait_for_fake_er_pass(watch)?;
+        let er_base = required_er_sha(er.base_sha.as_deref(), "base_sha", &er.display_id)?;
+        let er_head = required_er_sha(er.head_sha.as_deref(), "head_sha", &er.display_id)?;
         let task_head_x = git_sha(&workspace.workspace_path, "HEAD")?;
+        if er_head != task_head_x {
+            bail!(
+                "fake ER head proof does not match task worktree HEAD: er={} head={} worktree_head={}",
+                er.display_id,
+                er_head,
+                task_head_x
+            );
+        }
+        let task_markers = fake_marker_files_at_head(&workspace.workspace_path)?;
         println!(
-            "[executor] task head X={} marker_hint=fake-runner-markers/{}/",
-            task_head_x, self.task_id
+            "[executor] task head X={} markers={}",
+            task_head_x,
+            proof_list(&task_markers)
         );
         println!(
             "[external-review] {} runner={} status={} verdict={} base={} head={} superseded_by={}",
@@ -518,8 +530,8 @@ impl LiveHarness {
             er.runner.as_deref().unwrap_or("-"),
             er.status,
             er.verdict.as_deref().unwrap_or("-"),
-            er.base_sha.as_deref().unwrap_or("-"),
-            er.head_sha.as_deref().unwrap_or("-"),
+            er_base,
+            er_head,
             er.superseded_by.as_deref().unwrap_or("-")
         );
 
@@ -1000,6 +1012,32 @@ fn main_advance_marker_path(task_id: &str, case_name: &str) -> PathBuf {
 
 fn main_advance_commit_message(task_id: &str) -> String {
     format!("fake-run({task_id}): stale-base main advance")
+}
+
+fn required_er_sha(value: Option<&str>, field: &str, er_id: &str) -> Result<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .with_context(|| format!("fake external review {er_id} did not record {field}"))
+}
+
+fn fake_marker_files_at_head(repo: &Path) -> Result<Vec<String>> {
+    let out = git_stdout(repo, &["ls-tree", "-r", "--name-only", "HEAD"])?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|path| path.starts_with("fake-runner-markers/"))
+        .map(str::to_string)
+        .collect())
+}
+
+fn proof_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "-".to_string()
+    } else {
+        items.join(",")
+    }
 }
 
 fn git_sha(repo: &Path, rev: &str) -> Result<String> {
@@ -1627,6 +1665,23 @@ mod tests {
         assert_eq!(
             main_advance_commit_message("T205"),
             "fake-run(T205): stale-base main advance"
+        );
+        assert_eq!(
+            required_er_sha(Some(" abc123 "), "head_sha", "ER1").unwrap(),
+            "abc123"
+        );
+        assert!(required_er_sha(None, "base_sha", "ER1").is_err());
+    }
+
+    #[test]
+    fn proof_list_formats_marker_paths_without_guessing() {
+        assert_eq!(proof_list(&[]), "-");
+        assert_eq!(
+            proof_list(&[
+                "fake-runner-markers/T205-p1-c1-a1.txt".to_string(),
+                "fake-runner-markers/T205-p1-c2-a2.txt".to_string(),
+            ]),
+            "fake-runner-markers/T205-p1-c1-a1.txt,fake-runner-markers/T205-p1-c2-a2.txt"
         );
     }
 
