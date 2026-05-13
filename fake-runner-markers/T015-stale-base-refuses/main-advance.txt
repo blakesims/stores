@@ -1,0 +1,4 @@
+stores test stale-base-refuses
+task=T015
+case=stale-base-refuses
+created_unix=1778691209
