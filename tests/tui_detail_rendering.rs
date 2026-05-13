@@ -123,7 +123,11 @@ fn task_detail_rendering_contains_story_state_progress_blockers_events_artifacts
 
     for needle in [
         "operator cockpit story",
-        "Current state",
+        "Operator state",
+        "▣ exec",
+        "next valve: code review",
+        "Debug tuple",
+        "status: executing",
         "Progress",
         "Blockers / held reasons",
         "waiting on dependency",

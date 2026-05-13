@@ -1,12 +1,13 @@
 Task detail · T701
 
-Story summary
-  T1 operator cockpit story
-
-Current state
-  status: executing
+Operator state
+  ▣ exec
+  next valve: code review
   priority/tier: T1
   claimed: — by —
+
+Story summary
+  T1 operator cockpit story
 
 Why it matters
   done_when: T701 done when operators understand state
@@ -32,16 +33,27 @@ Artifact pointers
   cycles: 0 item(s)
   wrap log: 0 item(s)
   run log: runs/T701.log
+
+Debug tuple
+  status: executing
+  lifecycle: —
+  active_step: —
+  integration_step: —
+  activation: —
+  blocked: —
+  blocker_kind: —
+  blocked_reason: waiting on dependency
 ---
 Task detail · T702
 
-Story summary
-  T2 operator cockpit story
-
-Current state
-  status: executing
+Operator state
+  ▣ exec
+  next valve: code review
   priority/tier: T2
   claimed: — by —
+
+Story summary
+  T2 operator cockpit story
 
 Why it matters
   done_when: T702 done when operators understand state
@@ -67,16 +79,27 @@ Artifact pointers
   cycles: 0 item(s)
   wrap log: 0 item(s)
   run log: runs/T702.log
+
+Debug tuple
+  status: executing
+  lifecycle: —
+  active_step: —
+  integration_step: —
+  activation: —
+  blocked: —
+  blocker_kind: —
+  blocked_reason: waiting on dependency
 ---
 Task detail · T703
 
-Story summary
-  T3 operator cockpit story
-
-Current state
-  status: code_review
+Operator state
+  ◈ code-gate
+  next valve: resolve review
   priority/tier: T3
   claimed: — by —
+
+Story summary
+  T3 operator cockpit story
 
 Why it matters
   done_when: T703 done when operators understand state
@@ -102,3 +125,13 @@ Artifact pointers
   cycles: 0 item(s)
   wrap log: 0 item(s)
   run log: runs/T703.log
+
+Debug tuple
+  status: code_review
+  lifecycle: —
+  active_step: —
+  integration_step: —
+  activation: —
+  blocked: —
+  blocker_kind: —
+  blocked_reason: waiting on dependency
