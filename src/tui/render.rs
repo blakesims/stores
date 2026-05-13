@@ -19,10 +19,11 @@ use super::semantics::{
 };
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
-/// inside a bordered block ⇒ 5 lines: top border + 3 body rows + bottom
-/// border). Exposed so integration tests can derive the focused-table
-/// region's vertical span without re-encoding the literal.
-pub const TOP_STRIP_HEIGHT: u16 = 5;
+/// inside a bordered block ⇒ 9 lines: top border + two 3-column slot rows
+/// with wrapped full-word labels + one internal divider + bottom border).
+/// Exposed so integration tests can derive the focused-table region's
+/// vertical span without re-encoding the literal.
+pub const TOP_STRIP_HEIGHT: u16 = 9;
 
 /// Height (in rows) of the bottom chrome painted below the focused-table
 /// region: recent-exhaust strip (1) + hint line (1) + status bar (1) = 3.
@@ -230,9 +231,9 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
 }
 
 /// Render the 5-card store-flow strip across the top of the cockpit. Each
-/// card shows the lane label, a primary count, and a one-line status
-/// breakdown drawn from [`StoreFlowModel`]. The focused lane gets a cyan
-/// border; unfocused lanes are dim.
+/// card keeps the shared six-slot flow grammar in a readable 3x2 grid drawn
+/// from [`StoreFlowModel`]. The focused lane gets a cyan border; unfocused
+/// lanes are dim.
 fn draw_store_strip(f: &mut Frame, app: &App, area: Rect) {
     let model = store_flow_model(
         &app.rows,
@@ -275,61 +276,150 @@ fn draw_store_card(
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(Span::styled(format!(" {} ", lane.label()), title_style));
-    let lines = lane_card_lines(lane, model);
-    let primary_style = if focused {
+    f.render_widget(block, area);
+
+    if area.width < 5 || area.height < TOP_STRIP_HEIGHT {
+        return;
+    }
+
+    let divider_style = Style::default().fg(Color::DarkGray);
+    let value_style = if focused {
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
-    let body = Paragraph::new(vec![
-        Line::from(Span::styled(lines[0].clone(), primary_style)),
-        Line::from(Span::styled(
-            lines[1].clone(),
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(Span::styled(
-            lines[2].clone(),
-            Style::default().fg(Color::DarkGray),
-        )),
-    ])
-    .block(block);
-    f.render_widget(body, area);
+    let label_style = Style::default().fg(Color::Gray);
+    let slots = lane_card_slots(lane, model);
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    };
+    let col_widths = split_three_widths(inner.width);
+    let col_starts = [
+        inner.x,
+        inner.x + col_widths[0],
+        inner.x + col_widths[0] + col_widths[1],
+    ];
+    let row_ys = [inner.y, inner.y + 4];
+    let divider_y = inner.y + 3;
+    let buf = f.buffer_mut();
+
+    for sep_x in [col_starts[1], col_starts[2]] {
+        for y in inner.y..inner.y + inner.height {
+            buf[(sep_x, y)].set_symbol("│").set_style(divider_style);
+        }
+    }
+    for x in inner.x..inner.x + inner.width {
+        buf[(x, divider_y)]
+            .set_symbol("─")
+            .set_style(divider_style);
+    }
+    for sep_x in [col_starts[1], col_starts[2]] {
+        buf[(sep_x, divider_y)]
+            .set_symbol("┼")
+            .set_style(divider_style);
+    }
+
+    for (idx, slot) in slots.iter().enumerate() {
+        let row = idx / 3;
+        let col = idx % 3;
+        let cell_x = col_starts[col] + usize::from(col > 0) as u16;
+        let cell_w = col_widths[col].saturating_sub(usize::from(col > 0) as u16);
+        if cell_w == 0 {
+            continue;
+        }
+        let meta = slot.meta();
+        set_clipped(buf, cell_x, row_ys[row], cell_w, &meta, value_style);
+        let wrapped = wrap_label(slot.label, cell_w as usize, 2);
+        if let Some(line) = wrapped.first() {
+            set_clipped(buf, cell_x, row_ys[row] + 1, cell_w, line, label_style);
+        }
+        if let Some(line) = wrapped.get(1) {
+            set_clipped(buf, cell_x, row_ys[row] + 2, cell_w, line, label_style);
+        }
+    }
 }
 
-fn lane_card_lines(lane: StoreLane, model: &StoreFlowModel) -> [String; 3] {
+#[derive(Debug, Clone, Copy)]
+struct FlowSlot {
+    glyph: &'static str,
+    label: &'static str,
+    count: Option<usize>,
+}
+
+impl FlowSlot {
+    fn new(glyph: &'static str, label: &'static str, count: usize) -> Self {
+        Self {
+            glyph,
+            label,
+            count: Some(count),
+        }
+    }
+
+    fn flag(glyph: &'static str, label: &'static str) -> Self {
+        Self {
+            glyph,
+            label,
+            count: None,
+        }
+    }
+
+    fn meta(self) -> String {
+        match self.count {
+            Some(count) => format!("{} {}", self.glyph, count),
+            None => self.glyph.to_string(),
+        }
+    }
+}
+
+fn lane_card_slots(lane: StoreLane, model: &StoreFlowModel) -> [FlowSlot; 6] {
     match lane {
         StoreLane::Intake => {
             let i = &model.intake;
             [
-                format!("◌new{} ◆tri{}", i.new, i.triaging),
-                format!("◇ask{} ✓out{}", i.waiting, i.closed),
-                "△w0 ▲err0".to_string(),
+                FlowSlot::new("◌", "new", i.new),
+                FlowSlot::new("◆", "triage", i.triaging),
+                FlowSlot::new("◇", "needs info", i.waiting),
+                FlowSlot::new("✓", "routed", i.closed),
+                FlowSlot::new("△", "waiting", 0),
+                FlowSlot::new("▲", "errors", 0),
             ]
         }
         StoreLane::Observations => {
             let o = &model.observations;
             [
-                format!("◌cand{} ◆inv{}", o.candidate, o.in_progress),
-                format!("◇ctr{} ✓dn{}", o.ready, o.closed),
-                format!("△w{} ▲err0", o.waiting_kinds.values().sum::<usize>()),
+                FlowSlot::new("◌", "candidates", o.candidate),
+                FlowSlot::new("◆", "investigate", o.in_progress),
+                FlowSlot::new("◇", "contract gate", o.ready),
+                FlowSlot::new("✓", "closed", o.closed),
+                FlowSlot::new("△", "waiting", o.waiting_kinds.values().sum::<usize>()),
+                FlowSlot::new("▲", "errors", 0),
             ]
         }
         StoreLane::Tasks => {
             let t = &model.tasks;
             [
-                format!("◌q{} ◆wrk{}", t.queued, t.work),
-                format!("◇g{} ✓dn{}", t.gate, t.recently_terminal),
-                format!("△w{} ▲f{}", t.wait, t.fail),
+                FlowSlot::new("◌", "queued", t.queued),
+                FlowSlot::new("◆", "working", t.work),
+                FlowSlot::new("◇", "gate", t.gate),
+                FlowSlot::new("✓", "done", t.recently_terminal),
+                FlowSlot::new("△", "waiting", t.wait),
+                FlowSlot::new("▲", "failed", t.fail),
             ]
         }
         StoreLane::ExternalReviews => {
             let r = &model.external_reviews;
             [
-                format!("◌pend{} ◆run{}", r.pending, r.running),
-                format!("◇rev{} ✓pass{}", r.revise, r.passed),
-                format!("△w{} ▲tool{}", r.wait, r.tooling_held),
+                FlowSlot::new("◌", "pending", r.pending),
+                FlowSlot::new("◆", "running", r.running),
+                FlowSlot::new("◇", "revise", r.revise),
+                FlowSlot::new("✓", "passed", r.passed),
+                FlowSlot::new("△", "waiting", r.wait),
+                FlowSlot::new("▲", "tool fault", r.tooling_held),
             ]
         }
         StoreLane::EngineHealth => {
@@ -345,28 +435,68 @@ fn lane_card_lines(lane: StoreLane, model: &StoreFlowModel) -> [String; 3] {
             };
             let state = engine_presentation(&health, &daemon);
             let clear = usize::from(state.label == "clear" || state.label == "manual");
-            let (wait_label, wait_count) = if state.label == "manual" {
-                ("manual", String::new())
+            let wait_slot = if state.label == "manual" {
+                FlowSlot::flag("△", "manual")
             } else {
-                ("w", "0".to_string())
+                FlowSlot::new("△", "waiting", 0)
             };
-            let (fault_label, fault_count) = if state.severity == PresentationSeverity::Fault {
-                let label = if state.label == "daemon down" {
-                    "daemon"
-                } else {
-                    state.label.as_str()
-                };
-                (label, String::new())
+            let fault_slot = if state.severity == PresentationSeverity::Fault {
+                FlowSlot::flag("▲", "daemon down")
             } else {
-                ("err", "0".to_string())
+                FlowSlot::new("▲", "errors", 0)
             };
             [
-                "◌disp0 ◆run0".to_string(),
-                format!("◇lock{} ✓clr{}", e.unfinished_locks, clear),
-                format!("△{wait_label}{wait_count} ▲{fault_label}{fault_count}"),
+                FlowSlot::new("◌", "dispatch", 0),
+                FlowSlot::new("◆", "runners", 0),
+                FlowSlot::new("◇", "locks", e.unfinished_locks),
+                FlowSlot::new("✓", "clear", clear),
+                wait_slot,
+                fault_slot,
             ]
         }
     }
+}
+
+fn split_three_widths(width: u16) -> [u16; 3] {
+    let base = width / 3;
+    let rem = width % 3;
+    [base + u16::from(rem > 0), base + u16::from(rem > 1), base]
+}
+
+fn set_clipped(
+    buf: &mut ratatui::buffer::Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    text: &str,
+    style: Style,
+) {
+    let clipped: String = text.chars().take(width as usize).collect();
+    buf.set_string(x, y, clipped, style);
+}
+
+fn wrap_label(label: &str, width: usize, max_lines: usize) -> Vec<String> {
+    if width == 0 || max_lines == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for word in label.split_whitespace() {
+        if lines.len() == max_lines {
+            break;
+        }
+        if lines.last().is_none_or(|line: &String| line.is_empty()) {
+            lines.push(word.chars().take(width).collect());
+            continue;
+        }
+        let last = lines.last_mut().expect("line exists");
+        if last.chars().count() + 1 + word.chars().count() <= width {
+            last.push(' ');
+            last.push_str(word);
+        } else if lines.len() < max_lines {
+            lines.push(word.chars().take(width).collect());
+        }
+    }
+    lines
 }
 
 /// Render the focused-lane table (or engine panel when `EngineHealth` is
@@ -1117,41 +1247,112 @@ mod tests {
             StoreLane::EngineHealth,
         ];
         for lane in lanes {
-            let text = lane_card_lines(lane, &model).join("\n");
+            let slots = lane_card_slots(lane, &model);
             for glyph in ["◌", "◆", "◇", "✓", "△", "▲"] {
-                assert!(text.contains(glyph), "{lane:?} missing {glyph}: {text}");
-            }
-            for line in lane_card_lines(lane, &model) {
                 assert!(
-                    line.chars().count() <= 14,
-                    "{lane:?} line too wide for an 80-col card inner width: {line:?}"
+                    slots.iter().any(|slot| slot.glyph == glyph),
+                    "{lane:?} missing {glyph}: {slots:?}"
                 );
             }
-            assert!(
-                !text.contains("held"),
-                "{lane:?} leaked held headline: {text}"
-            );
+            assert_eq!(slots.len(), 6, "{lane:?} must expose six stable slots");
         }
 
-        let tasks = lane_card_lines(StoreLane::Tasks, &model).join("\n");
-        assert!(tasks.contains("△w12"), "{tasks}");
-        assert!(tasks.contains("▲f13"), "{tasks}");
+        let tasks = lane_card_slots(StoreLane::Tasks, &model);
+        assert_eq!(tasks[4].label, "waiting");
+        assert_eq!(tasks[4].count, Some(12));
+        assert_eq!(tasks[5].label, "failed");
+        assert_eq!(tasks[5].count, Some(13));
+    }
+
+    #[test]
+    fn top_cards_render_full_word_three_by_two_grid() {
+        let mut model = StoreFlowModel::default();
+        model.observations.candidate = 8;
+        model.observations.in_progress = 0;
+        model.observations.ready = 0;
+        model.observations.closed = 0;
+        model.observations.waiting_kinds.insert("human".into(), 8);
+        model.tasks.queued = 2;
+        model.tasks.work = 2;
+        model.tasks.gate = 1;
+        model.tasks.recently_terminal = 3;
+        model.tasks.wait = 8;
+        model.tasks.fail = 4;
+        model.external_reviews.tooling_held = 5;
+        model.engine.daemon_live = false;
+
+        let backend = TestBackend::new(260, TOP_STRIP_HEIGHT);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|f| {
+                let cells = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Ratio(1, 5); 5])
+                    .split(f.area());
+                for (i, lane) in StoreLane::ALL.iter().enumerate() {
+                    draw_store_card(f, *lane, *lane == StoreLane::Tasks, &model, cells[i]);
+                }
+            })
+            .expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let painted = buffer_to_string(&buf);
+
+        for needle in [
+            "candidates",
+            "investigate",
+            "contract gate",
+            "closed",
+            "waiting",
+            "errors",
+            "queued",
+            "working",
+            "gate",
+            "done",
+            "failed",
+            "tool fault",
+            "manual",
+        ] {
+            assert!(painted.contains(needle), "missing {needle:?}:\n{painted}");
+        }
+        for glued in [
+            "◌cand", "◆inv", "◌q", "◆wrk", "✓dn", "△w", "▲err", "▲tool",
+        ] {
+            assert!(!painted.contains(glued), "found glued token {glued:?}:\n{painted}");
+        }
+        assert!(painted.contains("◌ 8"), "missing separated observation count:\n{painted}");
+        assert!(painted.contains("△ 8"), "missing separated waiting count:\n{painted}");
+        assert!(painted.contains("│"), "missing vertical dividers:\n{painted}");
+        assert!(painted.contains("─"), "missing horizontal divider:\n{painted}");
+
+        model.engine.unfinished_locks = 2;
+        let backend = TestBackend::new(80, TOP_STRIP_HEIGHT);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|f| draw_store_card(f, StoreLane::EngineHealth, true, &model, f.area()))
+            .expect("draw");
+        let fault_painted = buffer_to_string(terminal.backend().buffer());
+        assert!(
+            fault_painted.contains("daemon down"),
+            "missing daemon down in rendered engine fault card:\n{fault_painted}"
+        );
     }
 
     #[test]
     fn engine_card_distinguishes_manual_from_daemon_down_fault() {
         let mut manual = StoreFlowModel::default();
         manual.engine.daemon_live = false;
-        let manual_text = lane_card_lines(StoreLane::EngineHealth, &manual).join("\n");
-        assert!(manual_text.contains("△manual"), "{manual_text}");
-        assert!(manual_text.contains("▲err0"), "{manual_text}");
+        let manual_slots = lane_card_slots(StoreLane::EngineHealth, &manual);
+        assert_eq!(manual_slots[4].label, "manual");
+        assert_eq!(manual_slots[5].label, "errors");
+        assert_eq!(manual_slots[5].count, Some(0));
 
         let mut fault = StoreFlowModel::default();
         fault.engine.daemon_live = false;
         fault.engine.unfinished_locks = 2;
-        let fault_text = lane_card_lines(StoreLane::EngineHealth, &fault).join("\n");
-        assert!(fault_text.contains("◇lock2"), "{fault_text}");
-        assert!(fault_text.contains("▲daemon"), "{fault_text}");
+        let fault_slots = lane_card_slots(StoreLane::EngineHealth, &fault);
+        assert_eq!(fault_slots[2].label, "locks");
+        assert_eq!(fault_slots[2].count, Some(2));
+        assert_eq!(fault_slots[5].label, "daemon down");
     }
 
     fn task_row(status: &str, reason: Option<&str>) -> Row {
@@ -1806,8 +2007,12 @@ mod tests {
         let mut app = cockpit_fixture_app();
         let buf = paint(&mut app, 120, 30);
         let painted = buffer_to_string(&buf);
-        // Top region is rows 0..4 (the 5-card strip).
-        let top_region: String = painted.lines().take(4).collect::<Vec<_>>().join("\n");
+        // Top region is the card strip.
+        let top_region: String = painted
+            .lines()
+            .take(TOP_STRIP_HEIGHT as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
         for label in ["INTAKE", "OBSERVATIONS", "TASKS", "EXTERNAL", "ENGINE"] {
             assert!(
                 top_region.contains(label),
@@ -1860,8 +2065,8 @@ mod tests {
             exhaust_line.contains("■ done"),
             "exhaust strip must show terminal status; got: {exhaust_line}"
         );
-        // Focused-table region (between top strip y=4 and exhaust y=h-3).
-        let middle: String = lines[4..lines.len() - 3].join("\n");
+        // Focused-table region (between top strip and exhaust).
+        let middle: String = lines[TOP_STRIP_HEIGHT as usize..lines.len() - 3].join("\n");
         assert!(
             !middle.contains("T200"),
             "terminal task id T200 must NOT appear in focused-table region:\n{middle}"
@@ -1899,7 +2104,7 @@ mod tests {
         let buf = paint(&mut app, 120, 30);
         let painted = buffer_to_string(&buf);
         let lines: Vec<&str> = painted.lines().collect();
-        let middle: String = lines[4..lines.len() - 3].join("\n");
+        let middle: String = lines[TOP_STRIP_HEIGHT as usize..lines.len() - 3].join("\n");
         assert!(
             middle.contains("daemon: DEAD"),
             "engine panel must show daemon status; got middle:\n{middle}"
@@ -2312,7 +2517,7 @@ mod tests {
         let buf = paint(&mut app, 120, 30);
         let painted = buffer_to_string(&buf);
         let lines: Vec<&str> = painted.lines().collect();
-        let middle: String = lines[4..lines.len() - 3].join("\n");
+        let middle: String = lines[TOP_STRIP_HEIGHT as usize..lines.len() - 3].join("\n");
         assert!(
             middle.contains("T100"),
             "active task T100 should be in focused-table region:\n{middle}"
