@@ -309,13 +309,14 @@ fn seeded_clean_db_rows_render_semantic_watch_vocabulary() {
 
     let rows = all_default_row_text(&mut app);
     for expected in [
+        "ID",
+        "SUMMARY",
+        "MAP",
         "queued",
-        "plan",
-        "plan-gate",
-        "exec",
-        "accept",
-        "runner-failed",
-        "exit 42",
+        "○ │ ·",
+        "● │ □",
+        "▰",
+        "runner",
         "capacity",
         "candidate",
         "CONTRACT GATE",

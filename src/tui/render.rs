@@ -16,8 +16,9 @@ use super::data::{
 use super::semantics::{
     engine_presentation, external_review_presentation, external_review_runner_label,
     intake_presentation, observation_presentation, observation_watch_projection,
-    observation_watch_slot_label, task_presentation, task_watch_projection, task_watch_slot_label,
-    PresentationSeverity, WatchProjection, WatchSlotId,
+    observation_watch_slot_label, task_map_projection, task_presentation, task_watch_projection,
+    task_watch_slot_label, MapCell, MapColor, PresentationSeverity, TaskMapProjection,
+    WatchProjection, WatchSlotId,
 };
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
@@ -828,7 +829,8 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
     }
     let cursor = app.current_flat();
     if app.focused_store == StoreLane::Tasks {
-        append_task_projection_items(app, &flat, window, cursor, &mut items);
+        items.push(ListItem::new(task_table_header(area.width)));
+        append_task_projection_items(app, &flat, window, cursor, area.width, &mut items);
     } else if app.focused_store == StoreLane::Observations {
         append_observation_projection_items(app, &flat, window, cursor, &mut items);
     } else {
@@ -879,6 +881,7 @@ fn append_task_projection_items(
     full: &[FlatRow],
     window: &[FlatRow],
     cursor: Option<usize>,
+    area_width: u16,
     items: &mut Vec<ListItem<'static>>,
 ) {
     for slot in task_projection_display_order(full, app) {
@@ -913,8 +916,8 @@ fn append_task_projection_items(
             items.push(ListItem::new(format_row_line_for_task_projection(
                 &app.rows[fr.abs],
                 selected,
-                &app.external_review,
                 &projection,
+                area_width,
             )));
         }
     }
@@ -1292,15 +1295,11 @@ fn format_row_line(
 fn format_row_line_for_task_projection(
     row: &Row,
     selected: bool,
-    external_review: &ExternalReviewState,
     projection: &WatchProjection,
+    area_width: u16,
 ) -> Line<'static> {
     let base = match row {
-        Row::Task(t) => format_task_line_with_status(
-            t,
-            external_review,
-            task_projection_status_label(projection),
-        ),
+        Row::Task(t) => format_task_table_line(t, projection, area_width),
         _ => match row {
             Row::Obs(o) => format_obs_line(o, None),
             Row::CollapsedObs(c) => format_obs_line(&c.representative, Some(c)),
@@ -1339,6 +1338,194 @@ fn styled_row_line(mut spans: Vec<Span<'static>>, selected: bool) -> Line<'stati
         }
     }
     Line::from(spans)
+}
+
+const TASK_ID_WIDTH: usize = 6;
+const TASK_MAP_WIDTH: usize = 18;
+const TASK_REASON_WIDTH: usize = 8;
+const TASK_AGE_WIDTH: usize = 5;
+const TASK_TIER_WIDTH: usize = 4;
+const TASK_TABLE_GAPS: usize = 5;
+const TASK_TABLE_PREFIX_WIDTH: usize = 2;
+
+fn task_table_summary_width(area_width: u16) -> usize {
+    let fixed = TASK_TABLE_PREFIX_WIDTH
+        + TASK_ID_WIDTH
+        + TASK_MAP_WIDTH
+        + TASK_REASON_WIDTH
+        + TASK_AGE_WIDTH
+        + TASK_TIER_WIDTH
+        + TASK_TABLE_GAPS;
+    (area_width as usize).saturating_sub(fixed).max(12)
+}
+
+fn task_table_header(area_width: u16) -> Line<'static> {
+    let summary_width = task_table_summary_width(area_width);
+    Line::from(vec![Span::styled(
+        format!(
+            "  {:<id_w$} {:<summary_w$} {:<map_w$} {:<reason_w$} {:>age_w$} {:>tier_w$}",
+            "ID",
+            "SUMMARY",
+            "MAP",
+            "REASON",
+            "AGE",
+            "TIER",
+            id_w = TASK_ID_WIDTH,
+            summary_w = summary_width,
+            map_w = TASK_MAP_WIDTH,
+            reason_w = TASK_REASON_WIDTH,
+            age_w = TASK_AGE_WIDTH,
+            tier_w = TASK_TIER_WIDTH,
+        ),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )])
+}
+
+fn format_task_table_line(
+    t: &super::data::TaskRow,
+    _projection: &WatchProjection,
+    area_width: u16,
+) -> Vec<Span<'static>> {
+    let summary_width = task_table_summary_width(area_width);
+    let map_projection = task_map_projection(t);
+    let map_text = task_map_text(&map_projection);
+    let reason = map_projection.reason.clone().unwrap_or_default();
+    let age = compact_age_label(super::data::parse_epoch(&t.updated_at));
+    let tier = t.tier_hint.as_deref().unwrap_or("");
+    let title = truncate(&t.title, summary_width);
+
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<id_w$}", t.display_id, id_w = TASK_ID_WIDTH),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw(" "),
+        Span::raw(format!("{:<summary_w$}", title, summary_w = summary_width)),
+        Span::raw(" "),
+    ];
+    spans.extend(task_map_spans(&map_projection, TASK_MAP_WIDTH));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<reason_w$}",
+        truncate(&reason, TASK_REASON_WIDTH),
+        reason_w = TASK_REASON_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:>age_w$}",
+        age,
+        age_w = TASK_AGE_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:>tier_w$}",
+        tier,
+        tier_w = TASK_TIER_WIDTH
+    )));
+
+    let rendered_map_chars = map_text.chars().count();
+    debug_assert!(rendered_map_chars <= TASK_MAP_WIDTH);
+    spans
+}
+
+fn task_map_text(projection: &TaskMapProjection) -> String {
+    task_map_tokens(projection)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn task_map_spans(projection: &TaskMapProjection, width: usize) -> Vec<Span<'static>> {
+    let tokens = task_map_tokens(projection);
+    let rendered: usize = tokens.iter().map(|(text, _)| text.chars().count()).sum();
+    let mut spans: Vec<Span<'static>> = tokens
+        .into_iter()
+        .map(|(text, style)| Span::styled(text, style))
+        .collect();
+    if rendered < width {
+        spans.push(Span::raw(" ".repeat(width - rendered)));
+    }
+    spans
+}
+
+fn task_map_tokens(projection: &TaskMapProjection) -> Vec<(String, Style)> {
+    if let Some(fallback) = projection.fallback.as_ref() {
+        return vec![(map_cell_text(fallback), map_cell_style(fallback))];
+    }
+
+    let mut tokens = vec![(
+        map_cell_text(&projection.planning),
+        map_cell_style(&projection.planning),
+    )];
+    if !projection.phases.is_empty() {
+        tokens.push((" │ ".to_string(), watch_divider_style()));
+        for (idx, cell) in projection.phases.iter().enumerate() {
+            if idx > 0 {
+                tokens.push((" ".to_string(), Style::default()));
+            }
+            tokens.push((map_cell_text(cell), map_cell_style(cell)));
+        }
+    }
+    if let Some(wrap) = projection.wrap.as_ref() {
+        tokens.push((" ".to_string(), Style::default()));
+        tokens.push((map_cell_text(wrap), map_cell_style(wrap)));
+    }
+    tokens
+}
+
+fn map_cell_text(cell: &MapCell) -> String {
+    match cell.cycle {
+        Some(cycle) => format!("{}{}", cell.glyph.symbol(), superscript_number(cycle)),
+        None => cell.glyph.symbol().to_string(),
+    }
+}
+
+fn map_cell_style(cell: &MapCell) -> Style {
+    let style = match cell.color_role {
+        MapColor::Inactive => Style::default().fg(WATCH_OVERLAY0),
+        MapColor::ActiveWork => Style::default().fg(Color::Cyan),
+        MapColor::ActiveGate => Style::default().fg(WATCH_YELLOW),
+        MapColor::Passed => Style::default().fg(WATCH_GREEN),
+        MapColor::Failed => Style::default().fg(WATCH_RED),
+        MapColor::Waiting => Style::default().fg(WATCH_PEACH),
+        MapColor::Unknown => Style::default().fg(WATCH_OVERLAY2),
+    };
+    if cell.active {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn superscript_number(n: i64) -> String {
+    n.to_string()
+        .chars()
+        .map(|ch| match ch {
+            '0' => '⁰',
+            '1' => '¹',
+            '2' => '²',
+            '3' => '³',
+            '4' => '⁴',
+            '5' => '⁵',
+            '6' => '⁶',
+            '7' => '⁷',
+            '8' => '⁸',
+            '9' => '⁹',
+            '-' => '⁻',
+            other => other,
+        })
+        .collect()
+}
+
+fn compact_age_label(epoch: Option<i64>) -> String {
+    age_label(epoch)
+        .strip_prefix("age:")
+        .unwrap_or("-")
+        .to_string()
 }
 
 fn age_label(epoch: Option<i64>) -> String {
@@ -1619,36 +1806,6 @@ fn format_review_line(r: &super::data::ReviewRow) -> Vec<Span<'static>> {
     spans
 }
 
-fn task_projection_status_label(projection: &WatchProjection) -> String {
-    let stage = match projection.slot {
-        WatchSlotId::Front if projection.row_stage == "queued" => "",
-        WatchSlotId::Work if projection.row_stage == "work" => "",
-        WatchSlotId::Wait => projection
-            .row_stage
-            .strip_prefix("waiting-")
-            .unwrap_or(projection.row_stage),
-        WatchSlotId::Fault => projection
-            .row_stage
-            .strip_suffix("-blocked")
-            .unwrap_or(projection.row_stage),
-        WatchSlotId::Exit if projection.row_stage == "done" => "",
-        _ => projection.row_stage,
-    };
-    let mut parts = vec![projection.glyph.to_string()];
-    if !stage.is_empty() {
-        parts.push(stage.to_string());
-    }
-    if let Some(signal) = projection
-        .row_signal
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        parts.push(signal.to_string());
-    }
-    parts.join(" ")
-}
-
 fn task_status_label(t: &super::data::TaskRow) -> String {
     let presentation = task_presentation(t);
     presentation_label(presentation)
@@ -1796,7 +1953,10 @@ mod tests {
     use super::*;
     use crate::tui::app::{App, StatusBar, TuiOpts};
     use crate::tui::daemon::Liveness;
-    use crate::tui::data::{IntakeRow, ObsRow, ReviewRow, Row, SystemHealth, TaskRow};
+    use crate::tui::data::{
+        CycleReviewGate, IntakeRow, ObsRow, PlanReviewGate, ReviewRow, Row, SystemHealth,
+        TaskCycleEntry, TaskPlanReviewEntry, TaskRow,
+    };
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -2208,23 +2368,26 @@ mod tests {
     }
 
     #[test]
-    fn task_projection_row_labels_suppress_broad_group_context() {
+    fn task_projection_row_labels_render_dense_table_fields() {
         let queued = TaskRow {
             display_id: "T301".to_string(),
             status: "ready".to_string(),
             title: "queued".to_string(),
             lifecycle: Some("queued".to_string()),
+            total_phases: Some(2),
             ..Default::default()
         };
         let queued_projection = task_watch_projection(&queued);
         let queued_text = line_text(format_row_line_for_task_projection(
             &Row::Task(queued),
             false,
-            &ExternalReviewState::default(),
             &queued_projection,
+            120,
         ));
-        assert!(queued_text.contains("◌ no worktree"), "{queued_text}");
-        assert!(!queued_text.contains("◌ queued"), "{queued_text}");
+        assert!(queued_text.contains("T301"), "{queued_text}");
+        assert!(queued_text.contains("queued"), "{queued_text}");
+        assert!(queued_text.contains("◌ │ · ·"), "{queued_text}");
+        assert!(!queued_text.contains("workspace:none"), "{queued_text}");
 
         let waiting = TaskRow {
             display_id: "T302".to_string(),
@@ -2238,10 +2401,11 @@ mod tests {
         let waiting_text = line_text(format_row_line_for_task_projection(
             &Row::Task(waiting),
             false,
-            &ExternalReviewState::default(),
             &waiting_projection,
+            120,
         ));
-        assert!(waiting_text.contains("△ capacity"), "{waiting_text}");
+        assert!(waiting_text.contains("△"), "{waiting_text}");
+        assert!(waiting_text.contains("capacity"), "{waiting_text}");
         assert!(!waiting_text.contains("waiting-capacity"), "{waiting_text}");
 
         let failed = TaskRow {
@@ -2257,14 +2421,122 @@ mod tests {
         let failed_text = line_text(format_row_line_for_task_projection(
             &Row::Task(failed),
             false,
-            &ExternalReviewState::default(),
             &failed_projection,
+            120,
         ));
-        assert!(
-            failed_text.contains("▲ runner-failed exit 42"),
-            "{failed_text}"
+        assert!(failed_text.contains("▲"), "{failed_text}");
+        assert!(failed_text.contains("runner"), "{failed_text}");
+        assert!(!failed_text.contains("exit 42"), "{failed_text}");
+    }
+
+    #[test]
+    fn task_focused_table_renders_aligned_static_map_columns() {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![
+            Row::Task(TaskRow {
+                display_id: "T001".to_string(),
+                status: "ready".to_string(),
+                title: "synthetic queued inactive plan task".to_string(),
+                lifecycle: Some("queued".to_string()),
+                total_phases: Some(3),
+                tier_hint: Some("T3".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T011".to_string(),
+                status: "executing".to_string(),
+                title: "retrying phase two after review".to_string(),
+                lifecycle: Some("active".to_string()),
+                active_step: Some("coding".to_string()),
+                current_phase: Some(2),
+                current_cycle: Some(2),
+                total_phases: Some(3),
+                plan_review_entries: vec![TaskPlanReviewEntry {
+                    gate: PlanReviewGate::Ready,
+                    ..Default::default()
+                }],
+                cycle_entries: vec![TaskCycleEntry {
+                    phase: 1,
+                    cycle: 1,
+                    review_gate: Some(CycleReviewGate::Pass),
+                    ..Default::default()
+                }],
+                tier_hint: Some("T3".to_string()),
+                workspace_path: Some("/tmp/t011".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T010".to_string(),
+                status: "blocked".to_string(),
+                title: "synthetic fake runner nonzero blocked task".to_string(),
+                lifecycle: Some("active".to_string()),
+                blocked: Some(true),
+                blocker_kind: Some("runner".to_string()),
+                total_phases: Some(3),
+                tier_hint: Some("T3".to_string()),
+                ..Default::default()
+            }),
+        ];
+        app.sections = classify(&app.rows);
+        app.apply_sort();
+        app.viewport_height = 20;
+
+        let backend = TestBackend::new(150, 14);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|f| draw_focused_table(f, &app, f.area()))
+            .expect("draw focused table");
+        let painted = buffer_to_string(terminal.backend().buffer());
+        let lines: Vec<&str> = painted.lines().collect();
+        let header = lines
+            .iter()
+            .find(|line| line.contains("ID") && line.contains("SUMMARY") && line.contains("MAP"))
+            .expect("header line");
+        let queued = lines.iter().find(|line| line.contains("T001")).unwrap();
+        let active = lines.iter().find(|line| line.contains("T011")).unwrap();
+        let failed = lines.iter().find(|line| line.contains("T010")).unwrap();
+
+        let char_pos = |line: &str, needle: &str| -> Option<usize> {
+            line.find(needle).map(|byte| line[..byte].chars().count())
+        };
+        let char_rpos = |line: &str, needle: &str| -> Option<usize> {
+            line.rfind(needle).map(|byte| line[..byte].chars().count())
+        };
+
+        assert_eq!(
+            char_pos(header, "ID"),
+            char_pos(queued, "T001"),
+            "{painted}"
         );
-        assert!(!failed_text.contains("▲ failed"), "{failed_text}");
+        assert_eq!(
+            char_pos(header, "SUMMARY"),
+            char_pos(queued, "synthetic queued inactive plan task"),
+            "{painted}"
+        );
+        assert_eq!(char_pos(header, "MAP"), char_pos(queued, "◌"), "{painted}");
+        assert_eq!(char_pos(header, "MAP"), char_pos(active, "●"), "{painted}");
+        assert_eq!(
+            char_pos(header, "REASON"),
+            char_rpos(failed, "runner"),
+            "{painted}"
+        );
+
+        assert!(painted.contains("◌ │ · · ·"), "{painted}");
+        assert!(painted.contains("● │ ▣ □² ·"), "{painted}");
+        assert!(painted.contains("▲"), "{painted}");
+        assert!(painted.contains("TIER"), "{painted}");
+        for prose_bag in [
+            "workspace:none",
+            "workspace:",
+            "tier:",
+            "lifecycle=",
+            "active_step=",
+        ] {
+            assert!(
+                !painted.contains(prose_bag),
+                "task rows must keep raw/debug prose out of focused table ({prose_bag}):\n{painted}"
+            );
+        }
     }
 
     #[test]

@@ -273,8 +273,8 @@ fn cockpit_adr_0001_review_steps_render_under_active_work() {
     assert!(
         lines[gate_line + 1..next_section_line]
             .iter()
-            .any(|line| line.contains("T102") && line.contains("code-gate")),
-        "render_frame must place T102 under GATE with semantic code-gate label before next projection group:\n{painted}"
+            .any(|line| line.contains("T102")),
+        "render_frame must place T102 under GATE before next projection group:\n{painted}"
     );
     if let Some(held_line) = lines
         .iter()
@@ -295,7 +295,7 @@ fn cockpit_adr_0001_review_steps_render_under_active_work() {
         assert!(
             !lines[held_line + 1..next_after_held]
                 .iter()
-                .any(|line| line.contains("T102") && line.contains("code-gate")),
+                .any(|line| line.contains("T102")),
             "render_frame must not place T102 under HELD-AI-REVIEW:\n{painted}"
         );
     }
@@ -383,34 +383,42 @@ fn task_focused_table_uses_projection_groups_and_contextual_task_rows() {
         "failed count mismatch:\n{middle}"
     );
     assert!(
-        middle.contains("T110") && middle.contains("◌ no worktree"),
-        "queued row must suppress broad queued stage but preserve no-worktree signal:\n{middle}"
+        middle.contains("ID") && middle.contains("SUMMARY") && middle.contains("MAP"),
+        "task-focused table must render aligned column headings:\n{middle}"
     );
     assert!(
-        !middle
-            .lines()
-            .any(|line| line.contains("T110") && line.contains("◌ queued")),
-        "queued row must not repeat broad queued state in its status slot:\n{middle}"
+        middle.contains("T110")
+            && middle.contains("queued no worktree")
+            && middle.contains("◌ │ ?"),
+        "queued row must preserve title and honest map without prose bags:\n{middle}"
     );
     assert!(
-        middle.contains("T111") && middle.contains("▣ exec"),
-        "working row missing exec stage:\n{middle}"
+        !middle.contains("workspace:none") && !middle.contains("workspace:"),
+        "task rows must keep worktree/debug prose out of focused table:\n{middle}"
     );
     assert!(
-        middle.contains("T112") && middle.contains("◈ code-gate"),
-        "gate row missing code-gate stage:\n{middle}"
+        middle.contains("T111") && middle.contains("exec work"),
+        "working row missing title:\n{middle}"
     );
     assert!(
-        middle.contains("T113") && middle.contains("△ capacity"),
-        "waiting row missing capacity subtype:\n{middle}"
+        middle.contains("T112") && middle.contains("code gate"),
+        "gate row missing title:\n{middle}"
+    );
+    assert!(
+        middle.contains("T113") && middle.contains("△") && middle.contains("capacity"),
+        "waiting row missing capacity reason/map:\n{middle}"
     );
     assert!(
         !middle.contains("waiting-capacity"),
         "waiting row repeated broad waiting state:\n{middle}"
     );
     assert!(
-        middle.contains("T114") && middle.contains("▲ runner-failed exit 42"),
-        "failed row missing runner/exit signal:\n{middle}"
+        middle.contains("T114") && middle.contains("▲") && middle.contains("runner"),
+        "failed row missing runner reason/map:\n{middle}"
+    );
+    assert!(
+        !middle.contains("exit 42"),
+        "focused table reason must stay bounded to blocker kind; detail owns raw exit data:\n{middle}"
     );
 }
 
