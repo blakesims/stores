@@ -245,27 +245,26 @@ fn cockpit_adr_0001_review_steps_render_under_active_work() {
     let buf = paint(&mut app);
     let painted = buffer_to_string(&buf);
     let lines: Vec<&str> = painted.lines().collect();
-    let active_line = lines
+    let gate_line = lines
         .iter()
-        .position(|line| line.contains("ACTIVE"))
-        .expect("render_frame must show ACTIVE header");
+        .position(|line| line.contains("GATE"))
+        .expect("render_frame must show projection GATE header");
     let next_section_line = lines
         .iter()
         .enumerate()
-        .skip(active_line + 1)
+        .skip(gate_line + 1)
         .find_map(|(idx, line)| {
-            Section::ALL
+            ["QUEUED", "WORKING", "WAITING", "FAILED", "DONE"]
                 .iter()
-                .filter(|s| **s != Section::TasksActionableCurrentWork)
-                .any(|s| line.contains(s.label()))
+                .any(|label| line.contains(label))
                 .then_some(idx)
         })
         .unwrap_or(lines.len());
     assert!(
-        lines[active_line + 1..next_section_line]
+        lines[gate_line + 1..next_section_line]
             .iter()
             .any(|line| line.contains("T102") && line.contains("code-gate")),
-        "render_frame must place T102 under ACTIVE with semantic code-gate label before next section:\n{painted}"
+        "render_frame must place T102 under GATE with semantic code-gate label before next projection group:\n{painted}"
     );
     if let Some(held_line) = lines
         .iter()
@@ -290,6 +289,112 @@ fn cockpit_adr_0001_review_steps_render_under_active_work() {
             "render_frame must not place T102 under HELD-AI-REVIEW:\n{painted}"
         );
     }
+    assert!(
+        !painted.contains("ACTIVE"),
+        "task-focused cockpit must not render legacy ACTIVE header:\n{painted}"
+    );
+}
+
+#[test]
+fn task_focused_table_uses_projection_groups_and_contextual_task_rows() {
+    let conn = fixture_conn();
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, updated_at, linked_observations, lifecycle, active_step, integration_step, blocked, blocker_kind, workspace_path) \
+         VALUES ('T110', 'ready', 'queued no worktree', '2026-05-06', '[]', 'queued', 'none', 'none', 0, NULL, NULL)",
+        [],
+    )
+    .expect("seed queued");
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, updated_at, linked_observations, lifecycle, active_step, integration_step, blocked, blocker_kind, workspace_path) \
+         VALUES ('T111', 'executing', 'exec work', '2026-05-06', '[]', 'active', 'coding', 'none', 0, NULL, '/tmp/t111')",
+        [],
+    )
+    .expect("seed working");
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, updated_at, linked_observations, lifecycle, active_step, integration_step, blocked, blocker_kind, workspace_path) \
+         VALUES ('T112', 'code_review', 'code gate', '2026-05-06', '[]', 'active', 'coding_review', 'none', 0, NULL, '/tmp/t112')",
+        [],
+    )
+    .expect("seed gate");
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, updated_at, linked_observations, lifecycle, active_step, integration_step, blocked, blocker_kind) \
+         VALUES ('T113', 'blocked', 'capacity wait', '2026-05-06', '[]', 'active', 'none', 'none', 1, 'capacity')",
+        [],
+    )
+    .expect("seed waiting");
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, updated_at, linked_observations, lifecycle, active_step, integration_step, blocked, blocker_kind, blocked_reason) \
+         VALUES ('T114', 'blocked', 'runner failed', '2026-05-06', '[]', 'active', 'none', 'none', 1, 'runner', '{\"exit_code\":42}')",
+        [],
+    )
+    .expect("seed failed");
+
+    let mut app = build_cockpit_app(&conn);
+    let buf = paint(&mut app);
+    let painted = buffer_to_string(&buf);
+    let lines: Vec<&str> = painted.lines().collect();
+    let middle_start = TOP_STRIP_HEIGHT as usize;
+    let middle_end = (H - BOTTOM_CHROME_HEIGHT) as usize;
+    let middle = lines[middle_start..middle_end].join("\n");
+
+    for header in ["QUEUED", "WORKING", "GATE", "WAITING", "FAILED"] {
+        assert!(
+            middle.contains(header),
+            "missing projection header {header}:\n{middle}"
+        );
+    }
+    for legacy in ["ACTIVE", "AWAITING HUMAN ACCEPTANCE", "HELD-TRIAGE"] {
+        assert!(
+            !middle.contains(legacy),
+            "task-focused table must not render legacy task header {legacy}:\n{middle}"
+        );
+    }
+    assert!(
+        middle.contains("▾ QUEUED (1)"),
+        "queued count mismatch:\n{middle}"
+    );
+    assert!(
+        middle.contains("▾ GATE (1)"),
+        "gate count mismatch:\n{middle}"
+    );
+    assert!(
+        middle.contains("▾ WAITING (1)"),
+        "waiting count mismatch:\n{middle}"
+    );
+    assert!(
+        middle.contains("▾ FAILED (1)"),
+        "failed count mismatch:\n{middle}"
+    );
+    assert!(
+        middle.contains("T110") && middle.contains("◌ no worktree"),
+        "queued row must suppress broad queued stage but preserve no-worktree signal:\n{middle}"
+    );
+    assert!(
+        !middle
+            .lines()
+            .any(|line| line.contains("T110") && line.contains("◌ queued")),
+        "queued row must not repeat broad queued state in its status slot:\n{middle}"
+    );
+    assert!(
+        middle.contains("T111") && middle.contains("▣ exec"),
+        "working row missing exec stage:\n{middle}"
+    );
+    assert!(
+        middle.contains("T112") && middle.contains("◈ code-gate"),
+        "gate row missing code-gate stage:\n{middle}"
+    );
+    assert!(
+        middle.contains("T113") && middle.contains("△ capacity"),
+        "waiting row missing capacity subtype:\n{middle}"
+    );
+    assert!(
+        !middle.contains("waiting-capacity"),
+        "waiting row repeated broad waiting state:\n{middle}"
+    );
+    assert!(
+        middle.contains("T114") && middle.contains("▲ runner-failed exit 42"),
+        "failed row missing runner/exit signal:\n{middle}"
+    );
 }
 
 #[test]

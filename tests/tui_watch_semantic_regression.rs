@@ -302,7 +302,7 @@ fn seeded_clean_db_rows_render_semantic_watch_vocabulary() {
         "accept",
         "runner-failed",
         "exit 42",
-        "waiting-capacity",
+        "capacity",
         "candidate",
         "contract-draft",
         "needs-info",

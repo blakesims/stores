@@ -15,7 +15,8 @@ use super::data::{
 };
 use super::semantics::{
     engine_presentation, external_review_presentation, external_review_runner_label,
-    intake_presentation, observation_presentation, task_presentation, PresentationSeverity,
+    intake_presentation, observation_presentation, task_presentation, task_watch_projection,
+    PresentationSeverity, WatchProjection, WatchSlotId,
 };
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
@@ -769,33 +770,37 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
     if let Some(alert) = system_alert_item(app) {
         items.push(alert);
     }
-    let mut last_section: Option<usize> = None;
     let cursor = app.current_flat();
-    for (i, fr) in window.iter().enumerate() {
-        let sec_kind = app.sections.get(fr.section).map(|(s, _)| *s);
-        if sec_kind == Some(Section::TasksRecentlyTerminal) {
-            continue;
-        }
-        if last_section != Some(fr.section) {
-            if let Some((sec, indices)) = app.sections.get(fr.section) {
-                let collapsed = app.collapsed.contains(sec);
-                let glyph = if collapsed { "▸" } else { "▾" };
-                items.push(ListItem::new(Line::from(Span::styled(
-                    format!("{glyph} {} ({})", sec.label(), indices.len()),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ))));
+    if app.focused_store == StoreLane::Tasks {
+        append_task_projection_items(app, &window, cursor, &mut items);
+    } else {
+        let mut last_section: Option<usize> = None;
+        for (i, fr) in window.iter().enumerate() {
+            let sec_kind = app.sections.get(fr.section).map(|(s, _)| *s);
+            if sec_kind == Some(Section::TasksRecentlyTerminal) {
+                continue;
             }
-            last_section = Some(fr.section);
+            if last_section != Some(fr.section) {
+                if let Some((sec, indices)) = app.sections.get(fr.section) {
+                    let collapsed = app.collapsed.contains(sec);
+                    let glyph = if collapsed { "▸" } else { "▾" };
+                    items.push(ListItem::new(Line::from(Span::styled(
+                        format!("{glyph} {} ({})", sec.label(), indices.len()),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ))));
+                }
+                last_section = Some(fr.section);
+            }
+            let absolute_idx = app.scroll_offset + i;
+            let selected = cursor == Some(absolute_idx);
+            items.push(ListItem::new(format_row_line(
+                &app.rows[fr.abs],
+                selected,
+                &app.external_review,
+            )));
         }
-        let absolute_idx = app.scroll_offset + i;
-        let selected = cursor == Some(absolute_idx);
-        items.push(ListItem::new(format_row_line(
-            &app.rows[fr.abs],
-            selected,
-            &app.external_review,
-        )));
     }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
@@ -809,6 +814,77 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
             .title(format!(" {} ", app.focused_store.label())),
     );
     f.render_widget(list, area);
+}
+
+fn append_task_projection_items(
+    app: &App,
+    window: &[FlatRow],
+    cursor: Option<usize>,
+    items: &mut Vec<ListItem<'static>>,
+) {
+    for slot in task_projection_display_order(window, app) {
+        let rows: Vec<(usize, &FlatRow, WatchProjection)> = window
+            .iter()
+            .enumerate()
+            .filter_map(|(i, fr)| match &app.rows[fr.abs] {
+                Row::Task(t) => {
+                    let projection = task_watch_projection(t);
+                    (projection.slot == slot).then_some((i, fr, projection))
+                }
+                _ => None,
+            })
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("▾ {} ({})", task_projection_group_label(slot), rows.len()),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))));
+        for (i, fr, projection) in rows {
+            let absolute_idx = app.scroll_offset + i;
+            let selected = cursor == Some(absolute_idx);
+            items.push(ListItem::new(format_row_line_for_task_projection(
+                &app.rows[fr.abs],
+                selected,
+                &app.external_review,
+                &projection,
+            )));
+        }
+    }
+}
+
+fn task_projection_display_order(window: &[FlatRow], app: &App) -> Vec<WatchSlotId> {
+    const ORDER: [WatchSlotId; 6] = [
+        WatchSlotId::Front,
+        WatchSlotId::Work,
+        WatchSlotId::Gate,
+        WatchSlotId::Wait,
+        WatchSlotId::Fault,
+        WatchSlotId::Exit,
+    ];
+    ORDER
+        .into_iter()
+        .filter(|slot| {
+            window.iter().any(|fr| match &app.rows[fr.abs] {
+                Row::Task(t) => task_watch_projection(t).slot == *slot,
+                _ => false,
+            })
+        })
+        .collect()
+}
+
+fn task_projection_group_label(slot: WatchSlotId) -> &'static str {
+    match slot {
+        WatchSlotId::Front => "QUEUED",
+        WatchSlotId::Work => "WORKING",
+        WatchSlotId::Gate => "GATE",
+        WatchSlotId::Wait => "WAITING",
+        WatchSlotId::Fault => "FAILED",
+        WatchSlotId::Exit => "DONE",
+    }
 }
 
 /// Engine-health panel: daemon liveness, dispatch-lock counts, oldest-lock
@@ -1073,15 +1149,39 @@ fn format_row_line(
         Row::Review(r) => format_review_line(r),
         Row::Intake(i) => format_intake_line(i),
     };
+    styled_row_line(base, selected)
+}
+
+fn format_row_line_for_task_projection(
+    row: &Row,
+    selected: bool,
+    external_review: &ExternalReviewState,
+    projection: &WatchProjection,
+) -> Line<'static> {
+    let base = match row {
+        Row::Task(t) => format_task_line_with_status(
+            t,
+            external_review,
+            task_projection_status_label(projection),
+        ),
+        _ => match row {
+            Row::Obs(o) => format_obs_line(o, None),
+            Row::CollapsedObs(c) => format_obs_line(&c.representative, Some(c)),
+            Row::Review(r) => format_review_line(r),
+            Row::Intake(i) => format_intake_line(i),
+            Row::Task(_) => unreachable!(),
+        },
+    };
+    styled_row_line(base, selected)
+}
+
+fn styled_row_line(mut spans: Vec<Span<'static>>, selected: bool) -> Line<'static> {
     if selected {
-        let mut spans = base;
         for s in spans.iter_mut() {
             s.style = s.style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
         }
-        Line::from(spans)
-    } else {
-        Line::from(base)
     }
+    Line::from(spans)
 }
 
 fn age_label(epoch: Option<i64>) -> String {
@@ -1103,6 +1203,14 @@ fn age_label(epoch: Option<i64>) -> String {
 fn format_task_line(
     t: &super::data::TaskRow,
     external_review: &ExternalReviewState,
+) -> Vec<Span<'static>> {
+    format_task_line_with_status(t, external_review, task_status_label(t))
+}
+
+fn format_task_line_with_status(
+    t: &super::data::TaskRow,
+    external_review: &ExternalReviewState,
+    status_label: String,
 ) -> Vec<Span<'static>> {
     let live_runner = t.live_run.as_ref().and_then(|live| {
         let role = live.role.trim();
@@ -1131,7 +1239,7 @@ fn format_task_line(
             Style::default().fg(Color::Cyan),
         ),
         Span::styled(
-            format!("{:<24}", task_status_label(t)),
+            format!("{:<24}", status_label),
             Style::default().fg(Color::Yellow),
         ),
         Span::raw(" "),
@@ -1305,6 +1413,36 @@ fn format_review_line(r: &super::data::ReviewRow) -> Vec<Span<'static>> {
         60,
     )));
     spans
+}
+
+fn task_projection_status_label(projection: &WatchProjection) -> String {
+    let stage = match projection.slot {
+        WatchSlotId::Front if projection.row_stage == "queued" => "",
+        WatchSlotId::Work if projection.row_stage == "work" => "",
+        WatchSlotId::Wait => projection
+            .row_stage
+            .strip_prefix("waiting-")
+            .unwrap_or(projection.row_stage),
+        WatchSlotId::Fault => projection
+            .row_stage
+            .strip_suffix("-blocked")
+            .unwrap_or(projection.row_stage),
+        WatchSlotId::Exit if projection.row_stage == "done" => "",
+        _ => projection.row_stage,
+    };
+    let mut parts = vec![projection.glyph.to_string()];
+    if !stage.is_empty() {
+        parts.push(stage.to_string());
+    }
+    if let Some(signal) = projection
+        .row_signal
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(signal.to_string());
+    }
+    parts.join(" ")
 }
 
 fn task_status_label(t: &super::data::TaskRow) -> String {
@@ -1866,6 +2004,66 @@ mod tests {
     }
 
     #[test]
+    fn task_projection_row_labels_suppress_broad_group_context() {
+        let queued = TaskRow {
+            display_id: "T301".to_string(),
+            status: "ready".to_string(),
+            title: "queued".to_string(),
+            lifecycle: Some("queued".to_string()),
+            ..Default::default()
+        };
+        let queued_projection = task_watch_projection(&queued);
+        let queued_text = line_text(format_row_line_for_task_projection(
+            &Row::Task(queued),
+            false,
+            &ExternalReviewState::default(),
+            &queued_projection,
+        ));
+        assert!(queued_text.contains("◌ no worktree"), "{queued_text}");
+        assert!(!queued_text.contains("◌ queued"), "{queued_text}");
+
+        let waiting = TaskRow {
+            display_id: "T302".to_string(),
+            status: "blocked".to_string(),
+            title: "capacity".to_string(),
+            blocked: Some(true),
+            blocker_kind: Some("capacity".to_string()),
+            ..Default::default()
+        };
+        let waiting_projection = task_watch_projection(&waiting);
+        let waiting_text = line_text(format_row_line_for_task_projection(
+            &Row::Task(waiting),
+            false,
+            &ExternalReviewState::default(),
+            &waiting_projection,
+        ));
+        assert!(waiting_text.contains("△ capacity"), "{waiting_text}");
+        assert!(!waiting_text.contains("waiting-capacity"), "{waiting_text}");
+
+        let failed = TaskRow {
+            display_id: "T303".to_string(),
+            status: "blocked".to_string(),
+            title: "runner".to_string(),
+            blocked: Some(true),
+            blocker_kind: Some("runner".to_string()),
+            blocked_reason: Some(r#"{"exit_code":42}"#.to_string()),
+            ..Default::default()
+        };
+        let failed_projection = task_watch_projection(&failed);
+        let failed_text = line_text(format_row_line_for_task_projection(
+            &Row::Task(failed),
+            false,
+            &ExternalReviewState::default(),
+            &failed_projection,
+        ));
+        assert!(
+            failed_text.contains("▲ runner-failed exit 42"),
+            "{failed_text}"
+        );
+        assert!(!failed_text.contains("▲ failed"), "{failed_text}");
+    }
+
+    #[test]
     fn task_line_prefers_live_runner_over_empty_claimed_by() {
         let row = Row::Task(TaskRow {
             display_id: "T149".to_string(),
@@ -2226,10 +2424,16 @@ mod tests {
 
         let painted = painted_buffer(&mut app);
 
-        for label in ["INTEGRATION (2)", "INTEGRATED (1)", "HELD-INTEGRATION (1)"] {
+        for label in ["GATE (3)", "FAILED (1)"] {
             assert!(
                 painted.contains(label),
-                "expected section header '{label}' in painted frame:\n{painted}"
+                "expected projection header '{label}' in painted frame:\n{painted}"
+            );
+        }
+        for legacy in ["INTEGRATION (2)", "INTEGRATED (1)", "HELD-INTEGRATION (1)"] {
+            assert!(
+                !painted.contains(legacy),
+                "task-focused table must not render legacy section header '{legacy}':\n{painted}"
             );
         }
         for id in ["T800", "T801", "T802", "T803"] {
@@ -2238,12 +2442,10 @@ mod tests {
                 "expected row id {id} painted:\n{painted}"
             );
         }
-        // Sections must appear in canonical order: INTEGRATION before
-        // INTEGRATED before HELD-INTEGRATION.
-        let pos_int = painted.find("INTEGRATION (2)").unwrap();
-        let pos_integrated = painted.find("INTEGRATED (1)").unwrap();
-        let pos_held = painted.find("HELD-INTEGRATION (1)").unwrap();
-        assert!(pos_int < pos_integrated && pos_integrated < pos_held);
+        // Projection groups appear in canonical order: GATE before FAILED.
+        let pos_gate = painted.find("GATE (3)").unwrap();
+        let pos_failed = painted.find("FAILED (1)").unwrap();
+        assert!(pos_gate < pos_failed);
     }
 
     #[test]
