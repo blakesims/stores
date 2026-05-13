@@ -25,6 +25,9 @@ use super::semantics::{
 /// vertical span without re-encoding the literal.
 pub const TOP_STRIP_HEIGHT: u16 = 9;
 
+const MIN_STORE_CARD_WIDTH: u16 = 24;
+const STORE_STRIP_MORE_WIDTH: u16 = 12;
+
 /// Height (in rows) of the bottom chrome painted below the focused-table
 /// region: recent-exhaust strip (1) + hint line (1) + status bar (1) = 3.
 /// Excludes the optional search bar (only present in `Mode::Search`).
@@ -230,10 +233,10 @@ fn draw_rows(f: &mut Frame, app: &App, flat: &[FlatRow], area: Rect) {
     f.render_widget(list, area);
 }
 
-/// Render the 5-card store-flow strip across the top of the cockpit. Each
-/// card keeps the shared six-slot flow grammar in a readable 3x2 grid drawn
-/// from [`StoreFlowModel`]. The focused lane gets a cyan border; unfocused
-/// lanes are dim.
+/// Render the store-flow strip across the top of the cockpit. At common wide
+/// widths all five cards are visible; below the readable-card threshold the
+/// focused lane gets the available width and the hidden lanes collapse behind
+/// an explicit `+ more` affordance.
 fn draw_store_strip(f: &mut Frame, app: &App, area: Rect) {
     let model = store_flow_model(
         &app.rows,
@@ -241,12 +244,61 @@ fn draw_store_strip(f: &mut Frame, app: &App, area: Rect) {
         &app.status_bar.daemon_liveness,
         &app.external_review,
     );
-    let cells = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Ratio(1, 5); 5])
-        .split(area);
-    for (i, lane) in StoreLane::ALL.iter().enumerate() {
-        draw_store_card(f, *lane, app.focused_store == *lane, &model, cells[i]);
+    if area.width / StoreLane::ALL.len() as u16 >= MIN_STORE_CARD_WIDTH {
+        let cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Ratio(1, 5); 5])
+            .split(area);
+        for (i, lane) in StoreLane::ALL.iter().enumerate() {
+            draw_store_card(f, *lane, app.focused_store == *lane, &model, cells[i]);
+        }
+    } else {
+        let more_width =
+            STORE_STRIP_MORE_WIDTH.min(area.width.saturating_sub(MIN_STORE_CARD_WIDTH));
+        let focused_width = area.width.saturating_sub(more_width);
+        let cells = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(focused_width),
+                Constraint::Length(more_width),
+            ])
+            .split(area);
+        draw_store_card(f, app.focused_store, true, &model, cells[0]);
+        draw_store_more_affordance(f, app.focused_store, cells[1]);
+    }
+}
+
+fn draw_store_more_affordance(f: &mut Frame, focused: StoreLane, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let hidden = StoreLane::ALL
+        .iter()
+        .filter(|lane| **lane != focused)
+        .count();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(
+            format!("+{hidden} more"),
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ));
+    f.render_widget(block, area);
+    if area.width > 2 && area.height > 2 {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "+ more",
+                Style::default().fg(Color::Gray),
+            ))),
+            Rect {
+                x: area.x + 1,
+                y: area.y + 1,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            },
+        );
     }
 }
 
@@ -314,9 +366,7 @@ fn draw_store_card(
         }
     }
     for x in inner.x..inner.x + inner.width {
-        buf[(x, divider_y)]
-            .set_symbol("─")
-            .set_style(divider_style);
+        buf[(x, divider_y)].set_symbol("─").set_style(divider_style);
     }
     for sep_x in [col_starts[1], col_starts[2]] {
         buf[(sep_x, divider_y)]
@@ -479,22 +529,34 @@ fn wrap_label(label: &str, width: usize, max_lines: usize) -> Vec<String> {
     if width == 0 || max_lines == 0 {
         return Vec::new();
     }
-    let mut lines = Vec::new();
+    let more = "+ more";
+    let mut lines: Vec<String> = Vec::new();
+    let mut hidden = false;
     for word in label.split_whitespace() {
-        if lines.len() == max_lines {
+        let word_len = word.chars().count();
+        if word_len > width {
+            hidden = true;
             break;
         }
-        if lines.last().is_none_or(|line: &String| line.is_empty()) {
-            lines.push(word.chars().take(width).collect());
-            continue;
+        if let Some(last) = lines.last_mut() {
+            if last.chars().count() + 1 + word_len <= width {
+                last.push(' ');
+                last.push_str(word);
+                continue;
+            }
         }
-        let last = lines.last_mut().expect("line exists");
-        if last.chars().count() + 1 + word.chars().count() <= width {
-            last.push(' ');
-            last.push_str(word);
-        } else if lines.len() < max_lines {
-            lines.push(word.chars().take(width).collect());
+        if lines.len() < max_lines {
+            lines.push(word.to_string());
+        } else {
+            hidden = true;
+            break;
         }
+    }
+    if hidden && more.chars().count() <= width {
+        if lines.len() == max_lines {
+            lines.pop();
+        }
+        lines.push(more.to_string());
     }
     lines
 }
@@ -1314,15 +1376,28 @@ mod tests {
         ] {
             assert!(painted.contains(needle), "missing {needle:?}:\n{painted}");
         }
-        for glued in [
-            "◌cand", "◆inv", "◌q", "◆wrk", "✓dn", "△w", "▲err", "▲tool",
-        ] {
-            assert!(!painted.contains(glued), "found glued token {glued:?}:\n{painted}");
+        for glued in ["◌cand", "◆inv", "◌q", "◆wrk", "✓dn", "△w", "▲err", "▲tool"] {
+            assert!(
+                !painted.contains(glued),
+                "found glued token {glued:?}:\n{painted}"
+            );
         }
-        assert!(painted.contains("◌ 8"), "missing separated observation count:\n{painted}");
-        assert!(painted.contains("△ 8"), "missing separated waiting count:\n{painted}");
-        assert!(painted.contains("│"), "missing vertical dividers:\n{painted}");
-        assert!(painted.contains("─"), "missing horizontal divider:\n{painted}");
+        assert!(
+            painted.contains("◌ 8"),
+            "missing separated observation count:\n{painted}"
+        );
+        assert!(
+            painted.contains("△ 8"),
+            "missing separated waiting count:\n{painted}"
+        );
+        assert!(
+            painted.contains("│"),
+            "missing vertical dividers:\n{painted}"
+        );
+        assert!(
+            painted.contains("─"),
+            "missing horizontal divider:\n{painted}"
+        );
 
         model.engine.unfinished_locks = 2;
         let backend = TestBackend::new(80, TOP_STRIP_HEIGHT);
@@ -2017,6 +2092,37 @@ mod tests {
             assert!(
                 top_region.contains(label),
                 "missing top-strip label {label:?} in top region:\n{top_region}\n\nfull buffer:\n{painted}"
+            );
+        }
+    }
+
+    #[test]
+    fn cockpit_top_strip_narrow_width_uses_more_fallback_without_label_fragments() {
+        let mut app = cockpit_fixture_app();
+        let buf = paint(&mut app, 80, 30);
+        let painted = buffer_to_string(&buf);
+        let top_region: String = painted
+            .lines()
+            .take(TOP_STRIP_HEIGHT as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            top_region.contains("+4 more") || top_region.contains("+ more"),
+            "narrow strip must expose hidden lanes via + more affordance:\n{top_region}"
+        );
+        for label in ["queued", "working", "gate", "done", "waiting", "failed"] {
+            assert!(
+                top_region.contains(label),
+                "focused card label {label:?} must remain readable under fallback:\n{top_region}"
+            );
+        }
+        for fragment in [
+            "cand", "inv", "contr", "wrk", "dn", "err", "◌q", "◆wrk", "✓dn", "△w", "▲err",
+        ] {
+            assert!(
+                !top_region.contains(fragment),
+                "narrow fallback must not paint cockpit-code/word fragment {fragment:?}:\n{top_region}"
             );
         }
     }
