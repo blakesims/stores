@@ -8,6 +8,7 @@ The operator is watching flow: signals enter intake, become observations, become
 
 1. **Flow before rows.** Default views show store-level flow, queue depth, rates, age, and pressure before listing individual rows.
 2. **Graphics before prose.** Use terminal graphics, color, sparklines, phase glyphs, and badges to show pressure and progress. Text explains after selection/drilldown.
+   - Use few shapes densely: shape = workflow family, position = phase/pipeline index, fill = substate, superscript = cycle count, color = result/pressure, animation = currently active. Do not add a new glyph family when fill/color/superscript can carry the distinction.
 3. **Stores are lanes.** The top-level cockpit is organized by stores/lane surfaces: intake, observations, tasks, external reviews, and engine health. Task internals such as planning/execution/code-review belong inside the task lane, not as top-level stores.
 4. **Rows are drilldown.** Selecting a lane shows a sortable/filterable row table for that store; selecting a row shows details, lifecycle position, logs, evidence, and suggested next action.
 5. **Action is a valve.** Human approvals, resumes, ratifications, and retries are part of the engine. They should be visible as pressure/valves, not separated from system flow.
@@ -72,14 +73,19 @@ Show contract pressure and promotion safety:
 
 Show active engine work and review loops:
 
-- lifecycle state and phase/cycle
-- runner/model/agent where available
-- plan review loop glyphs, e.g. `✕✕✕✓`
-- phase map, e.g. `▰▱▱▱▱▱`
-- per-phase code-review loop glyphs
-- blocked/deploy_blocked reason class
-- workspace/log/transcript pointers
+- task title/summary as first-class row content; it is not status prose
+- lifecycle state and phase/cycle as a dense visual map
+- one visual slot per logical phase: planning slot, then 1..N execution phase slots created by the plan
+- circle family for planning (`◌` queued/pre-plan, `○` planning, `●` plan review/result; `◉` is a possible reviewed-circle variant with an infill gap)
+- square family for execution (`·` unreached planned phase, `□` executing, `▣` code review/result, `▰` acceptance/wrap)
+- superscript numerals for cycle counts (`□²`, `▣¹²`); no superscript means cycle 1
+- color for active/pass/fail/waiting: active work blue/teal, active review peach/yellow, passed green, failed red, inactive dim
+- subtle breathing animation only for the currently active cell
+- blocked/deploy_blocked reason class as a bounded reason column, not raw JSON
+- workspace/log/transcript/debug pointers in detail panes, not scan rows
 - recent terminal exhaust only, not full history
+
+Detailed task-map design note: `docs/worklog/2026-05-13/06-watch-visual-state-grammar.md`.
 
 ### External reviews
 
