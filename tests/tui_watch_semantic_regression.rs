@@ -6,6 +6,7 @@ use stores::tui::app::{App, Selection, TuiOpts};
 use stores::tui::daemon::Liveness;
 use stores::tui::data::{Row, StoreLane};
 use stores::tui::render::{self, BOTTOM_CHROME_HEIGHT, TOP_STRIP_HEIGHT};
+use stores::tui::semantics::{observation_watch_projection, WatchSlotId};
 
 const W: u16 = 200;
 const H: u16 = 42;
@@ -51,7 +52,8 @@ fn seed_semantic_watch_conn() -> Connection {
             open_architecture_review_id TEXT,
             superseded_by_id TEXT,
             contract_state TEXT,
-            intent_contract TEXT
+            intent_contract TEXT,
+            investigation_failure_reason TEXT
         );
         CREATE TABLE intake (
             display_id TEXT PRIMARY KEY,
@@ -215,6 +217,18 @@ fn seed_semantic_watch_conn() -> Connection {
         [],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO observations (display_id,status,priority,summary,updated_at,body,priority_rank,lifecycle,contract_state,waiting,waiting_kind,investigation_failure_reason) \
+         VALUES ('L004','investigation_failed','normal','schema-produced investigation failure','2026-05-13','body',5,'candidate','draft',1,'human_ratification','schema handler raised')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO observations (display_id,status,priority,summary,updated_at,body,priority_rank,lifecycle,outcome) \
+         VALUES ('L005','resolved','normal','closed wont fix observation','2026-05-13','body',5,'closed','closed_wont_fix')",
+        [],
+    )
+    .unwrap();
 
     conn.execute(
         "INSERT INTO external_reviews (display_id,task_id,status,runner,held_reason,next_retry_at,attempts) \
@@ -307,6 +321,7 @@ fn seeded_clean_db_rows_render_semantic_watch_vocabulary() {
         "CONTRACT GATE",
         "draft",
         "info needed",
+        "investigation failed",
         "pending",
         "runner=—",
     ] {
@@ -315,6 +330,19 @@ fn seeded_clean_db_rows_render_semantic_watch_vocabulary() {
             "missing semantic token {expected:?}:\n{rows}"
         );
     }
+
+    let failure = app
+        .rows
+        .iter()
+        .find_map(|row| match row {
+            Row::Obs(obs) if obs.display_id == "L004" => Some(observation_watch_projection(obs)),
+            _ => None,
+        })
+        .expect("schema-produced investigation failure row");
+    assert_eq!(failure.slot, WatchSlotId::Fault);
+    assert_eq!(failure.slot_label, "errors");
+    assert_eq!(failure.row_stage, "investigation failed");
+    assert_eq!(failure.row_signal.as_deref(), Some("schema handler raised"));
 
     for clutter in [
         "runner:none",

@@ -320,12 +320,20 @@ pub fn observation_presentation(row: &ObsRow) -> Presentation {
             return presentation("■", "superseded", PresentationSeverity::Exit, None);
         }
         return match row.outcome.as_deref().unwrap_or(row.status.as_str()) {
-            "wont_fix" | "wont-fix" => {
+            "closed_wont_fix" | "wont_fix" | "wont-fix" => {
                 presentation("×", "wont-fix", PresentationSeverity::Exit, None)
             }
             "superseded" => presentation("■", "superseded", PresentationSeverity::Exit, None),
             _ => presentation("✓", "addressed", PresentationSeverity::Exit, None),
         };
+    }
+    if row.status == "investigation_failed" || row.investigation_failure_reason.is_some() {
+        return presentation(
+            "▲",
+            "investigation-failed",
+            PresentationSeverity::Fault,
+            row.investigation_failure_reason.clone(),
+        );
     }
     if row.pending_architecture_review.unwrap_or(false)
         || row
@@ -381,14 +389,6 @@ pub fn observation_presentation(row: &ObsRow) -> Presentation {
             contract_signal(row),
         ),
         "in_progress" => presentation("▣", "resolving", PresentationSeverity::Work, None),
-        _ if row.status == "investigation_failed" || row.investigation_failure_reason.is_some() => {
-            presentation(
-                "▲",
-                "investigation-failed",
-                PresentationSeverity::Fault,
-                row.investigation_failure_reason.clone(),
-            )
-        }
         _ => presentation(
             "◆",
             "investigate",
@@ -404,12 +404,12 @@ fn obs_is_closed_exit(row: &ObsRow) -> bool {
         .is_some_and(|s| !s.trim().is_empty())
         || matches!(
             row.outcome.as_deref(),
-            Some("superseded" | "wont_fix" | "wont-fix")
+            Some("superseded" | "closed_wont_fix" | "wont_fix" | "wont-fix")
         )
         || row.lifecycle.as_deref() == Some("closed")
         || matches!(
             row.status.as_str(),
-            "resolved" | "wont_fix" | "wont-fix" | "rejected" | "superseded"
+            "resolved" | "closed_wont_fix" | "wont_fix" | "wont-fix" | "rejected" | "superseded"
         )
 }
 
@@ -882,6 +882,15 @@ mod tests {
             ),
             (
                 ObsRow {
+                    lifecycle: Some("closed".to_string()),
+                    outcome: Some("closed_wont_fix".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Exit,
+                "wont-fix",
+            ),
+            (
+                ObsRow {
                     status: "investigation_failed".to_string(),
                     investigation_failure_reason: Some("tool fault".to_string()),
                     ..Default::default()
@@ -895,6 +904,25 @@ mod tests {
             let projection = observation_watch_projection(&row);
             assert_eq!((projection.slot, projection.row_stage), (slot, stage));
         }
+    }
+
+    #[test]
+    fn investigation_failure_beats_schema_failure_gate_shape() {
+        let row = ObsRow {
+            status: "investigation_failed".to_string(),
+            lifecycle: Some("candidate".to_string()),
+            contract_state: Some("draft".to_string()),
+            waiting_kind: Some("human_ratification".to_string()),
+            investigation_failure_reason: Some("schema handler raised".to_string()),
+            ..Default::default()
+        };
+
+        let projection = observation_watch_projection(&row);
+        assert_eq!(projection.slot, WatchSlotId::Fault);
+        assert_eq!(projection.slot_label, "errors");
+        assert_eq!(projection.row_stage, "investigation failed");
+        assert_eq!(projection.next_action, Some("inspect failure"));
+        assert_eq!(projection.row_signal.as_deref(), Some("schema handler raised"));
     }
 
     #[test]
