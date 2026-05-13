@@ -99,15 +99,96 @@ fn seed_semantic_watch_conn() -> Connection {
     .unwrap();
 
     let tasks = [
-        ("T001", "planning", "queued inactive task", "queued", "none", "none", 0, None, None),
-        ("T002", "planning", "active planning task", "active", "planning", "none", 0, None, None),
-        ("T003", "plan_review", "plan review task", "active", "planning_review", "none", 0, None, None),
-        ("T004", "executing", "executing task", "active", "coding", "none", 0, None, None),
-        ("T005", "in_review", "acceptance task with pending external review", "active", "wrapping", "none", 0, None, None),
-        ("T006", "blocked", "runner blocked task", "active", "none", "none", 1, Some("runner"), Some(r#"{"exit_code":42,"kind":"runner_crash"}"#)),
-        ("T007", "planning", "capacity blocked queued task", "queued", "none", "none", 1, Some("capacity"), None),
+        (
+            "T001",
+            "planning",
+            "queued inactive task",
+            "queued",
+            "none",
+            "none",
+            0,
+            None,
+            None,
+        ),
+        (
+            "T002",
+            "planning",
+            "active planning task",
+            "active",
+            "planning",
+            "none",
+            0,
+            None,
+            None,
+        ),
+        (
+            "T003",
+            "plan_review",
+            "plan review task",
+            "active",
+            "planning_review",
+            "none",
+            0,
+            None,
+            None,
+        ),
+        (
+            "T004",
+            "executing",
+            "executing task",
+            "active",
+            "coding",
+            "none",
+            0,
+            None,
+            None,
+        ),
+        (
+            "T005",
+            "in_review",
+            "acceptance task with pending external review",
+            "active",
+            "wrapping",
+            "none",
+            0,
+            None,
+            None,
+        ),
+        (
+            "T006",
+            "blocked",
+            "runner blocked task",
+            "active",
+            "none",
+            "none",
+            1,
+            Some("runner"),
+            Some(r#"{"exit_code":42,"kind":"runner_crash"}"#),
+        ),
+        (
+            "T007",
+            "planning",
+            "capacity blocked queued task",
+            "queued",
+            "none",
+            "none",
+            1,
+            Some("capacity"),
+            None,
+        ),
     ];
-    for (id, status, title, lifecycle, active_step, integration_step, blocked, blocker_kind, blocked_reason) in tasks {
+    for (
+        id,
+        status,
+        title,
+        lifecycle,
+        active_step,
+        integration_step,
+        blocked,
+        blocker_kind,
+        blocked_reason,
+    ) in tasks
+    {
         conn.execute(
             "INSERT INTO tasks (display_id,status,title,updated_at,tier_hint,linked_observations,blocked_reason,lifecycle,active_step,integration_step,blocked,blocker_kind,current_phase,current_cycle,plan,workspace_path) \
              VALUES (?1,?2,?3,'2026-05-13T00:00:00Z','T2','[]',?4,?5,?6,?7,?8,?9,1,1,'{\"phases\":[{}]}','/tmp/semantic-watch')",
@@ -228,7 +309,10 @@ fn seeded_clean_db_rows_render_semantic_watch_vocabulary() {
         "pending",
         "runner=—",
     ] {
-        assert!(rows.contains(expected), "missing semantic token {expected:?}:\n{rows}");
+        assert!(
+            rows.contains(expected),
+            "missing semantic token {expected:?}:\n{rows}"
+        );
     }
 
     for clutter in [
@@ -241,7 +325,10 @@ fn seeded_clean_db_rows_render_semantic_watch_vocabulary() {
         "held_reason=none",
         "next_retry_at=none",
     ] {
-        assert!(!rows.contains(clutter), "default rows leaked raw clutter {clutter:?}:\n{rows}");
+        assert!(
+            !rows.contains(clutter),
+            "default rows leaked raw clutter {clutter:?}:\n{rows}"
+        );
     }
 }
 
@@ -317,10 +404,28 @@ fn task_detail_retains_debug_tuple_while_default_rows_hide_it() {
     let rows = focused_table_text(&buf);
     let detail = stores::tui::detail::render_text_for_row(app.current_row().unwrap(), &app);
 
-    assert!(!rows.contains("lifecycle="), "row leaked debug tuple:\n{rows}");
-    assert!(!rows.contains("active_step="), "row leaked debug tuple:\n{rows}");
-    assert!(detail.contains("Debug tuple"), "detail missing debug tuple:\n{detail}");
-    assert!(detail.contains("lifecycle:"), "detail missing lifecycle field:\n{detail}");
-    assert!(detail.contains("active_step:"), "detail missing active_step field:\n{detail}");
-    assert!(detail.contains("blocked_reason:"), "detail missing blocker debug field:\n{detail}");
+    assert!(
+        !rows.contains("lifecycle="),
+        "row leaked debug tuple:\n{rows}"
+    );
+    assert!(
+        !rows.contains("active_step="),
+        "row leaked debug tuple:\n{rows}"
+    );
+    assert!(
+        detail.contains("Debug tuple"),
+        "detail missing debug tuple:\n{detail}"
+    );
+    assert!(
+        detail.contains("lifecycle:"),
+        "detail missing lifecycle field:\n{detail}"
+    );
+    assert!(
+        detail.contains("active_step:"),
+        "detail missing active_step field:\n{detail}"
+    );
+    assert!(
+        detail.contains("blocked_reason:"),
+        "detail missing blocker debug field:\n{detail}"
+    );
 }
