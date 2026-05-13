@@ -562,8 +562,10 @@ impl LiveHarness {
             }
             let state_reason = snap.refusal_evidence();
             if !is_freshness_refusal(&state_reason) {
+                self.assert_no_real_llm()?;
+                println!("[assert] no_real_llm=ok non_fake_agent_runs=0 real_er_runners=0");
                 bail!(
-                    "expected stale/freshness refusal; command_output={} state_evidence={} snapshot={:?}",
+                    "stale-base-refuses RED proof: expected stale/freshness refusal, but live integration did not produce one; command_output={} state_evidence={} snapshot={:?}",
                     refusal.combined_output,
                     state_reason,
                     snap
@@ -669,23 +671,27 @@ impl LiveHarness {
 
     fn latest_er_proof(&self) -> Result<Option<LiveExternalReviewProof>> {
         let conn = self.conn()?;
+        let verdict_expr = optional_column_expr(&conn, "external_reviews", "verdict")?;
+        let runner_expr = optional_column_expr(&conn, "external_reviews", "runner")?;
+        let base_sha_expr = optional_column_expr(&conn, "external_reviews", "base_sha")?;
+        let head_sha_expr = optional_column_expr(&conn, "external_reviews", "head_sha")?;
+        let superseded_by_expr = optional_column_expr(&conn, "external_reviews", "superseded_by")?;
+        let sql = format!(
+            "SELECT display_id,status,{verdict_expr},{runner_expr},{base_sha_expr},{head_sha_expr},{superseded_by_expr} \
+             FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1"
+        );
         let er = conn
-            .query_row(
-                "SELECT display_id,status,verdict,runner,base_sha,head_sha,superseded_by \
-             FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1",
-                [&self.task_id],
-                |r| {
-                    Ok(LiveExternalReviewProof {
-                        display_id: r.get(0)?,
-                        status: r.get(1)?,
-                        verdict: r.get(2)?,
-                        runner: r.get(3)?,
-                        base_sha: r.get(4)?,
-                        head_sha: r.get(5)?,
-                        superseded_by: r.get(6)?,
-                    })
-                },
-            )
+            .query_row(&sql, [&self.task_id], |r| {
+                Ok(LiveExternalReviewProof {
+                    display_id: r.get(0)?,
+                    status: r.get(1)?,
+                    verdict: r.get(2)?,
+                    runner: r.get(3)?,
+                    base_sha: r.get(4)?,
+                    head_sha: r.get(5)?,
+                    superseded_by: r.get(6)?,
+                })
+            })
             .ok();
         Ok(er)
     }
@@ -744,22 +750,68 @@ impl LiveHarness {
             return Ok(LiveRefusalProof::from_outputs(outputs));
         }
 
-        let daemon = match self.run_daemon_once() {
-            Ok(()) => LiveCommandOutput {
-                label: "stores agents run --once".to_string(),
-                success: true,
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-            Err(err) => LiveCommandOutput {
-                label: "stores agents run --once".to_string(),
-                success: false,
-                stdout: String::new(),
-                stderr: err.to_string(),
-            },
-        };
-        outputs.push(daemon);
-        Ok(LiveRefusalProof::from_outputs(outputs))
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let mut last_status = String::new();
+        loop {
+            let daemon = match self.run_daemon_once() {
+                Ok(()) => LiveCommandOutput {
+                    label: "stores agents run --once".to_string(),
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                Err(err) => LiveCommandOutput {
+                    label: "stores agents run --once".to_string(),
+                    success: false,
+                    stdout: String::new(),
+                    stderr: err.to_string(),
+                },
+            };
+            let daemon_success = daemon.success;
+            outputs.push(daemon);
+
+            let snap = self.snapshot()?;
+            let state_evidence = snap.refusal_evidence();
+            let status_line = format!(
+                "task={} status={} lifecycle={} evidence={}",
+                self.task_id,
+                snap.status,
+                snap.lifecycle.as_deref().unwrap_or("-"),
+                state_evidence
+            );
+            if status_line != last_status {
+                outputs.push(LiveCommandOutput {
+                    label: "integration state".to_string(),
+                    success: true,
+                    stdout: status_line.clone(),
+                    stderr: String::new(),
+                });
+                last_status = status_line;
+            }
+            if is_freshness_refusal(&state_evidence)
+                || matches!(
+                    snap.status.as_str(),
+                    "blocked" | "deploy_blocked" | "integration_blocked"
+                )
+                || matches!(snap.status.as_str(), "integrated" | "done")
+                || snap.lifecycle.as_deref() == Some("done")
+            {
+                return Ok(LiveRefusalProof::from_outputs(outputs));
+            }
+            if !daemon_success {
+                return Ok(LiveRefusalProof::from_outputs(outputs));
+            }
+            if std::time::Instant::now() > deadline {
+                outputs.push(LiveCommandOutput {
+                    label: "integration wait".to_string(),
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!("timed out waiting for integration refusal; last {snap:?}"),
+                });
+                return Ok(LiveRefusalProof::from_outputs(outputs));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
 
     fn conn(&self) -> Result<Connection> {
@@ -767,7 +819,7 @@ impl LiveHarness {
         for _ in 0..20 {
             match crate::db::open(&self.db_path) {
                 Ok(conn) => return Ok(conn),
-                Err(err) if err.to_string().contains("database is locked") => {
+                Err(err) if err.to_string().to_ascii_lowercase().contains("locked") => {
                     last_err = Some(err);
                     std::thread::sleep(std::time::Duration::from_millis(250));
                 }
@@ -816,6 +868,19 @@ impl LiveHarness {
 
     fn snapshot(&self) -> Result<LiveSnapshot> {
         let conn = self.conn()?;
+        let lifecycle_expr = optional_column_expr(&conn, "tasks", "lifecycle")?;
+        let active_step_expr = optional_column_expr(&conn, "tasks", "active_step")?;
+        let workspace_path_expr = optional_column_expr(&conn, "tasks", "workspace_path")?;
+        let branch_expr = optional_column_expr(&conn, "tasks", "branch")?;
+        let blocked_reason_expr = optional_column_expr(&conn, "tasks", "blocked_reason")?;
+        let blocker_kind_expr = optional_column_expr(&conn, "tasks", "blocker_kind")?;
+        let blocked_reason_class_expr =
+            optional_column_expr(&conn, "tasks", "blocked_reason_class")?;
+        let integration_attempts_expr =
+            optional_column_expr(&conn, "tasks", "integration_attempts")?;
+        let sql = format!(
+            "SELECT status,{lifecycle_expr},{active_step_expr},{workspace_path_expr},{branch_expr},{blocked_reason_expr},{blocker_kind_expr},{blocked_reason_class_expr},{integration_attempts_expr} FROM tasks WHERE display_id=?1"
+        );
         let (
             status,
             lifecycle,
@@ -836,16 +901,29 @@ impl LiveHarness {
             Option<String>,
             Option<String>,
             Option<String>,
-        ) = conn.query_row(
-            "SELECT status,lifecycle,active_step,workspace_path,branch,blocked_reason,blocker_kind,blocked_reason_class,integration_attempts FROM tasks WHERE display_id=?1",
-            [&self.task_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
-        )?;
-        let er: Option<(String, String, Option<String>, Option<String>)> = conn.query_row(
-            "SELECT display_id,status,verdict,runner FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1",
-            [&self.task_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        ).ok();
+        ) = conn.query_row(&sql, [&self.task_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })?;
+        let verdict_expr = optional_column_expr(&conn, "external_reviews", "verdict")?;
+        let runner_expr = optional_column_expr(&conn, "external_reviews", "runner")?;
+        let er_sql = format!(
+            "SELECT display_id,status,{verdict_expr},{runner_expr} FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1"
+        );
+        let er: Option<(String, String, Option<String>, Option<String>)> = conn
+            .query_row(&er_sql, [&self.task_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .ok();
         Ok(LiveSnapshot {
             status,
             lifecycle,
@@ -959,6 +1037,26 @@ impl LiveHarness {
     }
 }
 
+fn optional_column_expr(conn: &Connection, table: &str, column: &str) -> Result<String> {
+    if live_table_has_column(conn, table, column)? {
+        Ok(column.to_string())
+    } else {
+        Ok("NULL".to_string())
+    }
+}
+
+fn live_table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn run_live_stores_cmd<const N: usize>(root: &Path, args: [&str; N], label: &str) -> Result<()> {
     let out = run_live_stores_cmd_output(root, args, label)?;
     if !out.success {
@@ -992,7 +1090,10 @@ fn run_live_stores_cmd_output<const N: usize>(
 }
 
 fn is_freshness_refusal(text: &str) -> bool {
-    let normalized = text.to_ascii_lowercase().replace('-', "_");
+    let normalized = text
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .replace("stale_base_refuses", "");
     normalized.contains("stale_external_review")
         || normalized.contains("stale external review")
         || normalized.contains("stale_base")
@@ -1653,6 +1754,9 @@ mod tests {
         }
         assert!(!is_freshness_refusal(
             "runner crashed without stale evidence"
+        ));
+        assert!(!is_freshness_refusal(
+            "stores test stale-base-refuses timed out waiting for integration refusal"
         ));
     }
 
