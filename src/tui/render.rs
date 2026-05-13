@@ -829,8 +829,11 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
     }
     let cursor = app.current_flat();
     if app.focused_store == StoreLane::Tasks {
-        items.push(ListItem::new(task_table_header(area.width)));
-        append_task_projection_items(app, &flat, window, cursor, area.width, &mut items);
+        let map_width = task_table_map_width(window, app);
+        items.push(ListItem::new(task_table_header(area.width, map_width)));
+        append_task_projection_items(
+            app, &flat, window, cursor, area.width, map_width, &mut items,
+        );
     } else if app.focused_store == StoreLane::Observations {
         append_observation_projection_items(app, &flat, window, cursor, &mut items);
     } else {
@@ -882,6 +885,7 @@ fn append_task_projection_items(
     window: &[FlatRow],
     cursor: Option<usize>,
     area_width: u16,
+    map_width: usize,
     items: &mut Vec<ListItem<'static>>,
 ) {
     for slot in task_projection_display_order(full, app) {
@@ -918,6 +922,7 @@ fn append_task_projection_items(
                 selected,
                 &projection,
                 area_width,
+                map_width,
             )));
         }
     }
@@ -1297,9 +1302,10 @@ fn format_row_line_for_task_projection(
     selected: bool,
     projection: &WatchProjection,
     area_width: u16,
+    map_width: usize,
 ) -> Line<'static> {
     let base = match row {
-        Row::Task(t) => format_task_table_line(t, projection, area_width),
+        Row::Task(t) => format_task_table_line(t, projection, area_width, map_width),
         _ => match row {
             Row::Obs(o) => format_obs_line(o, None),
             Row::CollapsedObs(c) => format_obs_line(&c.representative, Some(c)),
@@ -1341,17 +1347,29 @@ fn styled_row_line(mut spans: Vec<Span<'static>>, selected: bool) -> Line<'stati
 }
 
 const TASK_ID_WIDTH: usize = 6;
-const TASK_MAP_WIDTH: usize = 18;
+const TASK_MAP_MIN_WIDTH: usize = 18;
 const TASK_REASON_WIDTH: usize = 8;
 const TASK_AGE_WIDTH: usize = 5;
 const TASK_TIER_WIDTH: usize = 4;
 const TASK_TABLE_GAPS: usize = 5;
 const TASK_TABLE_PREFIX_WIDTH: usize = 2;
 
-fn task_table_summary_width(area_width: u16) -> usize {
+fn task_table_map_width(window: &[FlatRow], app: &App) -> usize {
+    window
+        .iter()
+        .filter_map(|fr| match &app.rows[fr.abs] {
+            Row::Task(t) => Some(task_map_text(&task_map_projection(t)).chars().count()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(TASK_MAP_MIN_WIDTH)
+        .max(TASK_MAP_MIN_WIDTH)
+}
+
+fn task_table_summary_width(area_width: u16, map_width: usize) -> usize {
     let fixed = TASK_TABLE_PREFIX_WIDTH
         + TASK_ID_WIDTH
-        + TASK_MAP_WIDTH
+        + map_width
         + TASK_REASON_WIDTH
         + TASK_AGE_WIDTH
         + TASK_TIER_WIDTH
@@ -1359,8 +1377,8 @@ fn task_table_summary_width(area_width: u16) -> usize {
     (area_width as usize).saturating_sub(fixed).max(12)
 }
 
-fn task_table_header(area_width: u16) -> Line<'static> {
-    let summary_width = task_table_summary_width(area_width);
+fn task_table_header(area_width: u16, map_width: usize) -> Line<'static> {
+    let summary_width = task_table_summary_width(area_width, map_width);
     Line::from(vec![Span::styled(
         format!(
             "  {:<id_w$} {:<summary_w$} {:<map_w$} {:<reason_w$} {:>age_w$} {:>tier_w$}",
@@ -1372,7 +1390,7 @@ fn task_table_header(area_width: u16) -> Line<'static> {
             "TIER",
             id_w = TASK_ID_WIDTH,
             summary_w = summary_width,
-            map_w = TASK_MAP_WIDTH,
+            map_w = map_width,
             reason_w = TASK_REASON_WIDTH,
             age_w = TASK_AGE_WIDTH,
             tier_w = TASK_TIER_WIDTH,
@@ -1387,8 +1405,9 @@ fn format_task_table_line(
     t: &super::data::TaskRow,
     _projection: &WatchProjection,
     area_width: u16,
+    map_width: usize,
 ) -> Vec<Span<'static>> {
-    let summary_width = task_table_summary_width(area_width);
+    let summary_width = task_table_summary_width(area_width, map_width);
     let map_projection = task_map_projection(t);
     let map_text = task_map_text(&map_projection);
     let reason = map_projection.reason.clone().unwrap_or_default();
@@ -1406,7 +1425,7 @@ fn format_task_table_line(
         Span::raw(format!("{:<summary_w$}", title, summary_w = summary_width)),
         Span::raw(" "),
     ];
-    spans.extend(task_map_spans(&map_projection, TASK_MAP_WIDTH));
+    spans.extend(task_map_spans(&map_projection, map_width));
     spans.push(Span::raw(" "));
     spans.push(Span::raw(format!(
         "{:<reason_w$}",
@@ -1427,7 +1446,7 @@ fn format_task_table_line(
     )));
 
     let rendered_map_chars = map_text.chars().count();
-    debug_assert!(rendered_map_chars <= TASK_MAP_WIDTH);
+    debug_assert!(rendered_map_chars <= map_width);
     spans
 }
 
@@ -2383,6 +2402,7 @@ mod tests {
             false,
             &queued_projection,
             120,
+            TASK_MAP_MIN_WIDTH,
         ));
         assert!(queued_text.contains("T301"), "{queued_text}");
         assert!(queued_text.contains("queued"), "{queued_text}");
@@ -2403,6 +2423,7 @@ mod tests {
             false,
             &waiting_projection,
             120,
+            TASK_MAP_MIN_WIDTH,
         ));
         assert!(waiting_text.contains("△"), "{waiting_text}");
         assert!(waiting_text.contains("capacity"), "{waiting_text}");
@@ -2423,6 +2444,7 @@ mod tests {
             false,
             &failed_projection,
             120,
+            TASK_MAP_MIN_WIDTH,
         ));
         assert!(failed_text.contains("▲"), "{failed_text}");
         assert!(failed_text.contains("runner"), "{failed_text}");
@@ -2476,6 +2498,19 @@ mod tests {
                 tier_hint: Some("T3".to_string()),
                 ..Default::default()
             }),
+            Row::Task(TaskRow {
+                display_id: "T012".to_string(),
+                status: "executing".to_string(),
+                title: "long phase map keeps aligned columns".to_string(),
+                lifecycle: Some("active".to_string()),
+                total_phases: Some(12),
+                plan_review_entries: vec![TaskPlanReviewEntry {
+                    gate: PlanReviewGate::Ready,
+                    ..Default::default()
+                }],
+                tier_hint: Some("T3".to_string()),
+                ..Default::default()
+            }),
         ];
         app.sections = classify(&app.rows);
         app.apply_sort();
@@ -2495,6 +2530,7 @@ mod tests {
         let queued = lines.iter().find(|line| line.contains("T001")).unwrap();
         let active = lines.iter().find(|line| line.contains("T011")).unwrap();
         let failed = lines.iter().find(|line| line.contains("T010")).unwrap();
+        let long = lines.iter().find(|line| line.contains("T012")).unwrap();
 
         let char_pos = |line: &str, needle: &str| -> Option<usize> {
             line.find(needle).map(|byte| line[..byte].chars().count())
@@ -2521,8 +2557,18 @@ mod tests {
             "{painted}"
         );
 
+        assert_eq!(
+            char_pos(header, "AGE").map(|pos| pos + "AGE".chars().count() - 1),
+            char_rpos(long, "-"),
+            "{painted}"
+        );
+
         assert!(painted.contains("◌ │ · · ·"), "{painted}");
         assert!(painted.contains("● │ ▣ □² ·"), "{painted}");
+        assert!(
+            painted.contains("● │ · · · · · · · · · · · ·"),
+            "long maps must preserve every planned phase dot without shifting later columns:\n{painted}"
+        );
         assert!(painted.contains("▲"), "{painted}");
         assert!(painted.contains("TIER"), "{painted}");
         for prose_bag in [
