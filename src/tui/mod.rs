@@ -15,6 +15,7 @@ pub mod priming;
 pub mod progress;
 pub mod render;
 pub mod search;
+pub mod semantics;
 pub mod sidecar;
 pub mod sort;
 pub mod status_bar;
