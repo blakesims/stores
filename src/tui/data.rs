@@ -727,27 +727,13 @@ pub fn obs_lifecycle(row: &ObsRow) -> &str {
 }
 
 fn apply_task_to_flow(t: &TaskRow, flow: &mut TasksFlow) {
-    if task_is_terminal_primary(t) {
-        flow.recently_terminal += 1;
-        return;
-    }
-    if task_is_blocked(t) {
-        match super::semantics::task_presentation(t).severity {
-            super::semantics::PresentationSeverity::Wait => flow.wait += 1,
-            super::semantics::PresentationSeverity::Gate => flow.gate += 1,
-            super::semantics::PresentationSeverity::Fault => flow.fail += 1,
-            _ => flow.fail += 1,
-        }
-        return;
-    }
-    match (task_lifecycle(t), task_active_step(t)) {
-        ("queued", _) => flow.queued += 1,
-        ("active", "planning_review")
-        | ("active", "coding_review")
-        | ("active", "wrapping")
-        | ("integration", _) => flow.gate += 1,
-        ("active", _) => flow.work += 1,
-        _ => {}
+    match super::semantics::task_watch_projection(t).slot {
+        super::semantics::WatchSlotId::Front => flow.queued += 1,
+        super::semantics::WatchSlotId::Work => flow.work += 1,
+        super::semantics::WatchSlotId::Gate => flow.gate += 1,
+        super::semantics::WatchSlotId::Exit => flow.recently_terminal += 1,
+        super::semantics::WatchSlotId::Wait => flow.wait += 1,
+        super::semantics::WatchSlotId::Fault => flow.fail += 1,
     }
 }
 
@@ -3563,6 +3549,55 @@ mod tests {
         assert_eq!(model.engine.unfinished_locks, 0);
         assert_eq!(model.engine.oldest_lock_age_secs, None);
         assert_eq!(model.engine.agent_runs_recent, 0);
+    }
+
+    #[test]
+    fn task_flow_model_counts_projection_slots_for_representative_rows() {
+        let rows = vec![
+            Row::Task(TaskRow {
+                lifecycle: Some("queued".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                lifecycle: Some("active".to_string()),
+                active_step: Some("coding".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                lifecycle: Some("active".to_string()),
+                active_step: Some("planning_review".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                blocked: Some(true),
+                blocker_kind: Some("capacity".to_string()),
+                lifecycle: Some("queued".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                blocked: Some(true),
+                blocker_kind: Some("runner".to_string()),
+                lifecycle: Some("active".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                lifecycle: Some("done".to_string()),
+                ..Default::default()
+            }),
+        ];
+        let model = store_flow_model(
+            &rows,
+            &SystemHealth::default(),
+            &super::super::daemon::Liveness::Dead,
+            &ExternalReviewState::default(),
+        );
+
+        assert_eq!(model.tasks.queued, 1);
+        assert_eq!(model.tasks.work, 1);
+        assert_eq!(model.tasks.gate, 1);
+        assert_eq!(model.tasks.wait, 1);
+        assert_eq!(model.tasks.fail, 1);
+        assert_eq!(model.tasks.recently_terminal, 1);
     }
 
     #[test]

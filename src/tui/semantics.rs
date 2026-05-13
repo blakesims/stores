@@ -38,6 +38,108 @@ pub struct FlowSlotPresentation {
     pub count: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchSlotId {
+    Front,
+    Work,
+    Gate,
+    Exit,
+    Wait,
+    Fault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchAttention {
+    Exhaust,
+    Flow,
+    Fault,
+    Neutral,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchProjection {
+    pub slot: WatchSlotId,
+    pub slot_label: &'static str,
+    pub glyph: &'static str,
+    pub row_stage: &'static str,
+    pub row_signal: Option<String>,
+    pub next_action: Option<&'static str>,
+    pub attention: WatchAttention,
+}
+
+pub fn task_watch_projection(task: &TaskRow) -> WatchProjection {
+    let presentation = task_presentation(task);
+    let slot = watch_slot_id(presentation.severity);
+    WatchProjection {
+        slot,
+        slot_label: watch_slot_label(slot),
+        glyph: presentation.glyph,
+        row_stage: task_watch_stage(&presentation.label),
+        row_signal: presentation.signal,
+        next_action: None,
+        attention: watch_attention(slot),
+    }
+}
+
+fn task_watch_stage(label: &str) -> &'static str {
+    match label {
+        "done" => "done",
+        "ship" => "ship",
+        "queued" => "queued",
+        "plan" => "plan",
+        "plan-gate" => "plan-gate",
+        "exec" => "exec",
+        "code-gate" => "code-gate",
+        "accept" => "accept",
+        "work" => "work",
+        "waiting-capacity" => "waiting-capacity",
+        "waiting-dependency" => "waiting-dependency",
+        "runner-failed" => "runner-failed",
+        "rate-limited" => "rate-limited",
+        "needs-human" => "needs-human",
+        "review-blocked" => "review-blocked",
+        "stale-base" => "stale-base",
+        "config-fault" => "config-fault",
+        "tests-failed" => "tests-failed",
+        "main-red" => "main-red",
+        "deploy-failed" => "deploy-failed",
+        "migration-failed" => "migration-failed",
+        _ => "blocked",
+    }
+}
+
+fn watch_slot_id(severity: PresentationSeverity) -> WatchSlotId {
+    match severity {
+        PresentationSeverity::Front => WatchSlotId::Front,
+        PresentationSeverity::Work => WatchSlotId::Work,
+        PresentationSeverity::Gate => WatchSlotId::Gate,
+        PresentationSeverity::Exit => WatchSlotId::Exit,
+        PresentationSeverity::Wait => WatchSlotId::Wait,
+        PresentationSeverity::Fault => WatchSlotId::Fault,
+    }
+}
+
+fn watch_slot_label(slot: WatchSlotId) -> &'static str {
+    match slot {
+        WatchSlotId::Front => "queued",
+        WatchSlotId::Work => "working",
+        WatchSlotId::Gate => "gate",
+        WatchSlotId::Exit => "done",
+        WatchSlotId::Wait => "waiting",
+        WatchSlotId::Fault => "failed",
+    }
+}
+
+fn watch_attention(slot: WatchSlotId) -> WatchAttention {
+    match slot {
+        WatchSlotId::Exit => WatchAttention::Exhaust,
+        WatchSlotId::Fault => WatchAttention::Fault,
+        WatchSlotId::Front | WatchSlotId::Work | WatchSlotId::Gate | WatchSlotId::Wait => {
+            WatchAttention::Flow
+        }
+    }
+}
+
 pub fn task_presentation(task: &TaskRow) -> Presentation {
     if task_is_terminal_primary(task) {
         return presentation("■", "done", PresentationSeverity::Exit, None);
@@ -526,6 +628,55 @@ mod tests {
         };
         let p = task_presentation(&ship);
         assert_eq!((p.glyph, p.label.as_str()), ("▱", "ship"));
+    }
+
+    #[test]
+    fn task_watch_projection_covers_task_slots_and_stages() {
+        let cases = [
+            (task("queued", "none"), WatchSlotId::Front, "queued"),
+            (task("active", "planning"), WatchSlotId::Work, "plan"),
+            (task("active", "coding"), WatchSlotId::Work, "exec"),
+            (
+                task("active", "planning_review"),
+                WatchSlotId::Gate,
+                "plan-gate",
+            ),
+            (task("active", "wrapping"), WatchSlotId::Gate, "accept"),
+            (
+                TaskRow {
+                    blocked: Some(true),
+                    blocker_kind: Some("capacity".to_string()),
+                    lifecycle: Some("queued".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Wait,
+                "waiting-capacity",
+            ),
+            (
+                TaskRow {
+                    blocked: Some(true),
+                    blocker_kind: Some("runner".to_string()),
+                    blocked_reason: Some(r#"{"exit_code":42}"#.to_string()),
+                    lifecycle: Some("active".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Fault,
+                "runner-failed",
+            ),
+            (
+                TaskRow {
+                    lifecycle: Some("done".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Exit,
+                "done",
+            ),
+        ];
+
+        for (row, slot, stage) in cases {
+            let projection = task_watch_projection(&row);
+            assert_eq!((projection.slot, projection.row_stage), (slot, stage));
+        }
     }
 
     #[test]
