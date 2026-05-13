@@ -81,6 +81,20 @@ pub fn task_watch_projection(task: &TaskRow) -> WatchProjection {
     }
 }
 
+pub fn observation_watch_projection(row: &ObsRow) -> WatchProjection {
+    let presentation = observation_presentation(row);
+    let slot = watch_slot_id(presentation.severity);
+    WatchProjection {
+        slot,
+        slot_label: observation_watch_slot_label(slot),
+        glyph: presentation.glyph,
+        row_stage: observation_watch_stage(&presentation.label),
+        row_signal: presentation.signal,
+        next_action: Some(observation_watch_next_action(&presentation.label)),
+        attention: watch_attention(slot),
+    }
+}
+
 fn task_watch_stage(label: &str) -> &'static str {
     match label {
         "done" => "done",
@@ -127,6 +141,17 @@ fn watch_slot_label(slot: WatchSlotId) -> &'static str {
         WatchSlotId::Exit => "done",
         WatchSlotId::Wait => "waiting",
         WatchSlotId::Fault => "failed",
+    }
+}
+
+fn observation_watch_slot_label(slot: WatchSlotId) -> &'static str {
+    match slot {
+        WatchSlotId::Front => "candidates",
+        WatchSlotId::Work => "investigate",
+        WatchSlotId::Gate => "contract gate",
+        WatchSlotId::Exit => "closed",
+        WatchSlotId::Wait => "waiting",
+        WatchSlotId::Fault => "errors",
     }
 }
 
@@ -286,6 +311,22 @@ fn blocked_signal(task: &TaskRow) -> Option<String> {
 }
 
 pub fn observation_presentation(row: &ObsRow) -> Presentation {
+    if obs_is_closed_exit(row) {
+        if row
+            .superseded_by_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            return presentation("■", "superseded", PresentationSeverity::Exit, None);
+        }
+        return match row.outcome.as_deref().unwrap_or(row.status.as_str()) {
+            "wont_fix" | "wont-fix" => {
+                presentation("×", "wont-fix", PresentationSeverity::Exit, None)
+            }
+            "superseded" => presentation("■", "superseded", PresentationSeverity::Exit, None),
+            _ => presentation("✓", "addressed", PresentationSeverity::Exit, None),
+        };
+    }
     if row.pending_architecture_review.unwrap_or(false)
         || row
             .open_architecture_review_id
@@ -293,22 +334,6 @@ pub fn observation_presentation(row: &ObsRow) -> Presentation {
             .is_some_and(|s| !s.trim().is_empty())
     {
         return presentation("◈", "arch-gate", PresentationSeverity::Gate, None);
-    }
-    if row
-        .superseded_by_id
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty())
-        || matches!(row.outcome.as_deref(), Some("superseded"))
-    {
-        return presentation("■", "superseded", PresentationSeverity::Exit, None);
-    }
-    if matches!(row.waiting_kind.as_deref(), Some("info_needed")) {
-        return presentation(
-            "⋯",
-            "needs-info",
-            PresentationSeverity::Wait,
-            Some("waiting".to_string()),
-        );
     }
     if matches!(row.waiting_kind.as_deref(), Some("human_ratification")) {
         return presentation(
@@ -329,6 +354,19 @@ pub fn observation_presentation(row: &ObsRow) -> Presentation {
     if matches!(row.contract_state.as_deref(), Some("approved" | "ready")) {
         return presentation("▰", "contract-approved", PresentationSeverity::Gate, None);
     }
+    if let Some(kind) = row
+        .waiting_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return presentation(
+            "⋯",
+            observation_waiting_label(kind),
+            PresentationSeverity::Wait,
+            Some("waiting".to_string()),
+        );
+    }
     match obs_lifecycle(row) {
         "candidate" => presentation(
             "◌",
@@ -343,19 +381,82 @@ pub fn observation_presentation(row: &ObsRow) -> Presentation {
             contract_signal(row),
         ),
         "in_progress" => presentation("▣", "resolving", PresentationSeverity::Work, None),
-        "closed" => match row.outcome.as_deref().unwrap_or(row.status.as_str()) {
-            "wont_fix" | "wont-fix" => {
-                presentation("×", "wont-fix", PresentationSeverity::Exit, None)
-            }
-            "superseded" => presentation("■", "superseded", PresentationSeverity::Exit, None),
-            _ => presentation("✓", "addressed", PresentationSeverity::Exit, None),
-        },
+        _ if row.status == "investigation_failed" || row.investigation_failure_reason.is_some() => {
+            presentation(
+                "▲",
+                "investigation-failed",
+                PresentationSeverity::Fault,
+                row.investigation_failure_reason.clone(),
+            )
+        }
         _ => presentation(
             "◆",
             "investigate",
             PresentationSeverity::Work,
             contract_signal(row),
         ),
+    }
+}
+
+fn obs_is_closed_exit(row: &ObsRow) -> bool {
+    row.superseded_by_id
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || matches!(
+            row.outcome.as_deref(),
+            Some("superseded" | "wont_fix" | "wont-fix")
+        )
+        || row.lifecycle.as_deref() == Some("closed")
+        || matches!(
+            row.status.as_str(),
+            "resolved" | "wont_fix" | "wont-fix" | "rejected" | "superseded"
+        )
+}
+
+fn observation_waiting_label(kind: &str) -> &'static str {
+    match kind {
+        "info_needed" => "needs-info",
+        "external_dependency" => "external-dependency",
+        "triage_capacity" => "triage-capacity",
+        "human" => "needs-human",
+        _ => "waiting",
+    }
+}
+
+fn observation_watch_stage(label: &str) -> &'static str {
+    match label {
+        "candidate" => "candidate",
+        "investigate" => "investigate",
+        "resolving" => "resolve",
+        "contract-draft" => "draft",
+        "contract-approved" => "approved",
+        "arch-gate" => "architecture",
+        "needs-info" => "info needed",
+        "external-dependency" => "external dependency",
+        "triage-capacity" => "triage capacity",
+        "needs-human" => "human",
+        "addressed" => "addressed",
+        "wont-fix" => "wont-fix",
+        "superseded" => "superseded",
+        "investigation-failed" => "investigation failed",
+        _ => "waiting",
+    }
+}
+
+fn observation_watch_next_action(label: &str) -> &'static str {
+    match label {
+        "candidate" => "triage",
+        "investigate" => "gather evidence",
+        "needs-info" => "answer info",
+        "external-dependency" => "check dependency",
+        "triage-capacity" => "assign triage",
+        "contract-draft" => "approve/revise",
+        "contract-approved" => "promote/resolve",
+        "arch-gate" => "architecture review",
+        "resolving" => "resolve",
+        "investigation-failed" => "inspect failure",
+        "addressed" | "wont-fix" | "superseded" => "done",
+        _ => "triage",
     }
 }
 
@@ -697,12 +798,103 @@ mod tests {
             "contract-approved"
         );
 
+        let ready = ObsRow {
+            contract_state: Some("ready".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(observation_presentation(&ready).label, "contract-approved");
+
         let info = ObsRow {
             waiting_kind: Some("info_needed".to_string()),
             ..Default::default()
         };
         let p = observation_presentation(&info);
         assert_eq!((p.glyph, p.label.as_str()), ("⋯", "needs-info"));
+    }
+
+    #[test]
+    fn observation_watch_projection_covers_observation_slots_and_precedence() {
+        let cases = [
+            (
+                ObsRow {
+                    status: "open".to_string(),
+                    ..Default::default()
+                },
+                WatchSlotId::Front,
+                "candidate",
+            ),
+            (
+                ObsRow {
+                    lifecycle: Some("investigating".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Work,
+                "investigate",
+            ),
+            (
+                ObsRow {
+                    contract_state: Some("draft".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Gate,
+                "draft",
+            ),
+            (
+                ObsRow {
+                    contract_state: Some("approved".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Gate,
+                "approved",
+            ),
+            (
+                ObsRow {
+                    contract_state: Some("ready".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Gate,
+                "approved",
+            ),
+            (
+                ObsRow {
+                    waiting_kind: Some("info_needed".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Wait,
+                "info needed",
+            ),
+            (
+                ObsRow {
+                    pending_architecture_review: Some(true),
+                    waiting_kind: Some("info_needed".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Gate,
+                "architecture",
+            ),
+            (
+                ObsRow {
+                    lifecycle: Some("closed".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Exit,
+                "addressed",
+            ),
+            (
+                ObsRow {
+                    status: "investigation_failed".to_string(),
+                    investigation_failure_reason: Some("tool fault".to_string()),
+                    ..Default::default()
+                },
+                WatchSlotId::Fault,
+                "investigation failed",
+            ),
+        ];
+
+        for (row, slot, stage) in cases {
+            let projection = observation_watch_projection(&row);
+            assert_eq!((projection.slot, projection.row_stage), (slot, stage));
+        }
     }
 
     #[test]

@@ -532,6 +532,7 @@ pub struct ObsFlow {
     pub ready: usize,
     pub in_progress: usize,
     pub closed: usize,
+    pub errors: usize,
     pub waiting_kinds: BTreeMap<String, usize>,
     pub outcomes: BTreeMap<String, usize>,
 }
@@ -637,46 +638,24 @@ fn apply_intake_to_flow(row: &IntakeRow, count: usize, flow: &mut IntakeFlow) {
 }
 
 fn apply_obs_to_flow(row: &ObsRow, count: usize, flow: &mut ObsFlow) {
-    // Top-card observation slots are mutually exclusive. A row should answer
-    // "where is this observation now?", not increment both a lifecycle bucket
-    // and a waiting/contract overlay bucket. These flow maps back the visible
-    // card; raw row fields remain available in detail/debug.
-    if obs_lifecycle(row) == "closed" {
-        flow.closed += count;
-    } else if obs_is_contract_gate(row) {
-        flow.ready += count;
-    } else if obs_is_waiting(row) {
-        *flow.waiting_kinds
-            .entry(obs_waiting_kind(row).unwrap_or("waiting").to_string())
-            .or_default() += count;
-    } else {
-        match obs_lifecycle(row) {
-            "candidate" => flow.candidate += count,
-            "ready" => flow.ready += count,
-            "in_progress" => flow.in_progress += count,
-            _ => flow.in_progress += count,
+    // Top-card observation slots are mutually exclusive and route through the
+    // same projection buckets the focused observation list renders.
+    match super::semantics::observation_watch_projection(row).slot {
+        super::semantics::WatchSlotId::Front => flow.candidate += count,
+        super::semantics::WatchSlotId::Work => flow.in_progress += count,
+        super::semantics::WatchSlotId::Gate => flow.ready += count,
+        super::semantics::WatchSlotId::Exit => flow.closed += count,
+        super::semantics::WatchSlotId::Wait => {
+            *flow
+                .waiting_kinds
+                .entry(obs_waiting_kind(row).unwrap_or("waiting").to_string())
+                .or_default() += count;
         }
+        super::semantics::WatchSlotId::Fault => flow.errors += count,
     }
     if let Some(outcome) = row.outcome.as_deref().filter(|s| !s.is_empty()) {
         *flow.outcomes.entry(outcome.to_string()).or_default() += count;
     }
-}
-
-fn obs_is_contract_gate(row: &ObsRow) -> bool {
-    row.pending_architecture_review.unwrap_or(false)
-        || row
-            .open_architecture_review_id
-            .as_deref()
-            .is_some_and(|s| !s.trim().is_empty())
-        || matches!(
-            row.contract_state.as_deref(),
-            Some("draft" | "approved" | "ready")
-        )
-        || matches!(row.waiting_kind.as_deref(), Some("human_ratification"))
-}
-
-fn obs_is_waiting(row: &ObsRow) -> bool {
-    obs_waiting_kind(row).is_some()
 }
 
 fn obs_waiting_kind(row: &ObsRow) -> Option<&str> {
@@ -3528,9 +3507,10 @@ mod tests {
         assert_eq!(model.intake.closed, 2);
 
         assert_eq!(model.observations.candidate, 1);
-        assert_eq!(model.observations.in_progress, 1);
-        assert_eq!(model.observations.ready, 1);
-        assert_eq!(model.observations.closed, 3);
+        assert_eq!(model.observations.in_progress, 2);
+        assert_eq!(model.observations.ready, 0);
+        assert_eq!(model.observations.closed, 2);
+        assert_eq!(model.observations.errors, 1);
 
         assert_eq!(model.tasks.queued, 0);
         assert_eq!(model.tasks.work, 3);
@@ -3665,6 +3645,10 @@ mod tests {
             &ExternalReviewState::default(),
         );
         assert_eq!(model.observations.candidate, 7);
+        assert_eq!(model.observations.in_progress, 0);
+        assert_eq!(model.observations.ready, 0);
+        assert_eq!(model.observations.closed, 0);
+        assert_eq!(model.observations.errors, 0);
     }
 
     #[test]

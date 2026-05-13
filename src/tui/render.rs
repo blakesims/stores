@@ -15,8 +15,8 @@ use super::data::{
 };
 use super::semantics::{
     engine_presentation, external_review_presentation, external_review_runner_label,
-    intake_presentation, observation_presentation, task_presentation, task_watch_projection,
-    PresentationSeverity, WatchProjection, WatchSlotId,
+    intake_presentation, observation_presentation, observation_watch_projection, task_presentation,
+    task_watch_projection, PresentationSeverity, WatchProjection, WatchSlotId,
 };
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
@@ -618,7 +618,7 @@ fn lane_card_slots(lane: StoreLane, model: &StoreFlowModel) -> [FlowSlot; 6] {
                     o.waiting_kinds.values().sum::<usize>(),
                     TopSlotAttention::Flow,
                 ),
-                FlowSlot::new("▲", "errors", 0, TopSlotAttention::Fault),
+                FlowSlot::new("▲", "errors", o.errors, TopSlotAttention::Fault),
             ]
         }
         StoreLane::Tasks => {
@@ -773,6 +773,8 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
     let cursor = app.current_flat();
     if app.focused_store == StoreLane::Tasks {
         append_task_projection_items(app, &flat, window, cursor, &mut items);
+    } else if app.focused_store == StoreLane::Observations {
+        append_observation_projection_items(app, &flat, window, cursor, &mut items);
     } else {
         let mut last_section: Option<usize> = None;
         for (i, fr) in window.iter().enumerate() {
@@ -890,6 +892,93 @@ fn task_projection_group_label(slot: WatchSlotId) -> &'static str {
         WatchSlotId::Wait => "WAITING",
         WatchSlotId::Fault => "FAILED",
         WatchSlotId::Exit => "DONE",
+    }
+}
+
+fn append_observation_projection_items(
+    app: &App,
+    full: &[FlatRow],
+    window: &[FlatRow],
+    cursor: Option<usize>,
+    items: &mut Vec<ListItem<'static>>,
+) {
+    for slot in observation_projection_display_order(full, app) {
+        let total = observation_projection_group_count(full, app, slot);
+        let rows: Vec<(usize, &FlatRow, WatchProjection)> = window
+            .iter()
+            .enumerate()
+            .filter_map(|(i, fr)| {
+                observation_projection_for_row(&app.rows[fr.abs])
+                    .filter(|projection| projection.slot == slot)
+                    .map(|projection| (i, fr, projection))
+            })
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("▾ {} ({})", observation_projection_group_label(slot), total),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))));
+        for (i, fr, projection) in rows {
+            let absolute_idx = app.scroll_offset + i;
+            let selected = cursor == Some(absolute_idx);
+            items.push(ListItem::new(format_row_line_for_observation_projection(
+                &app.rows[fr.abs],
+                selected,
+                &projection,
+            )));
+        }
+    }
+}
+
+fn observation_projection_for_row(row: &Row) -> Option<WatchProjection> {
+    match row {
+        Row::Obs(o) => Some(observation_watch_projection(o)),
+        Row::CollapsedObs(c) => Some(observation_watch_projection(&c.representative)),
+        _ => None,
+    }
+}
+
+fn observation_projection_display_order(full: &[FlatRow], app: &App) -> Vec<WatchSlotId> {
+    const ORDER: [WatchSlotId; 6] = [
+        WatchSlotId::Front,
+        WatchSlotId::Work,
+        WatchSlotId::Gate,
+        WatchSlotId::Wait,
+        WatchSlotId::Fault,
+        WatchSlotId::Exit,
+    ];
+    ORDER
+        .into_iter()
+        .filter(|slot| observation_projection_group_count(full, app, *slot) > 0)
+        .collect()
+}
+
+fn observation_projection_group_count(full: &[FlatRow], app: &App, slot: WatchSlotId) -> usize {
+    full.iter()
+        .filter_map(|fr| {
+            let row = &app.rows[fr.abs];
+            observation_projection_for_row(row)
+                .filter(|p| p.slot == slot)
+                .map(|_| match row {
+                    Row::CollapsedObs(c) => c.count,
+                    _ => 1,
+                })
+        })
+        .sum()
+}
+
+fn observation_projection_group_label(slot: WatchSlotId) -> &'static str {
+    match slot {
+        WatchSlotId::Front => "CANDIDATES",
+        WatchSlotId::Work => "INVESTIGATE",
+        WatchSlotId::Gate => "CONTRACT GATE",
+        WatchSlotId::Wait => "WAITING",
+        WatchSlotId::Fault => "ERRORS",
+        WatchSlotId::Exit => "CLOSED",
     }
 }
 
@@ -1181,6 +1270,26 @@ fn format_row_line_for_task_projection(
     styled_row_line(base, selected)
 }
 
+fn format_row_line_for_observation_projection(
+    row: &Row,
+    selected: bool,
+    projection: &WatchProjection,
+) -> Line<'static> {
+    let base = match row {
+        Row::Obs(o) => format_obs_line_with_projection(o, None, projection),
+        Row::CollapsedObs(c) => {
+            format_obs_line_with_projection(&c.representative, Some(c), projection)
+        }
+        _ => match row {
+            Row::Task(t) => format_task_line(t, &ExternalReviewState::default()),
+            Row::Review(r) => format_review_line(r),
+            Row::Intake(i) => format_intake_line(i),
+            Row::Obs(_) | Row::CollapsedObs(_) => unreachable!(),
+        },
+    };
+    styled_row_line(base, selected)
+}
+
 fn styled_row_line(mut spans: Vec<Span<'static>>, selected: bool) -> Line<'static> {
     if selected {
         for s in spans.iter_mut() {
@@ -1291,7 +1400,10 @@ fn format_obs_line(
             format!("{:<6}", display_id),
             Style::default().fg(Color::Magenta),
         ),
-        Span::styled(format!("{:<20}", status), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!("{:<20}", status),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::raw(" "),
         Span::raw(format!("{:<9}{} ", priority, badge)),
         Span::raw(format!("next:{:<18} ", next)),
@@ -1306,20 +1418,64 @@ fn format_obs_line(
     spans
 }
 
+fn format_obs_line_with_projection(
+    o: &super::data::ObsRow,
+    collapsed: Option<&super::data::CollapsedObsRow>,
+    projection: &WatchProjection,
+) -> Vec<Span<'static>> {
+    let (display_id, badge, summary_prefix) = collapsed
+        .map(|c| {
+            (
+                c.primary_display_id.as_str(),
+                format!(" ×{}", c.count),
+                format!("{} ", c.summary),
+            )
+        })
+        .unwrap_or((o.display_id.as_str(), String::new(), String::new()));
+    let stage = if projection.slot == WatchSlotId::Front {
+        projection.glyph.to_string()
+    } else {
+        format!("{} {}", projection.glyph, projection.row_stage)
+    };
+    let next = projection.next_action.unwrap_or("triage");
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<6}", display_id),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::styled(format!("{:<24}", stage), Style::default().fg(Color::Yellow)),
+        Span::raw(" "),
+        Span::raw(format!("{:<9}{} ", o.priority, badge)),
+        Span::raw(format!("next:{:<18} ", next)),
+    ];
+    spans.push(Span::raw(truncate(
+        &format!("{}{}", summary_prefix, obs_snippet(o)),
+        60,
+    )));
+    spans
+}
+
 fn observation_next_action(o: &super::data::ObsRow, label: &str) -> &'static str {
     match label {
         "candidate" => "triage",
         "investigate" => "gather evidence",
         "needs-info" => "answer info",
+        "external-dependency" => "check dependency",
+        "triage-capacity" => "assign triage",
         "contract-draft" => "approve/revise",
         "contract-approved" => "promote/resolve",
         "arch-gate" => "architecture review",
         "resolving" => "resolve",
+        "investigation-failed" => "inspect failure",
         "addressed" | "wont-fix" | "superseded" => "done",
         _ if o
             .waiting_kind
             .as_deref()
-            .is_some_and(|s| s == "info_needed") => "answer info",
+            .is_some_and(|s| s == "info_needed") =>
+        {
+            "answer info"
+        }
         _ => "triage",
     }
 }
@@ -2070,6 +2226,67 @@ mod tests {
     }
 
     #[test]
+    fn observation_projection_row_labels_suppress_broad_group_context_and_raw_schema() {
+        let candidate = ObsRow {
+            display_id: "L301".to_string(),
+            status: "open".to_string(),
+            priority: "high".to_string(),
+            summary: "fresh signal".to_string(),
+            ..Default::default()
+        };
+        let candidate_projection = observation_watch_projection(&candidate);
+        let candidate_text = line_text(format_row_line_for_observation_projection(
+            &Row::Obs(candidate),
+            false,
+            &candidate_projection,
+        ));
+        assert!(candidate_text.contains("next:triage"), "{candidate_text}");
+        assert!(!candidate_text.contains("candidate"), "{candidate_text}");
+        assert!(!candidate_text.contains("lifecycle="), "{candidate_text}");
+
+        let contract = ObsRow {
+            display_id: "L302".to_string(),
+            status: "open".to_string(),
+            priority: "normal".to_string(),
+            summary: "contract summary".to_string(),
+            contract_state: Some("draft".to_string()),
+            tier_hint: Some("T2".to_string()),
+            ..Default::default()
+        };
+        let contract_projection = observation_watch_projection(&contract);
+        let contract_text = line_text(format_row_line_for_observation_projection(
+            &Row::Obs(contract),
+            false,
+            &contract_projection,
+        ));
+        assert!(contract_text.contains("◈ draft"), "{contract_text}");
+        assert!(
+            contract_text.contains("next:approve/revise"),
+            "{contract_text}"
+        );
+        assert!(!contract_text.contains("contract:"), "{contract_text}");
+        assert!(!contract_text.contains("tier:"), "{contract_text}");
+
+        let waiting = ObsRow {
+            display_id: "L303".to_string(),
+            status: "open".to_string(),
+            priority: "normal".to_string(),
+            summary: "waiting summary".to_string(),
+            waiting_kind: Some("info_needed".to_string()),
+            ..Default::default()
+        };
+        let waiting_projection = observation_watch_projection(&waiting);
+        let waiting_text = line_text(format_row_line_for_observation_projection(
+            &Row::Obs(waiting),
+            false,
+            &waiting_projection,
+        ));
+        assert!(waiting_text.contains("⋯ info needed"), "{waiting_text}");
+        assert!(waiting_text.contains("next:answer info"), "{waiting_text}");
+        assert!(!waiting_text.contains("waiting_kind="), "{waiting_text}");
+    }
+
+    #[test]
     fn task_line_prefers_live_runner_over_empty_claimed_by() {
         let row = Row::Task(TaskRow {
             display_id: "T149".to_string(),
@@ -2168,7 +2385,7 @@ mod tests {
             false,
             &ExternalReviewState::default(),
         ));
-        assert!(text.contains("addressed"), "{text}");
+        assert!(text.contains("investigation-failed"), "{text}");
         assert!(text.contains("investigator failed"), "{text}");
     }
 
@@ -2455,6 +2672,107 @@ mod tests {
     }
 
     #[test]
+    fn observation_projection_headers_use_projection_buckets_and_collapsed_counts() {
+        use crate::tui::data::{CollapsedObsRow, Section};
+
+        let mut app = App::new(TuiOpts::default());
+        app.focused_store = StoreLane::Observations;
+        app.rows = vec![
+            Row::Obs(ObsRow {
+                display_id: "L401".to_string(),
+                status: "open".to_string(),
+                priority: "normal".to_string(),
+                summary: "front".to_string(),
+                ..Default::default()
+            }),
+            Row::Obs(ObsRow {
+                display_id: "L402".to_string(),
+                status: "open".to_string(),
+                lifecycle: Some("investigating".to_string()),
+                priority: "normal".to_string(),
+                summary: "work".to_string(),
+                ..Default::default()
+            }),
+            Row::Obs(ObsRow {
+                display_id: "L403".to_string(),
+                status: "open".to_string(),
+                priority: "normal".to_string(),
+                summary: "gate".to_string(),
+                contract_state: Some("draft".to_string()),
+                ..Default::default()
+            }),
+            Row::Obs(ObsRow {
+                display_id: "L404".to_string(),
+                status: "open".to_string(),
+                priority: "normal".to_string(),
+                summary: "wait".to_string(),
+                waiting_kind: Some("info_needed".to_string()),
+                ..Default::default()
+            }),
+            Row::Obs(ObsRow {
+                display_id: "L405".to_string(),
+                status: "investigation_failed".to_string(),
+                priority: "normal".to_string(),
+                summary: "fault".to_string(),
+                investigation_failure_reason: Some("runner fault".to_string()),
+                ..Default::default()
+            }),
+            Row::CollapsedObs(CollapsedObsRow {
+                section: Section::ObsOther,
+                summary: "approved cluster".to_string(),
+                count: 4,
+                primary_display_id: "L406".to_string(),
+                display_ids: (0..4).map(|i| format!("L40{i}")).collect(),
+                representative: ObsRow {
+                    display_id: "L406".to_string(),
+                    status: "open".to_string(),
+                    priority: "normal".to_string(),
+                    summary: "approved cluster".to_string(),
+                    contract_state: Some("approved".to_string()),
+                    ..Default::default()
+                },
+            }),
+        ];
+        app.sections = vec![(Section::ObsOther, (0..app.rows.len()).collect())];
+        app.viewport_height = 20;
+
+        let model = store_flow_model(
+            &app.rows,
+            &SystemHealth::default(),
+            &Liveness::Dead,
+            &ExternalReviewState::default(),
+        );
+        assert_eq!(model.observations.candidate, 1);
+        assert_eq!(model.observations.in_progress, 1);
+        assert_eq!(model.observations.ready, 5);
+        assert_eq!(model.observations.waiting_kinds.values().sum::<usize>(), 1);
+        assert_eq!(model.observations.errors, 1);
+
+        let backend = TestBackend::new(140, 24);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|f| draw_focused_table(f, &app, f.area()))
+            .expect("draw focused table");
+        let painted = buffer_to_string(terminal.backend().buffer());
+
+        for label in [
+            "CANDIDATES (1)",
+            "INVESTIGATE (1)",
+            "CONTRACT GATE (5)",
+            "WAITING (1)",
+            "ERRORS (1)",
+        ] {
+            assert!(painted.contains(label), "missing {label}:\n{painted}");
+        }
+        assert!(
+            painted.contains("×4"),
+            "collapsed badge missing:\n{painted}"
+        );
+        assert!(!painted.contains("contract:"), "{painted}");
+        assert!(!painted.contains("waiting_kind="), "{painted}");
+    }
+
+    #[test]
     fn task_projection_headers_count_full_filtered_rows_not_visible_window() {
         let mut app = App::new(TuiOpts::default());
         app.rows = (0..8)
@@ -2477,7 +2795,11 @@ mod tests {
 
         let flat = app.flat_rows();
         assert_eq!(flat.len(), 8, "fixture full focused task row set");
-        assert_eq!(visible_window(&app, &flat).len(), 3, "fixture viewport slice");
+        assert_eq!(
+            visible_window(&app, &flat).len(),
+            3,
+            "fixture viewport slice"
+        );
 
         let backend = TestBackend::new(120, 12);
         let mut terminal = Terminal::new(backend).expect("test backend");
@@ -2495,7 +2817,10 @@ mod tests {
             assert!(painted.contains(id), "visible row {id} missing:\n{painted}");
         }
         for id in ["T900", "T901", "T905", "T906", "T907"] {
-            assert!(!painted.contains(id), "hidden row {id} rendered:\n{painted}");
+            assert!(
+                !painted.contains(id),
+                "hidden row {id} rendered:\n{painted}"
+            );
         }
     }
 

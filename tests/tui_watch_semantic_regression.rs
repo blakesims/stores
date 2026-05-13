@@ -304,8 +304,9 @@ fn seeded_clean_db_rows_render_semantic_watch_vocabulary() {
         "exit 42",
         "capacity",
         "candidate",
-        "contract-draft",
-        "needs-info",
+        "CONTRACT GATE",
+        "draft",
+        "info needed",
         "pending",
         "runner=—",
     ] {
