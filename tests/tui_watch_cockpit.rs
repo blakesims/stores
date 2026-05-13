@@ -16,6 +16,7 @@ use stores::tui::app::{App, TuiOpts};
 use stores::tui::daemon::Liveness;
 use stores::tui::data::{Row, Section, StoreLane};
 use stores::tui::render::{BOTTOM_CHROME_HEIGHT, TOP_STRIP_HEIGHT};
+use stores::tui::semantics::{observation_watch_slot_label, task_watch_slot_label, WatchSlotId};
 use stores::tui::{on_key, render};
 
 const W: u16 = 140;
@@ -137,6 +138,15 @@ fn build_cockpit_app(conn: &Connection) -> App {
     app.status_bar.daemon_liveness = Liveness::Dead;
     app
 }
+
+const WATCH_SLOTS: [WatchSlotId; 6] = [
+    WatchSlotId::Front,
+    WatchSlotId::Work,
+    WatchSlotId::Gate,
+    WatchSlotId::Exit,
+    WatchSlotId::Wait,
+    WatchSlotId::Fault,
+];
 
 /// AC4.5: `TuiOpts::default()` represents a flagless `stores watch` invocation;
 /// `legacy` must be false so `main.rs` routes through `tui::run` (the cockpit)
@@ -337,10 +347,17 @@ fn task_focused_table_uses_projection_groups_and_contextual_task_rows() {
     let middle_end = (H - BOTTOM_CHROME_HEIGHT) as usize;
     let middle = lines[middle_start..middle_end].join("\n");
 
-    for header in ["QUEUED", "WORKING", "GATE", "WAITING", "FAILED"] {
+    for slot in [
+        WatchSlotId::Front,
+        WatchSlotId::Work,
+        WatchSlotId::Gate,
+        WatchSlotId::Wait,
+        WatchSlotId::Fault,
+    ] {
+        let header = task_watch_slot_label(slot).to_ascii_uppercase();
         assert!(
-            middle.contains(header),
-            "missing projection header {header}:\n{middle}"
+            middle.contains(&header),
+            "missing task projection header {header}:\n{middle}"
         );
     }
     for legacy in ["ACTIVE", "AWAITING HUMAN ACCEPTANCE", "HELD-TRIAGE"] {
@@ -398,6 +415,80 @@ fn task_focused_table_uses_projection_groups_and_contextual_task_rows() {
 }
 
 #[test]
+fn observation_focused_table_uses_projection_vocabulary_not_legacy_sections() {
+    let conn = fixture_conn();
+    conn.execute_batch(
+        r#"
+        ALTER TABLE observations ADD COLUMN lifecycle TEXT;
+        ALTER TABLE observations ADD COLUMN waiting_kind TEXT;
+        ALTER TABLE observations ADD COLUMN outcome TEXT;
+
+        INSERT INTO observations (display_id, status, priority, summary, updated_at, lifecycle) VALUES
+            ('L010', 'open', 'normal', 'candidate obs', '2026-05-06', 'candidate'),
+            ('L011', 'investigating', 'normal', 'investigate obs', '2026-05-06', 'investigating'),
+            ('L012', 'confirmed', 'normal', 'contract obs', '2026-05-06', 'candidate'),
+            ('L013', 'needs_info', 'normal', 'waiting obs', '2026-05-06', 'candidate'),
+            ('L014', 'investigation_failed', 'normal', 'failed obs', '2026-05-06', 'candidate'),
+            ('L015', 'resolved', 'normal', 'closed obs', '2026-05-06', 'closed');
+        UPDATE observations SET intent_contract = '{"contract_state":"draft"}' WHERE display_id = 'L012';
+        UPDATE observations SET waiting_kind = 'info_needed' WHERE display_id = 'L013';
+        UPDATE observations SET investigation_failure_reason = 'boom' WHERE display_id = 'L014';
+        "#,
+    )
+    .expect("seed observation projection rows");
+
+    let mut app = build_cockpit_app(&conn);
+    app.focused_store = StoreLane::Observations;
+    let buf = paint(&mut app);
+    let painted = buffer_to_string(&buf);
+    let lines: Vec<&str> = painted.lines().collect();
+    let middle_start = TOP_STRIP_HEIGHT as usize;
+    let middle_end = (H - BOTTOM_CHROME_HEIGHT) as usize;
+    let middle = lines[middle_start..middle_end].join("\n");
+
+    for slot in [
+        WatchSlotId::Front,
+        WatchSlotId::Work,
+        WatchSlotId::Gate,
+        WatchSlotId::Wait,
+        WatchSlotId::Fault,
+    ] {
+        let header = observation_watch_slot_label(slot).to_ascii_uppercase();
+        assert!(
+            middle.contains(&header),
+            "missing observation projection header {header}:\n{middle}"
+        );
+    }
+    let display_rows = lines[middle_start + 1..middle_end].join("\n");
+    for legacy in ["PRIORITY", "OBSERVATIONS"] {
+        assert!(
+            !display_rows.contains(legacy),
+            "observation-focused table rows must not render legacy observation header {legacy}:\n{display_rows}"
+        );
+    }
+    assert!(
+        middle.contains("L010") && middle.contains("◌") && middle.contains("next:triage"),
+        "candidate row must use projection glyph/next-action vocabulary while suppressing broad candidate context:\n{middle}"
+    );
+    assert!(
+        middle.contains("L011") && middle.contains("◆ investigate"),
+        "investigate row must use projection row-stage vocabulary:\n{middle}"
+    );
+    assert!(
+        middle.contains("L012") && middle.contains("◈ draft"),
+        "contract-gate row must use projection row-stage vocabulary:\n{middle}"
+    );
+    assert!(
+        middle.contains("L013") && middle.contains("⋯ info needed"),
+        "waiting row must use projection row-stage vocabulary:\n{middle}"
+    );
+    assert!(
+        middle.contains("L014") && middle.contains("▲ investigation failed"),
+        "error row must use projection row-stage vocabulary:\n{middle}"
+    );
+}
+
+#[test]
 fn cockpit_top_strip_paints_all_five_lane_labels_with_counts() {
     let conn = fixture_conn();
     let mut app = build_cockpit_app(&conn);
@@ -425,20 +516,33 @@ fn cockpit_top_strip_paints_all_five_lane_labels_with_counts() {
     }
 
     // (i) Shared-flow top cards expose readable full-word labels and separated counts.
+    let task_projection_labels: Vec<&str> = WATCH_SLOTS
+        .iter()
+        .map(|slot| task_watch_slot_label(*slot))
+        .collect();
+    let observation_projection_labels: Vec<&str> = WATCH_SLOTS
+        .iter()
+        .map(|slot| observation_watch_slot_label(*slot))
+        .collect();
     for expected in [
-        "◌ 1", "new",      // intake draft
-        "◆ 0", "triage",   // intake triage / observation investigation zeroes
-        "candidates",       // observation open, not `cand`
-        "queued", "working", "gate", "done", "waiting", "failed",
-        "running", "tool", "fault",
-        "locks", "daemon", "down",
-    ] {
-        assert!(
-            top.contains(expected),
-            "top region missing readable shared-flow token {expected:?}:\n{top}\n\nfull paint:\n{painted}"
-        );
+        "◌ 1", "new", // intake draft
+        "◆ 0", "triage", // intake triage / observation investigation zeroes
+        "running", "tool", "fault", "locks", "daemon", "down",
+    ]
+    .into_iter()
+    .chain(task_projection_labels)
+    .chain(observation_projection_labels)
+    {
+        for token in expected.split_whitespace() {
+            assert!(
+                top.contains(token),
+                "top region missing readable shared-flow token {token:?} from projection label {expected:?}:\n{top}\n\nfull paint:\n{painted}"
+            );
+        }
     }
-    for obsolete in ["◌new", "◆tri", "◌cand", "◆inv", "◌q", "◆wrk", "✓dn", "△w", "▲f", "▲tool"] {
+    for obsolete in [
+        "◌new", "◆tri", "◌cand", "◆inv", "◌q", "◆wrk", "✓dn", "△w", "▲f", "▲tool",
+    ] {
         assert!(
             !top.contains(obsolete),
             "top region must not return to compact cockpit code {obsolete:?}:\n{top}"

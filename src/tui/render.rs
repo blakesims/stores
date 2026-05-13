@@ -15,8 +15,9 @@ use super::data::{
 };
 use super::semantics::{
     engine_presentation, external_review_presentation, external_review_runner_label,
-    intake_presentation, observation_presentation, observation_watch_projection, task_presentation,
-    task_watch_projection, PresentationSeverity, WatchProjection, WatchSlotId,
+    intake_presentation, observation_presentation, observation_watch_projection,
+    observation_watch_slot_label, task_presentation, task_watch_projection, task_watch_slot_label,
+    PresentationSeverity, WatchProjection, WatchSlotId,
 };
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
@@ -608,28 +609,83 @@ fn lane_card_slots(lane: StoreLane, model: &StoreFlowModel) -> [FlowSlot; 6] {
         StoreLane::Observations => {
             let o = &model.observations;
             [
-                FlowSlot::new("◌", "candidates", o.candidate, TopSlotAttention::Flow),
-                FlowSlot::new("◆", "investigate", o.in_progress, TopSlotAttention::Flow),
-                FlowSlot::new("◇", "contract gate", o.ready, TopSlotAttention::Flow),
-                FlowSlot::new("✓", "closed", o.closed, TopSlotAttention::Exhaust),
+                FlowSlot::new(
+                    "◌",
+                    observation_watch_slot_label(WatchSlotId::Front),
+                    o.candidate,
+                    TopSlotAttention::Flow,
+                ),
+                FlowSlot::new(
+                    "◆",
+                    observation_watch_slot_label(WatchSlotId::Work),
+                    o.in_progress,
+                    TopSlotAttention::Flow,
+                ),
+                FlowSlot::new(
+                    "◇",
+                    observation_watch_slot_label(WatchSlotId::Gate),
+                    o.ready,
+                    TopSlotAttention::Flow,
+                ),
+                FlowSlot::new(
+                    "✓",
+                    observation_watch_slot_label(WatchSlotId::Exit),
+                    o.closed,
+                    TopSlotAttention::Exhaust,
+                ),
                 FlowSlot::new(
                     "△",
-                    "waiting",
+                    observation_watch_slot_label(WatchSlotId::Wait),
                     o.waiting_kinds.values().sum::<usize>(),
                     TopSlotAttention::Flow,
                 ),
-                FlowSlot::new("▲", "errors", o.errors, TopSlotAttention::Fault),
+                FlowSlot::new(
+                    "▲",
+                    observation_watch_slot_label(WatchSlotId::Fault),
+                    o.errors,
+                    TopSlotAttention::Fault,
+                ),
             ]
         }
         StoreLane::Tasks => {
             let t = &model.tasks;
             [
-                FlowSlot::new("◌", "queued", t.queued, TopSlotAttention::Flow),
-                FlowSlot::new("◆", "working", t.work, TopSlotAttention::Flow),
-                FlowSlot::new("◇", "gate", t.gate, TopSlotAttention::Flow),
-                FlowSlot::new("✓", "done", t.recently_terminal, TopSlotAttention::Exhaust),
-                FlowSlot::new("△", "waiting", t.wait, TopSlotAttention::Flow),
-                FlowSlot::new("▲", "failed", t.fail, TopSlotAttention::Fault),
+                FlowSlot::new(
+                    "◌",
+                    task_watch_slot_label(WatchSlotId::Front),
+                    t.queued,
+                    TopSlotAttention::Flow,
+                ),
+                FlowSlot::new(
+                    "◆",
+                    task_watch_slot_label(WatchSlotId::Work),
+                    t.work,
+                    TopSlotAttention::Flow,
+                ),
+                FlowSlot::new(
+                    "◇",
+                    task_watch_slot_label(WatchSlotId::Gate),
+                    t.gate,
+                    TopSlotAttention::Flow,
+                ),
+                FlowSlot::new(
+                    "✓",
+                    task_watch_slot_label(WatchSlotId::Exit),
+                    t.recently_terminal,
+                    TopSlotAttention::Exhaust,
+                ),
+                FlowSlot::new(
+                    "△",
+                    task_watch_slot_label(WatchSlotId::Wait),
+                    t.wait,
+                    TopSlotAttention::Flow,
+                ),
+                FlowSlot::new(
+                    "▲",
+                    task_watch_slot_label(WatchSlotId::Fault),
+                    t.fail,
+                    TopSlotAttention::Fault,
+                ),
             ]
         }
         StoreLane::ExternalReviews => {
@@ -842,7 +898,11 @@ fn append_task_projection_items(
             continue;
         }
         items.push(ListItem::new(Line::from(Span::styled(
-            format!("▾ {} ({})", task_projection_group_label(slot), total),
+            format!(
+                "▾ {} ({})",
+                task_watch_slot_label(slot).to_ascii_uppercase(),
+                total
+            ),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -884,17 +944,6 @@ fn task_projection_group_count(full: &[FlatRow], app: &App, slot: WatchSlotId) -
         .count()
 }
 
-fn task_projection_group_label(slot: WatchSlotId) -> &'static str {
-    match slot {
-        WatchSlotId::Front => "QUEUED",
-        WatchSlotId::Work => "WORKING",
-        WatchSlotId::Gate => "GATE",
-        WatchSlotId::Wait => "WAITING",
-        WatchSlotId::Fault => "FAILED",
-        WatchSlotId::Exit => "DONE",
-    }
-}
-
 fn append_observation_projection_items(
     app: &App,
     full: &[FlatRow],
@@ -917,7 +966,11 @@ fn append_observation_projection_items(
             continue;
         }
         items.push(ListItem::new(Line::from(Span::styled(
-            format!("▾ {} ({})", observation_projection_group_label(slot), total),
+            format!(
+                "▾ {} ({})",
+                observation_watch_slot_label(slot).to_ascii_uppercase(),
+                total
+            ),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -969,17 +1022,6 @@ fn observation_projection_group_count(full: &[FlatRow], app: &App, slot: WatchSl
                 })
         })
         .sum()
-}
-
-fn observation_projection_group_label(slot: WatchSlotId) -> &'static str {
-    match slot {
-        WatchSlotId::Front => "CANDIDATES",
-        WatchSlotId::Work => "INVESTIGATE",
-        WatchSlotId::Gate => "CONTRACT GATE",
-        WatchSlotId::Wait => "WAITING",
-        WatchSlotId::Fault => "ERRORS",
-        WatchSlotId::Exit => "CLOSED",
-    }
 }
 
 /// Engine-health panel: daemon liveness, dispatch-lock counts, oldest-lock

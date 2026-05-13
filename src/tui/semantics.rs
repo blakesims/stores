@@ -56,6 +56,17 @@ pub enum WatchAttention {
     Neutral,
 }
 
+/// Transitional typed projection for `stores watch` presentation.
+///
+/// `WatchProjection` mirrors the future declarative schema `watch:` metadata:
+/// one slot vocabulary, one display-group label vocabulary, and one row-stage
+/// vocabulary per row. Renderers and data aggregation should consume this
+/// projection for top-card slots, focused display groups, and row labels instead
+/// of re-deriving independent labels from legacy `Section` buckets or raw row
+/// fields. `Section` remains an internal compatibility classifier while the
+/// schema seam is still Rust-owned. Raw lifecycle/status/debug fields remain
+/// available in detail panes and diagnostics; they are not the cockpit display
+/// vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchProjection {
     pub slot: WatchSlotId,
@@ -72,7 +83,7 @@ pub fn task_watch_projection(task: &TaskRow) -> WatchProjection {
     let slot = watch_slot_id(presentation.severity);
     WatchProjection {
         slot,
-        slot_label: watch_slot_label(slot),
+        slot_label: task_watch_slot_label(slot),
         glyph: presentation.glyph,
         row_stage: task_watch_stage(&presentation.label),
         row_signal: presentation.signal,
@@ -133,7 +144,7 @@ fn watch_slot_id(severity: PresentationSeverity) -> WatchSlotId {
     }
 }
 
-fn watch_slot_label(slot: WatchSlotId) -> &'static str {
+pub fn task_watch_slot_label(slot: WatchSlotId) -> &'static str {
     match slot {
         WatchSlotId::Front => "queued",
         WatchSlotId::Work => "working",
@@ -144,7 +155,7 @@ fn watch_slot_label(slot: WatchSlotId) -> &'static str {
     }
 }
 
-fn observation_watch_slot_label(slot: WatchSlotId) -> &'static str {
+pub fn observation_watch_slot_label(slot: WatchSlotId) -> &'static str {
     match slot {
         WatchSlotId::Front => "candidates",
         WatchSlotId::Work => "investigate",
@@ -922,7 +933,10 @@ mod tests {
         assert_eq!(projection.slot_label, "errors");
         assert_eq!(projection.row_stage, "investigation failed");
         assert_eq!(projection.next_action, Some("inspect failure"));
-        assert_eq!(projection.row_signal.as_deref(), Some("schema handler raised"));
+        assert_eq!(
+            projection.row_signal.as_deref(),
+            Some("schema handler raised")
+        );
     }
 
     #[test]
