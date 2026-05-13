@@ -19,7 +19,7 @@ T003   synthetic task paused in plan review                 ● │ · · ·    
 T004   synthetic active coding task                         ● │ □ · ·             7h   T3
 T011   retrying phase two after review                      ● │ ▣ □² ·            2h   T3
 T012   phase two back in review                             ● │ ▣ ▣² ·            2h   T3
-T009   stores test live happy-path                          ● │ ▣ ▣ ▰             7h   T3
+T009   stores test live happy-path                          ● │ ▣ ▣ ▣             7h   T3
 T007   synthetic observation-linked capacity wait           △                    7h   T2
 T010   synthetic fake runner nonzero blocked task           ▲           runner   7h   T3
 ```
@@ -45,8 +45,7 @@ One logical phase gets one visual slot. Do not show both planning and plan-revie
 ●  plan review / plan result
 ·  planned execution phase exists but unreached
 □  executing this phase
-▣  code review / phase result
-▰  wrap / acceptance valve
+▣  code review / phase result / acceptance valve
 △  waiting / non-failure pressure outside normal map
 ▲  fault / failed outside normal map unless exact phase placement is proven
 ```
@@ -236,7 +235,7 @@ Rendering requirements:
 
 - add a visible header row aligned to the same x positions as row cells;
 - `SUMMARY` is `TaskRow.title`, first-class, and receives remaining width after fixed columns;
-- `MAP` renders `TaskMapProjection` using glyphs, superscripts, and color roles;
+- `MAP` renders `TaskMapProjection` using glyphs, superscripts, and color roles; wrap/acceptance reuses `▣` rather than introducing a third square variant;
 - `REASON` is bounded and only for wait/fault/blocking reason (`capacity`, `runner`, `review`, etc.);
 - `AGE` and `TIER` are fixed/right-sized columns;
 - raw JSON, paths, `workspace:none`, and debug tuples stay in detail;

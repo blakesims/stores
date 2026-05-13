@@ -118,7 +118,10 @@ impl MapGlyph {
             Self::UnreachedPhase => "·",
             Self::Executing => "□",
             Self::CodeReview => "▣",
-            Self::Wrap => "▰",
+            // Wrap/acceptance deliberately reuses the filled square. The task
+            // map only has two execution-family squares: □ active work and
+            // ▣ gate/result/acceptance; no third slanted-square variant.
+            Self::Wrap => "▣",
             Self::Waiting => "△",
             Self::Fault => "▲",
             Self::Unknown => "?",
@@ -653,7 +656,7 @@ pub fn task_presentation(task: &TaskRow) -> Presentation {
                 task_signal(task),
             ),
             "wrapping" => {
-                presentation("▰", "accept", PresentationSeverity::Gate, task_signal(task))
+                presentation("▣", "accept", PresentationSeverity::Gate, task_signal(task))
             }
             _ => presentation("◆", "work", PresentationSeverity::Work, task_signal(task)),
         },
@@ -1172,7 +1175,7 @@ mod tests {
             ("active", "planning_review", "◇", "plan-gate"),
             ("active", "coding", "▣", "exec"),
             ("active", "coding_review", "◈", "code-gate"),
-            ("active", "wrapping", "▰", "accept"),
+            ("active", "wrapping", "▣", "accept"),
         ];
         for (lifecycle, step, glyph, label) in cases {
             let p = task_presentation(&task(lifecycle, step));

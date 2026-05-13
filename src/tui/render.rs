@@ -2367,7 +2367,7 @@ mod tests {
                     workspace_path: Some("/tmp/t205".to_string()),
                     ..Default::default()
                 },
-                ["▰ accept", ""],
+                ["▣ accept", ""],
             ),
         ];
 
