@@ -750,8 +750,9 @@ impl LiveHarness {
             return Ok(LiveRefusalProof::from_outputs(outputs));
         }
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
         let mut last_status = String::new();
+        let mut task_review_stall_seen_at: Option<std::time::Instant> = None;
         loop {
             let daemon = match self.run_daemon_once() {
                 Ok(()) => LiveCommandOutput {
@@ -771,7 +772,13 @@ impl LiveHarness {
             outputs.push(daemon);
 
             let snap = self.snapshot()?;
-            let state_evidence = snap.refusal_evidence();
+            let mut state_evidence = snap.refusal_evidence();
+            if let Some(lock) = self.latest_integrate_lock_evidence()? {
+                if !state_evidence.is_empty() {
+                    state_evidence.push('\n');
+                }
+                state_evidence.push_str(&lock);
+            }
             let status_line = format!(
                 "task={} status={} lifecycle={} evidence={}",
                 self.task_id,
@@ -797,6 +804,27 @@ impl LiveHarness {
                 || snap.lifecycle.as_deref() == Some("done")
             {
                 return Ok(LiveRefusalProof::from_outputs(outputs));
+            }
+            if snap.status == "integrating"
+                && snap.integration_step.as_deref() == Some("task_review")
+                && snap.integration_attempts.as_deref().unwrap_or("") == "null"
+                && state_evidence.contains("integrate_lock=unfinished")
+            {
+                let first_seen =
+                    *task_review_stall_seen_at.get_or_insert_with(std::time::Instant::now);
+                if first_seen.elapsed() >= std::time::Duration::from_secs(12) {
+                    outputs.push(LiveCommandOutput {
+                        label: "integration task_review stall".to_string(),
+                        success: false,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "integrate_dispatch_lock_unfinished_after_mark_refresh_done: task parked at integration_step=task_review with integration_attempts=null; {state_evidence}"
+                        ),
+                    });
+                    return Ok(LiveRefusalProof::from_outputs(outputs));
+                }
+            } else {
+                task_review_stall_seen_at = None;
             }
             if !daemon_success {
                 return Ok(LiveRefusalProof::from_outputs(outputs));
@@ -878,8 +906,11 @@ impl LiveHarness {
             optional_column_expr(&conn, "tasks", "blocked_reason_class")?;
         let integration_attempts_expr =
             optional_column_expr(&conn, "tasks", "integration_attempts")?;
+        let integration_blocked_reason_expr =
+            optional_column_expr(&conn, "tasks", "integration_blocked_reason")?;
+        let integration_step_expr = optional_column_expr(&conn, "tasks", "integration_step")?;
         let sql = format!(
-            "SELECT status,{lifecycle_expr},{active_step_expr},{workspace_path_expr},{branch_expr},{blocked_reason_expr},{blocker_kind_expr},{blocked_reason_class_expr},{integration_attempts_expr} FROM tasks WHERE display_id=?1"
+            "SELECT status,{lifecycle_expr},{active_step_expr},{workspace_path_expr},{branch_expr},{blocked_reason_expr},{blocker_kind_expr},{blocked_reason_class_expr},{integration_attempts_expr},{integration_blocked_reason_expr},{integration_step_expr} FROM tasks WHERE display_id=?1"
         );
         let (
             status,
@@ -891,8 +922,12 @@ impl LiveHarness {
             blocker_kind,
             blocked_reason_class,
             integration_attempts,
+            integration_blocked_reason,
+            integration_step,
         ): (
             String,
+            Option<String>,
+            Option<String>,
             Option<String>,
             Option<String>,
             Option<String>,
@@ -912,6 +947,8 @@ impl LiveHarness {
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
             ))
         })?;
         let verdict_expr = optional_column_expr(&conn, "external_reviews", "verdict")?;
@@ -934,6 +971,8 @@ impl LiveHarness {
             blocker_kind,
             blocked_reason_class,
             integration_attempts,
+            integration_blocked_reason,
+            integration_step,
             er,
         })
     }
@@ -1017,6 +1056,40 @@ impl LiveHarness {
             && snap.er_status() == Some(want_er)
     }
 
+    fn latest_integrate_lock_evidence(&self) -> Result<Option<String>> {
+        let conn = self.conn()?;
+        let has_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='dispatch_locks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if has_table == 0 {
+            return Ok(None);
+        }
+        let row: Option<(String, Option<String>, Option<String>, i64, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT claimed_at,last_status,finished_at,attempts,terminal_reason,postcondition_id \
+                 FROM dispatch_locks WHERE display_id=?1 AND agent_name='integrate' \
+                 ORDER BY id DESC LIMIT 1",
+                [&self.task_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .ok();
+        Ok(row.map(
+            |(claimed_at, last_status, finished_at, attempts, terminal_reason, postcondition_id)| {
+                let state = if finished_at.is_some() { "finished" } else { "unfinished" };
+                format!(
+                    "integrate_lock={state} claimed_at={claimed_at} attempts={attempts} last_status={} terminal_reason={} postcondition={}",
+                    last_status.as_deref().unwrap_or("-"),
+                    terminal_reason.as_deref().unwrap_or("-"),
+                    postcondition_id.as_deref().unwrap_or("-"),
+                )
+            },
+        ))
+    }
+
     fn assert_no_real_llm(&self) -> Result<()> {
         let conn = self.conn()?;
         let non_fake: i64 = conn.query_row("SELECT COUNT(*) FROM agent_runs WHERE display_id=?1 AND COALESCE(harness_id,'') != 'fake'", [&self.task_id], |r| r.get(0)).unwrap_or(0);
@@ -1098,6 +1171,10 @@ fn is_freshness_refusal(text: &str) -> bool {
         || normalized.contains("stale external review")
         || normalized.contains("stale_base")
         || normalized.contains("freshness")
+        || normalized.contains("stale_review")
+        || normalized.contains("stale review")
+        || normalized.contains("stale_test")
+        || normalized.contains("stale test")
         || (normalized.contains("external review head") && normalized.contains("stale"))
         || (normalized.contains("external review head") && normalized.contains("mismatch"))
         || (normalized.contains("external_review")
@@ -1175,6 +1252,8 @@ struct LiveSnapshot {
     blocker_kind: Option<String>,
     blocked_reason_class: Option<String>,
     integration_attempts: Option<String>,
+    integration_blocked_reason: Option<String>,
+    integration_step: Option<String>,
     er: Option<(String, String, Option<String>, Option<String>)>,
 }
 impl LiveSnapshot {
@@ -1187,6 +1266,8 @@ impl LiveSnapshot {
             self.blocked_reason.as_deref(),
             self.blocker_kind.as_deref(),
             self.blocked_reason_class.as_deref(),
+            self.integration_blocked_reason.as_deref(),
+            self.integration_step.as_deref(),
             self.integration_attempts.as_deref(),
         ]
         .into_iter()
@@ -1308,7 +1389,7 @@ fn create_live_task(case_name: &str) -> Result<String> {
             "--human-acceptance-policy",
             "delegated_by_policy",
             "--task-review-policy",
-            "authoritative",
+            live_task_review_policy(case_name),
             "--done-when",
             "live fake harness reaches expected state",
             "--scope-in",
@@ -1334,6 +1415,17 @@ fn create_live_task(case_name: &str) -> Result<String> {
         .context("tasks add did not print task id")?
         .to_string();
     Ok(id)
+}
+
+fn live_task_review_policy(case_name: &str) -> &'static str {
+    if is_stale_base_refuses_case(case_name) {
+        // This scenario is specifically testing post-ER integration freshness.
+        // An authoritative task-review policy parks integration at the review
+        // substep before the freshness/landing path can demonstrate the issue.
+        "none"
+    } else {
+        "authoritative"
+    }
 }
 
 struct Harness {
@@ -1748,6 +1840,8 @@ mod tests {
             "stale external review head: rerun required",
             "freshness check refused integration",
             "stale_base current_main differs",
+            "stale_review: affected scope requires rerun",
+            "integration_blocked_reason=stale_test",
             "external review head mismatch after rebase",
         ] {
             assert!(is_freshness_refusal(text), "{text}");
@@ -1758,6 +1852,13 @@ mod tests {
         assert!(!is_freshness_refusal(
             "stores test stale-base-refuses timed out waiting for integration refusal"
         ));
+    }
+
+    #[test]
+    fn stale_base_live_task_review_policy_does_not_park_before_freshness_path() {
+        assert_eq!(live_task_review_policy("stale-base-refuses"), "none");
+        assert_eq!(live_task_review_policy("happy-path"), "authoritative");
+        assert_eq!(live_task_review_policy("t3-failed-er"), "authoritative");
     }
 
     #[test]
@@ -1898,6 +1999,8 @@ mod tests {
             blocker_kind: None,
             blocked_reason_class: None,
             integration_attempts: None,
+            integration_blocked_reason: None,
+            integration_step: None,
             er: Some((
                 "ERUNIT".to_string(),
                 "passed".to_string(),
