@@ -164,6 +164,11 @@ pub struct LiveRunSummary {
     pub last_event_at: Option<String>,
     pub last_event_type: Option<String>,
     pub current_activity: Option<String>,
+    pub marker_path: Option<String>,
+    pub status_path: Option<String>,
+    pub events_path: Option<String>,
+    pub transcript_path: Option<String>,
+    pub stderr_log_path: Option<String>,
     pub events: Vec<LiveRunEventSummary>,
 }
 
@@ -1003,6 +1008,22 @@ fn load_live_run_summary(display_id: &str, workspace_path: Option<&str>) -> Opti
         .as_deref()
         .map(read_live_event_summaries)
         .unwrap_or_default();
+    let status_path = crate::cli::runs::current_status_path(&stores_dir, &current)
+        .map(|p| p.display().to_string());
+    let marker_path = Some(current.marker_path.display().to_string());
+    let transcript_path = current
+        .marker
+        .transcript_path
+        .as_ref()
+        .map(|p| crate::cli::runs::resolve_marker_path(&stores_dir, &current.marker_path, p))
+        .map(|p| p.display().to_string());
+    let stderr_log_path = current
+        .marker
+        .stderr_log_path
+        .as_ref()
+        .map(|p| crate::cli::runs::resolve_marker_path(&stores_dir, &current.marker_path, p))
+        .map(|p| p.display().to_string());
+    let events_path = events_path.map(|p| p.display().to_string());
     Some(LiveRunSummary {
         role: current.marker.role,
         runner: current.marker.runner,
@@ -1011,6 +1032,11 @@ fn load_live_run_summary(display_id: &str, workspace_path: Option<&str>) -> Opti
         last_event_at: status.as_ref().and_then(|s| s.last_event_at.clone()),
         last_event_type: status.as_ref().and_then(|s| s.last_event_type.clone()),
         current_activity: status.and_then(|s| s.current_activity),
+        marker_path,
+        status_path,
+        events_path,
+        transcript_path,
+        stderr_log_path,
         events,
     })
 }

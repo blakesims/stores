@@ -48,20 +48,30 @@ pub(super) fn lines_for_row(row: &Row, app: &App) -> Vec<String> {
 
 fn task_lines(t: &TaskRow, app: &App) -> Vec<String> {
     let progress = super::progress::task_progress(t, &app.external_review).text;
+    let state = super::semantics::task_presentation(t);
     let mut lines = vec![
         format!("Task detail · {}", t.display_id),
         String::new(),
-        "Story summary".to_string(),
-        format!("  {}", present(&t.title)),
-        String::new(),
-        "Current state".to_string(),
-        format!("  status: {}", present(&t.status)),
+        "Operator state".to_string(),
+        format!(
+            "  {} {}{}",
+            state.glyph,
+            state.label,
+            signal_suffix(state.signal.as_deref())
+        ),
+        format!("  next valve: {}", task_next_valve(t, &state)),
         format!("  priority/tier: {}", present_opt(t.tier_hint.as_deref())),
         format!(
             "  claimed: {} by {}",
             present_opt(t.claimed_at.as_deref()),
             present_opt(t.claimed_by.as_deref())
         ),
+    ];
+    append_live_runner(&mut lines, t);
+    lines.extend([
+        String::new(),
+        "Story summary".to_string(),
+        format!("  {}", present(&t.title)),
         String::new(),
         "Why it matters".to_string(),
         format!(
@@ -81,8 +91,7 @@ fn task_lines(t: &TaskRow, app: &App) -> Vec<String> {
             opt_i64(t.total_phases)
         ),
         format!("  cycle: {}", opt_i64(t.current_cycle)),
-    ];
-    append_live_runner(&mut lines, t);
+    ]);
     lines.extend([
         String::new(),
         "Blockers / held reasons".to_string(),
@@ -120,6 +129,7 @@ fn task_lines(t: &TaskRow, app: &App) -> Vec<String> {
             ),
         ]);
     }
+    append_task_debug_tuple(&mut lines, t);
     lines
 }
 
@@ -152,6 +162,11 @@ fn append_live_runner(lines: &mut Vec<String>, t: &TaskRow) {
         summary.push_str(&format!(" · {activity}"));
     }
     lines.extend([String::new(), "Live runner".to_string(), summary]);
+    append_present_path(lines, "marker_path", live.marker_path.as_deref());
+    append_present_path(lines, "status_path", live.status_path.as_deref());
+    append_present_path(lines, "events_path", live.events_path.as_deref());
+    append_present_path(lines, "transcript_path", live.transcript_path.as_deref());
+    append_present_path(lines, "stderr_log_path", live.stderr_log_path.as_deref());
     lines.push(String::new());
     lines.push(format!("Live activity · last {}", live.events.len().max(1)));
     if live.events.is_empty() {
@@ -171,6 +186,67 @@ fn append_live_runner(lines: &mut Vec<String>, t: &TaskRow) {
         };
         lines.push(format!("  {:<7} {}", age, text));
     }
+}
+
+fn append_present_path(lines: &mut Vec<String>, label: &str, value: Option<&str>) {
+    if let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) {
+        lines.push(format!("  {label}: {value}"));
+    }
+}
+
+fn append_nonempty_line(lines: &mut Vec<String>, label: &str, value: Option<&str>) {
+    if let Some(value) = value
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "none" && *s != "null")
+    {
+        lines.push(format!("  {label}: {value}"));
+    }
+}
+
+fn append_task_debug_tuple(lines: &mut Vec<String>, t: &TaskRow) {
+    lines.extend([
+        String::new(),
+        "Debug tuple".to_string(),
+        format!("  status: {}", present(&t.status)),
+        format!("  lifecycle: {}", present_opt(t.lifecycle.as_deref())),
+        format!("  active_step: {}", present_opt(t.active_step.as_deref())),
+        format!(
+            "  integration_step: {}",
+            present_opt(t.integration_step.as_deref())
+        ),
+        format!("  activation: {}", present_opt(t.activation.as_deref())),
+        format!("  blocked: {}", opt_bool(t.blocked)),
+        format!("  blocker_kind: {}", present_opt(t.blocker_kind.as_deref())),
+        format!(
+            "  blocked_reason: {}",
+            present_opt(t.blocked_reason.as_deref())
+        ),
+    ]);
+}
+
+fn task_next_valve(t: &TaskRow, state: &super::semantics::Presentation) -> String {
+    if let Some(kind) = t.blocker_kind.as_deref().filter(|s| !s.trim().is_empty()) {
+        return format!("clear {kind}");
+    }
+    match state.label.as_str() {
+        "queued" => "activate work".to_string(),
+        "plan" => "plan review".to_string(),
+        "plan-gate" => "approve plan".to_string(),
+        "exec" => "code review".to_string(),
+        "code-gate" => "resolve review".to_string(),
+        "accept" => "human acceptance".to_string(),
+        "ship" => "integration lane".to_string(),
+        "done" => "terminal".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn signal_suffix(signal: Option<&str>) -> String {
+    signal
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" · {s}"))
+        .unwrap_or_default()
 }
 
 fn now_epoch_secs() -> u64 {
@@ -367,12 +443,30 @@ fn intake_lines(i: &IntakeRow) -> Vec<String> {
 }
 
 fn review_lines(r: &ReviewRow) -> Vec<String> {
-    vec![
+    let state = super::semantics::external_review_presentation(r);
+    let mut lines = vec![
         format!("External review detail · {}", r.display_id),
         String::new(),
-        "ADR 0002 review state".to_string(),
-        format!("  lifecycle: {}", present_opt(r.lifecycle.as_deref())),
-        format!("  outcome: {}", present_opt(r.outcome.as_deref())),
+        "Operator state".to_string(),
+        format!(
+            "  {} {}{}",
+            state.glyph,
+            state.label,
+            signal_suffix(state.signal.as_deref())
+        ),
+        format!("  task: {}", present(&r.task_id)),
+        format!(
+            "  runner: {}",
+            super::semantics::external_review_runner_label(r)
+        ),
+        format!("  attempts: {}", r.attempts),
+        format!("  verdict: {}", present_opt(r.verdict.as_deref())),
+    ];
+    append_nonempty_line(&mut lines, "held_reason", r.held_reason.as_deref());
+    append_nonempty_line(&mut lines, "next_retry_at", r.next_retry_at.as_deref());
+    lines.extend([
+        String::new(),
+        "Links".to_string(),
         format!(
             "  linked_observation_ids: {}",
             list_or_dash(&r.linked_observation_ids)
@@ -380,28 +474,6 @@ fn review_lines(r: &ReviewRow) -> Vec<String> {
         format!(
             "  produced_task_id: {}",
             present_opt(r.produced_task_id.as_deref())
-        ),
-        format!("  Legacy status: {}", present(&r.status)),
-        format!("  task: {}", present(&r.task_id)),
-        format!(
-            "  runner: {}",
-            if r.runner.trim().is_empty() {
-                "unknown"
-            } else {
-                r.runner.as_str()
-            }
-        ),
-        format!("  attempts: {}", r.attempts),
-        format!("  verdict: {}", present_opt(r.verdict.as_deref())),
-        String::new(),
-        "Hold state".to_string(),
-        format!(
-            "  held_reason: {}",
-            r.held_reason.as_deref().unwrap_or("none")
-        ),
-        format!(
-            "  next_retry_at: {}",
-            r.next_retry_at.as_deref().unwrap_or("none")
         ),
         String::new(),
         "SHA window".to_string(),
@@ -428,7 +500,18 @@ fn review_lines(r: &ReviewRow) -> Vec<String> {
             "  transcript_path: {}",
             present_opt(r.transcript_path.as_deref())
         ),
-    ]
+        String::new(),
+        "Debug tuple".to_string(),
+        format!("  status: {}", present(&r.status)),
+        format!("  lifecycle: {}", present_opt(r.lifecycle.as_deref())),
+        format!("  outcome: {}", present_opt(r.outcome.as_deref())),
+        format!("  held_reason: {}", present_opt(r.held_reason.as_deref())),
+        format!(
+            "  next_retry_at: {}",
+            present_opt(r.next_retry_at.as_deref())
+        ),
+    ]);
+    lines
 }
 
 pub(super) fn engine_lines(app: &App) -> Vec<String> {
@@ -563,6 +646,10 @@ fn opt_i64(v: Option<i64>) -> String {
     v.map(|n| n.to_string()).unwrap_or_else(|| "—".to_string())
 }
 
+fn opt_bool(v: Option<bool>) -> String {
+    v.map(|b| b.to_string()).unwrap_or_else(|| "—".to_string())
+}
+
 fn list_or_dash(items: &[String]) -> String {
     if items.is_empty() {
         "—".to_string()
@@ -601,14 +688,24 @@ mod tests {
         let text = render_text_for_row(&row, &app);
         for needle in [
             "story title",
-            "Current state",
+            "Operator state",
+            "▣ exec",
+            "next valve: code review",
             "Progress",
             "Blockers / held reasons",
             "Recent events",
             "Artifact pointers",
+            "Debug tuple",
+            "status: executing",
         ] {
             assert!(text.contains(needle), "missing {needle}: {text}");
         }
+        let state_idx = text.find("Operator state").expect("state heading");
+        let debug_idx = text.find("Debug tuple").expect("debug heading");
+        assert!(
+            state_idx < debug_idx,
+            "semantic state must precede debug: {text}"
+        );
     }
 
     #[test]
@@ -626,6 +723,11 @@ mod tests {
                 last_event_at: Some("2026-05-11T00:00:05Z".to_string()),
                 last_event_type: Some("tool_start".to_string()),
                 current_activity: Some("tool:bash".to_string()),
+                marker_path: Some("/tmp/current-T901-planner.json".to_string()),
+                status_path: Some("/tmp/live/status.json".to_string()),
+                events_path: Some("/tmp/live/events.jsonl".to_string()),
+                transcript_path: Some("/tmp/live/transcript.jsonl".to_string()),
+                stderr_log_path: Some("/tmp/live/stderr.log".to_string()),
                 events: vec![crate::tui::data::LiveRunEventSummary {
                     ts: Some("2026-05-11T00:00:04Z".to_string()),
                     event_type: "tool_start".to_string(),
@@ -647,19 +749,25 @@ mod tests {
             text.contains("Live activity · last 1"),
             "missing activity heading: {text}"
         );
-        assert!(
-            text.contains("Bash cargo test live_runner_window"),
-            "missing event: {text}"
-        );
+        for needle in [
+            "marker_path: /tmp/current-T901-planner.json",
+            "status_path: /tmp/live/status.json",
+            "events_path: /tmp/live/events.jsonl",
+            "transcript_path: /tmp/live/transcript.jsonl",
+            "stderr_log_path: /tmp/live/stderr.log",
+            "Bash cargo test live_runner_window",
+        ] {
+            assert!(text.contains(needle), "missing {needle}: {text}");
+        }
     }
 
     #[test]
-    fn review_detail_contains_verdict_findings_and_sha() {
+    fn review_detail_contains_semantic_state_verdict_findings_and_sha() {
         let app = App::new(TuiOpts::default());
         let row = Row::Review(ReviewRow {
             display_id: "E001".to_string(),
             task_id: "T100".to_string(),
-            status: "completed".to_string(),
+            status: "passed".to_string(),
             runner: "codex".to_string(),
             attempts: 2,
             verdict: Some("PASS".to_string()),
@@ -678,11 +786,15 @@ mod tests {
         });
         let text = render_text_for_row(&row, &app);
         for needle in [
+            "Operator state",
+            "✓ passed",
             "verdict:",
             "base_sha:",
             "findings:",
             "log_path:",
             "started_at:",
+            "Debug tuple",
+            "status: passed",
         ] {
             assert!(text.contains(needle), "missing {needle}: {text}");
         }
@@ -692,6 +804,40 @@ mod tests {
             !text.contains("abcdef0123456789"),
             "base_sha not full: {text}"
         );
+        let state_idx = text.find("Operator state").expect("state heading");
+        let debug_idx = text.find("Debug tuple").expect("debug heading");
+        assert!(
+            state_idx < debug_idx,
+            "semantic state must precede debug: {text}"
+        );
+    }
+
+    #[test]
+    fn review_detail_hides_none_clutter_in_primary_state() {
+        let app = App::new(TuiOpts::default());
+        let row = Row::Review(ReviewRow {
+            display_id: "E002".to_string(),
+            task_id: "T101".to_string(),
+            status: "pending".to_string(),
+            runner: String::new(),
+            held_reason: Some("none".to_string()),
+            next_retry_at: Some("none".to_string()),
+            ..Default::default()
+        });
+        let text = render_text_for_row(&row, &app);
+        let primary = text
+            .split("\n\nLinks")
+            .next()
+            .expect("primary review section");
+        assert!(
+            primary.contains("◌ pending"),
+            "missing semantic state: {text}"
+        );
+        assert!(
+            !primary.contains("none"),
+            "primary state has none clutter: {primary}"
+        );
+        assert!(text.contains("Debug tuple"), "missing debug tuple: {text}");
     }
 
     #[test]
