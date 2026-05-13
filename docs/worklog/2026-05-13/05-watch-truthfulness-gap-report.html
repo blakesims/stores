@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>stores watch truthfulness gap report</title>
+  <style>
+    :root {
+      --base:#1e1e2e; --mantle:#181825; --crust:#11111b; --surface0:#313244; --surface1:#45475a; --surface2:#585b70;
+      --text:#cdd6f4; --subtext:#bac2de; --muted:#9399b2; --dim:#6c7086;
+      --blue:#89b4fa; --mauve:#cba6f7; --green:#a6e3a1; --yellow:#f9e2af; --peach:#fab387; --red:#f38ba8; --teal:#94e2d5;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:linear-gradient(180deg,var(--crust),var(--base)); color:var(--text); font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif; }
+    main { max-width:1180px; margin:0 auto; padding:36px 24px 80px; }
+    h1,h2,h3 { line-height:1.15; margin:0 0 14px; }
+    h1 { font-size:34px; letter-spacing:-.02em; }
+    h2 { margin-top:42px; font-size:25px; color:var(--blue); }
+    h3 { margin-top:24px; font-size:18px; color:var(--mauve); }
+    p { margin:10px 0; }
+    .lede { color:var(--subtext); font-size:18px; max-width:900px; }
+    .card { background:rgba(49,50,68,.72); border:1px solid var(--surface1); border-radius:16px; padding:20px; margin:18px 0; box-shadow:0 10px 28px rgba(0,0,0,.22); }
+    .grid { display:grid; gap:16px; }
+    .grid.cols2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .grid.cols3 { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    @media (max-width:850px){ .grid.cols2,.grid.cols3{grid-template-columns:1fr;} }
+    .pill { display:inline-block; padding:3px 9px; border-radius:999px; background:var(--surface1); color:var(--subtext); font-size:12px; margin:2px 4px 2px 0; }
+    .bad { color:var(--red); } .warn { color:var(--yellow); } .good { color:var(--green); } .info { color:var(--teal); }
+    code, pre { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    pre { background:var(--mantle); border:1px solid var(--surface1); border-radius:12px; padding:14px; overflow:auto; color:var(--subtext); }
+    table { width:100%; border-collapse:collapse; margin:14px 0; }
+    th,td { border-bottom:1px solid var(--surface1); padding:10px 8px; text-align:left; vertical-align:top; }
+    th { color:var(--blue); font-weight:650; background:rgba(69,71,90,.35); }
+    .callout { border-left:4px solid var(--yellow); padding:12px 16px; background:rgba(249,226,175,.08); border-radius:8px; }
+    .danger { border-left-color:var(--red); background:rgba(243,139,168,.08); }
+    .success { border-left-color:var(--green); background:rgba(166,227,161,.08); }
+    .flow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:10px 0; }
+    .node { border:1px solid var(--surface2); background:var(--surface0); border-radius:10px; padding:8px 10px; min-width:120px; }
+    .arrow { color:var(--dim); }
+    .small { color:var(--muted); font-size:13px; }
+    .score { font-size:28px; font-weight:750; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>stores watch truthfulness gap report</h1>
+  <p class="lede">What stands between today’s cockpit and the ideal: each store declares its own primitives/lifecycles/statuses once, and <code>stores watch</code> honestly renders them without hand-written dictionaries, over-fitted translations, or per-store display code.</p>
+
+  <div class="grid cols3">
+    <div class="card"><div class="score bad">High</div><strong>Frontend coupling</strong><p>Top cards, sections, rows, and details each classify rows separately.</p></div>
+    <div class="card"><div class="score warn">Medium</div><strong>Schema ambiguity</strong><p>Several stores expose more than one truth axis: legacy <code>status</code>, lifecycle tuples, waiting overlays, blocked flags.</p></div>
+    <div class="card"><div class="score warn">Medium</div><strong>Translation risk</strong><p>Recent semantic mappings improved UX but can hide contradictions or invent vocabulary not present in the store contract.</p></div>
+  </div>
+
+  <h2>1. The ideal target</h2>
+  <div class="card success">
+    <p><strong>Ideal:</strong> a store schema declares the operator-visible lifecycle and display primitives. The watch UI discovers those primitives and renders:</p>
+    <ul>
+      <li>top-card slots from declared lifecycle groups,</li>
+      <li>focused table sections from the same lifecycle groups,</li>
+      <li>row state from the row’s declared lifecycle/status fields,</li>
+      <li>detail debug from raw fields, clearly separated.</li>
+    </ul>
+    <p>No bespoke dictionary like <code>blocked + blocker_kind=runner → runner-failed</code> should live in frontend rendering unless that mapping is declared by the store itself.</p>
+  </div>
+
+  <h2>2. Current rendering pipeline</h2>
+  <div class="flow">
+    <div class="node">store schemas<br><span class="small">status/lifecycle fields</span></div><span class="arrow">→</span>
+    <div class="node">SQL loaders<br><span class="small"><code>src/tui/data.rs</code></span></div><span class="arrow">→</span>
+    <div class="node">section classifier<br><span class="small"><code>Section</code> enum</span></div><span class="arrow">+</span>
+    <div class="node">top-card model<br><span class="small"><code>StoreFlowModel</code></span></div><span class="arrow">+</span>
+    <div class="node">row semantics<br><span class="small"><code>semantics.rs</code></span></div><span class="arrow">→</span>
+    <div class="node">renderer<br><span class="small"><code>render.rs</code></span></div>
+  </div>
+  <div class="callout danger"><strong>Problem:</strong> these are not one pipeline. They are parallel classifiers. A row can be counted in a top-card slot, grouped under a section with another name, and rendered with a third name.</div>
+
+  <h2>3. Where we are not honest / automatic today</h2>
+  <table>
+    <thead><tr><th>Layer</th><th>Current behavior</th><th>Why it violates the ideal</th><th>Evidence in code</th></tr></thead>
+    <tbody>
+      <tr><td>Schema</td><td>Tasks have legacy <code>status</code> plus ADR tuple <code>lifecycle / active_step / integration_step / blocked / blocker_kind</code>.</td><td>There is no single declared operator state. UI must decide which axis wins.</td><td><code>stores/tasks/schema.yaml</code>; comments around legacy status and primary tuple.</td></tr>
+      <tr><td>Schema</td><td>Observations have <code>lifecycle</code>, <code>contract_state</code>, <code>waiting_kind</code>, <code>outcome</code>, and legacy <code>status</code>.</td><td>These are legitimate orthogonal axes, but watch needs a declared projection to avoid double counting.</td><td><code>stores/observations/schema.yaml</code>.</td></tr>
+      <tr><td>Top cards</td><td>Counts are built in hand-written <code>apply_*_to_flow</code> functions.</td><td>Adding a store will not automatically add a correct card; code must know the store.</td><td><code>StoreFlowModel</code>, <code>apply_obs_to_flow</code>, <code>apply_task_to_flow</code>.</td></tr>
+      <tr><td>Sections</td><td>Focused table groups use <code>Section</code> labels like <code>ACTIVE</code>, <code>AWAITING HUMAN ACCEPTANCE</code>, <code>HELD-TRIAGE</code>.</td><td>These labels do not derive from the top-card grammar (<code>working/gate/waiting/failed</code>), so the operator translates mentally.</td><td><code>Section::label</code> in <code>src/tui/data.rs</code>.</td></tr>
+      <tr><td>Rows</td><td>Rows call store-specific formatters: <code>format_task_line</code>, <code>format_obs_line</code>, <code>format_intake_line</code>, <code>format_review_line</code>.</td><td>Each formatter can invent or repeat information independently of section/top-card state.</td><td><code>src/tui/render.rs</code>.</td></tr>
+      <tr><td>Semantics</td><td><code>semantics.rs</code> maps raw fields to presentation labels like <code>runner-failed</code>, <code>contract-approved</code>, <code>tool-fault</code>.</td><td>Useful UX, but it is a frontend dictionary, not a store-declared truth. It may over-fit clean fixtures.</td><td><code>src/tui/semantics.rs</code>.</td></tr>
+      <tr><td>Details</td><td>Raw debug tuple is retained in details.</td><td>This is good: debug truth is available. But list/top views still decide what truth to foreground.</td><td><code>src/tui/detail.rs</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>4. Concrete current symptoms</h2>
+  <div class="grid cols2">
+    <div class="card"><h3>Tasks: mismatched grammar</h3><pre>Top card: queued / working / gate / done / waiting / failed
+Sections: QUEUED / ACTIVE / AWAITING HUMAN ACCEPTANCE / HELD-TRIAGE
+Rows:     queued / plan / plan-gate / exec / accept / runner-failed</pre><p>The pieces are locally useful but not one information schema.</p></div>
+    <div class="card"><h3>Observations: recently improved but still translated</h3><pre>Schema: lifecycle + contract_state + waiting_kind + outcome
+Top:    candidates / investigate / contract gate / waiting
+Rows:   candidate / contract-approved / next:promote/resolve</pre><p>Option A reduced double counting, but the rule lives in <code>apply_obs_to_flow</code>, not in the schema.</p></div>
+    <div class="card"><h3>Adding a new store is not automatic</h3><p>A new store currently needs schema plus loader, row enum variant, lane enum, top-card fold, section classifier, formatter, details, tests.</p></div>
+    <div class="card"><h3>Frontend suppresses duplication manually</h3><p>Example: hiding <code>contract:</code> in observation rows and suppressing raw task tuples are renderer decisions. Good UX, but not declarative.</p></div>
+  </div>
+
+  <h2>5. Classification: frontend problem or schema problem?</h2>
+  <table>
+    <thead><tr><th>Problem</th><th>Classification</th><th>Reason</th></tr></thead>
+    <tbody>
+      <tr><td>Top-card slots do not match focused sections.</td><td><span class="pill bad">Frontend/display architecture</span></td><td>The schema has enough fields; the UI chooses different vocabularies in different layers.</td></tr>
+      <tr><td>Rows repeat section state.</td><td><span class="pill bad">Frontend/display architecture</span></td><td>Renderer lacks context-aware row presentation: it does not know which state the section already conveys.</td></tr>
+      <tr><td>Tasks have legacy <code>status</code> and ADR tuple fields.</td><td><span class="pill warn">Schema/model debt</span></td><td>Multiple truth axes force the UI to pick precedence.</td></tr>
+      <tr><td>Observations can be both candidate and waiting/contract-gated.</td><td><span class="pill warn">Schema projection missing</span></td><td>Orthogonal fields are fine, but schema does not declare the operator-visible projection.</td></tr>
+      <tr><td><code>semantics.rs</code> contains mapping dictionaries.</td><td><span class="pill warn">Translation/over-fit risk</span></td><td>The frontend is becoming the domain model. This improves display but moves truth out of schemas.</td></tr>
+      <tr><td>New stores require custom watch code.</td><td><span class="pill bad">Architecture gap</span></td><td>No generic store display contract exists.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>6. Why per-store custom code is both good and bad</h2>
+  <div class="grid cols2">
+    <div class="card"><h3 class="good">Good</h3><ul><li>Tasks, observations, intake, reviews, and engine really have different domain semantics.</li><li>Hand-written code can produce excellent UX quickly.</li><li>It can hide legacy implementation details while schema cleanup lags.</li></ul></div>
+    <div class="card"><h3 class="bad">Bad</h3><ul><li>Every layer can invent vocabulary.</li><li>UI truth can drift from schema truth.</li><li>Adding a store is expensive and error-prone.</li><li>Fixes over-fit current fixture data rather than enforcing a durable primitive.</li></ul></div>
+  </div>
+
+  <h2>7. Proposed fixes</h2>
+  <div class="card">
+    <h3>Fix A — Declarative watch projection in every store schema</h3>
+    <p>Add a <code>watch:</code> block to each store schema. It declares the canonical operator projection, not just raw fields.</p>
+<pre>watch:
+  lane_label: TASKS
+  slots:
+    - {id: queued,  glyph: "◌", attention: flow,  when: "lifecycle == 'queued' && !blocked"}
+    - {id: working, glyph: "◆", attention: flow,  when: "lifecycle == 'active' && active_step in ['planning','coding']"}
+    - {id: gate,    glyph: "◇", attention: flow,  when: "active_step in ['planning_review','coding_review','wrapping']"}
+    - {id: done,    glyph: "✓", attention: exhaust, when: "lifecycle == 'done'"}
+    - {id: waiting, glyph: "△", attention: flow,  when: "blocked && blocker_kind in ['capacity','dependency','human_acceptance']"}
+    - {id: failed,  glyph: "▲", attention: fault, when: "blocked && blocker_kind in ['runner','test_failure','deploy']"}
+  section_by: slot
+  row:
+    primary: stage_label
+    suppress_if_same_as_section: true</pre>
+    <p><strong>Result:</strong> top card, sections, and row suppression all use the same declared slot. New stores become visible if they provide a <code>watch</code> projection.</p>
+    <p><strong>Tradeoff:</strong> still allows declarative expressions. The schema becomes responsible for operator truth; validators must ensure rows match exactly one visible slot unless explicitly multi-axis.</p>
+  </div>
+
+  <div class="card">
+    <h3>Fix B — Normalize store lifecycle primitives first, then generate watch</h3>
+    <p>Deeper approach: define a universal store primitive model and migrate schemas toward it.</p>
+<pre>Store row primitive:
+  phase: front | work | gate | exit | wait | fault
+  stage: store-specific value, e.g. plan-gate, contract-draft, tool-fault
+  outcome: optional terminal reason
+  attention: neutral | flow | exhaust | fault
+  debug: raw implementation tuple</pre>
+    <p>Then every store row literally carries its operator phase/stage. Watch does not translate; it groups and renders these fields.</p>
+    <p><strong>Result:</strong> closest to the ideal: frontend becomes generic.</p>
+    <p><strong>Tradeoff:</strong> larger schema migration and doctrine decision. Existing task/observation fields must be reconciled or made derived/generated.</p>
+  </div>
+
+  <h2>8. Recommended path</h2>
+  <div class="callout success">
+    <p><strong>Recommendation:</strong> do Fix A first as a schema-declared watch projection. It is the smallest step that stops the frontend from being the hidden domain model.</p>
+    <ol>
+      <li>Add <code>watch</code> projection metadata to tasks and observations only.</li>
+      <li>Generate top-card counts and focused sections from that metadata.</li>
+      <li>Make row renderers context-aware: if section is <code>QUEUED</code>, do not repeat <code>queued</code> in each row.</li>
+      <li>After two stores prove the pattern, generalize to intake/reviews/engine.</li>
+      <li>Then decide whether Fix B is worth migrating toward.</li>
+    </ol>
+  </div>
+
+  <h2>9. Success criteria</h2>
+  <table>
+    <thead><tr><th>Criterion</th><th>How we know we reached it</th></tr></thead>
+    <tbody>
+      <tr><td>One vocabulary per store</td><td>Top card slots, section headers, and row state all derive from the same declared projection.</td></tr>
+      <tr><td>No duplicated row state</td><td>Rows do not repeat the section label unless adding finer detail.</td></tr>
+      <tr><td>No frontend dictionaries</td><td>Mappings like <code>runner → runner-failed</code> live in schema metadata or row fields, not renderer code.</td></tr>
+      <tr><td>New store is automatic</td><td>A schema with <code>watch:</code> metadata appears in watch without adding a new formatter/top-card fold.</td></tr>
+      <tr><td>Debug truth remains accessible</td><td>Raw tuples remain in detail/debug, never as the primary cockpit language.</td></tr>
+    </tbody>
+  </table>
+
+  <p class="small">Generated 2026-05-13 from current repository state. Main files referenced: <code>stores/*/schema.yaml</code>, <code>src/tui/data.rs</code>, <code>src/tui/render.rs</code>, <code>src/tui/semantics.rs</code>, <code>src/tui/detail.rs</code>.</p>
+</main>
+</body>
+</html>
