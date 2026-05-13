@@ -25,8 +25,14 @@ use super::semantics::{
 /// vertical span without re-encoding the literal.
 pub const TOP_STRIP_HEIGHT: u16 = 9;
 
-const MIN_STORE_CARD_WIDTH: u16 = 24;
 const STORE_STRIP_MORE_WIDTH: u16 = 12;
+
+// Five-card mode uses a 3-column grid inside each bordered card. The longest
+// top-card label word is "investigate" (11 columns); non-first grid cells lose
+// one column to the vertical separator, so each raw column must be at least 12
+// columns wide. With borders, 36 inner columns + 2 borders = 38.
+const MIN_STORE_CARD_LABEL_WORD_WIDTH: u16 = 11;
+const MIN_STORE_CARD_WIDTH: u16 = (MIN_STORE_CARD_LABEL_WORD_WIDTH + 1) * 3 + 2;
 
 /// Height (in rows) of the bottom chrome painted below the focused-table
 /// region: recent-exhaust strip (1) + hint line (1) + status bar (1) = 3.
@@ -2076,11 +2082,12 @@ mod tests {
         cols
     }
 
-    /// AC3.1(a) / AC3.2: top strip paints all five lane labels.
+    /// AC3.1(a) / AC3.2: top strip paints all five lane labels once each card
+    /// is wide enough for its 3-column grid to preserve semantic label words.
     #[test]
-    fn cockpit_top_strip_paints_all_five_lane_labels() {
+    fn cockpit_top_strip_paints_all_five_lane_labels_at_readable_width() {
         let mut app = cockpit_fixture_app();
-        let buf = paint(&mut app, 120, 30);
+        let buf = paint(&mut app, 200, 30);
         let painted = buffer_to_string(&buf);
         // Top region is the card strip.
         let top_region: String = painted
@@ -2094,6 +2101,44 @@ mod tests {
                 "missing top-strip label {label:?} in top region:\n{top_region}\n\nfull buffer:\n{painted}"
             );
         }
+        for label in ["investigate", "contract", "gate", "working", "waiting", "tool fault"] {
+            assert!(
+                top_region.contains(label),
+                "missing readable slot word {label:?} in top region:\n{top_region}"
+            );
+        }
+        assert!(
+            !top_region.contains("+ more"),
+            "wide readable strip must not replace slot labels with + more:\n{top_region}"
+        );
+    }
+
+    #[test]
+    fn cockpit_top_strip_120_width_uses_focused_fallback_without_slot_more_labels() {
+        let mut app = cockpit_fixture_app();
+        let buf = paint(&mut app, 120, 30);
+        let painted = buffer_to_string(&buf);
+        let top_region: String = painted
+            .lines()
+            .take(TOP_STRIP_HEIGHT as usize)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            top_region.contains("+4 more"),
+            "120-column strip must collapse hidden lanes behind +4 more until card labels are readable:\n{top_region}"
+        );
+        for label in ["queued", "working", "gate", "done", "waiting", "failed"] {
+            assert!(
+                top_region.contains(label),
+                "focused card label {label:?} must remain readable at 120 columns:\n{top_region}"
+            );
+        }
+        assert_eq!(
+            top_region.matches("+ more").count(),
+            1,
+            "only the more-affordance body may say + more; slot labels must stay semantic:\n{top_region}"
+        );
     }
 
     #[test]
@@ -2132,7 +2177,7 @@ mod tests {
     fn cockpit_focused_card_has_distinct_border_style() {
         let mut app = cockpit_fixture_app();
         // Default focus = Tasks (index 2 in StoreLane::ALL).
-        let buf = paint(&mut app, 120, 30);
+        let buf = paint(&mut app, 200, 30);
         let cols = card_left_borders(&buf);
         assert_eq!(cols.len(), 5, "expected 5 cards, found cols {:?}", cols);
         let focused_col = cols[2];
@@ -2233,7 +2278,7 @@ mod tests {
     fn cockpit_right_key_changes_visibly_highlighted_lane() {
         let mut app = cockpit_fixture_app();
         // Default focus is Tasks (col index 2). Cyan border at cols[2] only.
-        let buf = paint(&mut app, 120, 30);
+        let buf = paint(&mut app, 200, 30);
         let cols = card_left_borders(&buf);
         assert_eq!(buf[(cols[2], 0)].fg, Color::Cyan);
 
@@ -2247,7 +2292,7 @@ mod tests {
         );
         assert_eq!(app.focused_store, StoreLane::ExternalReviews);
 
-        let buf2 = paint(&mut app, 120, 30);
+        let buf2 = paint(&mut app, 200, 30);
         let cols2 = card_left_borders(&buf2);
         assert_eq!(
             buf2[(cols2[3], 0)].fg,
