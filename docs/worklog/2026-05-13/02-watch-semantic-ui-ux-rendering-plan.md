@@ -144,176 +144,193 @@ Questions this raises:
 - What kind of review?
 - What should Blake do?
 
-### Proposed top card vocabulary
+### Proposed top card grammar: same flow shape for every store
 
-Use store-specific operator words. Keep numbers, but label them by meaning.
+Use store-specific operator words, but every lane card must share the same meta-pattern. Blake's correction: each store has its own inner flow, but the top level should make those flows comparable. Do not design five unrelated cards.
 
-#### Intake card
-
-Current:
+Universal card grammar:
 
 ```text
-open: 0
-new 0 · triaging 0 · waiting 0 · closed 0
+◌ front   ◆ work
+◇ gate    ✓ exit
+△ wait    ▲ fault
 ```
 
-Proposed:
+Meaning:
+
+| Glyph | Meta-slot | Meaning |
+|---:|---|---|
+| `◌` | front | newly arrived / queued / candidate / pending |
+| `◆` | work | actively being processed |
+| `◇` | gate | waiting on review, approval, contract, info, merge, or another valve |
+| `✓` | exit | recently routed/resolved/done/passed |
+| `△` | wait | non-failure waiting pressure |
+| `▲` | fault | failed / blocked-by-error / tool fault |
+
+Every lane card should render this shape, with local labels appropriate to that store.
+
+Target sketch:
+
+```text
+┌ INTAKE ─────────────┐┌ OBSERVATIONS ──────┐┌ TASKS ─────────────┐┌ REVIEW ────────────┐┌ ENGINE ────────────┐
+│◌ new 0   ◆ triage 0││◌ cand 8  ◆ inv 4  ││◌ queue 2 ◆ work 3 ││◌ pend 1 ◆ run 0   ││◌ disp 0 ◆ run 0   │
+│◇ info 0  ✓ route +0││◇ contract 1 ✓ close+2│◇ gate 1  ✓ done +0 ││◇ revise 0 ✓ pass +0││◇ locks 0 ✓ clear   │
+│△ wait 0  ▲ fault 0 ││△ wait 1  ▲ fault 0 ││△ wait 2  ▲ fail 2 ││△ wait 0  ▲ tool 0 ││△ manual ▲ fault 0 │
+└────────────────────┘└────────────────────┘└────────────────────┘└────────────────────┘└────────────────────┘
+```
+
+This sketch is intentionally compact. Implementation can use fuller labels where width allows (`candidate`, `investigate`, `pending`, `running`, `tool-fault`), but the slot pattern must stay stable.
+
+#### Intake card flow
+
+Inner flow:
+
+```text
+raw signal → triage → needs-info gate → routed/dropped
+```
+
+Card:
 
 ```text
 INTAKE
-intake queue: 0
-new 0 · triage 0 · needs-info 0 · routed 0
+◌ new 0   ◆ triage 0
+◇ info 0  ✓ routed +0
+△ wait 0  ▲ fault 0
 ```
 
-If empty:
+Mapping:
+
+- `◌ new`: `lifecycle=new` / draft raw input.
+- `◆ triage`: `lifecycle=triaging`.
+- `◇ info`: `lifecycle=waiting` / evidence-needed gate.
+- `✓ routed`: closed/routed outcomes, duplicate, fast-track, architecture-review route; recent exhaust only.
+- `▲ fault`: dropped as noise or triage failure/fault; do not over-alarm normal `dropped` if it is an intentional sink.
+
+#### Observations card flow
+
+Inner flow:
 
 ```text
-INTAKE
-clear
-new 0 · triage 0 · needs-info 0 · routed 0
+candidate → investigate/refine → contract gate → resolved/promoted
 ```
 
-Semantics:
-
-- `new`: unclaimed raw signals.
-- `triage`: actively being classified.
-- `needs-info`: waiting for narrow evidence or clarification.
-- `routed`: recently closed/routed exhaust, only if useful.
-
-#### Observations card
-
-Current:
-
-```text
-open: 8
-candidate 8 · ready 0 · in_progress 0 · closed 0
-```
-
-Proposed:
+Card:
 
 ```text
 OBSERVATIONS
-needs-contract: 8
-contract-approved 0 · investigating 4 · info-needed 1 · closed +2
+◌ candidate 8  ◆ investigate 4
+◇ contract 1   ✓ closed +2
+△ wait 1       ▲ fault 0
 ```
 
-Alternative if space is tight:
+Mapping:
+
+- `◌ candidate`: `lifecycle=candidate`, not actively under evidence/refinement, no approved contract.
+- `◆ investigate`: evidence gathering / contract shaping / investigation in progress.
+- `◇ contract`: contract-draft, contract-approved, info-needed, human-ratification, or architecture gate. This is the ADR 0002 front-gate pressure slot.
+- `✓ closed`: addressed, superseded, wont-fix, merged, resolved; recent exhaust only.
+- `△ wait`: non-failure wait overlays such as info-needed or external dependency when not counted under contract gate.
+- `▲ fault`: investigation_failed, broken linked task, overdue architecture gate, or other fault.
+
+Use `contract-approved`, not `contract-ready`, in row/detail text. The top card may shorten to `contract` because the slot includes both draft and approved contract pressure.
+
+#### Tasks card flow
+
+Inner flow:
 
 ```text
-OBSERVATIONS
-needs-contract: 8
-approved 0 · investigate 4 · info 1 · closed +2
+queued → plan/exec work → accept/integration gate → done
 ```
 
-Semantics:
-
-- `needs-contract`: observations not yet contract-approved/resolved; this names the ADR 0002 front-gate pressure.
-- `contract-approved`: U1/ratification/promote-ready pressure.
-- `investigating`: rows in evidence/contract refinement.
-- `info-needed`: explicit operator/info valve.
-- `closed +N`: recent exhaust, not backlog.
-
-Avoid ambiguous `open` as the card headline if possible; `open` is too database-like.
-
-#### Tasks card
-
-Current:
-
-```text
-active: 4
-held 4 · review 2
-```
-
-Proposed:
+Card:
 
 ```text
 TASKS
-work: 4
-plan 2 · exec 1 · accept 1 · waiting 2 · failed 2
+◌ queued 2  ◆ work 3
+◇ gate 1    ✓ done +0
+△ wait 2    ▲ fail 2
 ```
 
-Or if there is no executing runner:
+Mapping:
+
+- `◌ queued`: `lifecycle=queued` rows not yet flowing.
+- `◆ work`: active planning, plan-gate, execution, or code-gate work. The row table gives exact stage (`plan`, `plan-gate`, `exec`, `code-gate`).
+- `◇ gate`: acceptance/wrap/external-review/integration valve pressure. Row table can say `accept` or `ship`; top card uses the generic gate slot.
+- `✓ done`: terminal/recent exhaust.
+- `△ wait`: non-failure blockers such as capacity, dependency, rate-limit, human wait, or stale-base if recovery is expected by refresh/re-review.
+- `▲ fail`: runner-failed, review-blocked, tests-failed, config-fault, main-red, deploy-failed, migration-failed.
+
+Avoid top-card `active`, `held`, or generic `blocked`; use `work`, `wait`, and `fail` under the shared grammar.
+
+#### External review card flow
+
+Inner flow:
 
 ```text
-TASKS
-work: 4
-plan 2 · exec 1 · accept 1 · failed 2 · waiting 2
+pending → running → revise/tool gate → passed/superseded
 ```
 
-Semantics:
-
-- `work`: nonterminal tasks that can move or are mid-flow; does not imply a live runner.
-- `plan`: planning + plan-review pressure.
-- `exec`: coding + code-review pressure.
-- `accept`: needs human/final acceptance or formal review handoff.
-- `waiting`: non-failure blockers such as capacity/dependency/rate-limit/human valve, when recovery is expected without code repair.
-- `failed`: fault blockers such as runner/task_review/test/deploy/migration/main_red.
-
-Avoid `held` unless the row is truly parked by a hold policy. `Held` sounds like an internal category and confused Blake.
-
-#### External reviews card
-
-Current:
-
-```text
-running: 0
-pending 1 · revise 0 · held 0
-```
-
-Proposed:
+Card:
 
 ```text
 REVIEW
-needs-review: 1
-running 0 · passed 0 · revise 0 · tool-fault 0
+◌ pending 1  ◆ running 0
+◇ revise 0   ✓ passed +0
+△ wait 0     ▲ tool-fault 0
 ```
 
-Semantics:
+Mapping:
 
-- `needs-review`: pending review rows awaiting dispatch.
-- `running`: active review runner.
-- `passed`: recent successful gate/exhaust.
-- `revise`: semantic review rejection pressure.
-- `tool-fault`: infrastructure/tooling hold.
+- `◌ pending`: pending review rows awaiting dispatch.
+- `◆ running`: active review runner.
+- `◇ revise`: semantic review rejection pressure; gates task progress.
+- `✓ passed`: recent successful reviews.
+- `△ wait`: retry delay / capacity wait, if distinct from pending.
+- `▲ tool-fault`: `tooling_held` / runner infrastructure failure.
 
-Avoid `held` here too; use `tool-fault` or `blocked` depending on the state.
+Hide `runner=unknown`, `held_reason=none`, and `next_retry_at=none` in row lists.
 
-#### Engine card
+#### Engine card flow
 
-Current:
+Engine is not a store of business rows in the same way, but it still needs to follow the same visual grammar.
+
+Inner flow:
+
+```text
+dispatch candidates → live runners → locks/gates → clear/healthy
+```
+
+Card in manual/test mode:
 
 ```text
 ENGINE
-daemon DEAD ⚠
-locks 0 · oldest —
+◌ dispatch 0  ◆ runners 0
+◇ locks 0     ✓ clear
+△ manual      ▲ fault 0
 ```
 
-Proposed in manual/test mode:
+Card when daemon is expected and unhealthy:
 
 ```text
 ENGINE
-engine: manual
-runners 0 · locks clear · daemon off
+◌ dispatch ?  ◆ runners ?
+◇ locks 23    ✓ clear 0
+△ wait 0      ▲ daemon down
 ```
 
-Proposed when daemon is expected and unhealthy:
+Mapping:
 
-```text
-ENGINE
-engine: daemon down
-stale locks 23 · oldest 162h
-```
+- `◌ dispatch`: pending daemon/dispatch work.
+- `◆ runners`: live runner processes.
+- `◇ locks`: active locks / resource contention.
+- `✓ clear`: no pressure in the relevant engine surfaces.
+- `△ manual`: daemon off but not currently harmful; manual/test mode.
+- `▲ fault`: stale locks, daemon down when required, runner/process health faults.
 
-Semantics:
+Implementation may need a conservative heuristic first:
 
-- `daemon off` is not necessarily bad.
-- `engine: daemon down` is bad.
-- The health card should say whether the fault affects flow.
-
-Implementation may need a heuristic first:
-
-- If daemon dead, locks clear, and no daemon-owned active dispatch expected: render `engine: manual · daemon off`.
-- If daemon dead and there are active queued/working rows with daemon subscribers expected, or stale locks exist: render `engine: daemon down`.
+- If daemon dead, locks clear, and no daemon-owned active dispatch appears required: render `△ manual` / `✓ clear`.
+- If daemon dead and stale locks or daemon-owned active dispatch exists: render `▲ daemon down`.
 
 ## Task row rendering
 
@@ -692,16 +709,17 @@ Acceptance:
 - Blocked rows display semantic labels like `runner-failed`, `review-blocked`, `waiting-capacity`.
 - Existing detail pane still exposes raw tuple in debug section.
 
-### Step 3: Improve top lane card labels
+### Step 3: Implement shared-flow top lane cards
 
-Keep lane cards. Change words/counts.
+Keep lane cards, but make every card a store-specific projection of the same flow grammar.
 
 Acceptance:
 
-- No top card says `held` without a clearer qualifier.
-- Tasks card distinguishes work, accept, failed/waiting/blocked.
-- Engine card distinguishes `engine: manual · daemon off` from `engine: daemon down`.
-- External review card uses `needs-review/running/passed/revise/tool-fault`.
+- Each card has front/work/gate/exit/wait/fault slots, using the canonical glyphs.
+- No top card says `held` as a generic category.
+- Tasks card distinguishes `△ wait` from `▲ fail`.
+- Engine card distinguishes non-failure manual mode (`△ manual`) from actionable daemon failure (`▲ daemon down`).
+- External review card uses `◌ pending`, `◆ running`, `◇ revise`, `✓ passed`, `▲ tool-fault`.
 
 ### Step 4: Observation/intake/external-review row semantics
 
@@ -792,15 +810,15 @@ Avoid:
 
 ## Oracle review incorporation
 
-Oracle reviewed this plan after the initial draft and recommended tightening the glossary so the UI reinforces ADR 0001 / ADR 0002 primary terms instead of preserving transitional vocabulary. This note incorporates those recommendations. The key decisions are:
+Oracle reviewed this plan after the initial draft and recommended tightening the glossary so the UI reinforces ADR 0001 / ADR 0002 primary terms instead of preserving transitional vocabulary. Blake then tightened the top-card requirement further: lane cards must keep store separation while using one shared flow grammar across all stores. This note incorporates both rounds. The key decisions are:
 
-- Use `intake queue`, not `route queue`; routing is an outcome, intake is the buffer.
-- Use `needs-contract`, not `needs triage` or generic `waiting`, for the observations top card; observations are already past raw intake and are being refined toward the front gate.
+- Preserve separate lane cards for intake, observations, tasks, review, and engine.
+- Make every top lane card follow the same meta-pattern: `◌ front`, `◆ work`, `◇ gate`, `✓ exit`, `△ wait`, `▲ fault`.
+- Use store-local labels inside that shared pattern (`new/triage/info/routed`, `candidate/investigate/contract/closed`, `queued/work/gate/done`, `pending/running/revise/passed`, `dispatch/runners/locks/clear`).
 - Use `contract-approved`, not `contract-ready`; ADR 0002 primary contract enum is `none | draft | approved`, while nested legacy `ready` aliases to approved.
-- Use `work` for the tasks top-card headline, not `active` or `working`; subcounts explain the stage.
 - Split task pressure into `waiting` and `failed`; do not use top-card `held` or generic `blocked` when a clearer semantic class exists.
-- Use `needs-review` for pending external reviews and `tool-fault` for external-review tooling holds.
-- Use `engine: manual`, `engine: daemon`, `engine: daemon down`, and `engine: unknown` as the engine vocabulary.
+- Use `tool-fault` for external-review tooling holds.
+- Use `engine: manual`, `engine: daemon`, `engine: daemon down`, and `engine: unknown` in detail text, while the top card uses the shared `△ manual` / `▲ daemon down` grammar.
 - Reserve `held` only for explicit durable hold/park semantics. It is forbidden as a generic bucket for failed, waiting, blocked, pending, or queued rows.
 - Use portable high-quality glyphs only; no emojis. Prefer `⋯` for needs-info / needs-human and reserve `▲` for actual faults.
 
@@ -894,7 +912,8 @@ Engine:
 
 The implementation is complete when, against the current clean seeded DB:
 
-- The top lane cards are still separate store cards and use clear operator labels.
+- The top lane cards are still separate store cards.
+- Every top lane card follows the shared flow grammar: front/work/gate/exit/wait/fault.
 - Task rows no longer display raw lifecycle tuples or `runner:none`.
 - Blockers are semantic and typed.
 - Observations show contract/routing semantics.
