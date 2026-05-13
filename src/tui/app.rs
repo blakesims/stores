@@ -13,6 +13,7 @@ use super::data::{
 };
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
+use super::semantics::{observation_watch_projection, task_watch_projection, WatchSlotId};
 use super::sidecar::SidecarScope;
 use super::sort::{sort_indices, Sort};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -360,7 +361,29 @@ impl App {
                 }
             }
         }
+        self.sort_flat_rows_for_projection_display(&mut out);
         out
+    }
+
+    fn sort_flat_rows_for_projection_display(&self, rows: &mut [FlatRow]) {
+        match self.focused_store {
+            StoreLane::Tasks => rows.sort_by_key(|fr| {
+                let slot = match &self.rows[fr.abs] {
+                    Row::Task(t) => task_watch_projection(t).slot,
+                    _ => WatchSlotId::Exit,
+                };
+                (watch_slot_order(slot), fr.section, fr.row)
+            }),
+            StoreLane::Observations => rows.sort_by_key(|fr| {
+                let slot = match &self.rows[fr.abs] {
+                    Row::Obs(o) => observation_watch_projection(o).slot,
+                    Row::CollapsedObs(c) => observation_watch_projection(&c.representative).slot,
+                    _ => WatchSlotId::Exit,
+                };
+                (watch_slot_order(slot), fr.section, fr.row)
+            }),
+            _ => {}
+        }
     }
 
     /// Return the row under the current cursor.
@@ -525,6 +548,17 @@ impl App {
     }
 }
 
+fn watch_slot_order(slot: WatchSlotId) -> u8 {
+    match slot {
+        WatchSlotId::Front => 0,
+        WatchSlotId::Work => 1,
+        WatchSlotId::Gate => 2,
+        WatchSlotId::Wait => 3,
+        WatchSlotId::Fault => 4,
+        WatchSlotId::Exit => 5,
+    }
+}
+
 fn local_clock_string() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -629,12 +663,41 @@ mod tests {
         })
     }
 
+    fn task_with_steps(id: &str, lifecycle: &str, active_step: &str, blocked: bool, blocker_kind: Option<&str>) -> Row {
+        Row::Task(TaskRow {
+            display_id: id.to_string(),
+            status: id.to_string(),
+            title: id.to_string(),
+            lifecycle: Some(lifecycle.to_string()),
+            active_step: Some(active_step.to_string()),
+            integration_step: Some("none".to_string()),
+            blocked: Some(blocked),
+            blocker_kind: blocker_kind.map(str::to_string),
+            linked_observations: Vec::new(),
+            ..Default::default()
+        })
+    }
+
     fn obs(id: &str, summary: &str) -> Row {
         Row::Obs(ObsRow {
             display_id: id.to_string(),
             status: "open".to_string(),
             priority: "normal".to_string(),
             summary: summary.to_string(),
+            updated_at: "2026-05-05".to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn obs_with_projection(id: &str, status: &str, lifecycle: Option<&str>, contract_state: Option<&str>, waiting_kind: Option<&str>) -> Row {
+        Row::Obs(ObsRow {
+            display_id: id.to_string(),
+            status: status.to_string(),
+            lifecycle: lifecycle.map(str::to_string),
+            contract_state: contract_state.map(str::to_string),
+            waiting_kind: waiting_kind.map(str::to_string),
+            priority: "normal".to_string(),
+            summary: id.to_string(),
             updated_at: "2026-05-05".to_string(),
             ..Default::default()
         })
@@ -788,6 +851,62 @@ mod tests {
         assert!(app.flat_rows().is_empty());
         assert_eq!(app.selection, Selection::default());
         assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn task_flat_rows_follow_projection_display_order_for_navigation() {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![
+            task_with_steps("T-work", "active", "planning", false, None),
+            task_with_steps("T-gate", "active", "planning_review", false, None),
+            task_with_steps("T-exec", "active", "coding", false, None),
+            task_with_steps("T-wait", "queued", "none", true, Some("capacity")),
+            task_with_steps("T-fail", "active", "none", true, Some("runner")),
+            task_with_steps("T-queued", "queued", "none", false, None),
+        ];
+        app.sections = classify(&app.rows);
+        app.focused_store = StoreLane::Tasks;
+
+        let ids: Vec<&str> = app
+            .flat_rows()
+            .iter()
+            .map(|fr| app.rows[fr.abs].display_id())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["T-queued", "T-work", "T-exec", "T-gate", "T-wait", "T-fail"]
+        );
+
+        let flat = app.flat_rows();
+        app.selection = Selection {
+            section: flat[0].section,
+            row: flat[0].row,
+        };
+        app.move_selection(1);
+        assert_eq!(app.current_row().unwrap().display_id(), "T-work");
+        app.move_selection(1);
+        assert_eq!(app.current_row().unwrap().display_id(), "T-exec");
+        app.move_selection(1);
+        assert_eq!(app.current_row().unwrap().display_id(), "T-gate");
+    }
+
+    #[test]
+    fn observation_flat_rows_follow_projection_display_order_for_navigation() {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![
+            obs_with_projection("L-contract", "open", Some("candidate"), Some("draft"), Some("human_ratification")),
+            obs_with_projection("L-candidate", "open", Some("candidate"), None, None),
+            obs_with_projection("L-wait", "needs_info", Some("candidate"), None, Some("info_needed")),
+        ];
+        app.sections = classify(&app.rows);
+        app.focused_store = StoreLane::Observations;
+
+        let ids: Vec<&str> = app
+            .flat_rows()
+            .iter()
+            .map(|fr| app.rows[fr.abs].display_id())
+            .collect();
+        assert_eq!(ids, vec!["L-candidate", "L-contract", "L-wait"]);
     }
 
     #[test]
