@@ -480,7 +480,9 @@ pub fn cockpit_model(rows: &[Row], external_review: ExternalReviewState) -> Cock
                 if r.lifecycle.as_deref() != Some("closed") {
                     model.active += 1;
                 }
-                if r.lifecycle.as_deref() == Some("waiting") || r.held_reason.as_deref().is_some_and(|s| !s.is_empty()) {
+                if r.lifecycle.as_deref() == Some("waiting")
+                    || r.held_reason.as_deref().is_some_and(|s| !s.is_empty())
+                {
                     model.held += 1;
                 }
             }
@@ -635,19 +637,53 @@ fn apply_intake_to_flow(row: &IntakeRow, count: usize, flow: &mut IntakeFlow) {
 }
 
 fn apply_obs_to_flow(row: &ObsRow, count: usize, flow: &mut ObsFlow) {
-    match obs_lifecycle(row) {
-        "candidate" => flow.candidate += count,
-        "ready" => flow.ready += count,
-        "in_progress" => flow.in_progress += count,
-        "closed" => flow.closed += count,
-        _ => {}
-    }
-    if let Some(kind) = row.waiting_kind.as_deref().filter(|s| !s.is_empty()) {
-        *flow.waiting_kinds.entry(kind.to_string()).or_default() += count;
+    // Top-card observation slots are mutually exclusive. A row should answer
+    // "where is this observation now?", not increment both a lifecycle bucket
+    // and a waiting/contract overlay bucket. These flow maps back the visible
+    // card; raw row fields remain available in detail/debug.
+    if obs_lifecycle(row) == "closed" {
+        flow.closed += count;
+    } else if obs_is_contract_gate(row) {
+        flow.ready += count;
+    } else if obs_is_waiting(row) {
+        *flow.waiting_kinds
+            .entry(obs_waiting_kind(row).unwrap_or("waiting").to_string())
+            .or_default() += count;
+    } else {
+        match obs_lifecycle(row) {
+            "candidate" => flow.candidate += count,
+            "ready" => flow.ready += count,
+            "in_progress" => flow.in_progress += count,
+            _ => flow.in_progress += count,
+        }
     }
     if let Some(outcome) = row.outcome.as_deref().filter(|s| !s.is_empty()) {
         *flow.outcomes.entry(outcome.to_string()).or_default() += count;
     }
+}
+
+fn obs_is_contract_gate(row: &ObsRow) -> bool {
+    row.pending_architecture_review.unwrap_or(false)
+        || row
+            .open_architecture_review_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+        || matches!(
+            row.contract_state.as_deref(),
+            Some("draft" | "approved" | "ready")
+        )
+        || matches!(row.waiting_kind.as_deref(), Some("human_ratification"))
+}
+
+fn obs_is_waiting(row: &ObsRow) -> bool {
+    obs_waiting_kind(row).is_some()
+}
+
+fn obs_waiting_kind(row: &ObsRow) -> Option<&str> {
+    row.waiting_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "human_ratification")
 }
 
 pub fn intake_lifecycle(row: &IntakeRow) -> &str {
@@ -3527,6 +3563,49 @@ mod tests {
         assert_eq!(model.engine.unfinished_locks, 0);
         assert_eq!(model.engine.oldest_lock_age_secs, None);
         assert_eq!(model.engine.agent_runs_recent, 0);
+    }
+
+    #[test]
+    fn observation_flow_slots_are_mutually_exclusive_for_waiting_overlay() {
+        let rows = vec![Row::Obs(ObsRow {
+            display_id: "L-wait".to_string(),
+            status: "open".to_string(),
+            priority: "high".to_string(),
+            summary: "waiting candidate".to_string(),
+            waiting_kind: Some("info_needed".to_string()),
+            ..Default::default()
+        })];
+        let model = store_flow_model(
+            &rows,
+            &SystemHealth::default(),
+            &super::super::daemon::Liveness::Dead,
+            &ExternalReviewState::default(),
+        );
+        assert_eq!(model.observations.candidate, 0);
+        assert_eq!(model.observations.ready, 0);
+        assert_eq!(model.observations.waiting_kinds.values().sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn observation_flow_slots_are_mutually_exclusive_for_contract_gate() {
+        let rows = vec![Row::Obs(ObsRow {
+            display_id: "L-contract".to_string(),
+            status: "open".to_string(),
+            priority: "high".to_string(),
+            summary: "contract candidate".to_string(),
+            waiting_kind: Some("human_ratification".to_string()),
+            contract_state: Some("draft".to_string()),
+            ..Default::default()
+        })];
+        let model = store_flow_model(
+            &rows,
+            &SystemHealth::default(),
+            &super::super::daemon::Liveness::Dead,
+            &ExternalReviewState::default(),
+        );
+        assert_eq!(model.observations.candidate, 0);
+        assert_eq!(model.observations.ready, 1);
+        assert_eq!(model.observations.waiting_kinds.values().sum::<usize>(), 0);
     }
 
     #[test]

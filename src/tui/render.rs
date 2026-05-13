@@ -1150,10 +1150,7 @@ fn format_obs_line(
     collapsed: Option<&super::data::CollapsedObsRow>,
 ) -> Vec<Span<'static>> {
     let presentation = observation_presentation(o);
-    let status = match presentation.signal {
-        Some(signal) => format!("{} {} {}", presentation.glyph, presentation.label, signal),
-        None => format!("{} {}", presentation.glyph, presentation.label),
-    };
+    let status = format!("{} {}", presentation.glyph, presentation.label);
     let (display_id, badge, summary_prefix) = collapsed
         .map(|c| {
             (
@@ -1164,30 +1161,27 @@ fn format_obs_line(
         })
         .unwrap_or((o.display_id.as_str(), String::new(), String::new()));
     let tier = o.tier_hint.as_deref().filter(|s| !s.is_empty());
-    let contract = o.contract_state.as_deref().filter(|s| !s.is_empty());
     let linked = collapsed
         .is_none()
         .then(|| o.task_id.as_deref().filter(|s| !s.is_empty()))
         .flatten();
+    let priority = if let Some(t) = tier {
+        format!("{}/{}", o.priority, t)
+    } else {
+        o.priority.clone()
+    };
+    let next = observation_next_action(o, &presentation.label);
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(
             format!("{:<6}", display_id),
             Style::default().fg(Color::Magenta),
         ),
-        Span::styled(
-            format!("{:<24}", status),
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(format!("{:<20}", status), Style::default().fg(Color::Yellow)),
         Span::raw(" "),
-        Span::raw(format!("priority:{}{} ", o.priority, badge)),
+        Span::raw(format!("{:<9}{} ", priority, badge)),
+        Span::raw(format!("next:{:<18} ", next)),
     ];
-    if let Some(t) = tier {
-        spans.push(Span::raw(format!("tier:{t} ")));
-    }
-    if let Some(c) = contract {
-        spans.push(Span::raw(format!("contract:{c} ")));
-    }
     if let Some(l) = linked {
         spans.push(Span::raw(format!("linked:{l} ")));
     }
@@ -1196,6 +1190,24 @@ fn format_obs_line(
         60,
     )));
     spans
+}
+
+fn observation_next_action(o: &super::data::ObsRow, label: &str) -> &'static str {
+    match label {
+        "candidate" => "triage",
+        "investigate" => "gather evidence",
+        "needs-info" => "answer info",
+        "contract-draft" => "approve/revise",
+        "contract-approved" => "promote/resolve",
+        "arch-gate" => "architecture review",
+        "resolving" => "resolve",
+        "addressed" | "wont-fix" | "superseded" => "done",
+        _ if o
+            .waiting_kind
+            .as_deref()
+            .is_some_and(|s| s == "info_needed") => "answer info",
+        _ => "triage",
+    }
 }
 
 fn format_intake_line(i: &super::data::IntakeRow) -> Vec<Span<'static>> {
@@ -1905,8 +1917,8 @@ mod tests {
             false,
             &ExternalReviewState::default(),
         ));
-        assert!(obs_text.contains("priority:high"), "{obs_text}");
-        assert!(obs_text.contains("tier:T2"), "{obs_text}");
+        assert!(obs_text.contains("high/T2"), "{obs_text}");
+        assert!(obs_text.contains("next:triage"), "{obs_text}");
         assert!(intake_text.contains("priority:high"), "{intake_text}");
         assert!(intake_text.contains("held:missing owner"), "{intake_text}");
     }
@@ -2599,7 +2611,7 @@ mod tests {
 
     /// Phase 4: per-row renderers use semantic labels for upstream/review stores.
     #[test]
-    fn format_obs_line_surfaces_semantic_label_tier_and_contract() {
+    fn format_obs_line_surfaces_one_state_next_action_and_hides_raw_contract() {
         let row = Row::Obs(ObsRow {
             display_id: "L200".to_string(),
             status: "open".to_string(),
@@ -2616,12 +2628,14 @@ mod tests {
             false,
             &ExternalReviewState::default(),
         ));
-        assert!(text.contains("◆ investigate"), "{text}");
-        assert!(text.contains("tier:T2"), "{text}");
-        assert!(text.contains("contract:ready"), "{text}");
+        assert!(text.contains("▰ contract-approved"), "{text}");
+        assert!(text.contains("normal/T2"), "{text}");
+        assert!(text.contains("next:promote/resolve"), "{text}");
         assert!(text.contains("linked:T555"), "{text}");
+        assert!(!text.contains("contract:"), "{text}");
+        assert!(!text.contains("tier:"), "{text}");
 
-        // None/empty tier/contract/task_id are simply omitted — keeps the
+        // None/empty tier/task_id are simply omitted — keeps the
         // 80-col cockpit budget within reach for the narrow live-realistic
         // snapshot.
         let bare = Row::Obs(ObsRow {

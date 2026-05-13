@@ -224,7 +224,7 @@ pub fn observation_presentation(row: &ObsRow) -> Presentation {
             Some("contract draft".to_string()),
         );
     }
-    if matches!(row.contract_state.as_deref(), Some("approved")) {
+    if matches!(row.contract_state.as_deref(), Some("approved" | "ready")) {
         return presentation("▰", "contract-approved", PresentationSeverity::Gate, None);
     }
     match obs_lifecycle(row) {
@@ -260,7 +260,7 @@ pub fn observation_presentation(row: &ObsRow) -> Presentation {
 fn contract_signal(row: &ObsRow) -> Option<String> {
     match row.contract_state.as_deref() {
         Some("draft") => Some("contract draft".to_string()),
-        Some("approved") => Some("contract approved".to_string()),
+        Some("approved" | "ready") => Some("contract approved".to_string()),
         _ => None,
     }
 }
