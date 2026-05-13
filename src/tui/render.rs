@@ -27,6 +27,15 @@ pub const TOP_STRIP_HEIGHT: u16 = 9;
 
 const STORE_STRIP_MORE_WIDTH: u16 = 12;
 
+const WATCH_OVERLAY0: Color = Color::Rgb(0x6c, 0x70, 0x86);
+const WATCH_OVERLAY2: Color = Color::Rgb(0x93, 0x99, 0xb2);
+const WATCH_SURFACE1: Color = Color::Rgb(0x45, 0x47, 0x5a);
+const WATCH_TEXT: Color = Color::Rgb(0xcd, 0xd6, 0xf4);
+const WATCH_GREEN: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
+const WATCH_YELLOW: Color = Color::Rgb(0xf9, 0xe2, 0xaf);
+const WATCH_PEACH: Color = Color::Rgb(0xfa, 0xb3, 0x87);
+const WATCH_RED: Color = Color::Rgb(0xf3, 0x8b, 0xa8);
+
 // Five-card mode uses a 3-column grid inside each bordered card. The longest
 // top-card label word is "investigate" (11 columns); non-first grid cells lose
 // one column to the vertical separator, so each raw column must be at least 12
@@ -326,8 +335,8 @@ fn draw_store_card(
         )
     } else {
         (
-            Style::default().fg(Color::DarkGray),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(WATCH_SURFACE1),
+            Style::default().fg(WATCH_OVERLAY2),
         )
     };
     let block = Block::default()
@@ -340,15 +349,7 @@ fn draw_store_card(
         return;
     }
 
-    let divider_style = Style::default().fg(Color::DarkGray);
-    let value_style = if focused {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let label_style = Style::default().fg(Color::Gray);
+    let divider_style = watch_divider_style();
     let slots = lane_card_slots(lane, model);
     let inner = Rect {
         x: area.x + 1,
@@ -388,16 +389,56 @@ fn draw_store_card(
         if cell_w == 0 {
             continue;
         }
+        let slot_style = watch_slot_style(slot.severity());
         let meta = slot.meta();
-        set_clipped(buf, cell_x, row_ys[row], cell_w, &meta, value_style);
+        set_clipped(buf, cell_x, row_ys[row], cell_w, &meta, slot_style);
         let wrapped = wrap_label(slot.label, cell_w as usize, 2);
         if let Some(line) = wrapped.first() {
-            set_clipped(buf, cell_x, row_ys[row] + 1, cell_w, line, label_style);
+            set_clipped(buf, cell_x, row_ys[row] + 1, cell_w, line, slot_style);
         }
         if let Some(line) = wrapped.get(1) {
-            set_clipped(buf, cell_x, row_ys[row] + 2, cell_w, line, label_style);
+            set_clipped(buf, cell_x, row_ys[row] + 2, cell_w, line, slot_style);
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WatchSeverityThresholds {
+    flow_warning: usize,
+    flow_high: usize,
+    flow_critical: usize,
+    fault_high: usize,
+    fault_critical: usize,
+}
+
+impl Default for WatchSeverityThresholds {
+    fn default() -> Self {
+        Self {
+            flow_warning: 3,
+            flow_high: 6,
+            flow_critical: 10,
+            fault_high: 2,
+            fault_critical: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopSlotAttention {
+    Exhaust,
+    Flow,
+    Fault,
+    Neutral,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchSeverity {
+    Dim,
+    Normal,
+    Warning,
+    High,
+    Critical,
+    SuccessQuiet,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -405,22 +446,30 @@ struct FlowSlot {
     glyph: &'static str,
     label: &'static str,
     count: Option<usize>,
+    attention: TopSlotAttention,
 }
 
 impl FlowSlot {
-    fn new(glyph: &'static str, label: &'static str, count: usize) -> Self {
+    fn new(
+        glyph: &'static str,
+        label: &'static str,
+        count: usize,
+        attention: TopSlotAttention,
+    ) -> Self {
         Self {
             glyph,
             label,
             count: Some(count),
+            attention,
         }
     }
 
-    fn flag(glyph: &'static str, label: &'static str) -> Self {
+    fn flag(glyph: &'static str, label: &'static str, attention: TopSlotAttention) -> Self {
         Self {
             glyph,
             label,
             count: None,
+            attention,
         }
     }
 
@@ -430,6 +479,75 @@ impl FlowSlot {
             None => self.glyph.to_string(),
         }
     }
+
+    fn severity(self) -> WatchSeverity {
+        classify_watch_severity(self.attention, self.count.unwrap_or(1))
+    }
+}
+
+fn classify_watch_severity(attention: TopSlotAttention, count: usize) -> WatchSeverity {
+    classify_watch_severity_with_thresholds(attention, count, WatchSeverityThresholds::default())
+}
+
+fn classify_watch_severity_with_thresholds(
+    attention: TopSlotAttention,
+    count: usize,
+    thresholds: WatchSeverityThresholds,
+) -> WatchSeverity {
+    match attention {
+        TopSlotAttention::Exhaust => WatchSeverity::SuccessQuiet,
+        TopSlotAttention::Flow => {
+            if count == 0 {
+                WatchSeverity::Dim
+            } else if count >= thresholds.flow_critical {
+                WatchSeverity::Critical
+            } else if count >= thresholds.flow_high {
+                WatchSeverity::High
+            } else if count >= thresholds.flow_warning {
+                WatchSeverity::Warning
+            } else {
+                WatchSeverity::Normal
+            }
+        }
+        TopSlotAttention::Fault => {
+            if count == 0 {
+                WatchSeverity::Dim
+            } else if count >= thresholds.fault_critical {
+                WatchSeverity::Critical
+            } else if count >= thresholds.fault_high {
+                WatchSeverity::High
+            } else {
+                WatchSeverity::Warning
+            }
+        }
+        TopSlotAttention::Neutral => {
+            if count == 0 {
+                WatchSeverity::Dim
+            } else {
+                WatchSeverity::Normal
+            }
+        }
+    }
+}
+
+fn watch_slot_style(severity: WatchSeverity) -> Style {
+    let style = match severity {
+        WatchSeverity::Dim => Style::default().fg(WATCH_OVERLAY0),
+        WatchSeverity::Normal => Style::default().fg(WATCH_TEXT),
+        WatchSeverity::Warning => Style::default().fg(WATCH_YELLOW),
+        WatchSeverity::High => Style::default().fg(WATCH_PEACH),
+        WatchSeverity::Critical => Style::default().fg(WATCH_RED),
+        WatchSeverity::SuccessQuiet => Style::default().fg(WATCH_GREEN),
+    };
+    if severity == WatchSeverity::Critical {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn watch_divider_style() -> Style {
+    Style::default().fg(WATCH_SURFACE1)
 }
 
 fn lane_card_slots(lane: StoreLane, model: &StoreFlowModel) -> [FlowSlot; 6] {
@@ -437,45 +555,50 @@ fn lane_card_slots(lane: StoreLane, model: &StoreFlowModel) -> [FlowSlot; 6] {
         StoreLane::Intake => {
             let i = &model.intake;
             [
-                FlowSlot::new("◌", "new", i.new),
-                FlowSlot::new("◆", "triage", i.triaging),
-                FlowSlot::new("◇", "needs info", i.waiting),
-                FlowSlot::new("✓", "routed", i.closed),
-                FlowSlot::new("△", "waiting", 0),
-                FlowSlot::new("▲", "errors", 0),
+                FlowSlot::new("◌", "new", i.new, TopSlotAttention::Flow),
+                FlowSlot::new("◆", "triage", i.triaging, TopSlotAttention::Flow),
+                FlowSlot::new("◇", "needs info", i.waiting, TopSlotAttention::Flow),
+                FlowSlot::new("✓", "routed", i.closed, TopSlotAttention::Exhaust),
+                FlowSlot::new("△", "waiting", 0, TopSlotAttention::Flow),
+                FlowSlot::new("▲", "errors", 0, TopSlotAttention::Fault),
             ]
         }
         StoreLane::Observations => {
             let o = &model.observations;
             [
-                FlowSlot::new("◌", "candidates", o.candidate),
-                FlowSlot::new("◆", "investigate", o.in_progress),
-                FlowSlot::new("◇", "contract gate", o.ready),
-                FlowSlot::new("✓", "closed", o.closed),
-                FlowSlot::new("△", "waiting", o.waiting_kinds.values().sum::<usize>()),
-                FlowSlot::new("▲", "errors", 0),
+                FlowSlot::new("◌", "candidates", o.candidate, TopSlotAttention::Flow),
+                FlowSlot::new("◆", "investigate", o.in_progress, TopSlotAttention::Flow),
+                FlowSlot::new("◇", "contract gate", o.ready, TopSlotAttention::Flow),
+                FlowSlot::new("✓", "closed", o.closed, TopSlotAttention::Exhaust),
+                FlowSlot::new(
+                    "△",
+                    "waiting",
+                    o.waiting_kinds.values().sum::<usize>(),
+                    TopSlotAttention::Flow,
+                ),
+                FlowSlot::new("▲", "errors", 0, TopSlotAttention::Fault),
             ]
         }
         StoreLane::Tasks => {
             let t = &model.tasks;
             [
-                FlowSlot::new("◌", "queued", t.queued),
-                FlowSlot::new("◆", "working", t.work),
-                FlowSlot::new("◇", "gate", t.gate),
-                FlowSlot::new("✓", "done", t.recently_terminal),
-                FlowSlot::new("△", "waiting", t.wait),
-                FlowSlot::new("▲", "failed", t.fail),
+                FlowSlot::new("◌", "queued", t.queued, TopSlotAttention::Flow),
+                FlowSlot::new("◆", "working", t.work, TopSlotAttention::Flow),
+                FlowSlot::new("◇", "gate", t.gate, TopSlotAttention::Flow),
+                FlowSlot::new("✓", "done", t.recently_terminal, TopSlotAttention::Exhaust),
+                FlowSlot::new("△", "waiting", t.wait, TopSlotAttention::Flow),
+                FlowSlot::new("▲", "failed", t.fail, TopSlotAttention::Fault),
             ]
         }
         StoreLane::ExternalReviews => {
             let r = &model.external_reviews;
             [
-                FlowSlot::new("◌", "pending", r.pending),
-                FlowSlot::new("◆", "running", r.running),
-                FlowSlot::new("◇", "revise", r.revise),
-                FlowSlot::new("✓", "passed", r.passed),
-                FlowSlot::new("△", "waiting", r.wait),
-                FlowSlot::new("▲", "tool fault", r.tooling_held),
+                FlowSlot::new("◌", "pending", r.pending, TopSlotAttention::Flow),
+                FlowSlot::new("◆", "running", r.running, TopSlotAttention::Flow),
+                FlowSlot::new("◇", "revise", r.revise, TopSlotAttention::Flow),
+                FlowSlot::new("✓", "passed", r.passed, TopSlotAttention::Exhaust),
+                FlowSlot::new("△", "waiting", r.wait, TopSlotAttention::Flow),
+                FlowSlot::new("▲", "tool fault", r.tooling_held, TopSlotAttention::Fault),
             ]
         }
         StoreLane::EngineHealth => {
@@ -492,20 +615,20 @@ fn lane_card_slots(lane: StoreLane, model: &StoreFlowModel) -> [FlowSlot; 6] {
             let state = engine_presentation(&health, &daemon);
             let clear = usize::from(state.label == "clear" || state.label == "manual");
             let wait_slot = if state.label == "manual" {
-                FlowSlot::flag("△", "manual")
+                FlowSlot::flag("△", "manual", TopSlotAttention::Neutral)
             } else {
-                FlowSlot::new("△", "waiting", 0)
+                FlowSlot::new("△", "waiting", 0, TopSlotAttention::Flow)
             };
             let fault_slot = if state.severity == PresentationSeverity::Fault {
-                FlowSlot::flag("▲", "daemon down")
+                FlowSlot::flag("▲", "daemon down", TopSlotAttention::Fault)
             } else {
-                FlowSlot::new("▲", "errors", 0)
+                FlowSlot::new("▲", "errors", 0, TopSlotAttention::Fault)
             };
             [
-                FlowSlot::new("◌", "dispatch", 0),
-                FlowSlot::new("◆", "runners", 0),
-                FlowSlot::new("◇", "locks", e.unfinished_locks),
-                FlowSlot::new("✓", "clear", clear),
+                FlowSlot::new("◌", "dispatch", 0, TopSlotAttention::Neutral),
+                FlowSlot::new("◆", "runners", 0, TopSlotAttention::Neutral),
+                FlowSlot::new("◇", "locks", e.unfinished_locks, TopSlotAttention::Fault),
+                FlowSlot::new("✓", "clear", clear, TopSlotAttention::Exhaust),
                 wait_slot,
                 fault_slot,
             ]
@@ -1328,8 +1451,106 @@ mod tests {
         let tasks = lane_card_slots(StoreLane::Tasks, &model);
         assert_eq!(tasks[4].label, "waiting");
         assert_eq!(tasks[4].count, Some(12));
+        assert_eq!(tasks[4].attention, TopSlotAttention::Flow);
         assert_eq!(tasks[5].label, "failed");
         assert_eq!(tasks[5].count, Some(13));
+        assert_eq!(tasks[5].attention, TopSlotAttention::Fault);
+    }
+
+    #[test]
+    fn top_slot_severity_thresholds_are_semantic_not_count_only() {
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Flow, 0),
+            WatchSeverity::Dim
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Flow, 1),
+            WatchSeverity::Normal
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Flow, 3),
+            WatchSeverity::Warning
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Flow, 8),
+            WatchSeverity::High
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Flow, 10),
+            WatchSeverity::Critical
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Fault, 0),
+            WatchSeverity::Dim
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Fault, 1),
+            WatchSeverity::Warning
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Fault, 2),
+            WatchSeverity::High
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Fault, 4),
+            WatchSeverity::Critical
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Exhaust, 100),
+            WatchSeverity::SuccessQuiet
+        );
+        assert_eq!(
+            classify_watch_severity(TopSlotAttention::Neutral, 100),
+            WatchSeverity::Normal
+        );
+    }
+
+    #[test]
+    fn top_card_render_uses_slot_severity_colors_and_muted_dividers() {
+        let mut model = StoreFlowModel::default();
+        model.tasks.wait = 8;
+        model.tasks.fail = 4;
+        model.tasks.recently_terminal = 100;
+
+        let backend = TestBackend::new(80, TOP_STRIP_HEIGHT);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|f| draw_store_card(f, StoreLane::Tasks, true, &model, f.area()))
+            .expect("draw");
+        let buf = terminal.backend().buffer().clone();
+        let painted = buffer_to_string(&buf);
+        assert!(
+            painted.contains("△ 8"),
+            "missing waiting pile-up:\n{painted}"
+        );
+        assert!(painted.contains("▲ 4"), "missing fault pile-up:\n{painted}");
+        assert!(
+            painted.contains("✓ 100"),
+            "missing quiet exhaust count:\n{painted}"
+        );
+
+        let cell_with = |needle: &str| -> ratatui::buffer::Cell {
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    if buf[(x, y)].symbol() == needle {
+                        return buf[(x, y)].clone();
+                    }
+                }
+            }
+            panic!("missing cell {needle:?}:\n{painted}");
+        };
+
+        assert_eq!(cell_with("△").fg, WATCH_PEACH);
+        assert_eq!(cell_with("▲").fg, WATCH_RED);
+        assert_eq!(cell_with("✓").fg, WATCH_GREEN);
+        assert!(cell_with("▲").modifier.contains(Modifier::BOLD));
+
+        let divider = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| &buf[(x, y)])
+            .find(|cell| cell.symbol() == "│" && cell.fg == WATCH_SURFACE1)
+            .unwrap_or_else(|| panic!("missing muted divider:\n{painted}"));
+        assert!(!divider.modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -2101,7 +2322,14 @@ mod tests {
                 "missing top-strip label {label:?} in top region:\n{top_region}\n\nfull buffer:\n{painted}"
             );
         }
-        for label in ["investigate", "contract", "gate", "working", "waiting", "tool fault"] {
+        for label in [
+            "investigate",
+            "contract",
+            "gate",
+            "working",
+            "waiting",
+            "tool fault",
+        ] {
             assert!(
                 top_region.contains(label),
                 "missing readable slot word {label:?} in top region:\n{top_region}"

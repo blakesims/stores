@@ -7,7 +7,7 @@ use stores::tui::daemon::Liveness;
 use stores::tui::data::{Row, StoreLane};
 use stores::tui::render::{self, BOTTOM_CHROME_HEIGHT, TOP_STRIP_HEIGHT};
 
-const W: u16 = 180;
+const W: u16 = 200;
 const H: u16 = 42;
 
 fn seed_semantic_watch_conn() -> Connection {
@@ -253,13 +253,43 @@ fn seeded_clean_db_top_cards_use_shared_flow_slots() {
     let top = top_strip_text(&paint(&mut app));
 
     for expected in [
-        "◌new0", "◆tri0", "◇ask0", "✓out0", "△w0", "▲err0",
-        "◌cand1", "◆inv0", "◇ctr1", "✓dn0", "△w1", "▲err0",
-        "◌q1", "◆wrk2", "◇g2", "✓dn0", "△w1", "▲f1",
-        "◌pend1", "◆run0", "◇rev0", "✓pass0", "△w0", "▲tool0",
-        "◌disp0", "◆run0", "◇lock0", "✓clr1", "△manual", "▲err0",
+        "◌ 0", "◆ 0", "◇ 0", "✓ 0", "△ 0", "▲ 0", "◌ 1", "◇ 1", "△ 1", "◌ 1", "◆ 2", "◇ 2", "▲ 1",
+        "✓ 1", "△",
     ] {
-        assert!(top.contains(expected), "top card missing shared-flow token {expected:?}:\n{top}");
+        assert!(
+            top.contains(expected),
+            "top card missing shared-flow token {expected:?}:\n{top}"
+        );
+    }
+    for expected in [
+        "new",
+        "triage",
+        "needs info",
+        "routed",
+        "errors",
+        "candidates",
+        "investigate",
+        "contract",
+        "closed",
+        "queued",
+        "working",
+        "done",
+        "failed",
+        "pending",
+        "running",
+        "revise",
+        "passed",
+        "tool fault",
+        "dispatch",
+        "runners",
+        "locks",
+        "clear",
+        "manual",
+    ] {
+        assert!(
+            top.contains(expected),
+            "top card missing shared-flow label {expected:?}:\n{top}"
+        );
     }
 }
 
