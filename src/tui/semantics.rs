@@ -11,8 +11,8 @@ use serde_json::Value;
 use super::daemon::Liveness;
 use super::data::{
     obs_lifecycle, task_active_step, task_integration_step, task_is_blocked,
-    task_is_terminal_primary, task_lifecycle, CycleReviewGate, IntakeRow, ObsRow, PlanReviewGate,
-    ReviewRow, SystemHealth, TaskCycleEntry, TaskRow,
+    task_is_terminal_primary, task_lifecycle, CycleReviewGate, EngineDetail, IntakeRow, ObsRow,
+    PlanReviewGate, ReviewRow, SystemHealth, TaskCycleEntry, TaskRow,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2329,24 +2329,364 @@ fn findings_signal(row: &ReviewRow) -> Option<String> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineGlyph {
+    Clear,
+    Active,
+    Waiting,
+    Fault,
+    Unknown,
+}
+
+impl EngineGlyph {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Clear => "✓",
+            Self::Active => "◆",
+            Self::Waiting => "△",
+            Self::Fault => "▲",
+            Self::Unknown => "?",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineSource {
+    DaemonLiveness,
+    DispatchLocks,
+    LockLiveness,
+    AgentRunHistory,
+    MissingEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineCheckCell {
+    pub glyph: EngineGlyph,
+    pub color_role: MapColor,
+    pub active: bool,
+    pub source: EngineSource,
+    pub confidence: MapConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineCheck {
+    pub name: &'static str,
+    pub cell: EngineCheckCell,
+    pub signal: Option<String>,
+    pub count: Option<i64>,
+    pub age_epoch: Option<i64>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineHealthProjection {
+    pub checks: Vec<EngineCheck>,
+    pub overall: EngineCheckCell,
+    pub confidence: MapConfidence,
+}
+
+pub fn engine_health_projection(
+    health: &SystemHealth,
+    detail: &EngineDetail,
+    daemon: &Liveness,
+) -> EngineHealthProjection {
+    let checks = vec![
+        daemon_check(daemon),
+        locks_check(health, detail, matches!(daemon, Liveness::Dead)),
+        runners_check(detail),
+        agent_runs_check(detail),
+    ];
+    let overall = overall_engine_cell(&checks);
+    let confidence = checks_confidence(&checks, overall.confidence);
+    EngineHealthProjection {
+        checks,
+        overall,
+        confidence,
+    }
+}
+
+fn engine_cell(
+    glyph: EngineGlyph,
+    color_role: MapColor,
+    active: bool,
+    source: EngineSource,
+    confidence: MapConfidence,
+) -> EngineCheckCell {
+    EngineCheckCell {
+        glyph,
+        color_role,
+        active,
+        source,
+        confidence,
+    }
+}
+
+fn daemon_check(daemon: &Liveness) -> EngineCheck {
+    match daemon {
+        Liveness::Live { pid } => EngineCheck {
+            name: "DAEMON",
+            cell: engine_cell(
+                EngineGlyph::Clear,
+                MapColor::Passed,
+                false,
+                EngineSource::DaemonLiveness,
+                MapConfidence::Exact,
+            ),
+            signal: Some("live".to_string()),
+            count: None,
+            age_epoch: None,
+            detail: Some(format!("pid {pid}")),
+        },
+        Liveness::Dead => EngineCheck {
+            name: "DAEMON",
+            cell: engine_cell(
+                EngineGlyph::Waiting,
+                MapColor::Waiting,
+                false,
+                EngineSource::DaemonLiveness,
+                MapConfidence::Exact,
+            ),
+            signal: Some("manual".to_string()),
+            count: None,
+            age_epoch: None,
+            detail: Some("no live daemon".to_string()),
+        },
+    }
+}
+
+fn locks_check(health: &SystemHealth, detail: &EngineDetail, daemon_dead: bool) -> EngineCheck {
+    let count = health
+        .unfinished_dispatch_locks
+        .max(detail.unfinished_lock_rows.len());
+    let stale = detail
+        .unfinished_lock_rows
+        .iter()
+        .any(lock_row_is_stale_or_dead);
+    let (glyph, color, signal) = if count == 0 {
+        (EngineGlyph::Clear, MapColor::Passed, "clear")
+    } else if daemon_dead {
+        (EngineGlyph::Fault, MapColor::Failed, "daemon down")
+    } else if stale {
+        (EngineGlyph::Fault, MapColor::Failed, "stale")
+    } else {
+        (EngineGlyph::Waiting, MapColor::Waiting, "unfinished")
+    };
+    EngineCheck {
+        name: "LOCKS",
+        cell: engine_cell(
+            glyph,
+            color,
+            false,
+            if detail.unfinished_lock_rows.is_empty() {
+                EngineSource::DispatchLocks
+            } else {
+                EngineSource::LockLiveness
+            },
+            MapConfidence::Exact,
+        ),
+        signal: Some(signal.to_string()),
+        count: Some(count as i64),
+        age_epoch: health.oldest_claimed_at_epoch,
+        detail: oldest_lock_detail(detail),
+    }
+}
+
+fn runners_check(detail: &EngineDetail) -> EngineCheck {
+    let active: Vec<_> = detail
+        .unfinished_lock_rows
+        .iter()
+        .filter(|row| !lock_row_is_stale_or_dead(row))
+        .collect();
+    if active.is_empty() {
+        return EngineCheck {
+            name: "RUNNERS",
+            cell: engine_cell(
+                EngineGlyph::Clear,
+                MapColor::Inactive,
+                false,
+                EngineSource::LockLiveness,
+                MapConfidence::Exact,
+            ),
+            signal: Some("idle".to_string()),
+            count: Some(0),
+            age_epoch: None,
+            detail: Some("from unfinished locks".to_string()),
+        };
+    }
+    EngineCheck {
+        name: "RUNNERS",
+        cell: engine_cell(
+            EngineGlyph::Active,
+            MapColor::ActiveWork,
+            true,
+            EngineSource::LockLiveness,
+            MapConfidence::Exact,
+        ),
+        signal: Some("active".to_string()),
+        count: Some(active.len() as i64),
+        age_epoch: None,
+        detail: Some("from unfinished locks".to_string()),
+    }
+}
+
+fn agent_runs_check(detail: &EngineDetail) -> EngineCheck {
+    let count: i64 = detail
+        .recent_agent_runs_by_role
+        .iter()
+        .map(|row| row.count)
+        .sum();
+    let total_tokens: i64 = detail
+        .recent_agent_runs_by_role
+        .iter()
+        .map(|row| row.total_tokens)
+        .sum();
+    if count == 0 {
+        return EngineCheck {
+            name: "AGENT RUNS",
+            cell: engine_cell(
+                EngineGlyph::Unknown,
+                MapColor::Unknown,
+                false,
+                EngineSource::MissingEvidence,
+                MapConfidence::Unknown,
+            ),
+            signal: Some("unavailable".to_string()),
+            count: None,
+            age_epoch: None,
+            detail: Some("history unavailable".to_string()),
+        };
+    }
+    EngineCheck {
+        name: "AGENT RUNS",
+        cell: engine_cell(
+            EngineGlyph::Clear,
+            MapColor::Passed,
+            false,
+            EngineSource::AgentRunHistory,
+            MapConfidence::Exact,
+        ),
+        signal: Some("recent".to_string()),
+        count: Some(count),
+        age_epoch: None,
+        detail: Some(format!("tokens {total_tokens}")),
+    }
+}
+
+fn lock_row_is_stale_or_dead(row: &super::data::DispatchLockRow) -> bool {
+    let label = row.liveness_label.to_ascii_lowercase();
+    label.contains("stale") || label.contains("dead") || label.contains("zombie")
+}
+
+fn oldest_lock_detail(detail: &EngineDetail) -> Option<String> {
+    detail.unfinished_lock_rows.first().map(|row| {
+        format!(
+            "oldest {} {}",
+            row.display_id,
+            row.agent_name.as_deref().unwrap_or("-")
+        )
+    })
+}
+
+fn overall_engine_cell(checks: &[EngineCheck]) -> EngineCheckCell {
+    let severity = checks
+        .iter()
+        .map(|check| engine_cell_severity(&check.cell))
+        .max()
+        .unwrap_or(0);
+    match severity {
+        4 => engine_cell(
+            EngineGlyph::Fault,
+            MapColor::Failed,
+            false,
+            EngineSource::LockLiveness,
+            MapConfidence::Exact,
+        ),
+        3 => engine_cell(
+            EngineGlyph::Waiting,
+            MapColor::Waiting,
+            false,
+            EngineSource::DaemonLiveness,
+            MapConfidence::Exact,
+        ),
+        2 => engine_cell(
+            EngineGlyph::Active,
+            MapColor::ActiveWork,
+            true,
+            EngineSource::LockLiveness,
+            MapConfidence::Exact,
+        ),
+        1 => engine_cell(
+            EngineGlyph::Unknown,
+            MapColor::Unknown,
+            false,
+            EngineSource::MissingEvidence,
+            MapConfidence::Unknown,
+        ),
+        _ => engine_cell(
+            EngineGlyph::Clear,
+            MapColor::Passed,
+            false,
+            EngineSource::DaemonLiveness,
+            MapConfidence::Exact,
+        ),
+    }
+}
+
+fn engine_cell_severity(cell: &EngineCheckCell) -> i32 {
+    match cell.glyph {
+        EngineGlyph::Fault => 4,
+        EngineGlyph::Waiting => 3,
+        EngineGlyph::Active => 2,
+        EngineGlyph::Unknown => 1,
+        EngineGlyph::Clear => 0,
+    }
+}
+
+fn checks_confidence(checks: &[EngineCheck], overall: MapConfidence) -> MapConfidence {
+    if overall == MapConfidence::Unknown
+        || checks
+            .iter()
+            .any(|check| check.cell.confidence == MapConfidence::Unknown)
+    {
+        MapConfidence::Unknown
+    } else if checks
+        .iter()
+        .any(|check| check.cell.confidence == MapConfidence::Implied)
+    {
+        MapConfidence::Implied
+    } else {
+        MapConfidence::Exact
+    }
+}
+
 pub fn engine_presentation(health: &SystemHealth, daemon: &Liveness) -> Presentation {
-    let daemon_live = matches!(daemon, Liveness::Live { .. });
-    if daemon_live {
-        return presentation("✓", "clear", PresentationSeverity::Exit, None);
-    }
-    if health.unfinished_dispatch_locks > 0 {
-        return presentation(
-            "▲",
-            "daemon down",
-            PresentationSeverity::Fault,
-            Some(format!("{} locks", health.unfinished_dispatch_locks)),
-        );
-    }
-    presentation("△", "manual", PresentationSeverity::Wait, None)
+    let projection = engine_health_projection(health, &EngineDetail::default(), daemon);
+    let label = match projection.overall.glyph {
+        EngineGlyph::Clear => "clear",
+        EngineGlyph::Active => "active",
+        EngineGlyph::Waiting
+            if matches!(daemon, Liveness::Dead) && health.unfinished_dispatch_locks == 0 =>
+        {
+            "manual"
+        }
+        EngineGlyph::Waiting => "waiting",
+        EngineGlyph::Fault => "daemon down",
+        EngineGlyph::Unknown => "unknown",
+    };
+    let severity = match projection.overall.glyph {
+        EngineGlyph::Clear => PresentationSeverity::Exit,
+        EngineGlyph::Active => PresentationSeverity::Work,
+        EngineGlyph::Waiting => PresentationSeverity::Wait,
+        EngineGlyph::Fault | EngineGlyph::Unknown => PresentationSeverity::Fault,
+    };
+    let signal = (health.unfinished_dispatch_locks > 0)
+        .then(|| format!("{} locks", health.unfinished_dispatch_locks));
+    presentation(projection.overall.glyph.symbol(), label, severity, signal)
 }
 
 pub fn engine_flow_slots(health: &SystemHealth, daemon: &Liveness) -> Vec<FlowSlotPresentation> {
-    let state = engine_presentation(health, daemon);
+    let projection = engine_health_projection(health, &EngineDetail::default(), daemon);
+    let lock_count = health.unfinished_dispatch_locks;
     vec![
         FlowSlotPresentation {
             slot: PresentationSeverity::Front,
@@ -2364,22 +2704,18 @@ pub fn engine_flow_slots(health: &SystemHealth, daemon: &Liveness) -> Vec<FlowSl
             slot: PresentationSeverity::Gate,
             glyph: "◇",
             label: "locks",
-            count: Some(health.unfinished_dispatch_locks),
+            count: Some(lock_count),
         },
         FlowSlotPresentation {
             slot: PresentationSeverity::Exit,
             glyph: "✓",
             label: "clear",
-            count: if state.label == "clear" {
-                Some(1)
-            } else {
-                Some(0)
-            },
+            count: Some(usize::from(projection.overall.glyph == EngineGlyph::Clear)),
         },
         FlowSlotPresentation {
             slot: PresentationSeverity::Wait,
             glyph: "△",
-            label: if state.label == "manual" {
+            label: if projection.overall.glyph == EngineGlyph::Waiting {
                 "manual"
             } else {
                 "wait"
@@ -2389,16 +2725,12 @@ pub fn engine_flow_slots(health: &SystemHealth, daemon: &Liveness) -> Vec<FlowSl
         FlowSlotPresentation {
             slot: PresentationSeverity::Fault,
             glyph: "▲",
-            label: if state.label == "daemon down" {
+            label: if projection.overall.glyph == EngineGlyph::Fault {
                 "daemon down"
             } else {
                 "fault"
             },
-            count: if state.severity == PresentationSeverity::Fault {
-                Some(1)
-            } else {
-                Some(0)
-            },
+            count: Some(usize::from(projection.overall.glyph == EngineGlyph::Fault)),
         },
     ]
 }
@@ -3492,6 +3824,91 @@ mod tests {
             assert_eq!(projection.findings_label, findings, "{name}");
             assert_eq!(external_review_watch_projection(&row).slot, slot, "{name}");
         }
+    }
+
+    #[test]
+    fn engine_health_projection_covers_core_states() {
+        use crate::tui::data::{AgentRunsRoleAggregate, DispatchLockRow, EngineDetail};
+
+        let live = engine_health_projection(
+            &SystemHealth::default(),
+            &EngineDetail::default(),
+            &Liveness::Live { pid: 42 },
+        );
+        assert_eq!(live.checks[0].cell.glyph, EngineGlyph::Clear);
+        assert_eq!(live.checks[0].detail.as_deref(), Some("pid 42"));
+
+        let down_with_locks = engine_health_projection(
+            &SystemHealth {
+                unfinished_dispatch_locks: 2,
+                oldest_claimed_at_epoch: Some(100),
+            },
+            &EngineDetail::default(),
+            &Liveness::Dead,
+        );
+        assert_eq!(down_with_locks.overall.glyph, EngineGlyph::Fault);
+        assert_eq!(
+            down_with_locks.checks[1].signal.as_deref(),
+            Some("daemon down")
+        );
+
+        let manual = engine_health_projection(
+            &SystemHealth::default(),
+            &EngineDetail::default(),
+            &Liveness::Dead,
+        );
+        assert_eq!(manual.overall.glyph, EngineGlyph::Waiting);
+
+        let stale = engine_health_projection(
+            &SystemHealth {
+                unfinished_dispatch_locks: 1,
+                oldest_claimed_at_epoch: Some(100),
+            },
+            &EngineDetail {
+                unfinished_lock_rows: vec![DispatchLockRow {
+                    display_id: "T001".to_string(),
+                    agent_name: Some("executor".to_string()),
+                    liveness_label: "stale".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            &Liveness::Live { pid: 42 },
+        );
+        assert_eq!(stale.checks[1].cell.glyph, EngineGlyph::Fault);
+
+        let active = engine_health_projection(
+            &SystemHealth {
+                unfinished_dispatch_locks: 1,
+                oldest_claimed_at_epoch: Some(100),
+            },
+            &EngineDetail {
+                unfinished_lock_rows: vec![DispatchLockRow {
+                    display_id: "T002".to_string(),
+                    agent_name: Some("reviewer".to_string()),
+                    liveness_label: "live".to_string(),
+                    ..Default::default()
+                }],
+                recent_agent_runs_by_role: vec![AgentRunsRoleAggregate {
+                    role: "executor".to_string(),
+                    count: 3,
+                    total_tokens: 1200,
+                }],
+                ..Default::default()
+            },
+            &Liveness::Live { pid: 42 },
+        );
+        assert_eq!(active.checks[2].cell.glyph, EngineGlyph::Active);
+        assert_eq!(active.checks[3].cell.glyph, EngineGlyph::Clear);
+        assert_eq!(active.checks[3].count, Some(3));
+
+        let unavailable = engine_health_projection(
+            &SystemHealth::default(),
+            &EngineDetail::default(),
+            &Liveness::Live { pid: 42 },
+        );
+        assert_eq!(unavailable.checks[3].cell.glyph, EngineGlyph::Unknown);
+        assert_eq!(unavailable.confidence, MapConfidence::Unknown);
     }
 
     #[test]

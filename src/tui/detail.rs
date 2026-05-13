@@ -8,11 +8,11 @@ use super::data::{
     RecentEvent, ReviewRow, Row, TaskCycleEntry, TaskRow,
 };
 use super::semantics::{
-    intake_funnel_projection, observation_flow_projection, review_lane_projection,
-    task_map_projection, IntakeFunnelCell, IntakeFunnelGlyph, IntakeFunnelSource, MapCell,
-    MapConfidence, MapGlyph, MapSource, ObservationCheckpoint, ObservationFlowCell,
-    ObservationFlowSource, ObservationGlyph, ReviewLaneCell, ReviewLaneGlyph, ReviewLaneSource,
-    TaskMapProjection,
+    engine_health_projection, intake_funnel_projection, observation_flow_projection,
+    review_lane_projection, task_map_projection, EngineCheckCell, EngineGlyph, EngineSource,
+    IntakeFunnelCell, IntakeFunnelGlyph, IntakeFunnelSource, MapCell, MapConfidence, MapGlyph,
+    MapSource, ObservationCheckpoint, ObservationFlowCell, ObservationFlowSource, ObservationGlyph,
+    ReviewLaneCell, ReviewLaneGlyph, ReviewLaneSource, TaskMapProjection,
 };
 
 fn truncate_sha(sha: Option<&str>) -> String {
@@ -946,20 +946,50 @@ fn review_active_marker(cell: &ReviewLaneCell) -> &'static str {
 }
 
 pub(super) fn engine_lines(app: &App) -> Vec<String> {
+    let projection = engine_health_projection(
+        &app.system_health,
+        &app.engine_detail,
+        &app.status_bar.daemon_liveness,
+    );
     let mut lines = Vec::new();
     lines.push("Engine detail".to_string());
-    lines.push(String::new());
-    let daemon_line = match &app.status_bar.daemon_liveness {
-        super::daemon::Liveness::Live { pid } => format!("daemon: LIVE pid={pid}"),
-        super::daemon::Liveness::Dead => "daemon: DEAD".to_string(),
-    };
-    lines.push(daemon_line);
+    lines.push(format!(
+        "projection_confidence: {}",
+        map_confidence_label(projection.confidence)
+    ));
+    lines.push(format!(
+        "overall: {} source={} confidence={}{}",
+        engine_cell_label(&projection.overall),
+        engine_source_label(projection.overall.source),
+        map_confidence_label(projection.overall.confidence),
+        engine_active_marker(&projection.overall),
+    ));
     lines.push(String::new());
 
-    lines.push(format!(
-        "unfinished_locks: {}",
-        app.engine_detail.unfinished_lock_rows.len()
-    ));
+    lines.push("checks:".to_string());
+    for check in &projection.checks {
+        lines.push(format!(
+            "  {}: {} signal={} count={} age={} detail={} source={} confidence={}{}",
+            check.name,
+            engine_cell_label(&check.cell),
+            present_opt(check.signal.as_deref()),
+            check
+                .count
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "—".to_string()),
+            check
+                .age_epoch
+                .map(|epoch| epoch.to_string())
+                .unwrap_or_else(|| "—".to_string()),
+            present_opt(check.detail.as_deref()),
+            engine_source_label(check.cell.source),
+            map_confidence_label(check.cell.confidence),
+            engine_active_marker(&check.cell),
+        ));
+    }
+    lines.push(String::new());
+
+    lines.push("unfinished_locks:".to_string());
     if app.engine_detail.unfinished_lock_rows.is_empty() {
         lines.push("  —".to_string());
     } else {
@@ -1008,6 +1038,38 @@ pub(super) fn engine_lines(app: &App) -> Vec<String> {
         }
     }
     lines
+}
+
+fn engine_cell_label(cell: &EngineCheckCell) -> String {
+    format!("{} {}", engine_glyph_label(cell.glyph), cell.glyph.symbol())
+}
+
+fn engine_glyph_label(glyph: EngineGlyph) -> &'static str {
+    match glyph {
+        EngineGlyph::Clear => "clear",
+        EngineGlyph::Active => "active",
+        EngineGlyph::Waiting => "waiting",
+        EngineGlyph::Fault => "fault",
+        EngineGlyph::Unknown => "unknown",
+    }
+}
+
+fn engine_source_label(source: EngineSource) -> &'static str {
+    match source {
+        EngineSource::DaemonLiveness => "daemon_liveness",
+        EngineSource::DispatchLocks => "dispatch_locks",
+        EngineSource::LockLiveness => "lock_liveness",
+        EngineSource::AgentRunHistory => "agent_run_history",
+        EngineSource::MissingEvidence => "missing_evidence",
+    }
+}
+
+fn engine_active_marker(cell: &EngineCheckCell) -> &'static str {
+    if cell.active {
+        " active"
+    } else {
+        ""
+    }
 }
 
 fn append_events(lines: &mut Vec<String>, events: &[RecentEvent]) {
@@ -1453,8 +1515,19 @@ mod tests {
         };
         let lines = engine_lines(&app);
         let text = lines.join("\n");
-        assert!(text.contains("daemon:"), "missing daemon: {text}");
-        assert!(text.contains("unfinished_locks:"), "missing locks: {text}");
+        assert!(
+            text.contains("projection_confidence:"),
+            "missing confidence: {text}"
+        );
+        assert!(
+            text.contains("DAEMON: clear ✓"),
+            "missing daemon check: {text}"
+        );
+        assert!(text.contains("LOCKS:"), "missing lock check: {text}");
+        assert!(
+            text.contains("unfinished_locks:"),
+            "missing raw locks: {text}"
+        );
         assert!(text.contains("planner"), "missing agent_name: {text}");
         assert!(text.contains("9876"), "missing daemon pid: {text}");
     }

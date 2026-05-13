@@ -14,12 +14,13 @@ use super::data::{
     StoreFlowModel, StoreLane,
 };
 use super::semantics::{
-    engine_presentation, external_review_presentation, external_review_runner_label,
-    external_review_watch_projection, external_review_watch_slot_label, intake_funnel_projection,
-    intake_presentation, intake_watch_projection, intake_watch_slot_label,
-    observation_flow_projection, observation_presentation, observation_watch_projection,
-    observation_watch_slot_label, review_lane_projection, task_map_projection, task_presentation,
-    task_watch_projection, task_watch_slot_label, IntakeFunnelCell, IntakeFunnelProjection,
+    engine_flow_slots, engine_health_projection, external_review_presentation,
+    external_review_runner_label, external_review_watch_projection,
+    external_review_watch_slot_label, intake_funnel_projection, intake_presentation,
+    intake_watch_projection, intake_watch_slot_label, observation_flow_projection,
+    observation_presentation, observation_watch_projection, observation_watch_slot_label,
+    review_lane_projection, task_map_projection, task_presentation, task_watch_projection,
+    task_watch_slot_label, EngineCheck, EngineCheckCell, IntakeFunnelCell, IntakeFunnelProjection,
     MapCell, MapColor, ObservationFlowCell, ObservationFlowProjection, PresentationSeverity,
     ReviewLaneCell, ReviewLaneProjection, TaskMapProjection, WatchProjection, WatchSlotId,
 };
@@ -511,12 +512,22 @@ impl FlowSlot {
         }
     }
 
-    fn flag(glyph: &'static str, label: &'static str, attention: TopSlotAttention) -> Self {
+    fn from_engine(
+        slot: super::semantics::FlowSlotPresentation,
+        fallback_attention: TopSlotAttention,
+    ) -> Self {
         Self {
-            glyph,
-            label,
-            count: None,
-            attention,
+            glyph: slot.glyph,
+            label: slot.label,
+            count: slot.count,
+            attention: match slot.slot {
+                PresentationSeverity::Exit => TopSlotAttention::Exhaust,
+                PresentationSeverity::Fault => TopSlotAttention::Fault,
+                PresentationSeverity::Front
+                | PresentationSeverity::Work
+                | PresentationSeverity::Gate
+                | PresentationSeverity::Wait => fallback_attention,
+            },
         }
     }
 
@@ -714,28 +725,24 @@ fn lane_card_slots(lane: StoreLane, model: &StoreFlowModel) -> [FlowSlot; 6] {
             } else {
                 super::daemon::Liveness::Dead
             };
-            let state = engine_presentation(&health, &daemon);
-            let clear = usize::from(state.label == "clear" || state.label == "manual");
-            let wait_slot = if state.label == "manual" {
-                FlowSlot::flag("△", "manual", TopSlotAttention::Neutral)
-            } else {
-                FlowSlot::new("△", "waiting", 0, TopSlotAttention::Flow)
-            };
-            let fault_slot = if state.severity == PresentationSeverity::Fault {
-                FlowSlot::flag("▲", "daemon down", TopSlotAttention::Fault)
-            } else {
-                FlowSlot::new("▲", "errors", 0, TopSlotAttention::Fault)
-            };
+            let slots = engine_flow_slots(&health, &daemon);
             [
-                FlowSlot::new("◌", "dispatch", 0, TopSlotAttention::Neutral),
-                FlowSlot::new("◆", "runners", 0, TopSlotAttention::Neutral),
-                FlowSlot::new("◇", "locks", e.unfinished_locks, TopSlotAttention::Fault),
-                FlowSlot::new("✓", "clear", clear, TopSlotAttention::Exhaust),
-                wait_slot,
-                fault_slot,
+                flow_slot_from_engine(slots[0].clone(), TopSlotAttention::Neutral),
+                flow_slot_from_engine(slots[1].clone(), TopSlotAttention::Neutral),
+                flow_slot_from_engine(slots[2].clone(), TopSlotAttention::Fault),
+                flow_slot_from_engine(slots[3].clone(), TopSlotAttention::Exhaust),
+                flow_slot_from_engine(slots[4].clone(), TopSlotAttention::Flow),
+                flow_slot_from_engine(slots[5].clone(), TopSlotAttention::Fault),
             ]
         }
     }
+}
+
+fn flow_slot_from_engine(
+    slot: super::semantics::FlowSlotPresentation,
+    fallback_attention: TopSlotAttention,
+) -> FlowSlot {
+    FlowSlot::from_engine(slot, fallback_attention)
 }
 
 fn split_store_card_widths(lane: StoreLane, model: &StoreFlowModel, width: u16) -> [u16; 3] {
@@ -1209,77 +1216,17 @@ fn review_projection_group_count(full: &[FlatRow], app: &App, slot: WatchSlotId)
         .count()
 }
 
-/// Engine-health panel: daemon liveness, dispatch-lock counts, oldest-lock
-/// age, and an agent_runs note. No row list — this lane is a system-state
-/// surface, not a row store.
+/// Engine-health panel: clean dense dashboard. No row list — this lane is a
+/// system-state surface, not a row store.
 fn draw_engine_panel(f: &mut Frame, app: &App, area: Rect) {
-    let model = store_flow_model(
-        &app.rows,
+    let projection = engine_health_projection(
         &app.system_health,
+        &app.engine_detail,
         &app.status_bar.daemon_liveness,
-        &app.external_review,
     );
-    let e = &model.engine;
-    let daemon_line = if e.daemon_live {
-        Line::from(Span::styled(
-            "daemon: LIVE",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        Line::from(Span::styled(
-            "daemon: DEAD ⚠",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ))
-    };
-    let locks_line = Line::from(Span::raw(format!(
-        "unfinished_locks: {}",
-        e.unfinished_locks
-    )));
-    let oldest_line = Line::from(Span::raw(match e.oldest_lock_age_secs {
-        Some(secs) if secs >= 3600 => format!("oldest_lock_age: {}h", secs / 3600),
-        Some(secs) if secs >= 60 => format!("oldest_lock_age: {}m", secs / 60),
-        Some(_) => "oldest_lock_age: <1m".to_string(),
-        None => "oldest_lock_age: —".to_string(),
-    }));
-    let runs_line = Line::from(Span::styled(
-        format!(
-            "agent_runs (recent): {} (not yet wired)",
-            e.agent_runs_recent
-        ),
-        Style::default().fg(Color::DarkGray),
-    ));
-    let alert_lines: Vec<Line<'static>> = if !e.daemon_live && e.unfinished_locks > 0 {
-        vec![Line::from(Span::styled(
-            format!(
-                "system-alert: daemon DEAD; {} dangling locks",
-                e.unfinished_locks
-            ),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ))]
-    } else {
-        Vec::new()
-    };
-    let mut lines = vec![daemon_line, locks_line, oldest_line, runs_line];
-    if let Some(start) = app.engine_detail.recent_daemon_starts.first() {
-        let started = start.started_at.as_deref().unwrap_or("-");
-        lines.push(Line::from(Span::raw(format!(
-            "recent_restart: pid={} at {}",
-            start.pid, started
-        ))));
-    }
-    for lock in app.engine_detail.unfinished_lock_rows.iter().take(3) {
-        let agent = lock.agent_name.as_deref().unwrap_or("-");
-        let heartbeat = lock.heartbeat_at.as_deref().unwrap_or("-");
-        lines.push(Line::from(Span::raw(format!(
-            "lock: {} runner={} last_progress={} {}",
-            lock.display_id, agent, heartbeat, lock.liveness_label
-        ))));
-    }
-    if !alert_lines.is_empty() {
-        lines.push(Line::from(""));
-        lines.extend(alert_lines);
+    let mut lines = vec![engine_table_header()];
+    for check in &projection.checks {
+        lines.push(engine_check_line(check));
     }
     let body = Paragraph::new(lines).block(
         Block::default()
@@ -1287,6 +1234,69 @@ fn draw_engine_panel(f: &mut Frame, app: &App, area: Rect) {
             .title(" ENGINE · system health "),
     );
     f.render_widget(body, area);
+}
+
+fn engine_table_header() -> Line<'static> {
+    Line::from(vec![Span::styled(
+        format!(
+            "  {:<10} {:<5} {:<12} {:>5} {:>5} {}",
+            "CHECK", "STATE", "SIGNAL", "AGE", "COUNT", "DETAIL"
+        ),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )])
+}
+
+fn engine_check_line(check: &EngineCheck) -> Line<'static> {
+    let age = check
+        .age_epoch
+        .and_then(|epoch| (epoch > 0).then_some(epoch))
+        .map(|epoch| compact_age_label(Some(epoch)))
+        .unwrap_or_else(|| "-".to_string());
+    let count = check
+        .count
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let signal = truncate(check.signal.as_deref().unwrap_or("-"), 12);
+    let detail = truncate(check.detail.as_deref().unwrap_or("-"), 60);
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<10}", check.name),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<5}", check.cell.glyph.symbol()),
+            engine_cell_style(&check.cell),
+        ),
+        Span::raw(" "),
+        Span::raw(format!("{:<12}", signal)),
+        Span::raw(" "),
+        Span::raw(format!("{:>5}", age)),
+        Span::raw(" "),
+        Span::raw(format!("{:>5}", count)),
+        Span::raw(" "),
+        Span::raw(detail),
+    ])
+}
+
+fn engine_cell_style(cell: &EngineCheckCell) -> Style {
+    let style = match cell.color_role {
+        MapColor::Inactive => Style::default().fg(WATCH_OVERLAY0),
+        MapColor::ActiveWork => Style::default().fg(Color::Cyan),
+        MapColor::ActiveGate => Style::default().fg(WATCH_YELLOW),
+        MapColor::Passed => Style::default().fg(WATCH_GREEN),
+        MapColor::Failed => Style::default().fg(WATCH_RED),
+        MapColor::Waiting => Style::default().fg(WATCH_PEACH),
+        MapColor::Unknown => Style::default().fg(WATCH_OVERLAY2),
+    };
+    if cell.active {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 /// Render the side detail pane for the currently selected row. When the
@@ -3015,7 +3025,7 @@ mod tests {
         manual.engine.daemon_live = false;
         let manual_slots = lane_card_slots(StoreLane::EngineHealth, &manual);
         assert_eq!(manual_slots[4].label, "manual");
-        assert_eq!(manual_slots[5].label, "errors");
+        assert_eq!(manual_slots[5].label, "fault");
         assert_eq!(manual_slots[5].count, Some(0));
 
         let mut fault = StoreFlowModel::default();
@@ -4531,11 +4541,11 @@ mod tests {
         let lines: Vec<&str> = painted.lines().collect();
         let middle: String = lines[TOP_STRIP_HEIGHT as usize..lines.len() - 3].join("\n");
         assert!(
-            middle.contains("daemon: DEAD"),
-            "engine panel must show daemon status; got middle:\n{middle}"
+            middle.contains("DAEMON") && middle.contains("manual"),
+            "engine panel must show daemon check; got middle:\n{middle}"
         );
         assert!(
-            middle.contains("unfinished_locks: 3"),
+            middle.contains("LOCKS") && middle.contains("daemon down") && middle.contains("3"),
             "engine panel must show lock count; got middle:\n{middle}"
         );
         // Side detail pane now renders engine detail (T141 P2): the
@@ -4971,35 +4981,59 @@ mod tests {
     }
 
     #[test]
-    fn engine_panel_renders_recent_daemon_restart_when_present() {
-        use crate::tui::data::DaemonStartRow;
+    fn engine_panel_renders_dense_dashboard_without_prose_bags() {
+        use crate::tui::data::{AgentRunsRoleAggregate, DispatchLockRow};
         let mut app = cockpit_fixture_app();
         app.focused_store = StoreLane::EngineHealth;
-        app.engine_detail.recent_daemon_starts = vec![DaemonStartRow {
-            pid: 4242,
-            started_at: Some("2026-05-09T12:34:56Z".to_string()),
+        app.status_bar.daemon_liveness = crate::tui::daemon::Liveness::Live { pid: 4242 };
+        app.system_health.unfinished_dispatch_locks = 1;
+        app.system_health.oldest_claimed_at_epoch = Some(now_epoch() - 3600);
+        app.engine_detail.unfinished_lock_rows = vec![DispatchLockRow {
+            display_id: "T500".to_string(),
+            agent_name: Some("executor".to_string()),
+            liveness_label: "live".to_string(),
             ..Default::default()
+        }];
+        app.engine_detail.recent_agent_runs_by_role = vec![AgentRunsRoleAggregate {
+            role: "executor".to_string(),
+            count: 4,
+            total_tokens: 12_000,
         }];
         let buf = paint(&mut app, 120, 30);
         let painted = buffer_to_string(&buf);
+        for needle in [
+            "CHECK",
+            "STATE",
+            "SIGNAL",
+            "AGE",
+            "COUNT",
+            "DETAIL",
+            "DAEMON",
+            "LOCKS",
+            "RUNNERS",
+            "AGENT RUNS",
+        ] {
+            assert!(painted.contains(needle), "missing {needle}:\n{painted}");
+        }
         assert!(
-            painted.contains("recent_restart:"),
-            "engine panel must include recent_restart line:\n{painted}"
+            painted.contains("pid 4242"),
+            "missing daemon detail:\n{painted}"
         );
         assert!(
-            painted.contains("pid="),
-            "engine panel restart line must include pid=:\n{painted}"
+            painted.contains("from unfinished locks"),
+            "missing runner source:\n{painted}"
         );
-
-        // Empty recent_daemon_starts → no restart line, no panic.
-        let mut empty_app = cockpit_fixture_app();
-        empty_app.focused_store = StoreLane::EngineHealth;
-        let buf2 = paint(&mut empty_app, 120, 30);
-        let painted2 = buffer_to_string(&buf2);
-        assert!(
-            !painted2.contains("recent_restart:"),
-            "engine panel must NOT include recent_restart line when empty:\n{painted2}"
-        );
+        for bag in [
+            "oldest_lock_age:",
+            "agent_runs (recent):",
+            "recent_restart:",
+            "lock:",
+        ] {
+            assert!(
+                !painted.contains(bag),
+                "engine prose bag remained {bag}:\n{painted}"
+            );
+        }
     }
 
     /// AC3.6 invariant restated as a render-layer assertion: with focused
