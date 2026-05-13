@@ -4,12 +4,15 @@
 //! glyphs. Rendering phases consume these structs later; rows/details keep raw
 //! tuples elsewhere.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use super::daemon::Liveness;
 use super::data::{
     obs_lifecycle, task_active_step, task_integration_step, task_is_blocked,
-    task_is_terminal_primary, task_lifecycle, IntakeRow, ObsRow, ReviewRow, SystemHealth, TaskRow,
+    task_is_terminal_primary, task_lifecycle, CycleReviewGate, IntakeRow, ObsRow, PlanReviewGate,
+    ReviewRow, SystemHealth, TaskCycleEntry, TaskRow,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +92,439 @@ pub fn task_watch_projection(task: &TaskRow) -> WatchProjection {
         row_signal: presentation.signal,
         next_action: None,
         attention: watch_attention(slot),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapGlyph {
+    Queued,
+    Planning,
+    PlanReview,
+    UnreachedPhase,
+    Executing,
+    CodeReview,
+    Wrap,
+    Waiting,
+    Fault,
+    Unknown,
+}
+
+impl MapGlyph {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Queued => "◌",
+            Self::Planning => "○",
+            Self::PlanReview => "●",
+            Self::UnreachedPhase => "·",
+            Self::Executing => "□",
+            Self::CodeReview => "▣",
+            Self::Wrap => "▰",
+            Self::Waiting => "△",
+            Self::Fault => "▲",
+            Self::Unknown => "?",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapColor {
+    Inactive,
+    ActiveWork,
+    ActiveGate,
+    Passed,
+    Failed,
+    Waiting,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapConfidence {
+    Exact,
+    Implied,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapSource {
+    Lifecycle,
+    ActiveStep,
+    CurrentPhaseCycle,
+    TotalPhases,
+    PlanReviewLog,
+    Cycles,
+    PlanSource,
+    Blocker,
+    TerminalLifecycle,
+    MissingEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapCell {
+    pub glyph: MapGlyph,
+    pub cycle: Option<i64>,
+    pub color_role: MapColor,
+    pub active: bool,
+    pub source: MapSource,
+    pub confidence: MapConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskMapProjection {
+    pub planning: MapCell,
+    pub phases: Vec<MapCell>,
+    pub wrap: Option<MapCell>,
+    pub fallback: Option<MapCell>,
+    pub reason: Option<String>,
+    pub confidence: MapConfidence,
+}
+
+pub fn task_map_projection(task: &TaskRow) -> TaskMapProjection {
+    let mut planning = planning_cell(task);
+    let mut phases = phase_cells(task);
+    apply_historical_cycles(task, &mut phases);
+    apply_current_execution(task, &mut phases);
+    infer_planning_from_progress(task, &mut planning);
+
+    let wrap = wrap_cell(task);
+    let (fallback, reason) = blocked_fallback(task);
+    let confidence = projection_confidence(&planning, &phases, wrap.as_ref(), fallback.as_ref());
+
+    TaskMapProjection {
+        planning,
+        phases,
+        wrap,
+        fallback,
+        reason,
+        confidence,
+    }
+}
+
+fn map_cell(
+    glyph: MapGlyph,
+    cycle: Option<i64>,
+    color_role: MapColor,
+    active: bool,
+    source: MapSource,
+    confidence: MapConfidence,
+) -> MapCell {
+    MapCell {
+        glyph,
+        cycle: cycle.filter(|c| *c > 1),
+        color_role,
+        active,
+        source,
+        confidence,
+    }
+}
+
+fn planning_cell(task: &TaskRow) -> MapCell {
+    let lifecycle = task_lifecycle(task);
+    let active_step = task_active_step(task);
+    if lifecycle == "queued" {
+        return map_cell(
+            MapGlyph::Queued,
+            None,
+            MapColor::Inactive,
+            false,
+            MapSource::Lifecycle,
+            MapConfidence::Exact,
+        );
+    }
+    if lifecycle == "active" && active_step == "planning" {
+        return map_cell(
+            MapGlyph::Planning,
+            plan_attempt_count(task),
+            MapColor::ActiveWork,
+            true,
+            MapSource::ActiveStep,
+            MapConfidence::Exact,
+        );
+    }
+    if lifecycle == "active" && active_step == "planning_review" {
+        return map_cell(
+            MapGlyph::PlanReview,
+            plan_attempt_count(task),
+            MapColor::ActiveGate,
+            true,
+            MapSource::ActiveStep,
+            MapConfidence::Exact,
+        );
+    }
+
+    match task.plan_review_entries.last().map(|entry| &entry.gate) {
+        Some(PlanReviewGate::Ready) => map_cell(
+            MapGlyph::PlanReview,
+            plan_attempt_count(task),
+            MapColor::Passed,
+            false,
+            MapSource::PlanReviewLog,
+            MapConfidence::Exact,
+        ),
+        Some(PlanReviewGate::NotReady) => map_cell(
+            MapGlyph::PlanReview,
+            plan_attempt_count(task),
+            MapColor::Failed,
+            false,
+            MapSource::PlanReviewLog,
+            MapConfidence::Exact,
+        ),
+        _ if task
+            .plan_source
+            .as_deref()
+            .map(|s| s == "contract_synthesized")
+            .unwrap_or(false) =>
+        {
+            map_cell(
+                MapGlyph::PlanReview,
+                None,
+                MapColor::Inactive,
+                false,
+                MapSource::PlanSource,
+                MapConfidence::Implied,
+            )
+        }
+        _ => map_cell(
+            MapGlyph::Queued,
+            None,
+            MapColor::Inactive,
+            false,
+            MapSource::MissingEvidence,
+            MapConfidence::Unknown,
+        ),
+    }
+}
+
+fn plan_attempt_count(task: &TaskRow) -> Option<i64> {
+    let attempts = task.plan_review_entries.len() as i64;
+    (attempts > 1).then_some(attempts)
+}
+
+fn phase_cells(task: &TaskRow) -> Vec<MapCell> {
+    match task.total_phases {
+        Some(total) if total > 0 => (0..total)
+            .map(|_| {
+                map_cell(
+                    MapGlyph::UnreachedPhase,
+                    None,
+                    MapColor::Inactive,
+                    false,
+                    MapSource::TotalPhases,
+                    MapConfidence::Exact,
+                )
+            })
+            .collect(),
+        _ => vec![map_cell(
+            MapGlyph::Unknown,
+            None,
+            MapColor::Unknown,
+            false,
+            MapSource::MissingEvidence,
+            MapConfidence::Unknown,
+        )],
+    }
+}
+
+fn apply_historical_cycles(task: &TaskRow, phases: &mut [MapCell]) {
+    let mut latest_by_phase: BTreeMap<i64, &TaskCycleEntry> = BTreeMap::new();
+    for entry in &task.cycle_entries {
+        if entry.phase <= 0 || entry.cycle <= 0 {
+            continue;
+        }
+        latest_by_phase
+            .entry(entry.phase)
+            .and_modify(|current| {
+                if entry.cycle > current.cycle {
+                    *current = entry;
+                }
+            })
+            .or_insert(entry);
+    }
+
+    for (phase, entry) in latest_by_phase {
+        let Some(cell) = phase_cell_mut(phases, phase) else {
+            continue;
+        };
+        match entry.review_gate.as_ref() {
+            Some(CycleReviewGate::Pass) => {
+                *cell = map_cell(
+                    MapGlyph::CodeReview,
+                    Some(entry.cycle),
+                    MapColor::Passed,
+                    false,
+                    MapSource::Cycles,
+                    MapConfidence::Exact,
+                );
+            }
+            Some(CycleReviewGate::Revise) => {
+                *cell = map_cell(
+                    MapGlyph::CodeReview,
+                    Some(entry.cycle),
+                    MapColor::ActiveGate,
+                    false,
+                    MapSource::Cycles,
+                    MapConfidence::Exact,
+                );
+            }
+            Some(CycleReviewGate::Fail) => {
+                *cell = map_cell(
+                    MapGlyph::CodeReview,
+                    Some(entry.cycle),
+                    MapColor::Failed,
+                    false,
+                    MapSource::Cycles,
+                    MapConfidence::Exact,
+                );
+            }
+            Some(CycleReviewGate::Unknown(_)) | None => {}
+        }
+    }
+}
+
+fn apply_current_execution(task: &TaskRow, phases: &mut [MapCell]) {
+    let Some(phase) = task.current_phase.filter(|p| *p > 0) else {
+        return;
+    };
+    let Some(cell) = phase_cell_mut(phases, phase) else {
+        return;
+    };
+    match task_active_step(task) {
+        "coding" => {
+            *cell = map_cell(
+                MapGlyph::Executing,
+                task.current_cycle,
+                MapColor::ActiveWork,
+                true,
+                MapSource::CurrentPhaseCycle,
+                MapConfidence::Exact,
+            );
+        }
+        "coding_review" => {
+            *cell = map_cell(
+                MapGlyph::CodeReview,
+                task.current_cycle,
+                MapColor::ActiveGate,
+                true,
+                MapSource::CurrentPhaseCycle,
+                MapConfidence::Exact,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn phase_cell_mut(phases: &mut [MapCell], phase: i64) -> Option<&mut MapCell> {
+    let index = usize::try_from(phase - 1).ok()?;
+    phases.get_mut(index)
+}
+
+fn infer_planning_from_progress(task: &TaskRow, planning: &mut MapCell) {
+    if planning.confidence != MapConfidence::Unknown {
+        return;
+    }
+    let has_execution_progress = task.current_phase.filter(|p| *p > 0).is_some()
+        || task
+            .cycle_entries
+            .iter()
+            .any(|entry| entry.phase > 0 && entry.cycle > 0)
+        || task_active_step(task) == "wrapping"
+        || task_is_terminal_primary(task);
+    if has_execution_progress {
+        *planning = map_cell(
+            MapGlyph::PlanReview,
+            None,
+            MapColor::Inactive,
+            false,
+            MapSource::Lifecycle,
+            MapConfidence::Implied,
+        );
+    }
+}
+
+fn wrap_cell(task: &TaskRow) -> Option<MapCell> {
+    if task_lifecycle(task) == "active" && task_active_step(task) == "wrapping" {
+        return Some(map_cell(
+            MapGlyph::Wrap,
+            None,
+            MapColor::ActiveGate,
+            true,
+            MapSource::ActiveStep,
+            MapConfidence::Exact,
+        ));
+    }
+    if task_is_terminal_primary(task) {
+        return Some(map_cell(
+            MapGlyph::Wrap,
+            None,
+            MapColor::Passed,
+            false,
+            MapSource::TerminalLifecycle,
+            MapConfidence::Exact,
+        ));
+    }
+    None
+}
+
+fn blocked_fallback(task: &TaskRow) -> (Option<MapCell>, Option<String>) {
+    if !task_is_blocked(task) {
+        return (None, None);
+    }
+    let kind = task
+        .blocker_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "none")
+        .or_else(|| {
+            task.blocked_reason_class
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "none")
+        })
+        .unwrap_or("blocked");
+    let waiting = matches!(kind, "capacity" | "dependency" | "rate_limit" | "human");
+    let cell = if waiting {
+        map_cell(
+            MapGlyph::Waiting,
+            None,
+            MapColor::Waiting,
+            false,
+            MapSource::Blocker,
+            MapConfidence::Exact,
+        )
+    } else {
+        map_cell(
+            MapGlyph::Fault,
+            None,
+            MapColor::Failed,
+            false,
+            MapSource::Blocker,
+            MapConfidence::Exact,
+        )
+    };
+    (Some(cell), Some(kind.to_string()))
+}
+
+fn projection_confidence(
+    planning: &MapCell,
+    phases: &[MapCell],
+    wrap: Option<&MapCell>,
+    fallback: Option<&MapCell>,
+) -> MapConfidence {
+    let cells = std::iter::once(planning)
+        .chain(phases.iter())
+        .chain(wrap)
+        .chain(fallback);
+    if cells
+        .clone()
+        .any(|cell| cell.confidence == MapConfidence::Unknown)
+    {
+        MapConfidence::Unknown
+    } else if cells
+        .clone()
+        .any(|cell| cell.confidence == MapConfidence::Implied)
+    {
+        MapConfidence::Implied
+    } else {
+        MapConfidence::Exact
     }
 }
 
@@ -789,6 +1225,324 @@ mod tests {
             let projection = task_watch_projection(&row);
             assert_eq!((projection.slot, projection.row_stage), (slot, stage));
         }
+    }
+
+    fn task_with_map_fields() -> TaskRow {
+        TaskRow {
+            display_id: "T-map".to_string(),
+            status: "planning".to_string(),
+            lifecycle: Some("active".to_string()),
+            active_step: Some("none".to_string()),
+            integration_step: Some("none".to_string()),
+            total_phases: Some(3),
+            ..Default::default()
+        }
+    }
+
+    fn plan_gate(gate: PlanReviewGate) -> super::super::data::TaskPlanReviewEntry {
+        super::super::data::TaskPlanReviewEntry {
+            gate,
+            summary: None,
+            at: None,
+        }
+    }
+
+    fn cycle(phase: i64, cycle: i64, gate: Option<CycleReviewGate>) -> TaskCycleEntry {
+        TaskCycleEntry {
+            phase,
+            cycle,
+            review_gate: gate,
+            ..Default::default()
+        }
+    }
+
+    fn phase_shapes(
+        projection: &TaskMapProjection,
+    ) -> Vec<(MapGlyph, Option<i64>, MapColor, bool)> {
+        projection
+            .phases
+            .iter()
+            .map(|cell| (cell.glyph, cell.cycle, cell.color_role, cell.active))
+            .collect()
+    }
+
+    #[test]
+    fn task_map_projection_covers_planning_states() {
+        let cases = [
+            (
+                "queued before plan",
+                TaskRow {
+                    lifecycle: Some("queued".to_string()),
+                    active_step: Some("none".to_string()),
+                    total_phases: Some(3),
+                    ..Default::default()
+                },
+                MapGlyph::Queued,
+                None,
+                MapColor::Inactive,
+                false,
+                MapConfidence::Exact,
+            ),
+            (
+                "planning cycle one",
+                TaskRow {
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("planning".to_string()),
+                    total_phases: Some(3),
+                    ..Default::default()
+                },
+                MapGlyph::Planning,
+                None,
+                MapColor::ActiveWork,
+                true,
+                MapConfidence::Exact,
+            ),
+            (
+                "plan review current",
+                TaskRow {
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("planning_review".to_string()),
+                    total_phases: Some(3),
+                    ..Default::default()
+                },
+                MapGlyph::PlanReview,
+                None,
+                MapColor::ActiveGate,
+                true,
+                MapConfidence::Exact,
+            ),
+            (
+                "plan review attempt three",
+                TaskRow {
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("planning_review".to_string()),
+                    total_phases: Some(3),
+                    plan_review_entries: vec![
+                        plan_gate(PlanReviewGate::NeedsWork),
+                        plan_gate(PlanReviewGate::NeedsWork),
+                        plan_gate(PlanReviewGate::NotReady),
+                    ],
+                    ..Default::default()
+                },
+                MapGlyph::PlanReview,
+                Some(3),
+                MapColor::ActiveGate,
+                true,
+                MapConfidence::Exact,
+            ),
+            (
+                "plan review passed from READY",
+                TaskRow {
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("none".to_string()),
+                    total_phases: Some(3),
+                    plan_review_entries: vec![plan_gate(PlanReviewGate::Ready)],
+                    ..Default::default()
+                },
+                MapGlyph::PlanReview,
+                None,
+                MapColor::Passed,
+                false,
+                MapConfidence::Exact,
+            ),
+            (
+                "plan review failed from NOT_READY",
+                TaskRow {
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("none".to_string()),
+                    total_phases: Some(3),
+                    plan_review_entries: vec![plan_gate(PlanReviewGate::NotReady)],
+                    ..Default::default()
+                },
+                MapGlyph::PlanReview,
+                None,
+                MapColor::Failed,
+                false,
+                MapConfidence::Exact,
+            ),
+            (
+                "T1 contract synthesized is not green plan pass",
+                TaskRow {
+                    lifecycle: Some("active".to_string()),
+                    active_step: Some("none".to_string()),
+                    total_phases: Some(1),
+                    plan_source: Some("contract_synthesized".to_string()),
+                    ..Default::default()
+                },
+                MapGlyph::PlanReview,
+                None,
+                MapColor::Inactive,
+                false,
+                MapConfidence::Implied,
+            ),
+        ];
+
+        for (name, row, glyph, cycle, color, active, confidence) in cases {
+            let projection = task_map_projection(&row);
+            assert_eq!(projection.planning.glyph, glyph, "{name}");
+            assert_eq!(projection.planning.cycle, cycle, "{name}");
+            assert_eq!(projection.planning.color_role, color, "{name}");
+            assert_eq!(projection.planning.active, active, "{name}");
+            assert_eq!(projection.planning.confidence, confidence, "{name}");
+        }
+    }
+
+    #[test]
+    fn task_map_projection_covers_execution_and_history() {
+        let cases = [
+            (
+                "executing phase N cycle M",
+                TaskRow {
+                    active_step: Some("coding".to_string()),
+                    current_phase: Some(2),
+                    current_cycle: Some(3),
+                    ..task_with_map_fields()
+                },
+                vec![
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                    (MapGlyph::Executing, Some(3), MapColor::ActiveWork, true),
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                ],
+            ),
+            (
+                "code review phase N cycle M",
+                TaskRow {
+                    active_step: Some("coding_review".to_string()),
+                    current_phase: Some(2),
+                    current_cycle: Some(3),
+                    ..task_with_map_fields()
+                },
+                vec![
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                    (MapGlyph::CodeReview, Some(3), MapColor::ActiveGate, true),
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                ],
+            ),
+            (
+                "previous phase pass after earlier revise",
+                TaskRow {
+                    cycle_entries: vec![
+                        cycle(1, 1, Some(CycleReviewGate::Revise)),
+                        cycle(1, 2, Some(CycleReviewGate::Pass)),
+                    ],
+                    ..task_with_map_fields()
+                },
+                vec![
+                    (MapGlyph::CodeReview, Some(2), MapColor::Passed, false),
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                ],
+            ),
+            (
+                "current executing cycle two after REVISE",
+                TaskRow {
+                    active_step: Some("coding".to_string()),
+                    current_phase: Some(2),
+                    current_cycle: Some(2),
+                    cycle_entries: vec![cycle(2, 1, Some(CycleReviewGate::Revise))],
+                    ..task_with_map_fields()
+                },
+                vec![
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                    (MapGlyph::Executing, Some(2), MapColor::ActiveWork, true),
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                ],
+            ),
+            (
+                "current code review cycle two",
+                TaskRow {
+                    active_step: Some("coding_review".to_string()),
+                    current_phase: Some(2),
+                    current_cycle: Some(2),
+                    ..task_with_map_fields()
+                },
+                vec![
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                    (MapGlyph::CodeReview, Some(2), MapColor::ActiveGate, true),
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                ],
+            ),
+            (
+                "FAIL is exact red structured proof",
+                TaskRow {
+                    cycle_entries: vec![cycle(2, 1, Some(CycleReviewGate::Fail))],
+                    ..task_with_map_fields()
+                },
+                vec![
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                    (MapGlyph::CodeReview, None, MapColor::Failed, false),
+                    (MapGlyph::UnreachedPhase, None, MapColor::Inactive, false),
+                ],
+            ),
+        ];
+
+        for (name, row, expected) in cases {
+            let projection = task_map_projection(&row);
+            assert_eq!(phase_shapes(&projection), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn task_map_projection_covers_unknown_blocked_and_wrap() {
+        let unknown = TaskRow {
+            lifecycle: Some("active".to_string()),
+            active_step: Some("none".to_string()),
+            total_phases: None,
+            ..Default::default()
+        };
+        let projection = task_map_projection(&unknown);
+        assert_eq!(projection.phases.len(), 1);
+        assert_eq!(projection.phases[0].glyph, MapGlyph::Unknown);
+        assert_eq!(projection.phases[0].confidence, MapConfidence::Unknown);
+
+        let capacity = TaskRow {
+            lifecycle: Some("queued".to_string()),
+            blocked: Some(true),
+            blocker_kind: Some("capacity".to_string()),
+            total_phases: Some(1),
+            ..Default::default()
+        };
+        let projection = task_map_projection(&capacity);
+        assert_eq!(projection.reason.as_deref(), Some("capacity"));
+        let fallback = projection.fallback.as_ref().unwrap();
+        assert_eq!(fallback.glyph, MapGlyph::Waiting);
+        assert_eq!(fallback.color_role, MapColor::Waiting);
+
+        let runner = TaskRow {
+            lifecycle: Some("active".to_string()),
+            blocked: Some(true),
+            blocker_kind: Some("runner".to_string()),
+            total_phases: Some(1),
+            ..Default::default()
+        };
+        let projection = task_map_projection(&runner);
+        assert_eq!(projection.reason.as_deref(), Some("runner"));
+        let fallback = projection.fallback.as_ref().unwrap();
+        assert_eq!(fallback.glyph, MapGlyph::Fault);
+        assert_eq!(fallback.color_role, MapColor::Failed);
+
+        let wrapping = TaskRow {
+            lifecycle: Some("active".to_string()),
+            active_step: Some("wrapping".to_string()),
+            total_phases: Some(1),
+            ..Default::default()
+        };
+        let projection = task_map_projection(&wrapping);
+        let wrap = projection.wrap.as_ref().unwrap();
+        assert_eq!(wrap.glyph, MapGlyph::Wrap);
+        assert_eq!(wrap.color_role, MapColor::ActiveGate);
+        assert!(wrap.active);
+
+        let accepted = TaskRow {
+            lifecycle: Some("done".to_string()),
+            total_phases: Some(1),
+            ..Default::default()
+        };
+        let projection = task_map_projection(&accepted);
+        let wrap = projection.wrap.as_ref().unwrap();
+        assert_eq!(wrap.glyph, MapGlyph::Wrap);
+        assert_eq!(wrap.color_role, MapColor::Passed);
+        assert!(!wrap.active);
     }
 
     #[test]
