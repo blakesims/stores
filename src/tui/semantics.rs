@@ -652,22 +652,24 @@ pub fn observation_flow_projection(row: &ObsRow) -> ObservationFlowProjection {
         );
     }
 
-    if let Some(kind) = generic_observation_waiting_kind(row) {
-        let cell = observation_cell(
-            ObservationCheckpoint::Fallback,
-            ObservationGlyph::Waiting,
-            None,
-            MapColor::Waiting,
-            false,
-            ObservationFlowSource::WaitingKind,
-            MapConfidence::Exact,
-        );
-        return observation_projection_from_cells(
-            vec![cell],
-            Some(observation_wait_next(kind)),
-            Some(kind.to_string()),
-            observation_link(row),
-        );
+    if !observation_is_terminal(row) {
+        if let Some(kind) = generic_observation_waiting_kind(row) {
+            let cell = observation_cell(
+                ObservationCheckpoint::Fallback,
+                ObservationGlyph::Waiting,
+                None,
+                MapColor::Waiting,
+                false,
+                ObservationFlowSource::WaitingKind,
+                MapConfidence::Exact,
+            );
+            return observation_projection_from_cells(
+                vec![cell],
+                Some(observation_wait_next(kind)),
+                Some(kind.to_string()),
+                observation_link(row),
+            );
+        }
     }
 
     let include_arch = observation_has_architecture_gate(row);
@@ -887,7 +889,7 @@ fn observation_resolution_cell(row: &ObsRow) -> ObservationFlowCell {
             None,
             MapColor::Passed,
             false,
-            ObservationFlowSource::SupersededBy,
+            observation_superseded_source(row),
             MapConfidence::Exact,
         );
     }
@@ -904,7 +906,7 @@ fn observation_resolution_cell(row: &ObsRow) -> ObservationFlowCell {
             None,
             MapColor::Failed,
             false,
-            ObservationFlowSource::Outcome,
+            observation_closed_rejected_source(row),
             MapConfidence::Exact,
         );
     }
@@ -915,7 +917,7 @@ fn observation_resolution_cell(row: &ObsRow) -> ObservationFlowCell {
             None,
             MapColor::Passed,
             false,
-            ObservationFlowSource::Outcome,
+            observation_resolved_source(row),
             MapConfidence::Exact,
         );
     }
@@ -939,6 +941,44 @@ fn observation_resolution_cell(row: &ObsRow) -> ObservationFlowCell {
         ObservationFlowSource::MissingEvidence,
         MapConfidence::Exact,
     )
+}
+
+fn observation_superseded_source(row: &ObsRow) -> ObservationFlowSource {
+    if row
+        .superseded_by_id
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        ObservationFlowSource::SupersededBy
+    } else if matches!(row.outcome.as_deref(), Some("superseded")) {
+        ObservationFlowSource::Outcome
+    } else {
+        ObservationFlowSource::Status
+    }
+}
+
+fn observation_closed_rejected_source(row: &ObsRow) -> ObservationFlowSource {
+    if matches!(
+        row.outcome.as_deref(),
+        Some("closed_wont_fix" | "wont_fix" | "wont-fix")
+    ) {
+        ObservationFlowSource::Outcome
+    } else {
+        ObservationFlowSource::Status
+    }
+}
+
+fn observation_resolved_source(row: &ObsRow) -> ObservationFlowSource {
+    if matches!(
+        row.outcome.as_deref(),
+        Some("addressed" | "resolved" | "closed_resolved")
+    ) {
+        ObservationFlowSource::Outcome
+    } else if row.lifecycle.as_deref() == Some("closed") {
+        ObservationFlowSource::Lifecycle
+    } else {
+        ObservationFlowSource::Status
+    }
 }
 
 fn generic_observation_waiting_kind(row: &ObsRow) -> Option<&str> {
@@ -2180,6 +2220,28 @@ mod tests {
         });
         assert_eq!(failed.cells[0].glyph, ObservationGlyph::Fault);
         assert_eq!(failed.next.as_deref(), Some("inspect"));
+
+        let terminal_with_stale_wait = observation_flow_projection(&ObsRow {
+            status: "resolved".to_string(),
+            lifecycle: Some("closed".to_string()),
+            waiting_kind: Some("info_needed".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            terminal_with_stale_wait.cells.last().map(|cell| cell.glyph),
+            Some(ObservationGlyph::Resolved)
+        );
+        assert_eq!(terminal_with_stale_wait.next.as_deref(), Some("done"));
+        assert_eq!(terminal_with_stale_wait.reason, None);
+
+        let status_terminal = observation_flow_projection(&ObsRow {
+            status: "resolved".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(
+            status_terminal.cells.last().map(|cell| &cell.source),
+            Some(&ObservationFlowSource::Status)
+        );
     }
 
     #[test]
