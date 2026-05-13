@@ -660,6 +660,7 @@ fn intake_source_label(source: &IntakeFunnelSource) -> &'static str {
         IntakeFunnelSource::Decision => "decision",
         IntakeFunnelSource::Outcome => "outcome",
         IntakeFunnelSource::RoutedObservation => "routed_observation",
+        IntakeFunnelSource::RoutedTask => "routed_task",
         IntakeFunnelSource::RoutedArchitectureReview => "routed_architecture_review",
         IntakeFunnelSource::ProducedArtifact => "produced_artifact",
         IntakeFunnelSource::DuplicateOf => "duplicate_of",

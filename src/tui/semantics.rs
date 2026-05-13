@@ -1164,6 +1164,7 @@ pub enum IntakeFunnelSource {
     Decision,
     Outcome,
     RoutedObservation,
+    RoutedTask,
     RoutedArchitectureReview,
     ProducedArtifact,
     DuplicateOf,
@@ -1409,18 +1410,32 @@ fn intake_has_route_or_decision(row: &IntakeRow) -> bool {
 }
 
 fn intake_route_target(row: &IntakeRow) -> Option<String> {
-    row.routed_to_observation
-        .as_deref()
-        .or(row.produced_observation_id.as_deref())
-        .or(row.produced_task_id.as_deref())
-        .or(row.routed_to_arch_review.as_deref())
-        .or(row.produced_architecture_review_id.as_deref())
-        .or(row.duplicate_of.as_deref())
-        .or(row.duplicate_of_id.as_deref())
-        .or(row.produced_artifact_id.as_deref())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    // Keep the visible target aligned with the route glyph/source precedence:
+    // duplicate > architecture review > routed observation/task > generic artifact.
+    first_nonempty([row.duplicate_of.as_deref(), row.duplicate_of_id.as_deref()])
+        .or_else(|| {
+            first_nonempty([
+                row.routed_to_arch_review.as_deref(),
+                row.produced_architecture_review_id.as_deref(),
+            ])
+        })
+        .or_else(|| {
+            first_nonempty([
+                row.routed_to_observation.as_deref(),
+                row.produced_observation_id.as_deref(),
+                row.produced_task_id.as_deref(),
+            ])
+        })
+        .or_else(|| first_nonempty([row.produced_artifact_id.as_deref()]))
         .map(str::to_string)
+}
+
+fn first_nonempty<const N: usize>(values: [Option<&str>; N]) -> Option<&str> {
+    values
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
 }
 
 fn intake_routed_source(row: &IntakeRow) -> Option<IntakeFunnelSource> {
@@ -1429,12 +1444,15 @@ fn intake_routed_source(row: &IntakeRow) -> Option<IntakeFunnelSource> {
         .as_deref()
         .or(row.produced_observation_id.as_deref())
         .is_some_and(|s| !s.trim().is_empty())
-        || row
-            .produced_task_id
-            .as_deref()
-            .is_some_and(|s| !s.trim().is_empty())
     {
         return Some(IntakeFunnelSource::RoutedObservation);
+    }
+    if row
+        .produced_task_id
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Some(IntakeFunnelSource::RoutedTask);
     }
     if row
         .produced_artifact_kind
@@ -3014,6 +3032,43 @@ mod tests {
             IntakeFunnelGlyph::Unknown
         );
         assert_eq!(unknown.confidence, MapConfidence::Unknown);
+    }
+
+    #[test]
+    fn intake_funnel_route_target_matches_route_source_precedence() {
+        let duplicate_plus_route = intake_funnel_projection(&IntakeRow {
+            lifecycle: Some("closed".to_string()),
+            produced_observation_id: Some("L048".to_string()),
+            duplicate_of_id: Some("L041".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            duplicate_plus_route.route.as_ref().unwrap().glyph,
+            IntakeFunnelGlyph::Duplicate
+        );
+        assert_eq!(duplicate_plus_route.route_target.as_deref(), Some("L041"));
+
+        let arch_plus_task = intake_funnel_projection(&IntakeRow {
+            lifecycle: Some("closed".to_string()),
+            produced_task_id: Some("T010".to_string()),
+            produced_architecture_review_id: Some("A003".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            arch_plus_task.route.as_ref().unwrap().glyph,
+            IntakeFunnelGlyph::Architecture
+        );
+        assert_eq!(arch_plus_task.route_target.as_deref(), Some("A003"));
+
+        let task_route = intake_funnel_projection(&IntakeRow {
+            lifecycle: Some("closed".to_string()),
+            produced_task_id: Some("T010".to_string()),
+            ..Default::default()
+        });
+        let route = task_route.route.as_ref().unwrap();
+        assert_eq!(route.glyph, IntakeFunnelGlyph::Routed);
+        assert_eq!(route.source, IntakeFunnelSource::RoutedTask);
+        assert_eq!(task_route.route_target.as_deref(), Some("T010"));
     }
 
     #[test]
