@@ -148,6 +148,7 @@ pub enum MapConfidence {
 pub enum MapSource {
     Lifecycle,
     ActiveStep,
+    ActiveStepAndPlanReviewLog,
     CurrentPhaseCycle,
     TotalPhases,
     PlanReviewLog,
@@ -236,7 +237,7 @@ fn planning_cell(task: &TaskRow) -> MapCell {
             plan_attempt_count(task),
             MapColor::ActiveWork,
             true,
-            MapSource::ActiveStep,
+            active_planning_source(task),
             MapConfidence::Exact,
         );
     }
@@ -246,7 +247,7 @@ fn planning_cell(task: &TaskRow) -> MapCell {
             plan_attempt_count(task),
             MapColor::ActiveGate,
             true,
-            MapSource::ActiveStep,
+            active_planning_source(task),
             MapConfidence::Exact,
         );
     }
@@ -297,6 +298,14 @@ fn planning_cell(task: &TaskRow) -> MapCell {
 fn plan_attempt_count(task: &TaskRow) -> Option<i64> {
     let attempts = task.plan_review_entries.len() as i64;
     (attempts > 1).then_some(attempts)
+}
+
+fn active_planning_source(task: &TaskRow) -> MapSource {
+    if plan_attempt_count(task).is_some() {
+        MapSource::ActiveStepAndPlanReviewLog
+    } else {
+        MapSource::ActiveStep
+    }
 }
 
 fn phase_cells(task: &TaskRow) -> Vec<MapCell> {
@@ -1385,6 +1394,22 @@ mod tests {
             assert_eq!(projection.planning.active, active, "{name}");
             assert_eq!(projection.planning.confidence, confidence, "{name}");
         }
+
+        let attempt_three = task_map_projection(&TaskRow {
+            lifecycle: Some("active".to_string()),
+            active_step: Some("planning_review".to_string()),
+            total_phases: Some(3),
+            plan_review_entries: vec![
+                plan_gate(PlanReviewGate::NeedsWork),
+                plan_gate(PlanReviewGate::NeedsWork),
+                plan_gate(PlanReviewGate::NotReady),
+            ],
+            ..Default::default()
+        });
+        assert_eq!(
+            attempt_three.planning.source,
+            MapSource::ActiveStepAndPlanReviewLog
+        );
     }
 
     #[test]
