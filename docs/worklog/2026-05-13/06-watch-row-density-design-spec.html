@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>stores watch row density design spec</title>
+  <style>
+    :root {
+      --base:#1e1e2e; --mantle:#181825; --crust:#11111b; --surface0:#313244; --surface1:#45475a; --surface2:#585b70;
+      --text:#cdd6f4; --subtext:#bac2de; --muted:#9399b2; --dim:#6c7086;
+      --blue:#89b4fa; --mauve:#cba6f7; --green:#a6e3a1; --yellow:#f9e2af; --peach:#fab387; --red:#f38ba8; --teal:#94e2d5;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:linear-gradient(180deg,var(--crust),var(--base)); color:var(--text); font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif; }
+    main { max-width:1240px; margin:0 auto; padding:36px 24px 80px; }
+    h1,h2,h3 { line-height:1.15; margin:0 0 14px; }
+    h1 { font-size:34px; letter-spacing:-.02em; }
+    h2 { margin-top:42px; color:var(--blue); font-size:25px; }
+    h3 { margin-top:24px; color:var(--mauve); font-size:18px; }
+    p { margin:10px 0; }
+    .lede { color:var(--subtext); font-size:18px; max-width:920px; }
+    .card { background:rgba(49,50,68,.72); border:1px solid var(--surface1); border-radius:16px; padding:20px; margin:18px 0; box-shadow:0 10px 28px rgba(0,0,0,.22); }
+    .grid { display:grid; gap:16px; }
+    .grid.cols2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    @media (max-width:900px){ .grid.cols2{grid-template-columns:1fr;} }
+    code, pre { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    pre { background:var(--mantle); border:1px solid var(--surface1); border-radius:12px; padding:14px; overflow:auto; color:var(--subtext); font-size:13px; }
+    table { width:100%; border-collapse:collapse; margin:14px 0; }
+    th,td { border-bottom:1px solid var(--surface1); padding:10px 8px; text-align:left; vertical-align:top; }
+    th { color:var(--blue); background:rgba(69,71,90,.35); }
+    .pill { display:inline-block; border-radius:999px; padding:3px 9px; margin:2px 4px 2px 0; background:var(--surface1); color:var(--subtext); font-size:12px; }
+    .good{color:var(--green)} .warn{color:var(--yellow)} .bad{color:var(--red)} .info{color:var(--teal)}
+    .callout { border-left:4px solid var(--yellow); background:rgba(249,226,175,.08); padding:12px 16px; border-radius:8px; }
+    .term { white-space:pre; overflow:auto; background:#11111b; border:1px solid #45475a; border-radius:12px; padding:14px; color:#cdd6f4; }
+    .hdr { color:#f9e2af; font-weight:700; }
+    .dim { color:#6c7086; } .muted { color:#9399b2; } .blue { color:#89b4fa; } .green { color:#a6e3a1; } .red { color:#f38ba8; } .peach { color:#fab387; } .mauve { color:#cba6f7; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>stores watch row density design spec</h1>
+  <p class="lede">The top cards are getting close. The focused row list is still prose-heavy: age, tier, no-worktree, not scaffolded, workspace, runner failure, review reason, and summary are all competing in one free-form sentence. This spec sketches four approaches for turning that into a readable cockpit table inspired by btop's column discipline.</p>
+
+  <h2>What btop is doing well</h2>
+  <div class="card">
+    <ul>
+      <li><strong>Column headings are explicit.</strong> The operator knows what each token under it means.</li>
+      <li><strong>Columns have visual identity.</strong> Headings, numeric columns, and graph columns use different color/weight.</li>
+      <li><strong>Rows are not sentences.</strong> Each cell has one job: pid, program, command, threads, user, memory, cpu.</li>
+      <li><strong>Long fields get a budget.</strong> Command expands/truncates; fixed columns stay stable.</li>
+      <li><strong>Sort direction is visible.</strong> Cpu% ↑ tells you the table's ordering.</li>
+    </ul>
+  </div>
+
+  <h2>Current problem in stores watch</h2>
+  <div class="term"><span class="hdr">▾ WORKING (2)</span>
+  T002  <span class="blue">◆ plan no worktree</span>       not scaffolded age:6h tier:T3 · workspace:none · synthetic active planning task
+  T004  <span class="blue">▣ exec no worktree</span>       ▮ ··· age:6h tier:T3 · synthetic ready task awaiting coding
+
+<span class="hdr">▾ FAILED (2)</span>
+  T010  <span class="red">▲ runner-failed exit 42</span>  age:6h tier:T3 · reason:{"exit_code":42,"kind":"runner_crash"}
+  T005  <span class="red">▲ review</span> plan-reviewer marked NOT_READY: Synthetic plan rejected to create blocked state</div>
+  <div class="callout"><strong>Diagnosis:</strong> this is not a table yet. It is a row id + stage followed by a bag of facts. Some facts are state, some are actionability, some are debug, some are summary. Because they are not columnized, every row must be parsed from scratch.</div>
+
+  <h2>Information classes we need to separate</h2>
+  <table>
+    <thead><tr><th>Class</th><th>Examples today</th><th>Display rule</th></tr></thead>
+    <tbody>
+      <tr><td>Identity</td><td>T002, L006, ER001</td><td>Always fixed-width first column.</td></tr>
+      <tr><td>Stage/subtype</td><td>plan, exec, plan-gate, capacity, runner failed</td><td>Short semantic cell, colored by severity.</td></tr>
+      <tr><td>Signal</td><td>exit 42, plan ◐, review pending, no worktree</td><td>One compact cell. No raw JSON.</td></tr>
+      <tr><td>Age/urgency</td><td>age:6h</td><td>Numeric cell, dim unless stale/urgent.</td></tr>
+      <tr><td>Priority/tier</td><td>T3, high/T2</td><td>Small fixed cell, color graded if high priority.</td></tr>
+      <tr><td>Workspace/scaffold</td><td>no worktree, workspace:none, not scaffolded</td><td>Collapse into one readiness cell; avoid saying three variants.</td></tr>
+      <tr><td>Summary</td><td>synthetic active planning task...</td><td>Flexible trailing column.</td></tr>
+      <tr><td>Debug</td><td>blocked_reason JSON, raw lifecycle tuple</td><td>Detail pane only unless summarized into Signal.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Approach 1 — Fixed btop-style columns per focused store</h2>
+  <div class="card">
+    <p><span class="pill good">Best first implementation</span> Give each focused store a stable column table. Tasks get task-specific columns; observations get observation-specific columns. This is not fully generic, but it is highly readable.</p>
+    <div class="term"><span class="hdr"> TASKS                                  sort: slot → age</span>
+<span class="hdr">ID     STAGE        SIGNAL          READY       AGE   TIER  SUMMARY</span>
+<span class="hdr">▾ QUEUED (2)</span>
+T001   ◌            no worktree     not scaffold 6h    T3    synthetic queued inactive plan task
+T006   ◌            no worktree     not scaffold 6h    T2    synthetic abandoned queued task
+
+<span class="hdr">▾ WORKING (2)</span>
+T002   ◆ plan       no worktree     not scaffold 6h    T3    synthetic active planning task
+T004   ▣ exec       phase 1/1       ready        6h    T3    synthetic ready task awaiting coding
+
+<span class="hdr">▾ FAILED (2)</span>
+T010   ▲ runner     exit 42         —            6h    T3    synthetic fake runner nonzero blocked task
+T005   ▲ review     NOT_READY       —            6h    T3    synthetic plan rejected to create blocked state</div>
+    <h3>Pros</h3>
+    <ul><li>Strongest btop resemblance.</li><li>Fast scanning and stable mental model.</li><li>Easy to color by column and severity.</li></ul>
+    <h3>Cons</h3>
+    <ul><li>Per-store columns are still custom frontend decisions.</li><li>Needs responsive fallback when narrow.</li></ul>
+  </div>
+
+  <h2>Approach 2 — Universal columns across all stores</h2>
+  <div class="card">
+    <p><span class="pill info">Most aligned with projection architecture</span> Every store renders through the same columns: ID, Stage, Signal, Age, Priority, Summary. Store-specific detail goes into Signal and detail pane.</p>
+    <div class="term"><span class="hdr"> TASKS</span>
+<span class="hdr">ID     STAGE              SIGNAL          AGE   PRI   SUMMARY</span>
+T002   ◆ plan             no worktree     6h    T3    synthetic active planning task
+T010   ▲ runner failed    exit 42         6h    T3    synthetic fake runner nonzero blocked task
+
+<span class="hdr"> OBSERVATIONS</span>
+<span class="hdr">ID     STAGE              SIGNAL          AGE   PRI   SUMMARY</span>
+L006   ◇ draft            approve/revise  6h    high  synthetic architecture-risk contract draft
+L003   △ info needed      answer info     6h    norm  synthetic observation needing info</div>
+    <h3>Pros</h3>
+    <ul><li>Simple and consistent across stores.</li><li>Matches the future <code>WatchProjection</code> primitive.</li><li>New stores can render if they provide projection fields.</li></ul>
+    <h3>Cons</h3>
+    <ul><li>May be too generic for tasks; readiness/worktree info gets squeezed into Signal.</li><li>Less rich than Approach 1.</li></ul>
+  </div>
+
+  <h2>Approach 3 — Two-line rows: scan line + explanation line</h2>
+  <div class="card">
+    <p><span class="pill warn">Best for dense narrative data</span> First line is table-like. Second line is optional and dim, carrying summary/detail. This reduces horizontal pressure.</p>
+    <div class="term"><span class="hdr">ID     STAGE          SIGNAL       AGE  TIER</span>
+T002   ◆ plan         no worktree  6h   T3
+       <span class="dim">synthetic active planning task · next: plan review · not scaffolded</span>
+T010   ▲ runner       exit 42      6h   T3
+       <span class="dim">fake runner nonzero blocked task · log available in detail</span></div>
+    <h3>Pros</h3>
+    <ul><li>Very readable on medium widths.</li><li>Summary stops fighting with status facts.</li><li>Can show more useful text without giant columns.</li></ul>
+    <h3>Cons</h3>
+    <ul><li>Half as many rows visible.</li><li>Feels less like btop and more like a log viewer.</li></ul>
+  </div>
+
+  <h2>Approach 4 — Density modes: compact table + detail inspector</h2>
+  <div class="card">
+    <p><span class="pill">Best long-term interaction model</span> Default row is very compact; the right detail pane owns explanation. Toggle <code>d</code> or <code>Tab</code> for more row detail.</p>
+    <div class="term"><span class="hdr">Compact TASKS</span>
+<span class="hdr">ID     STAGE      SIGNAL      AGE  TIER</span>
+T002   ◆ plan     scaffold    6h   T3
+T003   ◇ review   plan ◐      6h   T3
+T010   ▲ runner   exit 42     6h   T3
+
+<span class="hdr">Right detail for T010</span>
+State: runner failed · exit 42
+Ready: —
+Why: fake runner nonzero blocked task
+Debug: blocked_reason JSON, logs, raw tuple</div>
+    <h3>Pros</h3>
+    <ul><li>Maximum scan speed.</li><li>Right pane becomes the explanation surface.</li><li>Pairs well with keyboard navigation.</li></ul>
+    <h3>Cons</h3>
+    <ul><li>Requires users to trust the detail pane.</li><li>Some information disappears from the row by default.</li></ul>
+  </div>
+
+  <h2>Recommendation</h2>
+  <div class="card">
+    <p><strong>Implement Approach 2 first, with Approach 1 as a per-store enrichment path.</strong></p>
+    <ol>
+      <li>Make <code>WatchProjection</code> expose universal cells: <code>id, stage, signal, age, priority, summary</code>.</li>
+      <li>Render focused rows through one table component with column headings.</li>
+      <li>For tasks only, add an optional <code>ready</code> column if width allows.</li>
+      <li>Keep raw readiness/debug facts in detail unless summarized into one Signal/Ready cell.</li>
+      <li>Add color roles: heading bright, ID muted/magenta, stage severity-colored, age dim→warning if stale, priority color graded.</li>
+    </ol>
+    <p>This gives the btop discipline without reintroducing a maze of store-specific prose renderers.</p>
+  </div>
+
+  <h2>Acceptance criteria for the next implementation</h2>
+  <table>
+    <thead><tr><th>Criterion</th><th>Example</th></tr></thead>
+    <tbody>
+      <tr><td>Column headings visible for focused table</td><td><code>ID STAGE SIGNAL AGE TIER SUMMARY</code></td></tr>
+      <tr><td>No prose bag rows</td><td>No <code>not scaffolded age:6h tier:T3 · workspace:none · ...</code></td></tr>
+      <tr><td>One readiness concept</td><td>Either <code>no worktree</code> or <code>not scaffolded</code>, not both plus <code>workspace:none</code>.</td></tr>
+      <tr><td>Debug stays in detail</td><td>Raw JSON reason becomes row signal <code>exit 42</code>; JSON appears in detail.</td></tr>
+      <tr><td>Rows remain aligned while navigating</td><td>Down arrow moves to the visually next row.</td></tr>
+      <tr><td>Width responsive</td><td>Wide: optional Ready column. Narrow: universal core columns only.</td></tr>
+    </tbody>
+  </table>
+
+  <p class="muted">Generated 2026-05-13. This is a design spec only; no implementation changes are included.</p>
+</main>
+</body>
+</html>
