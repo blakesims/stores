@@ -1573,21 +1573,40 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
         } else {
             "NULL"
         };
-        let attempts_expr = if cols.iter().any(|c| c == "attempts") {
-            "COALESCE(attempts,0)"
-        } else {
-            "0"
+        let has_attempts = cols.iter().any(|c| c == "attempts");
+        let has_attempt = cols.iter().any(|c| c == "attempt");
+        let attempts_expr = match (has_attempts, has_attempt) {
+            (true, true) => "COALESCE(attempts, attempt, 0)",
+            (true, false) => "COALESCE(attempts, 0)",
+            (false, true) => "COALESCE(attempt, 0)",
+            (false, false) => "0",
         };
         let findings_count_expr = if cols.iter().any(|c| c == "findings") {
             "json_array_length(findings)".to_string()
         } else {
             "NULL".to_string()
         };
+        let terminal_order_expr = match (
+            cols.iter().any(|c| c == "completed_at"),
+            cols.iter().any(|c| c == "started_at"),
+        ) {
+            (true, true) => "COALESCE(completed_at, started_at, display_id)",
+            (true, false) => "COALESCE(completed_at, display_id)",
+            (false, true) => "COALESCE(started_at, display_id)",
+            (false, false) => "display_id",
+        };
         let sql = format!(
             "SELECT display_id, task_id, status, {lifecycle}, {outcome}, {linked_observation_ids}, {produced_task_id}, {runner_expr}, {held_expr}, {retry_expr}, {attempts_expr}, \
              {verdict}, {base_sha}, {head_sha}, {log_path}, {transcript_path}, {started_at}, {completed_at}, {duration_ms}, \
              {critical_count}, {major_count}, {minor_count}, {findings_count_expr} \
-             FROM external_reviews WHERE status IN ('pending','running','passed','revise','tooling_held','tool_fault','tool-fault','superseded')",
+             FROM external_reviews \
+             WHERE status IN ('pending','running','revise','tooling_held','tool_fault','tool-fault') \
+                OR display_id IN (\
+                    SELECT display_id FROM external_reviews \
+                    WHERE status IN ('passed','superseded') \
+                    ORDER BY {terminal_order_expr} DESC \
+                    LIMIT 5\
+                )",
             lifecycle = sql_col(&cols, "lifecycle", "NULL"),
             outcome = sql_col(&cols, "outcome", "NULL"),
             linked_observation_ids = sql_col(&cols, "linked_observation_ids", "NULL"),
@@ -4073,6 +4092,47 @@ mod tests {
         assert!(loaded_statuses.contains(&"passed"));
         assert!(loaded_statuses.contains(&"revise"));
         assert!(loaded_statuses.contains(&"superseded"));
+    }
+
+    #[test]
+    fn external_review_loading_uses_attempt_and_caps_terminal_rows() {
+        let conn = cockpit_conn();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE external_reviews (
+                display_id TEXT, task_id TEXT, status TEXT, runner TEXT,
+                attempt INTEGER, completed_at TEXT
+            );
+            INSERT INTO external_reviews (display_id, task_id, status, runner, attempt, completed_at)
+            VALUES
+                ('ER001', 'T001', 'pending', 'codex', 4, '2026-05-09T01:00:00'),
+                ('ER010', 'T010', 'passed', 'codex', 1, '2026-05-09T01:00:00'),
+                ('ER011', 'T011', 'passed', 'codex', 1, '2026-05-09T02:00:00'),
+                ('ER012', 'T012', 'passed', 'codex', 1, '2026-05-09T03:00:00'),
+                ('ER013', 'T013', 'passed', 'codex', 1, '2026-05-09T04:00:00'),
+                ('ER014', 'T014', 'passed', 'codex', 1, '2026-05-09T05:00:00'),
+                ('ER015', 'T015', 'passed', 'codex', 1, '2026-05-09T06:00:00');
+            "#,
+        )
+        .unwrap();
+
+        let reviews: Vec<ReviewRow> = load_rows(&conn)
+            .unwrap()
+            .into_iter()
+            .filter_map(|row| match row {
+                Row::Review(review) => Some(review),
+                _ => None,
+            })
+            .collect();
+
+        let pending = reviews
+            .iter()
+            .find(|review| review.display_id == "ER001")
+            .expect("pending row loaded regardless of terminal cap");
+        assert_eq!(pending.attempts, 4);
+        assert_eq!(reviews.iter().filter(|r| r.status == "passed").count(), 5);
+        assert!(reviews.iter().any(|r| r.display_id == "ER015"));
+        assert!(!reviews.iter().any(|r| r.display_id == "ER010"));
     }
 
     #[test]
