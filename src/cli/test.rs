@@ -138,6 +138,25 @@ cases:
       no_real_llm: true
 "#;
 
+const PRESET_STALE_BASE_REFUSES: &str = r#"
+cases:
+  stale-base-refuses:
+    tier: T3
+    executor_mode: marker_file
+    stages:
+      planner: { outcome: PASS }
+      plan_reviewer: { outcome: PASS }
+      executor: { outcome: PASS }
+      code_reviewer: { outcome: PASS }
+      wrap: { outcome: PASS }
+      external_review: { outcome: PASS }
+    expect:
+      task_status: non_integrated
+      lifecycle: active
+      external_review_status: passed
+      no_real_llm: true
+"#;
+
 pub fn run(opts: TestRunOpts) -> Result<()> {
     let (case_name, case, case_file_for_fake) = load_case(&opts)?;
     validate_case_shape(&case)?;
@@ -175,6 +194,9 @@ pub fn run(opts: TestRunOpts) -> Result<()> {
 
     if opts.live {
         let h = LiveHarness::new(&case_name)?;
+        if is_stale_base_refuses_case(&case_name) {
+            return h.run_stale_base_refuses(opts.watch);
+        }
         return h.run(&case, &case.expect, opts.watch);
     }
 
@@ -242,6 +264,7 @@ fn load_case(opts: &TestRunOpts) -> Result<(String, TestCase, Option<PathBuf>)> 
     let raw = match name.as_str() {
         "happy-path" => PRESET_HAPPY,
         "t3-failed-er" | "t3-er-fail" => PRESET_FAILED_ER,
+        "stale-base-refuses" => PRESET_STALE_BASE_REFUSES,
         other => bail!("unknown stores test preset '{other}' (use --case-file for custom YAML)"),
     };
     let manifest: TestManifest = serde_yaml::from_str(raw).unwrap();
@@ -261,6 +284,10 @@ fn preset_scenario(name: &str) -> &'static str {
         "t3-failed-er" | "t3-er-fail" => "external-review-tooling-failure",
         _ => "all-pass",
     }
+}
+
+fn is_stale_base_refuses_case(case_name: &str) -> bool {
+    case_name == "stale-base-refuses"
 }
 
 fn validate_case_shape(case: &TestCase) -> Result<()> {
@@ -464,6 +491,265 @@ impl LiveHarness {
         }
     }
 
+    fn run_stale_base_refuses(&self, watch: bool) -> Result<()> {
+        println!(
+            "[setup] task={} status_cmd=`stores tasks status {}` watch_cmd=`stores watch --all`",
+            self.task_id, self.task_id
+        );
+        let workspace = self.wait_for_workspace(watch)?;
+        let base_a = git_sha(&self.root, "main")?;
+        println!(
+            "[setup] task={} worktree={} branch={} base A={}",
+            self.task_id,
+            workspace.workspace_path.display(),
+            workspace.branch,
+            base_a
+        );
+
+        let er = self.wait_for_fake_er_pass(watch)?;
+        let task_head_x = git_sha(&workspace.workspace_path, "HEAD")?;
+        println!(
+            "[executor] task head X={} marker_hint=fake-runner-markers/{}/",
+            task_head_x, self.task_id
+        );
+        println!(
+            "[external-review] {} runner={} status={} verdict={} base={} head={} superseded_by={}",
+            er.display_id,
+            er.runner.as_deref().unwrap_or("-"),
+            er.status,
+            er.verdict.as_deref().unwrap_or("-"),
+            er.base_sha.as_deref().unwrap_or("-"),
+            er.head_sha.as_deref().unwrap_or("-"),
+            er.superseded_by.as_deref().unwrap_or("-")
+        );
+
+        let main_marker = main_advance_marker_path(&self.task_id, &self.case_name);
+        let main_commit = self.advance_main_with_marker(&main_marker)?;
+        let main_b = git_sha(&self.root, "main")?;
+        if main_b == base_a {
+            bail!("main marker commit did not advance main: base={base_a} current={main_b}");
+        }
+        println!(
+            "[setup] advanced main B={} commit={} marker={}",
+            main_b,
+            main_commit,
+            main_marker.display()
+        );
+
+        let refusal = self.attempt_accept_enqueue_and_integration()?;
+        if !is_freshness_refusal(&refusal.combined_output) {
+            let snap = self.snapshot()?;
+            if matches!(snap.status.as_str(), "integrated" | "done")
+                || snap.lifecycle.as_deref() == Some("done")
+            {
+                bail!(
+                    "stale-base-refuses RED proof: task integrated after main moved; output={} snapshot={:?}",
+                    refusal.combined_output,
+                    snap
+                );
+            }
+            let state_reason = snap.refusal_evidence();
+            if !is_freshness_refusal(&state_reason) {
+                bail!(
+                    "expected stale/freshness refusal; command_output={} state_evidence={} snapshot={:?}",
+                    refusal.combined_output,
+                    state_reason,
+                    snap
+                );
+            }
+        }
+
+        self.assert_no_real_llm()?;
+        let final_snap = self.snapshot()?;
+        if matches!(final_snap.status.as_str(), "integrated" | "done")
+            || final_snap.lifecycle.as_deref() == Some("done")
+        {
+            bail!("expected non-integrated task after freshness refusal, got {final_snap:?}");
+        }
+        println!("[accept/integration] refused reason={}", refusal.summary());
+        println!(
+            "[assert] PASS freshness refusal was genuine integrated=false task={} status={} lifecycle={}",
+            self.task_id,
+            final_snap.status,
+            final_snap.lifecycle.as_deref().unwrap_or("-")
+        );
+        println!("[assert] no_real_llm=ok non_fake_agent_runs=0 real_er_runners=0");
+        println!("[watch] stores watch --all");
+        println!(
+            "[cleanup optional] stores tasks deactivate {} --reason 'stores test stale-base-refuses proof captured' --invoker ai_with_human",
+            self.task_id
+        );
+        Ok(())
+    }
+
+    fn wait_for_workspace(&self, watch: bool) -> Result<LiveWorkspaceProof> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        loop {
+            self.run_daemon_once()?;
+            if let Some(workspace) = self.workspace_proof()? {
+                return Ok(workspace);
+            }
+            if watch {
+                self.progress("waiting-workspace")?;
+            }
+            if std::time::Instant::now() > deadline {
+                bail!(
+                    "timed out waiting for live task {} workspace/branch",
+                    self.task_id
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    fn wait_for_fake_er_pass(&self, watch: bool) -> Result<LiveExternalReviewProof> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+        loop {
+            self.run_daemon_once()?;
+            if let Some(er) = self.latest_er_proof()? {
+                if er.status == "passed" && er.verdict.as_deref() == Some("PASS") {
+                    if er.runner.as_deref() != Some("fake") {
+                        bail!("expected fake external review runner, got {er:?}");
+                    }
+                    return Ok(er);
+                }
+            }
+            if watch {
+                self.progress("waiting-fake-er-pass")?;
+            }
+            if std::time::Instant::now() > deadline {
+                bail!(
+                    "timed out waiting for fake ER PASS for live task {}",
+                    self.task_id
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    fn workspace_proof(&self) -> Result<Option<LiveWorkspaceProof>> {
+        let conn = self.conn()?;
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT workspace_path,branch FROM tasks WHERE display_id=?1",
+                [&self.task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
+        let Some((workspace_path, branch)) = row else {
+            return Ok(None);
+        };
+        let Some(workspace_path) = workspace_path.filter(|s| !s.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let Some(branch) = branch.filter(|s| !s.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(workspace_path);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(LiveWorkspaceProof {
+            workspace_path: path,
+            branch,
+        }))
+    }
+
+    fn latest_er_proof(&self) -> Result<Option<LiveExternalReviewProof>> {
+        let conn = self.conn()?;
+        let er = conn
+            .query_row(
+                "SELECT display_id,status,verdict,runner,base_sha,head_sha,superseded_by \
+             FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1",
+                [&self.task_id],
+                |r| {
+                    Ok(LiveExternalReviewProof {
+                        display_id: r.get(0)?,
+                        status: r.get(1)?,
+                        verdict: r.get(2)?,
+                        runner: r.get(3)?,
+                        base_sha: r.get(4)?,
+                        head_sha: r.get(5)?,
+                        superseded_by: r.get(6)?,
+                    })
+                },
+            )
+            .ok();
+        Ok(er)
+    }
+
+    fn advance_main_with_marker(&self, marker: &Path) -> Result<String> {
+        let current_branch = git_stdout(&self.root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        if current_branch.trim() != "main" {
+            bail!("live stale-base scenario must run from main; current branch={current_branch}");
+        }
+        let full_path = self.root.join(marker);
+        if let Some(parent) = full_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating marker dir {}", parent.display()))?;
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        std::fs::write(
+            &full_path,
+            format!(
+                "stores test stale-base-refuses\ntask={}\ncase={}\ncreated_unix={}\n",
+                self.task_id,
+                self.case_name,
+                now.as_secs()
+            ),
+        )
+        .with_context(|| format!("writing marker {}", full_path.display()))?;
+        let marker_str = marker
+            .to_str()
+            .with_context(|| format!("marker path is not utf-8: {}", marker.display()))?;
+        git_ok(&self.root, &["add", marker_str])?;
+        let message = main_advance_commit_message(&self.task_id);
+        git_ok(&self.root, &["commit", "-m", &message])?;
+        git_sha(&self.root, "HEAD")
+    }
+
+    fn attempt_accept_enqueue_and_integration(&self) -> Result<LiveRefusalProof> {
+        let mut outputs = Vec::new();
+        let accept = run_live_stores_cmd_output(
+            &self.root,
+            ["tasks", "accept", &self.task_id, "--invoker", "human"],
+            "stores tasks accept",
+        )?;
+        outputs.push(accept.clone());
+        if !accept.success {
+            return Ok(LiveRefusalProof::from_outputs(outputs));
+        }
+
+        let enqueue = run_live_stores_cmd_output(
+            &self.root,
+            ["tasks", "enqueue-integration", &self.task_id],
+            "stores tasks enqueue-integration",
+        )?;
+        outputs.push(enqueue.clone());
+        if !enqueue.success {
+            return Ok(LiveRefusalProof::from_outputs(outputs));
+        }
+
+        let daemon = match self.run_daemon_once() {
+            Ok(()) => LiveCommandOutput {
+                label: "stores agents run --once".to_string(),
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            Err(err) => LiveCommandOutput {
+                label: "stores agents run --once".to_string(),
+                success: false,
+                stdout: String::new(),
+                stderr: err.to_string(),
+            },
+        };
+        outputs.push(daemon);
+        Ok(LiveRefusalProof::from_outputs(outputs))
+    }
+
     fn conn(&self) -> Result<Connection> {
         let mut last_err = None;
         for _ in 0..20 {
@@ -518,12 +804,31 @@ impl LiveHarness {
 
     fn snapshot(&self) -> Result<LiveSnapshot> {
         let conn = self.conn()?;
-        let (status, lifecycle, active_step): (String, Option<String>, Option<String>) = conn
-            .query_row(
-                "SELECT status,lifecycle,active_step FROM tasks WHERE display_id=?1",
-                [&self.task_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
+        let (
+            status,
+            lifecycle,
+            active_step,
+            workspace_path,
+            branch,
+            blocked_reason,
+            blocker_kind,
+            blocked_reason_class,
+            integration_attempts,
+        ): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn.query_row(
+            "SELECT status,lifecycle,active_step,workspace_path,branch,blocked_reason,blocker_kind,blocked_reason_class,integration_attempts FROM tasks WHERE display_id=?1",
+            [&self.task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+        )?;
         let er: Option<(String, String, Option<String>, Option<String>)> = conn.query_row(
             "SELECT display_id,status,verdict,runner FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1",
             [&self.task_id],
@@ -533,6 +838,12 @@ impl LiveHarness {
             status,
             lifecycle,
             active_step,
+            workspace_path,
+            branch,
+            blocked_reason,
+            blocker_kind,
+            blocked_reason_class,
+            integration_attempts,
             er,
         })
     }
@@ -540,8 +851,14 @@ impl LiveHarness {
     fn progress(&self, label: &str) -> Result<()> {
         let snap = self.snapshot()?;
         println!(
-            "progress live {label}: task={} status={} lifecycle={:?} active_step={:?} er={:?}",
-            self.task_id, snap.status, snap.lifecycle, snap.active_step, snap.er
+            "progress live {label}: task={} status={} lifecycle={:?} active_step={:?} workspace={:?} branch={:?} er={:?}",
+            self.task_id,
+            snap.status,
+            snap.lifecycle,
+            snap.active_step,
+            snap.workspace_path,
+            snap.branch,
+            snap.er
         );
         Ok(())
     }
@@ -631,6 +948,22 @@ impl LiveHarness {
 }
 
 fn run_live_stores_cmd<const N: usize>(root: &Path, args: [&str; N], label: &str) -> Result<()> {
+    let out = run_live_stores_cmd_output(root, args, label)?;
+    if !out.success {
+        bail!(
+            "{label} failed: stderr={} stdout={}",
+            out.stderr,
+            out.stdout
+        );
+    }
+    Ok(())
+}
+
+fn run_live_stores_cmd_output<const N: usize>(
+    root: &Path,
+    args: [&str; N],
+    label: &str,
+) -> Result<LiveCommandOutput> {
     let out = Command::new(stores_bin_for_preflight()?)
         .args(args)
         .current_dir(root)
@@ -638,27 +971,154 @@ fn run_live_stores_cmd<const N: usize>(root: &Path, args: [&str; N], label: &str
         .env("STORES_ALLOW_FAKE_REVIEW_ACCEPT", "1")
         .output()
         .with_context(|| label.to_string())?;
-    if !out.status.success() {
-        bail!(
-            "{label} failed: status={} stderr={} stdout={}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr),
-            String::from_utf8_lossy(&out.stdout)
-        );
-    }
-    Ok(())
+    Ok(LiveCommandOutput {
+        label: label.to_string(),
+        success: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
 }
 
-#[derive(Debug)]
+fn is_freshness_refusal(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase().replace('-', "_");
+    normalized.contains("stale_external_review")
+        || normalized.contains("stale external review")
+        || normalized.contains("stale_base")
+        || normalized.contains("freshness")
+        || (normalized.contains("external review head") && normalized.contains("stale"))
+        || (normalized.contains("external review head") && normalized.contains("mismatch"))
+        || (normalized.contains("external_review")
+            && normalized.contains("head")
+            && normalized.contains("mismatch"))
+}
+
+fn main_advance_marker_path(task_id: &str, case_name: &str) -> PathBuf {
+    PathBuf::from("fake-runner-markers")
+        .join(format!("{}-{}", task_id, sanitize(case_name)))
+        .join("main-advance.txt")
+}
+
+fn main_advance_commit_message(task_id: &str) -> String {
+    format!("fake-run({task_id}): stale-base main advance")
+}
+
+fn git_sha(repo: &Path, rev: &str) -> Result<String> {
+    Ok(git_stdout(repo, &["rev-parse", rev])?.trim().to_string())
+}
+
+fn git_stdout(repo: &Path, args: &[&str]) -> Result<String> {
+    let out = git_out(repo, args)?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn first_non_empty_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+#[derive(Debug, Clone)]
 struct LiveSnapshot {
     status: String,
     lifecycle: Option<String>,
     active_step: Option<String>,
+    workspace_path: Option<String>,
+    branch: Option<String>,
+    blocked_reason: Option<String>,
+    blocker_kind: Option<String>,
+    blocked_reason_class: Option<String>,
+    integration_attempts: Option<String>,
     er: Option<(String, String, Option<String>, Option<String>)>,
 }
 impl LiveSnapshot {
     fn er_status(&self) -> Option<&str> {
         self.er.as_ref().map(|(_, s, _, _)| s.as_str())
+    }
+
+    fn refusal_evidence(&self) -> String {
+        [
+            self.blocked_reason.as_deref(),
+            self.blocker_kind.as_deref(),
+            self.blocked_reason_class.as_deref(),
+            self.integration_attempts.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LiveWorkspaceProof {
+    workspace_path: PathBuf,
+    branch: String,
+}
+
+#[derive(Debug, Clone)]
+struct LiveExternalReviewProof {
+    display_id: String,
+    status: String,
+    verdict: Option<String>,
+    runner: Option<String>,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    superseded_by: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveCommandOutput {
+    label: String,
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Clone)]
+struct LiveRefusalProof {
+    outputs: Vec<LiveCommandOutput>,
+    combined_output: String,
+}
+
+impl LiveRefusalProof {
+    fn from_outputs(outputs: Vec<LiveCommandOutput>) -> Self {
+        let combined_output = outputs
+            .iter()
+            .map(|out| {
+                format!(
+                    "{} success={}\n{}\n{}",
+                    out.label, out.success, out.stdout, out.stderr
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            outputs,
+            combined_output,
+        }
+    }
+
+    fn summary(&self) -> String {
+        self.outputs
+            .iter()
+            .find(|out| !out.success)
+            .map(|out| {
+                first_non_empty_line(&out.stderr)
+                    .or_else(|| first_non_empty_line(&out.stdout))
+                    .unwrap_or_else(|| out.label.clone())
+            })
+            .unwrap_or_else(|| {
+                first_non_empty_line(&self.combined_output)
+                    .unwrap_or_else(|| "no command refusal; see task state evidence".to_string())
+            })
     }
 }
 
@@ -1123,6 +1583,74 @@ mod tests {
     }
 
     #[test]
+    fn stale_base_refuses_preset_loads_as_all_pass_fake_live_case() {
+        let opts = TestRunOpts {
+            case_name: Some("stale-base-refuses".to_string()),
+            case_file: None,
+            delay_ms: None,
+            watch: false,
+            live: true,
+        };
+        let (name, case, fake_path) = load_case(&opts).unwrap();
+        assert_eq!(name, "stale-base-refuses");
+        assert!(is_stale_base_refuses_case(&name));
+        assert_eq!(preset_scenario(&name), "all-pass");
+        assert_eq!(case.expect.external_review_status, "passed");
+        assert_eq!(case.executor_mode, "marker_file");
+        assert!(fake_path
+            .unwrap()
+            .ends_with("stores-test-stale-base-refuses-case.yaml"));
+    }
+
+    #[test]
+    fn freshness_refusal_classifier_covers_current_canonical_spellings() {
+        for text in [
+            "stale_external_review: review head no longer matches",
+            "stale external review head: rerun required",
+            "freshness check refused integration",
+            "stale_base current_main differs",
+            "external review head mismatch after rebase",
+        ] {
+            assert!(is_freshness_refusal(text), "{text}");
+        }
+        assert!(!is_freshness_refusal(
+            "runner crashed without stale evidence"
+        ));
+    }
+
+    #[test]
+    fn stale_base_main_marker_helpers_are_fenced_and_specific() {
+        assert_eq!(
+            main_advance_marker_path("T205", "stale-base-refuses"),
+            PathBuf::from("fake-runner-markers/T205-stale-base-refuses/main-advance.txt")
+        );
+        assert_eq!(
+            main_advance_commit_message("T205"),
+            "fake-run(T205): stale-base main advance"
+        );
+    }
+
+    #[test]
+    fn live_refusal_summary_prefers_first_failed_command_line() {
+        let proof = LiveRefusalProof::from_outputs(vec![
+            LiveCommandOutput {
+                label: "accept".to_string(),
+                success: true,
+                stdout: "accepted\n".to_string(),
+                stderr: String::new(),
+            },
+            LiveCommandOutput {
+                label: "integration".to_string(),
+                success: false,
+                stdout: String::new(),
+                stderr: "stale_external_review: rerun review\nmore detail".to_string(),
+            },
+        ]);
+        assert_eq!(proof.summary(), "stale_external_review: rerun review");
+        assert!(is_freshness_refusal(&proof.combined_output));
+    }
+
+    #[test]
     fn env_restore_restores_llm_off_under_runner_env_lock() {
         let _env_guard = crate::runner::test_support::ENV_LOCK
             .lock()
@@ -1205,6 +1733,12 @@ mod tests {
             status: "integrated".to_string(),
             lifecycle: Some("done".to_string()),
             active_step: None,
+            workspace_path: None,
+            branch: None,
+            blocked_reason: None,
+            blocker_kind: None,
+            blocked_reason_class: None,
+            integration_attempts: None,
             er: Some((
                 "ERUNIT".to_string(),
                 "passed".to_string(),
