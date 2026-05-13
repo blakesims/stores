@@ -8,7 +8,9 @@ use super::data::{
     RecentEvent, ReviewRow, Row, TaskCycleEntry, TaskRow,
 };
 use super::semantics::{
-    task_map_projection, MapCell, MapConfidence, MapGlyph, MapSource, TaskMapProjection,
+    observation_flow_projection, task_map_projection, MapCell, MapConfidence, MapGlyph, MapSource,
+    ObservationCheckpoint, ObservationFlowCell, ObservationFlowSource, ObservationGlyph,
+    TaskMapProjection,
 };
 
 fn truncate_sha(sha: Option<&str>) -> String {
@@ -487,6 +489,7 @@ fn observation_lines(o: &ObsRow, app: &App) -> Vec<String> {
         "Next action / held reason".to_string(),
         format!("  {}", obs_next_action(o)),
     ];
+    append_observation_flow_decode(&mut lines, o);
     let mut linked: Vec<String> = Vec::new();
     if let Some(tid) = o.task_id.as_deref().filter(|s| !s.trim().is_empty()) {
         linked.push(tid.to_string());
@@ -530,6 +533,95 @@ fn collapsed_observation_lines(c: &CollapsedObsRow, app: &App) -> Vec<String> {
         lines.push(format!("    {id}"));
     }
     lines
+}
+
+fn append_observation_flow_decode(lines: &mut Vec<String>, o: &ObsRow) {
+    let projection = observation_flow_projection(o);
+    lines.extend([String::new(), "Observation flow".to_string()]);
+    for cell in &projection.cells {
+        lines.push(format!(
+            "  {}: {} count={} source={} confidence={}{}",
+            observation_checkpoint_label(cell.checkpoint),
+            observation_cell_label(cell),
+            opt_i64(cell.count),
+            observation_source_label(&cell.source),
+            map_confidence_label(cell.confidence),
+            observation_active_marker(cell),
+        ));
+    }
+    lines.push(format!(
+        "  next: {}",
+        present_opt(projection.next.as_deref())
+    ));
+    lines.push(format!(
+        "  reason: {}",
+        present_opt(projection.reason.as_deref())
+    ));
+    lines.push(format!(
+        "  link: {}",
+        present_opt(projection.link.as_deref())
+    ));
+    lines.push(format!(
+        "  projection_confidence: {}",
+        map_confidence_label(projection.confidence)
+    ));
+}
+
+fn observation_cell_label(cell: &ObservationFlowCell) -> String {
+    let mut label = observation_glyph_label(cell.glyph).to_string();
+    label.push(' ');
+    label.push_str(cell.glyph.symbol());
+    label
+}
+
+fn observation_checkpoint_label(checkpoint: ObservationCheckpoint) -> &'static str {
+    match checkpoint {
+        ObservationCheckpoint::SignalEvidence => "signal/evidence",
+        ObservationCheckpoint::Contract => "contract",
+        ObservationCheckpoint::Architecture => "architecture",
+        ObservationCheckpoint::Resolution => "resolution",
+        ObservationCheckpoint::Fallback => "fallback",
+    }
+}
+
+fn observation_glyph_label(glyph: ObservationGlyph) -> &'static str {
+    match glyph {
+        ObservationGlyph::Candidate => "candidate",
+        ObservationGlyph::Evidence => "evidence",
+        ObservationGlyph::Contract => "contract",
+        ObservationGlyph::Architecture => "architecture",
+        ObservationGlyph::Resolved => "resolved",
+        ObservationGlyph::ClosedRejected => "closed-rejected",
+        ObservationGlyph::Superseded => "superseded",
+        ObservationGlyph::Waiting => "waiting",
+        ObservationGlyph::Fault => "fault",
+        ObservationGlyph::Unreached => "unreached",
+        ObservationGlyph::Unknown => "unknown",
+    }
+}
+
+fn observation_source_label(source: &ObservationFlowSource) -> &'static str {
+    match source {
+        ObservationFlowSource::Lifecycle => "lifecycle",
+        ObservationFlowSource::Status => "status",
+        ObservationFlowSource::EvidencePointers => "evidence_pointers",
+        ObservationFlowSource::ContractState => "contract_state",
+        ObservationFlowSource::WaitingKind => "waiting_kind",
+        ObservationFlowSource::ArchitectureReview => "architecture_review",
+        ObservationFlowSource::Outcome => "outcome",
+        ObservationFlowSource::SupersededBy => "superseded_by_id",
+        ObservationFlowSource::TaskLink => "task_id",
+        ObservationFlowSource::InvestigationFailure => "investigation_failure",
+        ObservationFlowSource::MissingEvidence => "missing_evidence",
+    }
+}
+
+fn observation_active_marker(cell: &ObservationFlowCell) -> &'static str {
+    if cell.active {
+        " active"
+    } else {
+        ""
+    }
 }
 
 fn intake_lines(i: &IntakeRow) -> Vec<String> {
@@ -801,7 +893,8 @@ fn obs_next_action(o: &ObsRow) -> String {
         format!("held: {reason}")
     } else if o.contract_state.as_deref() == Some("ready") {
         "ratify contract".to_string()
-    } else if o.status == "investigation_failed" { // ADR 0002 compatibility-only T148 task 6.1
+    } else if o.status == "investigation_failed" {
+        // ADR 0002 compatibility-only T148 task 6.1
         format!(
             "investigation failed: {}",
             present_opt(o.investigation_failure_reason.as_deref())
@@ -1147,6 +1240,18 @@ mod tests {
         let text = render_text_for_row(&row, &app);
         assert!(text.contains("Linked tasks"), "missing label: {text}");
         assert!(text.contains("T314"), "missing linking task id: {text}");
+        assert!(
+            text.contains("Observation flow"),
+            "missing flow decode: {text}"
+        );
+        assert!(
+            text.contains("signal/evidence:"),
+            "missing signal/evidence flow cell: {text}"
+        );
+        assert!(
+            text.contains("projection_confidence:"),
+            "missing projection confidence: {text}"
+        );
     }
 
     #[test]

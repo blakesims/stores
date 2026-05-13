@@ -15,9 +15,10 @@ use super::data::{
 };
 use super::semantics::{
     engine_presentation, external_review_presentation, external_review_runner_label,
-    intake_presentation, observation_presentation, observation_watch_projection,
-    observation_watch_slot_label, task_map_projection, task_presentation, task_watch_projection,
-    task_watch_slot_label, MapCell, MapColor, PresentationSeverity, TaskMapProjection,
+    intake_presentation, observation_flow_projection, observation_presentation,
+    observation_watch_projection, observation_watch_slot_label, task_map_projection,
+    task_presentation, task_watch_projection, task_watch_slot_label, MapCell, MapColor,
+    ObservationFlowCell, ObservationFlowProjection, PresentationSeverity, TaskMapProjection,
     WatchProjection, WatchSlotId,
 };
 
@@ -835,7 +836,13 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
             app, &flat, window, cursor, area.width, map_width, &mut items,
         );
     } else if app.focused_store == StoreLane::Observations {
-        append_observation_projection_items(app, &flat, window, cursor, &mut items);
+        let flow_width = observation_table_flow_width(window, app);
+        items.push(ListItem::new(observation_table_header(
+            area.width, flow_width,
+        )));
+        append_observation_projection_items(
+            app, &flat, window, cursor, area.width, flow_width, &mut items,
+        );
     } else {
         let mut last_section: Option<usize> = None;
         for (i, fr) in window.iter().enumerate() {
@@ -957,6 +964,8 @@ fn append_observation_projection_items(
     full: &[FlatRow],
     window: &[FlatRow],
     cursor: Option<usize>,
+    area_width: u16,
+    flow_width: usize,
     items: &mut Vec<ListItem<'static>>,
 ) {
     for slot in observation_projection_display_order(full, app) {
@@ -990,6 +999,8 @@ fn append_observation_projection_items(
                 &app.rows[fr.abs],
                 selected,
                 &projection,
+                area_width,
+                flow_width,
             )));
         }
     }
@@ -1320,12 +1331,14 @@ fn format_row_line_for_task_projection(
 fn format_row_line_for_observation_projection(
     row: &Row,
     selected: bool,
-    projection: &WatchProjection,
+    _projection: &WatchProjection,
+    area_width: u16,
+    flow_width: usize,
 ) -> Line<'static> {
     let base = match row {
-        Row::Obs(o) => format_obs_line_with_projection(o, None, projection),
+        Row::Obs(o) => format_observation_table_line(o, None, area_width, flow_width),
         Row::CollapsedObs(c) => {
-            format_obs_line_with_projection(&c.representative, Some(c), projection)
+            format_observation_table_line(&c.representative, Some(c), area_width, flow_width)
         }
         _ => match row {
             Row::Task(t) => format_task_line(t, &ExternalReviewState::default()),
@@ -1353,6 +1366,215 @@ const TASK_AGE_WIDTH: usize = 5;
 const TASK_TIER_WIDTH: usize = 4;
 const TASK_TABLE_GAPS: usize = 5;
 const TASK_TABLE_PREFIX_WIDTH: usize = 2;
+
+const OBS_ID_WIDTH: usize = 6;
+const OBS_FLOW_MIN_WIDTH: usize = 7;
+const OBS_NEXT_WIDTH: usize = 14;
+const OBS_AGE_WIDTH: usize = 5;
+const OBS_PRI_WIDTH: usize = 6;
+const OBS_TIER_WIDTH: usize = 4;
+const OBS_LINK_WIDTH: usize = 6;
+const OBS_CNT_WIDTH: usize = 4;
+const OBS_TABLE_GAPS: usize = 8;
+const OBS_TABLE_PREFIX_WIDTH: usize = 2;
+
+fn observation_table_flow_width(window: &[FlatRow], app: &App) -> usize {
+    window
+        .iter()
+        .filter_map(|fr| match &app.rows[fr.abs] {
+            Row::Obs(o) => Some(
+                observation_flow_text(&observation_flow_projection(o))
+                    .chars()
+                    .count(),
+            ),
+            Row::CollapsedObs(c) => Some(
+                observation_flow_text(&observation_flow_projection(&c.representative))
+                    .chars()
+                    .count(),
+            ),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(OBS_FLOW_MIN_WIDTH)
+        .max(OBS_FLOW_MIN_WIDTH)
+}
+
+fn observation_table_summary_width(area_width: u16, flow_width: usize) -> usize {
+    let fixed = OBS_TABLE_PREFIX_WIDTH
+        + OBS_ID_WIDTH
+        + flow_width
+        + OBS_NEXT_WIDTH
+        + OBS_AGE_WIDTH
+        + OBS_PRI_WIDTH
+        + OBS_TIER_WIDTH
+        + OBS_LINK_WIDTH
+        + OBS_CNT_WIDTH
+        + OBS_TABLE_GAPS;
+    (area_width as usize).saturating_sub(fixed).max(12)
+}
+
+fn observation_table_header(area_width: u16, flow_width: usize) -> Line<'static> {
+    let summary_width = observation_table_summary_width(area_width, flow_width);
+    Line::from(vec![Span::styled(
+        format!(
+            "  {:<id_w$} {:<summary_w$} {:<flow_w$} {:<next_w$} {:>age_w$} {:<pri_w$} {:<tier_w$} {:<link_w$} {:>cnt_w$}",
+            "ID",
+            "SUMMARY",
+            "FLOW",
+            "NEXT",
+            "AGE",
+            "PRI",
+            "TIER",
+            "LINK",
+            "CNT",
+            id_w = OBS_ID_WIDTH,
+            summary_w = summary_width,
+            flow_w = flow_width,
+            next_w = OBS_NEXT_WIDTH,
+            age_w = OBS_AGE_WIDTH,
+            pri_w = OBS_PRI_WIDTH,
+            tier_w = OBS_TIER_WIDTH,
+            link_w = OBS_LINK_WIDTH,
+            cnt_w = OBS_CNT_WIDTH,
+        ),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )])
+}
+
+fn format_observation_table_line(
+    o: &super::data::ObsRow,
+    collapsed: Option<&super::data::CollapsedObsRow>,
+    area_width: u16,
+    flow_width: usize,
+) -> Vec<Span<'static>> {
+    let projection = observation_flow_projection(o);
+    let summary_width = observation_table_summary_width(area_width, flow_width);
+    let age = compact_age_label(super::data::parse_epoch(&o.updated_at));
+    let link = projection.link.clone().unwrap_or_default();
+    let cnt = collapsed
+        .map(|c| format!("×{}", c.count))
+        .unwrap_or_default();
+    let summary_prefix = collapsed
+        .map(|c| format!("{} ", c.summary))
+        .unwrap_or_default();
+    let summary = truncate(&format!("{}{}", summary_prefix, o.summary), summary_width);
+    let next = projection
+        .next
+        .clone()
+        .unwrap_or_else(|| "triage".to_string());
+    let tier = o.tier_hint.as_deref().unwrap_or("");
+
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<id_w$}", o.display_id, id_w = OBS_ID_WIDTH),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::raw(" "),
+        Span::raw(format!(
+            "{:<summary_w$}",
+            summary,
+            summary_w = summary_width
+        )),
+        Span::raw(" "),
+    ];
+    spans.extend(observation_flow_spans(&projection, flow_width));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<next_w$}",
+        truncate(&next, OBS_NEXT_WIDTH),
+        next_w = OBS_NEXT_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!("{:>age_w$}", age, age_w = OBS_AGE_WIDTH)));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<pri_w$}",
+        truncate(&o.priority, OBS_PRI_WIDTH),
+        pri_w = OBS_PRI_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<tier_w$}",
+        truncate(tier, OBS_TIER_WIDTH),
+        tier_w = OBS_TIER_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<link_w$}",
+        truncate(&link, OBS_LINK_WIDTH),
+        link_w = OBS_LINK_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!("{:>cnt_w$}", cnt, cnt_w = OBS_CNT_WIDTH)));
+    spans
+}
+
+fn observation_flow_text(projection: &ObservationFlowProjection) -> String {
+    observation_flow_tokens(projection)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn observation_flow_spans(
+    projection: &ObservationFlowProjection,
+    width: usize,
+) -> Vec<Span<'static>> {
+    let tokens = observation_flow_tokens(projection);
+    let rendered: usize = tokens.iter().map(|(text, _)| text.chars().count()).sum();
+    let mut spans: Vec<Span<'static>> = tokens
+        .into_iter()
+        .map(|(text, style)| Span::styled(text, style))
+        .collect();
+    if rendered < width {
+        spans.push(Span::raw(" ".repeat(width - rendered)));
+    }
+    spans
+}
+
+fn observation_flow_tokens(projection: &ObservationFlowProjection) -> Vec<(String, Style)> {
+    projection
+        .cells
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, cell)| {
+            let mut out = Vec::new();
+            if idx > 0 {
+                out.push((" ".to_string(), Style::default()));
+            }
+            out.push((observation_cell_text(cell), observation_cell_style(cell)));
+            out
+        })
+        .collect()
+}
+
+fn observation_cell_text(cell: &ObservationFlowCell) -> String {
+    match cell.count {
+        Some(count) => format!("{}{}", cell.glyph.symbol(), superscript_number(count)),
+        None => cell.glyph.symbol().to_string(),
+    }
+}
+
+fn observation_cell_style(cell: &ObservationFlowCell) -> Style {
+    let style = match cell.color_role {
+        MapColor::Inactive => Style::default().fg(WATCH_OVERLAY0),
+        MapColor::ActiveWork => Style::default().fg(Color::Cyan),
+        MapColor::ActiveGate => Style::default().fg(WATCH_YELLOW),
+        MapColor::Passed => Style::default().fg(WATCH_GREEN),
+        MapColor::Failed => Style::default().fg(WATCH_RED),
+        MapColor::Waiting => Style::default().fg(WATCH_PEACH),
+        MapColor::Unknown => Style::default().fg(WATCH_OVERLAY2),
+    };
+    if cell.active {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
 
 fn task_table_map_width(window: &[FlatRow], app: &App) -> usize {
     window
@@ -1659,44 +1881,6 @@ fn format_obs_line(
     if let Some(l) = linked {
         spans.push(Span::raw(format!("linked:{l} ")));
     }
-    spans.push(Span::raw(truncate(
-        &format!("{}{}", summary_prefix, obs_snippet(o)),
-        60,
-    )));
-    spans
-}
-
-fn format_obs_line_with_projection(
-    o: &super::data::ObsRow,
-    collapsed: Option<&super::data::CollapsedObsRow>,
-    projection: &WatchProjection,
-) -> Vec<Span<'static>> {
-    let (display_id, badge, summary_prefix) = collapsed
-        .map(|c| {
-            (
-                c.primary_display_id.as_str(),
-                format!(" ×{}", c.count),
-                format!("{} ", c.summary),
-            )
-        })
-        .unwrap_or((o.display_id.as_str(), String::new(), String::new()));
-    let stage = if projection.slot == WatchSlotId::Front {
-        projection.glyph.to_string()
-    } else {
-        format!("{} {}", projection.glyph, projection.row_stage)
-    };
-    let next = projection.next_action.unwrap_or("triage");
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::styled(
-            format!("{:<6}", display_id),
-            Style::default().fg(Color::Magenta),
-        ),
-        Span::styled(format!("{:<24}", stage), Style::default().fg(Color::Yellow)),
-        Span::raw(" "),
-        Span::raw(format!("{:<9}{} ", o.priority, badge)),
-        Span::raw(format!("next:{:<18} ", next)),
-    ];
     spans.push(Span::raw(truncate(
         &format!("{}{}", summary_prefix, obs_snippet(o)),
         60,
@@ -2727,8 +2911,11 @@ mod tests {
             &Row::Obs(candidate),
             false,
             &candidate_projection,
+            120,
+            OBS_FLOW_MIN_WIDTH,
         ));
-        assert!(candidate_text.contains("next:triage"), "{candidate_text}");
+        assert!(candidate_text.contains("◌ · ·"), "{candidate_text}");
+        assert!(candidate_text.contains("triage"), "{candidate_text}");
         assert!(!candidate_text.contains("candidate"), "{candidate_text}");
         assert!(!candidate_text.contains("lifecycle="), "{candidate_text}");
 
@@ -2746,12 +2933,11 @@ mod tests {
             &Row::Obs(contract),
             false,
             &contract_projection,
+            120,
+            OBS_FLOW_MIN_WIDTH,
         ));
-        assert!(contract_text.contains("◈ draft"), "{contract_text}");
-        assert!(
-            contract_text.contains("next:approve/revise"),
-            "{contract_text}"
-        );
+        assert!(contract_text.contains("● ▣ ·"), "{contract_text}");
+        assert!(contract_text.contains("approve/revise"), "{contract_text}");
         assert!(!contract_text.contains("contract:"), "{contract_text}");
         assert!(!contract_text.contains("tier:"), "{contract_text}");
 
@@ -2768,9 +2954,11 @@ mod tests {
             &Row::Obs(waiting),
             false,
             &waiting_projection,
+            120,
+            OBS_FLOW_MIN_WIDTH,
         ));
-        assert!(waiting_text.contains("⋯ info needed"), "{waiting_text}");
-        assert!(waiting_text.contains("next:answer info"), "{waiting_text}");
+        assert!(waiting_text.contains("△"), "{waiting_text}");
+        assert!(waiting_text.contains("answer info"), "{waiting_text}");
         assert!(!waiting_text.contains("waiting_kind="), "{waiting_text}");
     }
 

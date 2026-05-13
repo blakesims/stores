@@ -554,6 +554,476 @@ pub fn observation_watch_projection(row: &ObsRow) -> WatchProjection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationCheckpoint {
+    SignalEvidence,
+    Contract,
+    Architecture,
+    Resolution,
+    Fallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationGlyph {
+    Candidate,
+    Evidence,
+    Contract,
+    Architecture,
+    Resolved,
+    ClosedRejected,
+    Superseded,
+    Waiting,
+    Fault,
+    Unreached,
+    Unknown,
+}
+
+impl ObservationGlyph {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Candidate => "◌",
+            Self::Evidence => "●",
+            Self::Contract => "▣",
+            Self::Architecture => "◈",
+            Self::Resolved => "✓",
+            Self::ClosedRejected => "×",
+            Self::Superseded => "■",
+            Self::Waiting => "△",
+            Self::Fault => "▲",
+            Self::Unreached => "·",
+            Self::Unknown => "?",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObservationFlowSource {
+    Lifecycle,
+    Status,
+    EvidencePointers,
+    ContractState,
+    WaitingKind,
+    ArchitectureReview,
+    Outcome,
+    SupersededBy,
+    TaskLink,
+    InvestigationFailure,
+    MissingEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationFlowCell {
+    pub checkpoint: ObservationCheckpoint,
+    pub glyph: ObservationGlyph,
+    pub count: Option<i64>,
+    pub color_role: MapColor,
+    pub active: bool,
+    pub source: ObservationFlowSource,
+    pub confidence: MapConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservationFlowProjection {
+    pub cells: Vec<ObservationFlowCell>,
+    pub next: Option<String>,
+    pub reason: Option<String>,
+    pub link: Option<String>,
+    pub confidence: MapConfidence,
+}
+
+pub fn observation_flow_projection(row: &ObsRow) -> ObservationFlowProjection {
+    if row.status == "investigation_failed" || row.investigation_failure_reason.is_some() {
+        let cell = observation_cell(
+            ObservationCheckpoint::Fallback,
+            ObservationGlyph::Fault,
+            None,
+            MapColor::Failed,
+            false,
+            ObservationFlowSource::InvestigationFailure,
+            MapConfidence::Exact,
+        );
+        return observation_projection_from_cells(
+            vec![cell],
+            Some("inspect"),
+            row.investigation_failure_reason
+                .clone()
+                .or_else(|| Some("investigation_failed".to_string())),
+            observation_link(row),
+        );
+    }
+
+    if let Some(kind) = generic_observation_waiting_kind(row) {
+        let cell = observation_cell(
+            ObservationCheckpoint::Fallback,
+            ObservationGlyph::Waiting,
+            None,
+            MapColor::Waiting,
+            false,
+            ObservationFlowSource::WaitingKind,
+            MapConfidence::Exact,
+        );
+        return observation_projection_from_cells(
+            vec![cell],
+            Some(observation_wait_next(kind)),
+            Some(kind.to_string()),
+            observation_link(row),
+        );
+    }
+
+    let include_arch = observation_has_architecture_gate(row);
+    let mut cells = vec![observation_signal_cell(row), observation_contract_cell(row)];
+    if include_arch {
+        cells.push(observation_architecture_cell(row));
+    }
+    cells.push(observation_resolution_cell(row));
+    observation_projection_from_cells(
+        cells,
+        Some(observation_flow_next(row)),
+        None,
+        observation_link(row),
+    )
+}
+
+fn observation_projection_from_cells(
+    cells: Vec<ObservationFlowCell>,
+    next: Option<impl Into<String>>,
+    reason: Option<String>,
+    link: Option<String>,
+) -> ObservationFlowProjection {
+    let confidence = cells_confidence(cells.iter().map(|cell| cell.confidence));
+    ObservationFlowProjection {
+        cells,
+        next: next.map(Into::into),
+        reason,
+        link,
+        confidence,
+    }
+}
+
+fn cells_confidence(confidences: impl Iterator<Item = MapConfidence>) -> MapConfidence {
+    let mut saw_implied = false;
+    for confidence in confidences {
+        match confidence {
+            MapConfidence::Unknown => return MapConfidence::Unknown,
+            MapConfidence::Implied => saw_implied = true,
+            MapConfidence::Exact => {}
+        }
+    }
+    if saw_implied {
+        MapConfidence::Implied
+    } else {
+        MapConfidence::Exact
+    }
+}
+
+fn observation_cell(
+    checkpoint: ObservationCheckpoint,
+    glyph: ObservationGlyph,
+    count: Option<i64>,
+    color_role: MapColor,
+    active: bool,
+    source: ObservationFlowSource,
+    confidence: MapConfidence,
+) -> ObservationFlowCell {
+    ObservationFlowCell {
+        checkpoint,
+        glyph,
+        count: count.filter(|c| *c > 1),
+        color_role,
+        active,
+        source,
+        confidence,
+    }
+}
+
+fn observation_signal_cell(row: &ObsRow) -> ObservationFlowCell {
+    let evidence_count = row.evidence_pointers.len() as i64;
+    let lifecycle = obs_lifecycle(row);
+    if matches!(lifecycle, "candidate")
+        && !observation_has_contract(row)
+        && !observation_is_terminal(row)
+        && !observation_has_architecture_gate(row)
+    {
+        return observation_cell(
+            ObservationCheckpoint::SignalEvidence,
+            ObservationGlyph::Candidate,
+            None,
+            MapColor::Inactive,
+            false,
+            ObservationFlowSource::Lifecycle,
+            MapConfidence::Exact,
+        );
+    }
+    if matches!(lifecycle, "ready" | "investigating") {
+        return observation_cell(
+            ObservationCheckpoint::SignalEvidence,
+            ObservationGlyph::Evidence,
+            Some(evidence_count),
+            MapColor::ActiveWork,
+            true,
+            if evidence_count > 0 {
+                ObservationFlowSource::EvidencePointers
+            } else {
+                ObservationFlowSource::Lifecycle
+            },
+            MapConfidence::Exact,
+        );
+    }
+    if observation_has_contract(row)
+        || observation_is_terminal(row)
+        || observation_has_architecture_gate(row)
+    {
+        return observation_cell(
+            ObservationCheckpoint::SignalEvidence,
+            ObservationGlyph::Evidence,
+            Some(evidence_count),
+            MapColor::Inactive,
+            false,
+            if evidence_count > 0 {
+                ObservationFlowSource::EvidencePointers
+            } else {
+                ObservationFlowSource::Lifecycle
+            },
+            MapConfidence::Implied,
+        );
+    }
+    observation_cell(
+        ObservationCheckpoint::SignalEvidence,
+        ObservationGlyph::Unknown,
+        None,
+        MapColor::Unknown,
+        false,
+        ObservationFlowSource::MissingEvidence,
+        MapConfidence::Unknown,
+    )
+}
+
+fn observation_contract_cell(row: &ObsRow) -> ObservationFlowCell {
+    match row.contract_state.as_deref() {
+        Some("draft") => observation_cell(
+            ObservationCheckpoint::Contract,
+            ObservationGlyph::Contract,
+            None,
+            MapColor::ActiveGate,
+            true,
+            ObservationFlowSource::ContractState,
+            MapConfidence::Exact,
+        ),
+        Some("ready" | "approved") => observation_cell(
+            ObservationCheckpoint::Contract,
+            ObservationGlyph::Contract,
+            None,
+            MapColor::Passed,
+            false,
+            ObservationFlowSource::ContractState,
+            MapConfidence::Exact,
+        ),
+        _ if matches!(row.waiting_kind.as_deref(), Some("human_ratification")) => observation_cell(
+            ObservationCheckpoint::Contract,
+            ObservationGlyph::Contract,
+            None,
+            MapColor::ActiveGate,
+            true,
+            ObservationFlowSource::WaitingKind,
+            MapConfidence::Exact,
+        ),
+        _ if observation_is_terminal(row) || observation_has_architecture_gate(row) => {
+            observation_cell(
+                ObservationCheckpoint::Contract,
+                ObservationGlyph::Contract,
+                None,
+                MapColor::Inactive,
+                false,
+                ObservationFlowSource::Lifecycle,
+                MapConfidence::Implied,
+            )
+        }
+        _ => observation_cell(
+            ObservationCheckpoint::Contract,
+            ObservationGlyph::Unreached,
+            None,
+            MapColor::Inactive,
+            false,
+            ObservationFlowSource::MissingEvidence,
+            MapConfidence::Exact,
+        ),
+    }
+}
+
+fn observation_architecture_cell(row: &ObsRow) -> ObservationFlowCell {
+    if observation_has_architecture_gate(row) {
+        return observation_cell(
+            ObservationCheckpoint::Architecture,
+            ObservationGlyph::Architecture,
+            None,
+            MapColor::ActiveGate,
+            true,
+            ObservationFlowSource::ArchitectureReview,
+            MapConfidence::Exact,
+        );
+    }
+    observation_cell(
+        ObservationCheckpoint::Architecture,
+        ObservationGlyph::Unreached,
+        None,
+        MapColor::Inactive,
+        false,
+        ObservationFlowSource::MissingEvidence,
+        MapConfidence::Exact,
+    )
+}
+
+fn observation_resolution_cell(row: &ObsRow) -> ObservationFlowCell {
+    if row
+        .superseded_by_id
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || matches!(row.outcome.as_deref(), Some("superseded"))
+        || matches!(row.status.as_str(), "superseded")
+    {
+        return observation_cell(
+            ObservationCheckpoint::Resolution,
+            ObservationGlyph::Superseded,
+            None,
+            MapColor::Passed,
+            false,
+            ObservationFlowSource::SupersededBy,
+            MapConfidence::Exact,
+        );
+    }
+    if matches!(
+        row.outcome.as_deref(),
+        Some("closed_wont_fix" | "wont_fix" | "wont-fix")
+    ) || matches!(
+        row.status.as_str(),
+        "closed_wont_fix" | "wont_fix" | "wont-fix" | "rejected"
+    ) {
+        return observation_cell(
+            ObservationCheckpoint::Resolution,
+            ObservationGlyph::ClosedRejected,
+            None,
+            MapColor::Failed,
+            false,
+            ObservationFlowSource::Outcome,
+            MapConfidence::Exact,
+        );
+    }
+    if obs_is_closed_exit(row) {
+        return observation_cell(
+            ObservationCheckpoint::Resolution,
+            ObservationGlyph::Resolved,
+            None,
+            MapColor::Passed,
+            false,
+            ObservationFlowSource::Outcome,
+            MapConfidence::Exact,
+        );
+    }
+    if obs_lifecycle(row) == "in_progress" {
+        return observation_cell(
+            ObservationCheckpoint::Resolution,
+            ObservationGlyph::Contract,
+            None,
+            MapColor::ActiveWork,
+            true,
+            ObservationFlowSource::Lifecycle,
+            MapConfidence::Exact,
+        );
+    }
+    observation_cell(
+        ObservationCheckpoint::Resolution,
+        ObservationGlyph::Unreached,
+        None,
+        MapColor::Inactive,
+        false,
+        ObservationFlowSource::MissingEvidence,
+        MapConfidence::Exact,
+    )
+}
+
+fn generic_observation_waiting_kind(row: &ObsRow) -> Option<&str> {
+    let kind = row.waiting_kind.as_deref()?.trim();
+    if kind.is_empty() || kind == "human_ratification" {
+        None
+    } else {
+        Some(kind)
+    }
+}
+
+fn observation_wait_next(kind: &str) -> String {
+    match kind {
+        "info_needed" => "answer info".to_string(),
+        "external_dependency" => "dependency".to_string(),
+        "triage_capacity" => "capacity".to_string(),
+        "human" => "human".to_string(),
+        other => other.replace('_', "-"),
+    }
+}
+
+fn observation_flow_next(row: &ObsRow) -> String {
+    if obs_is_closed_exit(row) {
+        return "done".to_string();
+    }
+    if observation_has_architecture_gate(row) {
+        return "architecture".to_string();
+    }
+    if matches!(row.contract_state.as_deref(), Some("draft"))
+        || matches!(row.waiting_kind.as_deref(), Some("human_ratification"))
+    {
+        return "approve/revise".to_string();
+    }
+    if matches!(row.contract_state.as_deref(), Some("ready" | "approved")) {
+        return "promote/resolve".to_string();
+    }
+    match obs_lifecycle(row) {
+        "candidate" => "triage".to_string(),
+        "ready" | "investigating" => "gather".to_string(),
+        "in_progress" => "resolve".to_string(),
+        _ => observation_watch_next_action(&observation_presentation(row).label).to_string(),
+    }
+}
+
+fn observation_has_contract(row: &ObsRow) -> bool {
+    row.contract_state
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || matches!(row.waiting_kind.as_deref(), Some("human_ratification"))
+}
+
+fn observation_has_architecture_gate(row: &ObsRow) -> bool {
+    row.pending_architecture_review.unwrap_or(false)
+        || row
+            .open_architecture_review_id
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn observation_is_terminal(row: &ObsRow) -> bool {
+    obs_is_closed_exit(row)
+}
+
+fn observation_link(row: &ObsRow) -> Option<String> {
+    row.task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            row.open_architecture_review_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            row.superseded_by_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+}
+
 fn task_watch_stage(label: &str) -> &'static str {
     match label {
         "done" => "done",
@@ -1603,6 +2073,113 @@ mod tests {
         };
         let p = observation_presentation(&info);
         assert_eq!((p.glyph, p.label.as_str()), ("⋯", "needs-info"));
+    }
+
+    #[test]
+    fn observation_flow_projection_covers_dense_flow_states() {
+        let cases = [
+            (
+                "candidate",
+                ObsRow {
+                    status: "open".to_string(),
+                    lifecycle: Some("candidate".to_string()),
+                    ..Default::default()
+                },
+                vec![
+                    ObservationGlyph::Candidate,
+                    ObservationGlyph::Unreached,
+                    ObservationGlyph::Unreached,
+                ],
+                "triage",
+            ),
+            (
+                "investigating",
+                ObsRow {
+                    status: "open".to_string(),
+                    lifecycle: Some("investigating".to_string()),
+                    evidence_pointers: vec![crate::tui::data::ArtifactPointer {
+                        label: "log".to_string(),
+                        value: "x".to_string(),
+                    }],
+                    ..Default::default()
+                },
+                vec![
+                    ObservationGlyph::Evidence,
+                    ObservationGlyph::Unreached,
+                    ObservationGlyph::Unreached,
+                ],
+                "gather",
+            ),
+            (
+                "contract draft",
+                ObsRow {
+                    status: "open".to_string(),
+                    contract_state: Some("draft".to_string()),
+                    ..Default::default()
+                },
+                vec![
+                    ObservationGlyph::Evidence,
+                    ObservationGlyph::Contract,
+                    ObservationGlyph::Unreached,
+                ],
+                "approve/revise",
+            ),
+            (
+                "arch gate",
+                ObsRow {
+                    status: "open".to_string(),
+                    contract_state: Some("ready".to_string()),
+                    open_architecture_review_id: Some("A003".to_string()),
+                    ..Default::default()
+                },
+                vec![
+                    ObservationGlyph::Evidence,
+                    ObservationGlyph::Contract,
+                    ObservationGlyph::Architecture,
+                    ObservationGlyph::Unreached,
+                ],
+                "architecture",
+            ),
+            (
+                "resolved",
+                ObsRow {
+                    status: "resolved".to_string(),
+                    lifecycle: Some("closed".to_string()),
+                    task_id: Some("T020".to_string()),
+                    ..Default::default()
+                },
+                vec![
+                    ObservationGlyph::Evidence,
+                    ObservationGlyph::Contract,
+                    ObservationGlyph::Resolved,
+                ],
+                "done",
+            ),
+        ];
+
+        for (name, row, glyphs, next) in cases {
+            let projection = observation_flow_projection(&row);
+            let actual: Vec<ObservationGlyph> =
+                projection.cells.iter().map(|cell| cell.glyph).collect();
+            assert_eq!(actual, glyphs, "{name}");
+            assert_eq!(projection.next.as_deref(), Some(next), "{name}");
+        }
+
+        let waiting = observation_flow_projection(&ObsRow {
+            status: "open".to_string(),
+            waiting_kind: Some("info_needed".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(waiting.cells[0].glyph, ObservationGlyph::Waiting);
+        assert_eq!(waiting.reason.as_deref(), Some("info_needed"));
+
+        let failed = observation_flow_projection(&ObsRow {
+            status: "investigation_failed".to_string(),
+            investigation_failure_reason: Some("runner".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(failed.cells[0].glyph, ObservationGlyph::Fault);
+        assert_eq!(failed.next.as_deref(), Some("inspect"));
     }
 
     #[test]
