@@ -15,12 +15,13 @@ use super::data::{
 };
 use super::semantics::{
     engine_presentation, external_review_presentation, external_review_runner_label,
-    intake_funnel_projection, intake_presentation, intake_watch_projection,
-    intake_watch_slot_label, observation_flow_projection, observation_presentation,
-    observation_watch_projection, observation_watch_slot_label, task_map_projection,
-    task_presentation, task_watch_projection, task_watch_slot_label, IntakeFunnelCell,
-    IntakeFunnelProjection, MapCell, MapColor, ObservationFlowCell, ObservationFlowProjection,
-    PresentationSeverity, TaskMapProjection, WatchProjection, WatchSlotId,
+    external_review_watch_projection, external_review_watch_slot_label, intake_funnel_projection,
+    intake_presentation, intake_watch_projection, intake_watch_slot_label,
+    observation_flow_projection, observation_presentation, observation_watch_projection,
+    observation_watch_slot_label, review_lane_projection, task_map_projection, task_presentation,
+    task_watch_projection, task_watch_slot_label, IntakeFunnelCell, IntakeFunnelProjection,
+    MapCell, MapColor, ObservationFlowCell, ObservationFlowProjection, PresentationSeverity,
+    ReviewLaneCell, ReviewLaneProjection, TaskMapProjection, WatchProjection, WatchSlotId,
 };
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
@@ -850,6 +851,18 @@ fn draw_focused_table(f: &mut Frame, app: &App, area: Rect) {
         append_intake_projection_items(
             app, &flat, window, cursor, area.width, flow_width, &mut items,
         );
+    } else if app.focused_store == StoreLane::ExternalReviews {
+        let review_width = review_table_review_width(window, app);
+        items.push(ListItem::new(review_table_header(area.width, review_width)));
+        append_review_projection_items(
+            app,
+            &flat,
+            window,
+            cursor,
+            area.width,
+            review_width,
+            &mut items,
+        );
     } else {
         let mut last_section: Option<usize> = None;
         for (i, fr) in window.iter().enumerate() {
@@ -1118,6 +1131,79 @@ fn intake_projection_group_count(full: &[FlatRow], app: &App, slot: WatchSlotId)
     full.iter()
         .filter(|fr| match &app.rows[fr.abs] {
             Row::Intake(row) => intake_watch_projection(row).slot == slot,
+            _ => false,
+        })
+        .count()
+}
+
+fn append_review_projection_items(
+    app: &App,
+    full: &[FlatRow],
+    window: &[FlatRow],
+    cursor: Option<usize>,
+    area_width: u16,
+    review_width: usize,
+    items: &mut Vec<ListItem<'static>>,
+) {
+    for slot in review_projection_display_order(full, app) {
+        let total = review_projection_group_count(full, app, slot);
+        let rows: Vec<(usize, &FlatRow, WatchProjection)> = window
+            .iter()
+            .enumerate()
+            .filter_map(|(i, fr)| match &app.rows[fr.abs] {
+                Row::Review(row) => {
+                    let projection = external_review_watch_projection(row);
+                    (projection.slot == slot).then_some((i, fr, projection))
+                }
+                _ => None,
+            })
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!(
+                "▾ {} ({})",
+                external_review_watch_slot_label(slot).to_ascii_uppercase(),
+                total
+            ),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))));
+        for (i, fr, projection) in rows {
+            let absolute_idx = app.scroll_offset + i;
+            let selected = cursor == Some(absolute_idx);
+            items.push(ListItem::new(format_row_line_for_review_projection(
+                &app.rows[fr.abs],
+                selected,
+                &projection,
+                area_width,
+                review_width,
+            )));
+        }
+    }
+}
+
+fn review_projection_display_order(full: &[FlatRow], app: &App) -> Vec<WatchSlotId> {
+    const ORDER: [WatchSlotId; 6] = [
+        WatchSlotId::Front,
+        WatchSlotId::Work,
+        WatchSlotId::Gate,
+        WatchSlotId::Wait,
+        WatchSlotId::Fault,
+        WatchSlotId::Exit,
+    ];
+    ORDER
+        .into_iter()
+        .filter(|slot| review_projection_group_count(full, app, *slot) > 0)
+        .collect()
+}
+
+fn review_projection_group_count(full: &[FlatRow], app: &App, slot: WatchSlotId) -> usize {
+    full.iter()
+        .filter(|fr| match &app.rows[fr.abs] {
+            Row::Review(row) => external_review_watch_projection(row).slot == slot,
             _ => false,
         })
         .count()
@@ -1450,6 +1536,26 @@ fn format_row_line_for_intake_projection(
     styled_row_line(base, selected)
 }
 
+fn format_row_line_for_review_projection(
+    row: &Row,
+    selected: bool,
+    _projection: &WatchProjection,
+    area_width: u16,
+    review_width: usize,
+) -> Line<'static> {
+    let base = match row {
+        Row::Review(r) => format_review_table_line(r, area_width, review_width),
+        _ => match row {
+            Row::Task(t) => format_task_line(t, &ExternalReviewState::default()),
+            Row::Obs(o) => format_obs_line(o, None),
+            Row::CollapsedObs(c) => format_obs_line(&c.representative, Some(c)),
+            Row::Intake(i) => format_intake_line(i),
+            Row::Review(_) => unreachable!(),
+        },
+    };
+    styled_row_line(base, selected)
+}
+
 fn styled_row_line(mut spans: Vec<Span<'static>>, selected: bool) -> Line<'static> {
     if selected {
         for s in spans.iter_mut() {
@@ -1487,6 +1593,17 @@ const INTAKE_SRC_WIDTH: usize = 8;
 const INTAKE_ROUTE_WIDTH: usize = 8;
 const INTAKE_TABLE_GAPS: usize = 7;
 const INTAKE_TABLE_PREFIX_WIDTH: usize = 2;
+
+const REVIEW_ID_WIDTH: usize = 6;
+const REVIEW_TASK_WIDTH: usize = 6;
+const REVIEW_REVIEW_MIN_WIDTH: usize = 3;
+const REVIEW_VERDICT_WIDTH: usize = 10;
+const REVIEW_FINDINGS_WIDTH: usize = 8;
+const REVIEW_AGE_WIDTH: usize = 5;
+const REVIEW_RUNNER_WIDTH: usize = 8;
+const REVIEW_SHA_WIDTH: usize = 8;
+const REVIEW_TABLE_GAPS: usize = 7;
+const REVIEW_TABLE_PREFIX_WIDTH: usize = 2;
 
 fn observation_table_flow_width(window: &[FlatRow], app: &App) -> usize {
     window
@@ -1744,6 +1861,182 @@ fn format_intake_table_line(
         route_w = INTAKE_ROUTE_WIDTH
     )));
     spans
+}
+
+fn review_table_review_width(window: &[FlatRow], app: &App) -> usize {
+    window
+        .iter()
+        .filter_map(|fr| match &app.rows[fr.abs] {
+            Row::Review(r) => Some(review_lane_text(&review_lane_projection(r)).chars().count()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(REVIEW_REVIEW_MIN_WIDTH)
+        .max(REVIEW_REVIEW_MIN_WIDTH)
+}
+
+fn review_table_summary_width(area_width: u16, review_width: usize) -> usize {
+    let fixed = REVIEW_TABLE_PREFIX_WIDTH
+        + REVIEW_ID_WIDTH
+        + REVIEW_TASK_WIDTH
+        + review_width
+        + REVIEW_VERDICT_WIDTH
+        + REVIEW_FINDINGS_WIDTH
+        + REVIEW_AGE_WIDTH
+        + REVIEW_RUNNER_WIDTH
+        + REVIEW_SHA_WIDTH
+        + REVIEW_TABLE_GAPS;
+    (area_width as usize).saturating_sub(fixed).max(0)
+}
+
+fn review_table_header(area_width: u16, review_width: usize) -> Line<'static> {
+    let _slack = review_table_summary_width(area_width, review_width);
+    Line::from(vec![Span::styled(
+        format!(
+            "  {:<id_w$} {:<task_w$} {:<review_w$} {:<verdict_w$} {:<findings_w$} {:>age_w$} {:<runner_w$} {:<sha_w$}",
+            "ID",
+            "TASK",
+            "REVIEW",
+            "VERDICT",
+            "FINDINGS",
+            "AGE",
+            "RUNNER",
+            "SHA",
+            id_w = REVIEW_ID_WIDTH,
+            task_w = REVIEW_TASK_WIDTH,
+            review_w = review_width,
+            verdict_w = REVIEW_VERDICT_WIDTH,
+            findings_w = REVIEW_FINDINGS_WIDTH,
+            age_w = REVIEW_AGE_WIDTH,
+            runner_w = REVIEW_RUNNER_WIDTH,
+            sha_w = REVIEW_SHA_WIDTH,
+        ),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )])
+}
+
+fn format_review_table_line(
+    r: &super::data::ReviewRow,
+    area_width: u16,
+    review_width: usize,
+) -> Vec<Span<'static>> {
+    let _slack = review_table_summary_width(area_width, review_width);
+    let projection = review_lane_projection(r);
+    let age = compact_age_label(
+        r.started_at
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(super::data::parse_epoch)
+            .or_else(|| {
+                r.completed_at
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .and_then(super::data::parse_epoch)
+            }),
+    );
+    let task = if r.task_id.trim().is_empty() {
+        "-"
+    } else {
+        &r.task_id
+    };
+    let runner = external_review_runner_label(r);
+    let sha = review_short_sha(r);
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{:<id_w$}", r.display_id, id_w = REVIEW_ID_WIDTH),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw(" "),
+        Span::raw(format!(
+            "{:<task_w$}",
+            truncate(task, REVIEW_TASK_WIDTH),
+            task_w = REVIEW_TASK_WIDTH
+        )),
+        Span::raw(" "),
+    ];
+    spans.extend(review_lane_spans(&projection, review_width));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<verdict_w$}",
+        truncate(&projection.verdict_label, REVIEW_VERDICT_WIDTH),
+        verdict_w = REVIEW_VERDICT_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<findings_w$}",
+        truncate(&projection.findings_label, REVIEW_FINDINGS_WIDTH),
+        findings_w = REVIEW_FINDINGS_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:>age_w$}",
+        age,
+        age_w = REVIEW_AGE_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<runner_w$}",
+        truncate(runner, REVIEW_RUNNER_WIDTH),
+        runner_w = REVIEW_RUNNER_WIDTH
+    )));
+    spans.push(Span::raw(" "));
+    spans.push(Span::raw(format!(
+        "{:<sha_w$}",
+        truncate(&sha, REVIEW_SHA_WIDTH),
+        sha_w = REVIEW_SHA_WIDTH
+    )));
+    spans
+}
+
+fn review_short_sha(r: &super::data::ReviewRow) -> String {
+    r.base_sha
+        .as_deref()
+        .or(r.head_sha.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(7).collect::<String>())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn review_lane_text(projection: &ReviewLaneProjection) -> String {
+    review_cell_text(&projection.cell)
+}
+
+fn review_lane_spans(projection: &ReviewLaneProjection, width: usize) -> Vec<Span<'static>> {
+    let text = review_cell_text(&projection.cell);
+    let rendered = text.chars().count();
+    let mut spans = vec![Span::styled(text, review_cell_style(&projection.cell))];
+    if rendered < width {
+        spans.push(Span::raw(" ".repeat(width - rendered)));
+    }
+    spans
+}
+
+fn review_cell_text(cell: &ReviewLaneCell) -> String {
+    match cell.attempts {
+        Some(attempts) => format!("{}{}", cell.glyph.symbol(), superscript_number(attempts)),
+        None => cell.glyph.symbol().to_string(),
+    }
+}
+
+fn review_cell_style(cell: &ReviewLaneCell) -> Style {
+    let style = match cell.color_role {
+        MapColor::Inactive => Style::default().fg(WATCH_OVERLAY0),
+        MapColor::ActiveWork => Style::default().fg(Color::Cyan),
+        MapColor::ActiveGate => Style::default().fg(WATCH_YELLOW),
+        MapColor::Passed => Style::default().fg(WATCH_GREEN),
+        MapColor::Failed => Style::default().fg(WATCH_RED),
+        MapColor::Waiting => Style::default().fg(WATCH_PEACH),
+        MapColor::Unknown => Style::default().fg(WATCH_OVERLAY2),
+    };
+    if cell.active {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn intake_flow_text(projection: &IntakeFunnelProjection) -> String {
@@ -4377,6 +4670,73 @@ mod tests {
         assert!(text.contains("verdict:PASS"), "{text}");
         assert!(text.contains("attempts:2"), "{text}");
         assert!(text.contains("sha:abcdef0"), "{text}");
+    }
+
+    #[test]
+    fn review_focused_table_renders_dense_review_columns_without_prose_bags() {
+        let mut app = App::new(TuiOpts::default());
+        app.focused_store = StoreLane::ExternalReviews;
+        app.rows = vec![
+            Row::Review(ReviewRow {
+                display_id: "R016".to_string(),
+                task_id: "T038".to_string(),
+                status: "passed".to_string(),
+                runner: "codex".to_string(),
+                attempts: 2,
+                critical_count: Some(0),
+                major_count: Some(0),
+                minor_count: Some(2),
+                base_sha: Some("abcdef0123456789".to_string()),
+                started_at: Some("2026-05-09T00:00:00Z".to_string()),
+                ..Default::default()
+            }),
+            Row::Review(ReviewRow {
+                display_id: "R017".to_string(),
+                task_id: "T039".to_string(),
+                status: "revise".to_string(),
+                runner: "codex".to_string(),
+                attempts: 3,
+                findings_count: Some(4),
+                ..Default::default()
+            }),
+            Row::Review(ReviewRow {
+                display_id: "A003".to_string(),
+                task_id: "L045".to_string(),
+                review_kind: Some("architecture".to_string()),
+                status: "awaiting_human_ratification".to_string(),
+                verdict: Some("create_primitive_task".to_string()),
+                ..Default::default()
+            }),
+            Row::Review(ReviewRow {
+                display_id: "R018".to_string(),
+                task_id: "T040".to_string(),
+                status: "tooling_held".to_string(),
+                runner: "codex".to_string(),
+                attempts: 2,
+                held_reason: Some("missing brief".to_string()),
+                ..Default::default()
+            }),
+        ];
+        app.sections = classify(&app.rows);
+
+        let buf = paint(&mut app, 140, 30);
+        let text = buffer_to_string(&buf);
+        assert!(text.contains("ID"), "{text}");
+        assert!(text.contains("TASK"), "{text}");
+        assert!(text.contains("REVIEW"), "{text}");
+        assert!(text.contains("VERDICT"), "{text}");
+        assert!(text.contains("FINDINGS"), "{text}");
+        assert!(text.contains("R016"), "{text}");
+        assert!(text.contains("✓²"), "{text}");
+        assert!(text.contains("0/0/2"), "{text}");
+        assert!(text.contains("↻³"), "{text}");
+        assert!(text.contains("◈"), "{text}");
+        assert!(text.contains("▲²"), "{text}");
+        assert!(!text.contains("verdict:"), "{text}");
+        assert!(!text.contains("attempts:"), "{text}");
+        assert!(!text.contains("held:"), "{text}");
+        assert!(!text.contains("task="), "{text}");
+        assert!(!text.contains("runner="), "{text}");
     }
 
     #[test]

@@ -8,9 +8,10 @@ use super::data::{
     RecentEvent, ReviewRow, Row, TaskCycleEntry, TaskRow,
 };
 use super::semantics::{
-    intake_funnel_projection, observation_flow_projection, task_map_projection, IntakeFunnelCell,
-    IntakeFunnelGlyph, IntakeFunnelSource, MapCell, MapConfidence, MapGlyph, MapSource,
-    ObservationCheckpoint, ObservationFlowCell, ObservationFlowSource, ObservationGlyph,
+    intake_funnel_projection, observation_flow_projection, review_lane_projection,
+    task_map_projection, IntakeFunnelCell, IntakeFunnelGlyph, IntakeFunnelSource, MapCell,
+    MapConfidence, MapGlyph, MapSource, ObservationCheckpoint, ObservationFlowCell,
+    ObservationFlowSource, ObservationGlyph, ReviewLaneCell, ReviewLaneGlyph, ReviewLaneSource,
     TaskMapProjection,
 };
 
@@ -830,6 +831,7 @@ fn review_lines(r: &ReviewRow) -> Vec<String> {
         format!("  attempts: {}", r.attempts),
         format!("  verdict: {}", present_opt(r.verdict.as_deref())),
     ];
+    append_review_lane_decode(&mut lines, r);
     append_nonempty_line(&mut lines, "held_reason", r.held_reason.as_deref());
     append_nonempty_line(&mut lines, "next_retry_at", r.next_retry_at.as_deref());
     lines.extend([
@@ -880,6 +882,67 @@ fn review_lines(r: &ReviewRow) -> Vec<String> {
         ),
     ]);
     lines
+}
+
+fn append_review_lane_decode(lines: &mut Vec<String>, r: &ReviewRow) {
+    let projection = review_lane_projection(r);
+    lines.extend([String::new(), "Review map".to_string()]);
+    lines.push(format!(
+        "  review: {} source={} confidence={}{}",
+        review_cell_label(&projection.cell),
+        review_source_label(projection.cell.source),
+        map_confidence_label(projection.cell.confidence),
+        review_active_marker(&projection.cell),
+    ));
+    lines.push(format!(
+        "  kind: {} verdict={} findings={} reason={} projection_confidence={}",
+        present_opt(projection.review_kind.as_deref()),
+        present(&projection.verdict_label),
+        present(&projection.findings_label),
+        present_opt(projection.retry_or_reason.as_deref()),
+        map_confidence_label(projection.confidence),
+    ));
+}
+
+fn review_cell_label(cell: &ReviewLaneCell) -> String {
+    let mut label = review_glyph_label(cell.glyph).to_string();
+    label.push(' ');
+    label.push_str(cell.glyph.symbol());
+    if let Some(attempts) = cell.attempts {
+        label.push_str(&format!(" attempts {attempts}"));
+    }
+    label
+}
+
+fn review_glyph_label(glyph: ReviewLaneGlyph) -> &'static str {
+    match glyph {
+        ReviewLaneGlyph::Pending => "pending",
+        ReviewLaneGlyph::Running => "running",
+        ReviewLaneGlyph::Passed => "passed",
+        ReviewLaneGlyph::Revise => "revise",
+        ReviewLaneGlyph::ArchitectureGate => "architecture-gate",
+        ReviewLaneGlyph::Fault => "fault",
+        ReviewLaneGlyph::Superseded => "superseded",
+        ReviewLaneGlyph::Unknown => "unknown",
+    }
+}
+
+fn review_source_label(source: ReviewLaneSource) -> &'static str {
+    match source {
+        ReviewLaneSource::Status => "status",
+        ReviewLaneSource::ArchitectureStatus => "architecture_status",
+        ReviewLaneSource::ToolingStatus => "tooling_status",
+        ReviewLaneSource::Attempts => "status+attempts",
+        ReviewLaneSource::MissingEvidence => "missing_evidence",
+    }
+}
+
+fn review_active_marker(cell: &ReviewLaneCell) -> &'static str {
+    if cell.active {
+        " active"
+    } else {
+        ""
+    }
 }
 
 pub(super) fn engine_lines(app: &App) -> Vec<String> {
@@ -1242,6 +1305,9 @@ mod tests {
             "verdict:",
             "base_sha:",
             "findings:",
+            "Review map",
+            "review: passed ✓ attempts 2 source=status+attempts confidence=exact",
+            "kind: — verdict=pass findings=0/1/2 reason=— projection_confidence=exact",
             "log_path:",
             "started_at:",
             "Debug tuple",

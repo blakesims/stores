@@ -14,7 +14,8 @@ use super::data::{
 use super::filter::{FilterPalette, FilterPredicate};
 use super::search::SearchState;
 use super::semantics::{
-    intake_watch_projection, observation_watch_projection, task_watch_projection, WatchSlotId,
+    external_review_watch_projection, intake_watch_projection, observation_watch_projection,
+    task_watch_projection, WatchSlotId,
 };
 use super::sidecar::SidecarScope;
 use super::sort::{sort_indices, Sort};
@@ -391,6 +392,13 @@ impl App {
                 };
                 (watch_slot_order(slot), fr.section, fr.row)
             }),
+            StoreLane::ExternalReviews => rows.sort_by_key(|fr| {
+                let slot = match &self.rows[fr.abs] {
+                    Row::Review(r) => external_review_watch_projection(r).slot,
+                    _ => WatchSlotId::Exit,
+                };
+                (watch_slot_order(slot), fr.section, fr.row)
+            }),
             _ => {}
         }
     }
@@ -755,6 +763,16 @@ mod tests {
         })
     }
 
+    fn review_with_status(id: &str, status: &str) -> Row {
+        Row::Review(ReviewRow {
+            display_id: id.to_string(),
+            task_id: "T001".to_string(),
+            status: status.to_string(),
+            runner: "codex".to_string(),
+            ..Default::default()
+        })
+    }
+
     fn five_lane_app() -> App {
         let mut app = App::new(TuiOpts::default());
         app.rows = vec![
@@ -971,6 +989,30 @@ mod tests {
             .map(|fr| app.rows[fr.abs].display_id())
             .collect();
         assert_eq!(ids, vec!["I-new", "I-triage", "I-wait", "I-routed"]);
+    }
+
+    #[test]
+    fn review_flat_rows_follow_projection_display_order_for_navigation() {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![
+            review_with_status("R-fail", "tooling_held"),
+            review_with_status("R-done", "passed"),
+            review_with_status("R-run", "running"),
+            review_with_status("R-pending", "pending"),
+            review_with_status("R-revise", "revise"),
+        ];
+        app.sections = classify(&app.rows);
+        app.focused_store = StoreLane::ExternalReviews;
+
+        let ids: Vec<&str> = app
+            .flat_rows()
+            .iter()
+            .map(|fr| app.rows[fr.abs].display_id())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["R-pending", "R-run", "R-revise", "R-fail", "R-done"]
+        );
     }
 
     #[test]

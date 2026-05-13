@@ -1997,7 +1997,272 @@ fn route_signal(row: &IntakeRow) -> Option<String> {
         .or_else(|| row.duplicate_of_id.clone())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewLaneGlyph {
+    Pending,
+    Running,
+    Passed,
+    Revise,
+    ArchitectureGate,
+    Fault,
+    Superseded,
+    Unknown,
+}
+
+impl ReviewLaneGlyph {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Pending => "◌",
+            Self::Running => "◆",
+            Self::Passed => "✓",
+            Self::Revise => "↻",
+            Self::ArchitectureGate => "◈",
+            Self::Fault => "▲",
+            Self::Superseded => "■",
+            Self::Unknown => "?",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewLaneSource {
+    Status,
+    ArchitectureStatus,
+    ToolingStatus,
+    Attempts,
+    MissingEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewLaneCell {
+    pub glyph: ReviewLaneGlyph,
+    pub attempts: Option<i64>,
+    pub color_role: MapColor,
+    pub active: bool,
+    pub source: ReviewLaneSource,
+    pub confidence: MapConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewLaneProjection {
+    pub cell: ReviewLaneCell,
+    pub verdict_label: String,
+    pub findings_label: String,
+    pub retry_or_reason: Option<String>,
+    pub review_kind: Option<String>,
+    pub confidence: MapConfidence,
+}
+
+pub fn external_review_watch_projection(row: &ReviewRow) -> WatchProjection {
+    let presentation = external_review_presentation(row);
+    let slot = watch_slot_id(presentation.severity);
+    WatchProjection {
+        slot,
+        slot_label: external_review_watch_slot_label(slot),
+        glyph: presentation.glyph,
+        row_stage: external_review_watch_stage(&presentation.label),
+        row_signal: presentation.signal,
+        next_action: None,
+        attention: watch_attention(slot),
+    }
+}
+
+pub fn external_review_watch_slot_label(slot: WatchSlotId) -> &'static str {
+    match slot {
+        WatchSlotId::Front => "pending",
+        WatchSlotId::Work => "running",
+        WatchSlotId::Gate => "gate",
+        WatchSlotId::Exit => "done",
+        WatchSlotId::Wait => "waiting",
+        WatchSlotId::Fault => "fault",
+    }
+}
+
+fn external_review_watch_stage(label: &str) -> &'static str {
+    match label {
+        "pending" => "pending",
+        "running" => "running",
+        "passed" => "passed",
+        "revise" => "revise",
+        "arch-gate" => "architecture",
+        "tool-fault" => "tool-fault",
+        "superseded" => "superseded",
+        _ => "unknown",
+    }
+}
+
+pub fn review_lane_projection(row: &ReviewRow) -> ReviewLaneProjection {
+    let cell = review_lane_cell(row);
+    let verdict_label = review_verdict_label(row);
+    let findings_label = review_findings_label(row);
+    let retry_or_reason = row
+        .held_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "none")
+        .map(str::to_string)
+        .or_else(|| {
+            row.next_retry_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "none")
+                .map(str::to_string)
+        });
+    let confidence = cell.confidence;
+    ReviewLaneProjection {
+        cell,
+        verdict_label,
+        findings_label,
+        retry_or_reason,
+        review_kind: review_kind(row),
+        confidence,
+    }
+}
+
+fn review_lane_cell(row: &ReviewRow) -> ReviewLaneCell {
+    let is_arch = review_kind(row).as_deref() == Some("architecture");
+    let source = if is_arch {
+        ReviewLaneSource::ArchitectureStatus
+    } else {
+        ReviewLaneSource::Status
+    };
+    let (glyph, color_role, active, source, confidence) = match row.status.as_str() {
+        "pending" => (
+            ReviewLaneGlyph::Pending,
+            MapColor::Inactive,
+            false,
+            source,
+            MapConfidence::Exact,
+        ),
+        "running" | "in_review" if is_arch => (
+            ReviewLaneGlyph::Running,
+            MapColor::ActiveWork,
+            true,
+            source,
+            MapConfidence::Exact,
+        ),
+        "running" => (
+            ReviewLaneGlyph::Running,
+            MapColor::ActiveWork,
+            true,
+            source,
+            MapConfidence::Exact,
+        ),
+        "passed" => (
+            ReviewLaneGlyph::Passed,
+            MapColor::Passed,
+            false,
+            source,
+            MapConfidence::Exact,
+        ),
+        "revise" => (
+            ReviewLaneGlyph::Revise,
+            MapColor::ActiveGate,
+            false,
+            source,
+            MapConfidence::Exact,
+        ),
+        "awaiting_human_ratification" | "verdict_issued" if is_arch => (
+            ReviewLaneGlyph::ArchitectureGate,
+            MapColor::ActiveGate,
+            false,
+            ReviewLaneSource::ArchitectureStatus,
+            MapConfidence::Exact,
+        ),
+        "tooling_held" | "tool_fault" | "tool-fault" => (
+            ReviewLaneGlyph::Fault,
+            MapColor::Failed,
+            false,
+            ReviewLaneSource::ToolingStatus,
+            MapConfidence::Exact,
+        ),
+        "superseded" => (
+            ReviewLaneGlyph::Superseded,
+            MapColor::Inactive,
+            false,
+            source,
+            MapConfidence::Exact,
+        ),
+        _ if is_arch => (
+            ReviewLaneGlyph::ArchitectureGate,
+            MapColor::ActiveGate,
+            false,
+            ReviewLaneSource::ArchitectureStatus,
+            MapConfidence::Implied,
+        ),
+        _ => (
+            ReviewLaneGlyph::Unknown,
+            MapColor::Unknown,
+            false,
+            ReviewLaneSource::MissingEvidence,
+            MapConfidence::Unknown,
+        ),
+    };
+    ReviewLaneCell {
+        glyph,
+        attempts: (row.attempts > 1).then_some(row.attempts),
+        color_role,
+        active,
+        source: if row.attempts > 1 && source == ReviewLaneSource::Status {
+            ReviewLaneSource::Attempts
+        } else {
+            source
+        },
+        confidence,
+    }
+}
+
+fn review_kind(row: &ReviewRow) -> Option<String> {
+    row.review_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            row.display_id
+                .starts_with('A')
+                .then(|| "architecture".to_string())
+        })
+}
+
+fn review_verdict_label(row: &ReviewRow) -> String {
+    if review_kind(row).as_deref() == Some("architecture") {
+        return row
+            .verdict
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("arch")
+            .to_string();
+    }
+    row.verdict
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| match row.status.as_str() {
+            "pending" => "pending".to_string(),
+            "running" => "running".to_string(),
+            "passed" => "pass".to_string(),
+            "revise" => "revise".to_string(),
+            "tooling_held" | "tool_fault" | "tool-fault" => "tool".to_string(),
+            "superseded" => "superseded".to_string(),
+            other => other.to_string(),
+        })
+}
+
+fn review_findings_label(row: &ReviewRow) -> String {
+    match (row.critical_count, row.major_count, row.minor_count) {
+        (Some(c), Some(mj), Some(mn)) => format!("{c}/{mj}/{mn}"),
+        _ => row
+            .findings_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    }
+}
+
 pub fn external_review_presentation(row: &ReviewRow) -> Presentation {
+    let is_arch = review_kind(row).as_deref() == Some("architecture");
     match row.status.as_str() {
         "pending" => presentation(
             "◌",
@@ -2005,6 +2270,9 @@ pub fn external_review_presentation(row: &ReviewRow) -> Presentation {
             PresentationSeverity::Front,
             Some("waiting for dispatch".to_string()),
         ),
+        "running" | "in_review" if is_arch => {
+            presentation("◆", "running", PresentationSeverity::Work, None)
+        }
         "running" => presentation("◆", "running", PresentationSeverity::Work, None),
         "passed" => presentation(
             "✓",
@@ -2018,6 +2286,12 @@ pub fn external_review_presentation(row: &ReviewRow) -> Presentation {
             PresentationSeverity::Gate,
             findings_signal(row),
         ),
+        "awaiting_human_ratification" | "verdict_issued" if is_arch => presentation(
+            "◈",
+            "arch-gate",
+            PresentationSeverity::Gate,
+            row.verdict.clone(),
+        ),
         "tooling_held" | "tool_fault" | "tool-fault" => presentation(
             "▲",
             "tool-fault",
@@ -2029,6 +2303,12 @@ pub fn external_review_presentation(row: &ReviewRow) -> Presentation {
                 .map(str::to_string),
         ),
         "superseded" => presentation("■", "superseded", PresentationSeverity::Exit, None),
+        other if is_arch => presentation(
+            "◈",
+            "arch-gate",
+            PresentationSeverity::Gate,
+            Some(other.to_string()),
+        ),
         other => presentation("◌", other, PresentationSeverity::Front, None),
     }
 }
@@ -3091,6 +3371,127 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(external_review_presentation(&tooling).label, "tool-fault");
+    }
+
+    #[test]
+    fn review_lane_projection_covers_dense_review_states() {
+        let cases = [
+            (
+                "pending",
+                ReviewRow {
+                    status: "pending".to_string(),
+                    ..Default::default()
+                },
+                ReviewLaneGlyph::Pending,
+                MapColor::Inactive,
+                "pending",
+                "-",
+                WatchSlotId::Front,
+            ),
+            (
+                "running",
+                ReviewRow {
+                    status: "running".to_string(),
+                    ..Default::default()
+                },
+                ReviewLaneGlyph::Running,
+                MapColor::ActiveWork,
+                "running",
+                "-",
+                WatchSlotId::Work,
+            ),
+            (
+                "passed",
+                ReviewRow {
+                    status: "passed".to_string(),
+                    attempts: 2,
+                    critical_count: Some(0),
+                    major_count: Some(0),
+                    minor_count: Some(2),
+                    ..Default::default()
+                },
+                ReviewLaneGlyph::Passed,
+                MapColor::Passed,
+                "pass",
+                "0/0/2",
+                WatchSlotId::Exit,
+            ),
+            (
+                "revise",
+                ReviewRow {
+                    status: "revise".to_string(),
+                    attempts: 3,
+                    findings_count: Some(4),
+                    ..Default::default()
+                },
+                ReviewLaneGlyph::Revise,
+                MapColor::ActiveGate,
+                "revise",
+                "4",
+                WatchSlotId::Gate,
+            ),
+            (
+                "tool fault",
+                ReviewRow {
+                    status: "tooling_held".to_string(),
+                    held_reason: Some("missing brief".to_string()),
+                    ..Default::default()
+                },
+                ReviewLaneGlyph::Fault,
+                MapColor::Failed,
+                "tool",
+                "-",
+                WatchSlotId::Fault,
+            ),
+            (
+                "superseded",
+                ReviewRow {
+                    status: "superseded".to_string(),
+                    ..Default::default()
+                },
+                ReviewLaneGlyph::Superseded,
+                MapColor::Inactive,
+                "superseded",
+                "-",
+                WatchSlotId::Exit,
+            ),
+            (
+                "architecture gate",
+                ReviewRow {
+                    display_id: "A003".to_string(),
+                    review_kind: Some("architecture".to_string()),
+                    status: "awaiting_human_ratification".to_string(),
+                    verdict: Some("create_primitive_task".to_string()),
+                    ..Default::default()
+                },
+                ReviewLaneGlyph::ArchitectureGate,
+                MapColor::ActiveGate,
+                "create_primitive_task",
+                "-",
+                WatchSlotId::Gate,
+            ),
+            (
+                "unknown",
+                ReviewRow {
+                    status: "mystery".to_string(),
+                    ..Default::default()
+                },
+                ReviewLaneGlyph::Unknown,
+                MapColor::Unknown,
+                "mystery",
+                "-",
+                WatchSlotId::Front,
+            ),
+        ];
+
+        for (name, row, glyph, color, verdict, findings, slot) in cases {
+            let projection = review_lane_projection(&row);
+            assert_eq!(projection.cell.glyph, glyph, "{name}");
+            assert_eq!(projection.cell.color_role, color, "{name}");
+            assert_eq!(projection.verdict_label, verdict, "{name}");
+            assert_eq!(projection.findings_label, findings, "{name}");
+            assert_eq!(external_review_watch_projection(&row).slot, slot, "{name}");
+        }
     }
 
     #[test]

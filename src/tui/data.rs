@@ -417,6 +417,7 @@ pub struct ReviewRow {
     pub display_id: String,
     pub task_id: String,
     pub status: String,
+    pub review_kind: Option<String>,
     pub lifecycle: Option<String>,
     pub outcome: Option<String>,
     pub linked_observation_ids: Vec<String>,
@@ -1586,7 +1587,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
             "SELECT display_id, task_id, status, {lifecycle}, {outcome}, {linked_observation_ids}, {produced_task_id}, {runner_expr}, {held_expr}, {retry_expr}, {attempts_expr}, \
              {verdict}, {base_sha}, {head_sha}, {log_path}, {transcript_path}, {started_at}, {completed_at}, {duration_ms}, \
              {critical_count}, {major_count}, {minor_count}, {findings_count_expr} \
-             FROM external_reviews WHERE status IN ('pending','running','tooling_held')",
+             FROM external_reviews WHERE status IN ('pending','running','passed','revise','tooling_held','tool_fault','tool-fault','superseded')",
             lifecycle = sql_col(&cols, "lifecycle", "NULL"),
             outcome = sql_col(&cols, "outcome", "NULL"),
             linked_observation_ids = sql_col(&cols, "linked_observation_ids", "NULL"),
@@ -1609,6 +1610,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
                 display_id: r.get(0)?,
                 task_id: r.get(1)?,
                 status: r.get(2)?,
+                review_kind: Some("external".to_string()),
                 lifecycle: r.get(3).ok().flatten(),
                 outcome: r.get(4).ok().flatten(),
                 linked_observation_ids: json_string_array(r.get::<_, String>(5).ok().as_deref()),
@@ -1655,6 +1657,7 @@ pub fn load_rows(conn: &Connection) -> Result<Vec<Row>> {
                 display_id: r.get(0)?,
                 task_id: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 status: r.get(1)?,
+                review_kind: Some("architecture".to_string()),
                 lifecycle: r.get(2).ok().flatten(),
                 outcome: r.get(3).ok().flatten(),
                 linked_observation_ids: json_string_array(r.get::<_, String>(4).ok().as_deref()),
@@ -4031,6 +4034,11 @@ mod tests {
                 '2026-05-09T01:00:00', '2026-05-09T01:05:00', 300000,
                 1, 2, 3, '[{"severity":"critical"},{"severity":"major"},{"severity":"major"},{"severity":"minor"}]'
             );
+            INSERT INTO external_reviews (display_id, task_id, status, runner, attempts)
+            VALUES
+                ('ER002', 'T101', 'passed', 'codex', 1),
+                ('ER003', 'T102', 'revise', 'codex', 3),
+                ('ER004', 'T103', 'superseded', 'codex', 1);
             "#,
         )
         .unwrap();
@@ -4054,6 +4062,17 @@ mod tests {
         assert_eq!(review.major_count, Some(2));
         assert_eq!(review.minor_count, Some(3));
         assert_eq!(review.findings_count, Some(4));
+        assert_eq!(review.review_kind.as_deref(), Some("external"));
+        let loaded_statuses: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Review(review) => Some(review.status.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(loaded_statuses.contains(&"passed"));
+        assert!(loaded_statuses.contains(&"revise"));
+        assert!(loaded_statuses.contains(&"superseded"));
     }
 
     #[test]
@@ -4103,6 +4122,7 @@ mod tests {
         assert_eq!(review.linked_observation_ids, vec!["L010", "L011", "L012"]);
         assert_eq!(review.produced_task_id.as_deref(), Some("T777"));
         assert_eq!(review.verdict.as_deref(), Some("create_primitive_task"));
+        assert_eq!(review.review_kind.as_deref(), Some("architecture"));
     }
 
     #[test]
